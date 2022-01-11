@@ -1,8 +1,10 @@
 from parser import *
+from stdlib import *
 
 
 def test1():
     test1 = """
+    y = 2
     x = y
     affirm x = y
     x = test()
@@ -28,25 +30,6 @@ def test1():
         except:
             print(i)
 
-class TestFuncInst:
-    def __init__(self, f, p) -> None:
-        self.f = f
-        self.p = p
-
-    def eval(self, scope: EvalScope, *args):
-        return self.f((scope,) + args)
-
-    def prove(self, scope: ProofScope, *args):
-        return self.p((scope,) + args)
-
-def addProve(args):
-    lhs = args[1]
-    rhs = args[2]
-
-    if isinstance(lhs[0], int):
-        if isinstance(rhs[0], int):
-            return [lhs[0] + rhs[0]]
-
 def test2():
     test2 = """
     x = 5
@@ -58,18 +41,17 @@ def test2():
     block = parse(test2)
 
     parentScope = EvalScope(None)
-    addFunct = TestFuncInst(lambda x: x[1] + x[2], addProve)
-    parentScope.functions['add'] = addFunct
+    parentScope.functions.update(StdLib)
     result = evalBlock(block, parentScope)
 
     assert result == 10
-    print(result)
 
     parentScope = ProofScope(None)
-    parentScope.functions['add'] = addFunct
-    result = proveBlock(block, parentScope)
+    parentScope.functions.update(StdLib)
+    result = proveBlock(block, parentScope).proofs
 
-    assert result[0] == 10
+    assert len(result) == 1
+    assert result[0] == Proof(Relation.EQ, ProofExpr.newNumVal(10))
 
 if __name__ == '__main__':
     test2()

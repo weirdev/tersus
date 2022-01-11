@@ -2,6 +2,8 @@ from typing import Dict, List, Optional
 from enum import Enum
 import re
 
+from proof import *
+
 affirmPattern = re.compile(r'affirm (.*)')
 setOpPattern = re.compile(r'(\w+)\s*=(.*)')
 callOpPattern = re.compile(r'(\w+)\((.*)\)')
@@ -26,7 +28,7 @@ class EvalScope:
 class ProofScope:
     def __init__(self, parent: Optional['ProofScope']) -> None:
         self.parent = parent
-        self.proofs: Dict[str, List['Expr']] = {}
+        self.proofs: Dict[str, ObjProofs] = {}
         self.functions: Dict[str, 'Expr'] = {}
 
     def getFn(self, functionName: str) -> Optional['Expr']:
@@ -43,7 +45,6 @@ class ExprType(Enum):
     AFF = 2 # Affirm: affirm <affirm>
     VAR = 3 # Variable: x
     NUM = 4 # Num: x
-    RET = 5
 
 class OpType(Enum):
     SET = 1 # x = <expr>
@@ -62,7 +63,7 @@ class SetOp:
         scope.vars[self.leftvar] = val
         return val
 
-    def prove(self, scope: ProofScope):
+    def prove(self, scope: ProofScope) -> ObjProofs:
         valProofs = self.expr.prove(scope)
         scope.proofs[self.leftvar] = valProofs
         return valProofs
@@ -83,7 +84,7 @@ class CallOp:
         fnScope = EvalScope(scope)
         return fn.eval(fnScope, *argResults)
 
-    def prove(self, scope: ProofScope):
+    def prove(self, scope: ProofScope) -> ObjProofs:
         fn = scope.getFn(self.funcName)
         if fn is None:
             raise Exception("Unknown function")
@@ -106,7 +107,7 @@ class Op:
         else:
             return self.callOp.eval(scope)
 
-    def proof(self, scope: ProofScope):
+    def proof(self, scope: ProofScope) -> ObjProofs:
         if self.type == OpType.SET:
             return self.setOp.prove(scope)
         else:
@@ -127,7 +128,7 @@ class Affirm: # affirm
     def __eq__(self, other: 'Affirm') -> bool:
         return self.proof == other.proof
 
-    def prove(self, scope: ProofScope):
+    def prove(self, scope: ProofScope) -> ObjProofs:
         return None
 
 class Expr: # expr
@@ -153,7 +154,7 @@ class Expr: # expr
         elif self.type == ExprType.NUM:
             return self.num
 
-    def prove(self, scope: ProofScope):
+    def prove(self, scope: ProofScope) -> ObjProofs:
         if self.type == ExprType.OP:
             return self.op.proof(scope)
         elif self.type == ExprType.AFF:
@@ -161,7 +162,7 @@ class Expr: # expr
         elif self.type == ExprType.VAR:
             return scope.proofs[self.var]
         elif self.type == ExprType.NUM:
-            return [self.num]
+            return ObjProofs([Proof(Relation.EQ, ProofExpr.newNumVal(self.num))], None)
 
     @staticmethod
     def newOpExpr(op: Op) -> 'Expr':
@@ -227,7 +228,7 @@ def evalBlock(block: List[Expr], parentScope: Optional[EvalScope] = None):
         last = expr.eval(scope)
     return last
 
-def proveBlock(block: List[Expr], parentScope: Optional[ProofScope] = None):
+def proveBlock(block: List[Expr], parentScope: Optional[ProofScope] = None) -> ObjProofs:
     scope = ProofScope(parentScope)
     last = None
     for expr in block:
