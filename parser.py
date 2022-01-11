@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from enum import Enum
 import re
 
@@ -8,7 +8,20 @@ affirmPattern = re.compile(r'affirm (.*)')
 setOpPattern = re.compile(r'(\w+)\s*=(.*)')
 callOpPattern = re.compile(r'(\w+)\((.*)\)')
 varPattern = re.compile(r'\w+')
+fieldAccessPattern = re.compile(r'(.+)\.(\w+)')
 numPattern = re.compile(r'[0-9]+')
+
+class Obj:
+    def __init__(self, cls: str, val: Any, fields: Dict[str, Any]) -> None:
+        self.cls = cls
+        self.val = val
+        self.fields = fields
+
+    def getField(self, field: str) -> Any:
+        return self.fields[field]
+
+    def getVal(self) -> Any:
+        return self.val
 
 class EvalScope:
     def __init__(self, parent: Optional['EvalScope']) -> None:
@@ -49,6 +62,7 @@ class ExprType(Enum):
 class OpType(Enum):
     SET = 1 # x = <expr>
     CALL = 2 # x(<expr>, <expr>, ...)
+    FACC = 5 # FieldAccess: <expr>.y
 
 class SetOp:
     def __init__(self, leftvar: str, expr: 'Expr') -> None:
@@ -92,34 +106,59 @@ class CallOp:
         fnScope = ProofScope(scope)
         return fn.prove(fnScope, *proofResults)
 
+class FieldAccessOp:
+    def __init__(self, expr: 'Expr', field: str) -> None:
+        self.expr = expr
+        self.field = field
+    
+    def __eq__(self, other: 'FieldAccessOp') -> bool:
+        return self.expr == other.expr and self.field == other.field
+
+    def eval(self, scope: EvalScope):
+        obj: Obj = self.expr.eval(scope)
+        return obj.fields[self.field]
+
+    def prove(self, scope: ProofScope) -> ObjProofs:
+        proofs = self.expr.prove(scope)
+        return proofs.fieldProofs[self.field]
+
 class Op:
-    def __init__(self, type: OpType, setOp: Optional[SetOp], callOp: Optional[CallOp]) -> None:
+    def __init__(self, type: OpType, setOp: Optional[SetOp], callOp: Optional[CallOp], faOp: Optional[FieldAccessOp]) -> None:
         self.type: OpType = type
         self.setOp: Optional[SetOp] = setOp
         self.callOp: Optional[CallOp] = callOp
+        self.faOp = faOp
 
     def __eq__(self, other: 'Op') -> bool:
-        return self.type == other.type and self.setOp == other.setOp and self.callOp == other.callOp
+        return self.type == other.type and self.setOp == other.setOp and self.callOp == other.callOp and self.faOp == other.faOp
 
     def eval(self, scope: EvalScope):
         if self.type == OpType.SET:
             return self.setOp.eval(scope)
+        elif self.type == OpType.FACC:
+            return self.faOp.eval(scope)
         else:
             return self.callOp.eval(scope)
 
     def proof(self, scope: ProofScope) -> ObjProofs:
         if self.type == OpType.SET:
             return self.setOp.prove(scope)
+        elif self.type == OpType.FACC:
+            return self.faOp.prove(scope)
         else:
             return self.callOp.prove(scope)
 
     @staticmethod
     def newSetOp(setOp: SetOp) -> 'Op':
-        return Op(OpType.SET, setOp, None)
+        return Op(OpType.SET, setOp, None, None)
 
     @staticmethod
     def newCallOp(callOp: CallOp) -> 'Op':
-        return Op(OpType.CALL, None, callOp)
+        return Op(OpType.CALL, None, callOp, None)
+
+    @staticmethod
+    def newFieldAccessOp(faOp: FieldAccessOp) -> 'Op':
+        return Op(OpType.FACC, None, None, faOp)
 
 class Affirm: # affirm
     def __init__(self, proof) -> None:
@@ -162,7 +201,7 @@ class Expr: # expr
         elif self.type == ExprType.VAR:
             return scope.proofs[self.var]
         elif self.type == ExprType.NUM:
-            return ObjProofs([Proof(Relation.EQ, ProofExpr.newNumVal(self.num))], None)
+            return ObjProofs([Proof(Relation.EQ, ProofExpr.newNumVal(self.num))], {})
 
     @staticmethod
     def newOpExpr(op: Op) -> 'Expr':
@@ -185,18 +224,18 @@ class Expr: # expr
         expr = expr.strip()
 
         am = affirmPattern.fullmatch(expr)
-        if (am is not None):
+        if am is not None:
             proof = am.group(1)
             return Expr.newAffirmExpr(Affirm(proof))
         
         sm = setOpPattern.fullmatch(expr)
-        if (sm is not None):
+        if sm is not None:
             leftVar = sm.group(1)
             rightExpr = Expr.parse(sm.group(2))
             return Expr.newOpExpr(Op.newSetOp(SetOp(leftVar, rightExpr)))
 
         cm = callOpPattern.fullmatch(expr)
-        if (cm is not None):
+        if cm is not None:
             functName = cm.group(1)
             argStrs = cm.group(2).strip()
             if (len(argStrs) == 0):
@@ -205,12 +244,19 @@ class Expr: # expr
                 args = list(map(Expr.parse, argStrs.split(','))) # TODO: Need a CFG to do this correctly
             return Expr.newOpExpr(Op.newCallOp(CallOp(functName, args)))
 
+        
+        fap = fieldAccessPattern.fullmatch(expr)
+        if fap is not None:
+            leftExpr = Expr.parse(fap.group(1))
+            rightFieldName = fap.group(2)
+            return Expr.newOpExpr(Op.newFieldAccessOp(FieldAccessOp(leftExpr, rightFieldName)))
+
         nm = numPattern.fullmatch(expr)
-        if (nm is not None):
+        if nm is not None:
             return Expr.newNumExpr(int(expr))
 
         vm = varPattern.fullmatch(expr)
-        if (vm is not None):
+        if vm is not None:
             return Expr.newVarExpr(expr)
 
 

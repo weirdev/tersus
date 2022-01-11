@@ -13,6 +13,7 @@ def test1():
     """
 
     test1Expected = [
+        Expr.newOpExpr(Op.newSetOp(SetOp('y', Expr.newNumExpr(2)))),
         Expr.newOpExpr(Op.newSetOp(SetOp('x', Expr.newVarExpr('y')))),
         Expr.newAffirmExpr(Affirm('x = y')),
         Expr.newOpExpr(Op.newSetOp(SetOp('x', Expr.newOpExpr(Op.newCallOp(CallOp('test', [])))))),
@@ -53,5 +54,29 @@ def test2():
     assert len(result) == 1
     assert result[0] == Proof(Relation.EQ, ProofExpr.newNumVal(10))
 
+def test3():
+    test3 = """
+    x = newArray(5)
+    y = x.size
+    """
+
+    block = parse(test3)
+
+    parentScope = EvalScope(None)
+    parentScope.functions.update(StdLib)
+    result = evalBlock(block, parentScope)
+
+    assert result == 5
+
+    parentScope = ProofScope(None)
+    parentScope.functions.update(StdLib)
+    result = proveBlock(block, parentScope).proofs
+
+    assert len(result) == 1
+    assert result[0] == Proof(Relation.EQ, ProofExpr.newNumVal(5))
+
 if __name__ == '__main__':
+    test3()
+
+    test1()
     test2()
