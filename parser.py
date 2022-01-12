@@ -161,14 +161,16 @@ class Op:
         return Op(OpType.FACC, None, None, faOp)
 
 class Affirm: # affirm
-    def __init__(self, proof) -> None:
+    def __init__(self, proof: 'Expr') -> None:
         self.proof = proof
 
     def __eq__(self, other: 'Affirm') -> bool:
         return self.proof == other.proof
 
     def prove(self, scope: ProofScope) -> ObjProofs:
-        return None
+        if self.proof.type != ExprType.OP and self.proof.op.type != OpType.CALL: # TODO: Support basic logical relations
+            return None
+        return self.proof.prove(scope)
 
 class Expr: # expr
     def __init__(self, type: ExprType, op: Optional[Op], affirm: Optional[Affirm], var: Optional[str], num: Optional[int]) -> None:
@@ -226,7 +228,7 @@ class Expr: # expr
         am = affirmPattern.fullmatch(expr)
         if am is not None:
             proof = am.group(1)
-            return Expr.newAffirmExpr(Affirm(proof))
+            return Expr.newAffirmExpr(Affirm(Expr.parse(proof)))
         
         sm = setOpPattern.fullmatch(expr)
         if sm is not None:

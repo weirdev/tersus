@@ -55,17 +55,26 @@ def setArrayProve(args):
 
     size = arrObj.fieldProofs["size"]
 
-    exactValProof = Proof(Relation.EQ, ProofExpr.newNumVal(None))
+    ltValProof = Proof(Relation.LT, ProofExpr.newNumVal(None))
     
-    indexExact = next(filter(lambda x: exactValProof.match(x), index.proofs))
-    sizeExact = next(filter(lambda x: exactValProof.match(x), size.proofs))
+    indexLt = next(filter(lambda x: ltValProof.match(x), index.proofs), None)
+    sizeLt = next(filter(lambda x: ltValProof.match(x), size.proofs), None)
 
-    assert indexExact is not None
-    assert sizeExact is not None
+    assert indexLt is not None
+    assert sizeLt is not None
 
-    assert indexExact.expr.numVal < sizeExact.expr.numVal
+    assert indexLt.expr.numVal < sizeLt.expr.numVal # TODO: New affirm function proving x < n -> x < n + 1 (or arbitrary positive int)
 
     return ObjProofs([], {})
+
+def affirmEqToLessThan(args):
+    varProofs: ObjProofs = args[1]
+
+    transformed: List[Proof] = []
+    for p in getEqs(varProofs.proofs):
+        transformed.append(Proof(Relation.LT, ProofExpr.newPlus(p.expr, ProofExpr.newNumVal(1)).simplify()))
+
+    varProofs.proofs.extend(transformed)
 
 StdLib = {
     "add": Func(lambda x: x[1] + x[2], addProve),
@@ -73,5 +82,6 @@ StdLib = {
     "newArray": Func(lambda x: Obj("array", [0]*x[1], {"size": x[1]}), lambda x: ObjProofs([], {"size": x[1]})),
     "getField": Func(lambda x: x[1].getField(x[2]), lambda x: x[1].fieldProofs[x]),
     "getArrayElement": Func(lambda x: x[1].getVal()[x[2]], lambda _: ObjProofs([], {})),
-    "setArrayElement": Func(setArrayFunc, setArrayProve)
+    "setArrayElement": Func(setArrayFunc, setArrayProve),
+    "affirmEqToLessThan": Func(lambda _: None, affirmEqToLessThan)
 }

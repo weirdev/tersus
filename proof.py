@@ -17,12 +17,14 @@ class ProofOp(Enum):
     PLUS = 2
     MINUS = 3
     ANY = 4
+    NESTED = 5
 
 class ProofExpr:
-    def __init__(self, numVal: Optional[int], op: ProofOp, args: List['ProofExpr']) -> None:
+    def __init__(self, numVal: Optional[int], op: ProofOp, args: List['ProofExpr'], nested: Optional['Proof']) -> None:
         self.numVal = numVal
         self.op = op
         self.args = args
+        self.nested = nested
 
     def simplify(self) -> 'ProofExpr':
         if self.op == ProofOp.NUMVAL:
@@ -58,19 +60,23 @@ class ProofExpr:
 
     @staticmethod
     def newNumVal(val: int):
-        return ProofExpr(val, ProofOp.NUMVAL, [])
+        return ProofExpr(val, ProofOp.NUMVAL, [], None)
 
     @staticmethod
     def newPlus(left: 'ProofExpr', right: 'ProofExpr'):
-        return ProofExpr(None, ProofOp.PLUS, [left, right])
+        return ProofExpr(None, ProofOp.PLUS, [left, right], None)
 
     @staticmethod
     def newMinus(left: 'ProofExpr', right: 'ProofExpr'):
-        return ProofExpr(None, ProofOp.MINUS, [left, right])
+        return ProofExpr(None, ProofOp.MINUS, [left, right], None)
 
     @staticmethod
     def newAny():
-        return ProofExpr(None, ProofOp.ANY, [])
+        return ProofExpr(None, ProofOp.ANY, [], None)
+        
+    @staticmethod
+    def newNestedProof(proof: 'Proof'):
+        return ProofExpr(None, ProofOp.NESTED, [], proof)
     
 class Proof:
     def __init__(self, relation: Relation, expr: ProofExpr) -> None:

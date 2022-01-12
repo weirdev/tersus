@@ -15,7 +15,7 @@ def test1():
     test1Expected = [
         Expr.newOpExpr(Op.newSetOp(SetOp('y', Expr.newNumExpr(2)))),
         Expr.newOpExpr(Op.newSetOp(SetOp('x', Expr.newVarExpr('y')))),
-        Expr.newAffirmExpr(Affirm('x = y')),
+        Expr.newAffirmExpr(Affirm(Expr.newOpExpr(Op.newSetOp(SetOp('x', Expr.newVarExpr('y')))))),
         Expr.newOpExpr(Op.newSetOp(SetOp('x', Expr.newOpExpr(Op.newCallOp(CallOp('test', [])))))),
         Expr.newOpExpr(Op.newCallOp(CallOp('z', [Expr.newVarExpr('x')]))),
         Expr.newOpExpr(Op.newSetOp(SetOp('y', Expr.newNumExpr(5))))
@@ -28,8 +28,9 @@ def test1():
     for i in range(len(results)):
         try:
             assert results[i] == test1Expected[i]
-        except:
+        except Exception as e:
             print(i)
+            raise e
 
 def test2():
     test2 = """
@@ -58,20 +59,34 @@ def test3():
     test3 = """
     x = newArray(5)
     y = x.size
-    setArrayElement(x, 6, 4)
+    i = {}
+    affirm affirmEqToLessThan(i)
+    affirm affirmEqToLessThan(x.size)
+    setArrayElement(x, i, 4)
     z = getArrayElement(x, 2)
     a = getArrayElement(x, 3)
     """
-
-    block = parse(test3)
     
+    # Prove
+    # Succeed
+    block = parse(test3.format("3"))
     parentScope = ProofScope(None)
     parentScope.functions.update(StdLib)
-    result = proveBlock(block, parentScope).proofs
+    proveBlock(block, parentScope)
 
-    assert len(parentScope.proofs["y"].proofs) == 1
-    assert parentScope.proofs["y"].proofs[0] == Proof(Relation.EQ, ProofExpr.newNumVal(5))
+    # Fail
+    block = parse(test3.format("6"))
+    parentScope = ProofScope(None)
+    parentScope.functions.update(StdLib)
+    failed = False
+    try:
+        proveBlock(block, parentScope)
+    except:
+        failed = True
+    assert failed
 
+    # Eval
+    block = parse(test3.format("3"))
     parentScope = EvalScope(None)
     parentScope.functions.update(StdLib)
     result = evalBlock(block, parentScope)
