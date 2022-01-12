@@ -16,6 +16,7 @@ class ProofOp(Enum):
     NUMVAL = 1
     PLUS = 2
     MINUS = 3
+    ANY = 4
 
 class ProofExpr:
     def __init__(self, numVal: Optional[int], op: ProofOp, args: List['ProofExpr']) -> None:
@@ -40,6 +41,21 @@ class ProofExpr:
     def __eq__(self, other: 'ProofExpr') -> bool:
         return self.numVal == other.numVal and self.op == other.op and self.args == other.args
 
+    def match(self, other: 'ProofExpr') -> bool:
+        if self.op == ProofOp.ANY or other.op == ProofOp.ANY:
+            return True
+
+        if self.op == other.op:
+            if self.op == ProofOp.PLUS or self.op == ProofOp.MINUS:
+                return self.args[0].match(other.args[0]) and self.args[1].match(other.args[1])
+            elif self.op == ProofOp.NUMVAL:
+                if self.numVal is None or other.numVal is None:
+                    return True
+                else:
+                    return self == other
+
+        return False
+
     @staticmethod
     def newNumVal(val: int):
         return ProofExpr(val, ProofOp.NUMVAL, [])
@@ -51,6 +67,10 @@ class ProofExpr:
     @staticmethod
     def newMinus(left: 'ProofExpr', right: 'ProofExpr'):
         return ProofExpr(None, ProofOp.MINUS, [left, right])
+
+    @staticmethod
+    def newAny():
+        return ProofExpr(None, ProofOp.ANY, [])
     
 class Proof:
     def __init__(self, relation: Relation, expr: ProofExpr) -> None:
@@ -59,6 +79,9 @@ class Proof:
 
     def __eq__(self, other: 'Proof') -> bool:
         return self.relation == other.relation and self.expr == other.expr
+
+    def match(self, other: 'Proof') -> bool:
+        return self.relation == other.relation and self.expr.match(other.expr)
 
 class ObjProofs:
     def __init__(self, proofs: List[Proof], fieldProofs: Dict[str, 'ObjProofs']) -> None:

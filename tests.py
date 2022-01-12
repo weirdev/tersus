@@ -58,22 +58,27 @@ def test3():
     test3 = """
     x = newArray(5)
     y = x.size
+    setArrayElement(x, 6, 4)
+    z = getArrayElement(x, 2)
+    a = getArrayElement(x, 3)
     """
 
     block = parse(test3)
+    
+    parentScope = ProofScope(None)
+    parentScope.functions.update(StdLib)
+    result = proveBlock(block, parentScope).proofs
+
+    assert len(parentScope.proofs["y"].proofs) == 1
+    assert parentScope.proofs["y"].proofs[0] == Proof(Relation.EQ, ProofExpr.newNumVal(5))
 
     parentScope = EvalScope(None)
     parentScope.functions.update(StdLib)
     result = evalBlock(block, parentScope)
 
-    assert result == 5
-
-    parentScope = ProofScope(None)
-    parentScope.functions.update(StdLib)
-    result = proveBlock(block, parentScope).proofs
-
-    assert len(result) == 1
-    assert result[0] == Proof(Relation.EQ, ProofExpr.newNumVal(5))
+    assert parentScope.vars["y"] == 5
+    assert parentScope.vars["z"] == 0
+    assert parentScope.vars["a"] == 4
 
 if __name__ == '__main__':
     test3()

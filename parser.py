@@ -267,15 +267,13 @@ def parse(lines: str) -> List[Expr]:
             lambda l: len(l.strip()) > 0, 
             lines.splitlines())))
 
-def evalBlock(block: List[Expr], parentScope: Optional[EvalScope] = None):
-    scope = EvalScope(parentScope)
+def evalBlock(block: List[Expr], scope: Optional[EvalScope] = None):
     last = None
     for expr in block:
         last = expr.eval(scope)
     return last
 
-def proveBlock(block: List[Expr], parentScope: Optional[ProofScope] = None) -> ObjProofs:
-    scope = ProofScope(parentScope)
+def proveBlock(block: List[Expr], scope: Optional[ProofScope] = None) -> ObjProofs:
     last = None
     for expr in block:
         last = expr.prove(scope)
