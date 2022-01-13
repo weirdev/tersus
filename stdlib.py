@@ -4,9 +4,9 @@ from proof import *
 
 
 class Func:
-    def __init__(self, f, p) -> None:
-        self.f = f
-        self.p = p
+    def __init__(self, eval, prove) -> None:
+        self.f = eval
+        self.p = prove
 
     def eval(self, scope: EvalScope, *args):
         return self.f((scope,) + args)
@@ -55,24 +55,41 @@ def setArrayProve(args):
 
     size = arrObj.fieldProofs["size"]
 
-    ltValProof = Proof(Relation.LT, ProofExpr.newNumVal(None))
-    
-    indexLt = next(filter(lambda x: ltValProof.match(x), index.proofs), None)
-    sizeLt = next(filter(lambda x: ltValProof.match(x), size.proofs), None)
+    proofMatch = False
+    for sp in size.proofs:
+        for ip in index.proofs:
+            if sp == ip:
+                proofMatch = True
 
-    assert indexLt is not None
-    assert sizeLt is not None
-
-    assert indexLt.expr.numVal < sizeLt.expr.numVal # TODO: New affirm function proving x < n -> x < n + 1 (or arbitrary positive int)
+    assert proofMatch
 
     return ObjProofs([], {})
 
-def affirmEqToLessThan(args):
+def affirmEqToLt(args):
     varProofs: ObjProofs = args[1]
 
     transformed: List[Proof] = []
     for p in getEqs(varProofs.proofs):
         transformed.append(Proof(Relation.LT, ProofExpr.newPlus(p.expr, ProofExpr.newNumVal(1)).simplify()))
+
+    varProofs.proofs.extend(transformed)
+
+def affirmLtToLtPlusN(args):
+    varProofs: ObjProofs = args[1]
+    numProofs: ObjProofs = args[2]
+
+    ltAny = Proof(Relation.LT, ProofExpr.newAny())
+    ltProofs = filter(lambda x: ltAny.match(x), varProofs.proofs)
+
+    eqNum = Proof(Relation.EQ, ProofExpr.newNumVal(None))
+    numProof = next(filter(lambda x: eqNum.match(x), numProofs.proofs), None)
+
+    assert numProof is not None
+    numExpr = numProof.expr
+
+    transformed: List[Proof] = []
+    for p in ltProofs:
+        transformed.append(Proof(Relation.LT, ProofExpr.newPlus(p.expr, numExpr).simplify()))
 
     varProofs.proofs.extend(transformed)
 
@@ -83,5 +100,6 @@ StdLib = {
     "getField": Func(lambda x: x[1].getField(x[2]), lambda x: x[1].fieldProofs[x]),
     "getArrayElement": Func(lambda x: x[1].getVal()[x[2]], lambda _: ObjProofs([], {})),
     "setArrayElement": Func(setArrayFunc, setArrayProve),
-    "affirmEqToLessThan": Func(lambda _: None, affirmEqToLessThan)
+    "affirmEqToLt": Func(lambda _: None, affirmEqToLt),
+    "affirmLtToLtPlusN": Func(lambda _: None, affirmLtToLtPlusN)
 }

@@ -60,8 +60,9 @@ def test3():
     x = newArray(5)
     y = x.size
     i = {}
-    affirm affirmEqToLessThan(i)
-    affirm affirmEqToLessThan(x.size)
+    affirm affirmEqToLt(i)
+    affirm affirmEqToLt(x.size)
+    affirm affirmLtToLtPlusN(i, 2)
     setArrayElement(x, i, 4)
     z = getArrayElement(x, 2)
     a = getArrayElement(x, 3)
