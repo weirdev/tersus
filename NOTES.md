@@ -6,3 +6,6 @@ Array (collection) element proofs
     Maps probably make sense being treated more like the array case rather than the tuple case
 
 Define a target proof that we want to acheive in order to validate method, rather than manually transforming / checking in each prove method
+
+Cannot "weaken" both sides of a proof
+    - Give each object two sets of proofs? stronger and weaker?
