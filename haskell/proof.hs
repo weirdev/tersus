@@ -5,18 +5,20 @@ import           Data.Map                       ( Map
                                                 , lookup
                                                 )
 
-data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 data Funct = Size | First | Last deriving Show
--- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
-data Proof = A Iota Rel Iota | C Iota Rel Value | FApp Iota Funct Iota deriving Show
-type Iota = String
 type Variable = String
 data Value = VInt Integer | VIntList [Integer]
     deriving Show
 data Op = Plus | Minus
 data Expression = Val Value | Var Variable | E Expression Op Expression | F Funct Expression
-data Statement = Assign Variable Expression
+data Statement = Assign Variable Expression | Rewrite RwRule
 type State = (Map Variable Value, Map Variable Iota, [Proof])
+
+-- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
+data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
+type Iota = String
+data Proof = A Iota Rel Iota | C Iota Rel Value | FApp Iota Funct Iota deriving Show
+data RwRule = Refl Variable
 type VState = (Map Variable Iota, [Proof], [String])
 
 iotalist :: [String]
@@ -39,14 +41,41 @@ proofConcrete :: Proof -> Bool
 proofConcrete C{} = True
 proofConcrete _   = False
 
-replaceLIotas :: [Proof] -> Iota -> [Proof]
-replaceLIotas [] _ = []
-replaceLIotas (A _ rel ptiota : tail) iota =
-    A iota rel ptiota : replaceLIotas tail iota
-replaceLIotas (C _ rel val : tail) iota =
-    C iota rel val : replaceLIotas tail iota
-replaceLIotas (FApp _ funct ptiota : tail) iota =
-    FApp iota funct ptiota : replaceLIotas tail iota
+proofAbstract :: Proof -> Bool
+proofAbstract A{} = True
+proofAbstract _   = False
+
+-- replaceLIotas :: [Proof] -> Iota -> [Proof]
+-- replaceLIotas [] _ = []
+-- replaceLIotas (A _ rel ptiota : tail) iota =
+--     A iota rel ptiota : replaceLIotas tail iota
+-- replaceLIotas (C _ rel val : tail) iota =
+--     C iota rel val : replaceLIotas tail iota
+-- replaceLIotas (FApp _ funct ptiota : tail) iota =
+--     FApp iota funct ptiota : replaceLIotas tail iota
+
+
+reflProofsByProof :: [Proof] -> Proof -> [Proof]
+reflProofsByProof (proof : ptail) (A iota Eq oiota) = case proof of
+    A li rel ri | li == iota ->
+        A oiota rel ri : reflProofsByProof ptail (A iota Eq oiota)
+    C li rel val | li == iota ->
+        C oiota rel val : reflProofsByProof ptail (A iota Eq oiota)
+    FApp li funct ri | li == iota ->
+        FApp oiota funct ri : reflProofsByProof ptail (A iota Eq oiota)
+    FApp li funct ri | ri == iota ->
+        FApp li funct oiota : reflProofsByProof ptail (A iota Eq oiota)
+    _ -> reflProofsByProof ptail (A iota Eq oiota)
+reflProofsByProof (proof : ptail) (C iota Eq val) = case proof of
+    A li rel ri | ri == iota ->
+        C li rel val : reflProofsByProof ptail (C iota Eq val)
+    _ -> reflProofsByProof ptail (C iota Eq val)
+reflProofsByProof _ _ = []
+
+-- reflProofsByProofs :: [Proof] -> [Proof] -> [Proof]
+-- reflProofsByProofs [] _ = []
+-- reflProofsByProofs _ [] = []
+-- reflProofsByProofs origProofs (reflByProof : rbpTail) = reflProofsByProof origProofs reflByProof ++ reflProofsByProofs origProofs rbpTail
 
 -- Public fns
 evaluate :: [Statement] -> State
@@ -72,12 +101,20 @@ evalStatement (vals, iotas, proofs) (Assign var expr) =
     in  case miota of
             Just niota -> (insert var val vals, insert var niota iotas, proofs)
             Nothing    -> (insert var val vals, delete var iotas, proofs)
+evalStatement state Rewrite{} = state
 
 valStatement :: VState -> Statement -> VState
 valStatement (iotas, proofs, iotaseq) (Assign var expr) =
     let niota : tiotalist = iotaseq
-    in  let nproofs = valExpression (iotas, proofs, iotaseq) niota expr
+    in  let nproofs = valExpression (iotas, proofs, tiotalist) niota expr
         in  (insert var niota iotas, proofs ++ nproofs, tiotalist)
+valStatement (iotas, proofs, iotaseq) (Rewrite (Refl var)) =
+    let oiota = Data.Map.lookup var iotas
+    in  let iota = case oiota of
+                Nothing -> error "Undefined variable"
+                Just i  -> i
+        in  let newProofs = concatMap (reflProofsByProof proofs) proofs
+            in  (iotas, proofs ++ newProofs, iotaseq)
 
 evalExpression :: State -> Expression -> (Value, Maybe Iota)
 evalExpression state (Val val) = (val, Nothing)
@@ -106,11 +143,30 @@ valExpression (iotas, proofs, iotaseq) iota (E expr1 op expr2) =
     let niota1 : niota2 : tiotalist = iotaseq
     in  let proofs1 = valExpression (iotas, proofs, tiotalist) niota1 expr1
         in  let proofs2 = valExpression (iotas, proofs, tiotalist) niota2 expr2
-            in  valOp op niota1 proofs1 niota2 proofs2 iota
+            in  valOp op
+                      niota1
+                      (proofs ++ proofs1)
+                      niota2
+                      (proofs ++ proofs2)
+                      iota
 valExpression (iotas, proofs, iotaseq) iota (F funct expr) =
     let niota : tiotalist = iotaseq
-    in  let finputproofs = valExpression (iotas, proofs, iotaseq) niota expr
-        in  valFunct funct niota finputproofs iota
+    in
+        let finputproofs = valExpression (iotas, proofs, tiotalist) niota expr -- proofs of input expression in terms of niota, ie. (A/C niota rel other/val)
+    -- If finputproofs = [A niota rel oi] where oi is already defined, replace with the definition of oi
+        in
+            let refloncefiproofs =
+                    concatMap (reflProofsByProof finputproofs) proofs
+            in
+                let concreteProofs = filter proofConcrete finputproofs -- C niota rel val
+                in
+                    concatMap (reflProofsByProof [FApp iota funct niota])
+                              finputproofs
+                        ++ valFunct
+                               funct
+                               niota
+                               (refloncefiproofs ++ concreteProofs)
+                               iota
 
 evalOp :: Op -> Value -> Value -> Value
 evalOp Plus (VInt i1) (VInt i2) = VInt (i1 + i2)
@@ -157,4 +213,11 @@ valFunct funct iiota iproofs retiota =
             (filter (proofRel Eq) (filter (proofLIota iiota) iproofs))
     in  case iEqProofs of
             C _ Eq l : _ -> [C retiota Eq (evalFunct funct l)]
-            _            -> error ("Funct not validated: " ++ show iproofs)
+            _            -> error
+                (  "Funct '"
+                ++ show funct
+                ++ "' not validated. InputIota: "
+                ++ show iiota
+                ++ ". Input Proofs: "
+                ++ show iproofs
+                )

@@ -1,15 +1,21 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
-1. Proof transformation v1
-    Basic refl
+1. Improved proof representation, proof engine
+    How are we handling proofs w/ nested expressions, we currently do not allow temp iotas to leak
+        Is this still workable?
+    Proof engine would be able to apply generalized rewritings supplied by functions
 2. Functions
     Multiple args
     Replace operators (plus, minus)
+    Dont fully evaluate immediately? ie. rewrite to get result?
 3. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?
-4. Improved proof representation, proof engine
-    Proof engine would be able to apply generalized rewritings supplied by functions
-5. Proof transformation v1
-6. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+4. Proof transformation v2
+5. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+
+
+Working Test cases:
+validate [Assign "x" (F Size (Val (VIntList [5])))]
+validate [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size (Var "x"))]
