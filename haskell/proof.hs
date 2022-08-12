@@ -6,13 +6,15 @@ import           Data.Map                       ( Map
                                                 )
 
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
-data Proof = A Iota Rel Iota | C Iota Rel Value deriving Show -- This will need to be made more robust, for now A=abstract, C=concrete
+data Funct = Size | First | Last deriving Show
+-- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
+data Proof = A Iota Rel Iota | C Iota Rel Value | FApp Iota Funct Iota deriving Show
 type Iota = String
 type Variable = String
-data Value = VInt Integer
+data Value = VInt Integer | VIntList [Integer]
     deriving Show
 data Op = Plus | Minus
-data Expression = Val Value | Var Variable | E Expression Op Expression
+data Expression = Val Value | Var Variable | E Expression Op Expression | F Funct Expression
 data Statement = Assign Variable Expression
 type State = (Map Variable Value, Map Variable Iota, [Proof])
 type VState = (Map Variable Iota, [Proof], [String])
@@ -24,12 +26,14 @@ proofLIotaLookup :: [Proof] -> Iota -> [Proof]
 proofLIotaLookup proofs iota = filter (proofLIota iota) proofs
 
 proofLIota :: Iota -> Proof -> Bool
-proofLIota iota (A piota _ _) = piota == iota
-proofLIota iota (C piota _ _) = piota == iota
+proofLIota iota (A    piota _ _) = piota == iota
+proofLIota iota (C    piota _ _) = piota == iota
+proofLIota iota (FApp piota _ _) = piota == iota
 
 proofRel :: Rel -> Proof -> Bool
 proofRel rel (A _ prel _) = prel == rel
 proofRel rel (C _ prel _) = prel == rel
+proofRel rel FApp{}       = False
 
 proofConcrete :: Proof -> Bool
 proofConcrete C{} = True
@@ -37,10 +41,12 @@ proofConcrete _   = False
 
 replaceLIotas :: [Proof] -> Iota -> [Proof]
 replaceLIotas [] _ = []
-replaceLIotas (A piota rel ptiota : tail) iota =
+replaceLIotas (A _ rel ptiota : tail) iota =
     A iota rel ptiota : replaceLIotas tail iota
-replaceLIotas (C piota rel val : tail) iota =
+replaceLIotas (C _ rel val : tail) iota =
     C iota rel val : replaceLIotas tail iota
+replaceLIotas (FApp _ funct ptiota : tail) iota =
+    FApp iota funct ptiota : replaceLIotas tail iota
 
 -- Public fns
 evaluate :: [Statement] -> State
@@ -80,7 +86,9 @@ evalExpression (vals, iotas, _) (Var var) =
     in  let miota = Data.Map.lookup var iotas
         in  case mval of
                 Just val -> (val, miota)
-                Nothing  -> error "Undefined variable" -- TODO: Validate
+                Nothing  -> error "Undefined variable"
+evalExpression state (F funct expr) =
+    ((\(v, _) -> evalFunct funct v) (evalExpression state expr), Nothing)
 evalExpression state (E expr1 op expr2) =
     let (val1, _) = evalExpression state expr1
     in  let (val2, _) = evalExpression state expr2
@@ -96,26 +104,57 @@ valExpression (iotas, proofs, _) iota (Var var) =
             Just oiota -> [A iota Eq oiota]
 valExpression (iotas, proofs, iotaseq) iota (E expr1 op expr2) =
     let niota1 : niota2 : tiotalist = iotaseq
-    in  let proofs1 = valExpression (iotas, proofs, iotaseq) niota1 expr1
-        in  let proofs2 = valExpression (iotas, proofs, iotaseq) niota2 expr2
+    in  let proofs1 = valExpression (iotas, proofs, tiotalist) niota1 expr1
+        in  let proofs2 = valExpression (iotas, proofs, tiotalist) niota2 expr2
             in  valOp op niota1 proofs1 niota2 proofs2 iota
+valExpression (iotas, proofs, iotaseq) iota (F funct expr) =
+    let niota : tiotalist = iotaseq
+    in  let finputproofs = valExpression (iotas, proofs, iotaseq) niota expr
+        in  valFunct funct niota finputproofs iota
 
 evalOp :: Op -> Value -> Value -> Value
-evalOp Plus  (VInt i1) (VInt i2) = VInt (i1 + i2)
+evalOp Plus (VInt i1) (VInt i2) = VInt (i1 + i2)
+evalOp Plus _ _ = error "Only ints are valid arguments to + operator"
 evalOp Minus (VInt i1) (VInt i2) = VInt (i1 - i2)
+evalOp Minus _ _ = error "Only ints are valid arguments to - operator"
 
 -- Takes: Op, left arg iota, Proofs of left arg, right arg iota, Proofs of right arg, result iota
--- -- Returns: Proofs for result iota
+-- Returns: Proofs for result iota
+-- TODO: See README. Replace with functions and proof engine.
+-- Currently only handling proving with concrete values (ex. iotaA=5 + iotaB=4 = iotaC=9)
+-- Later updates will produce proofs of abstract values (ex. iotaA + iotaB = iotaC)
 valOp :: Op -> Iota -> [Proof] -> Iota -> [Proof] -> Iota -> [Proof]
 valOp op liota lproofs riota rproofs retiota =
-    let lEqProofs = filter (proofRel Eq) (filter (proofLIota liota) lproofs)
+    let lEqProofs = filter
+            proofConcrete
+            (filter (proofRel Eq) (filter (proofLIota liota) lproofs))
     in  let rEqProofs = filter
                 proofConcrete
                 (filter (proofRel Eq) (filter (proofLIota riota) rproofs))
-        in  let opfun = case op of
-                    Plus  -> (+)
-                    Minus -> (-)
-            in  case (lEqProofs, rEqProofs) of
-                    (C _ Eq (VInt li) : _, C _ Eq (VInt ri) : _) ->
-                        [C retiota Eq (VInt (opfun li ri))]
-                    _ -> error "Op not validated"
+        in  case (lEqProofs, rEqProofs) of
+                (C _ Eq li : _, C _ Eq ri : _) ->
+                    [C retiota Eq (evalOp op li ri)]
+                _ -> error "Op not validated"
+
+evalFunct :: Funct -> Value -> Value
+evalFunct Size  (VIntList l) = VInt (fromIntegral (length l))
+evalFunct Size  _            = error "Size only valid for IntList"
+evalFunct First (VIntList l) = VInt (fromIntegral (head l))
+evalFunct First _            = error "First only valid for IntList"
+evalFunct Last  (VIntList l) = VInt (fromIntegral (last l))
+evalFunct Last  _            = error "Last only valid for IntList"
+
+-- Takes: Funct, funct input iota, funct input proofs, result iota
+-- Returns: Proofs for result iota
+-- TODO: Currently only supporting producing concrete proof results
+-- (ex. size(iotaA=[5, 4]) = iotaB=2)
+-- Later update to produce abstract FApp proofs
+-- (ex. size(iotaA) = iotaB)
+valFunct :: Funct -> Iota -> [Proof] -> Iota -> [Proof]
+valFunct funct iiota iproofs retiota =
+    let iEqProofs = filter
+            proofConcrete
+            (filter (proofRel Eq) (filter (proofLIota iiota) iproofs))
+    in  case iEqProofs of
+            C _ Eq l : _ -> [C retiota Eq (evalFunct funct l)]
+            _            -> error ("Funct not validated: " ++ show iproofs)
