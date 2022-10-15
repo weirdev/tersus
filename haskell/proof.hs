@@ -10,16 +10,22 @@ type Variable = String
 data Value = VInt Integer | VIntList [Integer]
     deriving Show
 data Op = Plus | Minus
-data Expression = Val Value | Var Variable | E Expression Op Expression | F Funct Expression
+data Expression = Val Value | Var Variable | E Expression Op Expression | F Funct [Expression]
 data Statement = Assign Variable Expression | Rewrite RwRule
 type State = (Map Variable Value, Map Variable Iota, [Proof])
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 type Iota = String
-data Proof = A Iota Rel Iota | C Iota Rel Value | FApp Iota Funct Iota deriving Show
+data Proof = A Iota Rel Iota | C Iota Rel Value | FApp Iota Funct [Iota] deriving Show
 data RwRule = Refl Variable
 type VState = (Map Variable Iota, [Proof], [String])
+
+zipMap :: [a] -> [b] -> (a -> b -> c) -> ([c], [b])
+zipMap [] _ _ = ([], [])
+zipMap (ah : at) (bh : bt) f =
+    let (atr, btr) = zipMap at bt f in (f ah bh : atr, bh : btr)
+zipMap (ah : at) [] _ = error "Second list must be at least length of first"
 
 iotalist :: [String]
 iotalist = [ l : show x | x <- [0 ..], l <- ['a' .. 'z'] ]
@@ -63,8 +69,9 @@ reflProofsByProof (proof : ptail) (A iota Eq oiota) = case proof of
         C oiota rel val : reflProofsByProof ptail (A iota Eq oiota)
     FApp li funct ri | li == iota ->
         FApp oiota funct ri : reflProofsByProof ptail (A iota Eq oiota)
-    FApp li funct ri | ri == iota ->
-        FApp li funct oiota : reflProofsByProof ptail (A iota Eq oiota)
+    FApp li funct (ri : rtaili) | ri == iota ->
+        FApp li funct (oiota : rtaili)
+            : reflProofsByProof ptail (A iota Eq oiota)
     _ -> reflProofsByProof ptail (A iota Eq oiota)
 reflProofsByProof (proof : ptail) (C iota Eq val) = case proof of
     A li rel ri | ri == iota ->
@@ -124,12 +131,13 @@ evalExpression (vals, iotas, _) (Var var) =
         in  case mval of
                 Just val -> (val, miota)
                 Nothing  -> error "Undefined variable"
-evalExpression state (F funct expr) =
-    ((\(v, _) -> evalFunct funct v) (evalExpression state expr), Nothing)
+evalExpression state (F funct exprs) =
+    (evalFunct funct (map (fst . evalExpression state) exprs), Nothing)
 evalExpression state (E expr1 op expr2) =
     let (val1, _) = evalExpression state expr1
     in  let (val2, _) = evalExpression state expr2
         in  (evalOp op val1 val2, Nothing)
+
 
 valExpression :: VState -> Iota -> Expression -> [Proof] -- produces only the new proofs
 valExpression state iota (Val val) = [C iota Eq val]
@@ -149,24 +157,27 @@ valExpression (iotas, proofs, iotaseq) iota (E expr1 op expr2) =
                       niota2
                       (proofs ++ proofs2)
                       iota
-valExpression (iotas, proofs, iotaseq) iota (F funct expr) =
-    let niota : tiotalist = iotaseq
+valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
+    let tiotalist = iotaseq
     in
-        let finputproofs = valExpression (iotas, proofs, tiotalist) niota expr -- proofs of input expression in terms of niota, ie. (A/C niota rel other/val)
+        let (finputproofs, niotas) = zipMap
+                exprargs
+                tiotalist
+                (flip (valExpression (iotas, proofs, tiotalist)))  -- proofs of input expression in terms of new iotas
     -- If finputproofs = [A niota rel oi] where oi is already defined, replace with the definition of oi
         in
-            let refloncefiproofs =
-                    concatMap (reflProofsByProof finputproofs) proofs
+            let flatfinputproofs = concat finputproofs
             in
-                let concreteProofs = filter proofConcrete finputproofs -- C niota rel val
+                let refloncefiproofs =
+                        concatMap (reflProofsByProof flatfinputproofs) proofs
                 in
-                    concatMap (reflProofsByProof [FApp iota funct niota])
-                              finputproofs
-                        ++ valFunct
-                               funct
-                               niota
-                               (refloncefiproofs ++ concreteProofs)
-                               iota
+                    let concreteProofs = filter proofConcrete flatfinputproofs -- C niota rel val
+                    in
+                        let ps = refloncefiproofs ++ concreteProofs
+                        in  concatMap
+                                    (reflProofsByProof [FApp iota funct niotas])
+                                    flatfinputproofs
+                                ++ valFunct funct niotas ps iota
 
 evalOp :: Op -> Value -> Value -> Value
 evalOp Plus (VInt i1) (VInt i2) = VInt (i1 + i2)
@@ -192,27 +203,27 @@ valOp op liota lproofs riota rproofs retiota =
                     [C retiota Eq (evalOp op li ri)]
                 _ -> error "Op not validated"
 
-evalFunct :: Funct -> Value -> Value
-evalFunct Size  (VIntList l) = VInt (fromIntegral (length l))
+evalFunct :: Funct -> [Value] -> Value
+evalFunct Size  [VIntList l] = VInt (fromIntegral (length l))
 evalFunct Size  _            = error "Size only valid for IntList"
-evalFunct First (VIntList l) = VInt (fromIntegral (head l))
+evalFunct First [VIntList l] = VInt (fromIntegral (head l))
 evalFunct First _            = error "First only valid for IntList"
-evalFunct Last  (VIntList l) = VInt (fromIntegral (last l))
+evalFunct Last  [VIntList l] = VInt (fromIntegral (last l))
 evalFunct Last  _            = error "Last only valid for IntList"
 
--- Takes: Funct, funct input iota, funct input proofs, result iota
+-- Takes: Funct, funct input iotas, funct input proofs, result iota
 -- Returns: Proofs for result iota
 -- TODO: Currently only supporting producing concrete proof results
 -- (ex. size(iotaA=[5, 4]) = iotaB=2)
 -- Later update to produce abstract FApp proofs
 -- (ex. size(iotaA) = iotaB)
-valFunct :: Funct -> Iota -> [Proof] -> Iota -> [Proof]
-valFunct funct iiota iproofs retiota =
+valFunct :: Funct -> [Iota] -> [Proof] -> Iota -> [Proof]
+valFunct funct [iiota] iproofs retiota =
     let iEqProofs = filter
             proofConcrete
             (filter (proofRel Eq) (filter (proofLIota iiota) iproofs))
     in  case iEqProofs of
-            C _ Eq l : _ -> [C retiota Eq (evalFunct funct l)]
+            C _ Eq l : _ -> [C retiota Eq (evalFunct funct [l])]
             _            -> error
                 (  "Funct '"
                 ++ show funct
@@ -221,3 +232,4 @@ valFunct funct iiota iproofs retiota =
                 ++ ". Input Proofs: "
                 ++ show iproofs
                 )
+valFunct _ _ _ _ = error "Only single argument functions currently supported"
