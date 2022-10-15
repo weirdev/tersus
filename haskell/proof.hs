@@ -5,7 +5,7 @@ import           Data.Map                       ( Map
                                                 , lookup
                                                 )
 
-data Funct = Size | First | Last deriving Show
+data Funct = Size | First | Last | MinusF deriving Show
 type Variable = String
 data Value = VInt Integer | VIntList [Integer]
     deriving Show
@@ -210,6 +210,16 @@ evalFunct First [VIntList l] = VInt (fromIntegral (head l))
 evalFunct First _            = error "First only valid for IntList"
 evalFunct Last  [VIntList l] = VInt (fromIntegral (last l))
 evalFunct Last  _            = error "Last only valid for IntList"
+evalFunct MinusF [VInt v1, VInt v2] = VInt (v1 - v2)
+evalFunct MinusF  _            = error "Minus only valid for two ints"
+
+concreteValsOfAllMaybe :: [[Proof]] -> Maybe [Value]
+concreteValsOfAllMaybe [] = Just []
+concreteValsOfAllMaybe (ps : pst) = case ps of
+                                            C _ Eq l : _ -> case concreteValsOfAllMaybe pst of
+                                                Just vt -> Just (l : vt)
+                                                Nothing -> Nothing
+                                            _            -> Nothing
 
 -- Takes: Funct, funct input iotas, funct input proofs, result iota
 -- Returns: Proofs for result iota
@@ -218,18 +228,18 @@ evalFunct Last  _            = error "Last only valid for IntList"
 -- Later update to produce abstract FApp proofs
 -- (ex. size(iotaA) = iotaB)
 valFunct :: Funct -> [Iota] -> [Proof] -> Iota -> [Proof]
-valFunct funct [iiota] iproofs retiota =
-    let iEqProofs = filter
+valFunct funct iiotas iproofs retiota =
+    let iEqProofs = map (\iiota -> filter
             proofConcrete
-            (filter (proofRel Eq) (filter (proofLIota iiota) iproofs))
-    in  case iEqProofs of
-            C _ Eq l : _ -> [C retiota Eq (evalFunct funct [l])]
-            _            -> error
+            (filter (proofRel Eq) (filter (proofLIota iiota) iproofs))) iiotas
+    in let vals = concreteValsOfAllMaybe iEqProofs in
+        case vals of
+            Just vs -> [C retiota Eq (evalFunct funct vs)]
+            Nothing -> error
                 (  "Funct '"
                 ++ show funct
-                ++ "' not validated. InputIota: "
-                ++ show iiota
+                ++ "' not validated. Input Iotas: "
+                ++ show iiotas
                 ++ ". Input Proofs: "
                 ++ show iproofs
                 )
-valFunct _ _ _ _ = error "Only single argument functions currently supported"

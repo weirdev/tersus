@@ -17,5 +17,6 @@ Next steps:
 
 
 Working Test cases:
-validate [Assign "x" (F Size (Val (VIntList [5])))]
-validate [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size (Var "x"))]
+validate [Assign "x" (F Size [(Val (VIntList [5]))])]
+validate [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [(Var "x")])]
+validate [Assign "x" (F Size [(Val (VIntList [5]))]), Assign "y" (E (Val (VInt 1)) Minus (Val (VInt 1)))]
