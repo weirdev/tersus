@@ -5,12 +5,11 @@ import           Data.Map                       ( Map
                                                 , lookup
                                                 )
 
-data Funct = Size | First | Last | MinusF deriving Show
+data Funct = Size | First | Last | Plus | Minus deriving Show
 type Variable = String
 data Value = VInt Integer | VIntList [Integer]
     deriving Show
-data Op = Plus | Minus
-data Expression = Val Value | Var Variable | E Expression Op Expression | F Funct [Expression]
+data Expression = Val Value | Var Variable | F Funct [Expression]
 data Statement = Assign Variable Expression | Rewrite RwRule
 type State = (Map Variable Value, Map Variable Iota, [Proof])
 
@@ -133,10 +132,6 @@ evalExpression (vals, iotas, _) (Var var) =
                 Nothing  -> error "Undefined variable"
 evalExpression state (F funct exprs) =
     (evalFunct funct (map (fst . evalExpression state) exprs), Nothing)
-evalExpression state (E expr1 op expr2) =
-    let (val1, _) = evalExpression state expr1
-    in  let (val2, _) = evalExpression state expr2
-        in  (evalOp op val1 val2, Nothing)
 
 
 valExpression :: VState -> Iota -> Expression -> [Proof] -- produces only the new proofs
@@ -147,16 +142,6 @@ valExpression (iotas, proofs, _) iota (Var var) =
     in  case omiota of
             Nothing    -> error "Undefined variable"
             Just oiota -> [A iota Eq oiota]
-valExpression (iotas, proofs, iotaseq) iota (E expr1 op expr2) =
-    let niota1 : niota2 : tiotalist = iotaseq
-    in  let proofs1 = valExpression (iotas, proofs, tiotalist) niota1 expr1
-        in  let proofs2 = valExpression (iotas, proofs, tiotalist) niota2 expr2
-            in  valOp op
-                      niota1
-                      (proofs ++ proofs1)
-                      niota2
-                      (proofs ++ proofs2)
-                      iota
 valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
     let tiotalist = iotaseq
     in
@@ -179,30 +164,6 @@ valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
                                     flatfinputproofs
                                 ++ valFunct funct niotas ps iota
 
-evalOp :: Op -> Value -> Value -> Value
-evalOp Plus (VInt i1) (VInt i2) = VInt (i1 + i2)
-evalOp Plus _ _ = error "Only ints are valid arguments to + operator"
-evalOp Minus (VInt i1) (VInt i2) = VInt (i1 - i2)
-evalOp Minus _ _ = error "Only ints are valid arguments to - operator"
-
--- Takes: Op, left arg iota, Proofs of left arg, right arg iota, Proofs of right arg, result iota
--- Returns: Proofs for result iota
--- TODO: See README. Replace with functions and proof engine.
--- Currently only handling proving with concrete values (ex. iotaA=5 + iotaB=4 = iotaC=9)
--- Later updates will produce proofs of abstract values (ex. iotaA + iotaB = iotaC)
-valOp :: Op -> Iota -> [Proof] -> Iota -> [Proof] -> Iota -> [Proof]
-valOp op liota lproofs riota rproofs retiota =
-    let lEqProofs = filter
-            proofConcrete
-            (filter (proofRel Eq) (filter (proofLIota liota) lproofs))
-    in  let rEqProofs = filter
-                proofConcrete
-                (filter (proofRel Eq) (filter (proofLIota riota) rproofs))
-        in  case (lEqProofs, rEqProofs) of
-                (C _ Eq li : _, C _ Eq ri : _) ->
-                    [C retiota Eq (evalOp op li ri)]
-                _ -> error "Op not validated"
-
 evalFunct :: Funct -> [Value] -> Value
 evalFunct Size  [VIntList l] = VInt (fromIntegral (length l))
 evalFunct Size  _            = error "Size only valid for IntList"
@@ -210,8 +171,10 @@ evalFunct First [VIntList l] = VInt (fromIntegral (head l))
 evalFunct First _            = error "First only valid for IntList"
 evalFunct Last  [VIntList l] = VInt (fromIntegral (last l))
 evalFunct Last  _            = error "Last only valid for IntList"
-evalFunct MinusF [VInt v1, VInt v2] = VInt (v1 - v2)
-evalFunct MinusF  _            = error "Minus only valid for two ints"
+evalFunct Minus [VInt v1, VInt v2] = VInt (v1 - v2)
+evalFunct Minus  _            = error "Plus only valid for two ints"
+evalFunct Plus [VInt v1, VInt v2] = VInt (v1 + v2)
+evalFunct Plus  _            = error "Plus only valid for two ints"
 
 concreteValsOfAllMaybe :: [[Proof]] -> Maybe [Value]
 concreteValsOfAllMaybe [] = Just []
