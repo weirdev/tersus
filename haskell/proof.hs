@@ -173,7 +173,7 @@ valStatement (iotas, proofs, iotaseq) (Rewrite (Refl var)) =
     in  let iota = case oiota of
                 Nothing -> error "Undefined variable"
                 Just i  -> i
-        in  let newProofs = concatMap (reflProofsByProof proofs) proofs
+        in  let newProofs = concatMap (reflProofsByProof proofs) proofs -- TODO: limit to proofs with iota
             in  (iotas, proofs ++ newProofs, iotaseq)
 valStatement (iotas, proofs, iotaseq) (Rewrite (Eval var)) =
     let oiota = Data.Map.lookup var iotas
@@ -189,8 +189,10 @@ valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var
     in  let iota = case oiota of
                 Nothing -> error "Undefined variable"
                 Just i  -> i
-        in let newProofs = [A iota Lt niota, FApp niota Plus [iota, c1iota], C c1iota Eq $ VInt 1]
-            in  (iotas, proofs ++ newProofs, iotaseq)
+        in let withNewProofs = proofs ++ [A iota Lt niota, FApp niota Plus [iota, c1iota], C c1iota Eq $ VInt 1]
+            in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs
+                in let withRefledNewProofs = withEvaledProofs ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
+                    in (iotas, withRefledNewProofs, iotaseq)
 valStatement (iotas, proofs, iotaseq) (ProofAssert varproof) =
     let iotaProof = varProofToIotaProof varproof iotas
     in  (if iotaProof `elem` proofs then (iotas, proofs, iotaseq) else error "Assertion failed")
