@@ -5,18 +5,18 @@ import           Data.Map                       ( Map
                                                 , lookup
                                                 )
 
-data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving Show
+data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
 type Variable = String
 data Value = VInt Integer | VIntList [Integer] | VBool Bool
-    deriving Show
-data Expression = Val Value | Var Variable | F Funct [Expression] | ProofAssert VariableProof deriving Show
-data Statement = Assign Variable Expression | Rewrite RwRule
+    deriving (Show, Eq)
+data Expression = Val Value | Var Variable | F Funct [Expression] deriving Show
+data Statement = Assign Variable Expression | Rewrite RwRule | ProofAssert VariableProof deriving Show
 type State = (Map Variable Value, Map Variable Iota, [IotaProof])
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 type Iota = String
-data Proof i = A i Rel i | C i Rel Value | FApp i Funct [i] deriving Show
+data Proof i = A i Rel i | C i Rel Value | FApp i Funct [i] deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 data RwRule = Refl Variable | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
@@ -80,6 +80,20 @@ reflProofsByProof (proof : ptail) (C iota Eq val) = case proof of
     _ -> reflProofsByProof ptail (C iota Eq val)
 reflProofsByProof _ _ = []
 
+varProofToIotaProof :: VariableProof -> Map Variable Iota -> IotaProof
+varProofToIotaProof (C var rel val) proofs =
+    let maybeIotaval = Data.Map.lookup var proofs
+    in  case maybeIotaval of
+            Just iotaval -> C iotaval rel val
+            _            -> error "Variable not found in proof map"
+varProofToIotaProof (A var1 rel var2) proofs =
+    let maybeIotaval1 = Data.Map.lookup var1 proofs
+        maybeIotaval2 = Data.Map.lookup var2 proofs
+    in  case (maybeIotaval1, maybeIotaval2) of
+            (Just iotaval1, Just iotaval2) ->
+                A iotaval1 rel iotaval2
+            _ -> error "Variable not found in proof map"
+
 -- reflProofsByProofs :: [Proof] -> [Proof] -> [Proof]
 -- reflProofsByProofs [] _ = []
 -- reflProofsByProofs _ [] = []
@@ -110,6 +124,7 @@ evalStatement (vals, iotas, proofs) (Assign var expr) =
             Just niota -> (insert var val vals, insert var niota iotas, proofs)
             Nothing    -> (insert var val vals, delete var iotas, proofs)
 evalStatement state Rewrite{} = state
+evalStatement state ProofAssert{} = state
 
 valStatement :: VState -> Statement -> VState
 valStatement (iotas, proofs, iotaseq) (Assign var expr) =
@@ -123,6 +138,9 @@ valStatement (iotas, proofs, iotaseq) (Rewrite (Refl var)) =
                 Just i  -> i
         in  let newProofs = concatMap (reflProofsByProof proofs) proofs
             in  (iotas, proofs ++ newProofs, iotaseq)
+valStatement (iotas, proofs, iotaseq) (ProofAssert varproof) =
+    let iotaProof = varProofToIotaProof varproof iotas
+    in  (if iotaProof `elem` proofs then (iotas, proofs, iotaseq) else error "Assertion failed")
 
 evalExpression :: State -> Expression -> (Value, Maybe Iota)
 evalExpression state (Val val) = (val, Nothing)

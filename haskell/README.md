@@ -20,3 +20,7 @@ Working Test cases:
 validate [Assign "x" (F Size [(Val (VIntList [5]))])]
 validate [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [(Var "x")])]
 validate [Assign "x" (F Size [(Val (VIntList [5]))]), Assign "y" (F Minus [(Val (VInt 1)), (Val (VInt 1))])]
+validate [Assign "x" (Val (VInt 5)),  ProofAssert (C "x" Eq (VInt 5))]
+
+Working Error cases:
+validate [ProofAssert (C "x" Lt (VInt 5))]
