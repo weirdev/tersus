@@ -5,20 +5,22 @@ import           Data.Map                       ( Map
                                                 , lookup
                                                 )
 
-data Funct = Size | First | Last | Plus | Minus deriving Show
+data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving Show
 type Variable = String
-data Value = VInt Integer | VIntList [Integer]
+data Value = VInt Integer | VIntList [Integer] | VBool Bool
     deriving Show
-data Expression = Val Value | Var Variable | F Funct [Expression]
+data Expression = Val Value | Var Variable | F Funct [Expression] | ProofAssert VariableProof deriving Show
 data Statement = Assign Variable Expression | Rewrite RwRule
-type State = (Map Variable Value, Map Variable Iota, [Proof])
+type State = (Map Variable Value, Map Variable Iota, [IotaProof])
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 type Iota = String
-data Proof = A Iota Rel Iota | C Iota Rel Value | FApp Iota Funct [Iota] deriving Show
-data RwRule = Refl Variable
-type VState = (Map Variable Iota, [Proof], [String])
+data Proof i = A i Rel i | C i Rel Value | FApp i Funct [i] deriving Show
+type IotaProof = Proof Iota
+type VariableProof = Proof Variable
+data RwRule = Refl Variable | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
+type VState = (Map Variable Iota, [IotaProof], [String])
 
 zipMap :: [a] -> [b] -> (a -> b -> c) -> ([c], [b])
 zipMap [] _ _ = ([], [])
@@ -29,24 +31,24 @@ zipMap (ah : at) [] _ = error "Second list must be at least length of first"
 iotalist :: [String]
 iotalist = [ l : show x | x <- [0 ..], l <- ['a' .. 'z'] ]
 
-proofLIotaLookup :: [Proof] -> Iota -> [Proof]
+proofLIotaLookup :: [IotaProof] -> Iota -> [IotaProof]
 proofLIotaLookup proofs iota = filter (proofLIota iota) proofs
 
-proofLIota :: Iota -> Proof -> Bool
+proofLIota :: Iota -> IotaProof -> Bool
 proofLIota iota (A    piota _ _) = piota == iota
 proofLIota iota (C    piota _ _) = piota == iota
 proofLIota iota (FApp piota _ _) = piota == iota
 
-proofRel :: Rel -> Proof -> Bool
+proofRel :: Rel -> IotaProof -> Bool
 proofRel rel (A _ prel _) = prel == rel
 proofRel rel (C _ prel _) = prel == rel
 proofRel rel FApp{}       = False
 
-proofConcrete :: Proof -> Bool
+proofConcrete :: IotaProof -> Bool
 proofConcrete C{} = True
 proofConcrete _   = False
 
-proofAbstract :: Proof -> Bool
+proofAbstract :: IotaProof -> Bool
 proofAbstract A{} = True
 proofAbstract _   = False
 
@@ -60,7 +62,7 @@ proofAbstract _   = False
 --     FApp iota funct ptiota : replaceLIotas tail iota
 
 
-reflProofsByProof :: [Proof] -> Proof -> [Proof]
+reflProofsByProof :: [IotaProof] -> IotaProof -> [IotaProof]
 reflProofsByProof (proof : ptail) (A iota Eq oiota) = case proof of
     A li rel ri | li == iota ->
         A oiota rel ri : reflProofsByProof ptail (A iota Eq oiota)
@@ -134,7 +136,7 @@ evalExpression state (F funct exprs) =
     (evalFunct funct (map (fst . evalExpression state) exprs), Nothing)
 
 
-valExpression :: VState -> Iota -> Expression -> [Proof] -- produces only the new proofs
+valExpression :: VState -> Iota -> Expression -> [IotaProof] -- produces only the new proofs
 valExpression state iota (Val val) = [C iota Eq val]
     -- foldr (\iota _ -> [C iota Eq val]) [] miota
 valExpression (iotas, proofs, _) iota (Var var) =
@@ -175,8 +177,18 @@ evalFunct Minus [VInt v1, VInt v2] = VInt (v1 - v2)
 evalFunct Minus  _            = error "Plus only valid for two ints"
 evalFunct Plus [VInt v1, VInt v2] = VInt (v1 + v2)
 evalFunct Plus  _            = error "Plus only valid for two ints"
+evalFunct (Rel Eq) [VInt v1, VInt v2] = VBool (v1 == v2)
+evalFunct (Rel Eq) _                  = error "Eq only valid for two ints"
+evalFunct (Rel Lt) [VInt v1, VInt v2] = VBool (v1 < v2)
+evalFunct (Rel Lt) _                  = error "Lt only valid for two ints"
+evalFunct (Rel Gt) [VInt v1, VInt v2] = VBool (v1 > v2)
+evalFunct (Rel Gt) _                  = error "Rt only valid for two ints"
+evalFunct (Rel LtEq) [VInt v1, VInt v2] = VBool (v1 <= v2)
+evalFunct (Rel LtEq) _                  = error "LtEq only valid for two ints"
+evalFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
+evalFunct (Rel GtEq) _                  = error "GtEq only valid for two ints"
 
-concreteValsOfAllMaybe :: [[Proof]] -> Maybe [Value]
+concreteValsOfAllMaybe :: [[IotaProof]] -> Maybe [Value]
 concreteValsOfAllMaybe [] = Just []
 concreteValsOfAllMaybe (ps : pst) = case ps of
                                             C _ Eq l : _ -> case concreteValsOfAllMaybe pst of
@@ -190,7 +202,7 @@ concreteValsOfAllMaybe (ps : pst) = case ps of
 -- (ex. size(iotaA=[5, 4]) = iotaB=2)
 -- Later update to produce abstract FApp proofs
 -- (ex. size(iotaA) = iotaB)
-valFunct :: Funct -> [Iota] -> [Proof] -> Iota -> [Proof]
+valFunct :: Funct -> [Iota] -> [IotaProof] -> Iota -> [IotaProof]
 valFunct funct iiotas iproofs retiota =
     let iEqProofs = map (\iiota -> filter
             proofConcrete
