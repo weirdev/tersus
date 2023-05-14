@@ -19,7 +19,7 @@ type Iota = String
 data Proof i = A i Rel i | C i Rel Value | FApp i Funct [i] deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
-data RwRule = Refl Variable | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
+data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll deriving Show -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 type VState = (Map Variable Iota, [IotaProof], [String])
 
 zipMap :: [a] -> [b] -> (a -> b -> c) -> ([c], [b])
@@ -80,6 +80,43 @@ reflProofsByProof (proof : ptail) (C iota Eq val) = case proof of
     _ -> reflProofsByProof ptail (C iota Eq val)
 reflProofsByProof _ _ = []
 
+evalIota :: Iota -> [IotaProof] -> [IotaProof]
+evalIota iota proofs =
+    concatMap (\proof -> evalIotaProofIfForIota iota proof proofs) proofs
+
+evalIotaProofIfForIota :: Iota -> IotaProof -> [IotaProof] -> [IotaProof]
+evalIotaProofIfForIota _ A{} _ = []
+evalIotaProofIfForIota _ C{} _ = []
+evalIotaProofIfForIota iota (FApp fiota funct iotaArgs) proofs =
+    if fiota == iota
+        then case iotasToValues iotaArgs proofs of
+            Just values -> [C iota Eq $ evalFunct funct values]
+            _           -> []
+        else []
+
+evalIotaProof :: IotaProof -> [IotaProof] -> [IotaProof]
+evalIotaProof (FApp iota funct iotaArgs) proofs =
+    case iotasToValues iotaArgs proofs of
+        Just values -> [C iota Eq $ evalFunct funct values]
+        _           -> []
+evalIotaProof _ _ = []
+
+iotasToValues :: [Iota] -> [IotaProof] -> Maybe [Value]
+iotasToValues [] _ = Just []
+iotasToValues (iota : tail) proofs =
+    let maybeValue = iotaToValue iota proofs
+    in  case maybeValue of
+            Just value -> case iotasToValues tail proofs of
+                Just values -> Just $ value : values
+                _           -> Nothing
+            _ -> Nothing
+
+iotaToValue :: Iota -> [IotaProof] -> Maybe Value
+iotaToValue iota [] = Nothing
+iotaToValue iota (proof : ptail) = case proof of
+    C piota Eq val | piota == iota -> Just val
+    _ -> iotaToValue iota ptail
+
 varProofToIotaProof :: VariableProof -> Map Variable Iota -> IotaProof
 varProofToIotaProof (C var rel val) proofs =
     let maybeIotaval = Data.Map.lookup var proofs
@@ -137,6 +174,22 @@ valStatement (iotas, proofs, iotaseq) (Rewrite (Refl var)) =
                 Nothing -> error "Undefined variable"
                 Just i  -> i
         in  let newProofs = concatMap (reflProofsByProof proofs) proofs
+            in  (iotas, proofs ++ newProofs, iotaseq)
+valStatement (iotas, proofs, iotaseq) (Rewrite (Eval var)) =
+    let oiota = Data.Map.lookup var iotas
+    in  let iota = case oiota of
+                Nothing -> error "Undefined variable"
+                Just i  -> i
+        in  (iotas, evalIota iota proofs ++ proofs, iotaseq)
+valStatement (iotas, proofs, iotaseq) (Rewrite EvalAll) =
+    let newProofs = concatMap (`evalIotaProof` proofs) proofs
+    in  (iotas, proofs ++ newProofs, iotaseq)
+valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var)) =
+    let oiota = Data.Map.lookup var iotas
+    in  let iota = case oiota of
+                Nothing -> error "Undefined variable"
+                Just i  -> i
+        in let newProofs = [A iota Lt niota, FApp niota Plus [iota, c1iota], C c1iota Eq $ VInt 1]
             in  (iotas, proofs ++ newProofs, iotaseq)
 valStatement (iotas, proofs, iotaseq) (ProofAssert varproof) =
     let iotaProof = varProofToIotaProof varproof iotas
