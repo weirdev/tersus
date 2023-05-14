@@ -12,8 +12,9 @@ Next steps:
 3. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?
-4. Proof transformation v2
-5. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+4. User defined functions
+5. Proof transformation v2
+6. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
 
 
 Working Test cases:
@@ -24,5 +25,5 @@ Working Test cases:
     validate [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), Rewrite EvalAll, Rewrite (Refl "x"), ProofAssert (C "x" Lt (VInt 6)) ]
 
 Working Error cases:
-validate [ProofAssert (C "x" Lt (VInt 5))]
-validate [Assign "x" (Val (VInt 5)),  ProofAssert (C "x" Lt (VInt 6))]
+    validate [ProofAssert (C "x" Lt (VInt 5))]
+    validate [Assign "x" (Val (VInt 5)),  ProofAssert (C "x" Lt (VInt 6))]
