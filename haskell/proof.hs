@@ -10,7 +10,7 @@ type Variable = String
 data Value = VInt Integer | VIntList [Integer] | VBool Bool
     deriving (Show, Eq)
 data Expression = Val Value | Var Variable | F Funct [Expression] deriving Show
-data Statement = Assign Variable Expression | Rewrite RwRule | ProofAssert VariableProof deriving Show
+data Statement = Assign Variable Expression | Rewrite RwRule | ProofAssert VariableProof | AssignProofVar Variable Expression deriving Show -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 type State = (Map Variable Value, Map Variable Iota, [IotaProof])
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
@@ -77,6 +77,8 @@ reflProofsByProof (proof : ptail) (A iota Eq oiota) = case proof of
 reflProofsByProof (proof : ptail) (C iota Eq val) = case proof of
     A li rel ri | ri == iota ->
         C li rel val : reflProofsByProof ptail (C iota Eq val)
+    C li Eq lval | (val == lval) && (iota /= li) ->
+        A iota Eq li : reflProofsByProof ptail (C iota Eq val)
     _ -> reflProofsByProof ptail (C iota Eq val)
 reflProofsByProof _ _ = []
 
@@ -162,6 +164,7 @@ evalStatement (vals, iotas, proofs) (Assign var expr) =
             Nothing    -> (insert var val vals, delete var iotas, proofs)
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
+evalStatement state AssignProofVar{} = state
 
 valStatement :: VState -> Statement -> VState
 valStatement (iotas, proofs, iotaseq) (Assign var expr) =
@@ -196,6 +199,10 @@ valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var
 valStatement (iotas, proofs, iotaseq) (ProofAssert varproof) =
     let iotaProof = varProofToIotaProof varproof iotas
     in  (if iotaProof `elem` proofs then (iotas, proofs, iotaseq) else error "Assertion failed")
+valStatement (iotas, proofs, iotaseq) (AssignProofVar var expr) =
+    let niota : tiotalist = iotaseq
+    in  let nproofs = valExpression (iotas, proofs, tiotalist) niota expr
+        in  (insert var niota iotas, proofs ++ nproofs, tiotalist)
 
 evalExpression :: State -> Expression -> (Value, Maybe Iota)
 evalExpression state (Val val) = (val, Nothing)

@@ -15,7 +15,13 @@ Next steps:
 4. User defined functions
 5. Proof transformation v2
 6. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+7. Distinguish between proof only vars and regular vars
 
+Running:
+    0. From this (haskell/) directory
+    1. `ghci`
+    2. `:load proof`
+    3. Enter one of the cases below
 
 Working Test cases:
     validate [Assign "x" (F Size [(Val (VIntList [5]))])]
@@ -23,7 +29,9 @@ Working Test cases:
     validate [Assign "x" (F Size [(Val (VIntList [5]))]), Assign "y" (F Minus [(Val (VInt 1)), (Val (VInt 1))])]
     validate [Assign "x" (Val (VInt 5)),  ProofAssert (C "x" Eq (VInt 5))]
     validate [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), ProofAssert (C "x" Lt (VInt 6))]
+    validate [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (A "x" Eq "a")]
 
 Working Error cases:
     validate [ProofAssert (C "x" Lt (VInt 5))]
-    validate [Assign "x" (Val (VInt 5)),  ProofAssert (C "x" Lt (VInt 6))]
+    validate [Assign "x" (Val (VInt 5)), ProofAssert (C "x" Lt (VInt 6))]
+    
