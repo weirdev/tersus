@@ -18,7 +18,7 @@ data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 type Iota = String
 -- TODO: Relations should just be FApps
 -- TODO: FApps should support complex arguments
-data Proof i = A i Rel i | C i Rel Value | FApp i Funct [i] | FApp2 Funct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
+data Proof i = A i Rel i | C i Rel Value | FApp2 Funct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll deriving Show -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
@@ -61,7 +61,6 @@ proofLIotaLookup proofs iota = filter (proofLIota iota) proofs
 proofLIota :: Iota -> IotaProof -> Bool
 proofLIota iota (A    piota _ _) = piota == iota
 proofLIota iota (C    piota _ _) = piota == iota
-proofLIota iota (FApp piota _ _) = piota == iota
 proofLIota iota (FApp2 (Rel Eq) proofs) = case proofs of
     -- TODO: checking first arg only is arbitrary
     (ATerm piota) : _ -> piota == iota
@@ -71,7 +70,7 @@ proofLIota iota (FApp2 (Rel Eq) proofs) = case proofs of
 proofRel :: Rel -> IotaProof -> Bool
 proofRel rel (A _ prel _) = prel == rel
 proofRel rel (C _ prel _) = prel == rel
-proofRel rel FApp{}       = False
+proofRel rel _       = False
 
 -- Is the proof concrete
 proofConcrete :: IotaProof -> Bool
@@ -99,10 +98,6 @@ reflProofByProof proof (A iota Eq oiota) = case proof of
         Just (A oiota rel ri)
     C li rel val | li == iota ->
         Just (C oiota rel val)
-    FApp li funct ri | li == iota ->
-        Just (FApp oiota funct ri)
-    FApp li funct (ri : rtaili) | ri == iota ->
-        Just (FApp li funct (oiota : rtaili))
     -- TODO: This should apply recursively to the entire proof structure
     FApp2 (Rel Eq) (ATerm li : rhs : []) -> case reflProofByProof rhs (A iota Eq oiota) of
         Just newRhs -> Just (FApp2 (Rel Eq) (ATerm li : newRhs : []))
@@ -138,22 +133,15 @@ evalIotaProofIfForIota _ A{} _ = []
 evalIotaProofIfForIota _ C{} _ = []
 evalIotaProofIfForIota iota proof proofs =
     case proof of
-        (FApp fiota funct iotaArgs) ->
-                if fiota == iota
-                    then evalIotaProof proof proofs
-                    else []
         (FApp2 (Rel Eq) (ATerm fiota : (FApp2 funct args) : [])) -> 
             if fiota == iota
                 then evalIotaProof proof proofs
                 else []
+        _ -> []
 
 -- Given an iota proof and a list of proofs as context,
 -- return a list of new proofs
 evalIotaProof :: IotaProof -> [IotaProof] -> [IotaProof]
-evalIotaProof (FApp iota funct iotaArgs) proofs =
-    case iotasToValues iotaArgs proofs of
-        Just values -> [C iota Eq $ evalFunct funct values]
-        _           -> []
 evalIotaProof (FApp2 (Rel Eq) (ATerm iota : (FApp2 funct args) : [])) proofs =
     -- TODO: Make recursive
     case flatMaybeMap maybeATermProofToIota args of
