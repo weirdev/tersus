@@ -258,7 +258,7 @@ valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var
     in  let iota = case oiota of
                 Nothing -> error "Undefined variable"
                 Just i  -> i
-        in let withNewProofs = proofs ++ [A iota Lt niota, FApp niota Plus [iota, c1iota], C c1iota Eq $ VInt 1]
+        in let withNewProofs = proofs ++ [A iota Lt niota, FApp2 (Rel Eq) [(ATerm niota), FApp2 Plus [(ATerm iota), (ATerm c1iota)]], C c1iota Eq $ VInt 1]
             in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs
                 in let withRefledNewProofs = withEvaledProofs ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
                     in (iotas, withRefledNewProofs, iotaseq)
@@ -321,7 +321,7 @@ valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
                     in
                         let ps = refloncefiproofs ++ concreteProofs
                         in  concatMap
-                                    (reflProofsByProof [FApp iota funct niotas])
+                                    (reflProofsByProof [FApp2 (Rel Eq) [(ATerm iota), FApp2 funct (map (\i -> ATerm i) niotas)]])
                                     flatfinputproofs
                                 ++ valFunct funct niotas ps iota
 
