@@ -1,6 +1,7 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
+-1. Support FApp2 in all places accepting A and C relations. Stop producing A and C relations. Delete A and C relations. Rename FApp2 to just FApp. 
 0. User defined functions
     Block structure
         expression containing list of expressions
