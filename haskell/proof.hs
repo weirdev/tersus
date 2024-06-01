@@ -99,11 +99,11 @@ reflProofByProof :: IotaProof -> IotaProof -> Maybe IotaProof
 reflProofByProof proof (A iota Eq oiota) = reflProofByProof proof (FApp2 (Rel Eq) [ATerm iota, ATerm oiota])
 reflProofByProof proof (FApp2 (Rel Eq) [ATerm iota, ATerm oiota]) = case proof of
     A li rel ri | li == iota ->
-        Just (A oiota rel ri)
+        Just (FApp2 (Rel rel) [ATerm oiota, ATerm ri])
     ATerm li | li == iota ->
         Just (ATerm oiota)
     C li rel val | li == iota ->
-        Just (C oiota rel val)
+        Just (FApp2 (Rel rel) [ATerm oiota, CTerm val])
     FApp2 (Rel Eq) [ATerm li, CTerm val] ->
         Just (FApp2 (Rel Eq) [ATerm oiota, CTerm val])
     -- TODO: This should apply recursively to the entire proof structure
@@ -117,11 +117,12 @@ reflProofByProof proof (FApp2 (Rel Eq) [ATerm iota, ATerm oiota]) = case proof o
 reflProofByProof proof (C iota Eq val) = reflProofByProof proof (FApp2 (Rel Eq) [ATerm iota, CTerm val])
 reflProofByProof proof (FApp2 (Rel Eq) [ATerm iota, CTerm val]) = case proof of
     A li rel ri | ri == iota ->
-        Just (C li rel val)
-    FApp2 (Rel Eq) [ATerm li, ATerm ri] | ri == iota ->
-        Just (FApp2 (Rel Eq) [ATerm li, CTerm val])
+        Just (FApp2 (Rel rel) [ATerm li, CTerm val])
+    -- TODO: This should apply to all arguments rather than arbitrarily the second
+    FApp2 funct [ATerm li, ATerm ri] | ri == iota ->
+        Just (FApp2 funct [ATerm li, CTerm val])
     C li Eq lval | val == lval && iota /= li ->
-        Just (A iota Eq li)
+        Just (FApp2 (Rel Eq) [ATerm iota, ATerm li])
     FApp2 (Rel Eq) [ATerm li, CTerm lval] | val == lval && iota /= li ->
         Just (FApp2 (Rel Eq) [ATerm iota, ATerm li])
     _ -> Nothing
@@ -148,10 +149,12 @@ evalIotaProofIfForIota _ A{} _ = []
 evalIotaProofIfForIota _ C{} _ = []
 evalIotaProofIfForIota iota proof proofs =
     case proof of
+        -- TODO: Support other functions
         (FApp2 (Rel Eq) [ATerm fiota, FApp2 funct args]) ->
             if fiota == iota
                 then evalIotaProof proof proofs
                 else []
+        _ -> []
 
 -- Given an iota proof and a list of proofs as context,
 -- return a list of new proofs
@@ -161,7 +164,7 @@ evalIotaProof (FApp2 (Rel Eq) [ATerm iota, FApp2 funct args]) proofs =
     case flatMaybeMap maybeATermProofToIota args of
         Just iotas -> case iotasToValues iotas proofs of
             -- TODO: Produce FApp2 with CTerm
-            Just values -> [C iota Eq $ evalFunct funct values]
+            Just values -> [FApp2 (Rel Eq) [ATerm iota, CTerm $ evalFunct funct values]]
             _          -> []
         _ -> []
 evalIotaProof _ _ = []
@@ -191,26 +194,27 @@ varProofToIotaProof :: VariableProof -> Map Variable Iota -> IotaProof
 varProofToIotaProof (C var rel val) proofs =
     let maybeIotaval = Data.Map.lookup var proofs
     in  case maybeIotaval of
-            Just iotaval -> C iotaval rel val
+            Just iotaval -> FApp2 (Rel rel) [ATerm iotaval, CTerm val]
             _            -> error "Variable not found in proof map"
 varProofToIotaProof (FApp2 (Rel rel) [ATerm var, CTerm val]) proofs =
     let maybeIotaval = Data.Map.lookup var proofs
     in  case maybeIotaval of
-            Just iotaval -> C iotaval rel val
+            Just iotaval -> FApp2 (Rel rel) [ATerm iotaval, CTerm val]
             _            -> error "Variable not found in proof map"
 varProofToIotaProof (A var1 rel var2) proofs =
     let maybeIotaval1 = Data.Map.lookup var1 proofs
         maybeIotaval2 = Data.Map.lookup var2 proofs
     in  case (maybeIotaval1, maybeIotaval2) of
             (Just iotaval1, Just iotaval2) ->
-                A iotaval1 rel iotaval2
+                FApp2 (Rel rel) [ATerm iotaval1, ATerm iotaval2]
             _ -> error "Variable not found in proof map"
+-- TODO: Support more than two arguments and non Rel functions
 varProofToIotaProof (FApp2 (Rel rel) [ATerm var1, ATerm var2]) proofs =
     let maybeIotaval1 = Data.Map.lookup var1 proofs
         maybeIotaval2 = Data.Map.lookup var2 proofs
     in  case (maybeIotaval1, maybeIotaval2) of
             (Just iotaval1, Just iotaval2) ->
-                A iotaval1 rel iotaval2
+                FApp2 (Rel rel) [ATerm iotaval1, ATerm iotaval2]
             _ -> error "Variable not found in proof map"
 
 -- reflProofsByProofs :: [Proof] -> [Proof] -> [Proof]
@@ -273,7 +277,7 @@ valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var
     in  let iota = case oiota of
                 Nothing -> error "Undefined variable"
                 Just i  -> i
-        in let withNewProofs = proofs ++ [A iota Lt niota, FApp2 (Rel Eq) [ATerm niota, FApp2 Plus [ATerm iota, ATerm c1iota]], C c1iota Eq $ VInt 1]
+        in let withNewProofs = proofs ++ [FApp2 (Rel Lt) [ATerm iota, ATerm niota], FApp2 (Rel Eq) [ATerm niota, FApp2 Plus [ATerm iota, ATerm c1iota]], FApp2 (Rel Eq) [ATerm c1iota, CTerm $ VInt 1]]
             in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs
                 in let withRefledNewProofs = withEvaledProofs ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
                     in (iotas, withRefledNewProofs, iotaseq)
@@ -311,13 +315,13 @@ evalExpression state (Block statements) =
     in  (Nothing, Nothing, newState)
 
 valExpression :: VState -> Iota -> Expression -> [IotaProof] -- produces only the new proofs
-valExpression state iota (Val val) = [C iota Eq val]
+valExpression state iota (Val val) = [FApp2 (Rel Eq) [ATerm iota, CTerm val]]
     -- foldr (\iota _ -> [C iota Eq val]) [] miota
 valExpression (iotas, proofs, _) iota (Var var) =
     let omiota = Data.Map.lookup var iotas
     in  case omiota of
             Nothing    -> error "Undefined variable"
-            Just oiota -> [A iota Eq oiota]
+            Just oiota -> [FApp2 (Rel Eq) [ATerm iota, ATerm oiota]]
 valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
     let tiotalist = iotaseq
     in
@@ -368,6 +372,9 @@ concreteValsOfAllMaybe (ps : pst) = case ps of
                                             C _ Eq l : _ -> case concreteValsOfAllMaybe pst of
                                                 Just vt -> Just (l : vt)
                                                 Nothing -> Nothing
+                                            FApp2 (Rel Eq) [ATerm _, CTerm l] : _ -> case concreteValsOfAllMaybe pst of
+                                                Just vt -> Just (l : vt)
+                                                Nothing -> Nothing
                                             _            -> Nothing
 
 -- Takes: Funct, funct input iotas, funct input proofs, result iota
@@ -383,7 +390,7 @@ valFunct funct iiotas iproofs retiota =
             (filter (proofRel Eq) (filter (proofLIota iiota) iproofs))) iiotas
     in let vals = concreteValsOfAllMaybe iEqProofs in
         case vals of
-            Just vs -> [C retiota Eq (evalFunct funct vs)]
+            Just vs -> [FApp2 (Rel Eq) [ATerm retiota, CTerm (evalFunct funct vs)]]
             Nothing -> error
                 (  "Funct '"
                 ++ show funct

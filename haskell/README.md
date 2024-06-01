@@ -33,13 +33,13 @@ Working Test cases:
     validate [Assign "x" (F Size [(Val (VIntList [5]))])]
       -> (fromList [("x","a0")],[C "a0" Eq (VInt 1)],["b0"])
     validate [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [(Var "x")])]
-      -> (fromList [("x","a0"),("y","b0")],[C "a0" Eq (VIntList [5,4]),FApp2 (Rel Eq) [ATerm "b0",FApp2 Size [ATerm "a0"]],C "b0" Eq (VInt 2)],["c0"])
+      -> (fromList [("x","a0"),("y","b0")],[FApp2 (Rel Eq) [ATerm "a0",CTerm (VIntList [5,4])],FApp2 (Rel Eq) [ATerm "b0",FApp2 Size [ATerm "a0"]],FApp2 (Rel Eq) [ATerm "b0",CTerm (VInt 2)]],["c0"])
     validate [Assign "x" (F Size [(Val (VIntList [5]))]), Assign "y" (F Minus [(Val (VInt 1)), (Val (VInt 1))])]
       -> (fromList [("x","a0"),("y","b0")],[C "a0" Eq (VInt 1),C "b0" Eq (VInt 0)],["c0"])
     validate [Assign "x" (Val (VInt 5)),  ProofAssert (C "x" Eq (VInt 5))]
       -> (fromList [("x","a0")],[C "a0" Eq (VInt 5)],["b0"])
     validate [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), ProofAssert (C "x" Lt (VInt 6))]
-      -> (fromList [("x","a0")],[C "a0" Eq (VInt 5),A "a0" Lt "b0",FApp2 (Rel Eq) [ATerm "b0",FApp2 Plus [ATerm "a0",ATerm "c0"]],C "c0" Eq (VInt 1),C "b0" Eq (VInt 6),C "a0" Lt (VInt 6)],["d0"])
+      -> (fromList [("x","a0")],[FApp2 (Rel Eq) [ATerm "a0",CTerm (VInt 5)],FApp2 (Rel Lt) [ATerm "a0",ATerm "b0"],FApp2 (Rel Eq) [ATerm "b0",FApp2 Plus [ATerm "a0",ATerm "c0"]],FApp2 (Rel Eq) [ATerm "c0",CTerm (VInt 1)],FApp2 (Rel Eq) [ATerm "b0",CTerm (VInt 6)],FApp2 (Rel Lt) [ATerm "a0",CTerm (VInt 6)]],["d0"])
     validate [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (A "x" Eq "a")]
       -> (fromList [("a","b0"),("x","a0")],[C "a0" Eq (VInt 5),C "b0" Eq (VInt 5),A "a0" Eq "b0",A "b0" Eq "a0"],["c0"])
 
