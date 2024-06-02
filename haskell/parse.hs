@@ -8,21 +8,33 @@ import Data.Char (isLetter)
 import Control.Arrow (Arrow(first))
 import Control.Monad (void)
 
-semicolon :: Parser String
-semicolon = many $ satisfy (==';')
+semicolon :: Parser ()
+semicolon = do
+    void (satisfy (==';'))
+    -- Treat multiple semicolons as one
+    skipMany (void (satisfy (==';')) <|> requiredWhitespace)
+    return ()
+
+requiredWhitespace :: Parser ()
+requiredWhitespace = void $ many1 $ oneOf " \n\t"
 
 whitespace :: Parser ()
 whitespace = void $ many $ oneOf " \n\t"
 
+statementBlock :: Parser [Statement]
+statementBlock = do
+    whitespace
+    statements <- statement `sepEndBy` semicolon
+    whitespace
+    return statements
+
 statement :: Parser Statement
 statement = do
      whitespace
-     statementType <- many $ satisfy isLetter
+     statementType <- many1 $ satisfy isLetter
      whitespace
      s <- case statementType of
         "assign" -> assignStatement
-     whitespace
-     semicolon
      whitespace
      return s
 
@@ -37,8 +49,17 @@ assignStatement = do
     whitespace
     return (Assign var expr)
 
+-- NOTE: Infix expression must be matched first,
+-- otherwise we will parse the lhs of infix expressions 
+-- as one of the other expression types,
+-- not matching the infix operator and rhs
+-- TODO: After the reorder, we loop endlessly
 expression :: Parser Expression
-expression = valExpression <|> varExpression <|> fExpression -- TODO: <|> blockExpression
+expression = try infixExpression <|> nonInfixExpression
+-- expression = fExpression <|> valExpression <|> varExpression -- TODO: <|> blockExpression
+
+nonInfixExpression :: Parser Expression
+nonInfixExpression = try fExpression <|> valExpression <|> varExpression -- TODO: <|> blockExpression
 
 valExpression :: Parser Expression
 valExpression = do
@@ -70,14 +91,12 @@ fExpression = do
     return (F funct args)
 
 infixExpression :: Parser Expression
-infixExpression = do
-    arg1 <- expression
-    whitespace
-    funct <- infixFunct
-    whitespace
-    arg2 <- expression
-    whitespace
-    return (F funct [arg1, arg2])
+infixExpression = chainl1 nonInfixExpression op
+    where
+        op = do
+            funct <- infixFunct
+            whitespace
+            return (\lexpr rexpr -> F funct [lexpr, rexpr])
 
 infixFunct :: Parser Funct
 infixFunct = arithmeticFunct <|> relationFunct
@@ -107,14 +126,24 @@ variable :: Parser String
 -- TODO: Allow digits in variable names
 variable = many1 letter
 
+withEof :: Parser a -> Parser a
+withEof p = do
+    result <- p
+    eof
+    return result
+
 -- Function to run the parser
 parseStatement :: String -> Either ParseError Statement
-parseStatement = parse statement ""
+parseStatement = parse (withEof statement) ""
+
+-- Function to run the parser
+parseStatementBlock :: String -> Either ParseError [Statement]
+parseStatementBlock = parse (withEof statementBlock) ""
 
 main :: IO ()
 main = do
     -- let input = "assign x = 5"
     input <- getLine
-    case parseStatement input of
+    case parseStatementBlock input of
         Left err -> print err
         Right result -> putStrLn $ "Parsed result: " ++ show result
