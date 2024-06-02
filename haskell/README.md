@@ -1,6 +1,7 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
-Next steps: 
+Next steps:
+-1. String syntax, parsing
 0. User defined functions
     Block structure
         expression containing list of expressions
