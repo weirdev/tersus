@@ -8,6 +8,9 @@ import Data.Char (isLetter)
 import Control.Arrow (Arrow(first))
 import Control.Monad (void)
 
+-- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
+-- https://hackage.haskell.org/package/parsec-3.1.17.0/docs/Text-Parsec-Combinator.html
+
 semicolon :: Parser ()
 semicolon = do
     void (satisfy (==';'))
@@ -59,7 +62,17 @@ expression = try infixExpression <|> nonInfixExpression
 -- expression = fExpression <|> valExpression <|> varExpression -- TODO: <|> blockExpression
 
 nonInfixExpression :: Parser Expression
-nonInfixExpression = try fExpression <|> valExpression <|> varExpression -- TODO: <|> blockExpression
+nonInfixExpression = try fExpression <|> valExpression <|> varExpression <|> parensExpression -- TODO: <|> blockExpression
+
+parensExpression :: Parser Expression
+parensExpression = do
+    char '('
+    whitespace
+    expr <- expression
+    whitespace
+    char ')'
+    whitespace
+    return expr
 
 valExpression :: Parser Expression
 valExpression = do
