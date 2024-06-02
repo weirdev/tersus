@@ -75,11 +75,23 @@ parensExpression = do
     return expr
 
 valExpression :: Parser Expression
-valExpression = do
+valExpression = intExpression <|> listExpression
+
+intExpression :: Parser Expression
+intExpression = do
     val <- many1 digit
     whitespace
-    -- TODO: Allow other types of values
     return (Val (VInt (read val)))
+
+listExpression :: Parser Expression
+listExpression = do
+    char '['
+    whitespace
+    vals <- intExpression `sepBy` char ','
+    whitespace
+    char ']'
+    whitespace
+    return (Val (VIntList (map (\(Val (VInt i)) -> i) vals)))
 
 varExpression :: Parser Expression
 varExpression = do

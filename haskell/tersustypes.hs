@@ -4,6 +4,7 @@ import           Data.Map                       ( Map )
 
 data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
 type Variable = String
+-- TODO: Generic list type
 data Value = VInt Integer | VIntList [Integer] | VBool Bool -- | VFunct
     deriving (Show, Eq)
 data Expression = Val Value | Var Variable | F Funct [Expression] | Block [Statement] deriving Show
