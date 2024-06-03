@@ -164,11 +164,3 @@ parseStatement = parse (withEof statement) ""
 -- Function to run the parser
 parseStatementBlock :: String -> Either ParseError [Statement]
 parseStatementBlock = parse (withEof statementBlock) ""
-
-main :: IO ()
-main = do
-    -- let input = "assign x = 5"
-    input <- getLine
-    case parseStatementBlock input of
-        Left err -> print err
-        Right result -> putStrLn $ "Parsed result: " ++ show result

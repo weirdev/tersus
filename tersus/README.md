@@ -24,9 +24,11 @@ Next steps:
 6. Distinguish between proof only vars and regular vars
 
 Running:
-    0. From this (haskell/) directory
+    0. stack run
+OR:
+    0. From this (tersus/) directory
     1. `ghci`
-    2. `:load proof`
+    2. `:load Proof`
     3. Enter one of the cases below
 
 Working Test cases:

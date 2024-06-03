@@ -1,7 +1,6 @@
 module Proof where
 
 import           Data.Map                       ( Map
-                                                , delete
                                                 , empty
                                                 , insert
                                                 , lookup
@@ -15,7 +14,7 @@ zipMap :: [a] -> [b] -> (a -> b -> c) -> ([c], [b])
 zipMap [] _ _ = ([], [])
 zipMap (ah : at) (bh : bt) f =
     let (atr, btr) = zipMap at bt f in (f ah bh : atr, bh : btr)
-zipMap (ah : at) [] _ = error "Second list must be at least length of first"
+zipMap (_ : _) [] _ = error "Second list must be at least length of first"
 
 flatMaybeMap :: (a -> Maybe b) -> [a] -> Maybe [b]
 flatMaybeMap _ [] = Just []
@@ -31,7 +30,7 @@ unwrapOrThrow err Nothing  = error err
 
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
 iotalist :: [String]
-iotalist = [ l : show x | x <- [0 ..], l <- ['a' .. 'z'] ]
+iotalist = [ l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z'] ]
 
 maybeATermProofToIota :: IotaProof -> Maybe Iota
 maybeATermProofToIota (ATerm i) = Just i
@@ -48,6 +47,7 @@ proofLIota iota (FApp2 (Rel Eq) proofs) = case proofs of
     -- TODO: checking first arg only is arbitrary
     ATerm piota : _ -> piota == iota
     _                 -> False
+proofLIota _ _ = error "Only Eq relation supported"
 
 -- Does the proof use the given relation
 proofRel :: Rel -> IotaProof -> Bool
@@ -78,7 +78,7 @@ reflProofByProof :: IotaProof -> IotaProof -> Maybe IotaProof
 reflProofByProof proof (FApp2 (Rel Eq) [ATerm iota, ATerm oiota]) = case proof of
     ATerm li | li == iota ->
         Just (ATerm oiota)
-    FApp2 (Rel Eq) [ATerm li, CTerm val] ->
+    FApp2 (Rel Eq) [ATerm li, CTerm val] | li == oiota ->
         Just (FApp2 (Rel Eq) [ATerm oiota, CTerm val])
     -- TODO: This should apply recursively to the entire proof structure
     FApp2 (Rel Eq) [ATerm li, rhs] -> case reflProofByProof rhs (FApp2 (Rel Eq) [ATerm iota, ATerm oiota]) of
@@ -95,6 +95,7 @@ reflProofByProof proof (FApp2 (Rel Eq) [ATerm iota, CTerm val]) = case proof of
     FApp2 (Rel Eq) [ATerm li, CTerm lval] | val == lval && iota /= li ->
         Just (FApp2 (Rel Eq) [ATerm iota, ATerm li])
     _ -> Nothing
+reflProofByProof _ _ = error "Only Eq relation supported"
 
 -- Given an eqality relation, construct new proofs by replacing the
 -- LHS iota with the RHS iota or value
@@ -115,7 +116,7 @@ evalIotaProofIfForIota :: Iota -> IotaProof -> [IotaProof] -> [IotaProof]
 evalIotaProofIfForIota iota proof proofs =
     case proof of
         -- TODO: Support other functions
-        (FApp2 (Rel Eq) [ATerm fiota, FApp2 funct args]) ->
+        (FApp2 (Rel Eq) [ATerm fiota, FApp2 _ _]) ->
             if fiota == iota
                 then evalIotaProof proof proofs
                 else []
@@ -138,10 +139,10 @@ evalIotaProof _ _ = []
 -- return a list of values or nothing if not all iotas have concrete definitions
 iotasToValues :: [Iota] -> [IotaProof] -> Maybe [Value]
 iotasToValues [] _ = Just []
-iotasToValues (iota : tail) proofs =
+iotasToValues (iota : itail) proofs =
     let maybeValue = iotaToValue iota proofs
     in  case maybeValue of
-            Just value -> case iotasToValues tail proofs of
+            Just value -> case iotasToValues itail proofs of
                 Just values -> Just $ value : values
                 _           -> Nothing
             _ -> Nothing
@@ -149,7 +150,7 @@ iotasToValues (iota : tail) proofs =
 -- Given an iota and a list of proofs, 
 -- return the concrete value of the iota or nothing if not found
 iotaToValue :: Iota -> [IotaProof] -> Maybe Value
-iotaToValue iota [] = Nothing
+iotaToValue _ [] = Nothing
 iotaToValue iota (proof : ptail) = case proof of
     FApp2 (Rel Eq) [ATerm piota, CTerm val] | piota == iota -> Just val
     _ -> iotaToValue iota ptail
@@ -168,6 +169,7 @@ varProofToIotaProof (FApp2 (Rel rel) [ATerm var1, ATerm var2]) proofs =
             (Just iotaval1, Just iotaval2) ->
                 FApp2 (Rel rel) [ATerm iotaval1, ATerm iotaval2]
             _ -> error "Variable not found in proof map"
+varProofToIotaProof _ _ = error "Only Eq relation supported"
 
 -- reflProofsByProofs :: [Proof] -> [Proof] -> [Proof]
 -- reflProofsByProofs [] _ = []
@@ -193,11 +195,11 @@ valProgram :: VState -> [Statement] -> VState
 valProgram = foldl valStatement
 
 evalStatement :: State -> Statement -> State
-evalStatement (vals, iotas, proofs) (Assign var expr) =
-    let (mval, miota, (vals, iotas, proofs)) = evalExpression (vals, iotas, proofs) expr
+evalStatement (svals, siotas, sproofs) (Assign _var expr) =
+    let (mval, miota, (vals, iotas, proofs)) = evalExpression (svals, siotas, sproofs) expr
     in  case (mval, miota) of
-        (Just val, Just niota) -> (vals, iotas, proofs) -- (insert var val vals, insert var niota iotas, proofs)
-        (Just val, Nothing)    -> (vals, iotas, proofs) -- (insert var val vals, delete var iotas, proofs)
+        (Just _, Just _niota) -> (vals, iotas, proofs) -- (insert var val vals, insert var niota iotas, proofs)
+        (Just _val, Nothing)    -> (vals, iotas, proofs) -- (insert var val vals, delete var iotas, proofs)
         (Nothing, _) -> (vals, iotas, proofs)
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
@@ -210,7 +212,7 @@ valStatement (iotas, proofs, iotaseq) (Assign var expr) =
         in  (insert var niota iotas, proofs ++ nproofs, tiotalist)
 valStatement (iotas, proofs, iotaseq) (Rewrite (Refl var)) =
     let oiota = Data.Map.lookup var iotas
-    in  let iota = case oiota of
+    in  let _ = case oiota of
                 Nothing -> error "Undefined variable"
                 Just i  -> i
         in  let newProofs = concatMap (reflProofsByProof proofs) proofs -- TODO: limit to proofs with iota
@@ -240,13 +242,14 @@ valStatement (iotas, proofs, iotaseq) (AssignProofVar var expr) =
     let niota : tiotalist = iotaseq
     in  let nproofs = valExpression (iotas, proofs, tiotalist) niota expr
         in  (insert var niota iotas, proofs ++ nproofs, tiotalist)
+valStatement (iotas, proofs, iotaseq) _ = (iotas, proofs, iotaseq)
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
 evalExpressionList state [] = (state, [])
-evalExpressionList state (expr : exprs) =
-    let (mval, miota, state) = evalExpression state expr
+evalExpressionList sstate (expr : exprs) =
+    let (mval, _, estate) = evalExpression sstate expr
     in  case mval of
-            Just val -> let (state, vals) = evalExpressionList state exprs
+            Just val -> let (state, vals) = evalExpressionList estate exprs
                         in  (state, val : vals)
             Nothing -> error "Expression must return a value to be passed to a function"
 
@@ -259,17 +262,17 @@ evalExpression state (Var var) =
             in  case mval of
                     Just _ -> (mval, miota, state)
                     Nothing  -> error "Undefined variable"
-evalExpression state (F funct exprs) =
-    let (state, vals) = evalExpressionList state exprs
+evalExpression sstate (F funct exprs) =
+    let (state, vals) = evalExpressionList sstate exprs
     in (Just $ evalFunct funct vals, Nothing, state)
 evalExpression state (Block statements) =
     let newState = evalBlock state statements
     in  (Nothing, Nothing, newState)
 
 valExpression :: VState -> Iota -> Expression -> [IotaProof] -- produces only the new proofs
-valExpression state iota (Val val) = [FApp2 (Rel Eq) [ATerm iota, CTerm val]]
+valExpression _ iota (Val val) = [FApp2 (Rel Eq) [ATerm iota, CTerm val]]
     -- foldr (\iota _ -> [C iota Eq val]) [] miota
-valExpression (iotas, proofs, _) iota (Var var) =
+valExpression (iotas, _, _) iota (Var var) =
     let omiota = Data.Map.lookup var iotas
     in  case omiota of
             Nothing    -> error "Undefined variable"
@@ -295,13 +298,14 @@ valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
                                     (reflProofsByProof [FApp2 (Rel Eq) [ATerm iota, FApp2 funct (map ATerm niotas)]])
                                     flatfinputproofs
                                 ++ valFunct funct niotas ps iota
+valExpression _ _ _ = error "Unsupported expression"
 
 evalFunct :: Funct -> [Value] -> Value
 evalFunct Size  [VIntList l] = VInt (fromIntegral (length l))
 evalFunct Size  _            = error "Size only valid for IntList"
-evalFunct First [VIntList l] = VInt (fromIntegral (head l))
+evalFunct First [VIntList l] = VInt (head l)
 evalFunct First _            = error "First only valid for IntList"
-evalFunct Last  [VIntList l] = VInt (fromIntegral (last l))
+evalFunct Last  [VIntList l] = VInt (last l)
 evalFunct Last  _            = error "Last only valid for IntList"
 evalFunct Minus [VInt v1, VInt v2] = VInt (v1 - v2)
 evalFunct Minus  _            = error "Plus only valid for two ints"
