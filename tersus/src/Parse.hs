@@ -5,7 +5,6 @@ import Text.Parsec.String (Parser)
 
 import TersusTypes
 import Data.Char (isLetter)
-import Control.Arrow (Arrow(first))
 import Control.Monad (void)
 
 -- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
@@ -15,7 +14,7 @@ semicolon :: Parser ()
 semicolon = do
     void (satisfy (==';'))
     -- Treat multiple semicolons as one
-    skipMany (void (satisfy (==';')) <|> requiredWhitespace)
+    skipMany (void (char ';') <|> requiredWhitespace)
     return ()
 
 requiredWhitespace :: Parser ()
@@ -38,6 +37,7 @@ statement = do
      whitespace
      s <- case statementType of
         "assign" -> assignStatement
+        _ -> error "Unknown statement type"
      whitespace
      return s
 
@@ -46,7 +46,7 @@ assignStatement = do
     -- TODO: Allow digits in variable names
     var <- many $ satisfy isLetter
     whitespace
-    char '='
+    void (char '=')
     whitespace
     expr <- expression
     whitespace
@@ -66,11 +66,11 @@ nonInfixExpression = try fExpression <|> valExpression <|> varExpression <|> par
 
 parensExpression :: Parser Expression
 parensExpression = do
-    char '('
+    void (char '(')
     whitespace
     expr <- expression
     whitespace
-    char ')'
+    void (char ')')
     whitespace
     return expr
 
@@ -83,15 +83,19 @@ intExpression = do
     whitespace
     return (Val (VInt (read val)))
 
+valToInteger :: Expression -> Integer
+valToInteger (Val (VInt i)) = i
+valToInteger _ = error "Not an integer"
+
 listExpression :: Parser Expression
 listExpression = do
-    char '['
+    void (char '[')
     whitespace
     vals <- intExpression `sepBy` char ','
     whitespace
-    char ']'
+    void (char ']')
     whitespace
-    return (Val (VIntList (map (\(Val (VInt i)) -> i) vals)))
+    return (Val (VIntList (map valToInteger vals)))
 
 varExpression :: Parser Expression
 varExpression = do
@@ -107,11 +111,11 @@ fExpression = do
          "first" -> First
          "last" -> Last
          _ -> error "Unknown function"
-    char '('
+    void (char '(')
     whitespace
     args <- expression `sepBy` char ','
     whitespace
-    char ')'
+    void (char ')')
     whitespace
     return (F funct args)
 
@@ -133,6 +137,7 @@ arithmeticFunct = do
     return (case op of
          '+' -> Plus
          '-' -> Minus
+         _ -> error "Unknown operator"
         )
 
 relationFunct :: Parser Funct
@@ -145,6 +150,7 @@ relationFunct = do
          ">" -> Gt
          "<=" -> LtEq
          ">=" -> GtEq
+         _ -> error "Unknown relation"
     return (Rel rel)
 
 variable :: Parser String

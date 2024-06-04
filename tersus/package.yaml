@@ -49,11 +49,12 @@ executables:
 
 tests:
   tersus-test:
-    main:                test.hs
+    main:                TestTersus.hs
     source-dirs:         test
     ghc-options:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    - -main-is TestTersus
     dependencies:
     - tersus

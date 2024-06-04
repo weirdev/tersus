@@ -25,6 +25,8 @@ Next steps:
 
 Running:
     0. stack run
+Tests:
+    0. stack test
 OR:
     0. From this (tersus/) directory
     1. `ghci`
