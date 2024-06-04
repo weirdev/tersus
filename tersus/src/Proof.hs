@@ -2,6 +2,7 @@ module Proof where
 
 import Data.Map (
     Map,
+    delete,
     empty,
     insert,
     lookup,
@@ -201,11 +202,13 @@ valProgram :: VState -> [Statement] -> VState
 valProgram = foldl valStatement
 
 evalStatement :: State -> Statement -> State
-evalStatement (svals, siotas, sproofs) (Assign _var expr) =
+evalStatement (svals, siotas, sproofs) (Assign var expr) =
     let (mval, miota, (vals, iotas, proofs)) = evalExpression (svals, siotas, sproofs) expr
      in case (mval, miota) of
-            (Just _, Just _niota) -> (vals, iotas, proofs) -- (insert var val vals, insert var niota iotas, proofs)
-            (Just _val, Nothing) -> (vals, iotas, proofs) -- (insert var val vals, delete var iotas, proofs)
+            (Just val, Just niota) -> (insert var val vals, insert var niota iotas, proofs)
+            -- TODO: When would we not have an iota?
+            (Just val, Nothing) -> (insert var val vals, delete var iotas, proofs)
+            -- TODO: Is this an error case?
             (Nothing, _) -> (vals, iotas, proofs)
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
