@@ -1,11 +1,12 @@
 module TersusTypes where
 
-import           Data.Map                       ( Map )
+import Data.Map (Map)
 
 data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
 type Variable = String
+
 -- TODO: Generic list type
-data Value = VInt Integer | VIntList [Integer] | VBool Bool -- | VFunct
+data Value = VInt Integer | VIntList [Integer] | VBool Bool
     deriving (Show, Eq)
 data Expression = Val Value | Var Variable | F Funct [Expression] | Block [Statement] deriving (Show, Eq)
 data Statement = Assign Variable Expression | Rewrite RwRule | ProofAssert VariableProof | AssignProofVar Variable Expression deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars

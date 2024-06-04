@@ -3,16 +3,16 @@ module Parse where
 import Text.Parsec
 import Text.Parsec.String (Parser)
 
-import TersusTypes
-import Data.Char (isLetter)
 import Control.Monad (void)
+import Data.Char (isLetter)
+import TersusTypes
 
 -- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
 -- https://hackage.haskell.org/package/parsec-3.1.17.0/docs/Text-Parsec-Combinator.html
 
 semicolon :: Parser ()
 semicolon = do
-    void (satisfy (==';'))
+    void (satisfy (== ';'))
     -- Treat multiple semicolons as one
     skipMany (void (char ';') <|> requiredWhitespace)
     return ()
@@ -32,14 +32,14 @@ statementBlock = do
 
 statement :: Parser Statement
 statement = do
-     whitespace
-     statementType <- many1 $ satisfy isLetter
-     whitespace
-     s <- case statementType of
+    whitespace
+    statementType <- many1 $ satisfy isLetter
+    whitespace
+    s <- case statementType of
         "assign" -> assignStatement
         _ -> error "Unknown statement type"
-     whitespace
-     return s
+    whitespace
+    return s
 
 assignStatement :: Parser Statement
 assignStatement = do
@@ -53,12 +53,13 @@ assignStatement = do
     return (Assign var expr)
 
 -- NOTE: Infix expression must be matched first,
--- otherwise we will parse the lhs of infix expressions 
+-- otherwise we will parse the lhs of infix expressions
 -- as one of the other expression types,
 -- not matching the infix operator and rhs
 -- TODO: After the reorder, we loop endlessly
 expression :: Parser Expression
 expression = try infixExpression <|> nonInfixExpression
+
 -- expression = fExpression <|> valExpression <|> varExpression -- TODO: <|> blockExpression
 
 nonInfixExpression :: Parser Expression
@@ -107,10 +108,10 @@ fExpression :: Parser Expression
 fExpression = do
     fname <- many1 letter
     let funct = case fname of
-         "size" -> Size
-         "first" -> First
-         "last" -> Last
-         _ -> error "Unknown function"
+            "size" -> Size
+            "first" -> First
+            "last" -> Last
+            _ -> error "Unknown function"
     void (char '(')
     whitespace
     args <- expression `sepBy` char ','
@@ -121,11 +122,11 @@ fExpression = do
 
 infixExpression :: Parser Expression
 infixExpression = chainl1 nonInfixExpression op
-    where
-        op = do
-            funct <- infixFunct
-            whitespace
-            return (\lexpr rexpr -> F funct [lexpr, rexpr])
+  where
+    op = do
+        funct <- infixFunct
+        whitespace
+        return (\lexpr rexpr -> F funct [lexpr, rexpr])
 
 infixFunct :: Parser Funct
 infixFunct = arithmeticFunct <|> relationFunct
@@ -134,10 +135,11 @@ arithmeticFunct :: Parser Funct
 arithmeticFunct = do
     op <- oneOf "+-" -- TODO: Add */
     whitespace
-    return (case op of
-         '+' -> Plus
-         '-' -> Minus
-         _ -> error "Unknown operator"
+    return
+        ( case op of
+            '+' -> Plus
+            '-' -> Minus
+            _ -> error "Unknown operator"
         )
 
 relationFunct :: Parser Funct
@@ -145,12 +147,12 @@ relationFunct = do
     relstr <- many1 $ oneOf "=<>"
     whitespace
     let rel = case relstr of
-         "=" -> Eq
-         "<" -> Lt
-         ">" -> Gt
-         "<=" -> LtEq
-         ">=" -> GtEq
-         _ -> error "Unknown relation"
+            "=" -> Eq
+            "<" -> Lt
+            ">" -> Gt
+            "<=" -> LtEq
+            ">=" -> GtEq
+            _ -> error "Unknown relation"
     return (Rel rel)
 
 variable :: Parser String
