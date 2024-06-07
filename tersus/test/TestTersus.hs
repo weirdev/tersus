@@ -1,17 +1,50 @@
 module TestTersus where
 
-import Data.Map (fromList)
+import Data.List (delete)
+import Data.Map (Map, findWithDefault, fromList, insert, insertWith, lookup)
 
 import Parse
 import Proof
 import TersusTypes
 
+-- Core Test data structures
 -- Test result is possible error output, else success
 type TestResult = Maybe String
 data Test = TestCase String TestResult | TestList String [Test] deriving (Show)
 
+type IotaAssignments = Map Iota Iota
+type IotaFailedAssignments = Map Iota [Iota]
+type VarAssignedProof = Proof (Either Iota String)
+
+-- (assignments: {expectedIota: validationIota},
+-- failedAssignmens: {expectedIota: [validationIota]},
+--  expectedProofsToCheck, validationProofs, prevStates)
+newtype SATProofsState = SATProofsState (IotaAssignments, IotaFailedAssignments, [VarAssignedProof], [VarAssignedProof], [SATProofsState])
+
+-- (assignments: {expectedIota: validationIota},
+-- failedAssignmens: {expectedIota: [validationIota]},
+-- availableIotasFromVal)
+type SATProofState = (IotaAssignments, IotaFailedAssignments, [Iota])
+
+assignments :: SATProofsState -> IotaAssignments
+assignments (SATProofsState (a, _, _, _, _)) = a
+
+failedAssignments :: SATProofsState -> IotaFailedAssignments
+failedAssignments (SATProofsState (_, a, _, _, _)) = a
+
+expectedProofsToCheck :: SATProofsState -> [VarAssignedProof]
+expectedProofsToCheck (SATProofsState (_, _, e, _, _)) = e
+
+validationProofs :: SATProofsState -> [VarAssignedProof]
+validationProofs (SATProofsState (_, _, _, v, _)) = v
+
+prevStates :: SATProofsState -> [SATProofsState]
+prevStates (SATProofsState (_, _, _, _, p)) = p
+
+-- Core Test helper functions
+
 testCaseSeq :: String -> [TestResult] -> Test
-testCaseSeq s results = TestList s (map (\(i, r) -> TestCase (s ++ (show i)) r) (zip [0 ..] results))
+testCaseSeq s results = TestList s (zipWith (\ i r -> TestCase (s ++ show i) r) [0 ..] results)
 
 runTest :: Test -> IO ()
 runTest (TestCase s r) =
@@ -31,8 +64,9 @@ testAssertEq :: (Show a, Eq a) => a -> a -> TestResult
 testAssertEq actual expected =
     if actual == expected
         then Nothing
-        else Just $ "Expected: " ++ (show expected) ++ "\nGot: " ++ (show actual)
+        else Just $ "Expected: " ++ show expected ++ "\nGot: " ++ show actual
 
+-- Tests
 testParseSimpleAssign :: Test
 testParseSimpleAssign =
     let parseOutput = parseStatementBlock "assign x = 5"
@@ -46,7 +80,7 @@ testParseComplexAssign =
     let parseOutput = parseStatementBlock "assign x = size([5]); assign yy = 1 - 1;"
      in let result = case parseOutput of
                 Left _ -> Nothing
-                Right parsed -> testAssertEq parsed [Assign "x" (F Size [(Val (VIntList [5]))]), Assign "yy" (F Minus [(Val (VInt 1)), (Val (VInt 1))])]
+                Right parsed -> testAssertEq parsed [Assign "x" (F Size [Val (VIntList [5])]), Assign "yy" (F Minus [Val (VInt 1), Val (VInt 1)])]
          in TestCase "testParseComplexAssign" result
 
 testParse :: Test
@@ -61,7 +95,69 @@ testEvaluateFullContext :: Test
 testEvaluateFullContext =
     testCaseSeq
         "testEvaluateFullContext"
-        [ evalFCHelper [Assign "x" (F Size [(Val (VIntList [5]))])] [("x", VInt 1)]
+        [ evalFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [("x", VInt 1)]
+        , evalFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [("x", VInt 1), ("y", VInt 0)]
+        ]
+
+-- ss :: SATProofsState -> SATProofsState
+-- ss (a, fa, e, v, p) =
+
+-- Assignment must be done prior to calling
+-- subproofgraph :: VarAssignedProof -> [VarAssignedProof] -> Bool
+-- subproofgraph _p [] = False
+-- subproofgraph p (vp:vps) =
+--     let
+--      in if i == p then True else subproofgraph a p xs
+
+-- assignments -> failedAssignments -> availableIotasFromVal ->
+-- proofFromExpected -> (VarAssignedProof, assignments, failedAssignments, availableIotas)
+assignIotas :: SATProofState -> VarAssignedProof -> (Maybe VarAssignedProof, SATProofState)
+assignIotas state (CTerm v) = (Just (CTerm v), state)
+assignIotas (as, fasm, ai) (ATerm ivar) = case ivar of
+    Left i -> case Data.Map.lookup i as of
+        Just i' -> (Just (ATerm (Left i')), (as, fasm, ai)) -- already assigned, replace with assigned iota
+        Nothing -> case nextValidAssignment ai (multimapLookup fasm i) of
+            Just i' -> (Just (ATerm (Left i')), (insert i i' as, fasm, delete i' ai)) -- add to map, remove from available
+            -- TODO: The failed assignment must be added on backtrack, not here
+            Nothing -> (Nothing, (as, fasm, ai))
+    var -> (Just (ATerm var), (as, fasm, ai))
+assignIotas state (FApp2 f ps) = let assignedArgs = statefulMap state (map (flip assignIotas) ps) in
+    case assignedArgs of
+        (Just ps', state') -> (Just (FApp2 f ps'), state')
+        (Nothing, state') -> (Nothing, state')
+
+-- TODO: This should probably be a monad
+statefulMap :: s -> [s -> (Maybe b, s)] -> (Maybe [b], s)
+statefulMap s [] = (Just [], s)
+statefulMap s (f:fs) = let (b, s') = f s in case b of
+    Just b' -> let (bs, s'') = statefulMap s' fs in case bs of
+        Just bs' -> (Just (b' : bs'), s'')
+        Nothing -> (Nothing, s'')
+    Nothing -> (Nothing, s')
+
+multimapLookup :: (Ord k, Ord v) => Map k [v] -> k -> [v]
+multimapLookup m k = findWithDefault [] k m
+
+multimapInsert :: (Ord k, Ord v) => Map k [v] -> k -> v -> Map k [v]
+multimapInsert m k v = insertWith (++) k [v] m
+
+-- availableIotasFromVal -> failedAssignmentsForExpectedIota -> newAssignment
+nextValidAssignment :: [Iota] -> [Iota] -> Maybe Iota
+nextValidAssignment [] _ = Nothing
+nextValidAssignment (i : is) fas = if i `elem` fas then nextValidAssignment is fas else Just i
+
+-- TODO: Can we check this without requiring a particular iota naming?
+-- validateFCHelper :: [Statement] ->  -> TestResult
+-- validateFCHelper stmts expected =
+--     let (vals, _, _) = evaluate stmts
+--      in testAssertEq vals (Data.Map.fromList expected)
+
+testValidateFullContext :: Test
+testValidateFullContext =
+    testCaseSeq
+        "testValidateFullContext"
+        [ evalFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [("x", VInt 1)]
+        , evalFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [("x", VInt 1), ("y", VInt 0)]
         ]
 
 main :: IO ()

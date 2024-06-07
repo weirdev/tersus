@@ -19,4 +19,4 @@ data Proof i = FApp2 Funct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
-type VState = (Map Variable Iota, [IotaProof], [String])
+type VState = (Map Variable Iota, [IotaProof], [Iota])
