@@ -23,8 +23,8 @@ newtype SATProofsState = SATProofsState (IotaAssignments, IotaFailedAssignments,
 
 -- (assignments: {expectedIota: validationIota},
 -- failedAssignmens: {expectedIota: [validationIota]},
--- availableIotasFromVal)
-type SATProofState = (IotaAssignments, IotaFailedAssignments, [Iota])
+-- availableIotasFromVal, prevState)
+newtype SATProofState = SATProofState (IotaAssignments, IotaFailedAssignments, [Iota], Maybe SATProofState)
 
 assignments :: SATProofsState -> IotaAssignments
 assignments (SATProofsState (a, _, _, _, _)) = a
@@ -103,34 +103,37 @@ testEvaluateFullContext =
 -- ss (a, fa, e, v, p) =
 
 -- Assignment must be done prior to calling
--- subproofgraph :: VarAssignedProof -> [VarAssignedProof] -> Bool
--- subproofgraph _p [] = False
--- subproofgraph p (vp:vps) =
---     let
---      in if i == p then True else subproofgraph a p xs
+subproofgraph :: VarAssignedProof -> [VarAssignedProof] -> Bool
+subproofgraph _ [] = False
+subproofgraph p (vp:vps) =
+    let
+     in if i == p then True else subproofgraph a p xs
 
 -- assignments -> failedAssignments -> availableIotasFromVal ->
 -- proofFromExpected -> (VarAssignedProof, assignments, failedAssignments, availableIotas)
 assignIotas :: SATProofState -> VarAssignedProof -> (Maybe VarAssignedProof, SATProofState)
 assignIotas state (CTerm v) = (Just (CTerm v), state)
-assignIotas (as, fasm, ai) (ATerm ivar) = case ivar of
+assignIotas (SATProofState (as, fasm, ai, ps)) (ATerm ivar) = case ivar of
     Left i -> case Data.Map.lookup i as of
-        Just i' -> (Just (ATerm (Left i')), (as, fasm, ai)) -- already assigned, replace with assigned iota
+        Just i' -> (Just (ATerm (Left i')), SATProofState (as, fasm, ai, ps)) -- already assigned, replace with assigned iota
+        -- Not assigned, pull next available validation iota
         Nothing -> case nextValidAssignment ai (multimapLookup fasm i) of
-            Just i' -> (Just (ATerm (Left i')), (insert i i' as, fasm, delete i' ai)) -- add to map, remove from available
+            Just i' -> (Just (ATerm (Left i')), (insert i i' as, fasm, delete i' ai, Just (SATProofState (as, fasm, ai, ps)))) -- add to map, remove from available
             -- TODO: The failed assignment must be added on backtrack, not here
-            Nothing -> (Nothing, (as, fasm, ai))
-    var -> (Just (ATerm var), (as, fasm, ai))
-assignIotas state (FApp2 f ps) = let assignedArgs = statefulMap state (map (flip assignIotas) ps) in
+            -- On failure pass the failure state
+            Nothing -> (Nothing, Just (SATProofState (as, fasm, ai, ps)))
+    var -> (Just (ATerm var), (as, fasm, ai, SATProofState (as, fasm, ai, ps)))
+assignIotas state (FApp2 f args) = let (assignedArgs, state') = statefulMap state (map (flip assignIotas) ps) in
     case assignedArgs of
-        (Just ps', state') -> (Just (FApp2 f ps'), state')
-        (Nothing, state') -> (Nothing, state')
+        Just args' -> (Just (FApp2 f args'), state')
+        Nothing -> (Nothing, state)
 
 -- TODO: This should probably be a monad
-statefulMap :: s -> [s -> (Maybe b, s)] -> (Maybe [b], s)
-statefulMap s [] = (Just [], s)
-statefulMap s (f:fs) = let (b, s') = f s in case b of
-    Just b' -> let (bs, s'') = statefulMap s' fs in case bs of
+-- state -> [valuesToCalculateGivenState] -> (gen new state on failure) -> (Maybe [results], newState)
+statefulMap :: s -> [s -> (Maybe b, s)] -> (s -> Maybe s) -> (Maybe [b], s)
+statefulMap s [] _ = (Just [], s)
+statefulMap s (f:fs) nsf = let (b, s') = f s in case b of
+    Just b' -> let (bs, s'') = statefulMap s' nsf in case bs of
         Just bs' -> (Just (b' : bs'), s'')
         Nothing -> (Nothing, s'')
     Nothing -> (Nothing, s')
