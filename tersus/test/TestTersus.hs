@@ -16,35 +16,10 @@ type IotaAssignments = Map Iota Iota
 type IotaFailedAssignments = Map Iota [Iota]
 type VarAssignedProof = Proof (Either Iota String)
 
--- (assignments: {expectedIota: validationIota},
--- failedAssignmens: {expectedIota: [validationIota]},
---  expectedProofsToCheck, validationProofs, prevStates)
-newtype SATProofsState = SATProofsState (IotaAssignments, IotaFailedAssignments, [VarAssignedProof], [VarAssignedProof], [SATProofsState])
-
--- (assignments: {expectedIota: validationIota},
--- failedAssignmens: {expectedIota: [validationIota]},
--- availableIotasFromVal, prevState)
-newtype SATProofState = SATProofState (IotaAssignments, IotaFailedAssignments, [Iota], Maybe SATProofState)
-
-assignments :: SATProofsState -> IotaAssignments
-assignments (SATProofsState (a, _, _, _, _)) = a
-
-failedAssignments :: SATProofsState -> IotaFailedAssignments
-failedAssignments (SATProofsState (_, a, _, _, _)) = a
-
-expectedProofsToCheck :: SATProofsState -> [VarAssignedProof]
-expectedProofsToCheck (SATProofsState (_, _, e, _, _)) = e
-
-validationProofs :: SATProofsState -> [VarAssignedProof]
-validationProofs (SATProofsState (_, _, _, v, _)) = v
-
-prevStates :: SATProofsState -> [SATProofsState]
-prevStates (SATProofsState (_, _, _, _, p)) = p
-
 -- Core Test helper functions
 
 testCaseSeq :: String -> [TestResult] -> Test
-testCaseSeq s results = TestList s (zipWith (\ i r -> TestCase (s ++ show i) r) [0 ..] results)
+testCaseSeq s results = TestList s (zipWith (\i r -> TestCase (s ++ show i) r) [0 ..] results)
 
 runTest :: Test -> IO ()
 runTest (TestCase s r) =
@@ -65,6 +40,13 @@ testAssertEq actual expected =
     if actual == expected
         then Nothing
         else Just $ "Expected: " ++ show expected ++ "\nGot: " ++ show actual
+
+testAllTrue :: (Show a) => (a -> Bool) -> [a] -> TestResult
+testAllTrue f [] = Nothing
+testAllTrue f (x : xs) =
+    if f x
+        then testAllTrue f xs
+        else Just $ "Failed for: " ++ show x
 
 -- Tests
 testParseSimpleAssign :: Test
@@ -99,71 +81,32 @@ testEvaluateFullContext =
         , evalFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [("x", VInt 1), ("y", VInt 0)]
         ]
 
--- ss :: SATProofsState -> SATProofsState
--- ss (a, fa, e, v, p) =
+expectedProofMatch :: VariableProof -> [IotaProof] -> Map Variable Iota -> Bool
+expectedProofMatch _ [] _ = False
+expectedProofMatch vp (ip : ips) varMap = expectedProofCompare vp ip varMap || expectedProofMatch vp ips varMap
 
--- Assignment must be done prior to calling
-subproofgraph :: VarAssignedProof -> [VarAssignedProof] -> Bool
-subproofgraph _ [] = False
-subproofgraph p (vp:vps) =
-    let
-     in if i == p then True else subproofgraph a p xs
+expectedProofCompare :: VariableProof -> IotaProof -> Map Variable Iota -> Bool
+expectedProofCompare (CTerm v1) (CTerm v2) _ = v1 == v2
+expectedProofCompare (ATerm var) (ATerm iota2) varMap = case Data.Map.lookup var varMap of
+    Just iota1 -> iota1 == iota2
+    Nothing -> False
+expectedProofCompare (FApp2 f1 p1) (FApp2 f2 p2) varMap = f1 == f2 && all (\(p1, p2) -> expectedProofCompare p1 p2 varMap) (zip p1 p2)
+expectedProofCompare _ _ _ = False
 
--- assignments -> failedAssignments -> availableIotasFromVal ->
--- proofFromExpected -> (VarAssignedProof, assignments, failedAssignments, availableIotas)
-assignIotas :: SATProofState -> VarAssignedProof -> (Maybe VarAssignedProof, SATProofState)
-assignIotas state (CTerm v) = (Just (CTerm v), state)
-assignIotas (SATProofState (as, fasm, ai, ps)) (ATerm ivar) = case ivar of
-    Left i -> case Data.Map.lookup i as of
-        Just i' -> (Just (ATerm (Left i')), SATProofState (as, fasm, ai, ps)) -- already assigned, replace with assigned iota
-        -- Not assigned, pull next available validation iota
-        Nothing -> case nextValidAssignment ai (multimapLookup fasm i) of
-            Just i' -> (Just (ATerm (Left i')), (insert i i' as, fasm, delete i' ai, Just (SATProofState (as, fasm, ai, ps)))) -- add to map, remove from available
-            -- TODO: The failed assignment must be added on backtrack, not here
-            -- On failure pass the failure state
-            Nothing -> (Nothing, Just (SATProofState (as, fasm, ai, ps)))
-    var -> (Just (ATerm var), (as, fasm, ai, SATProofState (as, fasm, ai, ps)))
-assignIotas state (FApp2 f args) = let (assignedArgs, state') = statefulMap state (map (flip assignIotas) ps) in
-    case assignedArgs of
-        Just args' -> (Just (FApp2 f args'), state')
-        Nothing -> (Nothing, state)
-
--- TODO: This should probably be a monad
--- state -> [valuesToCalculateGivenState] -> (gen new state on failure) -> (Maybe [results], newState)
-statefulMap :: s -> [s -> (Maybe b, s)] -> (s -> Maybe s) -> (Maybe [b], s)
-statefulMap s [] _ = (Just [], s)
-statefulMap s (f:fs) nsf = let (b, s') = f s in case b of
-    Just b' -> let (bs, s'') = statefulMap s' nsf in case bs of
-        Just bs' -> (Just (b' : bs'), s'')
-        Nothing -> (Nothing, s'')
-    Nothing -> (Nothing, s')
-
-multimapLookup :: (Ord k, Ord v) => Map k [v] -> k -> [v]
-multimapLookup m k = findWithDefault [] k m
-
-multimapInsert :: (Ord k, Ord v) => Map k [v] -> k -> v -> Map k [v]
-multimapInsert m k v = insertWith (++) k [v] m
-
--- availableIotasFromVal -> failedAssignmentsForExpectedIota -> newAssignment
-nextValidAssignment :: [Iota] -> [Iota] -> Maybe Iota
-nextValidAssignment [] _ = Nothing
-nextValidAssignment (i : is) fas = if i `elem` fas then nextValidAssignment is fas else Just i
-
--- TODO: Can we check this without requiring a particular iota naming?
--- validateFCHelper :: [Statement] ->  -> TestResult
--- validateFCHelper stmts expected =
---     let (vals, _, _) = evaluate stmts
---      in testAssertEq vals (Data.Map.fromList expected)
+validateFCHelper :: [Statement] -> [VariableProof] -> TestResult
+validateFCHelper stmts expected =
+    let (varMap, iproofs, _) = validate stmts
+     in testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
 
 testValidateFullContext :: Test
 testValidateFullContext =
     testCaseSeq
         "testValidateFullContext"
-        [ evalFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [("x", VInt 1)]
-        , evalFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [("x", VInt 1), ("y", VInt 0)]
+        [ validateFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 1)]]
         ]
 
 main :: IO ()
 main = do
     runTest testParse
     runTest testEvaluateFullContext
+    runTest testValidateFullContext
