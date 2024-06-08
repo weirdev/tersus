@@ -11,10 +11,6 @@ import TersusTypes
 type TestResult = Maybe String
 data Test = TestCase String TestResult | TestList String [Test] deriving (Show)
 
-type IotaAssignments = Map Iota Iota
-type IotaFailedAssignments = Map Iota [Iota]
-type VarAssignedProof = Proof (Either Iota String)
-
 -- Core Test helper functions
 
 testCaseSeq :: String -> [TestResult] -> Test
@@ -33,6 +29,10 @@ runTest (TestList s ts) = do
     putStrLn $ "Running test list: " ++ s
     mapM_ runTest ts
     putStrLn ""
+
+testAssertTrue :: Bool -> TestResult
+testAssertTrue True = Nothing
+testAssertTrue False = Just "Expected True, got False"
 
 testAssertEq :: (Show a, Eq a) => a -> a -> TestResult
 testAssertEq actual expected =
@@ -92,25 +92,58 @@ expectedProofCompare (ATerm var) (ATerm iota2) varMap = case Data.Map.lookup var
 expectedProofCompare (FApp2 f1 ps1) (FApp2 f2 ps2) varMap = f1 == f2 && all (\(p1, p2) -> expectedProofCompare p1 p2 varMap) (zip ps1 ps2)
 expectedProofCompare _ _ _ = False
 
-validateFCHelper :: [Statement] -> [VariableProof] -> TestResult
-validateFCHelper stmts expected =
-    let (varMap, iproofs, _) = validate stmts
-     in testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
+-- Validate with expected proofs
+validateWEMatchHelper :: [Statement] -> [VariableProof] -> TestResult
+validateWEMatchHelper stmts expected =
+    case validate stmts of
+        Ok (varMap, iproofs, _) -> testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
+        Error e -> Just $ "Validation failed with error: " ++ e
 
-testValidateFullContextSuccesses :: Test
-testValidateFullContextSuccesses =
+validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
+validateWEMismatchHelper stmts expected =
+    case validate stmts of
+        Ok (varMap, iproofs, _) -> testAssertTrue (not (all (\vp -> expectedProofMatch vp iproofs varMap) expected))
+        Error e -> Just $ "Validation failed with error: " ++ e
+
+validationFailHelper :: [Statement] -> TestResult
+validationFailHelper stmts =
+    case validate stmts of
+        Ok _ -> Just "Validation passed when it should have failed"
+        Error _ -> Nothing
+
+testValidateWithExpectedMatch :: Test
+testValidateWithExpectedMatch =
     testCaseSeq
-        "testValidateFullContextSuccess"
-        [ validateFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 1)]]
-        , validateFCHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 2)]]
-        , validateFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 1)], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 0)]]
-        , validateFCHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)]]
-        , validateFCHelper [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), ProofAssert (FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 6)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 6)]]
-        , validateFCHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp2 (Rel Eq) [ATerm "x", ATerm "a"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "x", ATerm "a"], FApp2 (Rel Eq) [ATerm "a", ATerm "x"]]
+        "testValidateWithExpectedMatch"
+        [ validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 1)]]
+        , validateWEMatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 2)]]
+        , validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 1)], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 0)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), ProofAssert (FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 6)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 6)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp2 (Rel Eq) [ATerm "x", ATerm "a"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "x", ATerm "a"], FApp2 (Rel Eq) [ATerm "a", ATerm "x"]]
+        ]
+
+testValidateWithExpectedMismatch :: Test
+testValidateWithExpectedMismatch =
+    testCaseSeq
+        "testValidateWithExpectedMismatch"
+        [ validateWEMismatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 1)]]
+        , validateWEMismatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 2)], FApp2 (Rel Eq) [ATerm "z", CTerm (VInt 2)]]
+        , validateWEMismatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp2 (Rel Eq) [ATerm "x", ATerm "a"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "x", ATerm "a"], FApp2 (Rel Eq) [ATerm "b", ATerm "x"]]
+        ]
+
+testValidationFail :: Test
+testValidationFail =
+    testCaseSeq
+        "testValidationFail"
+        [ validationFailHelper [ProofAssert (FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 5)])]
+        , validationFailHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 4)])]
         ]
 
 main :: IO ()
 main = do
     runTest testParse
     runTest testEvaluateFullContext
-    runTest testValidateFullContextSuccesses
+    runTest testValidateWithExpectedMatch
+    runTest testValidateWithExpectedMismatch
+    runTest testValidationFail
