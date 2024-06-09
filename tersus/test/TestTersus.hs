@@ -89,7 +89,7 @@ expectedProofCompare (CTerm v1) (CTerm v2) _ = v1 == v2
 expectedProofCompare (ATerm var) (ATerm iota2) varMap = case Data.Map.lookup var varMap of
     Just iota1 -> iota1 == iota2
     Nothing -> False
-expectedProofCompare (FApp2 f1 ps1) (FApp2 f2 ps2) varMap = f1 == f2 && all (\(p1, p2) -> expectedProofCompare p1 p2 varMap) (zip ps1 ps2)
+expectedProofCompare (FApp f1 ps1) (FApp f2 ps2) varMap = f1 == f2 && all (\(p1, p2) -> expectedProofCompare p1 p2 varMap) (zip ps1 ps2)
 expectedProofCompare _ _ _ = False
 
 -- Validate with expected proofs
@@ -115,29 +115,29 @@ testValidateWithExpectedMatch :: Test
 testValidateWithExpectedMatch =
     testCaseSeq
         "testValidateWithExpectedMatch"
-        [ validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 1)]]
-        , validateWEMatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 2)]]
-        , validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 1)], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 0)]]
-        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)]]
-        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), ProofAssert (FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 6)])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 6)]]
-        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp2 (Rel Eq) [ATerm "x", ATerm "a"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "x", ATerm "a"], FApp2 (Rel Eq) [ATerm "a", ATerm "x"]]
+        [ validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 1)]]
+        , validateWEMatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp (Rel Eq) [ATerm "y", CTerm (VInt 2)]]
+        , validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 1)], FApp (Rel Eq) [ATerm "y", CTerm (VInt 0)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 6)])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Lt) [ATerm "x", CTerm (VInt 6)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp (Rel Eq) [ATerm "x", ATerm "a"])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "x", ATerm "a"], FApp (Rel Eq) [ATerm "a", ATerm "x"]]
         ]
 
 testValidateWithExpectedMismatch :: Test
 testValidateWithExpectedMismatch =
     testCaseSeq
         "testValidateWithExpectedMismatch"
-        [ validateWEMismatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 1)]]
-        , validateWEMismatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp2 (Rel Eq) [ATerm "y", CTerm (VInt 2)], FApp2 (Rel Eq) [ATerm "z", CTerm (VInt 2)]]
-        , validateWEMismatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp2 (Rel Eq) [ATerm "x", ATerm "a"])] [FApp2 (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp2 (Rel Eq) [ATerm "x", ATerm "a"], FApp2 (Rel Eq) [ATerm "b", ATerm "x"]]
+        [ validateWEMismatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp (Rel Eq) [ATerm "y", CTerm (VInt 1)]]
+        , validateWEMismatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp (Rel Eq) [ATerm "y", CTerm (VInt 2)], FApp (Rel Eq) [ATerm "z", CTerm (VInt 2)]]
+        , validateWEMismatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp (Rel Eq) [ATerm "x", ATerm "a"])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "x", ATerm "a"], FApp (Rel Eq) [ATerm "b", ATerm "x"]]
         ]
 
 testValidationFail :: Test
 testValidationFail =
     testCaseSeq
         "testValidationFail"
-        [ validationFailHelper [ProofAssert (FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 5)])]
-        , validationFailHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp2 (Rel Lt) [ATerm "x", CTerm (VInt 4)])]
+        [ validationFailHelper [ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 5)])]
+        , validationFailHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 4)])]
         ]
 
 main :: IO ()

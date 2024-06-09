@@ -17,7 +17,7 @@ type State = (Map Variable Value, Map Variable Iota, [IotaProof])
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 type Iota = String
-data Proof i = FApp2 Funct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
+data Proof i = FApp Funct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
