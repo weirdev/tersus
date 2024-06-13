@@ -82,6 +82,8 @@ testEvaluateFullContext =
         [ evalFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [("x", VInt 1)]
         , evalFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [("x", VInt 1), ("y", VInt 0)]
         , evalFCHelper [Assign "x" (Block [Assign "y" (Val (VInt 5)), Assign "z" (F Plus [Var "y", Val (VInt 1)]), Return (Var "z")])] [("x", VInt 6)]
+        , evalFCHelper [Assign "f" (Val (VFunct (Val (VInt 3)))), Assign "result" (F Call [Var "f"])] [("result", VInt 3), ("f", VFunct (Val (VInt 3)))]
+        , evalFCHelper [Assign "f" (Val (VFunct (Block [Assign "y" (Val (VInt 2)), Return (Var "y")]))), Assign "result" (F Call [Var "f"])] [("result", VInt 2), ("f", VFunct (Block [Assign "y" (Val (VInt 2)), Return (Var "y")]))]
         ]
 
 -- Validation tests

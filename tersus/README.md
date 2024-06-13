@@ -7,6 +7,7 @@ Next steps:
         evaluating returns a value or void
         validating adds proofs
     Functions as ordinary values
+    Functions with arguments
 0.5. Remove iotas from validations
 1. Improved proof representation, proof engine
     How are we handling proofs w/ nested expressions, we currently do not allow temp iotas to leak

@@ -369,6 +369,7 @@ evalFunct (Rel LtEq) _ = error "LtEq only valid for two ints"
 evalFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
 evalFunct (Rel GtEq) _ = error "GtEq only valid for two ints"
 evalFunct Call (VFunct expr : args) =
+    -- TODO: Add args to state
     let state = (empty, empty, [])
      in case evalExpression state expr of
             (Just val, _, _) -> val
