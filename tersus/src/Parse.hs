@@ -25,21 +25,12 @@ whitespace = void $ many $ oneOf " \n\t"
 
 statementBlock :: Parser [Statement]
 statementBlock = do
-    whitespace
     statements <- statement `sepEndBy` semicolon
     whitespace
     return statements
 
 statement :: Parser Statement
-statement = do
-    whitespace
-    statementType <- many1 $ satisfy isLetter
-    whitespace
-    s <- case statementType of
-        "assign" -> assignStatement
-        _ -> error "Unknown statement type"
-    whitespace
-    return s
+statement = rewriteStatement <|> assignStatement
 
 assignStatement :: Parser Statement
 assignStatement = do
@@ -51,6 +42,30 @@ assignStatement = do
     expr <- expression
     whitespace
     return (Assign var expr)
+
+rewriteStatement :: Parser Statement
+rewriteStatement = do
+    void (string "rewrite")
+    whitespace
+    rule <- rwRule
+    whitespace
+    return (Rewrite rule)
+
+rwRule :: Parser RwRule
+rwRule = do
+    ruleStr <- many1 letter
+    whitespace
+    -- TODO: Parens and argument list
+    mvar <- optionMaybe variable
+    whitespace
+    return
+        ( case (ruleStr, mvar) of
+            ("refl", Just var) -> Refl var
+            ("eqToLtPlus1", Just var) -> EqToLtPlus1 var
+            ("eval", Just var) -> Eval var
+            ("evalAll", Nothing) -> EvalAll
+            _ -> error "Unknown rule or wrong number of arguments"
+        )
 
 -- NOTE: Infix expression must be matched first,
 -- otherwise we will parse the lhs of infix expressions
@@ -65,15 +80,18 @@ expression = try infixExpression <|> nonInfixExpression
 nonInfixExpression :: Parser Expression
 nonInfixExpression = try fExpression <|> valExpression <|> varExpression <|> parensExpression -- TODO: <|> blockExpression
 
-parensExpression :: Parser Expression
-parensExpression = do
+parensParse :: Parser a -> Parser a
+parensParse innerParser = do
     void (char '(')
     whitespace
-    expr <- expression
+    inner <- innerParser
     whitespace
     void (char ')')
     whitespace
-    return expr
+    return inner
+
+parensExpression :: Parser Expression
+parensExpression = parensParse expression
 
 valExpression :: Parser Expression
 valExpression = intExpression <|> listExpression
@@ -159,16 +177,18 @@ variable :: Parser String
 -- TODO: Allow digits in variable names
 variable = many1 letter
 
-withEof :: Parser a -> Parser a
-withEof p = do
+topLevelWrap :: Parser a -> Parser a
+topLevelWrap p = do
+    whitespace
     result <- p
-    eof
+    -- whitespace?
+    eof -- Ensure we have parsed the whole input
     return result
 
 -- Function to run the parser
 parseStatement :: String -> Either ParseError Statement
-parseStatement = parse (withEof statement) ""
+parseStatement = parse (topLevelWrap statement) ""
 
 -- Function to run the parser
 parseStatementBlock :: String -> Either ParseError [Statement]
-parseStatementBlock = parse (withEof statementBlock) ""
+parseStatementBlock = parse (topLevelWrap statementBlock) ""

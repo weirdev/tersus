@@ -27,6 +27,7 @@ type Iota = String
 data Proof i = FApp Funct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
+-- TODO: As with Funct, the rule name should be a separate type from the arguments
 data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 type VState = (Map Variable Iota, [IotaProof], [Iota])

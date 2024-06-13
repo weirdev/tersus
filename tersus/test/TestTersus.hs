@@ -14,7 +14,10 @@ data Test = TestCase String TestResult | TestList String [Test] deriving (Show)
 -- Core Test helper functions
 
 testCaseSeq :: String -> [TestResult] -> Test
-testCaseSeq s results = TestList s (zipWith (\i r -> TestCase (s ++ show i) r) [0 :: Integer ..] results)
+testCaseSeq s results =
+    TestList
+        s
+        (zipWith (\i r -> TestCase (s ++ show i) r) [0 :: Integer ..] results)
 
 runTest :: Test -> IO ()
 runTest (TestCase s r) =
@@ -52,7 +55,7 @@ testAllTrue f (x : xs) =
 -- Parse tests
 testParseSimpleAssign :: Test
 testParseSimpleAssign =
-    let parseOutput = parseStatementBlock "assign x = 5"
+    let parseOutput = parseStatementBlock "x = 5"
      in let result = case parseOutput of
                 Left _ -> Nothing
                 Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
@@ -60,10 +63,10 @@ testParseSimpleAssign =
 
 testParseComplexAssign :: Test
 testParseComplexAssign =
-    let parseOutput = parseStatementBlock "assign x = size([5]); assign yy = 1 - 1;"
+    let parseOutput = parseStatementBlock "x = size([5]); rr = 1 - 1;"
      in let result = case parseOutput of
                 Left _ -> Nothing
-                Right parsed -> testAssertEq parsed [Assign "x" (F Size [Val (VIntList [5])]), Assign "yy" (F Minus [Val (VInt 1), Val (VInt 1)])]
+                Right parsed -> testAssertEq parsed [Assign "x" (F Size [Val (VIntList [5])]), Assign "rr" (F Minus [Val (VInt 1), Val (VInt 1)])]
          in TestCase "testParseComplexAssign" result
 
 testParse :: Test
