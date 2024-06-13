@@ -300,7 +300,7 @@ evalExpression state (Var var) =
          in let miota = Data.Map.lookup var iotas
              in case mval of
                     Just _ -> (mval, miota, state)
-                    Nothing -> error "Undefined variable"
+                    Nothing -> error ("Undefined variable: " ++ var)
 evalExpression sstate (F funct exprs) =
     let (state, vals) = evalExpressionList sstate exprs
      in (Just $ evalFunct funct vals, Nothing, state)
@@ -368,12 +368,13 @@ evalFunct (Rel LtEq) [VInt v1, VInt v2] = VBool (v1 <= v2)
 evalFunct (Rel LtEq) _ = error "LtEq only valid for two ints"
 evalFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
 evalFunct (Rel GtEq) _ = error "GtEq only valid for two ints"
-evalFunct Call (VFunct expr : args) =
-    -- TODO: Add args to state
-    let state = (empty, empty, [])
-     in case evalExpression state expr of
-            (Just val, _, _) -> val
-            _ -> error "Function did not return a value"
+evalFunct Call (VFunct vars expr : args) =
+    let (argVals, _) = zipMap vars args (,)
+     in -- Give args the function parameter names
+        let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
+         in case evalExpression (varMap, empty, []) expr of
+                (Just val, _, _) -> val
+                _ -> error "Function did not return a value"
 
 concreteValsOfAllMaybe :: [[IotaProof]] -> Maybe [Value]
 concreteValsOfAllMaybe [] = Just []
