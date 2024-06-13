@@ -230,6 +230,12 @@ evalStatement (svals, siotas, sproofs) (Assign var expr) =
             (Just val, Nothing) -> (insert var val vals, delete var iotas, proofs)
             -- TODO: Is this an error case?
             (Nothing, _) -> (vals, iotas, proofs)
+evalStatement state (Return expr) =
+    let (mval, miota, (vals, iotas, proofs)) = evalExpression state expr
+     in case (mval, miota) of
+            -- TODO: Real return slot rather than using a var
+            (Just val, Just niota) -> (insert "return" val vals, iotas, proofs)
+            (Just val, Nothing) -> (insert "return" val vals, iotas, proofs)
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
 evalStatement state AssignProofVar{} = state
@@ -299,8 +305,12 @@ evalExpression sstate (F funct exprs) =
     let (state, vals) = evalExpressionList sstate exprs
      in (Just $ evalFunct funct vals, Nothing, state)
 evalExpression state (Block statements) =
-    let newState = evalBlock state statements
-     in (Nothing, Nothing, newState)
+    let (vals, _, _) = evalBlock state statements
+     in -- TODO: Real return slot
+        -- Note: returning old state here, which is what we want regarding not
+        -- exporting vars declared in the block. But it does hide changes to
+        -- variables declared outside the block made inside the block
+        (Data.Map.lookup "return" vals, Nothing, state)
 
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression _ iota (Val val) = Ok [FApp (Rel Eq) [ATerm iota, CTerm val]]
@@ -327,13 +337,14 @@ valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
                          in let concreteProofs = filter proofConcrete flatfinputproofs -- C niota rel val
                              in let ps = refloncefiproofs ++ concreteProofs
                                  in case valFunct funct niotas ps iota of
-                                    Ok functProofs -> Ok
-                                        ( concatMap
-                                            (reflProofsByProof [FApp (Rel Eq) [ATerm iota, FApp funct (map ATerm niotas)]])
-                                            flatfinputproofs
-                                            ++ functProofs
-                                        )
-                                    Error e -> Error e
+                                        Ok functProofs ->
+                                            Ok
+                                                ( concatMap
+                                                    (reflProofsByProof [FApp (Rel Eq) [ATerm iota, FApp funct (map ATerm niotas)]])
+                                                    flatfinputproofs
+                                                    ++ functProofs
+                                                )
+                                        Error e -> Error e
 valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 
 evalFunct :: Funct -> [Value] -> Value
@@ -357,6 +368,11 @@ evalFunct (Rel LtEq) [VInt v1, VInt v2] = VBool (v1 <= v2)
 evalFunct (Rel LtEq) _ = error "LtEq only valid for two ints"
 evalFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
 evalFunct (Rel GtEq) _ = error "GtEq only valid for two ints"
+evalFunct Call (VFunct expr : args) =
+    let state = (empty, empty, [])
+     in case evalExpression state expr of
+            (Just val, _, _) -> val
+            _ -> error "Function did not return a value"
 
 concreteValsOfAllMaybe :: [[IotaProof]] -> Maybe [Value]
 concreteValsOfAllMaybe [] = Just []

@@ -48,6 +48,8 @@ testAllTrue f (x : xs) =
         else Just $ "Failed for: " ++ show x
 
 -- Tests
+
+-- Parse tests
 testParseSimpleAssign :: Test
 testParseSimpleAssign =
     let parseOutput = parseStatementBlock "assign x = 5"
@@ -67,6 +69,7 @@ testParseComplexAssign =
 testParse :: Test
 testParse = TestList "testParse" [testParseSimpleAssign, testParseComplexAssign]
 
+-- Evaluate tests
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
 evalFCHelper stmts expected =
     let (vals, _, _) = evaluate stmts
@@ -78,8 +81,10 @@ testEvaluateFullContext =
         "testEvaluateFullContext"
         [ evalFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [("x", VInt 1)]
         , evalFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [("x", VInt 1), ("y", VInt 0)]
+        , evalFCHelper [Assign "x" (Block [Assign "y" (Val (VInt 5)), Assign "z" (F Plus [Var "y", Val (VInt 1)]), Return (Var "z")])] [("x", VInt 6)]
         ]
 
+-- Validation tests
 expectedProofMatch :: VariableProof -> [IotaProof] -> Map Variable Iota -> Bool
 expectedProofMatch _ [] _ = False
 expectedProofMatch vp (ip : ips) varMap = expectedProofCompare vp ip varMap || expectedProofMatch vp ips varMap
@@ -140,6 +145,7 @@ testValidationFail =
         , validationFailHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 4)])]
         ]
 
+-- Run tests
 main :: IO ()
 main = do
     runTest testParse

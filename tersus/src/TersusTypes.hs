@@ -4,14 +4,14 @@ import Data.Map (Map)
 
 data Result a e = Ok a | Error e deriving (Eq)
 
-data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
 type Variable = String
+data Funct = Size | First | Last | Plus | Minus | Rel Rel | Call deriving (Show, Eq)
 
 -- TODO: Generic list type
-data Value = VInt Integer | VIntList [Integer] | VBool Bool
+data Value = VInt Integer | VIntList [Integer] | VBool Bool | VFunct Expression
     deriving (Show, Eq)
 data Expression = Val Value | Var Variable | F Funct [Expression] | Block [Statement] deriving (Show, Eq)
-data Statement = Assign Variable Expression | Rewrite RwRule | ProofAssert VariableProof | AssignProofVar Variable Expression deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
+data Statement = Assign Variable Expression | Return Expression | Rewrite RwRule | ProofAssert VariableProof | AssignProofVar Variable Expression deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 type State = (Map Variable Value, Map Variable Iota, [IotaProof])
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
