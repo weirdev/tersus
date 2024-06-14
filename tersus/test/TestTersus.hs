@@ -121,6 +121,16 @@ testParseEvalBlockExpr =
         \ return y;}"
         (VInt 3)
 
+testParseEvalWFunctDef :: TestResult
+testParseEvalWFunctDef =
+    parseEvalExprHelper
+        "{x = 6;\
+        \ fn add1(i) {\
+        \   return i + 1;\
+        \ };\
+        \ return add1;}"
+        (VFunct ["i"] (Block [Return (F Plus [Var "i", Val (VInt 1)])]))
+
 testParseEval :: Test
 testParseEval =
     testCaseSeq
@@ -128,6 +138,7 @@ testParseEval =
         [ testParseEvalSimpleExpression
         , testParseEvalCompoundExpression
         , testParseEvalBlockExpr
+        , testParseEvalWFunctDef
         ]
 
 -- Validation tests

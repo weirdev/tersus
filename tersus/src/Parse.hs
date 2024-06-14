@@ -4,12 +4,13 @@ import Text.Parsec
 import Text.Parsec.String (Parser)
 
 import Control.Monad (void)
-import Data.Char (isLetter)
+import Data.Char (isDigit, isLetter)
 import TersusTypes
 
 -- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
 -- https://hackage.haskell.org/package/parsec-3.1.17.0/docs/Text-Parsec-Combinator.html
 
+-- Utility parsers
 semicolon :: Parser ()
 semicolon = do
     void (satisfy (== ';'))
@@ -23,6 +24,14 @@ requiredWhitespace = void $ many1 $ oneOf " \n\t"
 whitespace :: Parser ()
 whitespace = void $ many $ oneOf " \n\t"
 
+variable :: Parser String
+-- TODO: Allow digits in variable names
+variable = do
+    fl <- satisfy isLetter
+    rest <- many $ satisfy isLetter <|> satisfy isDigit
+    return (fl : rest)
+
+-- Tersus parsers
 statementBlock :: Parser [Statement]
 statementBlock = do
     statements <- statement `sepEndBy` semicolon
@@ -30,12 +39,15 @@ statementBlock = do
     return statements
 
 statement :: Parser Statement
-statement = returnStatement <|> rewriteStatement <|> assignStatement
+statement =
+    returnStatement
+        <|> rewriteStatement
+        <|> functStatement
+        <|> assignStatement
 
 assignStatement :: Parser Statement
 assignStatement = do
-    -- TODO: Allow digits in variable names
-    var <- many $ satisfy isLetter
+    var <- variable
     whitespace
     void (char '=')
     whitespace
@@ -51,6 +63,22 @@ returnStatement = do
     whitespace
     return (Return expr)
 
+functStatement :: Parser Statement
+functStatement = do
+    void (string "fn")
+    whitespace
+    var <- variable
+    whitespace
+    void (char '(')
+    whitespace
+    argNames <- variable `sepBy` char ','
+    whitespace
+    void (char ')')
+    whitespace
+    fnBody <- blockExpression
+    whitespace
+    return (Assign var (Val (VFunct argNames fnBody)))
+
 rewriteStatement :: Parser Statement
 rewriteStatement = do
     void (string "rewrite")
@@ -61,7 +89,7 @@ rewriteStatement = do
 
 rwRule :: Parser RwRule
 rwRule = do
-    ruleStr <- many1 letter
+    ruleStr <- variable
     whitespace
     -- TODO: Parens and argument list
     mvar <- optionMaybe variable
@@ -147,11 +175,12 @@ varExpression = do
 
 fExpression :: Parser Expression
 fExpression = do
-    fname <- many1 letter
+    fname <- variable
     let funct = case fname of
             "size" -> Size
             "first" -> First
             "last" -> Last
+            -- TODO: Call
             _ -> error "Unknown function"
     void (char '(')
     whitespace
@@ -195,10 +224,6 @@ relationFunct = do
             ">=" -> GtEq
             _ -> error "Unknown relation"
     return (Rel rel)
-
-variable :: Parser String
--- TODO: Allow digits in variable names
-variable = many1 letter
 
 topLevelWrap :: Parser a -> Parser a
 topLevelWrap p = do
