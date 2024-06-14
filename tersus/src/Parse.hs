@@ -24,6 +24,12 @@ requiredWhitespace = void $ many1 $ oneOf " \n\t"
 whitespace :: Parser ()
 whitespace = void $ many $ oneOf " \n\t"
 
+skipWhitespace :: Parser a -> Parser a
+skipWhitespace p = do
+    out <- p
+    whitespace
+    return out
+
 variable :: Parser String
 -- TODO: Allow digits in variable names
 variable = do
@@ -71,7 +77,7 @@ functStatement = do
     whitespace
     void (char '(')
     whitespace
-    argNames <- variable `sepBy` char ','
+    argNames <- variable `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ')')
     whitespace
@@ -161,7 +167,7 @@ listExpression :: Parser Expression
 listExpression = do
     void (char '[')
     whitespace
-    vals <- intExpression `sepBy` char ','
+    vals <- intExpression `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ']')
     whitespace
@@ -176,19 +182,23 @@ varExpression = do
 fExpression :: Parser Expression
 fExpression = do
     fname <- variable
-    let funct = case fname of
-            "size" -> Size
-            "first" -> First
-            "last" -> Last
-            -- TODO: Call
-            _ -> error "Unknown function"
+    let builtinFunct = case fname of
+            "size" -> Just Size
+            "first" -> Just First
+            "last" -> Just Last
+            _ -> Nothing
     void (char '(')
     whitespace
-    args <- expression `sepBy` char ','
+    args <- expression `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ')')
     whitespace
-    return (F funct args)
+    return
+        ( case builtinFunct of
+            Just funct -> F funct args
+            -- User defined function
+            Nothing -> F Call (Var fname : args)
+        )
 
 infixExpression :: Parser Expression
 infixExpression = chainl1 nonInfixExpression op

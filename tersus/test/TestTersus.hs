@@ -131,6 +131,16 @@ testParseEvalWFunctDef =
         \ return add1;}"
         (VFunct ["i"] (Block [Return (F Plus [Var "i", Val (VInt 1)])]))
 
+testParseEvalWUdfCall :: TestResult
+testParseEvalWUdfCall =
+    parseEvalExprHelper
+        "{x = [3, 6, 9, 12];\
+        \ fn sumFirstLast(lst) {\
+        \   return first(lst) + last(lst);\
+        \ };\
+        \ return sumFirstLast(x);}"
+        (VInt 15)
+
 testParseEval :: Test
 testParseEval =
     testCaseSeq
@@ -139,6 +149,7 @@ testParseEval =
         , testParseEvalCompoundExpression
         , testParseEvalBlockExpr
         , testParseEvalWFunctDef
+        , testParseEvalWUdfCall
         ]
 
 -- Validation tests
