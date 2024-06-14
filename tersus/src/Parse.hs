@@ -30,7 +30,7 @@ statementBlock = do
     return statements
 
 statement :: Parser Statement
-statement = rewriteStatement <|> assignStatement
+statement = returnStatement <|> rewriteStatement <|> assignStatement
 
 assignStatement :: Parser Statement
 assignStatement = do
@@ -42,6 +42,14 @@ assignStatement = do
     expr <- expression
     whitespace
     return (Assign var expr)
+
+returnStatement :: Parser Statement
+returnStatement = do
+    void (string "return")
+    whitespace
+    expr <- expression
+    whitespace
+    return (Return expr)
 
 rewriteStatement :: Parser Statement
 rewriteStatement = do
@@ -78,7 +86,22 @@ expression = try infixExpression <|> nonInfixExpression
 -- expression = fExpression <|> valExpression <|> varExpression -- TODO: <|> blockExpression
 
 nonInfixExpression :: Parser Expression
-nonInfixExpression = try fExpression <|> valExpression <|> varExpression <|> parensExpression -- TODO: <|> blockExpression
+nonInfixExpression =
+    try fExpression
+        <|> valExpression
+        <|> varExpression
+        <|> parensExpression
+        <|> blockExpression
+
+blockExpression :: Parser Expression
+blockExpression = do
+    void (char '{')
+    whitespace
+    stmts <- statementBlock
+    whitespace
+    void (char '}')
+    whitespace
+    return (Block stmts)
 
 parensParse :: Parser a -> Parser a
 parensParse innerParser = do

@@ -102,7 +102,7 @@ parseEvalExprHelper :: String -> Value -> TestResult
 parseEvalExprHelper exprStr expected =
     let parseOutput = parseExpression exprStr
      in case parseOutput of
-            Left _ -> Just "Parse failed"
+            Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> evalExprHelper parsed expected
 
 testParseEvalSimpleExpression :: TestResult
@@ -113,12 +113,21 @@ testParseEvalCompoundExpression :: TestResult
 testParseEvalCompoundExpression =
     parseEvalExprHelper "10-5-5" (VInt 0)
 
+testParseEvalBlockExpr :: TestResult
+testParseEvalBlockExpr =
+    parseEvalExprHelper
+        "{x = [5,4,3];\
+        \ y = size(x);\
+        \ return y;}"
+        (VInt 3)
+
 testParseEval :: Test
 testParseEval =
     testCaseSeq
         "testParseEval"
         [ testParseEvalSimpleExpression
         , testParseEvalCompoundExpression
+        , testParseEvalBlockExpr
         ]
 
 -- Validation tests
