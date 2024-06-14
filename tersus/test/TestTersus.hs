@@ -1,6 +1,6 @@
 module TestTersus where
 
-import Data.Map (Map, fromList, lookup)
+import Data.Map (Map, empty, fromList, lookup)
 
 import Parse
 import Proof
@@ -91,6 +91,36 @@ testEvaluateFullContext =
         , evalFCHelper [Assign "add" (Val (VFunct ["l", "r"] (Block [Return (F Plus [Var "l", Var "r"])]))), Assign "result" (F Call [Var "add", Val (VInt 7), Val (VInt 13)])] [("result", VInt 20), ("add", VFunct ["l", "r"] (Block [Return (F Plus [Var "l", Var "r"])]))]
         ]
 
+evalExprHelper :: Expression -> Value -> TestResult
+evalExprHelper expr expected =
+    let (mval, _, _) = evalExpression (Data.Map.empty, Data.Map.empty, []) expr
+     in case mval of
+            Just val -> testAssertEq val expected
+            Nothing -> Just "Expression did not produce a value"
+
+parseEvalExprHelper :: String -> Value -> TestResult
+parseEvalExprHelper exprStr expected =
+    let parseOutput = parseExpression exprStr
+     in case parseOutput of
+            Left _ -> Just "Parse failed"
+            Right parsed -> evalExprHelper parsed expected
+
+testParseEvalSimpleExpression :: TestResult
+testParseEvalSimpleExpression =
+    parseEvalExprHelper "0" (VInt 0)
+
+testParseEvalCompoundExpression :: TestResult
+testParseEvalCompoundExpression =
+    parseEvalExprHelper "10-5-5" (VInt 0)
+
+testParseEval :: Test
+testParseEval =
+    testCaseSeq
+        "testParseEval"
+        [ testParseEvalSimpleExpression
+        , testParseEvalCompoundExpression
+        ]
+
 -- Validation tests
 expectedProofMatch :: VariableProof -> [IotaProof] -> Map Variable Iota -> Bool
 expectedProofMatch _ [] _ = False
@@ -157,6 +187,7 @@ main :: IO ()
 main = do
     runTest testParse
     runTest testEvaluateFullContext
+    runTest testParseEval
     runTest testValidateWithExpectedMatch
     runTest testValidateWithExpectedMismatch
     runTest testValidationFail

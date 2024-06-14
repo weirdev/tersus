@@ -1,11 +1,10 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
+Parse and evaluate tests for more complex scenarios.
 0. User defined functions
     Block structure
-        expression containing list of expressions
-        evaluating returns a value or void
-        validating adds proofs
+        validation IO for funct
     Functions as ordinary values
     Functions with arguments
 0.5. Remove iotas from validations

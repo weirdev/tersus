@@ -192,3 +192,7 @@ parseStatement = parse (topLevelWrap statement) ""
 -- Function to run the parser
 parseStatementBlock :: String -> Either ParseError [Statement]
 parseStatementBlock = parse (topLevelWrap statementBlock) ""
+
+-- Function to run the parser
+parseExpression :: String -> Either ParseError Expression
+parseExpression = parse (topLevelWrap expression) ""
