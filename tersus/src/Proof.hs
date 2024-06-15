@@ -60,6 +60,23 @@ lookupVar (State (vals, pState)) var = case Data.Map.lookup var vals of
         Just p -> lookupVar p var
         Nothing -> Nothing
 
+updateExistingVar :: State -> Variable -> Value -> Maybe State
+updateExistingVar (State (vals, pState)) var val = case Data.Map.lookup var vals of
+    Just _ -> Just (State (insert var val vals, pState))
+    Nothing -> case pState of
+        Just p -> case updateExistingVar p var val of
+            Just np -> Just (State (vals, Just np))
+            Nothing -> Nothing
+        Nothing -> Nothing
+
+insertVar :: State -> Variable -> Value -> State
+insertVar (State (vals, pState)) var val =
+    -- Prefentially update existing var in this or parent scope if the variable is already bound.
+    -- Otherwise, just insert the new variable in the current scope.
+    case updateExistingVar (State (vals, pState)) var val of
+        Just s -> s
+        Nothing -> State (insert var val vals, pState)
+
 -- TODO: We should have a real return slot rather than using a var
 getReturn :: State -> Maybe Value
 getReturn (State (vals, _)) = Data.Map.lookup "return" vals
@@ -254,12 +271,12 @@ valProgram state (stmt : stmts) = case valStatement state stmt of
     _ -> Error "Validation failed"
 
 evalStatement :: State -> Statement -> State
-evalStatement (State svals) (Assign var expr) =
-    let (mval, State (vals, pScope)) = evalExpression (State svals) expr
+evalStatement state (Assign var expr) =
+    let (mval, rState) = evalExpression state expr
      in case mval of
-            Just val -> State (insert var val vals, pScope)
+            Just val -> insertVar rState var val
             -- TODO: Is this an error case?
-            Nothing -> State (vals, pScope)
+            Nothing -> rState
 evalStatement state (Return expr) =
     let (mval, rState) = evalExpression state expr
      in case mval of
@@ -269,13 +286,12 @@ evalStatement state (Return expr) =
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
 evalStatement state AssignProofVar{} = state
-evalStatement state (Block statements) = evalBlock state statements
-    -- let rState = 
-    --  in -- TODO: Real return slot
-    --     -- Note: returning old state here, which is what we want regarding not
-    --     -- exporting vars declared in the block. But it does hide changes to
-    --     -- variables declared outside the block made inside the block
-    --     (getReturn rState, rState)
+evalStatement state (Block statements) = case evalBlock (State (empty, Just state)) statements of
+    -- Any vars declared in the block are not exported,
+    -- but any vars updated in the parent scope must be exported
+    -- TODO: Bubble up nested returns
+    State (_, Just pState) -> pState
+    _ -> error "Statement block eval did not return a parent state"
 
 valStatement :: VState -> Statement -> Result VState String
 valStatement (iotas, proofs, iotaseq) (Assign var expr) =

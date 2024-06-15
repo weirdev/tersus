@@ -170,6 +170,16 @@ testParseEvalWUdfCall =
         \ return sumFirstLast(x);}"
         (VInt 15)
 
+testParseNestedBlocks :: TestResult
+testParseNestedBlocks =
+    parseEvalReturningStmtHelper
+        "{x = [3, 6, 9, 12];\
+        \  {\
+        \    x = [1];\
+        \  };\
+        \ return size(x);}"
+        (VInt 1)
+
 testParseEval :: Test
 testParseEval =
     testCaseSeq
@@ -179,6 +189,7 @@ testParseEval =
         , testParseEvalBlockExpr
         , testParseEvalWFunctDef
         , testParseEvalWUdfCall
+        , testParseNestedBlocks
         ]
 
 -- Validation tests
