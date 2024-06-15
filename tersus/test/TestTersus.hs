@@ -75,7 +75,7 @@ testParse = TestList "testParse" [testParseSimpleAssign, testParseComplexAssign]
 -- Evaluate tests
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
 evalFCHelper stmts expected =
-    let (vals, _, _) = evaluate stmts
+    let State vals = evaluate stmts
      in testAssertEq vals (Data.Map.fromList expected)
 
 testEvaluateFullContext :: Test
@@ -93,7 +93,7 @@ testEvaluateFullContext =
 
 evalExprHelper :: Expression -> Value -> TestResult
 evalExprHelper expr expected =
-    let (mval, _, _) = evalExpression (Data.Map.empty, Data.Map.empty, []) expr
+    let (mval, _) = evalExpression (State Data.Map.empty) expr
      in case mval of
             Just val -> testAssertEq val expected
             Nothing -> Just "Expression did not produce a value"

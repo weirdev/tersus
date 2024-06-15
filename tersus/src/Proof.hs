@@ -202,8 +202,8 @@ varProofToIotaProof _ _ = error "Only Eq relation supported"
 
 -- Public fns
 evaluate :: [Statement] -> State
-evaluate [] = (empty, empty, [])
-evaluate l = evalBlock (empty, empty, []) l
+evaluate [] = State empty
+evaluate l = evalBlock (State empty) l
 
 validate :: [Statement] -> Result VState String
 validate [] = Ok (empty, [], [head iotalist])
@@ -222,20 +222,18 @@ valProgram state (stmt : stmts) = case valStatement state stmt of
     _ -> Error "Validation failed"
 
 evalStatement :: State -> Statement -> State
-evalStatement (svals, siotas, sproofs) (Assign var expr) =
-    let (mval, miota, (vals, iotas, proofs)) = evalExpression (svals, siotas, sproofs) expr
-     in case (mval, miota) of
-            (Just val, Just niota) -> (insert var val vals, insert var niota iotas, proofs)
-            -- TODO: When would we not have an iota?
-            (Just val, Nothing) -> (insert var val vals, delete var iotas, proofs)
+evalStatement (State svals) (Assign var expr) =
+    let (mval, State vals) = evalExpression (State svals) expr
+     in case mval of
+            Just val -> State $ insert var val vals
             -- TODO: Is this an error case?
-            (Nothing, _) -> (vals, iotas, proofs)
+            Nothing -> State vals
 evalStatement state (Return expr) =
-    let (mval, miota, (vals, iotas, proofs)) = evalExpression state expr
-     in case (mval, miota) of
+    let (mval, State vals) = evalExpression state expr
+     in case mval of
             -- TODO: Real return slot rather than using a var
-            (Just val, Just niota) -> (insert "return" val vals, iotas, proofs)
-            (Just val, Nothing) -> (insert "return" val vals, iotas, proofs)
+            Just val -> State $ insert "return" val vals
+            Just val -> State $ insert "return" val vals
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
 evalStatement state AssignProofVar{} = state
@@ -285,32 +283,31 @@ valStatement (iotas, proofs, iotaseq) _ = Ok (iotas, proofs, iotaseq)
 evalExpressionList :: State -> [Expression] -> (State, [Value])
 evalExpressionList state [] = (state, [])
 evalExpressionList sstate (expr : exprs) =
-    let (mval, _, estate) = evalExpression sstate expr
+    let (mval, estate) = evalExpression sstate expr
      in case mval of
             Just val ->
                 let (state, vals) = evalExpressionList estate exprs
                  in (state, val : vals)
             Nothing -> error "Expression must return a value to be passed to a function"
 
-evalExpression :: State -> Expression -> (Maybe Value, Maybe Iota, State)
-evalExpression state (Val val) = (Just val, Nothing, state)
+evalExpression :: State -> Expression -> (Maybe Value, State)
+evalExpression state (Val val) = (Just val, state)
 evalExpression state (Var var) =
-    let (vals, iotas, _) = state
+    let State vals = state
      in let mval = Data.Map.lookup var vals
-         in let miota = Data.Map.lookup var iotas
-             in case mval of
-                    Just _ -> (mval, miota, state)
-                    Nothing -> error ("Undefined variable: " ++ var)
+         in case mval of
+                Just _ -> (mval, state)
+                Nothing -> error ("Undefined variable: " ++ var)
 evalExpression sstate (F funct exprs) =
     let (state, vals) = evalExpressionList sstate exprs
-     in (Just $ evalFunct funct vals, Nothing, state)
+     in (Just $ evalFunct funct vals, state)
 evalExpression state (Block statements) =
-    let (vals, _, _) = evalBlock state statements
+    let State vals = evalBlock state statements
      in -- TODO: Real return slot
         -- Note: returning old state here, which is what we want regarding not
         -- exporting vars declared in the block. But it does hide changes to
         -- variables declared outside the block made inside the block
-        (Data.Map.lookup "return" vals, Nothing, state)
+        (Data.Map.lookup "return" vals, state)
 
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression _ iota (Val val) = Ok [FApp (Rel Eq) [ATerm iota, CTerm val]]
@@ -372,8 +369,8 @@ evalFunct Call (VFunct vars expr : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
-         in case evalExpression (varMap, empty, []) expr of
-                (Just val, _, _) -> val
+         in case evalExpression (State varMap) expr of
+                (Just val, _) -> val
                 _ -> error "Function did not return a value"
 
 concreteValsOfAllMaybe :: [[IotaProof]] -> Maybe [Value]
