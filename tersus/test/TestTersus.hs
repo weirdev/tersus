@@ -83,12 +83,31 @@ testEvaluateFullContext =
     testCaseSeq
         "testEvaluateFullContext"
         [ evalFCHelper [Assign "x" (F Size [Val (VIntList [5])])] [("x", VInt 1)]
-        , evalFCHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [("x", VInt 1), ("y", VInt 0)]
-        , evalFCHelper [Assign "x" (Block [Assign "y" (Val (VInt 5)), Assign "z" (F Plus [Var "y", Val (VInt 1)]), Return (Var "z")])] [("x", VInt 6)]
-        , evalFCHelper [Assign "f" (Val (VFunct [] (Val (VInt 3)))), Assign "result" (F Call [Var "f"])] [("result", VInt 3), ("f", VFunct [] (Val (VInt 3)))]
-        , evalFCHelper [Assign "f" (Val (VFunct [] (Block [Assign "y" (Val (VInt 2)), Return (Var "y")]))), Assign "result" (F Call [Var "f"])] [("result", VInt 2), ("f", VFunct [] (Block [Assign "y" (Val (VInt 2)), Return (Var "y")]))]
-        , evalFCHelper [Assign "id" (Val (VFunct ["v"] (Block [Return (Var "v")]))), Assign "result" (F Call [Var "id", Val (VInt 7)])] [("result", VInt 7), ("id", VFunct ["v"] (Block [Return (Var "v")]))]
-        , evalFCHelper [Assign "add" (Val (VFunct ["l", "r"] (Block [Return (F Plus [Var "l", Var "r"])]))), Assign "result" (F Call [Var "add", Val (VInt 7), Val (VInt 13)])] [("result", VInt 20), ("add", VFunct ["l", "r"] (Block [Return (F Plus [Var "l", Var "r"])]))]
+        , evalFCHelper
+            [ Assign "x" (F Size [Val (VIntList [5])])
+            , Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])
+            ]
+            [("x", VInt 1), ("y", VInt 0)]
+        , evalFCHelper
+            [ Assign "f" (Val (VFunct [] [Return (Val (VInt 3))]))
+            , Assign "result" (F Call [Var "f"])
+            ]
+            [("result", VInt 3), ("f", VFunct [] [Return (Val (VInt 3))])]
+        , evalFCHelper
+            [ Assign "f" (Val (VFunct [] [Assign "y" (Val (VInt 2)), Return (Var "y")]))
+            , Assign "result" (F Call [Var "f"])
+            ]
+            [("result", VInt 2), ("f", VFunct [] [Assign "y" (Val (VInt 2)), Return (Var "y")])]
+        , evalFCHelper
+            [ Assign "id" (Val (VFunct ["v"] [Return (Var "v")]))
+            , Assign "result" (F Call [Var "id", Val (VInt 7)])
+            ]
+            [("result", VInt 7), ("id", VFunct ["v"] [Return (Var "v")])]
+        , evalFCHelper
+            [ Assign "add" (Val (VFunct ["l", "r"] [Return (F Plus [Var "l", Var "r"])]))
+            , Assign "result" (F Call [Var "add", Val (VInt 7), Val (VInt 13)])
+            ]
+            [("result", VInt 20), ("add", VFunct ["l", "r"] [Return (F Plus [Var "l", Var "r"])])]
         ]
 
 evalExprHelper :: Expression -> Value -> TestResult
@@ -105,6 +124,16 @@ parseEvalExprHelper exprStr expected =
             Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> evalExprHelper parsed expected
 
+parseEvalReturningStmtHelper :: String -> Value -> TestResult
+parseEvalReturningStmtHelper stmtStr expected =
+    let parseOutput = parseStatement stmtStr
+     in case parseOutput of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right (Block stmts) -> case evalReturningBlock (State (Data.Map.empty, Nothing)) stmts of
+                (_, Just val) -> testAssertEq val expected
+                (_, Nothing) -> Just "No value returned"
+            Right _ -> Just "Not a block statement"
+
 testParseEvalSimpleExpression :: TestResult
 testParseEvalSimpleExpression =
     parseEvalExprHelper "0" (VInt 0)
@@ -115,7 +144,7 @@ testParseEvalCompoundExpression =
 
 testParseEvalBlockExpr :: TestResult
 testParseEvalBlockExpr =
-    parseEvalExprHelper
+    parseEvalReturningStmtHelper
         "{x = [5,4,3];\
         \ y = size(x);\
         \ return y;}"
@@ -123,17 +152,17 @@ testParseEvalBlockExpr =
 
 testParseEvalWFunctDef :: TestResult
 testParseEvalWFunctDef =
-    parseEvalExprHelper
+    parseEvalReturningStmtHelper
         "{x = 6;\
         \ fn add1(i) {\
         \   return i + 1;\
         \ };\
         \ return add1;}"
-        (VFunct ["i"] (Block [Return (F Plus [Var "i", Val (VInt 1)])]))
+        (VFunct ["i"] [Return (F Plus [Var "i", Val (VInt 1)])])
 
 testParseEvalWUdfCall :: TestResult
 testParseEvalWUdfCall =
-    parseEvalExprHelper
+    parseEvalReturningStmtHelper
         "{x = [3, 6, 9, 12];\
         \ fn sumFirstLast(lst) {\
         \   return first(lst) + last(lst);\

@@ -12,9 +12,9 @@ data Value
     = VInt Integer
     | VIntList [Integer]
     | VBool Bool
-    | VFunct [Variable] Expression
+    | VFunct [Variable] [Statement]
     deriving (Show, Eq)
-data Expression = Val Value | Var Variable | F Funct [Expression] | Block [Statement]
+data Expression = Val Value | Var Variable | F Funct [Expression]
     deriving (Show, Eq)
 data Statement
     = Assign Variable Expression
@@ -22,6 +22,7 @@ data Statement
     | Rewrite RwRule
     | ProofAssert VariableProof
     | AssignProofVar Variable Expression
+    | Block [Statement]
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- (variableAssignments, parentScopeState)

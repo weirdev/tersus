@@ -50,6 +50,7 @@ statement =
         <|> rewriteStatement
         <|> functStatement
         <|> assignStatement
+        <|> blockStatement
 
 assignStatement :: Parser Statement
 assignStatement = do
@@ -81,7 +82,7 @@ functStatement = do
     whitespace
     void (char ')')
     whitespace
-    fnBody <- blockExpression
+    fnBody <- curlyBracesParse statementBlock
     whitespace
     return (Assign var (Val (VFunct argNames fnBody)))
 
@@ -92,6 +93,11 @@ rewriteStatement = do
     rule <- rwRule
     whitespace
     return (Rewrite rule)
+
+blockStatement :: Parser Statement
+blockStatement = do
+    stmts <- curlyBracesParse statementBlock
+    return (Block stmts)
 
 rwRule :: Parser RwRule
 rwRule = do
@@ -117,35 +123,28 @@ rwRule = do
 expression :: Parser Expression
 expression = try infixExpression <|> nonInfixExpression
 
--- expression = fExpression <|> valExpression <|> varExpression -- TODO: <|> blockExpression
-
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
     try fExpression
         <|> valExpression
         <|> varExpression
         <|> parensExpression
-        <|> blockExpression
 
-blockExpression :: Parser Expression
-blockExpression = do
-    void (char '{')
-    whitespace
-    stmts <- statementBlock
-    whitespace
-    void (char '}')
-    whitespace
-    return (Block stmts)
-
-parensParse :: Parser a -> Parser a
-parensParse innerParser = do
-    void (char '(')
+bracketsParse :: Parser o -> Parser c -> Parser a -> Parser a
+bracketsParse open close innerParser = do
+    void open
     whitespace
     inner <- innerParser
     whitespace
-    void (char ')')
+    void close
     whitespace
     return inner
+
+parensParse :: Parser a -> Parser a
+parensParse = bracketsParse (char '(') (char ')')
+
+curlyBracesParse :: Parser a -> Parser a
+curlyBracesParse = bracketsParse (char '{') (char '}')
 
 parensExpression :: Parser Expression
 parensExpression = parensParse expression

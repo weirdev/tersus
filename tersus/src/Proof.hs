@@ -242,6 +242,11 @@ validate l = case valProgram (empty, [], iotalist) l of
 evalBlock :: State -> [Statement] -> State
 evalBlock = foldl evalStatement
 
+evalReturningBlock :: State -> [Statement] -> (State, Maybe Value)
+evalReturningBlock state statements =
+    let rState = evalBlock state statements
+     in (rState, getReturn rState)
+
 valProgram :: VState -> [Statement] -> Result VState String
 valProgram state [] = Ok state
 valProgram state (stmt : stmts) = case valStatement state stmt of
@@ -264,6 +269,13 @@ evalStatement state (Return expr) =
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
 evalStatement state AssignProofVar{} = state
+evalStatement state (Block statements) = evalBlock state statements
+    -- let rState = 
+    --  in -- TODO: Real return slot
+    --     -- Note: returning old state here, which is what we want regarding not
+    --     -- exporting vars declared in the block. But it does hide changes to
+    --     -- variables declared outside the block made inside the block
+    --     (getReturn rState, rState)
 
 valStatement :: VState -> Statement -> Result VState String
 valStatement (iotas, proofs, iotaseq) (Assign var expr) =
@@ -334,13 +346,6 @@ evalExpression state (Var var) =
 evalExpression sstate (F funct exprs) =
     let (state, vals) = evalExpressionList sstate exprs
      in (Just $ evalFunct funct vals, state)
-evalExpression state (Block statements) =
-    let rState = evalBlock state statements
-     in -- TODO: Real return slot
-        -- Note: returning old state here, which is what we want regarding not
-        -- exporting vars declared in the block. But it does hide changes to
-        -- variables declared outside the block made inside the block
-        (getReturn rState, state)
 
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression _ iota (Val val) = Ok [FApp (Rel Eq) [ATerm iota, CTerm val]]
@@ -405,12 +410,12 @@ evalFunct (Rel LtEq) [VInt v1, VInt v2] = VBool (v1 <= v2)
 evalFunct (Rel LtEq) _ = error "LtEq only valid for two ints"
 evalFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
 evalFunct (Rel GtEq) _ = error "GtEq only valid for two ints"
-evalFunct Call (VFunct vars expr : args) =
+evalFunct Call (VFunct vars block : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
-         in case evalExpression (State (varMap, Nothing)) expr of
-                (Just val, _) -> val
+         in case evalReturningBlock (State (varMap, Nothing)) block of
+                (_, Just val) -> val
                 _ -> error "Function did not return a value"
 
 concreteValsOfAllMaybe :: [[IotaProof]] -> Maybe [Value]
