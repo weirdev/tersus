@@ -27,7 +27,12 @@ flatMap f (ah : at) = case f ah of
     Right c -> Right c
 
 flatMaybeMap :: (a -> Maybe b) -> [a] -> Maybe [b]
-flatMaybeMap f as = case flatMap (\a -> case f a of Just b -> Left b; Nothing -> Right ()) as of
+flatMaybeMap f as = case flatMap
+    ( \a -> case f a of
+        Just b -> Left b
+        Nothing -> Right ()
+    )
+    as of
     Left bs -> Just bs
     Right _ -> Nothing
 
@@ -121,9 +126,10 @@ reflProofByProof proof (FApp (Rel Eq) [ATerm iota, ATerm oiota]) = case proof of
         | li == oiota ->
             Just (FApp (Rel Eq) [ATerm oiota, CTerm val])
     -- TODO: This should apply recursively to the entire proof structure
-    FApp (Rel Eq) [ATerm li, rhs] -> case reflProofByProof rhs (FApp (Rel Eq) [ATerm iota, ATerm oiota]) of
-        Just newRhs -> Just (FApp (Rel Eq) [ATerm li, newRhs])
-        _ -> Nothing
+    FApp (Rel Eq) [ATerm li, rhs] ->
+        case reflProofByProof rhs (FApp (Rel Eq) [ATerm iota, ATerm oiota]) of
+            Just newRhs -> Just (FApp (Rel Eq) [ATerm li, newRhs])
+            _ -> Nothing
     -- TODO: This should apply to all arguments rather than arbitrarily the first
     FApp funct (ATerm fi : rtaili)
         | fi == iota ->
@@ -143,12 +149,14 @@ reflProofByProof _ _ = error "Only Eq relation supported"
 -- Given an eqality relation, construct new proofs by replacing the
 -- LHS iota with the RHS iota or value
 reflProofsByProof :: [IotaProof] -> IotaProof -> [IotaProof]
-reflProofsByProof (proof : ptail) (FApp (Rel Eq) [ATerm iota, ATerm oiota]) = case reflProofByProof proof (FApp (Rel Eq) [ATerm iota, ATerm oiota]) of
-    Just newProof -> newProof : reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, ATerm oiota])
-    _ -> reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, ATerm oiota])
-reflProofsByProof (proof : ptail) (FApp (Rel Eq) [ATerm iota, CTerm val]) = case reflProofByProof proof (FApp (Rel Eq) [ATerm iota, CTerm val]) of
-    Just newProof -> newProof : reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, CTerm val])
-    _ -> reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, CTerm val])
+reflProofsByProof (proof : ptail) (FApp (Rel Eq) [ATerm iota, ATerm oiota]) =
+    case reflProofByProof proof (FApp (Rel Eq) [ATerm iota, ATerm oiota]) of
+        Just newProof -> newProof : reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, ATerm oiota])
+        _ -> reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, ATerm oiota])
+reflProofsByProof (proof : ptail) (FApp (Rel Eq) [ATerm iota, CTerm val]) =
+    case reflProofByProof proof (FApp (Rel Eq) [ATerm iota, CTerm val]) of
+        Just newProof -> newProof : reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, CTerm val])
+        _ -> reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, CTerm val])
 reflProofsByProof _ _ = []
 
 evalIota :: Iota -> [IotaProof] -> [IotaProof]
@@ -283,9 +291,16 @@ valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var
      in case oiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just iota ->
-                let withNewProofs = proofs ++ [FApp (Rel Lt) [ATerm iota, ATerm niota], FApp (Rel Eq) [ATerm niota, FApp Plus [ATerm iota, ATerm c1iota]], FApp (Rel Eq) [ATerm c1iota, CTerm $ VInt 1]]
+                let withNewProofs =
+                        proofs
+                            ++ [ FApp (Rel Lt) [ATerm iota, ATerm niota]
+                               , FApp (Rel Eq) [ATerm niota, FApp Plus [ATerm iota, ATerm c1iota]]
+                               , FApp (Rel Eq) [ATerm c1iota, CTerm $ VInt 1]
+                               ]
                  in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs
-                     in let withRefledNewProofs = withEvaledProofs ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
+                     in let withRefledNewProofs =
+                                withEvaledProofs
+                                    ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
                          in Ok (iotas, withRefledNewProofs, iotaseq)
 valStatement (iotas, proofs, iotaseq) (ProofAssert varproof) =
     let iotaProof = varProofToIotaProof varproof iotas
@@ -312,10 +327,10 @@ evalExpressionList sstate (expr : exprs) =
 evalExpression :: State -> Expression -> (Maybe Value, State)
 evalExpression state (Val val) = (Just val, state)
 evalExpression state (Var var) =
-     let mval = lookupVar state var
-         in case mval of
-                Just _ -> (mval, state)
-                Nothing -> error ("Undefined variable: " ++ var)
+    let mval = lookupVar state var
+     in case mval of
+            Just _ -> (mval, state)
+            Nothing -> error ("Undefined variable: " ++ var)
 evalExpression sstate (F funct exprs) =
     let (state, vals) = evalExpressionList sstate exprs
      in (Just $ evalFunct funct vals, state)
@@ -355,7 +370,14 @@ valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
                                         Ok functProofs ->
                                             Ok
                                                 ( concatMap
-                                                    (reflProofsByProof [FApp (Rel Eq) [ATerm iota, FApp funct (map ATerm niotas)]])
+                                                    ( reflProofsByProof
+                                                        [ FApp
+                                                            (Rel Eq)
+                                                            [ ATerm iota
+                                                            , FApp funct (map ATerm niotas)
+                                                            ]
+                                                        ]
+                                                    )
                                                     flatfinputproofs
                                                     ++ functProofs
                                                 )
