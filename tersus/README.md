@@ -2,8 +2,8 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
 Parse and evaluate tests for more complex scenarios.
-0.5. Remove iotas from validations
 0.625. Scoping
+0.6875. Make blocks no longer expressions
 0.75. Unify function call model, builtin and user defined
 0. Validate functions
     Export assertions to caller

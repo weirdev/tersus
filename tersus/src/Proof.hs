@@ -47,6 +47,25 @@ unwrapOrThrow :: String -> Maybe a -> a
 unwrapOrThrow _ (Just a) = a
 unwrapOrThrow err Nothing = error err
 
+-- Lookup the value of a var in State, including parent scopes
+lookupVar :: State -> Variable -> Maybe Value
+lookupVar (State (vals, pState)) var = case Data.Map.lookup var vals of
+    Just val -> Just val
+    Nothing -> case pState of
+        Just p -> lookupVar p var
+        Nothing -> Nothing
+
+-- TODO: We should have a real return slot rather than using a var
+getReturn :: State -> Maybe Value
+getReturn (State (vals, _)) = Data.Map.lookup "return" vals
+
+-- Return is always set in the top level scope
+-- NOTE: If we ever have nested functions that implicitly get their parent's scope,
+-- this will need to be updated to indicate on which scope to set the return value
+setReturn :: State -> Value -> State
+setReturn (State (vals, Nothing)) val = State (insert "return" val vals, Nothing)
+setReturn (State (vals, Just pState)) val = setReturn pState val
+
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
 iotalist :: [String]
 iotalist = [l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z']]
@@ -202,8 +221,8 @@ varProofToIotaProof _ _ = error "Only Eq relation supported"
 
 -- Public fns
 evaluate :: [Statement] -> State
-evaluate [] = State empty
-evaluate l = evalBlock (State empty) l
+evaluate [] = State (empty, Nothing)
+evaluate l = evalBlock (State (empty, Nothing)) l
 
 validate :: [Statement] -> Result VState String
 validate [] = Ok (empty, [], [head iotalist])
@@ -223,17 +242,17 @@ valProgram state (stmt : stmts) = case valStatement state stmt of
 
 evalStatement :: State -> Statement -> State
 evalStatement (State svals) (Assign var expr) =
-    let (mval, State vals) = evalExpression (State svals) expr
+    let (mval, State (vals, pScope)) = evalExpression (State svals) expr
      in case mval of
-            Just val -> State $ insert var val vals
+            Just val -> State (insert var val vals, pScope)
             -- TODO: Is this an error case?
-            Nothing -> State vals
+            Nothing -> State (vals, pScope)
 evalStatement state (Return expr) =
-    let (mval, State vals) = evalExpression state expr
+    let (mval, rState) = evalExpression state expr
      in case mval of
             -- TODO: Real return slot rather than using a var
-            Just val -> State $ insert "return" val vals
-            Just val -> State $ insert "return" val vals
+            Just val -> setReturn rState val
+            Nothing -> error "Return expression must return a value"
 evalStatement state Rewrite{} = state
 evalStatement state ProofAssert{} = state
 evalStatement state AssignProofVar{} = state
@@ -293,8 +312,7 @@ evalExpressionList sstate (expr : exprs) =
 evalExpression :: State -> Expression -> (Maybe Value, State)
 evalExpression state (Val val) = (Just val, state)
 evalExpression state (Var var) =
-    let State vals = state
-     in let mval = Data.Map.lookup var vals
+     let mval = lookupVar state var
          in case mval of
                 Just _ -> (mval, state)
                 Nothing -> error ("Undefined variable: " ++ var)
@@ -302,12 +320,12 @@ evalExpression sstate (F funct exprs) =
     let (state, vals) = evalExpressionList sstate exprs
      in (Just $ evalFunct funct vals, state)
 evalExpression state (Block statements) =
-    let State vals = evalBlock state statements
+    let rState = evalBlock state statements
      in -- TODO: Real return slot
         -- Note: returning old state here, which is what we want regarding not
         -- exporting vars declared in the block. But it does hide changes to
         -- variables declared outside the block made inside the block
-        (Data.Map.lookup "return" vals, state)
+        (getReturn rState, state)
 
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression _ iota (Val val) = Ok [FApp (Rel Eq) [ATerm iota, CTerm val]]
@@ -369,7 +387,7 @@ evalFunct Call (VFunct vars expr : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
-         in case evalExpression (State varMap) expr of
+         in case evalExpression (State (varMap, Nothing)) expr of
                 (Just val, _) -> val
                 _ -> error "Function did not return a value"
 
