@@ -129,7 +129,7 @@ parseEvalReturningStmtHelper stmtStr expected =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case evalReturningBlock (State (Data.Map.empty, Continuations stmts, Nothing)) of
+            Right (Block stmts) -> case evalReturningBlock (State (Data.Map.empty, Continuations stmts, Just $ State (Data.Map.empty, emptyContinuations, Nothing))) of
                 (_, Just val) -> testAssertEq val expected
                 (_, Nothing) -> Just "No value returned"
             Right _ -> Just "Not a block statement"
@@ -180,6 +180,21 @@ testParseNestedBlocks =
         \ return size(x);}"
         (VInt 1)
 
+
+testParseFunctReturnNestedBlocks :: TestResult
+testParseFunctReturnNestedBlocks =
+    parseEvalReturningStmtHelper
+        "{x = [3, 6, 9, 12];\
+        \ fn getFirst(y) {\
+        \  x = [1];\
+        \  {\
+        \    return first(y);\
+        \  };\
+        \  return first(x);\
+        \ };\
+        \ return getFirst(x);}"
+        (VInt 3)
+
 testParseEval :: Test
 testParseEval =
     testCaseSeq
@@ -190,6 +205,7 @@ testParseEval =
         , testParseEvalWFunctDef
         , testParseEvalWUdfCall
         , testParseNestedBlocks
+        , testParseFunctReturnNestedBlocks
         ]
 
 -- Validation tests

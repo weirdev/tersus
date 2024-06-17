@@ -1,7 +1,6 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
-Short circuit on return -- roll up to correct parent scope
 Validate semantics sync
 ProofAssert syntax
 Let declarations
@@ -15,11 +14,13 @@ Let declarations
 2. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?
-3. Functions
+3. Control flow
+    if/else/while
+4. Functions
     Dont fully evaluate immediately in validation? ie. rewrite to get result?
-4. Proof transformation v2
-5. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
-6. Distinguish between proof only vars and regular vars
+5. Proof transformation v2
+6. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+7. Distinguish between proof only vars and regular vars
 
 Running:
     0. stack run

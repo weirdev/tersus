@@ -96,6 +96,10 @@ advanceStatement (State (_, Continuations [], _)) = error "No more statements to
 advanceStatement (State (vals, Continuations (stmt : nxt), pState)) =
     State (vals, Continuations nxt, pState)
 
+topLevelScope :: State -> State
+topLevelScope (State (vals, c, Nothing)) = State (vals, c, Nothing)
+topLevelScope (State (_, _, Just pState)) = topLevelScope pState
+
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
 iotalist :: [String]
 iotalist = [l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z']]
@@ -290,21 +294,25 @@ evalNextStatement state = case state of
                 Just val -> insertVar rState var val
                 -- TODO: Is this an error case?
                 Nothing -> rState
-    State (_, Continuations (Return expr : _), pState) ->
+    State (_, Continuations (Return expr : _), _) ->
         let (mval, rState) = evalExpression (advanceStatement state) expr
-         in case mval of
-                -- TODO: Real return slot rather than using a var
-                Just val -> setReturn rState val
-                Nothing -> error "Return expression must return a value"
+         in -- Break out of the current block and return the value
+            let prState = topLevelScope rState
+             in case mval of
+                    Just val -> setReturn prState val
+                    -- TODO: Allow this for functions returning nothing
+                    Nothing -> error "Return expression must return a value"
     State (_, Continuations (Rewrite{} : _), _) -> advanceStatement state
     State (_, Continuations (ProofAssert{} : _), _) -> advanceStatement state
     State (_, Continuations (AssignProofVar{} : _), _) -> advanceStatement state
     State (_, Continuations (Block statements : _), _) ->
-        case evalBlock (State (empty, Continuations statements, Just (advanceStatement state))) of
-            -- Any vars declared in the block are not exported,
-            -- but any vars updated in the parent scope must be exported
-            State (_, _, Just pState) -> pState
-            _ -> error "Statement block eval did not return a parent state"
+        evalBlock (State (empty, Continuations (statements ++ [EndBlock]), Just (advanceStatement state)))
+    State (_, Continuations (EndBlock : _), pState) ->
+        -- Any vars declared in the block are not exported,
+        -- but any vars updated in the parent scope must be exported
+        case pState of
+            Just rpState -> rpState
+            _ -> error "EndBlock must have a parent state"
 
 valStatement :: VState -> Statement -> Result VState String
 valStatement (iotas, proofs, iotaseq) (Assign var expr) =
@@ -443,7 +451,7 @@ evalFunct Call (VFunct vars block : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
-         in case evalReturningBlock (State (varMap, Continuations block, Nothing)) of
+         in case evalReturningBlock (State (varMap, Continuations block, Just $ State (empty, emptyContinuations, Nothing))) of
                 (_, Just val) -> val
                 _ -> error "Function did not return a value"
 

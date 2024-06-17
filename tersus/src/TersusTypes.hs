@@ -23,6 +23,7 @@ data Statement
     | ProofAssert VariableProof
     | AssignProofVar Variable Expression
     | Block [Statement]
+    | EndBlock
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- nextStmt
