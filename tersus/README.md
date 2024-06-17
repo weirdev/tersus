@@ -1,11 +1,11 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
-Parse and evaluate tests for more complex scenarios.
-0.625. Scoping
-0.75. Unify function call model, builtin and user defined
-Short circuit on return
+Short circuit on return -- roll up to correct parent scope
+Validate semantics sync
+ProofAssert syntax
 Let declarations
+0.75. Unify function call model, builtin and user defined
 0. Validate functions
     Export assertions to caller
 1. Improved proof representation, proof engine

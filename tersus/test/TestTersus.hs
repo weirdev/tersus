@@ -75,7 +75,7 @@ testParse = TestList "testParse" [testParseSimpleAssign, testParseComplexAssign]
 -- Evaluate tests
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
 evalFCHelper stmts expected =
-    let State (vals, _) = evaluate stmts
+    let State (vals, _, _) = evaluate stmts
      in testAssertEq vals (Data.Map.fromList expected)
 
 testEvaluateFullContext :: Test
@@ -112,7 +112,7 @@ testEvaluateFullContext =
 
 evalExprHelper :: Expression -> Value -> TestResult
 evalExprHelper expr expected =
-    let (mval, _) = evalExpression (State (Data.Map.empty, Nothing)) expr
+    let (mval, _) = evalExpression (State (Data.Map.empty, Continuations [], Nothing)) expr
      in case mval of
             Just val -> testAssertEq val expected
             Nothing -> Just "Expression did not produce a value"
@@ -129,7 +129,7 @@ parseEvalReturningStmtHelper stmtStr expected =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case evalReturningBlock (State (Data.Map.empty, Nothing)) stmts of
+            Right (Block stmts) -> case evalReturningBlock (State (Data.Map.empty, Continuations stmts, Nothing)) of
                 (_, Just val) -> testAssertEq val expected
                 (_, Nothing) -> Just "No value returned"
             Right _ -> Just "Not a block statement"

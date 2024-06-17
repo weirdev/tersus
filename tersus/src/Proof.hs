@@ -54,39 +54,47 @@ unwrapOrThrow err Nothing = error err
 
 -- Lookup the value of a var in State, including parent scopes
 lookupVar :: State -> Variable -> Maybe Value
-lookupVar (State (vals, pState)) var = case Data.Map.lookup var vals of
+lookupVar (State (vals, _, pState)) var = case Data.Map.lookup var vals of
     Just val -> Just val
     Nothing -> case pState of
         Just p -> lookupVar p var
         Nothing -> Nothing
 
 updateExistingVar :: State -> Variable -> Value -> Maybe State
-updateExistingVar (State (vals, pState)) var val = case Data.Map.lookup var vals of
-    Just _ -> Just (State (insert var val vals, pState))
+updateExistingVar (State (vals, c, pState)) var val = case Data.Map.lookup var vals of
+    Just _ -> Just (State (insert var val vals, c, pState))
     Nothing -> case pState of
         Just p -> case updateExistingVar p var val of
-            Just np -> Just (State (vals, Just np))
+            Just np -> Just (State (vals, c, Just np))
             Nothing -> Nothing
         Nothing -> Nothing
 
 insertVar :: State -> Variable -> Value -> State
-insertVar (State (vals, pState)) var val =
+insertVar (State (vals, c, pState)) var val =
     -- Prefentially update existing var in this or parent scope if the variable is already bound.
     -- Otherwise, just insert the new variable in the current scope.
-    case updateExistingVar (State (vals, pState)) var val of
+    case updateExistingVar (State (vals, c, pState)) var val of
         Just s -> s
-        Nothing -> State (insert var val vals, pState)
+        Nothing -> State (insert var val vals, c, pState)
 
 -- TODO: We should have a real return slot rather than using a var
 getReturn :: State -> Maybe Value
-getReturn (State (vals, _)) = Data.Map.lookup "return" vals
+getReturn (State (vals, _, _)) = Data.Map.lookup "return" vals
 
 -- Return is always set in the top level scope
 -- NOTE: If we ever have nested functions that implicitly get their parent's scope,
 -- this will need to be updated to indicate on which scope to set the return value
 setReturn :: State -> Value -> State
-setReturn (State (vals, Nothing)) val = State (insert "return" val vals, Nothing)
-setReturn (State (vals, Just pState)) val = setReturn pState val
+setReturn (State (vals, c, Nothing)) val = State (insert "return" val vals, c, Nothing)
+setReturn (State (_, _, Just pState)) val = setReturn pState val
+
+emptyContinuations :: Continuations
+emptyContinuations = Continuations []
+
+advanceStatement :: State -> State
+advanceStatement (State (_, Continuations [], _)) = error "No more statements to advance"
+advanceStatement (State (vals, Continuations (stmt : nxt), pState)) =
+    State (vals, Continuations nxt, pState)
 
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
 iotalist :: [String]
@@ -246,8 +254,8 @@ varProofToIotaProof _ _ = error "Only Eq relation supported"
 
 -- Public fns
 evaluate :: [Statement] -> State
-evaluate [] = State (empty, Nothing)
-evaluate l = evalBlock (State (empty, Nothing)) l
+evaluate [] = State (empty, emptyContinuations, Nothing)
+evaluate l = evalBlock (State (empty, Continuations l, Nothing))
 
 validate :: [Statement] -> Result VState String
 validate [] = Ok (empty, [], [head iotalist])
@@ -256,12 +264,16 @@ validate l = case valProgram (empty, [], iotalist) l of
     Error e -> Error e
 
 -- Private fns
-evalBlock :: State -> [Statement] -> State
-evalBlock = foldl evalStatement
+evalBlock :: State -> State
+evalBlock state = case state of
+    State (_, Continuations [], _) -> state
+    State (_, Continuations (stmt : nxt), pState) ->
+        let nState = evalNextStatement state
+         in evalBlock nState
 
-evalReturningBlock :: State -> [Statement] -> (State, Maybe Value)
-evalReturningBlock state statements =
-    let rState = evalBlock state statements
+evalReturningBlock :: State -> (State, Maybe Value)
+evalReturningBlock state =
+    let rState = evalBlock state
      in (rState, getReturn rState)
 
 valProgram :: VState -> [Statement] -> Result VState String
@@ -270,28 +282,29 @@ valProgram state (stmt : stmts) = case valStatement state stmt of
     Ok nstate -> valProgram nstate stmts
     _ -> Error "Validation failed"
 
-evalStatement :: State -> Statement -> State
-evalStatement state (Assign var expr) =
-    let (mval, rState) = evalExpression state expr
-     in case mval of
-            Just val -> insertVar rState var val
-            -- TODO: Is this an error case?
-            Nothing -> rState
-evalStatement state (Return expr) =
-    let (mval, rState) = evalExpression state expr
-     in case mval of
-            -- TODO: Real return slot rather than using a var
-            Just val -> setReturn rState val
-            Nothing -> error "Return expression must return a value"
-evalStatement state Rewrite{} = state
-evalStatement state ProofAssert{} = state
-evalStatement state AssignProofVar{} = state
-evalStatement state (Block statements) = case evalBlock (State (empty, Just state)) statements of
-    -- Any vars declared in the block are not exported,
-    -- but any vars updated in the parent scope must be exported
-    -- TODO: Bubble up nested returns
-    State (_, Just pState) -> pState
-    _ -> error "Statement block eval did not return a parent state"
+evalNextStatement :: State -> State
+evalNextStatement state = case state of
+    State (_, Continuations (Assign var expr : nxt), _) ->
+        let (mval, rState) = evalExpression (advanceStatement state) expr
+         in case mval of
+                Just val -> insertVar rState var val
+                -- TODO: Is this an error case?
+                Nothing -> rState
+    State (_, Continuations (Return expr : _), pState) ->
+        let (mval, rState) = evalExpression (advanceStatement state) expr
+         in case mval of
+                -- TODO: Real return slot rather than using a var
+                Just val -> setReturn rState val
+                Nothing -> error "Return expression must return a value"
+    State (_, Continuations (Rewrite{} : _), _) -> advanceStatement state
+    State (_, Continuations (ProofAssert{} : _), _) -> advanceStatement state
+    State (_, Continuations (AssignProofVar{} : _), _) -> advanceStatement state
+    State (_, Continuations (Block statements : _), _) ->
+        case evalBlock (State (empty, Continuations statements, Just (advanceStatement state))) of
+            -- Any vars declared in the block are not exported,
+            -- but any vars updated in the parent scope must be exported
+            State (_, _, Just pState) -> pState
+            _ -> error "Statement block eval did not return a parent state"
 
 valStatement :: VState -> Statement -> Result VState String
 valStatement (iotas, proofs, iotaseq) (Assign var expr) =
@@ -430,7 +443,7 @@ evalFunct Call (VFunct vars block : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
-         in case evalReturningBlock (State (varMap, Nothing)) block of
+         in case evalReturningBlock (State (varMap, Continuations block, Nothing)) of
                 (_, Just val) -> val
                 _ -> error "Function did not return a value"
 

@@ -25,8 +25,13 @@ data Statement
     | Block [Statement]
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
+-- nextStmt
+-- TODO: Naming is probably wrong here
+newtype Continuations = Continuations [Statement]
+
 -- (variableAssignments, parentScopeState)
-newtype State = State (Map Variable Value, Maybe State)
+-- This could be (variableAssignments, nextStmt, Either returnPoint parentScopeState)
+newtype State = State (Map Variable Value, Continuations, Maybe State)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
