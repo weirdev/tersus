@@ -2,9 +2,14 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
 Validate semantics sync
-  - Finish nexted scopes support (not yet generating new scopes)
+  - Finish nexted scopes support
+    - Support exporting proofs to top scope on return
+      - Only proofs that only mention returned iota should be exported
+      - May have issue with constants present in proofs relating to returned iota via indirection (assignment to iota) preventing export
+    - Tests - validation of scopes, return, no breakout yet
   - Utilize continuations
     - Replace VState -> Statement -> VState with VState -> VState
+  - Support multiple returns
 ProofAssert syntax
 Let declarations
 0.75. Unify function call model, builtin and user defined

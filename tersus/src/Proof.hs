@@ -318,7 +318,7 @@ evaluate l = evalBlock (State (empty, Continuations l, Nothing))
 
 validate :: [Statement] -> Result VState String
 validate [] = Ok $ VState (emptyVScopeState, [])
-validate l = case valProgram (VState (emptyVScopeState, iotalist)) l of
+validate l = case valBlock (VState (emptyVScopeState, iotalist)) l of
     Ok (VState (vScopeState, remainingIotas)) -> Ok $ VState (vScopeState, [head remainingIotas])
     Error e -> Error e
 
@@ -335,10 +335,10 @@ evalReturningBlock state =
     let rState = evalBlock state
      in (rState, getReturn rState)
 
-valProgram :: VState -> [Statement] -> Result VState String
-valProgram state [] = Ok state
-valProgram state (stmt : stmts) = case valStatement state stmt of
-    Ok nstate -> valProgram nstate stmts
+valBlock :: VState -> [Statement] -> Result VState String
+valBlock state [] = Ok state
+valBlock state (stmt : stmts) = case valStatement state stmt of
+    Ok nstate -> valBlock nstate stmts
     _ -> Error "Validation failed"
 
 evalNextStatement :: State -> State
@@ -362,6 +362,7 @@ evalNextStatement state = case state of
     State (_, Continuations (AssignProofVar{} : _), _) -> advanceStatement state
     State (_, Continuations (Block statements : _), _) ->
         evalBlock (State (empty, Continuations (statements ++ [EndBlock]), Just (advanceStatement state)))
+    -- TODO: Could we just match on Continuations [] insead of inserting EndBlock?
     State (_, Continuations (EndBlock : _), pState) ->
         -- Any vars declared in the block are not exported,
         -- but any vars updated in the parent scope must be exported
@@ -375,6 +376,16 @@ valStatement state (Assign var expr) =
      in case valExpression state' niota expr of
             Ok nproofs ->
                 let state'' = vInsertVar state' var niota
+                 in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
+                     in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
+            Error e -> Error e
+valStatement state (Return expr) =
+    let (niota, state') = popIotaFromSeq state
+     in case valExpression state' niota expr of
+            Ok nproofs ->
+                -- TODO: Break out of the current block and return the value
+                -- let prState = topLevelScope rState
+                let state'' = vSetReturn state' niota
                  in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
                      in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
             Error e -> Error e
@@ -393,6 +404,8 @@ valStatement state (AssignProofVar var expr) =
                  in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
                      in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
             Error e -> Error e
+valStatement (VState (scope, iotaseq)) (Block stmts) =
+    valBlock (VState (VScopeState (empty, [], Continuations stmts, Just scope), iotaseq)) stmts
 
 valRewrite :: VState -> RwRule -> Result VState String
 valRewrite state (Refl var) =
