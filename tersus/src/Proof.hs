@@ -93,7 +93,7 @@ emptyContinuations = Continuations []
 
 advanceStatement :: State -> State
 advanceStatement (State (_, Continuations [], _)) = error "No more statements to advance"
-advanceStatement (State (vals, Continuations (stmt : nxt), pState)) =
+advanceStatement (State (vals, Continuations (_ : nxt), pState)) =
     State (vals, Continuations nxt, pState)
 
 topLevelScope :: State -> State
@@ -274,7 +274,7 @@ validate l = case valProgram (VState (emptyVScopeState, iotalist)) l of
 evalBlock :: State -> State
 evalBlock state = case state of
     State (_, Continuations [], _) -> state
-    State (_, Continuations (stmt : nxt), pState) ->
+    State (_, Continuations (_ : _), _) ->
         let nState = evalNextStatement state
          in evalBlock nState
 
@@ -291,7 +291,7 @@ valProgram state (stmt : stmts) = case valStatement state stmt of
 
 evalNextStatement :: State -> State
 evalNextStatement state = case state of
-    State (_, Continuations (Assign var expr : nxt), _) ->
+    State (_, Continuations (Assign var expr : _), _) ->
         let (mval, rState) = evalExpression (advanceStatement state) expr
          in case mval of
                 Just val -> insertVar rState var val
@@ -323,22 +323,35 @@ valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Assign 
      in case valExpression (VState (VScopeState (iotas, proofs, c, pscope), tiotalist)) niota expr of
             Ok nproofs -> Ok $ VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pscope), tiotalist)
             Error e -> Error e
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Rewrite (Refl var)) =
+valStatement state (Rewrite rwrule) = valRewrite state rwrule
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (ProofAssert varproof) =
+    let iotaProof = varProofToIotaProof varproof iotas
+     in if iotaProof `elem` proofs
+            then Ok $ VState (VScopeState (iotas, proofs, c, pscope), iotaseq)
+            else Error $ "Assertion failed: " ++ show varproof
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (AssignProofVar var expr) =
+    let niota : tiotalist = iotaseq
+     in case valExpression (VState (VScopeState (iotas, proofs, c, pscope), tiotalist)) niota expr of
+            Ok nproofs -> Ok $ VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pscope), tiotalist)
+            Error e -> Error e
+
+valRewrite :: VState -> RwRule -> Result VState String
+valRewrite (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Refl var) =
     let oiota = Data.Map.lookup var iotas
      in case oiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just _ ->
                 let newProofs = concatMap (reflProofsByProof proofs) proofs -- TODO: limit to proofs with iota
                  in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaseq)
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Rewrite (Eval var)) =
+valRewrite (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Eval var) =
     let oiota = Data.Map.lookup var iotas
      in case oiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just iota -> Ok $ VState (VScopeState (iotas, evalIota iota proofs ++ proofs, c, pscope), iotaseq)
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Rewrite EvalAll) =
+valRewrite (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) EvalAll =
     let newProofs = concatMap (`evalIotaProof` proofs) proofs
      in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaseq)
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), niota : c1iota : iotaseq)) (Rewrite (EqToLtPlus1 var)) =
+valRewrite (VState (VScopeState (iotas, proofs, c, pscope), niota : c1iota : iotaseq)) (EqToLtPlus1 var) =
     let oiota = Data.Map.lookup var iotas
      in case oiota of
             Nothing -> Error $ "Undefined variable: " ++ var
@@ -354,18 +367,6 @@ valStatement (VState (VScopeState (iotas, proofs, c, pscope), niota : c1iota : i
                                 withEvaledProofs
                                     ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
                          in Ok $ VState (VScopeState (iotas, withRefledNewProofs, c, pscope), iotaseq)
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (ProofAssert varproof) =
-    let iotaProof = varProofToIotaProof varproof iotas
-     in if iotaProof `elem` proofs
-            then Ok $ VState (VScopeState (iotas, proofs, c, pscope), iotaseq)
-            else Error $ "Assertion failed: " ++ show varproof
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (AssignProofVar var expr) =
-    let niota : tiotalist = iotaseq
-     in case valExpression (VState (VScopeState (iotas, proofs, c, pscope), tiotalist)) niota expr of
-            Ok nproofs -> Ok $ VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pscope), tiotalist)
-            Error e -> Error e
-
--- valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) _ = Ok $ VState (VScopeState (iotas, proofs, iotaseq)
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
 evalExpressionList state [] = (state, [])
