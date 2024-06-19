@@ -2,6 +2,9 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
 Validate semantics sync
+  - Finish nexted scopes support (not yet generating new scopes)
+  - Utilize continuations
+    - Replace VState -> Statement -> VState with VState -> VState
 ProofAssert syntax
 Let declarations
 0.75. Unify function call model, builtin and user defined

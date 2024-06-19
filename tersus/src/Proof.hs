@@ -60,6 +60,17 @@ lookupVar (State (vals, _, pState)) var = case Data.Map.lookup var vals of
         Just p -> lookupVar p var
         Nothing -> Nothing
 
+vLookupVar :: VState -> Variable -> Maybe Iota
+vLookupVar (VState (scope, _)) = vScopeLookupVar scope
+
+vScopeLookupVar :: VScopeState -> Variable -> Maybe Iota
+vScopeLookupVar (VScopeState (iotas, _, _, pScope)) var =
+    case Data.Map.lookup var iotas of
+        Just iota -> Just iota
+        Nothing -> case pScope of
+            Just p -> vScopeLookupVar p var
+            Nothing -> Nothing
+
 updateExistingVar :: State -> Variable -> Value -> Maybe State
 updateExistingVar (State (vals, c, pState)) var val = case Data.Map.lookup var vals of
     Just _ -> Just (State (insert var val vals, c, pState))
@@ -69,6 +80,21 @@ updateExistingVar (State (vals, c, pState)) var val = case Data.Map.lookup var v
             Nothing -> Nothing
         Nothing -> Nothing
 
+vUpdateExistingVar :: VState -> Variable -> Iota -> Maybe VState
+vUpdateExistingVar (VState (scope, iotaseq)) var iota = case vScopeUpdateExistingVar scope var iota of
+    Just ns -> Just $ VState (ns, iotaseq)
+    Nothing -> Nothing
+
+vScopeUpdateExistingVar :: VScopeState -> Variable -> Iota -> Maybe VScopeState
+vScopeUpdateExistingVar (VScopeState (iotas, proofs, c, pScope)) var iota =
+    case Data.Map.lookup var iotas of
+        Just _ -> Just $ VScopeState (insert var iota iotas, proofs, c, pScope)
+        Nothing -> case pScope of
+            Just p -> case vScopeUpdateExistingVar p var iota of
+                Just np -> Just $ VScopeState (iotas, proofs, c, Just np)
+                Nothing -> Nothing
+            Nothing -> Nothing
+
 insertVar :: State -> Variable -> Value -> State
 insertVar (State (vals, c, pState)) var val =
     -- Prefentially update existing var in this or parent scope if the variable is already bound.
@@ -77,9 +103,20 @@ insertVar (State (vals, c, pState)) var val =
         Just s -> s
         Nothing -> State (insert var val vals, c, pState)
 
+vInsertVar :: VState -> Variable -> Iota -> VState
+vInsertVar (VState (VScopeState (iotas, proofs, c, pScope), iotaseq)) var iota =
+    case vUpdateExistingVar (VState (VScopeState (iotas, proofs, c, pScope), iotaseq)) var iota of
+        Just s -> s
+        Nothing -> VState (VScopeState (insert var iota iotas, proofs, c, pScope), iotaseq)
+
+-- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
 getReturn :: State -> Maybe Value
 getReturn (State (vals, _, _)) = Data.Map.lookup "return" vals
+
+-- Return is always set in the top level scope
+vGetReturn :: VState -> Maybe Iota
+vGetReturn (VState (VScopeState (iotas, _, _, _), _)) = Data.Map.lookup "return" iotas
 
 -- Return is always set in the top level scope
 -- NOTE: If we ever have nested functions that implicitly get their parent's scope,
@@ -87,6 +124,21 @@ getReturn (State (vals, _, _)) = Data.Map.lookup "return" vals
 setReturn :: State -> Value -> State
 setReturn (State (vals, c, Nothing)) val = State (insert "return" val vals, c, Nothing)
 setReturn (State (_, _, Just pState)) val = setReturn pState val
+
+vSetReturn :: VState -> Iota -> VState
+vSetReturn (VState (scope, iotaseq)) iota =
+    VState (vScopeSetReturn scope iota, iotaseq)
+
+vScopeSetReturn :: VScopeState -> Iota -> VScopeState
+vScopeSetReturn (VScopeState (iotas, proofs, c, Nothing)) iota =
+    VScopeState (insert "return" iota iotas, proofs, c, Nothing)
+vScopeSetReturn (VScopeState (iotas, proofs, c, Just pScope)) iota =
+    VScopeState (iotas, proofs, c, Just $ vScopeSetReturn pScope iota)
+
+popIotaFromSeq :: VState -> (Iota, VState)
+popIotaFromSeq (VState (vScopeState, iotaseq)) = case iotaseq of
+    [] -> error "No more iotas to pop"
+    i : is -> (i, VState (vScopeState, is))
 
 emptyContinuations :: Continuations
 emptyContinuations = Continuations []
@@ -238,16 +290,16 @@ iotaToValue iota (proof : ptail) = case proof of
     FApp (Rel Eq) [ATerm piota, CTerm val] | piota == iota -> Just val
     _ -> iotaToValue iota ptail
 
-varProofToIotaProof :: VariableProof -> Map Variable Iota -> IotaProof
-varProofToIotaProof (FApp (Rel rel) [ATerm var, CTerm val]) proofs =
-    let maybeIotaval = Data.Map.lookup var proofs
+varProofToIotaProof :: VariableProof -> VState -> IotaProof
+varProofToIotaProof (FApp (Rel rel) [ATerm var, CTerm val]) state =
+    let maybeIotaval = vLookupVar state var
      in case maybeIotaval of
             Just iotaval -> FApp (Rel rel) [ATerm iotaval, CTerm val]
             _ -> error "Variable not found in proof map"
 -- TODO: Support more than two arguments and non Rel functions
-varProofToIotaProof (FApp (Rel rel) [ATerm var1, ATerm var2]) proofs =
-    let maybeIotaval1 = Data.Map.lookup var1 proofs
-        maybeIotaval2 = Data.Map.lookup var2 proofs
+varProofToIotaProof (FApp (Rel rel) [ATerm var1, ATerm var2]) state =
+    let maybeIotaval1 = vLookupVar state var1
+        maybeIotaval2 = vLookupVar state var2
      in case (maybeIotaval1, maybeIotaval2) of
             (Just iotaval1, Just iotaval2) ->
                 FApp (Rel rel) [ATerm iotaval1, ATerm iotaval2]
@@ -318,55 +370,65 @@ evalNextStatement state = case state of
             _ -> error "EndBlock must have a parent state"
 
 valStatement :: VState -> Statement -> Result VState String
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Assign var expr) =
-    let niota : tiotalist = iotaseq
-     in case valExpression (VState (VScopeState (iotas, proofs, c, pscope), tiotalist)) niota expr of
-            Ok nproofs -> Ok $ VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pscope), tiotalist)
+valStatement state (Assign var expr) =
+    let (niota, state') = popIotaFromSeq state
+     in case valExpression state' niota expr of
+            Ok nproofs ->
+                let state'' = vInsertVar state' var niota
+                 in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
+                     in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
             Error e -> Error e
 valStatement state (Rewrite rwrule) = valRewrite state rwrule
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (ProofAssert varproof) =
-    let iotaProof = varProofToIotaProof varproof iotas
-     in if iotaProof `elem` proofs
-            then Ok $ VState (VScopeState (iotas, proofs, c, pscope), iotaseq)
-            else Error $ "Assertion failed: " ++ show varproof
-valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (AssignProofVar var expr) =
-    let niota : tiotalist = iotaseq
-     in case valExpression (VState (VScopeState (iotas, proofs, c, pscope), tiotalist)) niota expr of
-            Ok nproofs -> Ok $ VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pscope), tiotalist)
+valStatement state (ProofAssert varproof) =
+    let (VState (VScopeState (_, proofs, _, _), _)) = state
+     in let iotaProof = varProofToIotaProof varproof state
+         in if iotaProof `elem` proofs
+                then Ok state
+                else Error $ "Assertion failed: " ++ show varproof
+valStatement state (AssignProofVar var expr) =
+    let (niota, state') = popIotaFromSeq state
+     in case valExpression state' niota expr of
+            Ok nproofs ->
+                let state'' = vInsertVar state' var niota
+                 in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
+                     in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
             Error e -> Error e
 
 valRewrite :: VState -> RwRule -> Result VState String
-valRewrite (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Refl var) =
-    let oiota = Data.Map.lookup var iotas
-     in case oiota of
-            Nothing -> Error $ "Undefined variable: " ++ var
-            Just _ ->
-                let newProofs = concatMap (reflProofsByProof proofs) proofs -- TODO: limit to proofs with iota
-                 in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaseq)
-valRewrite (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Eval var) =
-    let oiota = Data.Map.lookup var iotas
-     in case oiota of
-            Nothing -> Error $ "Undefined variable: " ++ var
-            Just iota -> Ok $ VState (VScopeState (iotas, evalIota iota proofs ++ proofs, c, pscope), iotaseq)
+valRewrite state (Refl var) =
+    let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state
+     in let oiota = vLookupVar state var
+         in case oiota of
+                Nothing -> Error $ "Undefined variable: " ++ var
+                Just _ ->
+                    let newProofs = concatMap (reflProofsByProof proofs) proofs -- TODO: limit to proofs with iota
+                     in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaseq)
+valRewrite state (Eval var) =
+    let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state
+     in let oiota = vLookupVar state var
+         in case oiota of
+                Nothing -> Error $ "Undefined variable: " ++ var
+                Just iota -> Ok $ VState (VScopeState (iotas, evalIota iota proofs ++ proofs, c, pscope), iotaseq)
 valRewrite (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) EvalAll =
     let newProofs = concatMap (`evalIotaProof` proofs) proofs
      in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaseq)
-valRewrite (VState (VScopeState (iotas, proofs, c, pscope), niota : c1iota : iotaseq)) (EqToLtPlus1 var) =
-    let oiota = Data.Map.lookup var iotas
-     in case oiota of
-            Nothing -> Error $ "Undefined variable: " ++ var
-            Just iota ->
-                let withNewProofs =
-                        proofs
-                            ++ [ FApp (Rel Lt) [ATerm iota, ATerm niota]
-                               , FApp (Rel Eq) [ATerm niota, FApp Plus [ATerm iota, ATerm c1iota]]
-                               , FApp (Rel Eq) [ATerm c1iota, CTerm $ VInt 1]
-                               ]
-                 in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs
-                     in let withRefledNewProofs =
-                                withEvaledProofs
-                                    ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
-                         in Ok $ VState (VScopeState (iotas, withRefledNewProofs, c, pscope), iotaseq)
+valRewrite state (EqToLtPlus1 var) =
+    let (VState (VScopeState (iotas, proofs, c, pscope), niota : c1iota : iotaseq)) = state
+     in let oiota = vLookupVar state var
+         in case oiota of
+                Nothing -> Error $ "Undefined variable: " ++ var
+                Just iota ->
+                    let withNewProofs =
+                            proofs
+                                ++ [ FApp (Rel Lt) [ATerm iota, ATerm niota]
+                                   , FApp (Rel Eq) [ATerm niota, FApp Plus [ATerm iota, ATerm c1iota]]
+                                   , FApp (Rel Eq) [ATerm c1iota, CTerm $ VInt 1]
+                                   ]
+                     in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs
+                         in let withRefledNewProofs =
+                                    withEvaledProofs
+                                        ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
+                             in Ok $ VState (VScopeState (iotas, withRefledNewProofs, c, pscope), iotaseq)
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
 evalExpressionList state [] = (state, [])
@@ -392,8 +454,8 @@ evalExpression sstate (F funct exprs) =
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression _ iota (Val val) = Ok [FApp (Rel Eq) [ATerm iota, CTerm val]]
 -- foldr (\iota _ -> [C iota Eq val]) [] miota
-valExpression (VState (VScopeState (iotas, _, _, _), _)) iota (Var var) =
-    let omiota = Data.Map.lookup var iotas
+valExpression state iota (Var var) =
+    let omiota = vLookupVar state var
      in case omiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just oiota -> Ok [FApp (Rel Eq) [ATerm iota, ATerm oiota]]
