@@ -100,6 +100,9 @@ topLevelScope :: State -> State
 topLevelScope (State (vals, c, Nothing)) = State (vals, c, Nothing)
 topLevelScope (State (_, _, Just pState)) = topLevelScope pState
 
+emptyVScopeState :: VScopeState
+emptyVScopeState = VScopeState (empty, [], emptyContinuations, Nothing)
+
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
 iotalist :: [String]
 iotalist = [l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z']]
@@ -262,9 +265,9 @@ evaluate [] = State (empty, emptyContinuations, Nothing)
 evaluate l = evalBlock (State (empty, Continuations l, Nothing))
 
 validate :: [Statement] -> Result VState String
-validate [] = Ok (empty, [], [head iotalist])
-validate l = case valProgram (empty, [], iotalist) l of
-    Ok (iotas, proofs, remainingIotas) -> Ok (iotas, proofs, [head remainingIotas])
+validate [] = Ok $ VState (emptyVScopeState, [])
+validate l = case valProgram (VState (emptyVScopeState, iotalist)) l of
+    Ok (VState (vScopeState, remainingIotas)) -> Ok $ VState (vScopeState, [head remainingIotas])
     Error e -> Error e
 
 -- Private fns
@@ -315,27 +318,27 @@ evalNextStatement state = case state of
             _ -> error "EndBlock must have a parent state"
 
 valStatement :: VState -> Statement -> Result VState String
-valStatement (iotas, proofs, iotaseq) (Assign var expr) =
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Assign var expr) =
     let niota : tiotalist = iotaseq
-     in case valExpression (iotas, proofs, tiotalist) niota expr of
-            Ok nproofs -> Ok (insert var niota iotas, proofs ++ nproofs, tiotalist)
+     in case valExpression (VState (VScopeState (iotas, proofs, c, pscope), tiotalist)) niota expr of
+            Ok nproofs -> Ok $ VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pscope), tiotalist)
             Error e -> Error e
-valStatement (iotas, proofs, iotaseq) (Rewrite (Refl var)) =
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Rewrite (Refl var)) =
     let oiota = Data.Map.lookup var iotas
      in case oiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just _ ->
                 let newProofs = concatMap (reflProofsByProof proofs) proofs -- TODO: limit to proofs with iota
-                 in Ok (iotas, proofs ++ newProofs, iotaseq)
-valStatement (iotas, proofs, iotaseq) (Rewrite (Eval var)) =
+                 in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaseq)
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Rewrite (Eval var)) =
     let oiota = Data.Map.lookup var iotas
      in case oiota of
             Nothing -> Error $ "Undefined variable: " ++ var
-            Just iota -> Ok (iotas, evalIota iota proofs ++ proofs, iotaseq)
-valStatement (iotas, proofs, iotaseq) (Rewrite EvalAll) =
+            Just iota -> Ok $ VState (VScopeState (iotas, evalIota iota proofs ++ proofs, c, pscope), iotaseq)
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (Rewrite EvalAll) =
     let newProofs = concatMap (`evalIotaProof` proofs) proofs
-     in Ok (iotas, proofs ++ newProofs, iotaseq)
-valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var)) =
+     in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaseq)
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), niota : c1iota : iotaseq)) (Rewrite (EqToLtPlus1 var)) =
     let oiota = Data.Map.lookup var iotas
      in case oiota of
             Nothing -> Error $ "Undefined variable: " ++ var
@@ -350,18 +353,19 @@ valStatement (iotas, proofs, niota : c1iota : iotaseq) (Rewrite (EqToLtPlus1 var
                      in let withRefledNewProofs =
                                 withEvaledProofs
                                     ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
-                         in Ok (iotas, withRefledNewProofs, iotaseq)
-valStatement (iotas, proofs, iotaseq) (ProofAssert varproof) =
+                         in Ok $ VState (VScopeState (iotas, withRefledNewProofs, c, pscope), iotaseq)
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (ProofAssert varproof) =
     let iotaProof = varProofToIotaProof varproof iotas
      in if iotaProof `elem` proofs
-            then Ok (iotas, proofs, iotaseq)
+            then Ok $ VState (VScopeState (iotas, proofs, c, pscope), iotaseq)
             else Error $ "Assertion failed: " ++ show varproof
-valStatement (iotas, proofs, iotaseq) (AssignProofVar var expr) =
+valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) (AssignProofVar var expr) =
     let niota : tiotalist = iotaseq
-     in case valExpression (iotas, proofs, tiotalist) niota expr of
-            Ok nproofs -> Ok (insert var niota iotas, proofs ++ nproofs, tiotalist)
+     in case valExpression (VState (VScopeState (iotas, proofs, c, pscope), tiotalist)) niota expr of
+            Ok nproofs -> Ok $ VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pscope), tiotalist)
             Error e -> Error e
-valStatement (iotas, proofs, iotaseq) _ = Ok (iotas, proofs, iotaseq)
+
+-- valStatement (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) _ = Ok $ VState (VScopeState (iotas, proofs, iotaseq)
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
 evalExpressionList state [] = (state, [])
@@ -387,18 +391,18 @@ evalExpression sstate (F funct exprs) =
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression _ iota (Val val) = Ok [FApp (Rel Eq) [ATerm iota, CTerm val]]
 -- foldr (\iota _ -> [C iota Eq val]) [] miota
-valExpression (iotas, _, _) iota (Var var) =
+valExpression (VState (VScopeState (iotas, _, _, _), _)) iota (Var var) =
     let omiota = Data.Map.lookup var iotas
      in case omiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just oiota -> Ok [FApp (Rel Eq) [ATerm iota, ATerm oiota]]
-valExpression (iotas, proofs, iotaseq) iota (F funct exprargs) =
+valExpression (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) iota (F funct exprargs) =
     let tiotalist = iotaseq
      in let (fInputProofResults, niotas) =
                 zipMap
                     exprargs
                     tiotalist
-                    (flip (valExpression (iotas, proofs, tiotalist))) -- proofs of input expression in terms of new iotas
+                    (flip (valExpression $ VState (VScopeState (iotas, proofs, c, pscope), tiotalist))) -- proofs of input expression in terms of new iotas
                     -- If finputproofs = [A niota rel oi] where oi is already defined, replace with the definition of oi
          in case flatResultMap id fInputProofResults of
                 Error e -> Error e

@@ -180,7 +180,6 @@ testParseNestedBlocks =
         \ return size(x);}"
         (VInt 1)
 
-
 testParseFunctReturnNestedBlocks :: TestResult
 testParseFunctReturnNestedBlocks =
     parseEvalReturningStmtHelper
@@ -225,13 +224,15 @@ expectedProofCompare _ _ _ = False
 validateWEMatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMatchHelper stmts expected =
     case validate stmts of
-        Ok (varMap, iproofs, _) -> testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
+        Ok (VState (VScopeState (varMap, iproofs, _, _), _)) ->
+            testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMismatchHelper stmts expected =
     case validate stmts of
-        Ok (varMap, iproofs, _) -> testAssertTrue (not (all (\vp -> expectedProofMatch vp iproofs varMap) expected))
+        Ok (VState (VScopeState (varMap, iproofs, _, _), _)) ->
+            testAssertTrue (not (all (\vp -> expectedProofMatch vp iproofs varMap) expected))
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validationFailHelper :: [Statement] -> TestResult

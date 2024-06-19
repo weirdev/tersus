@@ -44,4 +44,11 @@ type VariableProof = Proof Variable
 -- TODO: As with Funct, the rule name should be a separate type from the arguments
 data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
-type VState = (Map Variable Iota, [IotaProof], [Iota])
+newtype VScopeState
+    = VScopeState
+        ( Map Variable Iota
+        , [IotaProof]
+        , Continuations
+        , Maybe VScopeState
+        )
+newtype VState = VState (VScopeState, [Iota])
