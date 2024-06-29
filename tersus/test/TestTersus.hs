@@ -145,9 +145,11 @@ testParseEvalCompoundExpression =
 testParseEvalBlockExpr :: TestResult
 testParseEvalBlockExpr =
     parseEvalReturningStmtHelper
-        "{x = [5,4,3];\
-        \ y = size(x);\
-        \ return y;}"
+        "{\
+        \  x = [5,4,3];\
+        \  y = size(x);\
+        \  return y;\
+        \}"
         (VInt 3)
 
 testParseEvalWFunctDef :: TestResult
@@ -173,11 +175,13 @@ testParseEvalWUdfCall =
 testParseNestedBlocks :: TestResult
 testParseNestedBlocks =
     parseEvalReturningStmtHelper
-        "{x = [3, 6, 9, 12];\
+        "{\
+        \  x = [3, 6, 9, 12];\
         \  {\
         \    x = [1];\
         \  };\
-        \ return size(x);}"
+        \  return size(x);\
+        \}"
         (VInt 1)
 
 testParseFunctReturnNestedBlocks :: TestResult
@@ -270,6 +274,56 @@ testValidationFail =
         , validationFailHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 4)])]
         ]
 
+testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult
+testIotaProofVarProofMatch i ip v vp =
+    let varMap = Data.Map.fromList [(v, i)]
+     in case testAllTrue (\p -> expectedProofMatch p ip varMap) vp of
+            Nothing -> Nothing
+            Just e -> Just $ e ++ " had " ++ show ip
+
+parseValReturningStmtHelper :: String -> Variable -> [VariableProof] -> TestResult
+parseValReturningStmtHelper stmtStr expVar expected =
+    let parseOutput = parseStatement stmtStr
+     in case parseOutput of
+            Left err -> Just $ "Parse failed: " ++ show err
+            -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
+            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), iotalist)) stmts of
+                Ok (VState (VScopeState (_, proofs, _, _), _), Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
+                Ok (_, Nothing) -> Just "No value returned"
+                Error e -> Just $ "Validation failed with error: " ++ e
+            Right _ -> Just "Not a block statement"
+
+testParseValBlockExpr :: TestResult
+testParseValBlockExpr =
+    parseValReturningStmtHelper
+        "{\
+        \  x = [5,4,3];\
+        \  y = size(x);\
+        \  return y;\
+        \}"
+        "ret"
+        [FApp (Rel Eq) [ATerm "ret", CTerm (VInt 3)]]
+
+testValidateNestedBlocks :: TestResult
+testValidateNestedBlocks =
+    parseValReturningStmtHelper
+        "{\
+        \ x = [3, 6, 9, 12];\
+        \ {\
+        \   x = [1];\
+        \ };\
+        \ return size(x);}"
+        "ret"
+        [FApp (Rel Eq) [ATerm "ret", CTerm (VInt 1)]]
+
+testParseVal :: Test
+testParseVal =
+    testCaseSeq
+        "testParseVal"
+        [ testParseValBlockExpr
+        , testValidateNestedBlocks
+        ]
+
 -- Run tests
 main :: IO ()
 main = do
@@ -279,3 +333,4 @@ main = do
     runTest testValidateWithExpectedMatch
     runTest testValidateWithExpectedMismatch
     runTest testValidationFail
+    runTest testParseVal

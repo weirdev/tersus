@@ -3,9 +3,6 @@ Well typed implementation of ideas I wrote in black FB notebook.
 Next steps:
 Validate semantics sync
   - Finish nexted scopes support
-    - Support exporting proofs to top scope on return
-      - Only proofs that only mention returned iota should be exported
-      - May have issue with constants present in proofs relating to returned iota via indirection (assignment to iota) preventing export
     - Tests - validation of scopes, return, no breakout yet
   - Utilize continuations
     - Replace VState -> Statement -> VState with VState -> VState
@@ -22,13 +19,15 @@ Let declarations
 2. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?
-3. Control flow
+3. Support setting proofs in parent scope when they only correspond to declared there
+    Control flow blocks will need to have their own rules
+4. Control flow
     if/else/while
-4. Functions
+5. Functions
     Dont fully evaluate immediately in validation? ie. rewrite to get result?
-5. Proof transformation v2
-6. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
-7. Distinguish between proof only vars and regular vars
+6. Proof transformation v2
+7. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+8. Distinguish between proof only vars and regular vars
 
 Running:
     0. stack run

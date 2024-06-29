@@ -80,17 +80,18 @@ updateExistingVar (State (vals, c, pState)) var val = case Data.Map.lookup var v
             Nothing -> Nothing
         Nothing -> Nothing
 
-vUpdateExistingVar :: VState -> Variable -> Iota -> Maybe VState
-vUpdateExistingVar (VState (scope, iotaseq)) var iota = case vScopeUpdateExistingVar scope var iota of
-    Just ns -> Just $ VState (ns, iotaseq)
-    Nothing -> Nothing
+vUpdateExistingVar :: VState -> Variable -> Iota -> [IotaProof] -> Maybe VState
+vUpdateExistingVar (VState (scope, iotaseq)) var niota nproofs =
+    case vScopeUpdateExistingVar scope var niota nproofs of
+        Just ns -> Just $ VState (ns, iotaseq)
+        Nothing -> Nothing
 
-vScopeUpdateExistingVar :: VScopeState -> Variable -> Iota -> Maybe VScopeState
-vScopeUpdateExistingVar (VScopeState (iotas, proofs, c, pScope)) var iota =
+vScopeUpdateExistingVar :: VScopeState -> Variable -> Iota -> [IotaProof] -> Maybe VScopeState
+vScopeUpdateExistingVar (VScopeState (iotas, proofs, c, pScope)) var niota nproofs =
     case Data.Map.lookup var iotas of
-        Just _ -> Just $ VScopeState (insert var iota iotas, proofs, c, pScope)
+        Just _ -> Just $ VScopeState (insert var niota iotas, proofs ++ nproofs, c, pScope)
         Nothing -> case pScope of
-            Just p -> case vScopeUpdateExistingVar p var iota of
+            Just p -> case vScopeUpdateExistingVar p var niota nproofs of
                 Just np -> Just $ VScopeState (iotas, proofs, c, Just np)
                 Nothing -> Nothing
             Nothing -> Nothing
@@ -103,11 +104,11 @@ insertVar (State (vals, c, pState)) var val =
         Just s -> s
         Nothing -> State (insert var val vals, c, pState)
 
-vInsertVar :: VState -> Variable -> Iota -> VState
-vInsertVar (VState (VScopeState (iotas, proofs, c, pScope), iotaseq)) var iota =
-    case vUpdateExistingVar (VState (VScopeState (iotas, proofs, c, pScope), iotaseq)) var iota of
+vInsertVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
+vInsertVar (VState (VScopeState (iotas, proofs, c, pScope), iotaseq)) var niota nproofs =
+    case vUpdateExistingVar (VState (VScopeState (iotas, proofs, c, pScope), iotaseq)) var niota nproofs of
         Just s -> s
-        Nothing -> VState (VScopeState (insert var iota iotas, proofs, c, pScope), iotaseq)
+        Nothing -> VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pScope), iotaseq)
 
 -- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
@@ -115,8 +116,11 @@ getReturn :: State -> Maybe Value
 getReturn (State (vals, _, _)) = Data.Map.lookup "return" vals
 
 -- Return is always set in the top level scope
+-- TODO: We should have a real return slot rather than using a var
 vGetReturn :: VState -> Maybe Iota
-vGetReturn (VState (VScopeState (iotas, _, _, _), _)) = Data.Map.lookup "return" iotas
+vGetReturn (VState (VScopeState (iotas, _, _, Nothing), _)) =
+    Data.Map.lookup "return" iotas
+vGetReturn _ = error "Not top scope"
 
 -- Return is always set in the top level scope
 -- NOTE: If we ever have nested functions that implicitly get their parent's scope,
@@ -125,15 +129,15 @@ setReturn :: State -> Value -> State
 setReturn (State (vals, c, Nothing)) val = State (insert "return" val vals, c, Nothing)
 setReturn (State (_, _, Just pState)) val = setReturn pState val
 
-vSetReturn :: VState -> Iota -> VState
-vSetReturn (VState (scope, iotaseq)) iota =
-    VState (vScopeSetReturn scope iota, iotaseq)
+vSetReturn :: VState -> Iota -> [IotaProof] -> VState
+vSetReturn (VState (scope, iotaseq)) niota nproofs =
+    VState (vScopeSetReturn scope niota nproofs, iotaseq)
 
-vScopeSetReturn :: VScopeState -> Iota -> VScopeState
-vScopeSetReturn (VScopeState (iotas, proofs, c, Nothing)) iota =
-    VScopeState (insert "return" iota iotas, proofs, c, Nothing)
-vScopeSetReturn (VScopeState (iotas, proofs, c, Just pScope)) iota =
-    VScopeState (iotas, proofs, c, Just $ vScopeSetReturn pScope iota)
+vScopeSetReturn :: VScopeState -> Iota -> [IotaProof] -> VScopeState
+vScopeSetReturn (VScopeState (iotas, proofs, c, Nothing)) niota nproofs =
+    VScopeState (insert "return" niota iotas, proofs ++ nproofs, c, Nothing)
+vScopeSetReturn (VScopeState (iotas, proofs, c, Just pScope)) niota nproofs =
+    VScopeState (iotas, proofs, c, Just $ vScopeSetReturn pScope niota nproofs)
 
 popIotaFromSeq :: VState -> (Iota, VState)
 popIotaFromSeq (VState (vScopeState, iotaseq)) = case iotaseq of
@@ -175,6 +179,11 @@ proofLIota iota (FApp (Rel Eq) proofs) = case proofs of
     ATerm piota : _ -> piota == iota
     _ -> False
 proofLIota _ _ = error "Only Eq relation supported"
+
+proofOnlyOfIotasOrConst :: [Iota] -> IotaProof -> Bool
+proofOnlyOfIotasOrConst iotas (ATerm i) = i `elem` iotas
+proofOnlyOfIotasOrConst _ CTerm{} = True
+proofOnlyOfIotasOrConst iotas (FApp _ proofs) = all (proofOnlyOfIotasOrConst iotas) proofs
 
 -- Does the proof use the given relation
 proofRel :: Rel -> IotaProof -> Bool
@@ -339,7 +348,14 @@ valBlock :: VState -> [Statement] -> Result VState String
 valBlock state [] = Ok state
 valBlock state (stmt : stmts) = case valStatement state stmt of
     Ok nstate -> valBlock nstate stmts
-    _ -> Error "Validation failed"
+    e -> e
+
+valReturningBlock :: VState -> [Statement] -> Result (VState, Maybe Iota) String
+valReturningBlock state stmts =
+    let result = valBlock state stmts
+     in case result of
+            Ok rstate -> Ok (rstate, vGetReturn rstate)
+            Error e -> Error e
 
 evalNextStatement :: State -> State
 evalNextStatement state = case state of
@@ -374,21 +390,20 @@ valStatement :: VState -> Statement -> Result VState String
 valStatement state (Assign var expr) =
     let (niota, state') = popIotaFromSeq state
      in case valExpression state' niota expr of
-            Ok nproofs ->
-                let state'' = vInsertVar state' var niota
-                 in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
-                     in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
+            -- TODO: Partition nproofs into 1) those that only use niota and iotas
+            -- from scopes higher than where niota is declared and 2) the inverse
+            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
             Error e -> Error e
 valStatement state (Return expr) =
-    let (niota, state') = popIotaFromSeq state
-     in case valExpression state' niota expr of
-            Ok nproofs ->
-                -- TODO: Break out of the current block and return the value
-                -- let prState = topLevelScope rState
-                let state'' = vSetReturn state' niota
-                 in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
-                     in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
-            Error e -> Error e
+    let (VState (VScopeState (_, proofs, _, _), _)) = state
+     in let (niota, state') = popIotaFromSeq state
+         in case valExpression state' niota expr of
+                Ok nproofs ->
+                    -- TODO: Break out of the current block and return the value
+                    -- TODO: Shoud vSetReturn also pass up the nproofs?
+                    let refledNProofs = reflProofsByProofs nproofs proofs
+                     in Ok $ vSetReturn state' niota (filter (proofOnlyOfIotasOrConst [niota]) (nproofs ++ refledNProofs))
+                Error e -> Error e
 valStatement state (Rewrite rwrule) = valRewrite state rwrule
 valStatement state (ProofAssert varproof) =
     let (VState (VScopeState (_, proofs, _, _), _)) = state
@@ -399,13 +414,19 @@ valStatement state (ProofAssert varproof) =
 valStatement state (AssignProofVar var expr) =
     let (niota, state') = popIotaFromSeq state
      in case valExpression state' niota expr of
-            Ok nproofs ->
-                let state'' = vInsertVar state' var niota
-                 in let (VState (VScopeState (iotas, proofs, c, pscope), iotaseq)) = state''
-                     in Ok $ VState (VScopeState (iotas, proofs ++ nproofs, c, pscope), iotaseq)
+            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
             Error e -> Error e
 valStatement (VState (scope, iotaseq)) (Block stmts) =
-    valBlock (VState (VScopeState (empty, [], Continuations stmts, Just scope), iotaseq)) stmts
+    valBlock
+        (VState (VScopeState (empty, [], Continuations (stmts ++ [EndBlock]), Just scope), iotaseq))
+        (stmts ++ [EndBlock])
+valStatement (VState (VScopeState (_, _, _, pstate), iotaseq)) EndBlock =
+    case pstate of
+        Just ps -> Ok $ VState (ps, iotaseq)
+        _ -> error "EndBlock must have a parent state"
+
+reflProofsByProofs :: [IotaProof] -> [IotaProof] -> [IotaProof]
+reflProofsByProofs lproofs = concatMap (reflProofsByProof lproofs)
 
 valRewrite :: VState -> RwRule -> Result VState String
 valRewrite state (Refl var) =
@@ -566,7 +587,7 @@ valFunct funct iiotas iproofs retiota =
                     Error
                         ( "Funct '"
                             ++ show funct
-                            ++ "' not validated. Input Iotas: "
+                            ++ "' agrs not validated. Input Iotas: "
                             ++ show iiotas
                             ++ ". Input Proofs: "
                             ++ show iproofs

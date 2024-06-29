@@ -64,7 +64,7 @@ assignStatement = do
 
 returnStatement :: Parser Statement
 returnStatement = do
-    void (string "return")
+    try $ void (string "return")
     whitespace
     expr <- expression
     whitespace
