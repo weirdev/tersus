@@ -155,21 +155,25 @@ testParseEvalBlockExpr =
 testParseEvalWFunctDef :: TestResult
 testParseEvalWFunctDef =
     parseEvalReturningStmtHelper
-        "{x = 6;\
-        \ fn add1(i) {\
-        \   return i + 1;\
-        \ };\
-        \ return add1;}"
+        "{\
+        \  x = 6;\
+        \  fn add1(i) {\
+        \    return i + 1;\
+        \  };\
+        \  return add1;\
+        \}"
         (VFunct ["i"] [Return (F Plus [Var "i", Val (VInt 1)])])
 
 testParseEvalWUdfCall :: TestResult
 testParseEvalWUdfCall =
     parseEvalReturningStmtHelper
-        "{x = [3, 6, 9, 12];\
-        \ fn sumFirstLast(lst) {\
-        \   return first(lst) + last(lst);\
-        \ };\
-        \ return sumFirstLast(x);}"
+        "{\
+        \  x = [3, 6, 9, 12];\
+        \  fn sumFirstLast(lst) {\
+        \    return first(lst) + last(lst);\
+        \  };\
+        \  return sumFirstLast(x);\
+        \}"
         (VInt 15)
 
 testParseNestedBlocks :: TestResult
@@ -304,15 +308,42 @@ testParseValBlockExpr =
         "ret"
         [FApp (Rel Eq) [ATerm "ret", CTerm (VInt 3)]]
 
+testParseValWFunctDef :: TestResult
+testParseValWFunctDef =
+    parseValReturningStmtHelper
+        "{\
+        \  x = 6;\
+        \  fn add1(i) {\
+        \    return i + 1;\
+        \  };\
+        \  return add1;\
+        \}"
+        "ret"
+        [FApp (Rel Eq) [ATerm "ret", CTerm (VFunct ["i"] [Return (F Plus [Var "i", Val (VInt 1)])])]]
+
+testParseValWUdfCall :: TestResult
+testParseValWUdfCall =
+    parseValReturningStmtHelper
+        "{\
+        \  x = [3, 6, 9, 12];\
+        \  fn sumFirstLast(lst) {\
+        \    return first(lst) + last(lst);\
+        \  };\
+        \  return sumFirstLast(x);\
+        \}"
+        "ret"
+        [FApp (Rel Eq) [ATerm "ret", CTerm (VInt 15)]]
+
 testValidateNestedBlocks :: TestResult
 testValidateNestedBlocks =
     parseValReturningStmtHelper
         "{\
-        \ x = [3, 6, 9, 12];\
-        \ {\
-        \   x = [1];\
-        \ };\
-        \ return size(x);}"
+        \  x = [3, 6, 9, 12];\
+        \  {\
+        \    x = [1];\
+        \  };\
+        \  return size(x);\
+        \}"
         "ret"
         [FApp (Rel Eq) [ATerm "ret", CTerm (VInt 1)]]
 
@@ -321,6 +352,8 @@ testParseVal =
     testCaseSeq
         "testParseVal"
         [ testParseValBlockExpr
+        , testParseValWFunctDef
+        , testParseValWUdfCall
         , testValidateNestedBlocks
         ]
 
