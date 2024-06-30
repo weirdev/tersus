@@ -2,10 +2,7 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
 Validate semantics sync
-  - Finish nexted scopes support
-    - Tests - validation of scopes, return, no breakout yet
-  - Utilize continuations
-    - Replace VState -> Statement -> VState with VState -> VState
+  - Return breakout support
   - Support multiple returns
 ProofAssert syntax
 Let declarations

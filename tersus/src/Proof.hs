@@ -152,6 +152,16 @@ advanceStatement (State (_, Continuations [], _)) = error "No more statements to
 advanceStatement (State (vals, Continuations (_ : nxt), pState)) =
     State (vals, Continuations nxt, pState)
 
+vAdvanceStatement :: VState -> VState
+vAdvanceStatement (VState (scope, iotaseq)) =
+    VState (vScopeAdvanceStatement scope, iotaseq)
+
+vScopeAdvanceStatement :: VScopeState -> VScopeState
+vScopeAdvanceStatement (VScopeState (iotas, proofs, Continuations [], _)) =
+    error "No more statements to advance"
+vScopeAdvanceStatement (VScopeState (iotas, proofs, Continuations (_ : nxt), pScope)) =
+    VScopeState (iotas, proofs, Continuations nxt, pScope)
+
 topLevelScope :: State -> State
 topLevelScope (State (vals, c, Nothing)) = State (vals, c, Nothing)
 topLevelScope (State (_, _, Just pState)) = topLevelScope pState
@@ -327,7 +337,7 @@ evaluate l = evalBlock (State (empty, Continuations l, Nothing))
 
 validate :: [Statement] -> Result VState String
 validate [] = Ok $ VState (emptyVScopeState, [])
-validate l = case valBlock (VState (emptyVScopeState, iotalist)) l of
+validate l = case valBlock (VState (VScopeState (empty, [], Continuations l, Nothing), iotalist)) of
     Ok (VState (vScopeState, remainingIotas)) -> Ok $ VState (vScopeState, [head remainingIotas])
     Error e -> Error e
 
@@ -344,15 +354,17 @@ evalReturningBlock state =
     let rState = evalBlock state
      in (rState, getReturn rState)
 
-valBlock :: VState -> [Statement] -> Result VState String
-valBlock state [] = Ok state
-valBlock state (stmt : stmts) = case valStatement state stmt of
-    Ok nstate -> valBlock nstate stmts
-    e -> e
+valBlock :: VState -> Result VState String
+valBlock state = case state of
+    VState (VScopeState (_, _, Continuations [], _), _) -> Ok state
+    VState (VScopeState (_, _, Continuations (_ : _), _), _) ->
+        case valNextStatement state of
+            Ok state' -> valBlock state'
+            e -> e
 
 valReturningBlock :: VState -> [Statement] -> Result (VState, Maybe Iota) String
 valReturningBlock state stmts =
-    let result = valBlock state stmts
+    let result = valBlock state
      in case result of
             Ok rstate -> Ok (rstate, vGetReturn rstate)
             Error e -> Error e
@@ -386,44 +398,46 @@ evalNextStatement state = case state of
             Just rpState -> rpState
             _ -> error "EndBlock must have a parent state"
 
-valStatement :: VState -> Statement -> Result VState String
-valStatement state (Assign var expr) =
-    let (niota, state') = popIotaFromSeq state
-     in case valExpression state' niota expr of
-            -- TODO: Partition nproofs into 1) those that only use niota and iotas
-            -- from scopes higher than where niota is declared and 2) the inverse
-            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
-            Error e -> Error e
-valStatement state (Return expr) =
-    let (VState (VScopeState (_, proofs, _, _), _)) = state
-     in let (niota, state') = popIotaFromSeq state
-         in case valExpression state' niota expr of
-                Ok nproofs ->
-                    -- TODO: Break out of the current block and return the value
-                    -- TODO: Shoud vSetReturn also pass up the nproofs?
-                    let refledNProofs = reflProofsByProofs nproofs proofs
-                     in Ok $ vSetReturn state' niota (filter (proofOnlyOfIotasOrConst [niota]) (nproofs ++ refledNProofs))
-                Error e -> Error e
-valStatement state (Rewrite rwrule) = valRewrite state rwrule
-valStatement state (ProofAssert varproof) =
-    let (VState (VScopeState (_, proofs, _, _), _)) = state
-     in let iotaProof = varProofToIotaProof varproof state
-         in if iotaProof `elem` proofs
-                then Ok state
-                else Error $ "Assertion failed: " ++ show varproof
-valStatement state (AssignProofVar var expr) =
-    let (niota, state') = popIotaFromSeq state
-     in case valExpression state' niota expr of
-            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
-            Error e -> Error e
-valStatement (VState (scope, iotaseq)) (Block stmts) =
-    valBlock
-        (VState (VScopeState (empty, [], Continuations (stmts ++ [EndBlock]), Just scope), iotaseq))
-        (stmts ++ [EndBlock])
-valStatement (VState (VScopeState (_, _, _, pstate), iotaseq)) EndBlock =
-    case pstate of
-        Just ps -> Ok $ VState (ps, iotaseq)
-        _ -> error "EndBlock must have a parent state"
+valNextStatement :: VState -> Result VState String
+valNextStatement state =
+    let VState (scope, iotaseq) = state
+     in let VScopeState (_, _, Continuations stmts, pscope) = scope
+         in case stmts of
+                (Assign var expr : _) ->
+                    let (niota, state') = popIotaFromSeq (vAdvanceStatement state)
+                     in case valExpression state' niota expr of
+                            -- TODO: Partition nproofs into 1) those that only use niota and iotas
+                            -- from scopes higher than where niota is declared and 2) the inverse
+                            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
+                            Error e -> Error e
+                (Return expr : _) ->
+                    let (VState (VScopeState (_, proofs, _, _), _)) = state
+                     in let (niota, state') = popIotaFromSeq (vAdvanceStatement state)
+                         in case valExpression state' niota expr of
+                                Ok nproofs ->
+                                    -- TODO: Break out of the current block and return the value
+                                    -- TODO: Shoud vSetReturn also pass up the nproofs?
+                                    let refledNProofs = reflProofsByProofs nproofs proofs
+                                     in Ok $ vSetReturn state' niota (filter (proofOnlyOfIotasOrConst [niota]) (nproofs ++ refledNProofs))
+                                Error e -> Error e
+                (Rewrite rwrule : _) -> valRewrite (vAdvanceStatement state) rwrule
+                (ProofAssert varproof : _) ->
+                    let (VState (VScopeState (_, proofs, _, _), _)) = state
+                     in let state' = vAdvanceStatement state
+                         in let iotaProof = varProofToIotaProof varproof state'
+                             in if iotaProof `elem` proofs
+                                    then Ok state'
+                                    else Error $ "Assertion failed: " ++ show varproof
+                (AssignProofVar var expr : _) ->
+                    let (niota, state') = popIotaFromSeq (vAdvanceStatement state)
+                     in case valExpression state' niota expr of
+                            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
+                            Error e -> Error e
+                (Block bstmts : _) ->
+                    valBlock $ VState (VScopeState (empty, [], Continuations (bstmts ++ [EndBlock]), Just (vScopeAdvanceStatement scope)), iotaseq)
+                (EndBlock : _) -> case pscope of
+                    Just ps -> Ok $ VState (ps, iotaseq)
+                    _ -> error "EndBlock must have a parent state"
 
 reflProofsByProofs :: [IotaProof] -> [IotaProof] -> [IotaProof]
 reflProofsByProofs lproofs = concatMap (reflProofsByProof lproofs)
