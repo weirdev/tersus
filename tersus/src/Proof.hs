@@ -166,6 +166,13 @@ topLevelScope :: State -> State
 topLevelScope (State (vals, c, Nothing)) = State (vals, c, Nothing)
 topLevelScope (State (_, _, Just pState)) = topLevelScope pState
 
+vTopLevelScope :: VState -> VState
+vTopLevelScope (VState (scope, iotaseq)) = VState (vScopeTopLevelScope scope, iotaseq)
+
+vScopeTopLevelScope :: VScopeState -> VScopeState
+vScopeTopLevelScope (VScopeState (iotas, proofs, c, Nothing)) = VScopeState (iotas, proofs, c, Nothing)
+vScopeTopLevelScope (VScopeState (_, _, _, Just pScope)) = vScopeTopLevelScope pScope
+
 emptyVScopeState :: VScopeState
 emptyVScopeState = VScopeState (empty, [], emptyContinuations, Nothing)
 
@@ -418,7 +425,8 @@ valNextStatement state =
                                     -- TODO: Break out of the current block and return the value
                                     -- TODO: Shoud vSetReturn also pass up the nproofs?
                                     let refledNProofs = reflProofsByProofs nproofs proofs
-                                     in Ok $ vSetReturn state' niota (filter (proofOnlyOfIotasOrConst [niota]) (nproofs ++ refledNProofs))
+                                     in let state'' = vTopLevelScope state'
+                                         in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst [niota]) (nproofs ++ refledNProofs))
                                 Error e -> Error e
                 (Rewrite rwrule : _) -> valRewrite (vAdvanceStatement state) rwrule
                 (ProofAssert varproof : _) ->

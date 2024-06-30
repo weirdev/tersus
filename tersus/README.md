@@ -1,25 +1,23 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
-Validate semantics sync
-  - Return breakout support
-  - Support multiple returns
 ProofAssert syntax
 Let declarations
 0.75. Unify function call model, builtin and user defined
 0. Validate functions
     Export assertions to caller
-1. Improved proof representation, proof engine
+    Syntax
+1. Control flow
+    if/else/while
+2. Improved proof representation, proof engine
     How are we handling proofs w/ nested expressions, we currently do not allow temp iotas to leak
         Is this still workable?
     Proof engine would be able to apply generalized rewritings supplied by functions
-2. Property objects
+3. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?
-3. Support setting proofs in parent scope when they only correspond to declared there
+4. Support setting proofs in parent scope when they only correspond to declared there
     Control flow blocks will need to have their own rules
-4. Control flow
-    if/else/while
 5. Functions
     Dont fully evaluate immediately in validation? ie. rewrite to get result?
 6. Proof transformation v2

@@ -191,15 +191,17 @@ testParseNestedBlocks =
 testParseFunctReturnNestedBlocks :: TestResult
 testParseFunctReturnNestedBlocks =
     parseEvalReturningStmtHelper
-        "{x = [3, 6, 9, 12];\
-        \ fn getFirst(y) {\
-        \  x = [1];\
-        \  {\
-        \    return first(y);\
+        "{\
+        \  x = [3, 6, 9, 12];\
+        \  fn getFirst(y) {\
+        \    x = [1];\
+        \    {\
+        \      return first(y);\
+        \    };\
+        \    return first(x);\
         \  };\
-        \  return first(x);\
-        \ };\
-        \ return getFirst(x);}"
+        \  return getFirst(x);\
+        \}"
         (VInt 3)
 
 testParseEval :: Test
@@ -347,6 +349,23 @@ testValidateNestedBlocks =
         "ret"
         [FApp (Rel Eq) [ATerm "ret", CTerm (VInt 1)]]
 
+testParseValFunctReturnNestedBlocks :: TestResult
+testParseValFunctReturnNestedBlocks =
+    parseValReturningStmtHelper
+        "{\
+        \  x = [3, 6, 9, 12];\
+        \  fn getFirst(y) {\
+        \    x = [1];\
+        \    {\
+        \      return first(y);\
+        \    };\
+        \    return first(x);\
+        \  };\
+        \  return getFirst(x);\
+        \}"
+        "ret"
+        [FApp (Rel Eq) [ATerm "ret", CTerm (VInt 3)]]
+
 testParseVal :: Test
 testParseVal =
     testCaseSeq
@@ -355,6 +374,7 @@ testParseVal =
         , testParseValWFunctDef
         , testParseValWUdfCall
         , testValidateNestedBlocks
+        , testParseValFunctReturnNestedBlocks
         ]
 
 -- Run tests
