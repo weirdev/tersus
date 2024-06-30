@@ -2,13 +2,13 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
 ProofAssert syntax
-Let declarations
 0.75. Unify function call model, builtin and user defined
 0. Validate functions
     Export assertions to caller
     Syntax
 1. Control flow
     if/else/while
+1.5. Let declarations
 2. Improved proof representation, proof engine
     How are we handling proofs w/ nested expressions, we currently do not allow temp iotas to leak
         Is this still workable?

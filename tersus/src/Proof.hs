@@ -392,9 +392,7 @@ evalNextStatement state = case state of
                     Just val -> setReturn prState val
                     -- TODO: Allow this for functions returning nothing
                     Nothing -> error "Return expression must return a value"
-    State (_, Continuations (Rewrite{} : _), _) -> advanceStatement state
-    State (_, Continuations (ProofAssert{} : _), _) -> advanceStatement state
-    State (_, Continuations (AssignProofVar{} : _), _) -> advanceStatement state
+    State (_, Continuations (ValidationStatement{} : _), _) -> advanceStatement state
     State (_, Continuations (Block statements : _), _) ->
         evalBlock (State (empty, Continuations (statements ++ [EndBlock]), Just (advanceStatement state)))
     -- TODO: Could we just match on Continuations [] insead of inserting EndBlock?
@@ -428,19 +426,7 @@ valNextStatement state =
                                      in let state'' = vTopLevelScope state'
                                          in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst [niota]) (nproofs ++ refledNProofs))
                                 Error e -> Error e
-                (Rewrite rwrule : _) -> valRewrite (vAdvanceStatement state) rwrule
-                (ProofAssert varproof : _) ->
-                    let (VState (VScopeState (_, proofs, _, _), _)) = state
-                     in let state' = vAdvanceStatement state
-                         in let iotaProof = varProofToIotaProof varproof state'
-                             in if iotaProof `elem` proofs
-                                    then Ok state'
-                                    else Error $ "Assertion failed: " ++ show varproof
-                (AssignProofVar var expr : _) ->
-                    let (niota, state') = popIotaFromSeq (vAdvanceStatement state)
-                     in case valExpression state' niota expr of
-                            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
-                            Error e -> Error e
+                (ValidationStatement valStmt : _) -> valValidationStatement state valStmt
                 (Block bstmts : _) ->
                     valBlock $ VState (VScopeState (empty, [], Continuations (bstmts ++ [EndBlock]), Just (vScopeAdvanceStatement scope)), iotaseq)
                 (EndBlock : _) -> case pscope of
@@ -449,6 +435,21 @@ valNextStatement state =
 
 reflProofsByProofs :: [IotaProof] -> [IotaProof] -> [IotaProof]
 reflProofsByProofs lproofs = concatMap (reflProofsByProof lproofs)
+
+valValidationStatement :: VState -> ValidationStatement -> Result VState String
+valValidationStatement state (Rewrite rwrule) = valRewrite (vAdvanceStatement state) rwrule
+valValidationStatement state (ProofAssert varproof) =
+    let (VState (VScopeState (_, proofs, _, _), _)) = state
+     in let state' = vAdvanceStatement state
+         in let iotaProof = varProofToIotaProof varproof state'
+             in if iotaProof `elem` proofs
+                    then Ok state'
+                    else Error $ "Assertion failed: " ++ show varproof
+valValidationStatement state (AssignProofVar var expr) =
+    let (niota, state') = popIotaFromSeq (vAdvanceStatement state)
+     in case valExpression state' niota expr of
+            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
+            Error e -> Error e
 
 valRewrite :: VState -> RwRule -> Result VState String
 valRewrite state (Refl var) =
@@ -570,7 +571,7 @@ evalFunct (Rel LtEq) [VInt v1, VInt v2] = VBool (v1 <= v2)
 evalFunct (Rel LtEq) _ = error "LtEq only valid for two ints"
 evalFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
 evalFunct (Rel GtEq) _ = error "GtEq only valid for two ints"
-evalFunct Call (VFunct vars block : args) =
+evalFunct Call (VFunct vars _ block _ : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals

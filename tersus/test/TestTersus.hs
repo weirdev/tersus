@@ -89,25 +89,25 @@ testEvaluateFullContext =
             ]
             [("x", VInt 1), ("y", VInt 0)]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [Return (Val (VInt 3))]))
+            [ Assign "f" (Val (VFunct [] [] [Return (Val (VInt 3))] []))
             , Assign "result" (F Call [Var "f"])
             ]
-            [("result", VInt 3), ("f", VFunct [] [Return (Val (VInt 3))])]
+            [("result", VInt 3), ("f", VFunct [] [] [Return (Val (VInt 3))] [])]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [Assign "y" (Val (VInt 2)), Return (Var "y")]))
+            [ Assign "f" (Val (VFunct [] [] [Assign "y" (Val (VInt 2)), Return (Var "y")] []))
             , Assign "result" (F Call [Var "f"])
             ]
-            [("result", VInt 2), ("f", VFunct [] [Assign "y" (Val (VInt 2)), Return (Var "y")])]
+            [("result", VInt 2), ("f", VFunct [] [] [Assign "y" (Val (VInt 2)), Return (Var "y")] [])]
         , evalFCHelper
-            [ Assign "id" (Val (VFunct ["v"] [Return (Var "v")]))
+            [ Assign "id" (Val (VFunct ["v"] [] [Return (Var "v")] []))
             , Assign "result" (F Call [Var "id", Val (VInt 7)])
             ]
-            [("result", VInt 7), ("id", VFunct ["v"] [Return (Var "v")])]
+            [("result", VInt 7), ("id", VFunct ["v"] [] [Return (Var "v")] [])]
         , evalFCHelper
-            [ Assign "add" (Val (VFunct ["l", "r"] [Return (F Plus [Var "l", Var "r"])]))
+            [ Assign "add" (Val (VFunct ["l", "r"] [] [Return (F Plus [Var "l", Var "r"])] []))
             , Assign "result" (F Call [Var "add", Val (VInt 7), Val (VInt 13)])
             ]
-            [("result", VInt 20), ("add", VFunct ["l", "r"] [Return (F Plus [Var "l", Var "r"])])]
+            [("result", VInt 20), ("add", VFunct ["l", "r"] [] [Return (F Plus [Var "l", Var "r"])] [])]
         ]
 
 evalExprHelper :: Expression -> Value -> TestResult
@@ -162,7 +162,7 @@ testParseEvalWFunctDef =
         \  };\
         \  return add1;\
         \}"
-        (VFunct ["i"] [Return (F Plus [Var "i", Val (VInt 1)])])
+        (VFunct ["i"] [] [Return (F Plus [Var "i", Val (VInt 1)])] [])
 
 testParseEvalWUdfCall :: TestResult
 testParseEvalWUdfCall =
@@ -258,9 +258,9 @@ testValidateWithExpectedMatch =
         [ validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 1)]]
         , validateWEMatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp (Rel Eq) [ATerm "y", CTerm (VInt 2)]]
         , validateWEMatchHelper [Assign "x" (F Size [Val (VIntList [5])]), Assign "y" (F Minus [Val (VInt 1), Val (VInt 1)])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 1)], FApp (Rel Eq) [ATerm "y", CTerm (VInt 0)]]
-        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)]]
-        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), Rewrite (EqToLtPlus1 "x"), ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 6)])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Lt) [ATerm "x", CTerm (VInt 6)]]
-        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp (Rel Eq) [ATerm "x", ATerm "a"])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "x", ATerm "a"], FApp (Rel Eq) [ATerm "a", ATerm "x"]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), ValidationStatement (ProofAssert (FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)]))] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), ValidationStatement (Rewrite (EqToLtPlus1 "x")), ValidationStatement (ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 6)]))] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Lt) [ATerm "x", CTerm (VInt 6)]]
+        , validateWEMatchHelper [Assign "x" (Val (VInt 5)), ValidationStatement (AssignProofVar "a" (Val (VInt 5))), ValidationStatement (Rewrite (Refl "x")), ValidationStatement (ProofAssert (FApp (Rel Eq) [ATerm "x", ATerm "a"]))] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "x", ATerm "a"], FApp (Rel Eq) [ATerm "a", ATerm "x"]]
         ]
 
 testValidateWithExpectedMismatch :: Test
@@ -269,15 +269,15 @@ testValidateWithExpectedMismatch =
         "testValidateWithExpectedMismatch"
         [ validateWEMismatchHelper [Assign "x" (F Size [Val (VIntList [5])])] [FApp (Rel Eq) [ATerm "y", CTerm (VInt 1)]]
         , validateWEMismatchHelper [Assign "x" (Val (VIntList [5, 4])), Assign "y" (F Size [Var "x"])] [FApp (Rel Eq) [ATerm "x", CTerm (VIntList [5, 4])], FApp (Rel Eq) [ATerm "y", CTerm (VInt 2)], FApp (Rel Eq) [ATerm "z", CTerm (VInt 2)]]
-        , validateWEMismatchHelper [Assign "x" (Val (VInt 5)), AssignProofVar "a" (Val (VInt 5)), Rewrite (Refl "x"), ProofAssert (FApp (Rel Eq) [ATerm "x", ATerm "a"])] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "x", ATerm "a"], FApp (Rel Eq) [ATerm "b", ATerm "x"]]
+        , validateWEMismatchHelper [Assign "x" (Val (VInt 5)), ValidationStatement (AssignProofVar "a" (Val (VInt 5))), ValidationStatement (Rewrite (Refl "x")), ValidationStatement (ProofAssert (FApp (Rel Eq) [ATerm "x", ATerm "a"]))] [FApp (Rel Eq) [ATerm "x", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "a", CTerm (VInt 5)], FApp (Rel Eq) [ATerm "x", ATerm "a"], FApp (Rel Eq) [ATerm "b", ATerm "x"]]
         ]
 
 testValidationFail :: Test
 testValidationFail =
     testCaseSeq
         "testValidationFail"
-        [ validationFailHelper [ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 5)])]
-        , validationFailHelper [Assign "x" (Val (VInt 5)), ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 4)])]
+        [ validationFailHelper [ValidationStatement (ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 5)]))]
+        , validationFailHelper [Assign "x" (Val (VInt 5)), ValidationStatement (ProofAssert (FApp (Rel Lt) [ATerm "x", CTerm (VInt 4)]))]
         ]
 
 testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult
@@ -321,7 +321,7 @@ testParseValWFunctDef =
         \  return add1;\
         \}"
         "ret"
-        [FApp (Rel Eq) [ATerm "ret", CTerm (VFunct ["i"] [Return (F Plus [Var "i", Val (VInt 1)])])]]
+        [FApp (Rel Eq) [ATerm "ret", CTerm (VFunct ["i"] [] [Return (F Plus [Var "i", Val (VInt 1)])] [])]]
 
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =

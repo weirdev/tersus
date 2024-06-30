@@ -12,16 +12,22 @@ data Value
     = VInt Integer
     | VIntList [Integer]
     | VBool Bool
-    | VFunct [Variable] [Statement]
+    | -- VFunct inputArgs inputArgAssertions body resultAssertions
+      -- Result assertions may contain variables from inputArgs and "return" variable
+      -- TODO: Real return slot rather than var
+      VFunct [Variable] [ValidationStatement] [Statement] [VariableProof]
     deriving (Show, Eq)
 data Expression = Val Value | Var Variable | F Funct [Expression]
+    deriving (Show, Eq)
+data ValidationStatement
+    = Rewrite RwRule
+    | ProofAssert VariableProof
+    | AssignProofVar Variable Expression
     deriving (Show, Eq)
 data Statement
     = Assign Variable Expression
     | Return Expression
-    | Rewrite RwRule
-    | ProofAssert VariableProof
-    | AssignProofVar Variable Expression
+    | ValidationStatement ValidationStatement
     | Block [Statement]
     | EndBlock
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars

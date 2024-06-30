@@ -47,7 +47,7 @@ statementBlock = do
 statement :: Parser Statement
 statement =
     returnStatement
-        <|> rewriteStatement
+        <|> validationStatement
         <|> functStatement
         <|> assignStatement
         <|> blockStatement
@@ -84,9 +84,12 @@ functStatement = do
     whitespace
     fnBody <- curlyBracesParse statementBlock
     whitespace
-    return (Assign var (Val (VFunct argNames fnBody)))
+    return (Assign var (Val (VFunct argNames [] fnBody [])))
 
-rewriteStatement :: Parser Statement
+validationStatement :: Parser Statement
+validationStatement = ValidationStatement <$> rewriteStatement
+
+rewriteStatement :: Parser ValidationStatement
 rewriteStatement = do
     void (string "rewrite")
     whitespace
