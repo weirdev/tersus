@@ -75,7 +75,7 @@ testParse = TestList "testParse" [testParseSimpleAssign, testParseComplexAssign]
 -- Evaluate tests
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
 evalFCHelper stmts expected =
-    let State (vals, _, _) = evaluate stmts
+    let State (ScopeState (vals, _, _), _) = evaluate stmts
      in testAssertEq vals (Data.Map.fromList expected)
 
 testEvaluateFullContext :: Test
@@ -112,7 +112,7 @@ testEvaluateFullContext =
 
 evalExprHelper :: Expression -> Value -> TestResult
 evalExprHelper expr expected =
-    let (mval, _) = evalExpression (State (Data.Map.empty, Continuations [], Nothing)) expr
+    let (mval, _) = evalExpression (State (ScopeState (Data.Map.empty, Continuations [], Nothing), Data.Map.empty)) expr
      in case mval of
             Just val -> testAssertEq val expected
             Nothing -> Just "Expression did not produce a value"
@@ -129,7 +129,7 @@ parseEvalReturningStmtHelper stmtStr expected =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case evalReturningBlock (State (Data.Map.empty, Continuations stmts, Just $ State (Data.Map.empty, emptyContinuations, Nothing))) of
+            Right (Block stmts) -> case evalReturningBlock (State (ScopeState (Data.Map.empty, Continuations stmts, Just $ ScopeState (Data.Map.empty, emptyContinuations, Nothing)), Data.Map.empty)) of
                 (_, Just val) -> testAssertEq val expected
                 (_, Nothing) -> Just "No value returned"
             Right _ -> Just "Not a block statement"
@@ -234,14 +234,14 @@ expectedProofCompare _ _ _ = False
 validateWEMatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMatchHelper stmts expected =
     case validate stmts of
-        Ok (VState (VScopeState (varMap, iproofs, _, _), _)) ->
+        Ok (VState (VScopeState (varMap, iproofs, _, _), _, _, _)) ->
             testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMismatchHelper stmts expected =
     case validate stmts of
-        Ok (VState (VScopeState (varMap, iproofs, _, _), _)) ->
+        Ok (VState (VScopeState (varMap, iproofs, _, _), _, _, _)) ->
             testAssertTrue (not (all (\vp -> expectedProofMatch vp iproofs varMap) expected))
         Error e -> Just $ "Validation failed with error: " ++ e
 
@@ -293,8 +293,8 @@ parseValReturningStmtHelper stmtStr expVar expected =
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
-            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), iotalist)) stmts of
-                Ok (VState (VScopeState (_, proofs, _, _), _), Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
+            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) stmts of
+                Ok (VState (VScopeState (_, proofs, _, _), _, _, _), Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
                 Ok (_, Nothing) -> Just "No value returned"
                 Error e -> Just $ "Validation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
@@ -382,7 +382,7 @@ parseValFailStmtHelper stmtStr =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), iotalist)) stmts of
+            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) stmts of
                 Ok _ -> Just "Validation succeeded expected failure"
                 Error e -> Nothing
             Right _ -> Just "Not a block statement"

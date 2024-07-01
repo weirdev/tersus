@@ -1,8 +1,9 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
-ProofAssert syntax
 0.75. Unify function call model, builtin and user defined
+    Eval
+    Validate
 0. Validate functions
     Export assertions to caller
     Syntax

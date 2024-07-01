@@ -36,9 +36,9 @@ data Statement
 -- TODO: Naming is probably wrong here
 newtype Continuations = Continuations [Statement]
 
--- (variableAssignments, parentScopeState)
--- This could be (variableAssignments, nextStmt, Either returnPoint parentScopeState)
-newtype State = State (Map Variable Value, Continuations, Maybe State)
+newtype ScopeState = ScopeState (Map Variable Value, Continuations, Maybe ScopeState)
+-- (scope info, file context [aka standard lib + imports])
+newtype State = State (ScopeState, Map Variable Value)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
@@ -57,4 +57,4 @@ newtype VScopeState
         , Continuations
         , Maybe VScopeState
         )
-newtype VState = VState (VScopeState, [Iota])
+newtype VState = VState (VScopeState, Map Variable Iota, [IotaProof], [Iota])
