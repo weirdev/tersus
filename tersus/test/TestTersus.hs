@@ -377,6 +377,40 @@ testParseVal =
         , testParseValFunctReturnNestedBlocks
         ]
 
+parseValFailStmtHelper :: String -> TestResult
+parseValFailStmtHelper stmtStr =
+    let parseOutput = parseStatement stmtStr
+     in case parseOutput of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), iotalist)) stmts of
+                Ok _ -> Just "Validation succeeded expected failure"
+                Error e -> Nothing
+            Right _ -> Just "Not a block statement"
+
+testParseValAffirmFail :: TestResult
+testParseValAffirmFail =
+    parseValFailStmtHelper
+        "{\
+        \  x = 5;\
+        \  affirm x < 4;\
+        \}"
+
+testParseValAffirmParensFail :: TestResult
+testParseValAffirmParensFail =
+    parseValFailStmtHelper
+        "{\
+        \  x = 5;\
+        \  affirm x < (5 - 1);\
+        \}"
+
+testParseValFail :: Test
+testParseValFail =
+    testCaseSeq
+        "testParseValFail"
+        [ testParseValAffirmFail
+        , testParseValAffirmParensFail
+        ]
+
 -- Run tests
 main :: IO ()
 main = do
@@ -387,3 +421,4 @@ main = do
     runTest testValidateWithExpectedMismatch
     runTest testValidationFail
     runTest testParseVal
+    runTest testParseValFail

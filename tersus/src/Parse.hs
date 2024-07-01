@@ -31,7 +31,6 @@ skipWhitespace p = do
     return out
 
 variable :: Parser String
--- TODO: Allow digits in variable names
 variable = do
     fl <- satisfy isLetter
     rest <- many $ satisfy isLetter <|> satisfy isDigit
@@ -87,7 +86,8 @@ functStatement = do
     return (Assign var (Val (VFunct argNames [] fnBody [])))
 
 validationStatement :: Parser Statement
-validationStatement = ValidationStatement <$> rewriteStatement
+validationStatement =
+    ValidationStatement <$> (rewriteStatement <|> proofAssertStatement)
 
 rewriteStatement :: Parser ValidationStatement
 rewriteStatement = do
@@ -96,6 +96,63 @@ rewriteStatement = do
     rule <- rwRule
     whitespace
     return (Rewrite rule)
+
+proofAssertStatement :: Parser ValidationStatement
+proofAssertStatement = do
+    void (string "affirm")
+    whitespace
+    p <- proof
+    whitespace
+    return (ProofAssert p)
+
+proof :: Parser VariableProof
+proof =
+    try
+        infixProof
+        <|> nonInfixProof
+
+nonInfixProof :: Parser VariableProof
+nonInfixProof =
+    concreteProof
+        <|> parensProof
+        <|> try functionProof
+        <|> try abstractProof
+
+infixProof :: Parser VariableProof
+infixProof = chainl1 nonInfixProof op
+  where
+    op = do
+        funct <- infixFunct
+        whitespace
+        return (\lproof rproof -> FApp funct [lproof, rproof])
+
+parensProof :: Parser VariableProof
+parensProof = parensParse proof
+
+functionProof :: Parser VariableProof
+functionProof = do
+    fname <- variable
+    let builtinFunct = case fname of
+            "size" -> Size
+            "first" -> First
+            "last" -> Last
+            _ -> error "Functions in proofs only support builtins for now"
+    void (char '(')
+    whitespace
+    args <- proof `sepBy` skipWhitespace (char ',')
+    whitespace
+    void (char ')')
+    whitespace
+    return (FApp builtinFunct args)
+
+abstractProof :: Parser VariableProof
+abstractProof = do
+    p <- ATerm <$> variable
+    whitespace
+    return p
+
+concreteProof :: Parser VariableProof
+concreteProof = CTerm <$> value
 
 blockStatement :: Parser Statement
 blockStatement = do
@@ -122,14 +179,13 @@ rwRule = do
 -- otherwise we will parse the lhs of infix expressions
 -- as one of the other expression types,
 -- not matching the infix operator and rhs
--- TODO: After the reorder, we loop endlessly
 expression :: Parser Expression
 expression = try infixExpression <|> nonInfixExpression
 
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
     try fExpression
-        <|> valExpression
+        <|> (Val <$> value)
         <|> varExpression
         <|> parensExpression
 
@@ -152,28 +208,28 @@ curlyBracesParse = bracketsParse (char '{') (char '}')
 parensExpression :: Parser Expression
 parensExpression = parensParse expression
 
-valExpression :: Parser Expression
-valExpression = intExpression <|> listExpression
+value :: Parser Value
+value = vint <|> vlist
 
-intExpression :: Parser Expression
-intExpression = do
+vint :: Parser Value
+vint = do
     val <- many1 digit
     whitespace
-    return (Val (VInt (read val)))
+    return (VInt (read val))
 
-valToInteger :: Expression -> Integer
-valToInteger (Val (VInt i)) = i
+valToInteger :: Value -> Integer
+valToInteger (VInt i) = i
 valToInteger _ = error "Not an integer"
 
-listExpression :: Parser Expression
-listExpression = do
+vlist :: Parser Value
+vlist = do
     void (char '[')
     whitespace
-    vals <- intExpression `sepBy` skipWhitespace (char ',')
+    vals <- vint `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ']')
     whitespace
-    return (Val (VIntList (map valToInteger vals)))
+    return (VIntList (map valToInteger vals))
 
 varExpression :: Parser Expression
 varExpression = do

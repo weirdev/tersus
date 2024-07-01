@@ -317,20 +317,15 @@ iotaToValue iota (proof : ptail) = case proof of
     _ -> iotaToValue iota ptail
 
 varProofToIotaProof :: VariableProof -> VState -> IotaProof
-varProofToIotaProof (FApp (Rel rel) [ATerm var, CTerm val]) state =
+varProofToIotaProof (CTerm val) _ = CTerm val
+varProofToIotaProof (ATerm var) state =
     let maybeIotaval = vLookupVar state var
      in case maybeIotaval of
-            Just iotaval -> FApp (Rel rel) [ATerm iotaval, CTerm val]
+            Just iotaval -> ATerm iotaval
             _ -> error "Variable not found in proof map"
--- TODO: Support more than two arguments and non Rel functions
-varProofToIotaProof (FApp (Rel rel) [ATerm var1, ATerm var2]) state =
-    let maybeIotaval1 = vLookupVar state var1
-        maybeIotaval2 = vLookupVar state var2
-     in case (maybeIotaval1, maybeIotaval2) of
-            (Just iotaval1, Just iotaval2) ->
-                FApp (Rel rel) [ATerm iotaval1, ATerm iotaval2]
-            _ -> error "Variable not found in proof map"
-varProofToIotaProof _ _ = error "Only Eq relation supported"
+varProofToIotaProof (FApp funct args) state =
+    let iotaproofs = map (`varProofToIotaProof` state) args
+     in FApp funct iotaproofs
 
 -- reflProofsByProofs :: [Proof] -> [Proof] -> [Proof]
 -- reflProofsByProofs [] _ = []
