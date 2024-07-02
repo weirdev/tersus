@@ -1,6 +1,6 @@
 module TestTersus where
 
-import Data.Map (Map, empty, fromList, lookup)
+import Data.Map (Map, fromList, lookup)
 
 import Parse
 import Proof
@@ -114,7 +114,7 @@ testEvaluateFullContext =
 
 evalExprHelper :: Expression -> Value -> TestResult
 evalExprHelper expr expected =
-    let (mval, _) = evalExpression (State (ScopeState (Data.Map.empty, Continuations [], Nothing), Data.Map.empty)) expr
+    let (mval, _) = evalExpression initState expr
      in case mval of
             Just val -> testAssertEq val expected
             Nothing -> Just "Expression did not produce a value"
@@ -131,7 +131,7 @@ parseEvalReturningStmtHelper stmtStr expected =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case evalReturningBlock (State (ScopeState (Data.Map.empty, Continuations stmts, Just $ ScopeState (Data.Map.empty, emptyContinuations, Nothing)), Data.Map.empty)) of
+            Right (Block stmts) -> case evalReturningBlock (setPScope (initStateWStatements stmts) (Just emptyScopeState)) of
                 (_, Just val) -> testAssertEq val expected
                 (_, Nothing) -> Just "No value returned"
             Right _ -> Just "Not a block statement"
@@ -295,7 +295,7 @@ parseValReturningStmtHelper stmtStr expVar expected =
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
-            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) of
+            Right (Block stmts) -> case valReturningBlock (initVStateWStatements stmts) of
                 Ok (VState (VScopeState (_, proofs, _, _), _, _, _), Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
                 Ok (_, Nothing) -> Just "No value returned"
                 Error e -> Just $ "Validation failed with error: " ++ e
@@ -384,7 +384,7 @@ parseValFailStmtHelper stmtStr =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) of
+            Right (Block stmts) -> case valReturningBlock (initVStateWStatements stmts) of
                 Ok _ -> Just "Validation succeeded expected failure"
                 Error _ -> Nothing
             Right _ -> Just "Not a block statement"

@@ -9,8 +9,12 @@ import Data.Map (
 import TersusTypes
 import Utils
 
+initState :: State
+initState = State (emptyScopeState, empty)
+
 initStateWStatements :: [Statement] -> State
-initStateWStatements stmts = State (initScopeStateWStatements stmts, empty)
+initStateWStatements stmts = case initState of
+    State (_, ctxVals) -> State (initScopeStateWStatements stmts, ctxVals)
 
 initScopeStateWStatements :: [Statement] -> ScopeState
 initScopeStateWStatements stmts = ScopeState (empty, Continuations stmts, Nothing)
@@ -23,6 +27,12 @@ initVScopeStateWStatements stmts = VScopeState (empty, [], Continuations stmts, 
 
 emptyScopeState :: ScopeState
 emptyScopeState = ScopeState (empty, emptyContinuations, Nothing)
+
+setPScope :: State -> Maybe ScopeState -> State
+setPScope (State (scope, ctxVals)) p = State (scopeSetPScope scope p, ctxVals)
+
+scopeSetPScope :: ScopeState -> Maybe ScopeState -> ScopeState
+scopeSetPScope (ScopeState (vals, c, _)) p = ScopeState (vals, c, p)
 
 -- Lookup the value of a var in State, including parent scopes
 lookupVar :: State -> Variable -> Maybe Value

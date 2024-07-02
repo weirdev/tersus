@@ -45,7 +45,7 @@ evalIotaProofIfForIota iota proof proofs ctx =
 
 -- Public fns
 evaluate :: [Statement] -> State
-evaluate [] = State (emptyScopeState, empty)
+evaluate [] = initState
 evaluate l = evalBlock $ initStateWStatements l
 
 validate :: [Statement] -> Result VState String
