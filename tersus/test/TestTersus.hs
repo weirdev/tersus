@@ -4,7 +4,9 @@ import Data.Map (Map, empty, fromList, lookup)
 
 import Parse
 import Proof
+import ProofHelpers
 import TersusTypes
+import Utils
 
 -- Core Test data structures
 -- Test result is possible error output, else success
@@ -293,7 +295,7 @@ parseValReturningStmtHelper stmtStr expVar expected =
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
-            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) stmts of
+            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) of
                 Ok (VState (VScopeState (_, proofs, _, _), _, _, _), Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
                 Ok (_, Nothing) -> Just "No value returned"
                 Error e -> Just $ "Validation failed with error: " ++ e
@@ -382,9 +384,9 @@ parseValFailStmtHelper stmtStr =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) stmts of
+            Right (Block stmts) -> case valReturningBlock (VState (VScopeState (Data.Map.empty, [], Continuations stmts, Nothing), Data.Map.empty, [], iotalist)) of
                 Ok _ -> Just "Validation succeeded expected failure"
-                Error e -> Nothing
+                Error _ -> Nothing
             Right _ -> Just "Not a block statement"
 
 testParseValAffirmFail :: TestResult

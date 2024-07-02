@@ -2,8 +2,6 @@ module TersusTypes where
 
 import Data.Map (Map)
 
-data Result a e = Ok a | Error e deriving (Eq)
-
 type Variable = String
 data Funct = Size | First | Last | Plus | Minus | Rel Rel | Call deriving (Show, Eq)
 

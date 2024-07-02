@@ -23,7 +23,9 @@ library
   exposed-modules:
       Parse
       Proof
+      ProofHelpers
       TersusTypes
+      Utils
   other-modules:
       Paths_tersus
   autogen-modules:
