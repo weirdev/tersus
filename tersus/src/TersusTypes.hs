@@ -5,6 +5,7 @@ import Data.Map (Map)
 type Variable = String
 data Funct = Size | First | Last | Plus | Minus | Rel Rel | Call deriving (Show, Eq)
 
+data FunctBody = NativeFunct [Statement] | BuiltinFunct Funct deriving (Show, Eq)
 -- TODO: Generic list type
 data Value
     = VInt Integer
@@ -13,8 +14,9 @@ data Value
     | -- VFunct inputArgs inputArgAssertions body resultAssertions
       -- Result assertions may contain variables from inputArgs and "return" variable
       -- TODO: Real return slot rather than var
-      VFunct [Variable] [ValidationStatement] [Statement] [VariableProof]
+      VFunct [Variable] [ValidationStatement] FunctBody [VariableProof]
     deriving (Show, Eq)
+-- TODO: Call
 data Expression = Val Value | Var Variable | F Funct [Expression]
     deriving (Show, Eq)
 data ValidationStatement

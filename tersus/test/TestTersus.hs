@@ -91,25 +91,25 @@ testEvaluateFullContext =
             ]
             [("x", VInt 1), ("y", VInt 0)]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] [Return (Val (VInt 3))] []))
+            [ Assign "f" (Val (VFunct [] [] (NativeFunct [Return (Val (VInt 3))]) []))
             , Assign "result" (F Call [Var "f"])
             ]
-            [("result", VInt 3), ("f", VFunct [] [] [Return (Val (VInt 3))] [])]
+            [("result", VInt 3), ("f", VFunct [] [] (NativeFunct [Return (Val (VInt 3))]) [])]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] [Assign "y" (Val (VInt 2)), Return (Var "y")] []))
+            [ Assign "f" (Val (VFunct [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) []))
             , Assign "result" (F Call [Var "f"])
             ]
-            [("result", VInt 2), ("f", VFunct [] [] [Assign "y" (Val (VInt 2)), Return (Var "y")] [])]
+            [("result", VInt 2), ("f", VFunct [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) [])]
         , evalFCHelper
-            [ Assign "id" (Val (VFunct ["v"] [] [Return (Var "v")] []))
+            [ Assign "id" (Val (VFunct ["v"] [] (NativeFunct [Return (Var "v")]) []))
             , Assign "result" (F Call [Var "id", Val (VInt 7)])
             ]
-            [("result", VInt 7), ("id", VFunct ["v"] [] [Return (Var "v")] [])]
+            [("result", VInt 7), ("id", VFunct ["v"] [] (NativeFunct [Return (Var "v")]) [])]
         , evalFCHelper
-            [ Assign "add" (Val (VFunct ["l", "r"] [] [Return (F Plus [Var "l", Var "r"])] []))
+            [ Assign "add" (Val (VFunct ["l", "r"] [] (NativeFunct [Return (F Plus [Var "l", Var "r"])]) []))
             , Assign "result" (F Call [Var "add", Val (VInt 7), Val (VInt 13)])
             ]
-            [("result", VInt 20), ("add", VFunct ["l", "r"] [] [Return (F Plus [Var "l", Var "r"])] [])]
+            [("result", VInt 20), ("add", VFunct ["l", "r"] [] (NativeFunct [Return (F Plus [Var "l", Var "r"])]) [])]
         ]
 
 evalExprHelper :: Expression -> Value -> TestResult
@@ -164,7 +164,7 @@ testParseEvalWFunctDef =
         \  };\
         \  return add1;\
         \}"
-        (VFunct ["i"] [] [Return (F Plus [Var "i", Val (VInt 1)])] [])
+        (VFunct ["i"] [] (NativeFunct [Return (F Plus [Var "i", Val (VInt 1)])]) [])
 
 testParseEvalWUdfCall :: TestResult
 testParseEvalWUdfCall =
@@ -323,7 +323,7 @@ testParseValWFunctDef =
         \  return add1;\
         \}"
         "ret"
-        [FApp (Rel Eq) [ATerm "ret", CTerm (VFunct ["i"] [] [Return (F Plus [Var "i", Val (VInt 1)])] [])]]
+        [FApp (Rel Eq) [ATerm "ret", CTerm (VFunct ["i"] [] (NativeFunct [Return (F Plus [Var "i", Val (VInt 1)])]) [])]]
 
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =

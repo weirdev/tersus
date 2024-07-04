@@ -83,7 +83,7 @@ functStatement = do
     whitespace
     fnBody <- curlyBracesParse statementBlock
     whitespace
-    return (Assign var (Val (VFunct argNames [] fnBody [])))
+    return (Assign var (Val (VFunct argNames [] (NativeFunct fnBody) [])))
 
 validationStatement :: Parser Statement
 validationStatement =
@@ -132,6 +132,7 @@ parensProof = parensParse proof
 functionProof :: Parser VariableProof
 functionProof = do
     fname <- variable
+    -- TODO: Udf support
     let builtinFunct = case fname of
             "size" -> Size
             "first" -> First
@@ -251,12 +252,12 @@ fExpression = do
     whitespace
     void (char ')')
     whitespace
-    return
-        ( case builtinFunct of
-            Just funct -> F funct args
-            -- User defined function
-            Nothing -> F Call (Var fname : args)
-        )
+    return $ F Call (Var fname : args)
+        -- ( case builtinFunct of
+        --     Just funct -> F funct args
+        --     -- User defined function
+        --     Nothing -> F Call (Var fname : args)
+        -- )
 
 infixExpression :: Parser Expression
 infixExpression = chainl1 nonInfixExpression op

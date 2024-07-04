@@ -165,7 +165,7 @@ valRewrite state (Refl var) =
          in case oiota of
                 Nothing -> Error $ "Undefined variable: " ++ var
                 Just _ ->
-                    let newProofs = concatMap (reflProofsByProof proofs) proofs -- TODO: limit to proofs with iota
+                    let newProofs = reflProofsByProofs proofs proofs -- TODO: limit to proofs with iota
                      in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaCtx, proofCtx, iotaseq)
 valRewrite state (Eval var) =
     let (VState (VScopeState (iotas, proofs, c, pscope), iotaCtx, proofCtx, iotaseq)) = state
@@ -191,7 +191,7 @@ valRewrite state (EqToLtPlus1 var) =
                      in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs (iotaCtx, proofCtx)
                          in let withRefledNewProofs =
                                     withEvaledProofs
-                                        ++ concatMap (reflProofsByProof withEvaledProofs) withEvaledProofs -- TODO: Maybe limit to new proofs
+                                        ++ reflProofsByProofs withEvaledProofs withEvaledProofs -- TODO: Maybe limit to new proofs
                              in Ok $ VState (VScopeState (iotas, withRefledNewProofs, c, pscope), iotaCtx, proofCtx, iotaseq)
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
@@ -215,6 +215,7 @@ evalExpression sstate (F funct exprs) =
     let (State (scope, valCtx), vals) = evalExpressionList sstate exprs
      in (Just $ evalFunct funct valCtx vals, State (scope, valCtx))
 
+-- State -> iota of result -> expression -> Result [proofs about result iota] String
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression _ iota (Val val) = Ok [FApp (Rel Eq) [ATerm iota, CTerm val]]
 -- foldr (\iota _ -> [C iota Eq val]) [] miota
@@ -223,62 +224,71 @@ valExpression state iota (Var var) =
      in case omiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just oiota -> Ok [FApp (Rel Eq) [ATerm iota, ATerm oiota]]
-valExpression (VState (VScopeState (iotas, proofs, c, pscope), iotaCtx, proofCtx, iotaseq)) iota (F funct exprargs) =
-    let tiotalist = iotaseq
+valExpression (VState (scope, iotaCtx, proofCtx, iotaseq)) iota (F funct exprargs) =
+    let VScopeState (_, proofs, _, _) = scope
+     in let tiotalist = iotaseq
+         in let functResults = case funct of
+                    Call ->
+                        let (fnObjExpr : exprargs') = exprargs
+                         in let (niota : tiotalist') = tiotalist
+                             in let fnProofResult = valExpression (VState (scope, iotaCtx, proofCtx, tiotalist)) niota fnObjExpr
+                                 in case fnProofResult of
+                                        Error e -> Error e
+                                        Ok fnProofs ->
+                                            let reflOnceFnProofs = reflProofsByProofs fnProofs (proofs ++ proofCtx)
+                                             in case concreteValOfIotaMaybe niota (reflOnceFnProofs ++ fnProofs) of
+                                                    -- Keep call as funct
+                                                    Just (VFunct _ _ (NativeFunct{}) _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota funct exprargs
+                                                    -- TODO: (Temp) Replace funct Call with builtin for remainder of validation
+                                                    Just (VFunct _ _ (BuiltinFunct funct') _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist)) iota funct' exprargs'
+                                                    Nothing -> Error "Not able to determine function object for validation"
+                    _ -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist)) iota funct exprargs
+             in case functResults of
+                    Ok (flatfinputproofs, functProofs, niotas) ->
+                        Ok
+                            ( concatMap
+                                ( reflProofsByProof
+                                    [ FApp
+                                        (Rel Eq)
+                                        [ ATerm iota
+                                        , FApp funct (map ATerm niotas)
+                                        ]
+                                    ]
+                                )
+                                flatfinputproofs
+                                ++ functProofs
+                            )
+                    -- TODO: If cannot get concrete value use proof IO
+                    Error e -> Error e
+valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
+
+-- -> (argProofs, functresultproofs, new iotas)
+valFunctExprHelper :: VState -> Iota -> Funct -> [Expression] -> Result ([IotaProof], [IotaProof], [Iota]) String
+valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota funct exprargs =
+    let VScopeState (_, proofs, _, _) = scope
      in let (fInputProofResults, niotas) =
                 zipMap
                     exprargs
-                    tiotalist
-                    (flip (valExpression $ VState (VScopeState (iotas, proofs, c, pscope), iotaCtx, proofCtx, tiotalist))) -- proofs of input expression in terms of new iotas
+                    iotaseq
+                    -- TODO: remove new iotas from iotaseq before using below
+                    (flip (valExpression $ VState (scope, iotaCtx, proofCtx, iotaseq))) -- proofs of input expression in terms of new iotas
                     -- If finputproofs = [A niota rel oi] where oi is already defined, replace with the definition of oi
          in case flatResultMap id fInputProofResults of
                 Error e -> Error e
                 Ok finputproofs ->
                     let flatfinputproofs = concat finputproofs
                      in let refloncefiproofs =
-                                concatMap (reflProofsByProof flatfinputproofs) proofs
+                                reflProofsByProofs flatfinputproofs proofs
                          in let concreteProofs = filter proofConcrete flatfinputproofs -- C niota rel val
                              in let ps = refloncefiproofs ++ concreteProofs
                                  in case valFunct funct (iotaCtx, proofCtx) niotas ps iota of
-                                        Ok functProofs ->
-                                            Ok
-                                                ( concatMap
-                                                    ( reflProofsByProof
-                                                        [ FApp
-                                                            (Rel Eq)
-                                                            [ ATerm iota
-                                                            , FApp funct (map ATerm niotas)
-                                                            ]
-                                                        ]
-                                                    )
-                                                    flatfinputproofs
-                                                    ++ functProofs
-                                                )
+                                        Ok functProofs -> Ok (flatfinputproofs, functProofs, niotas)
                                         Error e -> Error e
-valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 
 evalFunct :: Funct -> Map Variable Value -> [Value] -> Value
-evalFunct Size _ [VIntList l] = VInt (fromIntegral (length l))
-evalFunct Size _ _ = error "Size only valid for IntList"
-evalFunct First _ [VIntList l] = VInt (head l)
-evalFunct First _ _ = error "First only valid for IntList"
-evalFunct Last _ [VIntList l] = VInt (last l)
-evalFunct Last _ _ = error "Last only valid for IntList"
-evalFunct Minus _ [VInt v1, VInt v2] = VInt (v1 - v2)
-evalFunct Minus _ _ = error "Plus only valid for two ints"
-evalFunct Plus _ [VInt v1, VInt v2] = VInt (v1 + v2)
-evalFunct Plus _ _ = error "Plus only valid for two ints"
-evalFunct (Rel Eq) _ [VInt v1, VInt v2] = VBool (v1 == v2)
-evalFunct (Rel Eq) _ _ = error "Eq only valid for two ints"
-evalFunct (Rel Lt) _ [VInt v1, VInt v2] = VBool (v1 < v2)
-evalFunct (Rel Lt) _ _ = error "Lt only valid for two ints"
-evalFunct (Rel Gt) _ [VInt v1, VInt v2] = VBool (v1 > v2)
-evalFunct (Rel Gt) _ _ = error "Rt only valid for two ints"
-evalFunct (Rel LtEq) _ [VInt v1, VInt v2] = VBool (v1 <= v2)
-evalFunct (Rel LtEq) _ _ = error "LtEq only valid for two ints"
-evalFunct (Rel GtEq) _ [VInt v1, VInt v2] = VBool (v1 >= v2)
-evalFunct (Rel GtEq) _ _ = error "GtEq only valid for two ints"
-evalFunct Call valCtx (VFunct vars _ block _ : args) =
+evalFunct Call valCtx (VFunct _ _ (BuiltinFunct funct) _ : args) =
+    evalFunct funct valCtx args
+evalFunct Call valCtx (VFunct vars _ (NativeFunct block) _ : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
@@ -286,6 +296,29 @@ evalFunct Call valCtx (VFunct vars _ block _ : args) =
              in case evalReturningBlock (State (scope, valCtx)) of
                     (_, Just val) -> val
                     _ -> error "Function did not return a value"
+evalFunct builtin _ args = evalBuiltinFunct builtin args
+
+evalBuiltinFunct :: Funct -> [Value] -> Value
+evalBuiltinFunct Size [VIntList l] = VInt (fromIntegral (length l))
+evalBuiltinFunct Size _ = error "Size only valid for IntList"
+evalBuiltinFunct First [VIntList l] = VInt (head l)
+evalBuiltinFunct First _ = error "First only valid for IntList"
+evalBuiltinFunct Last [VIntList l] = VInt (last l)
+evalBuiltinFunct Last _ = error "Last only valid for IntList"
+evalBuiltinFunct Minus [VInt v1, VInt v2] = VInt (v1 - v2)
+evalBuiltinFunct Minus _ = error "Plus only valid for two ints"
+evalBuiltinFunct Plus [VInt v1, VInt v2] = VInt (v1 + v2)
+evalBuiltinFunct Plus _ = error "Plus only valid for two ints"
+evalBuiltinFunct (Rel Eq) [VInt v1, VInt v2] = VBool (v1 == v2)
+evalBuiltinFunct (Rel Eq) _ = error "Eq only valid for two ints"
+evalBuiltinFunct (Rel Lt) [VInt v1, VInt v2] = VBool (v1 < v2)
+evalBuiltinFunct (Rel Lt) _ = error "Lt only valid for two ints"
+evalBuiltinFunct (Rel Gt) [VInt v1, VInt v2] = VBool (v1 > v2)
+evalBuiltinFunct (Rel Gt) _ = error "Rt only valid for two ints"
+evalBuiltinFunct (Rel LtEq) [VInt v1, VInt v2] = VBool (v1 <= v2)
+evalBuiltinFunct (Rel LtEq) _ = error "LtEq only valid for two ints"
+evalBuiltinFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
+evalBuiltinFunct (Rel GtEq) _ = error "GtEq only valid for two ints"
 
 concreteValsOfAllMaybe :: [[IotaProof]] -> Maybe [Value]
 concreteValsOfAllMaybe [] = Just []
@@ -298,10 +331,12 @@ concreteValsOfAllMaybe (ps : pst) = case ps of
 iotaMapToConcreteMap :: (Ord a) => Map a Iota -> [IotaProof] -> Map a Value
 iotaMapToConcreteMap imap proofs =
     Data.Map.fromList $
-        mapMaybe ( \(k, i) -> case iotaToValue i proofs of
+        mapMaybe
+            ( \(k, i) -> case iotaToValue i proofs of
                 Just val -> Just (k, val)
                 Nothing -> Nothing
-            ) (Data.Map.toList imap)
+            )
+            (Data.Map.toList imap)
 
 concreteValOfIotaMaybe :: Iota -> [IotaProof] -> Maybe Value
 concreteValOfIotaMaybe _ [] = Nothing
@@ -322,6 +357,7 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA) = iotaB)
 valFunct :: Funct -> (Map Variable Iota, [IotaProof]) -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
 valFunct funct ctx iiotas iproofs retiota =
+    -- TODO: Refactor with concreteValOfIotaMaybe
     let iEqProofs =
             map
                 ( \iiota ->

@@ -6,11 +6,12 @@ import Data.Map (
     lookup,
  )
 
+import StdLib
 import TersusTypes
 import Utils
 
 initState :: State
-initState = State (emptyScopeState, empty)
+initState = State (emptyScopeState, stdLibCtx)
 
 initStateWStatements :: [Statement] -> State
 initStateWStatements stmts = case initState of
@@ -20,7 +21,8 @@ initScopeStateWStatements :: [Statement] -> ScopeState
 initScopeStateWStatements stmts = ScopeState (empty, Continuations stmts, Nothing)
 
 initVStateWStatements :: [Statement] -> VState
-initVStateWStatements stmts = VState (initVScopeStateWStatements stmts, empty, [], iotalist)
+initVStateWStatements stmts = let (iotaCtx, proofCtx) = stdLibValCtx
+    in VState (initVScopeStateWStatements stmts, iotaCtx, proofCtx, iotalist)
 
 initVScopeStateWStatements :: [Statement] -> VScopeState
 initVScopeStateWStatements stmts = VScopeState (empty, [], Continuations stmts, Nothing)

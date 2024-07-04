@@ -24,6 +24,7 @@ library
       Parse
       Proof
       ProofHelpers
+      StdLib
       TersusTypes
       Utils
   other-modules:
