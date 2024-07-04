@@ -249,7 +249,7 @@ fExpression = do
     whitespace
     void (char ')')
     whitespace
-    return $ F (Var fname : args)
+    return $ F (Var fname) args
 
 infixExpression :: Parser Expression
 infixExpression = chainl1 nonInfixExpression op
@@ -258,7 +258,7 @@ infixExpression = chainl1 nonInfixExpression op
         funct <- infixFunct
         whitespace
         -- TODO: Function should be Var expression like fExpression produces not Val
-        return (\lexpr rexpr -> F [Val (builtinFunct funct), lexpr, rexpr])
+        return (\lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr])
 
 infixFunct :: Parser BuiltinFunct
 infixFunct = arithmeticFunct <|> relationFunct

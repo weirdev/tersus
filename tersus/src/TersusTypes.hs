@@ -17,7 +17,7 @@ data Value
       VFunct [Variable] [ValidationStatement] FunctBody [VariableProof]
     deriving (Show, Eq)
 -- TODO: Call
-data Expression = Val Value | Var Variable | F [Expression]
+data Expression = Val Value | Var Variable | F Expression [Expression]
     deriving (Show, Eq)
 data ValidationStatement
     = Rewrite RwRule
