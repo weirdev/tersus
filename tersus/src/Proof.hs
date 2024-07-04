@@ -238,11 +238,12 @@ valExpression (VState (scope, iotaCtx, proofCtx, iotaseq)) iota (F funct exprarg
                                             let reflOnceFnProofs = reflProofsByProofs fnProofs (proofs ++ proofCtx)
                                              in case concreteValOfIotaMaybe niota (reflOnceFnProofs ++ fnProofs) of
                                                     -- Keep call as funct
-                                                    Just (VFunct _ _ (NativeFunct{}) _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota funct exprargs
+                                                    -- Just (VFunct _ _ (NativeFunct{}) _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota funct exprargs
                                                     -- TODO: (Temp) Replace funct Call with builtin for remainder of validation
-                                                    Just (VFunct _ _ (BuiltinFunct funct') _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist)) iota funct' exprargs'
+                                                    -- Just (VFunct _ _ (BuiltinFunct funct') _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist)) iota funct' exprargs'
+                                                    Just _ -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota funct exprargs
                                                     Nothing -> Error "Not able to determine function object for validation"
-                    _ -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist)) iota funct exprargs
+                    _ -> error "Old builtin no longer supported"
              in case functResults of
                     Ok (flatfinputproofs, functProofs, niotas) ->
                         Ok
@@ -278,7 +279,7 @@ valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota funct expra
                 Ok finputproofs ->
                     let flatfinputproofs = concat finputproofs
                      in let refloncefiproofs =
-                                reflProofsByProofs flatfinputproofs proofs
+                                reflProofsByProofs flatfinputproofs (proofs ++ proofCtx)
                          in let concreteProofs = filter proofConcrete flatfinputproofs -- C niota rel val
                              in let ps = refloncefiproofs ++ concreteProofs
                                  in case valFunct funct (iotaCtx, proofCtx) niotas ps iota of
@@ -320,14 +321,6 @@ evalBuiltinFunct (Rel LtEq) _ = error "LtEq only valid for two ints"
 evalBuiltinFunct (Rel GtEq) [VInt v1, VInt v2] = VBool (v1 >= v2)
 evalBuiltinFunct (Rel GtEq) _ = error "GtEq only valid for two ints"
 
-concreteValsOfAllMaybe :: [[IotaProof]] -> Maybe [Value]
-concreteValsOfAllMaybe [] = Just []
-concreteValsOfAllMaybe (ps : pst) = case ps of
-    FApp (Rel Eq) [ATerm _, CTerm l] : _ -> case concreteValsOfAllMaybe pst of
-        Just vt -> Just (l : vt)
-        Nothing -> Nothing
-    _ -> Nothing
-
 iotaMapToConcreteMap :: (Ord a) => Map a Iota -> [IotaProof] -> Map a Value
 iotaMapToConcreteMap imap proofs =
     Data.Map.fromList $
@@ -357,26 +350,18 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA) = iotaB)
 valFunct :: Funct -> (Map Variable Iota, [IotaProof]) -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
 valFunct funct ctx iiotas iproofs retiota =
-    -- TODO: Refactor with concreteValOfIotaMaybe
-    let iEqProofs =
-            map
-                ( \iiota ->
-                    filter
-                        proofConcrete
-                        (filter (proofRel Eq) (filter (proofLIota iiota) iproofs))
-                )
-                iiotas
-     in let vals = concreteValsOfAllMaybe iEqProofs
-         in case vals of
-                Just vs ->
-                    let (iotaCtx, proofCtx) = ctx
-                     in Ok [FApp (Rel Eq) [ATerm retiota, CTerm (evalFunct funct (iotaMapToConcreteMap iotaCtx proofCtx) vs)]]
-                Nothing ->
-                    Error
-                        ( "Funct '"
-                            ++ show funct
-                            ++ "' agrs not validated. Input Iotas: "
-                            ++ show iiotas
-                            ++ ". Input Proofs: "
-                            ++ show iproofs
-                        )
+    let vals =
+            flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
+     in case vals of
+            Just vs ->
+                let (iotaCtx, proofCtx) = ctx
+                 in Ok [FApp (Rel Eq) [ATerm retiota, CTerm (evalFunct funct (iotaMapToConcreteMap iotaCtx proofCtx) vs)]]
+            Nothing ->
+                Error
+                    ( "Funct '"
+                        ++ show funct
+                        ++ "' agrs not validated. Input Iotas: "
+                        ++ show iiotas
+                        ++ ". Input Proofs: "
+                        ++ show iproofs
+                    )
