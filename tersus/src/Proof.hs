@@ -298,7 +298,7 @@ evalFunct valCtx (VFunct vars _ (NativeFunct block) _ : args) =
                     (_, Just val) -> val
                     _ -> error "Function did not return a value"
 
-evalBuiltinFunct :: Funct -> [Value] -> Value
+evalBuiltinFunct :: BuiltinFunct -> [Value] -> Value
 evalBuiltinFunct Size [VIntList l] = VInt (fromIntegral (length l))
 evalBuiltinFunct Size _ = error "Size only valid for IntList"
 evalBuiltinFunct First [VIntList l] = VInt (head l)

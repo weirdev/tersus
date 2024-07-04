@@ -4,7 +4,7 @@ import Data.Map (Map, fromList, toList)
 
 import TersusTypes
 
-builtinFunct :: Funct -> Value
+builtinFunct :: BuiltinFunct -> Value
 builtinFunct Size = VFunct ["list"] [] (BuiltinFunct Size) []
 builtinFunct First = VFunct ["list"] [] (BuiltinFunct First) []
 builtinFunct Last = VFunct ["list"] [] (BuiltinFunct Last) []

@@ -260,10 +260,10 @@ infixExpression = chainl1 nonInfixExpression op
         -- TODO: Function should be Var expression like fExpression produces not Val
         return (\lexpr rexpr -> F [Val (builtinFunct funct), lexpr, rexpr])
 
-infixFunct :: Parser Funct
+infixFunct :: Parser BuiltinFunct
 infixFunct = arithmeticFunct <|> relationFunct
 
-arithmeticFunct :: Parser Funct
+arithmeticFunct :: Parser BuiltinFunct
 arithmeticFunct = do
     op <- oneOf "+-" -- TODO: Add */
     whitespace
@@ -274,7 +274,7 @@ arithmeticFunct = do
             _ -> error "Unknown operator"
         )
 
-relationFunct :: Parser Funct
+relationFunct :: Parser BuiltinFunct
 relationFunct = do
     relstr <- many1 $ oneOf "=<>"
     whitespace

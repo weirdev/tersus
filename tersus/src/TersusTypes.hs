@@ -3,9 +3,9 @@ module TersusTypes where
 import Data.Map (Map)
 
 type Variable = String
-data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
+data BuiltinFunct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
 
-data FunctBody = NativeFunct [Statement] | BuiltinFunct Funct deriving (Show, Eq)
+data FunctBody = NativeFunct [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq)
 -- TODO: Generic list type
 data Value
     = VInt Integer
@@ -43,11 +43,11 @@ newtype State = State (ScopeState, Map Variable Value)
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 type Iota = String
-data Proof i = FApp Funct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
+data Proof i = FApp BuiltinFunct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 
--- TODO: As with Funct, the rule name should be a separate type from the arguments
+-- TODO: As with BuiltinFunct, the rule name should be a separate type from the arguments
 data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 newtype VScopeState

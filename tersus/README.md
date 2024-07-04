@@ -2,7 +2,7 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
 0.75. Unify function call model, builtin and user defined
-    Remove "Call" Funct, special eval slot for function to be called
+    special eval slot for function to be called
     Eval
     Validate
 0. Validate functions
