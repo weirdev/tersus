@@ -3,7 +3,7 @@ module TersusTypes where
 import Data.Map (Map)
 
 type Variable = String
-data Funct = Size | First | Last | Plus | Minus | Rel Rel | Call deriving (Show, Eq)
+data Funct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
 
 data FunctBody = NativeFunct [Statement] | BuiltinFunct Funct deriving (Show, Eq)
 -- TODO: Generic list type
@@ -17,7 +17,7 @@ data Value
       VFunct [Variable] [ValidationStatement] FunctBody [VariableProof]
     deriving (Show, Eq)
 -- TODO: Call
-data Expression = Val Value | Var Variable | F Funct [Expression]
+data Expression = Val Value | Var Variable | F [Expression]
     deriving (Show, Eq)
 data ValidationStatement
     = Rewrite RwRule

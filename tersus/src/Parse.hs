@@ -5,6 +5,8 @@ import Text.Parsec.String (Parser)
 
 import Control.Monad (void)
 import Data.Char (isDigit, isLetter)
+
+import StdLib
 import TersusTypes
 
 -- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
@@ -241,23 +243,13 @@ varExpression = do
 fExpression :: Parser Expression
 fExpression = do
     fname <- variable
-    let builtinFunct = case fname of
-            "size" -> Just Size
-            "first" -> Just First
-            "last" -> Just Last
-            _ -> Nothing
     void (char '(')
     whitespace
     args <- expression `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ')')
     whitespace
-    return $ F Call (Var fname : args)
-        -- ( case builtinFunct of
-        --     Just funct -> F funct args
-        --     -- User defined function
-        --     Nothing -> F Call (Var fname : args)
-        -- )
+    return $ F (Var fname : args)
 
 infixExpression :: Parser Expression
 infixExpression = chainl1 nonInfixExpression op
@@ -265,7 +257,8 @@ infixExpression = chainl1 nonInfixExpression op
     op = do
         funct <- infixFunct
         whitespace
-        return (\lexpr rexpr -> F funct [lexpr, rexpr])
+        -- TODO: Function should be Var expression like fExpression produces not Val
+        return (\lexpr rexpr -> F [Val (builtinFunct funct), lexpr, rexpr])
 
 infixFunct :: Parser Funct
 infixFunct = arithmeticFunct <|> relationFunct

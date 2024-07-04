@@ -11,6 +11,7 @@ import Data.Map (
 import Data.Maybe (mapMaybe)
 
 import ProofHelpers
+import StdLib
 import TersusTypes
 import Utils
 
@@ -24,7 +25,7 @@ evalIotaProof (FApp (Rel Eq) [ATerm iota, FApp funct args]) proofs ctx =
             -- TODO: Produce FApp with CTerm
             Just values ->
                 let (iotaCtx, proofCtx) = ctx
-                 in [FApp (Rel Eq) [ATerm iota, CTerm $ evalFunct funct (iotaMapToConcreteMap iotaCtx proofCtx) values]]
+                 in [FApp (Rel Eq) [ATerm iota, CTerm $ evalFunct (iotaMapToConcreteMap iotaCtx proofCtx) (builtinFunct funct : values)]]
             _ -> []
         _ -> []
 evalIotaProof _ _ _ = []
@@ -211,9 +212,9 @@ evalExpression state (Var var) =
      in case mval of
             Just _ -> (mval, state)
             Nothing -> error ("Undefined variable: " ++ var)
-evalExpression sstate (F funct exprs) =
+evalExpression sstate (F exprs) =
     let (State (scope, valCtx), vals) = evalExpressionList sstate exprs
-     in (Just $ evalFunct funct valCtx vals, State (scope, valCtx))
+     in (Just $ evalFunct valCtx vals, State (scope, valCtx))
 
 -- State -> iota of result -> expression -> Result [proofs about result iota] String
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
@@ -224,48 +225,47 @@ valExpression state iota (Var var) =
      in case omiota of
             Nothing -> Error $ "Undefined variable: " ++ var
             Just oiota -> Ok [FApp (Rel Eq) [ATerm iota, ATerm oiota]]
-valExpression (VState (scope, iotaCtx, proofCtx, iotaseq)) iota (F funct exprargs) =
+valExpression (VState (scope, iotaCtx, proofCtx, iotaseq)) iota (F exprargs) =
     let VScopeState (_, proofs, _, _) = scope
      in let tiotalist = iotaseq
-         in let functResults = case funct of
-                    Call ->
-                        let (fnObjExpr : exprargs') = exprargs
-                         in let (niota : tiotalist') = tiotalist
-                             in let fnProofResult = valExpression (VState (scope, iotaCtx, proofCtx, tiotalist)) niota fnObjExpr
-                                 in case fnProofResult of
-                                        Error e -> Error e
-                                        Ok fnProofs ->
-                                            let reflOnceFnProofs = reflProofsByProofs fnProofs (proofs ++ proofCtx)
-                                             in case concreteValOfIotaMaybe niota (reflOnceFnProofs ++ fnProofs) of
-                                                    -- Keep call as funct
-                                                    -- Just (VFunct _ _ (NativeFunct{}) _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota funct exprargs
-                                                    -- TODO: (Temp) Replace funct Call with builtin for remainder of validation
-                                                    -- Just (VFunct _ _ (BuiltinFunct funct') _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist)) iota funct' exprargs'
-                                                    Just _ -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota funct exprargs
-                                                    Nothing -> Error "Not able to determine function object for validation"
-                    _ -> error "Old builtin no longer supported"
+         in let functResults =
+                    let (fnObjExpr : exprargs') = exprargs
+                     in let (niota : tiotalist') = tiotalist
+                         in let fnProofResult = valExpression (VState (scope, iotaCtx, proofCtx, tiotalist)) niota fnObjExpr
+                             in case fnProofResult of
+                                    Error e -> Error e
+                                    Ok fnProofs ->
+                                        let reflOnceFnProofs = reflProofsByProofs fnProofs (proofs ++ proofCtx)
+                                         in case concreteValOfIotaMaybe niota (reflOnceFnProofs ++ fnProofs) of
+                                                -- Keep call as funct
+                                                -- Just (VFunct _ _ (NativeFunct{}) _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota funct exprargs
+                                                -- TODO: (Temp) Replace funct Call with builtin for remainder of validation
+                                                -- Just (VFunct _ _ (BuiltinFunct funct') _) -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist)) iota funct' exprargs'
+                                                Just _ -> valFunctExprHelper (VState (scope, iotaCtx, proofCtx, tiotalist')) iota exprargs
+                                                Nothing -> Error "Not able to determine function object for validation"
              in case functResults of
                     Ok (flatfinputproofs, functProofs, niotas) ->
                         Ok
-                            ( concatMap
-                                ( reflProofsByProof
-                                    [ FApp
-                                        (Rel Eq)
-                                        [ ATerm iota
-                                        , FApp funct (map ATerm niotas)
-                                        ]
-                                    ]
-                                )
-                                flatfinputproofs
-                                ++ functProofs
-                            )
+                            -- TODO: Add back
+                            -- (
+                            -- reflProofsByProofs
+                            -- [ FApp
+                            --     (Rel Eq)
+                            --     [ ATerm iota
+                            --     , FApp funct (map ATerm niotas)
+                            --     ]
+                            -- ]
+                            -- flatfinputproofs
+                            -- ++
+                            functProofs
+                    -- )
                     -- TODO: If cannot get concrete value use proof IO
                     Error e -> Error e
 valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 
 -- -> (argProofs, functresultproofs, new iotas)
-valFunctExprHelper :: VState -> Iota -> Funct -> [Expression] -> Result ([IotaProof], [IotaProof], [Iota]) String
-valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota funct exprargs =
+valFunctExprHelper :: VState -> Iota -> [Expression] -> Result ([IotaProof], [IotaProof], [Iota]) String
+valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota exprargs =
     let VScopeState (_, proofs, _, _) = scope
      in let (fInputProofResults, niotas) =
                 zipMap
@@ -282,14 +282,14 @@ valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota funct expra
                                 reflProofsByProofs flatfinputproofs (proofs ++ proofCtx)
                          in let concreteProofs = filter proofConcrete flatfinputproofs -- C niota rel val
                              in let ps = refloncefiproofs ++ concreteProofs
-                                 in case valFunct funct (iotaCtx, proofCtx) niotas ps iota of
+                                 in case valFunct (iotaCtx, proofCtx) niotas ps iota of
                                         Ok functProofs -> Ok (flatfinputproofs, functProofs, niotas)
                                         Error e -> Error e
 
-evalFunct :: Funct -> Map Variable Value -> [Value] -> Value
-evalFunct Call valCtx (VFunct _ _ (BuiltinFunct funct) _ : args) =
-    evalFunct funct valCtx args
-evalFunct Call valCtx (VFunct vars _ (NativeFunct block) _ : args) =
+evalFunct :: Map Variable Value -> [Value] -> Value
+evalFunct valCtx (VFunct _ _ (BuiltinFunct builtin) _ : args) =
+    evalBuiltinFunct builtin args
+evalFunct valCtx (VFunct vars _ (NativeFunct block) _ : args) =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
@@ -297,7 +297,6 @@ evalFunct Call valCtx (VFunct vars _ (NativeFunct block) _ : args) =
              in case evalReturningBlock (State (scope, valCtx)) of
                     (_, Just val) -> val
                     _ -> error "Function did not return a value"
-evalFunct builtin _ args = evalBuiltinFunct builtin args
 
 evalBuiltinFunct :: Funct -> [Value] -> Value
 evalBuiltinFunct Size [VIntList l] = VInt (fromIntegral (length l))
@@ -348,19 +347,17 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA=[5, 4]) = iotaB=2)
 -- Later update to produce abstract FApp proofs
 -- (ex. size(iotaA) = iotaB)
-valFunct :: Funct -> (Map Variable Iota, [IotaProof]) -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
-valFunct funct ctx iiotas iproofs retiota =
+valFunct :: (Map Variable Iota, [IotaProof]) -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
+valFunct ctx iiotas iproofs retiota =
     let vals =
             flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
      in case vals of
             Just vs ->
                 let (iotaCtx, proofCtx) = ctx
-                 in Ok [FApp (Rel Eq) [ATerm retiota, CTerm (evalFunct funct (iotaMapToConcreteMap iotaCtx proofCtx) vs)]]
+                 in Ok [FApp (Rel Eq) [ATerm retiota, CTerm (evalFunct (iotaMapToConcreteMap iotaCtx proofCtx) vs)]]
             Nothing ->
                 Error
-                    ( "Funct '"
-                        ++ show funct
-                        ++ "' agrs not validated. Input Iotas: "
+                    ( "Funct agrs not validated. Input Iotas: "
                         ++ show iiotas
                         ++ ". Input Proofs: "
                         ++ show iproofs
