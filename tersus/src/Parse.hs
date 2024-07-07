@@ -126,7 +126,7 @@ infixProof = chainl1 nonInfixProof op
     op = do
         funct <- infixFunct
         whitespace
-        return (\lproof rproof -> FApp funct [lproof, rproof])
+        return (\lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof])
 
 parensProof :: Parser VariableProof
 parensProof = parensParse proof
@@ -135,7 +135,7 @@ functionProof :: Parser VariableProof
 functionProof = do
     fname <- variable
     -- TODO: Udf support
-    let builtinFunct = case fname of
+    let funct = case fname of
             "size" -> Size
             "first" -> First
             "last" -> Last
@@ -146,7 +146,7 @@ functionProof = do
     whitespace
     void (char ')')
     whitespace
-    return (FApp builtinFunct args)
+    return (FApp (CTerm (builtinFunct funct)) args)
 
 abstractProof :: Parser VariableProof
 abstractProof = do

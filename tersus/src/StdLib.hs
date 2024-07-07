@@ -27,6 +27,9 @@ stdLibCtx =
         , (">=", builtinFunct (Rel GtEq))
         ]
 
+eqProof :: IotaProof
+eqProof = CTerm (builtinFunct (Rel Eq))
+
 stdLibValCtx :: (Map Variable Iota, [IotaProof])
 stdLibValCtx = stdLibCtxToValCtx stdLibCtx
 
@@ -40,6 +43,6 @@ stdLibCtxToValCtxHelper :: [(Variable, Value)] -> ([(Variable, Iota)], [IotaProo
 stdLibCtxToValCtxHelper [] = ([], [])
 stdLibCtxToValCtxHelper ((var, functDef) : rest) =
     let newVarIota = (var, var)
-     in let newProof = FApp (Rel Eq) [ATerm var, CTerm functDef]
+     in let newProof = FApp eqProof [ATerm var, CTerm functDef]
          in let (restVarIota, restProof) = stdLibCtxToValCtxHelper rest
              in (newVarIota : restVarIota, newProof : restProof)

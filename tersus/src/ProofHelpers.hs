@@ -210,16 +210,16 @@ proofOnlyOfIotasOrConst iotas (FApp _ proofs) = all (proofOnlyOfIotasOrConst iot
 
 -- Does the proof use the given relation
 proofRel :: Rel -> IotaProof -> Bool
-proofRel rel (FApp (Rel prel) _) = prel == rel
+proofRel rel (FApp funct _) = funct == CTerm (builtinFunct (Rel rel))
 proofRel _ _ = False
 
 -- Is the proof concrete
 abstractLhsEqConcreteRhs :: IotaProof -> Bool
-abstractLhsEqConcreteRhs (FApp (Rel Eq) [ATerm _, CTerm _]) = True
+abstractLhsEqConcreteRhs (FApp funct [ATerm _, CTerm _]) = funct == CTerm (builtinFunct (Rel Eq))
 abstractLhsEqConcreteRhs _ = False
 
 abstractLhsEqAbstractRhs :: IotaProof -> Bool
-abstractLhsEqAbstractRhs (FApp (Rel Eq) [ATerm _, ATerm _]) = True
+abstractLhsEqAbstractRhs (FApp funct [ATerm _, ATerm _]) = funct == CTerm (builtinFunct (Rel Eq))
 abstractLhsEqAbstractRhs _ = False
 
 -- replaceLIotas :: [Proof] -> Iota -> [Proof]
@@ -234,45 +234,47 @@ abstractLhsEqAbstractRhs _ = False
 -- Given an eqality relation, construct a new proof by replacing
 -- instances of the LHS iota (from the equality) with the RHS iota or value
 reflProofByProof :: IotaProof -> IotaProof -> Maybe IotaProof
-reflProofByProof proof (FApp (Rel Eq) [ATerm iota, ATerm oiota]) = case proof of
-    ATerm li
-        | li == iota ->
-            Just (ATerm oiota)
-    FApp (Rel Eq) [ATerm li, CTerm val]
-        | li == oiota ->
-            Just (FApp (Rel Eq) [ATerm oiota, CTerm val])
-    -- TODO: This should apply recursively to the entire proof structure
-    FApp (Rel Eq) [ATerm li, rhs] ->
-        case reflProofByProof rhs (FApp (Rel Eq) [ATerm iota, ATerm oiota]) of
-            Just newRhs -> Just (FApp (Rel Eq) [ATerm li, newRhs])
-            _ -> Nothing
-    -- TODO: This should apply to all arguments rather than arbitrarily the first
-    FApp funct (ATerm fi : rtaili)
-        | fi == iota ->
-            Just (FApp funct (ATerm oiota : rtaili))
-    _ -> Nothing
-reflProofByProof proof (FApp (Rel Eq) [ATerm iota, CTerm val]) = case proof of
-    -- TODO: This should apply to all arguments rather than arbitrarily the second
-    FApp funct [ATerm li, ATerm ri]
-        | ri == iota ->
-            Just (FApp funct [ATerm li, CTerm val])
-    FApp (Rel Eq) [ATerm li, CTerm lval]
-        | val == lval && iota /= li ->
-            Just (FApp (Rel Eq) [ATerm iota, ATerm li])
-    _ -> Nothing
+reflProofByProof proof (FApp funct [ATerm iota, ATerm oiota]) | funct == eqProof =
+    case proof of
+        ATerm li
+            | li == iota ->
+                Just (ATerm oiota)
+        FApp funct [ATerm li, CTerm val]
+            | li == oiota && funct == eqProof ->
+                Just (FApp eqProof [ATerm oiota, CTerm val])
+        -- TODO: This should apply recursively to the entire proof structure
+        FApp funct [ATerm li, rhs] | funct == eqProof ->
+            case reflProofByProof rhs (FApp eqProof [ATerm iota, ATerm oiota]) of
+                Just newRhs -> Just (FApp eqProof [ATerm li, newRhs])
+                _ -> Nothing
+        -- TODO: This should apply to all arguments rather than arbitrarily the first
+        FApp funct (ATerm fi : rtaili)
+            | fi == iota ->
+                Just (FApp funct (ATerm oiota : rtaili))
+        _ -> Nothing
+reflProofByProof proof (FApp funct [ATerm iota, CTerm val]) | funct == eqProof =
+    case proof of
+        -- TODO: This should apply to all arguments rather than arbitrarily the second
+        FApp funct [ATerm li, ATerm ri]
+            | ri == iota ->
+                Just (FApp funct [ATerm li, CTerm val])
+        FApp funct [ATerm li, CTerm lval]
+            | val == lval && iota /= li && funct == eqProof ->
+                Just (FApp eqProof [ATerm iota, ATerm li])
+        _ -> Nothing
 reflProofByProof _ _ = error "Only Eq relation supported"
 
 -- Given an eqality relation, construct new proofs by replacing the
 -- LHS iota with the RHS iota or value
 reflProofsByProof :: [IotaProof] -> IotaProof -> [IotaProof]
-reflProofsByProof (proof : ptail) (FApp (Rel Eq) [ATerm iota, ATerm oiota]) =
-    case reflProofByProof proof (FApp (Rel Eq) [ATerm iota, ATerm oiota]) of
-        Just newProof -> newProof : reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, ATerm oiota])
-        _ -> reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, ATerm oiota])
-reflProofsByProof (proof : ptail) (FApp (Rel Eq) [ATerm iota, CTerm val]) =
-    case reflProofByProof proof (FApp (Rel Eq) [ATerm iota, CTerm val]) of
-        Just newProof -> newProof : reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, CTerm val])
-        _ -> reflProofsByProof ptail (FApp (Rel Eq) [ATerm iota, CTerm val])
+reflProofsByProof (proof : ptail) (FApp funct [ATerm iota, ATerm oiota]) | funct == eqProof =
+    case reflProofByProof proof (FApp eqProof [ATerm iota, ATerm oiota]) of
+        Just newProof -> newProof : reflProofsByProof ptail (FApp eqProof [ATerm iota, ATerm oiota])
+        _ -> reflProofsByProof ptail (FApp eqProof [ATerm iota, ATerm oiota])
+reflProofsByProof (proof : ptail) (FApp funct [ATerm iota, CTerm val]) | funct == eqProof =
+    case reflProofByProof proof (FApp eqProof [ATerm iota, CTerm val]) of
+        Just newProof -> newProof : reflProofsByProof ptail (FApp eqProof [ATerm iota, CTerm val])
+        _ -> reflProofsByProof ptail (FApp eqProof [ATerm iota, CTerm val])
 reflProofsByProof _ _ = []
 
 -- Given a list of iotas and a list of proofs,
@@ -292,7 +294,7 @@ iotasToValues (iota : itail) proofs =
 iotaToValue :: Iota -> [IotaProof] -> Maybe Value
 iotaToValue _ [] = Nothing
 iotaToValue iota (proof : ptail) = case proof of
-    FApp (Rel Eq) [ATerm piota, CTerm val] | piota == iota -> Just val
+    FApp eqProof [ATerm piota, CTerm val] | piota == iota -> Just val
     _ -> iotaToValue iota ptail
 
 varProofToIotaProof :: VariableProof -> VState -> IotaProof

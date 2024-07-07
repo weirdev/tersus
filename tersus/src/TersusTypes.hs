@@ -43,7 +43,8 @@ newtype State = State (ScopeState, Map Variable Value)
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 type Iota = String
-data Proof i = FApp BuiltinFunct [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
+-- Function being applied, arguments
+data Proof i = FApp (Proof i) [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 
