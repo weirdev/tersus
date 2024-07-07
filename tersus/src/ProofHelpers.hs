@@ -214,13 +214,13 @@ proofRel rel (FApp (Rel prel) _) = prel == rel
 proofRel _ _ = False
 
 -- Is the proof concrete
-proofConcrete :: IotaProof -> Bool
-proofConcrete (FApp (Rel Eq) [ATerm _, CTerm _]) = True
-proofConcrete _ = False
+abstractLhsEqConcreteRhs :: IotaProof -> Bool
+abstractLhsEqConcreteRhs (FApp (Rel Eq) [ATerm _, CTerm _]) = True
+abstractLhsEqConcreteRhs _ = False
 
-proofAbstract :: IotaProof -> Bool
-proofAbstract (FApp (Rel Eq) [ATerm _, ATerm _]) = True
-proofAbstract _ = False
+abstractLhsEqAbstractRhs :: IotaProof -> Bool
+abstractLhsEqAbstractRhs (FApp (Rel Eq) [ATerm _, ATerm _]) = True
+abstractLhsEqAbstractRhs _ = False
 
 -- replaceLIotas :: [Proof] -> Iota -> [Proof]
 -- replaceLIotas [] _ = []

@@ -275,7 +275,7 @@ valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota fnexpr expr
                     let flatfinputproofs = concat finputproofs
                      in let refloncefiproofs =
                                 reflProofsByProofs flatfinputproofs (proofs ++ proofCtx)
-                         in let concreteProofs = filter proofConcrete flatfinputproofs -- C niota rel val
+                         in let concreteProofs = filter abstractLhsEqConcreteRhs flatfinputproofs -- C niota rel val
                              in let ps = refloncefiproofs ++ concreteProofs
                                in let (fniota : argiotas) = niotas
                                  in case valFunct fniota (iotaCtx, proofCtx) argiotas ps iota of
