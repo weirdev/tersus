@@ -21,8 +21,9 @@ initScopeStateWStatements :: [Statement] -> ScopeState
 initScopeStateWStatements stmts = ScopeState (empty, Continuations stmts, Nothing)
 
 initVStateWStatements :: [Statement] -> VState
-initVStateWStatements stmts = let (iotaCtx, proofCtx) = stdLibValCtx
-    in VState (initVScopeStateWStatements stmts, iotaCtx, proofCtx, iotalist)
+initVStateWStatements stmts =
+    let (iotaCtx, proofCtx) = stdLibValCtx
+     in VState (initVScopeStateWStatements stmts, iotaCtx, proofCtx, iotalist)
 
 initVScopeStateWStatements :: [Statement] -> VScopeState
 initVScopeStateWStatements stmts = VScopeState (empty, [], Continuations stmts, Nothing)
@@ -197,11 +198,10 @@ proofLIotaLookup proofs iota = filter (proofLIota iota) proofs
 -- Proofs where the LHS is the given iota
 -- For FApp, check if the first arg is the given iota
 proofLIota :: Iota -> IotaProof -> Bool
-proofLIota iota (FApp (Rel Eq) proofs) = case proofs of
+proofLIota iota (FApp _ args) = case args of
     -- TODO: checking first arg only is arbitrary
     ATerm piota : _ -> piota == iota
     _ -> False
-proofLIota _ _ = error "Only Eq relation supported"
 
 proofOnlyOfIotasOrConst :: [Iota] -> IotaProof -> Bool
 proofOnlyOfIotasOrConst iotas (ATerm i) = i `elem` iotas
