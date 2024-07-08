@@ -46,10 +46,11 @@ evalIotaProofIfForIota :: Iota -> IotaProof -> [IotaProof] -> (Map Variable Iota
 evalIotaProofIfForIota iota proof proofs ctx =
     case proof of
         -- TODO: Support other functions
-        (FApp funct [ATerm fiota, FApp _ _]) | funct == eqProof ->
-            if fiota == iota
-                then evalIotaProof proof proofs ctx
-                else []
+        (FApp funct [ATerm fiota, FApp _ _])
+            | funct == eqProof ->
+                if fiota == iota
+                    then evalIotaProof proof proofs ctx
+                    else []
         _ -> []
 
 -- Public fns
@@ -60,7 +61,7 @@ evaluate l = evalBlock $ initStateWStatements l
 validate :: [Statement] -> Result VState String
 validate [] = Ok $ VState (emptyVScopeState, empty, [], [])
 validate l = case valBlock $ initVStateWStatements l of
-    Ok (VState (vScopeState, iotaCtx, proofCtx, remainingIotas)) -> 
+    Ok (VState (vScopeState, iotaCtx, proofCtx, remainingIotas)) ->
         Ok $ VState (vScopeState, iotaCtx, proofCtx, [head remainingIotas])
     Error e -> Error e
 
@@ -169,14 +170,11 @@ valValidationStatement state (AssignProofVar var expr) =
             Error e -> Error e
 
 valRewrite :: VState -> RwRule -> Result VState String
-valRewrite state (Refl var) =
+valRewrite state (Refl varProof) =
     let (VState (VScopeState (iotas, proofs, c, pscope), iotaCtx, proofCtx, iotaseq)) = state
-     in let oiota = vLookupVar state var
-         in case oiota of
-                Nothing -> Error $ "Undefined variable: " ++ var
-                Just _ ->
-                    let newProofs = reflProofsByProofs proofs proofs -- TODO: limit to proofs with iota
-                     in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaCtx, proofCtx, iotaseq)
+     in let iotaProof = varProofToIotaProof varProof state
+         in let newProofs = reflProofsByProofs proofs proofs -- TODO: limit to proofs with iotaProof
+             in Ok $ VState (VScopeState (iotas, proofs ++ newProofs, c, pscope), iotaCtx, proofCtx, iotaseq)
 valRewrite state (Eval var) =
     let (VState (VScopeState (iotas, proofs, c, pscope), iotaCtx, proofCtx, iotaseq)) = state
      in let oiota = vLookupVar state var

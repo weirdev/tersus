@@ -299,7 +299,7 @@ testValidateWithExpectedMatch =
         , validateWEMatchHelper
             [ Assign "x" (Val (VInt 5))
             , ValidationStatement (AssignProofVar "a" (Val (VInt 5)))
-            , ValidationStatement (Rewrite (Refl "x"))
+            , ValidationStatement (Rewrite (Refl (ATerm "x")))
             , ValidationStatement (ProofAssert (FApp eqProof [ATerm "x", ATerm "a"]))
             ]
             [ FApp eqProof [ATerm "x", CTerm (VInt 5)]
@@ -335,7 +335,7 @@ testValidateWithExpectedMismatch =
                 "x"
                 (Val (VInt 5))
             , ValidationStatement (AssignProofVar "a" (Val (VInt 5)))
-            , ValidationStatement (Rewrite (Refl "x"))
+            , ValidationStatement (Rewrite (Refl (ATerm "x")))
             , ValidationStatement (ProofAssert (FApp eqProof [ATerm "x", ATerm "a"]))
             ]
             [ FApp eqProof [ATerm "x", CTerm (VInt 5)]

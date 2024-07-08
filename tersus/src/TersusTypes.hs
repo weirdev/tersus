@@ -49,7 +49,7 @@ type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 
 -- TODO: As with BuiltinFunct, the rule name should be a separate type from the arguments
-data RwRule = Refl Variable | EqToLtPlus1 Variable | Eval Variable | EvalAll
+data RwRule = Refl VariableProof | EqToLtPlus1 Variable | Eval Variable | EvalAll
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 newtype VScopeState
     = VScopeState

@@ -166,17 +166,19 @@ rwRule :: Parser RwRule
 rwRule = do
     ruleStr <- variable
     whitespace
-    -- TODO: Parens and argument list
-    mvar <- optionMaybe variable
-    whitespace
-    return
-        ( case (ruleStr, mvar) of
-            ("refl", Just var) -> Refl var
-            ("eqToLtPlus1", Just var) -> EqToLtPlus1 var
-            ("eval", Just var) -> Eval var
-            ("evalAll", Nothing) -> EvalAll
-            _ -> error "Unknown rule or wrong number of arguments"
-        )
+    case ruleStr of
+        "refl" -> Refl <$> proof
+        _ -> do
+            -- TODO: Parens and argument list
+            mvar <- optionMaybe variable
+            whitespace
+            return
+                ( case (ruleStr, mvar) of
+                    ("eqToLtPlus1", Just var) -> EqToLtPlus1 var
+                    ("eval", Just var) -> Eval var
+                    ("evalAll", Nothing) -> EvalAll
+                    _ -> error "Unknown rule or wrong number of arguments"
+                )
 
 -- NOTE: Infix expression must be matched first,
 -- otherwise we will parse the lhs of infix expressions
