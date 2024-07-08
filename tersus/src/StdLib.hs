@@ -6,7 +6,17 @@ import TersusTypes
 
 builtinFunct :: BuiltinFunct -> Value
 builtinFunct Size = VFunct ["list"] [] (BuiltinFunct Size) []
-builtinFunct First = VFunct ["list"] [] (BuiltinFunct First) []
+builtinFunct First =
+    VFunct
+        ["list"]
+        [ ProofAssert
+            ( FApp
+                (CTerm (builtinFunct (Rel Gt)))
+                [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 0)]
+            )
+        ]
+        (BuiltinFunct First)
+        []
 builtinFunct Last = VFunct ["list"] [] (BuiltinFunct Last) []
 builtinFunct Plus = VFunct ["a", "b"] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] (BuiltinFunct Minus) []

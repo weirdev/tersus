@@ -269,13 +269,12 @@ valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 valFunctExprHelper :: VState -> Iota -> Expression -> [Expression] -> Result ([IotaProof], [IotaProof], [Iota]) String
 valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota fnexpr exprargs =
     let VScopeState (_, proofs, _, _) = scope
-     in let (fInputProofResults, niotas) =
+     in -- TODO: remove new iotas from iotaseq before using below
+        let (fInputProofResults, niotas) =
                 zipMap
                     (fnexpr : exprargs)
                     iotaseq
-                    -- TODO: remove new iotas from iotaseq before using below
                     (flip (valExpression $ VState (scope, iotaCtx, proofCtx, iotaseq))) -- proofs of input expression in terms of new iotas
-                    -- If finputproofs = [A niota rel oi] where oi is already defined, replace with the definition of oi
          in case flatResultMap id fInputProofResults of
                 Error e -> Error e
                 Ok finputproofs ->
@@ -285,7 +284,7 @@ valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) iota fnexpr expr
                          in let concreteProofs = filter abstractLhsEqConcreteRhs flatfinputproofs -- C niota rel val
                              in let ps = refloncefiproofs ++ concreteProofs
                                  in let (fniota : argiotas) = niotas
-                                     in case valFunct fniota (iotaCtx, proofCtx) argiotas ps iota of
+                                     in case valFunct (VState (scope, iotaCtx, proofCtx, iotaseq)) fniota argiotas ps iota of
                                             Ok functProofs -> Ok (flatfinputproofs, functProofs, niotas)
                                             Error e -> Error e
 
@@ -351,18 +350,39 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA=[5, 4]) = iotaB=2)
 -- Later update to produce abstract FApp proofs
 -- (ex. size(iotaA) = iotaB)
-valFunct :: Iota -> (Map Variable Iota, [IotaProof]) -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
-valFunct fniota ctx iiotas iproofs retiota =
-    let vals =
-            flatMaybeMap (`concreteValOfIotaMaybe` iproofs) (fniota : iiotas)
-     in case vals of
-            Just (fnVal : argVals) ->
-                let (iotaCtx, proofCtx) = ctx
-                 in Ok [FApp eqProof [ATerm retiota, CTerm (evalFunct fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals)]]
-            Nothing ->
-                Error
-                    ( "Funct agrs not validated. Input Iotas: "
-                        ++ show iiotas
-                        ++ ". Input Proofs: "
-                        ++ show iproofs
-                    )
+valFunct :: VState -> Iota -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
+valFunct state fniota iiotas iproofs retiota =
+    case concreteValOfIotaMaybe fniota iproofs of
+        Just fnVal -> case fnVal of
+            VFunct _ inputValStmts _ _ ->
+                case valFunctInput state inputValStmts of
+                    Error e -> Error $ "Funct input validation failed: " ++ e
+                    Ok state' ->
+                        let argvals =
+                                flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
+                         in case argvals of
+                                Just argVals' ->
+                                    let (VState (_, iotaCtx, proofCtx, _)) = state'
+                                     in let functResult = evalFunct fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals'
+                                         in Ok [FApp eqProof [ATerm retiota, CTerm functResult]]
+                                Nothing ->
+                                    Error
+                                        ( "Funct agrs not validated. Input iotas: "
+                                            ++ show iiotas
+                                            ++ ". Input Proofs: "
+                                            ++ show iproofs
+                                        )
+            _ -> Error "Non-function value called"
+        Nothing ->
+            Error $
+                "Function object not validated. Function iota: "
+                    ++ show fniota
+                    ++ ". Input proofs: "
+                    ++ show iproofs
+
+valFunctInput :: VState -> [ValidationStatement] -> Result VState String
+valFunctInput state [] = Ok state
+valFunctInput state (valStmt : valStmts) =
+    case valValidationStatement state valStmt of
+        Ok state' -> valFunctInput state' valStmts
+        e -> e

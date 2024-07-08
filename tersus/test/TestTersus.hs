@@ -401,6 +401,16 @@ testParseValWFunctDef =
             ]
         ]
 
+testParseValFunctWInputStatements :: TestResult
+testParseValFunctWInputStatements =
+    parseValReturningStmtHelper
+        "{\
+        \  x = [3, 6, 9, 12];\
+        \  return first(x);\
+        \}"
+        "ret"
+        [FApp eqProof [ATerm "ret", CTerm (VInt 3)]]
+
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
     parseValReturningStmtHelper
@@ -450,6 +460,7 @@ testParseVal =
         "testParseVal"
         [ testParseValBlockExpr
         , testParseValWFunctDef
+        , testParseValFunctWInputStatements
         , testParseValWUdfCall
         , testValidateNestedBlocks
         , testParseValFunctReturnNestedBlocks
