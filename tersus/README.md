@@ -10,9 +10,8 @@ Next steps:
     if/else/while
 1.5. Let declarations
 2. Improved proof representation, proof engine
-    How are we handling proofs w/ nested expressions, we currently do not allow temp iotas to leak
-        Is this still workable?
     Proof engine would be able to apply generalized rewritings supplied by functions
+    Axioms, replace EqToLtPlus1 with a standard lib impl
 3. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?

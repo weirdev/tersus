@@ -9,7 +9,9 @@ builtinFunct Size = VFunct ["list"] [] (BuiltinFunct Size) []
 builtinFunct First =
     VFunct
         ["list"]
-        [ ProofAssert
+        [ AssignProofVar "s" (F (Val (builtinFunct Size)) [Var "list"])
+        , Rewrite (Eval "s")
+        , ProofAssert
             ( FApp
                 (CTerm (builtinFunct (Rel Gt)))
                 [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 0)]
