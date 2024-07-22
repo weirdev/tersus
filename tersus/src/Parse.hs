@@ -175,6 +175,7 @@ rwRule = do
             return
                 ( case (ruleStr, mvar) of
                     ("eqToLtPlus1", Just var) -> EqToLtPlus1 var
+                    ("eqToGtZero", Just var) -> EqToGtZero var
                     ("eval", Just var) -> Eval var
                     ("evalAll", Nothing) -> EvalAll
                     _ -> error "Unknown rule or wrong number of arguments"

@@ -9,7 +9,10 @@ builtinFunct Size = VFunct ["list"] [] (BuiltinFunct Size) []
 builtinFunct First =
     VFunct
         ["list"]
-        [ ProofAssert
+        [ AssignProofVar "s" (F (Val (builtinFunct Size)) [Var "list"])
+        -- , Rewrite (Eval "s")
+        , Rewrite (EqToGtZero "s")
+        , ProofAssert
             ( FApp
                 (CTerm (builtinFunct (Rel Gt)))
                 [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 0)]
@@ -40,6 +43,9 @@ stdLibCtx =
 eqProof :: IotaProof
 eqProof = CTerm (builtinFunct (Rel Eq))
 
+eqVarProof :: VariableProof
+eqVarProof = CTerm (builtinFunct (Rel Eq))
+
 stdLibValCtx :: (Map Variable Iota, [IotaProof])
 stdLibValCtx = stdLibCtxToValCtx stdLibCtx
 
@@ -52,7 +58,7 @@ stdLibCtxToValCtx ctx =
 stdLibCtxToValCtxHelper :: [(Variable, Value)] -> ([(Variable, Iota)], [IotaProof])
 stdLibCtxToValCtxHelper [] = ([], [])
 stdLibCtxToValCtxHelper ((var, functDef) : rest) =
-    let newVarIota = (var, var)
-     in let newProof = FApp eqProof [ATerm var, CTerm functDef]
+    let newVarIota = (var, Iota var)
+     in let newProof = FApp eqProof [ATerm (Iota var), CTerm functDef]
          in let (restVarIota, restProof) = stdLibCtxToValCtxHelper rest
              in (newVarIota : restVarIota, newProof : restProof)

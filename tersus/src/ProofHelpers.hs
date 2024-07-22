@@ -141,6 +141,22 @@ vScopeSetReturn (VScopeState (iotas, proofs, c, Nothing)) niota nproofs =
 vScopeSetReturn (VScopeState (iotas, proofs, c, Just pScope)) niota nproofs =
     VScopeState (iotas, proofs, c, Just $ vScopeSetReturn pScope niota nproofs)
 
+-- TODO: Include parent scopes
+vScopeGetProofs :: VScopeState -> [IotaProof]
+vScopeGetProofs (VScopeState (_, proofs, _, _)) = proofs
+
+-- TODO: Include proof ctx
+vGetProofs :: VState -> [IotaProof]
+vGetProofs (VState (scope, _, _, _)) = vScopeGetProofs scope
+
+vScopeInsertProofs :: VScopeState -> [IotaProof] -> VScopeState
+vScopeInsertProofs (VScopeState (iotas, proofs, c, pScope)) newProofs =
+    VScopeState (iotas, proofs ++ newProofs, c, pScope)
+
+vInsertProofs :: VState -> [IotaProof] -> VState
+vInsertProofs (VState (scope, iotaCtx, proofCtx, iotaseq)) newProofs =
+    VState (vScopeInsertProofs scope newProofs, iotaCtx, proofCtx, iotaseq)
+
 popIotaFromSeq :: VState -> (Iota, VState)
 popIotaFromSeq (VState (vScopeState, iotaCtx, proofCtx, iotaseq)) = case iotaseq of
     [] -> error "No more iotas to pop"
@@ -184,8 +200,8 @@ emptyVScopeState :: VScopeState
 emptyVScopeState = VScopeState (empty, [], emptyContinuations, Nothing)
 
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
-iotalist :: [String]
-iotalist = [l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z']]
+iotalist :: [Iota]
+iotalist = [Iota $ l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z']]
 
 maybeATermProofToIota :: IotaProof -> Maybe Iota
 maybeATermProofToIota (ATerm i) = Just i
@@ -233,6 +249,7 @@ abstractLhsEqAbstractRhs _ = False
 
 -- Given an eqality relation, construct a new proof by replacing
 -- instances of the LHS iota (from the equality) with the RHS iota or value
+-- proof to change -> eq relation -> maybe updated proof
 reflProofByProof :: IotaProof -> IotaProof -> Maybe IotaProof
 reflProofByProof proof (FApp funct [ATerm iota, ATerm oiota]) | funct == eqProof =
     case proof of
@@ -252,29 +269,33 @@ reflProofByProof proof (FApp funct [ATerm iota, ATerm oiota]) | funct == eqProof
             | fi == iota ->
                 Just (FApp funct (ATerm oiota : rtaili))
         _ -> Nothing
-reflProofByProof proof (FApp funct [ATerm iota, CTerm val]) | funct == eqProof =
+reflProofByProof proof (FApp funct [ATerm iota, nonAbstract]) | funct == eqProof =
     case proof of
-        -- TODO: This should apply to all arguments rather than arbitrarily the second
+        -- TODO: Handle all possible replacements
         FApp funct [ATerm li, ATerm ri]
             | ri == iota ->
-                Just (FApp funct [ATerm li, CTerm val])
-        FApp funct [ATerm li, CTerm lval]
-            | val == lval && iota /= li && funct == eqProof ->
+                Just (FApp funct [ATerm li, nonAbstract])
+        FApp funct [ATerm li, lNonAbstract]
+            | iota == li && nonAbstract /= lNonAbstract ->
+                Just (FApp funct [nonAbstract, lNonAbstract])
+        FApp funct [ATerm li, lNonAbstract]
+            | nonAbstract == lNonAbstract && iota /= li && funct == eqProof ->
                 Just (FApp eqProof [ATerm iota, ATerm li])
         _ -> Nothing
 reflProofByProof _ _ = error "Only Eq relation supported"
 
 -- Given an eqality relation, construct new proofs by replacing the
 -- LHS iota with the RHS iota or value
+-- proofs to change -> eq relation -> new proofs
 reflProofsByProof :: [IotaProof] -> IotaProof -> [IotaProof]
 reflProofsByProof (proof : ptail) (FApp funct [ATerm iota, ATerm oiota]) | funct == eqProof =
     case reflProofByProof proof (FApp eqProof [ATerm iota, ATerm oiota]) of
         Just newProof -> newProof : reflProofsByProof ptail (FApp eqProof [ATerm iota, ATerm oiota])
         _ -> reflProofsByProof ptail (FApp eqProof [ATerm iota, ATerm oiota])
-reflProofsByProof (proof : ptail) (FApp funct [ATerm iota, CTerm val]) | funct == eqProof =
-    case reflProofByProof proof (FApp eqProof [ATerm iota, CTerm val]) of
-        Just newProof -> newProof : reflProofsByProof ptail (FApp eqProof [ATerm iota, CTerm val])
-        _ -> reflProofsByProof ptail (FApp eqProof [ATerm iota, CTerm val])
+reflProofsByProof (proof : ptail) (FApp funct [ATerm iota, nonAbstract]) | funct == eqProof =
+    case reflProofByProof proof (FApp eqProof [ATerm iota, nonAbstract]) of
+        Just newProof -> newProof : reflProofsByProof ptail (FApp eqProof [ATerm iota, nonAbstract])
+        _ -> reflProofsByProof ptail (FApp eqProof [ATerm iota, nonAbstract])
 reflProofsByProof _ _ = []
 
 -- Given a list of iotas and a list of proofs,
@@ -306,4 +327,9 @@ varProofToIotaProof (ATerm var) state =
             _ -> error "Variable not found in proof map"
 varProofToIotaProof (FApp funct args) state =
     let iotaproofs = map (`varProofToIotaProof` state) args
-     in FApp funct iotaproofs
+     in FApp (varProofToIotaProof funct state) iotaproofs
+
+exprToProof :: Expression -> VariableProof
+exprToProof (Val val) = CTerm val
+exprToProof (Var var) = ATerm var
+exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof argExprs)

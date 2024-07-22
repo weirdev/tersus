@@ -246,6 +246,7 @@ validateWEMatchHelper stmts expected =
     case validate stmts of
         Ok (VState (VScopeState (varMap, iproofs, _, _), _, _, _)) ->
             testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
+            -- Just $ show (varMap, iproofs)
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
@@ -268,44 +269,44 @@ testValidateWithExpectedMatch =
         [ validateWEMatchHelper
             [ Assign "x" (F (Val (builtinFunct Size)) [Val (VIntList [5])])
             ]
-            [FApp eqProof [ATerm "x", CTerm (VInt 1)]]
+            [FApp eqVarProof [ATerm "x", CTerm (VInt 1)]]
         , validateWEMatchHelper
             [ Assign "x" (Val (VIntList [5, 4]))
             , Assign "y" (F (Val (builtinFunct Size)) [Var "x"])
             ]
-            [ FApp eqProof [ATerm "x", CTerm (VIntList [5, 4])]
-            , FApp eqProof [ATerm "y", CTerm (VInt 2)]
+            [ FApp eqVarProof [ATerm "x", CTerm (VIntList [5, 4])]
+            , FApp eqVarProof [ATerm "y", CTerm (VInt 2)]
             ]
         , validateWEMatchHelper
             [ Assign "x" (F (Val (builtinFunct Size)) [Val (VIntList [5])])
             , Assign "y" (F (Val (builtinFunct Minus)) [Val (VInt 1), Val (VInt 1)])
             ]
-            [ FApp eqProof [ATerm "x", CTerm (VInt 1)]
-            , FApp eqProof [ATerm "y", CTerm (VInt 0)]
+            [ FApp eqVarProof [ATerm "x", CTerm (VInt 1)]
+            , FApp eqVarProof [ATerm "y", CTerm (VInt 0)]
             ]
         , validateWEMatchHelper
             [ Assign "x" (Val (VInt 5))
-            , ValidationStatement (ProofAssert (FApp eqProof [ATerm "x", CTerm (VInt 5)]))
+            , ValidationStatement (ProofAssert (FApp eqVarProof [ATerm "x", CTerm (VInt 5)]))
             ]
-            [FApp eqProof [ATerm "x", CTerm (VInt 5)]]
+            [FApp eqVarProof [ATerm "x", CTerm (VInt 5)]]
         , validateWEMatchHelper
             [ Assign "x" (Val (VInt 5))
             , ValidationStatement (Rewrite (EqToLtPlus1 "x"))
             , ValidationStatement (ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 6)]))
             ]
-            [ FApp eqProof [ATerm "x", CTerm (VInt 5)]
+            [ FApp eqVarProof [ATerm "x", CTerm (VInt 5)]
             , FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 6)]
             ]
         , validateWEMatchHelper
             [ Assign "x" (Val (VInt 5))
             , ValidationStatement (AssignProofVar "a" (Val (VInt 5)))
             , ValidationStatement (Rewrite (Refl (ATerm "x")))
-            , ValidationStatement (ProofAssert (FApp eqProof [ATerm "x", ATerm "a"]))
+            , ValidationStatement (ProofAssert (FApp eqVarProof [ATerm "x", ATerm "a"]))
             ]
-            [ FApp eqProof [ATerm "x", CTerm (VInt 5)]
-            , FApp eqProof [ATerm "a", CTerm (VInt 5)]
-            , FApp eqProof [ATerm "x", ATerm "a"]
-            , FApp eqProof [ATerm "a", ATerm "x"]
+            [ FApp eqVarProof [ATerm "x", CTerm (VInt 5)]
+            , FApp eqVarProof [ATerm "a", CTerm (VInt 5)]
+            , FApp eqVarProof [ATerm "x", ATerm "a"]
+            , FApp eqVarProof [ATerm "a", ATerm "x"]
             ]
         ]
 
@@ -321,14 +322,14 @@ testValidateWithExpectedMismatch =
                     [Val (VIntList [5])]
                 )
             ]
-            [FApp eqProof [ATerm "y", CTerm (VInt 1)]]
+            [FApp eqVarProof [ATerm "y", CTerm (VInt 1)]]
         , validateWEMismatchHelper
             [ Assign "x" (Val (VIntList [5, 4]))
             , Assign "y" (F (Val (builtinFunct Size)) [Var "x"])
             ]
-            [ FApp eqProof [ATerm "x", CTerm (VIntList [5, 4])]
-            , FApp eqProof [ATerm "y", CTerm (VInt 2)]
-            , FApp eqProof [ATerm "z", CTerm (VInt 2)]
+            [ FApp eqVarProof [ATerm "x", CTerm (VIntList [5, 4])]
+            , FApp eqVarProof [ATerm "y", CTerm (VInt 2)]
+            , FApp eqVarProof [ATerm "z", CTerm (VInt 2)]
             ]
         , validateWEMismatchHelper
             [ Assign
@@ -336,12 +337,12 @@ testValidateWithExpectedMismatch =
                 (Val (VInt 5))
             , ValidationStatement (AssignProofVar "a" (Val (VInt 5)))
             , ValidationStatement (Rewrite (Refl (ATerm "x")))
-            , ValidationStatement (ProofAssert (FApp eqProof [ATerm "x", ATerm "a"]))
+            , ValidationStatement (ProofAssert (FApp eqVarProof [ATerm "x", ATerm "a"]))
             ]
-            [ FApp eqProof [ATerm "x", CTerm (VInt 5)]
-            , FApp eqProof [ATerm "a", CTerm (VInt 5)]
-            , FApp eqProof [ATerm "x", ATerm "a"]
-            , FApp eqProof [ATerm "b", ATerm "x"]
+            [ FApp eqVarProof [ATerm "x", CTerm (VInt 5)]
+            , FApp eqVarProof [ATerm "a", CTerm (VInt 5)]
+            , FApp eqVarProof [ATerm "x", ATerm "a"]
+            , FApp eqVarProof [ATerm "b", ATerm "x"]
             ]
         ]
 
@@ -381,7 +382,7 @@ testParseValBlockExpr =
         \  return y;\
         \}"
         "ret"
-        [FApp eqProof [ATerm "ret", CTerm (VInt 3)]]
+        [FApp eqVarProof [ATerm "ret", CTerm (VInt 3)]]
 
 testParseValWFunctDef :: TestResult
 testParseValWFunctDef =
@@ -395,7 +396,7 @@ testParseValWFunctDef =
         \}"
         "ret"
         [ FApp
-            eqProof
+            eqVarProof
             [ ATerm "ret"
             , CTerm (VFunct ["i"] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])]) [])
             ]
@@ -409,7 +410,7 @@ testParseValFunctWInputStatements =
         \  return first(x);\
         \}"
         "ret"
-        [FApp eqProof [ATerm "ret", CTerm (VInt 3)]]
+        [FApp eqVarProof [ATerm "ret", CTerm (VInt 3)]]
 
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
@@ -422,7 +423,7 @@ testParseValWUdfCall =
         \  return sumFirstLast(x);\
         \}"
         "ret"
-        [FApp eqProof [ATerm "ret", CTerm (VInt 15)]]
+        [FApp eqVarProof [ATerm "ret", CTerm (VInt 15)]]
 
 testValidateNestedBlocks :: TestResult
 testValidateNestedBlocks =
@@ -435,7 +436,7 @@ testValidateNestedBlocks =
         \  return size(x);\
         \}"
         "ret"
-        [FApp eqProof [ATerm "ret", CTerm (VInt 1)]]
+        [FApp eqVarProof [ATerm "ret", CTerm (VInt 1)]]
 
 testParseValFunctReturnNestedBlocks :: TestResult
 testParseValFunctReturnNestedBlocks =
@@ -452,7 +453,7 @@ testParseValFunctReturnNestedBlocks =
         \  return getFirst(x);\
         \}"
         "ret"
-        [FApp eqProof [ATerm "ret", CTerm (VInt 3)]]
+        [FApp eqVarProof [ATerm "ret", CTerm (VInt 3)]]
 
 testParseVal :: Test
 testParseVal =

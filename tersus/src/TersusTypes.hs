@@ -6,6 +6,7 @@ type Variable = String
 data BuiltinFunct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
 
 data FunctBody = NativeFunct [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq)
+
 -- TODO: Generic list type
 data Value
     = VInt Integer
@@ -16,6 +17,7 @@ data Value
       -- TODO: Real return slot rather than var
       VFunct [Variable] [ValidationStatement] FunctBody [VariableProof]
     deriving (Show, Eq)
+
 -- TODO: Call
 data Expression = Val Value | Var Variable | F Expression [Expression]
     deriving (Show, Eq)
@@ -34,22 +36,29 @@ data Statement
 
 -- nextStmt
 -- TODO: Naming is probably wrong here
-newtype Continuations = Continuations [Statement]
+newtype Continuations = Continuations [Statement] deriving (Show)
 
 newtype ScopeState = ScopeState (Map Variable Value, Continuations, Maybe ScopeState)
+
 -- (scope info, file context [aka standard lib + imports])
 newtype State = State (ScopeState, Map Variable Value)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
-type Iota = String
+newtype Iota = Iota String deriving (Eq, Show)
+
 -- Function being applied, arguments
 data Proof i = FApp (Proof i) [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 
 -- TODO: As with BuiltinFunct, the rule name should be a separate type from the arguments
-data RwRule = Refl VariableProof | EqToLtPlus1 Variable | Eval Variable | EvalAll
+data RwRule
+    = Refl VariableProof
+    | EqToLtPlus1 Variable
+    | EqToGtZero Variable
+    | Eval Variable
+    | EvalAll
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 newtype VScopeState
     = VScopeState
@@ -58,4 +67,9 @@ newtype VScopeState
         , Continuations
         , Maybe VScopeState
         )
+    deriving (Show)
 newtype VState = VState (VScopeState, Map Variable Iota, [IotaProof], [Iota])
+
+instance Show VState where
+    show (VState (scope, iotaCtx, proofCtx, iotaseq)) =
+        "VState (" ++ show (scope, iotaCtx, proofCtx) ++ "("
