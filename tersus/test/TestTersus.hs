@@ -246,6 +246,7 @@ validateWEMatchHelper stmts expected =
     case validate stmts of
         Ok (VState (VScopeState (varMap, iproofs, _, _), _, _, _)) ->
             testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
+            -- Just $ show (varMap, iproofs)
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
