@@ -1,4 +1,6 @@
 module Utils where
+    
+import Debug.Trace (trace)
 
 data Result a e = Ok a | Error e deriving (Eq)
 
@@ -36,3 +38,6 @@ flatResultMap f as = case flatMap (\a -> case f a of Ok b -> Left b; Error e -> 
 unwrapOrThrow :: String -> Maybe a -> a
 unwrapOrThrow _ (Just a) = a
 unwrapOrThrow err Nothing = error err
+
+-- doTrace print passthrough = trace print passthrough
+doTrace print passthrough = passthrough
