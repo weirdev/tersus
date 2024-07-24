@@ -238,7 +238,8 @@ valExpression (VState (scope, iotaCtx, proofCtx, iotaseq)) iota (F fnexpr argexp
     let VScopeState (_, proofs, _, _) = scope
      in let functResults = valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) fnexpr argexprs iota
          in case functResults of
-                Ok (flatfinputproofs, functProofs, niotas) ->
+                -- TODO: Return updated iotaseq
+                Ok (flatfinputproofs, functProofs, niotas, iotaseq') ->
                     Ok
                         -- TODO: Add back
                         -- (
@@ -262,7 +263,7 @@ valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 -- validate and return:
 -- 1) proofs of input expressions 2) proofs of the evaluated fn result 3) the new iotas used
 -- state -> fnexpr -> argexprs -> (argProofs, functresultproofs, new iotas)
-valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result ([IotaProof], [IotaProof], [Iota]) String
+valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result ([IotaProof], [IotaProof], [Iota], [Iota]) String
 valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) fnexpr exprargs riota =
     let VScopeState (_, proofs, _, _) = scope
      in -- Get proofs from the function and arg expressions
@@ -288,8 +289,7 @@ valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) fnexpr exprargs 
                                          in -- Finally validate the function with the processed proofs
                                             -- TODO: Update iotaseq with iotas consumed in valFunct
                                             case valFunct (VState (VScopeState (empty, [], Continuations [], Just scope), iotaCtx, proofCtx, iotaseq')) fniota argiotas ps riota of
-                                                -- TODO: Return updated iotaseq
-                                                Ok functProofs -> Ok (flatfinputproofs, functProofs, niotas)
+                                                Ok functProofs -> Ok (flatfinputproofs, functProofs, niotas, iotaseq')
                                                 Error e -> Error e
 
 evalFunct :: Value -> Map Variable Value -> [Value] -> Value
