@@ -266,14 +266,14 @@ valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result ([I
 valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) fnexpr exprargs riota =
     let VScopeState (_, proofs, _, _) = scope
      in -- Get proofs from the function and arg expressions
-        -- TODO: remove new iotas from iotaseq before using below
         let exprsToVal = fnexpr : exprargs
-         in let niotas = take (length exprsToVal) iotaseq
+         in let (niotas, iotaseq') = splitAt (length exprsToVal) iotaseq
              in let (fInputProofResults, _) =
                         zipMap
                             exprsToVal
                             niotas
-                            (flip (valExpression $ VState (scope, iotaCtx, proofCtx, iotaseq))) -- proofs of input expression in terms of new iotas
+                            -- TODO: Update iotaseq with any used iotas
+                            (flip (valExpression $ VState (scope, iotaCtx, proofCtx, iotaseq'))) -- proofs of input expression in terms of new iotas
                  in case flatResultMap id fInputProofResults of
                         Error e -> Error e
                         Ok finputproofs ->
@@ -286,7 +286,9 @@ valFunctExprHelper (VState (scope, iotaCtx, proofCtx, iotaseq)) fnexpr exprargs 
                                      in -- Iota of the function object is first of the new iotas, rest are iotas of the args
                                         let (fniota : argiotas) = niotas
                                          in -- Finally validate the function with the processed proofs
-                                            case valFunct (VState (VScopeState (empty, [], Continuations [], Just scope), iotaCtx, proofCtx, iotaseq)) fniota argiotas ps riota of
+                                            -- TODO: Update iotaseq with iotas consumed in valFunct
+                                            case valFunct (VState (VScopeState (empty, [], Continuations [], Just scope), iotaCtx, proofCtx, iotaseq')) fniota argiotas ps riota of
+                                                -- TODO: Return updated iotaseq
                                                 Ok functProofs -> Ok (flatfinputproofs, functProofs, niotas)
                                                 Error e -> Error e
 
