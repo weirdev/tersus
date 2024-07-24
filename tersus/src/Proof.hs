@@ -162,7 +162,7 @@ valValidationStatement state (ProofAssert varproof) =
          in let iotaProof = varProofToIotaProof varproof state'
              in if iotaProof `elem` proofs
                     then Ok state'
-                    else Error $ "Assertion failed: " ++ show varproof
+                    else doTrace2 ("Had proofs: " ++ show proofs) (Error $ "Assertion failed: " ++ show varproof)
 valValidationStatement state (AssignProofVar var expr) =
     let VState (scope, _, _, _) = state
      in let VScopeState (_, _, c, _) = scope
@@ -352,36 +352,40 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA) = iotaB)
 valFunct :: VState -> Iota -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
 valFunct state fniota iiotas iproofs retiota =
-    -- Get the concrete function object
-    -- TODO: Support function proof evaluation with less than the full concrete function
-    case concreteValOfIotaMaybe fniota iproofs of
-        Just fnVal -> case fnVal of
-            VFunct varArgs inputValStmts _ _ ->
-                -- Validate the inputs are valid wrt the function signature
-                case valFunctInput state varArgs iiotas iproofs inputValStmts of
-                    Error e -> Error $ "Funct input validation failed: " ++ e
-                    Ok state' ->
-                        let argvalsMaybe = flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
-                         in case argvalsMaybe of
-                                Just argVals ->
-                                    -- Concrete values of function args
-                                    let (VState (_, iotaCtx, proofCtx, _)) = state' -- Evaluate the function using the concrete values of the function and args
-                                     in let functResult = evalFunct fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
-                                         in Ok [FApp eqProof [ATerm retiota, CTerm functResult]]
-                                Nothing ->
-                                    Error
-                                        ( "Funct agrs not validated. Input iotas: "
-                                            ++ show iiotas
-                                            ++ ". Input Proofs: "
-                                            ++ show iproofs
-                                        )
-            _ -> Error "Non-function value called"
-        Nothing ->
-            Error $
-                "Function object not validated. Function iota: "
-                    ++ show fniota
-                    ++ ". Input proofs: "
-                    ++ show iproofs
+    let mFnIota = findIotaEqToFn ["list"] iproofs
+     in doTrace2 (case mFnIota of
+                            Nothing -> "no Fn Iota"
+                            Just i -> "Proofs equaling fn: " ++ show (iotaLhsEq i iproofs))
+            -- Get the concrete function object
+            -- TODO: Support function proof evaluation with less than the full concrete function
+            (case concreteValOfIotaMaybe fniota iproofs of
+                Just fnVal -> case fnVal of
+                    VFunct varArgs inputValStmts _ _ ->
+                        -- Validate the inputs are valid wrt the function signature
+                        case valFunctInput state varArgs iiotas iproofs inputValStmts of
+                            Error e -> Error $ "Funct input validation failed: " ++ e
+                            Ok state' ->
+                                let argvalsMaybe = flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
+                                in case argvalsMaybe of
+                                        Just argVals ->
+                                            -- Concrete values of function args
+                                            let (VState (_, iotaCtx, proofCtx, _)) = state' -- Evaluate the function using the concrete values of the function and args
+                                            in let functResult = evalFunct fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
+                                                in Ok [FApp eqProof [ATerm retiota, CTerm functResult]]
+                                        Nothing ->
+                                            Error
+                                                ( "Funct agrs not validated. Input iotas: "
+                                                    ++ show iiotas
+                                                    ++ ". Input Proofs: "
+                                                    ++ show iproofs
+                                                )
+                    _ -> Error "Non-function value called"
+                Nothing ->
+                    Error $
+                        "Function object not validated. Function iota: "
+                            ++ show fniota
+                            ++ ". Input proofs: "
+                            ++ show iproofs)
 
 valFunctInput :: VState -> [Variable] -> [Iota] -> [IotaProof] -> [ValidationStatement] -> Result VState String
 valFunctInput state _ _ _ [] = Ok state
@@ -391,9 +395,26 @@ valFunctInput
     argIotas
     argProofs
     valStmts =
-        let (argIotasMap, _) = zipMap varArgs argIotas (,)
+        let (argIotasMap, _) = doTrace2 (show argIotas) (doTrace2 (show argProofs) (zipMap varArgs argIotas (,)))
          in let stmts = map ValidationStatement valStmts
              in case valBlock $ VState (VScopeState (Data.Map.fromList argIotasMap, argProofs, Continuations (stmts ++ [EndBlock]), Just scope), iotaCtx, proofCtx, iotaseq) of
                     -- TODO: Export validation vars from this into the function body?
                     Ok _ -> Ok $ VState (scope, iotaCtx, proofCtx, iotaseq)
                     Error e -> Error e
+
+
+iotaLhsEq :: Iota -> [IotaProof] -> [IotaProof]
+iotaLhsEq _ [] = []
+iotaLhsEq iota (proof : tail) =
+    case proof of
+      FApp funct [ATerm liota, rhsProof] | funct == eqProof && liota == iota -> 
+        rhsProof : iotaLhsEq iota tail
+      _ -> iotaLhsEq iota tail
+
+findIotaEqToFn :: [Variable] -> [IotaProof] -> Maybe Iota
+findIotaEqToFn _ [] = Nothing
+findIotaEqToFn varList (proof : tail) =
+    case proof of
+        FApp funct [ATerm iota, CTerm (VFunct argList _ _ _)] | funct == eqProof && argList == varList ->
+            Just iota
+        _ -> findIotaEqToFn varList tail

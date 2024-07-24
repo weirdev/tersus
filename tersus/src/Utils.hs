@@ -41,3 +41,5 @@ unwrapOrThrow err Nothing = error err
 
 -- doTrace print passthrough = trace print passthrough
 doTrace print passthrough = passthrough
+
+doTrace2 = trace
