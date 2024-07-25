@@ -307,3 +307,8 @@ varProofToIotaProof (ATerm var) state =
 varProofToIotaProof (FApp funct args) state =
     let iotaproofs = map (`varProofToIotaProof` state) args
      in FApp funct iotaproofs
+
+exprToProof :: Expression -> VariableProof
+exprToProof (Val val) = CTerm val
+exprToProof (Var var) = ATerm var
+exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof argExprs)

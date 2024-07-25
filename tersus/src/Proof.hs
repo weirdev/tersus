@@ -168,7 +168,13 @@ valValidationStatement state (AssignProofVar var expr) =
      in let VScopeState (_, _, c, _) = scope
          in let (niota, state') = doTrace ("assignProofVar: " ++ show c) (popIotaFromSeq (vAdvanceStatement state))
              in case doTrace "apv1" (valExpression state' niota expr) of
-                    Ok nproofs -> Ok $ doTrace "apv2" (vInsertVar state' var niota nproofs)
+                    -- TODO: Convert expression to iota proof p1, and add additional proof (niota == p1)
+                    Ok nproofs ->
+                        -- TODO: Should we be doing this in the ordinary valExpression?
+                        let nonEvalProof =
+                                let exprAsProof = exprToProof expr
+                                 in FApp eqProof [ATerm niota, exprAsProof]
+                         in doTrace2 ("New assign proof var proofs: " ++ show (nonEvalProof : nproofs)) (Ok $ doTrace "apv2" (vInsertVar state' var niota (nonEvalProof : nproofs)))
                     Error e -> Error e
 
 valRewrite :: VState -> RwRule -> Result VState String
