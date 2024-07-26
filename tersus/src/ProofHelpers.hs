@@ -26,7 +26,7 @@ initVStateWStatements stmts =
      in VState (initVScopeStateWStatements stmts, iotaCtx, proofCtx, iotalist)
 
 initVScopeStateWStatements :: [Statement] -> VScopeState
-initVScopeStateWStatements stmts = VScopeState (empty, [], Continuations stmts, Nothing)
+initVScopeStateWStatements stmts = VScopeState empty [] (Continuations stmts) Nothing
 
 emptyScopeState :: ScopeState
 emptyScopeState = ScopeState (empty, emptyContinuations, Nothing)
@@ -56,7 +56,7 @@ vLookupVar (VState (scope, iotaCtx, _, _)) var = case vScopeLookupVar scope var 
     Nothing -> Data.Map.lookup var iotaCtx
 
 vScopeLookupVar :: VScopeState -> Variable -> Maybe Iota
-vScopeLookupVar (VScopeState (iotas, _, _, pScope)) var =
+vScopeLookupVar (VScopeState iotas _ _ pScope) var =
     case Data.Map.lookup var iotas of
         Just iota -> Just iota
         Nothing -> case pScope of
@@ -86,12 +86,12 @@ vUpdateExistingVar (VState (scope, iotaCtx, proofCtx, iotaseq)) var niota nproof
         Nothing -> Nothing
 
 vScopeUpdateExistingVar :: VScopeState -> Variable -> Iota -> [IotaProof] -> Maybe VScopeState
-vScopeUpdateExistingVar (VScopeState (iotas, proofs, c, pScope)) var niota nproofs =
+vScopeUpdateExistingVar (VScopeState iotas proofs c pScope) var niota nproofs =
     case Data.Map.lookup var iotas of
-        Just _ -> Just $ VScopeState (insert var niota iotas, proofs ++ nproofs, c, pScope)
+        Just _ -> Just $ VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope
         Nothing -> case pScope of
             Just p -> case vScopeUpdateExistingVar p var niota nproofs of
-                Just np -> Just $ VScopeState (iotas, proofs, c, Just np)
+                Just np -> Just $ VScopeState iotas proofs c (Just np)
                 Nothing -> Nothing
             Nothing -> Nothing
 
@@ -104,10 +104,10 @@ insertVar (State (ScopeState (vals, c, pState), ctxVals)) var val =
         Nothing -> State (ScopeState (insert var val vals, c, pState), ctxVals)
 
 vInsertVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
-vInsertVar (VState (VScopeState (iotas, proofs, c, pScope), iotaCtx, proofCtx, iotaseq)) var niota nproofs =
-    case vUpdateExistingVar (VState (VScopeState (iotas, proofs, c, pScope), iotaCtx, proofCtx, iotaseq)) var niota nproofs of
+vInsertVar (VState (VScopeState iotas proofs c pScope, iotaCtx, proofCtx, iotaseq)) var niota nproofs =
+    case vUpdateExistingVar (VState (VScopeState iotas proofs c pScope, iotaCtx, proofCtx, iotaseq)) var niota nproofs of
         Just s -> s
-        Nothing -> VState (VScopeState (insert var niota iotas, proofs ++ nproofs, c, pScope), iotaCtx, proofCtx, iotaseq)
+        Nothing -> VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope, iotaCtx, proofCtx, iotaseq)
 
 -- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
@@ -117,7 +117,7 @@ getReturn (State (ScopeState (vals, _, _), _)) = Data.Map.lookup "return" vals
 -- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
 vGetReturn :: VState -> Maybe Iota
-vGetReturn (VState (VScopeState (iotas, _, _, Nothing), _, _, _)) =
+vGetReturn (VState (VScopeState iotas _ _ Nothing, _, _, _)) =
     Data.Map.lookup "return" iotas
 vGetReturn _ = error "Not top scope"
 
@@ -136,22 +136,22 @@ vSetReturn (VState (scope, iotaCtx, proofCtx, iotaseq)) niota nproofs =
     VState (vScopeSetReturn scope niota nproofs, iotaCtx, proofCtx, iotaseq)
 
 vScopeSetReturn :: VScopeState -> Iota -> [IotaProof] -> VScopeState
-vScopeSetReturn (VScopeState (iotas, proofs, c, Nothing)) niota nproofs =
-    VScopeState (insert "return" niota iotas, proofs ++ nproofs, c, Nothing)
-vScopeSetReturn (VScopeState (iotas, proofs, c, Just pScope)) niota nproofs =
-    VScopeState (iotas, proofs, c, Just $ vScopeSetReturn pScope niota nproofs)
+vScopeSetReturn (VScopeState iotas proofs c Nothing) niota nproofs =
+    VScopeState (insert "return" niota iotas) (proofs ++ nproofs) c Nothing
+vScopeSetReturn (VScopeState iotas proofs c (Just pScope)) niota nproofs =
+    VScopeState iotas proofs c (Just $ vScopeSetReturn pScope niota nproofs)
 
 -- TODO: Include parent scopes
 vScopeGetProofs :: VScopeState -> [IotaProof]
-vScopeGetProofs (VScopeState (_, proofs, _, _)) = proofs
+vScopeGetProofs (VScopeState _ proofs _ _) = proofs
 
 -- TODO: Include proof ctx
 vGetProofs :: VState -> [IotaProof]
 vGetProofs (VState (scope, _, _, _)) = vScopeGetProofs scope
 
 vScopeInsertProofs :: VScopeState -> [IotaProof] -> VScopeState
-vScopeInsertProofs (VScopeState (iotas, proofs, c, pScope)) newProofs =
-    VScopeState (iotas, proofs ++ newProofs, c, pScope)
+vScopeInsertProofs (VScopeState iotas proofs c pScope) newProofs =
+    VScopeState iotas (proofs ++ newProofs) c pScope
 
 vInsertProofs :: VState -> [IotaProof] -> VState
 vInsertProofs (VState (scope, iotaCtx, proofCtx, iotaseq)) newProofs =
@@ -177,10 +177,10 @@ vAdvanceStatement (VState (scope, iotaCtx, proofCtx, iotaseq)) =
     VState (vScopeAdvanceStatement scope, iotaCtx, proofCtx, iotaseq)
 
 vScopeAdvanceStatement :: VScopeState -> VScopeState
-vScopeAdvanceStatement (VScopeState (_, _, Continuations [], _)) =
+vScopeAdvanceStatement (VScopeState _ _ (Continuations []) _) =
     error "No more statements to advance"
-vScopeAdvanceStatement (VScopeState (iotas, proofs, Continuations (_ : nxt), pScope)) =
-    VScopeState (iotas, proofs, Continuations nxt, pScope)
+vScopeAdvanceStatement (VScopeState iotas proofs (Continuations (_ : nxt)) pScope) =
+    VScopeState iotas proofs (Continuations nxt) pScope
 
 topLevelScope :: State -> State
 topLevelScope (State (scope, ctxVals)) = State (scopeTopLevelScope scope, ctxVals)
@@ -193,11 +193,11 @@ vTopLevelScope :: VState -> VState
 vTopLevelScope (VState (scope, iotaCtx, proofCtx, iotaseq)) = VState (vScopeTopLevelScope scope, iotaCtx, proofCtx, iotaseq)
 
 vScopeTopLevelScope :: VScopeState -> VScopeState
-vScopeTopLevelScope (VScopeState (iotas, proofs, c, Nothing)) = VScopeState (iotas, proofs, c, Nothing)
-vScopeTopLevelScope (VScopeState (_, _, _, Just pScope)) = vScopeTopLevelScope pScope
+vScopeTopLevelScope (VScopeState iotas proofs c Nothing) = VScopeState iotas proofs c Nothing
+vScopeTopLevelScope (VScopeState _ _ _ (Just pScope)) = vScopeTopLevelScope pScope
 
 emptyVScopeState :: VScopeState
-emptyVScopeState = VScopeState (empty, [], emptyContinuations, Nothing)
+emptyVScopeState = VScopeState empty [] emptyContinuations Nothing
 
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
 iotalist :: [Iota]

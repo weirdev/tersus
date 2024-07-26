@@ -244,7 +244,7 @@ expectedProofCompare _ _ _ = False
 validateWEMatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMatchHelper stmts expected =
     case validate stmts of
-        Ok (VState (VScopeState (varMap, iproofs, _, _), _, _, _)) ->
+        Ok (VState (VScopeState varMap iproofs _ _, _, _, _)) ->
             testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
             -- Just $ show (varMap, iproofs)
         Error e -> Just $ "Validation failed with error: " ++ e
@@ -252,7 +252,7 @@ validateWEMatchHelper stmts expected =
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMismatchHelper stmts expected =
     case validate stmts of
-        Ok (VState (VScopeState (varMap, iproofs, _, _), _, _, _)) ->
+        Ok (VState (VScopeState varMap iproofs _ _, _, _, _)) ->
             testAssertTrue (not (all (\vp -> expectedProofMatch vp iproofs varMap) expected))
         Error e -> Just $ "Validation failed with error: " ++ e
 
@@ -368,7 +368,7 @@ parseValReturningStmtHelper stmtStr expVar expected =
             Left err -> Just $ "Parse failed: " ++ show err
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
             Right (Block stmts) -> case valReturningBlock (initVStateWStatements stmts) of
-                Ok (VState (VScopeState (_, proofs, _, _), _, _, _), Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
+                Ok (VState (VScopeState _ proofs _ _, _, _, _), Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
                 Ok (_, Nothing) -> Just "No value returned"
                 Error e -> Just $ "Validation failed with error: " ++ e
             Right _ -> Just "Not a block statement"

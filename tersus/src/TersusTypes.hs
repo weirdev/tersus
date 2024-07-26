@@ -60,13 +60,12 @@ data RwRule
     | Eval Variable
     | EvalAll
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
-newtype VScopeState
+data VScopeState
     = VScopeState
-        ( Map Variable Iota
-        , [IotaProof]
-        , Continuations
-        , Maybe VScopeState
-        )
+        (Map Variable Iota)
+        [IotaProof]
+        Continuations
+        (Maybe VScopeState)
     deriving (Show)
 newtype VState = VState (VScopeState, Map Variable Iota, [IotaProof], [Iota])
 
