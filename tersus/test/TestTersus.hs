@@ -83,7 +83,7 @@ testParse = TestList "testParse" [testParseSimpleAssign, testParseComplexAssign]
 -- Evaluate tests
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
 evalFCHelper stmts expected =
-    let State (ScopeState (vals, _, _)) _ = evaluate stmts
+    let State (ScopeState vals _ _) _ = evaluate stmts
      in testAssertEq vals (Data.Map.fromList expected)
 
 testEvaluateFullContext :: Test

@@ -38,7 +38,7 @@ data Statement
 -- TODO: Naming is probably wrong here
 newtype Continuations = Continuations [Statement] deriving (Show)
 
-newtype ScopeState = ScopeState (Map Variable Value, Continuations, Maybe ScopeState)
+data ScopeState = ScopeState (Map Variable Value) Continuations (Maybe ScopeState)
 
 -- (scope info, file context [aka standard lib + imports])
 data State = State ScopeState (Map Variable Value)
