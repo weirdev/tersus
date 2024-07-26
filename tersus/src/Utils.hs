@@ -35,6 +35,10 @@ flatResultMap f as = case flatMap (\a -> case f a of Ok b -> Left b; Error e -> 
     Left bs -> Ok bs
     Right e -> Error e
 
+mapResult :: (a -> b) -> Result a e -> Result b e
+mapResult fn (Ok a) = Ok $ fn a
+mapResult _ (Error e) = Error e
+
 unwrapOrThrow :: String -> Maybe a -> a
 unwrapOrThrow _ (Just a) = a
 unwrapOrThrow err Nothing = error err

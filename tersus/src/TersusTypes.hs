@@ -71,4 +71,4 @@ data VState = VState VScopeState (Map Variable Iota) [IotaProof] [Iota]
 
 instance Show VState where
     show (VState scope iotaCtx proofCtx iotaseq) =
-        "VState (" ++ show (scope, iotaCtx, proofCtx) ++ "("
+        "VState (" ++ show (scope, iotaCtx, proofCtx) ++ ")"

@@ -31,11 +31,30 @@ initVScopeStateWStatements stmts = VScopeState empty [] (Continuations stmts) No
 emptyScopeState :: ScopeState
 emptyScopeState = ScopeState empty emptyContinuations Nothing
 
+emptyVScopeState :: VScopeState
+emptyVScopeState = VScopeState empty [] emptyContinuations Nothing
+
 setPScope :: State -> Maybe ScopeState -> State
 setPScope (State scope ctxVals) p = State (scopeSetPScope scope p) ctxVals
 
 scopeSetPScope :: ScopeState -> Maybe ScopeState -> ScopeState
 scopeSetPScope (ScopeState vals c _) = ScopeState vals c
+
+vScopeSetPScope :: VScopeState -> Maybe VScopeState -> VScopeState
+vScopeSetPScope (VScopeState iotas proofs c _) = VScopeState iotas proofs c
+
+emptyScopeStateWithParent :: Maybe ScopeState -> ScopeState
+emptyScopeStateWithParent = scopeSetPScope emptyScopeState
+
+vEmptyScopeStateWithParent :: Maybe VScopeState -> VScopeState
+vEmptyScopeStateWithParent = vScopeSetPScope emptyVScopeState
+
+pushNewEmptyScope :: State -> State
+pushNewEmptyScope (State scope ctxVals) = State (emptyScopeStateWithParent (Just scope)) ctxVals
+
+vPushNewEmptyScope :: VState -> VState
+vPushNewEmptyScope (VState scope iotaCtx proofCtx iotaseq) = 
+    VState (vEmptyScopeStateWithParent (Just scope)) iotaCtx proofCtx iotaseq
 
 -- Lookup the value of a var in State, including parent scopes
 lookupVar :: State -> Variable -> Maybe Value
@@ -108,6 +127,18 @@ vInsertVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq)
     case vUpdateExistingVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq) var niota nproofs of
         Just s -> s
         Nothing -> VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq
+
+setContinuations :: State -> Continuations -> State
+setContinuations (State scope ctxVals) c = State (scopeSetContinuations scope c) ctxVals
+
+vSetContinuations :: VState -> Continuations -> VState
+vSetContinuations (VState scope iotaCtx proofCtx iotaseq) c = VState (vScopeSetContinuations scope c) iotaCtx proofCtx iotaseq
+
+scopeSetContinuations :: ScopeState -> Continuations -> ScopeState
+scopeSetContinuations (ScopeState vals _ pScope) c = ScopeState vals c pScope
+
+vScopeSetContinuations :: VScopeState -> Continuations -> VScopeState
+vScopeSetContinuations (VScopeState iotas proofs _ pScope) c = VScopeState iotas proofs c pScope
 
 -- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
@@ -196,9 +227,6 @@ vTopLevelScope (VState scope iotaCtx proofCtx iotaseq) =
 vScopeTopLevelScope :: VScopeState -> VScopeState
 vScopeTopLevelScope (VScopeState iotas proofs c Nothing) = VScopeState iotas proofs c Nothing
 vScopeTopLevelScope (VScopeState _ _ _ (Just pScope)) = vScopeTopLevelScope pScope
-
-emptyVScopeState :: VScopeState
-emptyVScopeState = VScopeState empty [] emptyContinuations Nothing
 
 -- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
 iotalist :: [Iota]

@@ -259,8 +259,14 @@ evalExpression sstate (F fnExpr argExprs) =
 
 -- State -> iota of result -> expression -> Result [proofs about result iota] String
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
-valExpression _ iota (Val val) = Ok [FApp eqProof [ATerm iota, CTerm val]]
--- foldr (\iota _ -> [C iota Eq val]) [] miota
+valExpression state iota (Val val) =
+    let functValResult = case val of
+            VFunct args inputValStmts body _ -> case body of
+                NativeFunct stmts -> mapResult (const ()) (valBlock $ vSetContinuations (vPushNewEmptyScope state) (Continuations stmts))
+                _ -> Ok ()
+            _ -> Ok ()
+     in let eqIotaProof = FApp eqProof [ATerm iota, CTerm val]
+         in mapResult (const [eqIotaProof]) functValResult
 valExpression state iota (Var var) =
     let omiota = vLookupVar state var
      in case omiota of

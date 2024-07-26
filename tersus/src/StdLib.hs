@@ -4,6 +4,9 @@ import Data.Map (Map, fromList, toList)
 
 import TersusTypes
 
+-- TODO: Separate this into primitive functions and true std lib
+-- TODO: Write std lib as text to be parsed
+
 builtinFunct :: BuiltinFunct -> Value
 builtinFunct Size = VFunct ["list"] [] (BuiltinFunct Size) []
 builtinFunct First =
