@@ -53,7 +53,7 @@ pushNewEmptyScope :: State -> State
 pushNewEmptyScope (State scope ctxVals) = State (emptyScopeStateWithParent (Just scope)) ctxVals
 
 vPushNewEmptyScope :: VState -> VState
-vPushNewEmptyScope (VState scope iotaCtx proofCtx iotaseq) = 
+vPushNewEmptyScope (VState scope iotaCtx proofCtx iotaseq) =
     VState (vEmptyScopeStateWithParent (Just scope)) iotaCtx proofCtx iotaseq
 
 -- Lookup the value of a var in State, including parent scopes
@@ -128,6 +128,11 @@ vInsertVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq)
         Just s -> s
         Nothing -> VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq
 
+vInsertVars :: VState -> [(Variable, Iota)] -> [IotaProof] -> VState
+vInsertVars state [] nproofs = vInsertProofs state nproofs
+vInsertVars state ((var, iota) : varIotas) nproofs =
+    vInsertVars (vInsertVar state var iota nproofs) varIotas []
+
 setContinuations :: State -> Continuations -> State
 setContinuations (State scope ctxVals) c = State (scopeSetContinuations scope c) ctxVals
 
@@ -192,6 +197,14 @@ popIotaFromSeq :: VState -> (Iota, VState)
 popIotaFromSeq (VState vScopeState iotaCtx proofCtx iotaseq) = case iotaseq of
     [] -> error "No more iotas to pop"
     i : is -> (i, VState vScopeState iotaCtx proofCtx is)
+
+popNIotasFromSeq :: VState -> Int -> ([Iota], VState)
+popNIotasFromSeq state n
+    | n > 0 =
+        let (iota, state') = popIotaFromSeq state
+         in let (remainingIotas, state'') = popNIotasFromSeq state' (n - 1)
+             in (iota : remainingIotas, state'')
+popNIotasFromSeq state _ = ([], state)
 
 emptyContinuations :: Continuations
 emptyContinuations = Continuations []

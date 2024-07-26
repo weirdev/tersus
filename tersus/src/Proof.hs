@@ -261,9 +261,7 @@ evalExpression sstate (F fnExpr argExprs) =
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
 valExpression state iota (Val val) =
     let functValResult = case val of
-            VFunct args inputValStmts body _ -> case body of
-                NativeFunct stmts -> mapResult (const ()) (valBlock $ vSetContinuations (vPushNewEmptyScope state) (Continuations stmts))
-                _ -> Ok ()
+            VFunct args inputValStmts body _ -> valFunctDef state args inputValStmts body
             _ -> Ok ()
      in let eqIotaProof = FApp eqProof [ATerm iota, CTerm val]
          in mapResult (const [eqIotaProof]) functValResult
@@ -295,6 +293,18 @@ valExpression (VState scope iotaCtx proofCtx iotaseq) iota (F fnexpr argexprs) =
                 -- TODO: If cannot get concrete value use proof IO
                 Error e -> Error e
 valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
+
+valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> FunctBody -> Result () String
+valFunctDef state args inputValStmts (NativeFunct stmts) =
+    let state' =
+            let wNewScope = vPushNewEmptyScope state
+             in let wContinuations = vSetContinuations wNewScope (Continuations stmts)
+                 in let (niotas, state') = popNIotasFromSeq wContinuations (length args)
+                     in let (argIotas, _) = zipMap args niotas (,)
+                         in vInsertVars state' argIotas []
+     in let valResult = valBlock state'
+         in mapResult (const ()) valResult
+valFunctDef _ _ _ BuiltinFunct{} = Ok () -- Builtin functions assumed to be validly defined
 
 -- Given expression evaluating to a function object, expressions evaluating to
 -- the function's arguments, and the iota corresponding to the function return value,
