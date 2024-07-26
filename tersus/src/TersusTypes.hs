@@ -67,8 +67,8 @@ data VScopeState
         Continuations
         (Maybe VScopeState)
     deriving (Show)
-newtype VState = VState (VScopeState, Map Variable Iota, [IotaProof], [Iota])
+data VState = VState VScopeState (Map Variable Iota) [IotaProof] [Iota]
 
 instance Show VState where
-    show (VState (scope, iotaCtx, proofCtx, iotaseq)) =
+    show (VState scope iotaCtx proofCtx iotaseq) =
         "VState (" ++ show (scope, iotaCtx, proofCtx) ++ "("
