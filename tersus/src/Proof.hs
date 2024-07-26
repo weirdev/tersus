@@ -33,7 +33,7 @@ evalIotaProof
                 -- TODO: Produce FApp with CTerm
                 Just values ->
                     let (iotaCtx, proofCtx) = ctx
-                     in [FApp eqFunct [ATerm iota, CTerm $ evalFunct (builtinFunct funct) (iotaMapToConcreteMap iotaCtx proofCtx) values]]
+                     in [FApp eqFunct [ATerm iota, CTerm $ evalFunctCall (builtinFunct funct) (iotaMapToConcreteMap iotaCtx proofCtx) values]]
                 _ -> []
             _ -> []
 evalIotaProof _ _ _ = []
@@ -255,7 +255,7 @@ evalExpression state (Var var) =
             Nothing -> error ("Undefined variable: " ++ var)
 evalExpression sstate (F fnExpr argExprs) =
     let (State scope valCtx, fval : argVals) = evalExpressionList sstate (fnExpr : argExprs)
-     in (Just $ evalFunct fval valCtx argVals, State scope valCtx)
+     in (Just $ evalFunctCall fval valCtx argVals, State scope valCtx)
 
 -- State -> iota of result -> expression -> Result [proofs about result iota] String
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
@@ -326,14 +326,14 @@ valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr exprargs riota
                                         let (fniota : argiotas) = niotas
                                          in -- Finally validate the function with the processed proofs
                                             -- TODO: Update iotaseq with iotas consumed in valFunct
-                                            case valFunct (VState (VScopeState empty [] (Continuations []) (Just scope)) iotaCtx proofCtx iotaseq') fniota argiotas ps riota of
+                                            case valFunctCall (VState (VScopeState empty [] (Continuations []) (Just scope)) iotaCtx proofCtx iotaseq') fniota argiotas ps riota of
                                                 Ok functProofs -> Ok (flatfinputproofs, functProofs, niotas, iotaseq')
                                                 Error e -> Error e
 
-evalFunct :: Value -> Map Variable Value -> [Value] -> Value
-evalFunct (VFunct _ _ (BuiltinFunct builtin) _) valCtx args =
+evalFunctCall :: Value -> Map Variable Value -> [Value] -> Value
+evalFunctCall (VFunct _ _ (BuiltinFunct builtin) _) valCtx args =
     evalBuiltinFunct builtin args
-evalFunct (VFunct vars _ (NativeFunct block) _) valCtx args =
+evalFunctCall (VFunct vars _ (NativeFunct block) _) valCtx args =
     let (argVals, _) = zipMap vars args (,)
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
@@ -341,7 +341,7 @@ evalFunct (VFunct vars _ (NativeFunct block) _) valCtx args =
              in case evalReturningBlock (State scope valCtx) of
                     (_, Just val) -> val
                     _ -> error "Function did not return a value"
-evalFunct _ _ _ = error "Object being called must be a function"
+evalFunctCall _ _ _ = error "Object being called must be a function"
 
 evalBuiltinFunct :: BuiltinFunct -> [Value] -> Value
 evalBuiltinFunct Size [VIntList l] = VInt (fromIntegral (length l))
@@ -392,8 +392,8 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA=[5, 4]) = iotaB=2)
 -- Later update to produce abstract FApp proofs
 -- (ex. size(iotaA) = iotaB)
-valFunct :: VState -> Iota -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
-valFunct state fniota iiotas iproofs retiota =
+valFunctCall :: VState -> Iota -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
+valFunctCall state fniota iiotas iproofs retiota =
     let mFnIota = findIotaEqToFn ["list"] iproofs
      in -- Get the concrete function object
         -- TODO: Support function proof evaluation with less than the full concrete function
@@ -409,7 +409,7 @@ valFunct state fniota iiotas iproofs retiota =
                                     Just argVals ->
                                         -- Concrete values of function args
                                         let (VState _ iotaCtx proofCtx _) = state' -- Evaluate the function using the concrete values of the function and args
-                                         in let functResult = evalFunct fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
+                                         in let functResult = evalFunctCall fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
                                              in Ok [FApp eqProof [ATerm retiota, CTerm functResult]]
                                     Nothing ->
                                         Error
