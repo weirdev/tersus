@@ -41,7 +41,7 @@ newtype Continuations = Continuations [Statement] deriving (Show)
 newtype ScopeState = ScopeState (Map Variable Value, Continuations, Maybe ScopeState)
 
 -- (scope info, file context [aka standard lib + imports])
-newtype State = State (ScopeState, Map Variable Value)
+data State = State ScopeState (Map Variable Value)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)

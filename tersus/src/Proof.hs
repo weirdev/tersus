@@ -68,8 +68,8 @@ validate l = case valBlock $ initVStateWStatements l of
 -- Private fns
 evalBlock :: State -> State
 evalBlock state = case state of
-    State (ScopeState (_, Continuations [], _), _) -> state
-    State (ScopeState (_, Continuations (_ : _), _), _) ->
+    State (ScopeState (_, Continuations [], _)) _ -> state
+    State (ScopeState (_, Continuations (_ : _), _)) _ ->
         let nState = evalNextStatement state
          in evalBlock nState
 
@@ -95,13 +95,13 @@ valReturningBlock state =
 
 evalNextStatement :: State -> State
 evalNextStatement state = case state of
-    State (ScopeState (_, Continuations (Assign var expr : _), _), _) ->
+    State (ScopeState (_, Continuations (Assign var expr : _), _)) _ ->
         let (mval, rState) = evalExpression (advanceStatement state) expr
          in case mval of
                 Just val -> insertVar rState var val
                 -- TODO: Is this an error case?
                 Nothing -> rState
-    State (ScopeState (_, Continuations (Return expr : _), _), _) ->
+    State (ScopeState (_, Continuations (Return expr : _), _)) _ ->
         let (mval, rState) = evalExpression (advanceStatement state) expr
          in -- Break out of the current block and return the value
             let prState = topLevelScope rState
@@ -109,16 +109,16 @@ evalNextStatement state = case state of
                     Just val -> setReturn prState val
                     -- TODO: Allow this for functions returning nothing
                     Nothing -> error "Return expression must return a value"
-    State (ScopeState (_, Continuations (ValidationStatement{} : _), _), _) -> advanceStatement state
-    State (ScopeState (_, Continuations (Block statements : _), _), _) ->
-        let State (scope, ctxVals) = state
-         in evalBlock (State (ScopeState (empty, Continuations (statements ++ [EndBlock]), Just (scopeAdvanceStatement scope)), ctxVals))
+    State (ScopeState (_, Continuations (ValidationStatement{} : _), _)) _ -> advanceStatement state
+    State (ScopeState (_, Continuations (Block statements : _), _)) _ ->
+        let State scope ctxVals = state
+         in evalBlock (State (ScopeState (empty, Continuations (statements ++ [EndBlock]), Just (scopeAdvanceStatement scope))) ctxVals)
     -- TODO: Could we just match on Continuations [] insead of inserting EndBlock?
-    State (ScopeState (_, Continuations (EndBlock : _), pScope), ctxVals) ->
+    State (ScopeState (_, Continuations (EndBlock : _), pScope)) ctxVals ->
         -- Any vars declared in the block are not exported,
         -- but any vars updated in the parent scope must be exported
         case pScope of
-            Just rpScope -> State (rpScope, ctxVals)
+            Just rpScope -> State rpScope ctxVals
             _ -> error "EndBlock must have a parent scope"
 
 valNextStatement :: VState -> Result VState String
@@ -251,8 +251,8 @@ evalExpression state (Var var) =
             Just _ -> (mval, state)
             Nothing -> error ("Undefined variable: " ++ var)
 evalExpression sstate (F fnExpr argExprs) =
-    let (State (scope, valCtx), fval : argVals) = evalExpressionList sstate (fnExpr : argExprs)
-     in (Just $ evalFunct fval valCtx argVals, State (scope, valCtx))
+    let (State scope valCtx, fval : argVals) = evalExpressionList sstate (fnExpr : argExprs)
+     in (Just $ evalFunct fval valCtx argVals, State scope valCtx)
 
 -- State -> iota of result -> expression -> Result [proofs about result iota] String
 valExpression :: VState -> Iota -> Expression -> Result [IotaProof] String -- produces only the new proofs
@@ -329,7 +329,7 @@ evalFunct (VFunct vars _ (NativeFunct block) _) valCtx args =
      in -- Give args the function parameter names
         let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
          in let scope = ScopeState (varMap, Continuations block, Just emptyScopeState)
-             in case evalReturningBlock (State (scope, valCtx)) of
+             in case evalReturningBlock (State scope valCtx) of
                     (_, Just val) -> val
                     _ -> error "Function did not return a value"
 evalFunct _ _ _ = error "Object being called must be a function"

@@ -11,11 +11,11 @@ import TersusTypes
 import Utils
 
 initState :: State
-initState = State (emptyScopeState, stdLibCtx)
+initState = State emptyScopeState stdLibCtx
 
 initStateWStatements :: [Statement] -> State
 initStateWStatements stmts = case initState of
-    State (_, ctxVals) -> State (initScopeStateWStatements stmts, ctxVals)
+    State _ ctxVals -> State (initScopeStateWStatements stmts) ctxVals
 
 initScopeStateWStatements :: [Statement] -> ScopeState
 initScopeStateWStatements stmts = ScopeState (empty, Continuations stmts, Nothing)
@@ -32,14 +32,14 @@ emptyScopeState :: ScopeState
 emptyScopeState = ScopeState (empty, emptyContinuations, Nothing)
 
 setPScope :: State -> Maybe ScopeState -> State
-setPScope (State (scope, ctxVals)) p = State (scopeSetPScope scope p, ctxVals)
+setPScope (State scope ctxVals) p = State (scopeSetPScope scope p) ctxVals
 
 scopeSetPScope :: ScopeState -> Maybe ScopeState -> ScopeState
 scopeSetPScope (ScopeState (vals, c, _)) p = ScopeState (vals, c, p)
 
 -- Lookup the value of a var in State, including parent scopes
 lookupVar :: State -> Variable -> Maybe Value
-lookupVar (State (scope, ctxVals)) var = case scopeLookupVar scope var of
+lookupVar (State scope ctxVals) var = case scopeLookupVar scope var of
     Just val -> Just val
     Nothing -> Data.Map.lookup var ctxVals
 
@@ -64,9 +64,9 @@ vScopeLookupVar (VScopeState iotas _ _ pScope) var =
             Nothing -> Nothing
 
 updateExistingVar :: State -> Variable -> Value -> Maybe State
-updateExistingVar (State (scope, ctxVals)) var val =
+updateExistingVar (State scope ctxVals) var val =
     case scopeUpdateExistingVar scope var val of
-        Just ns -> Just $ State (ns, ctxVals)
+        Just ns -> Just $ State ns ctxVals
         Nothing -> Nothing
 
 scopeUpdateExistingVar :: ScopeState -> Variable -> Value -> Maybe ScopeState
@@ -96,12 +96,12 @@ vScopeUpdateExistingVar (VScopeState iotas proofs c pScope) var niota nproofs =
             Nothing -> Nothing
 
 insertVar :: State -> Variable -> Value -> State
-insertVar (State (ScopeState (vals, c, pState), ctxVals)) var val =
+insertVar (State (ScopeState (vals, c, pState)) ctxVals) var val =
     -- Prefentially update existing var in this or parent scope if the variable is already bound.
     -- Otherwise, just insert the new variable in the current scope.
-    case updateExistingVar (State (ScopeState (vals, c, pState), ctxVals)) var val of
+    case updateExistingVar (State (ScopeState (vals, c, pState)) ctxVals) var val of
         Just s -> s
-        Nothing -> State (ScopeState (insert var val vals, c, pState), ctxVals)
+        Nothing -> State (ScopeState (insert var val vals, c, pState)) ctxVals
 
 vInsertVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
 vInsertVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq) var niota nproofs =
@@ -112,7 +112,7 @@ vInsertVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq)
 -- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
 getReturn :: State -> Maybe Value
-getReturn (State (ScopeState (vals, _, _), _)) = Data.Map.lookup "return" vals
+getReturn (State (ScopeState (vals, _, _)) _) = Data.Map.lookup "return" vals
 
 -- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
@@ -125,7 +125,7 @@ vGetReturn _ = error "Not top scope"
 -- NOTE: If we ever have nested functions that implicitly get their parent's scope,
 -- this will need to be updated to indicate on which scope to set the return value
 setReturn :: State -> Value -> State
-setReturn (State (scope, ctxVals)) val = State (scopeSetReturn scope val, ctxVals)
+setReturn (State scope ctxVals) val = State (scopeSetReturn scope val) ctxVals
 
 scopeSetReturn :: ScopeState -> Value -> ScopeState
 scopeSetReturn (ScopeState (vals, c, Nothing)) val = ScopeState (insert "return" val vals, c, Nothing)
@@ -166,7 +166,7 @@ emptyContinuations :: Continuations
 emptyContinuations = Continuations []
 
 advanceStatement :: State -> State
-advanceStatement (State (scope, ctxVals)) = State (scopeAdvanceStatement scope, ctxVals)
+advanceStatement (State scope ctxVals) = State (scopeAdvanceStatement scope) ctxVals
 
 scopeAdvanceStatement :: ScopeState -> ScopeState
 scopeAdvanceStatement (ScopeState (_, Continuations [], _)) = error "No more statements to advance"
@@ -183,7 +183,7 @@ vScopeAdvanceStatement (VScopeState iotas proofs (Continuations (_ : nxt)) pScop
     VScopeState iotas proofs (Continuations nxt) pScope
 
 topLevelScope :: State -> State
-topLevelScope (State (scope, ctxVals)) = State (scopeTopLevelScope scope, ctxVals)
+topLevelScope (State scope ctxVals) = State (scopeTopLevelScope scope) ctxVals
 
 scopeTopLevelScope :: ScopeState -> ScopeState
 scopeTopLevelScope (ScopeState (vals, c, Nothing)) = ScopeState (vals, c, Nothing)
