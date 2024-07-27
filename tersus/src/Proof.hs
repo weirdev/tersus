@@ -134,7 +134,7 @@ valNextStatement state =
                      in case valExpression state' niota expr of
                             -- TODO: Partition nproofs into 1) those that only use niota and iotas
                             -- from scopes higher than where niota is declared and 2) the inverse
-                            Ok nproofs -> Ok $ vInsertVar state' var niota nproofs
+                            Ok nproofs -> doTrace3 (var ++ " = " ++ show nproofs) (Ok $ vInsertVar state' var niota nproofs)
                             Error e -> Error e
                 (Return expr : _) ->
                     let (VState (VScopeState _ proofs c _) _ _ _) = state
@@ -192,7 +192,7 @@ valRewrite state (Eval var) =
     let (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) = state
      in let oiota = vLookupVar state var
          in case oiota of
-                Nothing -> Error $ "Undefined variable: " ++ var
+                Nothing -> Error $ "(Eval) Undefined variable: " ++ var
                 Just iota ->
                     Ok $
                         VState
@@ -207,7 +207,7 @@ valRewrite state (EqToLtPlus1 var) =
     let (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx (niota : c1iota : iotaseq)) = state
      in let oiota = vLookupVar state var
          in case oiota of
-                Nothing -> Error $ "Undefined variable: " ++ var
+                Nothing -> Error $ "(EqToLtPlus1) Undefined variable: " ++ var
                 Just iota ->
                     let withNewProofs =
                             proofs
@@ -224,7 +224,7 @@ valRewrite state (EqToLtPlus1 var) =
 -- TODO: Make this EqToGtTarget with two arguments, the var and the target number
 valRewrite state (EqToGtZero var) =
     case vLookupVar state var of
-        Nothing -> Error $ "Undefined variable: " ++ var
+        Nothing -> Error $ "(EqToGtZero) Undefined variable: " ++ var
         Just iota -> case iotaToValue iota (vGetProofs state) of
             Nothing -> Error $ "Var lacks concrete definition: " ++ var
             Just (VInt num) ->
@@ -252,7 +252,7 @@ evalExpression state (Var var) =
     let mval = lookupVar state var
      in case mval of
             Just _ -> (mval, state)
-            Nothing -> error ("Undefined variable: " ++ var)
+            Nothing -> error $ "Undefined variable: " ++ var
 evalExpression sstate (F fnExpr argExprs) =
     let (State scope valCtx, fval : argVals) = evalExpressionList sstate (fnExpr : argExprs)
      in (Just $ evalFunctCall fval valCtx argVals, State scope valCtx)
@@ -264,11 +264,12 @@ valExpression state iota (Val val) =
             VFunct args inputValStmts body _ -> valFunctDef state args inputValStmts body
             _ -> Ok ()
      in let eqIotaProof = FApp eqProof [ATerm iota, CTerm val]
-         in mapResult (const [eqIotaProof]) functValResult
+         in let r = mapResult (const [eqIotaProof]) functValResult
+             in doTrace3 (show r) r
 valExpression state iota (Var var) =
     let omiota = vLookupVar state var
      in case omiota of
-            Nothing -> Error $ "Undefined variable: " ++ var
+            Nothing -> Error $ "(Validate Expression) Undefined variable: " ++ var ++ " \nState: " ++ show state
             Just oiota -> Ok [FApp eqProof [ATerm iota, ATerm oiota]]
 valExpression (VState scope iotaCtx proofCtx iotaseq) iota (F fnexpr argexprs) =
     let VScopeState _ proofs _ _ = scope
@@ -296,14 +297,14 @@ valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 
 valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> FunctBody -> Result () String
 valFunctDef state args inputValStmts (NativeFunct stmts) =
-    let state' =
-            let wNewScope = vPushNewEmptyScope state
-             in let wContinuations = vSetContinuations wNewScope (Continuations stmts)
-                 in let (niotas, state') = popNIotasFromSeq wContinuations (length args)
+    let fnValState =
+            let newState = vPushNewEmptyScope (vSetScope state emptyVScopeState)
+             in let wContinuations = vSetContinuations newState (Continuations stmts)
+                 in let (niotas, newState') = popNIotasFromSeq wContinuations (length args)
                      in let (argIotas, _) = zipMap args niotas (,)
-                         in vInsertVars state' argIotas []
-     in let valResult = valBlock state'
-         in mapResult (const ()) valResult
+                         in vInsertVars newState' argIotas []
+     in let valResult = valBlock fnValState
+         in mapResult (const ()) (doTrace3 ("valFunctDef val result: " ++ show valResult) valResult)
 valFunctDef _ _ _ BuiltinFunct{} = Ok () -- Builtin functions assumed to be validly defined
 
 -- Given expression evaluating to a function object, expressions evaluating to
@@ -404,37 +405,37 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA) = iotaB)
 valFunctCall :: VState -> Iota -> [Iota] -> [IotaProof] -> Iota -> Result [IotaProof] String
 valFunctCall state fniota iiotas iproofs retiota =
-    let mFnIota = findIotaEqToFn ["list"] iproofs
-     in -- Get the concrete function object
-        -- TODO: Support function proof evaluation with less than the full concrete function
-        case concreteValOfIotaMaybe fniota iproofs of
-            Just fnVal -> case fnVal of
-                VFunct varArgs inputValStmts _ _ ->
-                    -- Validate the inputs are valid wrt the function signature
-                    case valFunctInput state varArgs iiotas iproofs inputValStmts of
-                        Error e -> Error $ "Funct input validation failed: " ++ e
-                        Ok state' ->
-                            let argvalsMaybe = flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
-                             in case argvalsMaybe of
-                                    Just argVals ->
-                                        -- Concrete values of function args
-                                        let (VState _ iotaCtx proofCtx _) = state' -- Evaluate the function using the concrete values of the function and args
-                                         in let functResult = evalFunctCall fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
-                                             in Ok [FApp eqProof [ATerm retiota, CTerm functResult]]
-                                    Nothing ->
-                                        Error
-                                            ( "Funct agrs not validated. Input iotas: "
-                                                ++ show iiotas
-                                                ++ ". Input Proofs: "
-                                                ++ show iproofs
-                                            )
-                _ -> Error "Non-function value called"
-            Nothing ->
-                Error $
-                    "Function object not validated. Function iota: "
-                        ++ show fniota
-                        ++ ". Input proofs: "
-                        ++ show iproofs
+    -- Get the concrete function object
+    -- TODO: Support function proof evaluation with less than the full concrete function
+    case concreteValOfIotaMaybe fniota iproofs of
+        Just fnVal -> case fnVal of
+            VFunct varArgs inputValStmts _ _ ->
+                -- Validate the inputs are valid wrt the function signature
+                case valFunctInput state varArgs iiotas iproofs inputValStmts of
+                    Error e -> Error $ "Funct input validation failed: " ++ e
+                    Ok state' ->
+                        let argvalsMaybe = flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
+                         in case argvalsMaybe of
+                                Just argVals ->
+                                    -- Concrete values of function args
+                                    let (VState _ iotaCtx proofCtx _) = state' -- Evaluate the function using the concrete values of the function and args
+                                     in let functResult = evalFunctCall fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
+                                         in Ok [FApp eqProof [ATerm retiota, CTerm functResult]]
+                                Nothing ->
+                                    Ok [] -- Don't require concrete fn vals
+                                    -- Error
+                                    --     ( "Funct agrs not validated. Input iotas: "
+                                    --         ++ show iiotas
+                                    --         ++ ". Input Proofs: "
+                                    --         ++ show iproofs
+                                    --     )
+            _ -> Error "Non-function value called"
+        Nothing ->
+            Error $
+                "Function object not validated. Function iota: "
+                    ++ show fniota
+                    ++ ". Input proofs: "
+                    ++ show iproofs
 
 valFunctInput :: VState -> [Variable] -> [Iota] -> [IotaProof] -> [ValidationStatement] -> Result VState String
 valFunctInput state _ _ _ [] = Ok state

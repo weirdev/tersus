@@ -2,7 +2,7 @@ module Utils where
     
 import Debug.Trace (trace)
 
-data Result a e = Ok a | Error e deriving (Eq)
+data Result a e = Ok a | Error e deriving (Eq, Show)
 
 -- Map elementwise two lists with a function,
 -- returning the result list and the second list trimmed to the length of the first
@@ -48,3 +48,5 @@ doTrace print passthrough = passthrough
 
 -- doTrace2 = trace
 doTrace2 = doTrace
+
+doTrace3 = trace

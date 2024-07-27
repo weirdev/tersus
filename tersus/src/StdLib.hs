@@ -13,7 +13,6 @@ builtinFunct First =
     VFunct
         ["list"]
         [ AssignProofVar "s" (F (Val (builtinFunct Size)) [Var "list"])
-        -- , Rewrite (Eval "s")
         , Rewrite (EqToGtZero "s")
         , ProofAssert
             ( FApp

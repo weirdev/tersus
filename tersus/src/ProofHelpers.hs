@@ -34,6 +34,12 @@ emptyScopeState = ScopeState empty emptyContinuations Nothing
 emptyVScopeState :: VScopeState
 emptyVScopeState = VScopeState empty [] emptyContinuations Nothing
 
+setScope :: State -> ScopeState -> State
+setScope (State _ ctxVals) scope = State scope ctxVals
+
+vSetScope :: VState -> VScopeState -> VState
+vSetScope (VState _ iotaCtx proofCtx iotaseq) scope = VState scope iotaCtx proofCtx iotaseq
+
 setPScope :: State -> Maybe ScopeState -> State
 setPScope (State scope ctxVals) p = State (scopeSetPScope scope p) ctxVals
 

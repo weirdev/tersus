@@ -137,9 +137,10 @@ parseEvalReturningStmtHelper stmtStr expected =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> case evalReturningBlock (setPScope (initStateWStatements stmts) (Just emptyScopeState)) of
-                (_, Just val) -> testAssertEq val expected
-                (_, Nothing) -> Just "No value returned"
+            Right (Block stmts) -> doTrace (show stmts) $
+                case evalReturningBlock (setPScope (initStateWStatements stmts) (Just emptyScopeState)) of
+                    (_, Just val) -> testAssertEq val expected
+                    (_, Nothing) -> Just "No value returned"
             Right _ -> Just "Not a block statement"
 
 testParseEvalSimpleExpression :: TestResult
@@ -246,7 +247,7 @@ validateWEMatchHelper stmts expected =
     case validate stmts of
         Ok (VState (VScopeState varMap iproofs _ _) _ _ _) ->
             testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
-            -- Just $ show (varMap, iproofs)
+        -- Just $ show (varMap, iproofs)
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
@@ -367,10 +368,11 @@ parseValReturningStmtHelper stmtStr expVar expected =
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
-            Right (Block stmts) -> case valReturningBlock (initVStateWStatements stmts) of
-                Ok (VState (VScopeState _ proofs _ _) _ _ _, Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
-                Ok (_, Nothing) -> Just "No value returned"
-                Error e -> Just $ "Validation failed with error: " ++ e
+            Right (Block stmts) -> doTrace3 (show stmts) $
+                case valReturningBlock (initVStateWStatements stmts) of
+                    Ok (VState (VScopeState _ proofs _ _) _ _ _, Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
+                    Ok (_, Nothing) -> Just "No value returned"
+                    Error e -> Just $ "Validation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
 
 testParseValBlockExpr :: TestResult
@@ -417,7 +419,11 @@ testParseValWUdfCall =
     parseValReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
-        \  fn sumFirstLast(lst) {\
+        \  fn sumFirstLast(lst) [{\
+        \    suppose s = size(lst);\
+        \    rewrite eqToGtZero s;\
+        \    affirm size(lst) > 0;\
+        \  }] {\
         \    return first(lst) + last(lst);\
         \  };\
         \  return sumFirstLast(x);\
