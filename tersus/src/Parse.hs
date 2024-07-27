@@ -38,17 +38,25 @@ variable = do
     rest <- many $ satisfy isLetter <|> satisfy isDigit
     return (fl : rest)
 
--- Tersus parsers
-statementBlock :: Parser [Statement]
-statementBlock = do
-    statements <- statement `sepEndBy` semicolon
+genericStatementBlock :: Parser a -> Parser [a]
+genericStatementBlock p = do
+    statements <- p `sepEndBy` semicolon
     whitespace
     return statements
+
+-- Tersus parsers
+statementBlock :: Parser [Statement]
+statementBlock = genericStatementBlock statement
+
+validationStatementBlock :: Parser [ValidationStatement]
+validationStatementBlock = genericStatementBlock validationStatement
 
 statement :: Parser Statement
 statement =
     returnStatement
-        <|> validationStatement
+        <|> ( ValidationStatement
+                <$> validationStatement
+            )
         <|> functStatement
         <|> assignStatement
         <|> blockStatement
@@ -83,13 +91,20 @@ functStatement = do
     whitespace
     void (char ')')
     whitespace
+    inputReqs <- option [] functInputReqs
+    whitespace
     fnBody <- curlyBracesParse statementBlock
     whitespace
-    return (Assign var (Val (VFunct argNames [] (NativeFunct fnBody) [])))
+    return (Assign var (Val (VFunct argNames inputReqs (NativeFunct fnBody) [])))
 
-validationStatement :: Parser Statement
+functInputReqs :: Parser [ValidationStatement]
+functInputReqs = squareBracketsParse (curlyBracesParse validationStatementBlock)
+
+validationStatement :: Parser ValidationStatement
 validationStatement =
-    ValidationStatement <$> (rewriteStatement <|> proofAssertStatement)
+    rewriteStatement
+        <|> proofAssertStatement
+        <|> assignProofVarStatement
 
 rewriteStatement :: Parser ValidationStatement
 rewriteStatement = do
@@ -106,6 +121,18 @@ proofAssertStatement = do
     p <- proof
     whitespace
     return (ProofAssert p)
+
+assignProofVarStatement :: Parser ValidationStatement
+assignProofVarStatement = do
+    void (string "suppose")
+    whitespace
+    var <- variable
+    whitespace
+    void (char '=')
+    whitespace
+    expr <- expression
+    whitespace
+    return (AssignProofVar var expr)
 
 proof :: Parser VariableProof
 proof =
@@ -210,6 +237,9 @@ parensParse = bracketsParse (char '(') (char ')')
 
 curlyBracesParse :: Parser a -> Parser a
 curlyBracesParse = bracketsParse (char '{') (char '}')
+
+squareBracketsParse :: Parser a -> Parser a
+squareBracketsParse = bracketsParse (char '[') (char ']')
 
 parensExpression :: Parser Expression
 parensExpression = parensParse expression
