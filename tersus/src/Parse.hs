@@ -124,7 +124,7 @@ proofAssertStatement = do
 
 assignProofVarStatement :: Parser ValidationStatement
 assignProofVarStatement = do
-    void (string "suppose")
+    void (string "define")
     whitespace
     var <- variable
     whitespace

@@ -1,6 +1,7 @@
 module ProofHelpers where
 
 import Data.Map (
+    Map,
     empty,
     insert,
     lookup,
@@ -61,6 +62,9 @@ pushNewEmptyScope (State scope ctxVals) = State (emptyScopeStateWithParent (Just
 vPushNewEmptyScope :: VState -> VState
 vPushNewEmptyScope (VState scope iotaCtx proofCtx iotaseq) =
     VState (vEmptyScopeStateWithParent (Just scope)) iotaCtx proofCtx iotaseq
+
+vGetVars :: VState -> Map Variable Iota
+vGetVars (VState (VScopeState iotas _ _ _) _ _ _) = iotas
 
 -- Lookup the value of a var in State, including parent scopes
 lookupVar :: State -> Variable -> Maybe Value

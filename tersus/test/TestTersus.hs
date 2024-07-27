@@ -414,15 +414,16 @@ testParseValFunctWInputStatements =
         "ret"
         [FApp eqVarProof [ATerm "ret", CTerm (VInt 3)]]
 
+-- TODO: Additional similar tests, including validation failures
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
     parseValReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
         \  fn sumFirstLast(lst) [{\
-        \    suppose s = size(lst);\
+        \    define s = size(lst);\
         \    rewrite eqToGtZero s;\
-        \    affirm size(lst) > 0;\
+        \    affirm s > 0;\
         \  }] {\
         \    return first(lst) + last(lst);\
         \  };\

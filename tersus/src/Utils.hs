@@ -49,4 +49,10 @@ doTrace print passthrough = passthrough
 -- doTrace2 = trace
 doTrace2 = doTrace
 
-doTrace3 = trace
+-- doTrace3 = trace
+doTrace3 = doTrace2
+
+doTrace4 = trace
+-- doTrace4 = doTrace3
+
+doTraceStatements = trace
