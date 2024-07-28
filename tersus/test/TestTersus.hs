@@ -419,7 +419,6 @@ testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
     parseValReturningStmtHelper
         "{\
-        \  x = [3, 6, 9, 12];\
         \  fn sumFirstLast(lst) [{\
         \    define s = size(lst);\
         \    rewrite eqToGtZero s;\
@@ -427,6 +426,7 @@ testParseValWUdfCall =
         \  }] {\
         \    return first(lst) + last(lst);\
         \  };\
+        \  x = [3, 6, 9, 12];\
         \  return sumFirstLast(x);\
         \}"
         "ret"
@@ -450,7 +450,11 @@ testParseValFunctReturnNestedBlocks =
     parseValReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
-        \  fn getFirst(y) {\
+        \  fn getFirst(y) [{\
+        \    define s = size(y);\
+        \    rewrite eqToGtZero s;\
+        \    affirm s > 0;\
+        \  }] {\
         \    x = [1];\
         \    {\
         \      return first(y);\

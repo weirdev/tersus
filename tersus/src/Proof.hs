@@ -172,16 +172,23 @@ valValidationStatement state (ProofAssert varproof) =
 valValidationStatement state (AssignProofVar var expr) =
     let VState scope _ _ _ = state
      in let VScopeState _ _ c _ = scope
-         in let (niota, state') = doTrace ("assignProofVar: " ++ show c) (popIotaFromSeq (vAdvanceStatement state))
-             in case doTrace "apv1" (valExpression state' niota expr) of
-                    -- TODO: Convert expression to iota proof p1, and add additional proof (niota == p1)
-                    Ok nproofs ->
-                        -- TODO: Should we be doing this in the ordinary valExpression?
-                        let nonEvalProof =
-                                let exprAsProof = varProofToIotaProof (exprToProof expr) state'
-                                 in FApp eqProof [ATerm niota, exprAsProof]
-                         in doTrace2 ("New assign proof var proofs: " ++ show (nonEvalProof : nproofs)) (Ok $ doTrace "apv2" (vInsertVar state' var niota (nonEvalProof : nproofs)))
-                    Error e -> Error e
+         in let state' = vAdvanceStatement state
+             in assignProofVarImpl state' var expr
+
+assignProofVarImpl :: VState -> Variable -> Expression -> Result VState String
+assignProofVarImpl state var expr =
+    let (niota, state') = popIotaFromSeq state
+     in case doTrace "apv1" (valExpression state' niota expr) of
+            -- TODO: Convert expression to iota proof p1, and add additional proof (niota == p1)
+            Ok nproofs ->
+                -- TODO: Should we be doing this in the ordinary valExpression?
+                let nonEvalProof =
+                        let exprAsProof = varProofToIotaProof (exprToProof expr) state'
+                         in FApp eqProof [ATerm niota, exprAsProof]
+                 in doTrace2
+                        ("New assign proof var proofs: " ++ show (nonEvalProof : nproofs))
+                        (Ok $ doTrace "apv2" (vInsertVar state' var niota (nonEvalProof : nproofs)))
+            Error e -> Error e
 
 valRewrite :: VState -> RwRule -> Result VState String
 valRewrite state (Refl varProof) =
@@ -226,18 +233,19 @@ valRewrite state (EqToLtPlus1 var) =
 valRewrite state (EqToGtZero var) =
     case vLookupVar state var of
         Nothing -> Error $ "(EqToGtZero) Undefined variable: " ++ var
-        Just iota -> case iotaToValue iota (vGetProofs state) of
+        Just iota -> case iotaToValue iota state of
             Nothing ->
-                doTrace3
-                    ("Var w/o def: " ++ var ++ " Proofs: " ++ show (vGetProofs state))
+                doTrace4
+                    ("Var w/o def: " ++ var ++ " Iotas: " ++ show (vGetVars state) ++ " Proofs: " ++ show (vGetProofs state))
                     (Error $ "Var lacks concrete definition: " ++ var)
             Just (VInt num) ->
-                if num > 0
-                    then
-                        let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
-                         in let refledNewProof = reflProofsByProofs [gtZeroProof] (vGetProofs state)
-                             in Ok $ vInsertProofs state (gtZeroProof : refledNewProof)
-                    else Error $ "Var is not greater than 0: " ++ var
+                doTrace4 ("EqToGtZero found concrete val: " ++ show num) $
+                    if num > 0
+                        then
+                            let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
+                             in let refledNewProof = reflProofsByProofs [gtZeroProof] (vGetProofs state)
+                                 in Ok $ vInsertProofs state (gtZeroProof : refledNewProof)
+                        else Error $ "Var is not greater than 0: " ++ var
             Just _ -> Error $ "Var is not an int: " ++ var
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
@@ -274,7 +282,10 @@ valExpression state iota (Var var) =
     let omiota = vLookupVar state var
      in case omiota of
             Nothing -> Error $ "(Validate Expression) Undefined variable: " ++ var ++ " \nState: " ++ show state
-            Just oiota -> Ok [FApp eqProof [ATerm iota, ATerm oiota]]
+            Just oiota ->
+                let iotaEq = FApp eqProof [ATerm iota, ATerm oiota]
+                 in let refledEqProofs = reflProofsByProofs [iotaEq] (vGetProofs state)
+                     in Ok (iotaEq : refledEqProofs)
 valExpression (VState scope iotaCtx proofCtx iotaseq) iota (F fnexpr argexprs) =
     let VScopeState _ proofs _ _ = scope
      in let functResults = valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr argexprs iota
@@ -303,14 +314,20 @@ valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> FunctBody -> Res
 valFunctDef state args inputValStmts (NativeFunct stmts) =
     let fnValStateResult =
             let newState = vPushNewEmptyScope (vSetScope state emptyVScopeState)
-             in let wContinuations = vSetContinuations newState (Continuations stmts)
+             in let wContinuations =
+                        doTrace4
+                            ("valFunctDef: Setting conts: " ++ show stmts)
+                            (vSetContinuations newState (Continuations stmts))
                  in let (niotas, newState') = popNIotasFromSeq wContinuations (length args)
                      in let (argIotas, _) = zipMap args niotas (,)
                          in let preInputValState = vInsertVars newState' argIotas []
                              in assumeValStmts preInputValState inputValStmts
      in case fnValStateResult of
             Ok fnValState ->
-                let valResult = valBlock fnValState
+                let valResult =
+                        doTrace4
+                            ("valFunctDef: Validating body: " ++ show (vGetContinuations fnValState))
+                            (valBlock fnValState)
                  in mapResult (const ()) (doTrace3 ("valFunctDef val result: " ++ show valResult) valResult)
             Error e -> Error e
 valFunctDef _ _ _ BuiltinFunct{} = Ok () -- Builtin functions assumed to be validly defined
@@ -326,7 +343,7 @@ assumeValStmt :: VState -> ValidationStatement -> Result VState String
 assumeValStmt state (Rewrite rwrule) = Ok state -- TODO: Instead of ignoring rewrites entirely during assumptions, should we just ignore failures?
 --  doTrace4 ("assume rewrite: " ++ show rwrule ++ " Proofs: " ++ show (vGetProofs state)) (valRewrite state rwrule)
 assumeValStmt state (ProofAssert varproof) = Ok $ vInsertProofs state [varProofToIotaProof varproof state]
-assumeValStmt state (AssignProofVar var expr) = valValidationStatement state (AssignProofVar var expr)
+assumeValStmt state (AssignProofVar var expr) = assignProofVarImpl state var expr
 
 -- Given expression evaluating to a function object, expressions evaluating to
 -- the function's arguments, and the iota corresponding to the function return value,
@@ -401,7 +418,7 @@ iotaMapToConcreteMap :: (Ord a) => Map a Iota -> [IotaProof] -> Map a Value
 iotaMapToConcreteMap imap proofs =
     Data.Map.fromList $
         mapMaybe
-            ( \(k, i) -> case iotaToValue i proofs of
+            ( \(k, i) -> case iotaToValueWProofList i proofs of
                 Just val -> Just (k, val)
                 Nothing -> Nothing
             )

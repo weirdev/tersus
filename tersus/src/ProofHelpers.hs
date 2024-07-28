@@ -143,6 +143,18 @@ vInsertVars state [] nproofs = vInsertProofs state nproofs
 vInsertVars state ((var, iota) : varIotas) nproofs =
     vInsertVars (vInsertVar state var iota nproofs) varIotas []
 
+getContinuations :: State -> Continuations
+getContinuations (State scope _) = scopeGetContinuations scope
+
+scopeGetContinuations :: ScopeState -> Continuations
+scopeGetContinuations (ScopeState _ c _) = c
+
+vGetContinuations :: VState -> Continuations
+vGetContinuations (VState scope _ _ _) = vScopeGetContinuations scope
+
+vScopeGetContinuations :: VScopeState -> Continuations
+vScopeGetContinuations (VScopeState _ _ c _) = c
+
 setContinuations :: State -> Continuations -> State
 setContinuations (State scope ctxVals) c = State (scopeSetContinuations scope c) ctxVals
 
@@ -189,11 +201,13 @@ vScopeSetReturn (VScopeState iotas proofs c (Just pScope)) niota nproofs =
 
 -- TODO: Include parent scopes
 vScopeGetProofs :: VScopeState -> [IotaProof]
-vScopeGetProofs (VScopeState _ proofs _ _) = proofs
+vScopeGetProofs (VScopeState _ proofs _ Nothing) = proofs
+vScopeGetProofs (VScopeState _ proofs _ (Just pScope)) = 
+    proofs ++ vScopeGetProofs pScope
 
 -- TODO: Include proof ctx
 vGetProofs :: VState -> [IotaProof]
-vGetProofs (VState scope _ _ _) = vScopeGetProofs scope
+vGetProofs (VState scope _ proofCtx _) = vScopeGetProofs scope ++ proofCtx
 
 vScopeInsertProofs :: VScopeState -> [IotaProof] -> VScopeState
 vScopeInsertProofs (VScopeState iotas proofs c pScope) newProofs =
@@ -355,7 +369,7 @@ reflProofsByProof _ _ = []
 iotasToValues :: [Iota] -> [IotaProof] -> Maybe [Value]
 iotasToValues [] _ = Just []
 iotasToValues (iota : itail) proofs =
-    let maybeValue = iotaToValue iota proofs
+    let maybeValue = iotaToValueWProofList iota proofs
      in case maybeValue of
             Just value -> case iotasToValues itail proofs of
                 Just values -> Just $ value : values
@@ -364,11 +378,14 @@ iotasToValues (iota : itail) proofs =
 
 -- Given an iota and a list of proofs,
 -- return the concrete value of the iota or nothing if not found
-iotaToValue :: Iota -> [IotaProof] -> Maybe Value
-iotaToValue _ [] = Nothing
-iotaToValue iota (proof : ptail) = case proof of
+iotaToValueWProofList :: Iota -> [IotaProof] -> Maybe Value
+iotaToValueWProofList _ [] = Nothing
+iotaToValueWProofList iota (proof : ptail) = case proof of
     FApp eqProof [ATerm piota, CTerm val] | piota == iota -> Just val
-    _ -> iotaToValue iota ptail
+    _ -> iotaToValueWProofList iota ptail
+
+iotaToValue :: Iota -> VState -> Maybe Value
+iotaToValue iota state = iotaToValueWProofList iota (vGetProofs state)
 
 varProofToIotaProof :: VariableProof -> VState -> IotaProof
 varProofToIotaProof (CTerm val) _ = CTerm val
