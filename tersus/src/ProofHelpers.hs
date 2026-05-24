@@ -7,9 +7,19 @@ import Data.Map (
     lookup,
  )
 
+import Data.Maybe (mapMaybe)
+
 import StdLib
 import TersusTypes
 import Utils
+
+newtype ProofMatchTerm i = MatchEquivalents [Proof i] deriving (Show, Eq)
+data ProofMatcher i
+    = FAppMatch (ProofMatcher i) [ProofMatcher i]
+    | ProofMatchTerm (ProofMatchTerm i)
+    deriving (Show, Eq)
+type IotaProofMatcher = ProofMatcher Iota
+type VariableProofMatcher = ProofMatcher Variable
 
 initState :: State
 initState = State emptyScopeState stdLibCtx
@@ -63,6 +73,7 @@ vPushNewEmptyScope :: VState -> VState
 vPushNewEmptyScope (VState scope iotaCtx proofCtx iotaseq) =
     VState (vEmptyScopeStateWithParent (Just scope)) iotaCtx proofCtx iotaseq
 
+-- TODO: Get vars from parent scopes and ctx
 vGetVars :: VState -> Map Variable Iota
 vGetVars (VState (VScopeState iotas _ _ _) _ _ _) = iotas
 
@@ -199,13 +210,11 @@ vScopeSetReturn (VScopeState iotas proofs c Nothing) niota nproofs =
 vScopeSetReturn (VScopeState iotas proofs c (Just pScope)) niota nproofs =
     VScopeState iotas proofs c (Just $ vScopeSetReturn pScope niota nproofs)
 
--- TODO: Include parent scopes
 vScopeGetProofs :: VScopeState -> [IotaProof]
 vScopeGetProofs (VScopeState _ proofs _ Nothing) = proofs
-vScopeGetProofs (VScopeState _ proofs _ (Just pScope)) = 
+vScopeGetProofs (VScopeState _ proofs _ (Just pScope)) =
     proofs ++ vScopeGetProofs pScope
 
--- TODO: Include proof ctx
 vGetProofs :: VState -> [IotaProof]
 vGetProofs (VState scope _ proofCtx _) = vScopeGetProofs scope ++ proofCtx
 
@@ -402,3 +411,33 @@ exprToProof :: Expression -> VariableProof
 exprToProof (Val val) = CTerm val
 exprToProof (Var var) = ATerm var
 exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof argExprs)
+
+-- proof `p` being searched for -> source equality proof -> other side of equality if p found
+extractFirstDegreeEquivalent :: IotaProof -> IotaProof -> Maybe IotaProof
+extractFirstDegreeEquivalent proof (FApp eqProof [lhs, rhs]) | lhs == proof = Just rhs
+extractFirstDegreeEquivalent proof (FApp eqProof [lhs, rhs]) | rhs == proof = Just lhs
+extractFirstDegreeEquivalent _ _ = Nothing
+
+-- proof `p` being searched for -> source equality proofs -> other side of equalities where p found
+extractFirstDegreeEquivalents :: IotaProof -> [IotaProof] -> [IotaProof]
+extractFirstDegreeEquivalents proof = mapMaybe (extractFirstDegreeEquivalent proof)
+
+extractFirstDegreeEquivalentsInclusive :: IotaProof -> [IotaProof] -> [IotaProof]
+extractFirstDegreeEquivalentsInclusive proof proofs =
+    proof : extractFirstDegreeEquivalents proof proofs
+
+extractNDegreeEquivalents :: Int -> IotaProof -> [IotaProof] -> [IotaProof]
+extractNDegreeEquivalents 0 _ _ = []
+extractNDegreeEquivalents n proof proofs =
+    let nextProofs = extractFirstDegreeEquivalents proof proofs
+     in nextProofs ++ concatMap (\p -> extractNDegreeEquivalents (n - 1) p proofs) nextProofs
+
+extractNDegreeEquivalentsInclusive :: Int -> IotaProof -> [IotaProof] -> [IotaProof]
+extractNDegreeEquivalentsInclusive n proof proofs =
+    proof : extractNDegreeEquivalents n proof proofs
+
+matchIotaProof :: IotaProofMatcher -> IotaProof -> Bool
+matchIotaProof (ProofMatchTerm (MatchEquivalents matchers)) proof = proof `elem` matchers
+matchIotaProof (FAppMatch matcherFunct matchers) (FApp proofFunct proofArgs) =
+    matchIotaProof matcherFunct proofFunct && all (uncurry matchIotaProof) (zip matchers proofArgs)
+matchIotaProof _ _ = False

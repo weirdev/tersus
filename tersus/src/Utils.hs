@@ -20,6 +20,7 @@ flatMap f (ah : at) = case f ah of
         Right c -> Right c
     Right c -> Right c
 
+-- TODO: Replace usages with mapMaybe
 flatMaybeMap :: (a -> Maybe b) -> [a] -> Maybe [b]
 flatMaybeMap f as = case flatMap
     ( \a -> case f a of

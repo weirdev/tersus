@@ -233,20 +233,44 @@ valRewrite state (EqToLtPlus1 var) =
 valRewrite state (EqToGtZero var) =
     case vLookupVar state var of
         Nothing -> Error $ "(EqToGtZero) Undefined variable: " ++ var
-        Just iota -> case iotaToValue iota state of
-            Nothing ->
-                doTrace4
-                    ("Var w/o def: " ++ var ++ " Iotas: " ++ show (vGetVars state) ++ " Proofs: " ++ show (vGetProofs state))
-                    (Error $ "Var lacks concrete definition: " ++ var)
-            Just (VInt num) ->
-                doTrace4 ("EqToGtZero found concrete val: " ++ show num) $
-                    if num > 0
-                        then
-                            let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
-                             in let refledNewProof = reflProofsByProofs [gtZeroProof] (vGetProofs state)
-                                 in Ok $ vInsertProofs state (gtZeroProof : refledNewProof)
-                        else Error $ "Var is not greater than 0: " ++ var
-            Just _ -> Error $ "Var is not an int: " ++ var
+        Just iota ->
+            let shouldProduceRewrite =
+                    case iotaToValue iota state of
+                        Nothing ->
+                            doTrace4 ("Var lacks concrete definition: " ++ var) $
+                                -- Do we already have the proof we are trying to produce?
+                                let equivProofExists =
+                                        let allProofs = doTrace4 ("Vars: " ++ show (vGetVars state) ++ " All proofs: " ++ show (vGetProofs state)) vGetProofs state
+                                         in let matcher =
+                                                    let gtProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (builtinFunct (Rel Gt))) allProofs
+                                                     in let lhsProofs = extractNDegreeEquivalentsInclusive 10 (ATerm iota) allProofs
+                                                         in let rhsProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (VInt 0)) allProofs
+                                                             in FAppMatch
+                                                                    (ProofMatchTerm (MatchEquivalents gtProofs))
+                                                                    [ ProofMatchTerm (MatchEquivalents lhsProofs)
+                                                                    , ProofMatchTerm (MatchEquivalents rhsProofs)
+                                                                    ]
+                                             in any (matchIotaProof matcher) allProofs
+                                 in if equivProofExists
+                                        then Ok ()
+                                        else Error $ "Var lacks concrete definition and no equivalent proof exists: " ++ var
+                        -- If we have the proof, we are done
+                        -- doTrace4
+                        -- ("Var w/o def: " ++ var ++ " Iotas: " ++ show (vGetVars state) ++ " Proofs: " ++ show (vGetProofs state))
+                        Just (VInt num) ->
+                            doTrace4 ("EqToGtZero found concrete val: " ++ show num) $
+                                if num > 0
+                                    then
+                                        Ok ()
+                                    else Error $ "Var is not greater than 0: " ++ var
+                        Just _ -> Error $ "Var is not an int: " ++ var
+             in case shouldProduceRewrite of
+                    Ok{} ->
+                        let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
+                         in let refledNewProof = reflProofsByProofs [gtZeroProof] (vGetProofs state)
+                             in let newproofs = gtZeroProof : refledNewProof
+                                 in Ok $ vInsertProofs state newproofs
+                    Error e -> Error e
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
 evalExpressionList state [] = (state, [])
@@ -284,30 +308,30 @@ valExpression state iota (Var var) =
             Nothing -> Error $ "(Validate Expression) Undefined variable: " ++ var ++ " \nState: " ++ show state
             Just oiota ->
                 let iotaEq = FApp eqProof [ATerm iota, ATerm oiota]
-                 in let refledEqProofs = reflProofsByProofs [iotaEq] (vGetProofs state)
+                 in -- Remove unnecessary indirection if oiota used in other proofs
+                    let refledEqProofs = reflProofsByProofs [iotaEq] (vGetProofs state)
                      in Ok (iotaEq : refledEqProofs)
 valExpression (VState scope iotaCtx proofCtx iotaseq) iota (F fnexpr argexprs) =
-    let VScopeState _ proofs _ _ = scope
-     in let functResults = valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr argexprs iota
-         in case functResults of
-                -- TODO: Return updated iotaseq
-                Ok (flatfinputproofs, functProofs, niotas, iotaseq') ->
-                    Ok
-                        -- TODO: Add back
-                        -- (
-                        -- reflProofsByProofs
-                        -- [ FApp
-                        --     eqProof
-                        --     [ ATerm iota
-                        --     , FApp funct (map ATerm niotas)
-                        --     ]
-                        -- ]
-                        -- flatfinputproofs
-                        -- ++
-                        functProofs
-                -- )
-                -- TODO: If cannot get concrete value use proof IO
-                Error e -> Error e
+    let functResults = valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr argexprs iota
+     in case functResults of
+            -- TODO: Return updated iotaseq
+            Ok (flatfinputproofs, functProofs, niotas, iotaseq') ->
+                Ok
+                    -- TODO: Add back
+                    -- (
+                    -- reflProofsByProofs
+                    -- [ FApp
+                    --     eqProof
+                    --     [ ATerm iota
+                    --     , FApp funct (map ATerm niotas)
+                    --     ]
+                    -- ]
+                    -- flatfinputproofs
+                    -- ++
+                    functProofs
+            -- )
+            -- TODO: If cannot get concrete value use proof IO
+            Error e -> Error e
 valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 
 valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> FunctBody -> Result () String
@@ -327,7 +351,7 @@ valFunctDef state args inputValStmts (NativeFunct stmts) =
                 let valResult =
                         doTrace4
                             ("valFunctDef: Validating body: " ++ show (vGetContinuations fnValState))
-                            (valBlock fnValState)
+                            (doTrace4 ("Preval fn body: Vars: " ++ show (vGetVars fnValState) ++ " Proofs: " ++ show (vGetProofs fnValState)) (valBlock fnValState))
                  in mapResult (const ()) (doTrace3 ("valFunctDef val result: " ++ show valResult) valResult)
             Error e -> Error e
 valFunctDef _ _ _ BuiltinFunct{} = Ok () -- Builtin functions assumed to be validly defined
@@ -352,7 +376,7 @@ assumeValStmt state (AssignProofVar var expr) = assignProofVarImpl state var exp
 -- state -> fnexpr -> argexprs -> (argProofs, functresultproofs, new iotas)
 valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result ([IotaProof], [IotaProof], [Iota], [Iota]) String
 valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr exprargs riota =
-    let VScopeState _ proofs _ _ = scope
+    let proofs = vGetProofs (VState scope iotaCtx proofCtx iotaseq)
      in -- Get proofs from the function and arg expressions
         let exprsToVal = fnexpr : exprargs
          in let (niotas, iotaseq') = splitAt (length exprsToVal) iotaseq
@@ -475,20 +499,16 @@ valFunctCall state fniota iiotas iproofs retiota =
 -- -> function validation state
 valFunctInput :: VState -> [Variable] -> [Iota] -> [IotaProof] -> [ValidationStatement] -> Result VState String
 valFunctInput state _ _ _ [] = Ok state
-valFunctInput
-    (VState scope iotaCtx proofCtx iotaseq)
-    varArgs
-    argIotas
-    argProofs
-    valStmts =
-        let (argIotasMap, _) =
+valFunctInput state varArgs argIotas argProofs valStmts =
+    let VState scope iotaCtx proofCtx iotaseq = state
+     in let (argIotasMap, _) =
                 doTrace3
                     ("Arg iotas: " ++ show argIotas)
                     (doTrace3 ("Arg proofs: " ++ show argProofs) (zipMap varArgs argIotas (,)))
          in let stmts = map ValidationStatement valStmts
              in valBlock $
                     VState
-                        (VScopeState (Data.Map.fromList argIotasMap) argProofs (Continuations stmts) Nothing)
+                        (VScopeState (Data.Map.fromList argIotasMap) (argProofs ++ vGetProofs state) (Continuations stmts) Nothing)
                         iotaCtx
                         proofCtx
                         iotaseq
