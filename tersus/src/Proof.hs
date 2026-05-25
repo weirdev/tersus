@@ -159,6 +159,8 @@ valAssignStatement state var expr =
             Ok (exprState, nproofs) -> doTrace3 (var ++ " = " ++ show nproofs) (Ok $ vInsertVar exprState var niota nproofs)
             Error e -> Error e
 
+-- Return proofs are trimmed to names visible at the call boundary so nested block-local
+-- iotas do not leak out when a function or block returns a value.
 valReturnStatement :: VState -> Expression -> Result VState String
 valReturnStatement state expr =
     let VState (VScopeState _ proofs c _) _ _ _ = state
@@ -457,22 +459,22 @@ assumeValStmt state (AssignProofVar var expr) = assignProofVarImpl state var exp
 -- 1) proofs of input expressions 2) proofs of the evaluated fn result 3) the new iotas used
 -- state -> fnexpr -> argexprs -> (argProofs, functresultproofs, new iotas)
 valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result (VState, [IotaProof], [IotaProof], [Iota]) String
-valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr exprargs riota =
+valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) functionExpr argExprs resultIota =
     let proofs = vGetProofs (VState scope iotaCtx proofCtx iotaseq)
      in -- Get proofs from the function and arg expressions
-         let exprsToVal = fnexpr : exprargs
-          in let (niotas, iotaseq') = splitAt (length exprsToVal) iotaseq
+         let exprsToVal = functionExpr : argExprs
+          in let (freshIotas, iotaseq') = splitAt (length exprsToVal) iotaseq
               in let exprState = VState scope iotaCtx proofCtx iotaseq'
-                  in case valExpressionSeq exprState exprsToVal niotas of
+                  in case valExpressionSeq exprState exprsToVal freshIotas of
                         Error e -> Error e
-                        Ok (exprValidatedState, finputproofs) ->
-                            let flatfinputproofs = concat finputproofs
-                             in let refloncefiproofs =
-                                        reflProofsByProofs flatfinputproofs (proofs ++ proofCtx)
-                                 in let ps = refloncefiproofs ++ flatfinputproofs
-                                     in let (fniota : argiotas) = niotas
-                                         in case valFunctCall exprValidatedState fniota argiotas ps riota of
-                                                Ok (callState, functProofs) -> Ok (callState, flatfinputproofs, functProofs, niotas)
+                        Ok (exprValidatedState, inputProofGroups) ->
+                            let flatInputProofs = concat inputProofGroups
+                             in let reflectedInputProofs =
+                                        reflProofsByProofs flatInputProofs (proofs ++ proofCtx)
+                                 in let availableInputProofs = reflectedInputProofs ++ flatInputProofs
+                                     in let (functionIota : inputIotas) = freshIotas
+                                         in case valFunctCall exprValidatedState functionIota inputIotas availableInputProofs resultIota of
+                                                Ok (callState, functionProofs) -> Ok (callState, flatInputProofs, functionProofs, freshIotas)
                                                 Error e -> Error e
 
 valExpressionSeq :: VState -> [Expression] -> [Iota] -> Result (VState, [[IotaProof]]) String
@@ -584,19 +586,21 @@ maybeConcreteFunctionResult fnValState fnVal iiotas iproofs retiota instantiated
              in FApp eqProof [ATerm retiota, CTerm functResult] : instantiatedProofs
         Nothing -> instantiatedProofs
 
+-- Exported proof variables are rebound to fresh caller-side iotas before the callee's
+-- proof templates are converted back into concrete caller-visible proofs.
 instantiateFunctOutputProofs :: VState -> [Variable] -> [Iota] -> Iota -> [VariableProof] -> Result (VState, [IotaProof]) String
 instantiateFunctOutputProofs state _ _ _ [] = Ok (state, [])
-instantiateFunctOutputProofs state varArgs argIotas retiota exportedProofs =
+instantiateFunctOutputProofs state varArgs argIotas returnIota exportedProofs =
     let exportedNames = nub (concatMap proofVars exportedProofs)
-     in let proofVarNames = filter (\var -> var /= "return" && notElem var varArgs) exportedNames
-         in let (proofVarIotas, state') = popNIotasFromSeq state (length proofVarNames)
+     in let exportedProofVarNames = filter (\var -> var /= "return" && notElem var varArgs) exportedNames
+         in let (exportedProofVarIotas, state') = popNIotasFromSeq state (length exportedProofVarNames)
              in let argBindings =
-                        zip (varArgs ++ ["return"]) (argIotas ++ [retiota])
-                 in let proofBindings = proofVarNames `zip` proofVarIotas
-                      in let exportBindings = argBindings ++ proofBindings
+                        zip (varArgs ++ ["return"]) (argIotas ++ [returnIota])
+                 in let proofVarBindings = exportedProofVarNames `zip` exportedProofVarIotas
+                      in let exportBindings = argBindings ++ proofVarBindings
                           in let exportState = buildVarToIotaState state' exportBindings [] (case state' of VState _ _ _ remaining -> remaining)
                               in let instantiatedProofs = map (`varProofToIotaProof` exportState) exportedProofs
-                                  in Ok (vInsertVars state' proofBindings instantiatedProofs, instantiatedProofs)
+                                  in Ok (vInsertVars state' proofVarBindings instantiatedProofs, instantiatedProofs)
 
 -- Validate the input arguments of a function call using the functions validation block
 -- (outer) state -> function arg names -> function arg iotas -> function arg proofs -> function validation block

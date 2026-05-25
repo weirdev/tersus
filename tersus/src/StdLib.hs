@@ -73,6 +73,8 @@ stdLibCtxToValCtx ctx =
 
 stdLibCtxToValCtxHelper :: [(Variable, Value)] -> ([(Variable, Iota)], [IotaProof])
 stdLibCtxToValCtxHelper [] = ([], [])
+-- Seed validation with one fresh symbolic name per stdlib binding plus a proof that
+-- the symbolic name is equal to the concrete builtin value.
 stdLibCtxToValCtxHelper ((var, functDef) : rest) =
     let newVarIota = (var, Iota var)
      in let newProof = FApp eqProof [ATerm (Iota var), CTerm functDef]

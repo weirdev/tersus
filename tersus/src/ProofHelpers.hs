@@ -410,6 +410,7 @@ proofVars (ATerm var) = [var]
 proofVars (FApp funct args) = nub (proofVars funct ++ concatMap proofVars args)
 
 valStmtDefinedVars :: ValidationStatement -> [Variable]
+-- Only proof-variable definitions are exportable names from a validation block.
 valStmtDefinedVars (AssignProofVar var _) = [var]
 valStmtDefinedVars _ = []
 
@@ -432,6 +433,8 @@ iotaProofToVarProof namedIotas (FApp funct args) = do
 
 buildVarToIotaState :: VState -> [(Variable, Iota)] -> [IotaProof] -> [Iota] -> VState
 buildVarToIotaState (VState _ iotaCtx proofCtx _) vars proofs = VState
+        -- This builds a temporary name->iota environment used while instantiating
+        -- exported function proofs back into the caller's scope.
         (VScopeState (fromList vars) proofs emptyContinuations Nothing)
         iotaCtx
         proofCtx

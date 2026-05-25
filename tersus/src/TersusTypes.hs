@@ -36,8 +36,11 @@ data Statement
 
 -- nextStmt
 -- TODO: Naming is probably wrong here
+-- Pending statements for the current scope; entering a block swaps in a new queue.
 newtype Continuations = Continuations [Statement] deriving (Show)
 
+-- Runtime state is split between the current lexical scope, the remaining statements
+-- for that scope, and an optional parent scope to return to on EndBlock.
 data ScopeState = ScopeState (Map Variable Value) Continuations (Maybe ScopeState)
 
 -- (scope info, file context [aka standard lib + imports])
@@ -48,6 +51,7 @@ data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 newtype Iota = Iota String deriving (Eq, Ord, Show)
 
 -- Function being applied, arguments
+-- Proof terms reuse the same tree shape for both concrete values and symbolic placeholders.
 data Proof i = FApp (Proof i) [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable

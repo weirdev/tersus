@@ -109,6 +109,8 @@ functStatement = do
     return (Assign var (Val (VFunct argNames inputReqs outputReqs (NativeFunct fnBody) [])))
 
 functContractReqs :: Parser [ValidationStatement]
+-- Function contracts are written as `[{ ... }]`: square brackets mark the presence
+-- of a contract section and the inner braces hold ordinary validation statements.
 functContractReqs = squareBracketsParse (curlyBracesParse validationStatementBlock)
 
 validationStatement :: Parser ValidationStatement
@@ -227,6 +229,7 @@ parseNullaryRule = return
 -- otherwise we will parse the lhs of infix expressions
 -- as one of the other expression types,
 -- not matching the infix operator and rhs
+-- All infix operators currently share the same precedence and associate left.
 expression :: Parser Expression
 expression = try infixExpression <|> nonInfixExpression
 
