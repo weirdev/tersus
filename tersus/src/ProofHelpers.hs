@@ -322,55 +322,44 @@ abstractLhsEqAbstractRhs _ = False
 -- replaceLIotas (FApp _ funct ptiota : tail) iota =
 --     FApp iota funct ptiota : replaceLIotas tail iota
 
--- Given an eqality relation, construct a new proof by replacing
--- instances of the LHS iota (from the equality) with the RHS iota or value
--- proof to change -> eq relation -> maybe updated proof
+substituteProofTerm :: IotaProof -> IotaProof -> IotaProof -> Maybe IotaProof
+substituteProofTerm source target proof
+    | proof == source = Just target
+substituteProofTerm source target (FApp funct args) =
+    let maybeFunct = substituteProofTerm source target funct
+     in let maybeArgs = map (substituteProofTerm source target) args
+         in if any isJust (maybeFunct : maybeArgs)
+                then
+                    Just
+                        ( FApp
+                            (Data.Maybe.fromMaybe funct maybeFunct)
+                            (zipWith (flip Data.Maybe.fromMaybe) maybeArgs args)
+                        )
+                else Nothing
+  where
+    isJust (Just _) = True
+    isJust _ = False
+substituteProofTerm _ _ _ = Nothing
+
+reverseEqProof :: IotaProof -> IotaProof
+reverseEqProof (FApp funct [lhs, rhs]) | funct == eqProof = FApp eqProof [rhs, lhs]
+reverseEqProof _ = error "Only Eq relation supported"
+
+-- Given an equality relation, construct a new proof by replacing
+-- instances of the LHS proof term with the RHS proof term.
 reflProofByProof :: IotaProof -> IotaProof -> Maybe IotaProof
-reflProofByProof proof (FApp funct [ATerm iota, ATerm oiota]) | funct == eqProof =
-    case proof of
-        ATerm li
-            | li == iota ->
-                Just (ATerm oiota)
-        FApp funct [ATerm li, CTerm val]
-            | li == oiota && funct == eqProof ->
-                Just (FApp eqProof [ATerm oiota, CTerm val])
-        -- TODO: This should apply recursively to the entire proof structure
-        FApp funct [ATerm li, rhs] | funct == eqProof ->
-            case reflProofByProof rhs (FApp eqProof [ATerm iota, ATerm oiota]) of
-                Just newRhs -> Just (FApp eqProof [ATerm li, newRhs])
-                _ -> Nothing
-        -- TODO: This should apply to all arguments rather than arbitrarily the first
-        FApp funct (ATerm fi : rtaili)
-            | fi == iota ->
-                Just (FApp funct (ATerm oiota : rtaili))
-        _ -> Nothing
-reflProofByProof proof (FApp funct [ATerm iota, nonAbstract]) | funct == eqProof =
-    case proof of
-        -- TODO: Handle all possible replacements
-        FApp funct [ATerm li, ATerm ri]
-            | ri == iota ->
-                Just (FApp funct [ATerm li, nonAbstract])
-        FApp funct [ATerm li, lNonAbstract]
-            | iota == li && nonAbstract /= lNonAbstract ->
-                Just (FApp funct [nonAbstract, lNonAbstract])
-        FApp funct [ATerm li, lNonAbstract]
-            | nonAbstract == lNonAbstract && iota /= li && funct == eqProof ->
-                Just (FApp eqProof [ATerm iota, ATerm li])
-        _ -> Nothing
+reflProofByProof proof (FApp funct [lhs, rhs]) | funct == eqProof =
+    substituteProofTerm lhs rhs proof
 reflProofByProof _ _ = error "Only Eq relation supported"
 
 -- Given an eqality relation, construct new proofs by replacing the
 -- LHS iota with the RHS iota or value
 -- proofs to change -> eq relation -> new proofs
 reflProofsByProof :: [IotaProof] -> IotaProof -> [IotaProof]
-reflProofsByProof (proof : ptail) (FApp funct [ATerm iota, ATerm oiota]) | funct == eqProof =
-    case reflProofByProof proof (FApp eqProof [ATerm iota, ATerm oiota]) of
-        Just newProof -> newProof : reflProofsByProof ptail (FApp eqProof [ATerm iota, ATerm oiota])
-        _ -> reflProofsByProof ptail (FApp eqProof [ATerm iota, ATerm oiota])
-reflProofsByProof (proof : ptail) (FApp funct [ATerm iota, nonAbstract]) | funct == eqProof =
-    case reflProofByProof proof (FApp eqProof [ATerm iota, nonAbstract]) of
-        Just newProof -> newProof : reflProofsByProof ptail (FApp eqProof [ATerm iota, nonAbstract])
-        _ -> reflProofsByProof ptail (FApp eqProof [ATerm iota, nonAbstract])
+reflProofsByProof (proof : ptail) eqProofSource@(FApp funct [_lhs, _rhs]) | funct == eqProof =
+    case reflProofByProof proof eqProofSource of
+        Just newProof -> newProof : reflProofsByProof ptail eqProofSource
+        _ -> reflProofsByProof ptail eqProofSource
 reflProofsByProof _ _ = []
 
 -- Given a list of iotas and a list of proofs,

@@ -185,17 +185,26 @@ assignProofVarImpl state var expr =
                 let nonEvalProof =
                         let exprAsProof = varProofToIotaProof (exprToProof expr) state'
                          in FApp eqProof [ATerm niota, exprAsProof]
-                 in doTrace2
-                        ("New assign proof var proofs: " ++ show (nonEvalProof : nproofs))
-                        (Ok $ doTrace "apv2" (vInsertVar state' var niota (nonEvalProof : nproofs)))
+                 in let reverseNonEvalProof = reverseEqProof nonEvalProof
+                     in let refledProofs =
+                                reflProofsByProofs (vGetProofs state') [nonEvalProof, reverseNonEvalProof]
+                         in let newProofs = nonEvalProof : nproofs ++ refledProofs
+                             in doTrace2
+                                    ("New assign proof var proofs: " ++ show newProofs)
+                                    (Ok $ doTrace "apv2" (vInsertVar state' var niota newProofs))
             Error e -> Error e
 
 valRewrite :: VState -> RwRule -> Result VState String
 valRewrite state (Refl varProof) =
     let (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) = state
      in let iotaProof = varProofToIotaProof varProof state
-         in let newProofs = reflProofsByProofs proofs proofs -- TODO: limit to proofs with iotaProof
-             in Ok $ VState (VScopeState iotas (proofs ++ newProofs) c pscope) iotaCtx proofCtx iotaseq
+         in let reverseEqProofs =
+                    [ reverseEqProof proof
+                    | proof@(FApp funct [_lhs, _rhs]) <- proofs
+                    , funct == eqProof
+                    ]
+             in let newProofs = reflProofsByProofs proofs (proofs ++ reverseEqProofs) -- TODO: limit to proofs with iotaProof
+              in Ok $ VState (VScopeState iotas (proofs ++ newProofs) c pscope) iotaCtx proofCtx iotaseq
 valRewrite state (Eval var) =
     let (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) = state
      in let oiota = vLookupVar state var
@@ -308,9 +317,11 @@ valExpression state iota (Var var) =
             Nothing -> Error $ "(Validate Expression) Undefined variable: " ++ var ++ " \nState: " ++ show state
             Just oiota ->
                 let iotaEq = FApp eqProof [ATerm iota, ATerm oiota]
-                 in -- Remove unnecessary indirection if oiota used in other proofs
-                    let refledEqProofs = reflProofsByProofs [iotaEq] (vGetProofs state)
-                     in Ok (iotaEq : refledEqProofs)
+                 in let reverseIotaEq = reverseEqProof iotaEq
+                     in -- Propagate proofs across the fresh alias in both directions.
+                        let refledEqProofs =
+                                reflProofsByProofs (vGetProofs state) [iotaEq, reverseIotaEq]
+                         in Ok (iotaEq : reverseIotaEq : refledEqProofs)
 valExpression (VState scope iotaCtx proofCtx iotaseq) iota (F fnexpr argexprs) =
     let functResults = valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr argexprs iota
      in case functResults of
