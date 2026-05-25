@@ -23,7 +23,20 @@ builtinFunct First =
         []
         (BuiltinFunct First)
         []
-builtinFunct Last = VFunct ["list"] [] [] (BuiltinFunct Last) []
+builtinFunct Last =
+    VFunct
+        ["list"]
+        [ AssignProofVar "s" (F (Val (builtinFunct Size)) [Var "list"])
+        , Rewrite (EqToGtZero "s")
+        , ProofAssert
+            ( FApp
+                (CTerm (builtinFunct (Rel Gt)))
+                [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 0)]
+            )
+        ]
+        []
+        (BuiltinFunct Last)
+        []
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []

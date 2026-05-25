@@ -427,16 +427,14 @@ iotaProofToVarProof _ (CTerm val) = Just (CTerm val)
 iotaProofToVarProof namedIotas (ATerm iota) = ATerm <$> Data.Map.lookup iota namedIotas
 iotaProofToVarProof namedIotas (FApp funct args) = do
     vfunct <- iotaProofToVarProof namedIotas funct
-    vargs <- flatMaybeMap (iotaProofToVarProof namedIotas) args
+    vargs <- collectMaybes (iotaProofToVarProof namedIotas) args
     Just (FApp vfunct vargs)
 
 buildVarToIotaState :: VState -> [(Variable, Iota)] -> [IotaProof] -> [Iota] -> VState
-buildVarToIotaState (VState _ iotaCtx proofCtx _) vars proofs iotaseq =
-    VState
+buildVarToIotaState (VState _ iotaCtx proofCtx _) vars proofs = VState
         (VScopeState (fromList vars) proofs emptyContinuations Nothing)
         iotaCtx
         proofCtx
-        iotaseq
 
 namedIotaMap :: [(Variable, Iota)] -> Map Iota Variable
 namedIotaMap = fromList . map (\(var, iota) -> (iota, var))

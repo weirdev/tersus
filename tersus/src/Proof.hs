@@ -29,7 +29,7 @@ evalIotaProof
     proofs
     ctx | eqFunct == eqProof =
         -- TODO: Make recursive
-        case flatMaybeMap maybeATermProofToIota args of
+        case collectMaybes maybeATermProofToIota args of
             Just iotas -> case iotasToValues iotas proofs of
                 -- TODO: Produce FApp with CTerm
                 Just values ->
@@ -63,7 +63,9 @@ validate :: [Statement] -> Result VState String
 validate [] = Ok $ VState emptyVScopeState empty [] []
 validate l = case valBlock $ initVStateWStatements l of
     Ok (VState vScopeState iotaCtx proofCtx remainingIotas) ->
-        Ok $ VState vScopeState iotaCtx proofCtx [head remainingIotas]
+        case remainingIotas of
+            nextIota : _ -> Ok $ VState vScopeState iotaCtx proofCtx [nextIota]
+            [] -> Error "Validation exhausted the available iota sequence"
     Error e -> Error e
 
 -- Private fns
@@ -339,7 +341,7 @@ validateValue :: VState -> Value -> Result Value String
 validateValue state val = case val of
     VFunct args inputValStmts outputValStmts body _ ->
         mapResult
-            (\exportedProofs -> VFunct args inputValStmts outputValStmts body exportedProofs)
+            (VFunct args inputValStmts outputValStmts body)
             (valFunctDef state args inputValStmts outputValStmts body)
     _ -> Ok val
 
@@ -445,7 +447,7 @@ valExpressionSeq state (expr : exprs) (iota : iotas) =
                 Ok (finalState, remainingProofs) -> Ok (finalState, proofs : remainingProofs)
                 Error e -> Error e
         Error e -> Error e
-valExpressionSeq _ _ _ = error "Expression/iota arity mismatch"
+valExpressionSeq _ _ _ = Error "Expression/iota arity mismatch"
 
 evalFunctCall :: Value -> Map Variable Value -> [Value] -> Value
 evalFunctCall (VFunct _ _ _ (BuiltinFunct builtin) _) valCtx args =
@@ -463,8 +465,10 @@ evalFunctCall _ _ _ = error "Object being called must be a function"
 evalBuiltinFunct :: BuiltinFunct -> [Value] -> Value
 evalBuiltinFunct Size [VIntList l] = VInt (fromIntegral (length l))
 evalBuiltinFunct Size _ = error "Size only valid for IntList"
+evalBuiltinFunct First [VIntList []] = error "First requires a non-empty IntList"
 evalBuiltinFunct First [VIntList l] = VInt (head l)
 evalBuiltinFunct First _ = error "First only valid for IntList"
+evalBuiltinFunct Last [VIntList []] = error "Last requires a non-empty IntList"
 evalBuiltinFunct Last [VIntList l] = VInt (last l)
 evalBuiltinFunct Last _ = error "Last only valid for IntList"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = VInt (v1 - v2)
@@ -524,7 +528,7 @@ valFunctCall state fniota iiotas iproofs retiota =
                          in case exportStateResult of
                                 Error e -> Error e
                                 Ok (stateWithExports, instantiatedProofs) ->
-                                    let argvalsMaybe = flatMaybeMap (`concreteValOfIotaMaybe` iproofs) iiotas
+                                    let argvalsMaybe = collectMaybes (`concreteValOfIotaMaybe` iproofs) iiotas
                                      in case argvalsMaybe of
                                             Just argVals ->
                                                 let (VState _ iotaCtx proofCtx _) = fnValState
@@ -544,7 +548,7 @@ instantiateFunctOutputProofs :: VState -> [Variable] -> [Iota] -> Iota -> [Varia
 instantiateFunctOutputProofs state _ _ _ [] = Ok (state, [])
 instantiateFunctOutputProofs state varArgs argIotas retiota exportedProofs =
     let exportedNames = nub (concatMap proofVars exportedProofs)
-     in let proofVarNames = filter (\var -> var /= "return" && not (var `elem` varArgs)) exportedNames
+     in let proofVarNames = filter (\var -> var /= "return" && notElem var varArgs) exportedNames
          in let (proofVarIotas, state') = popNIotasFromSeq state (length proofVarNames)
              in let argBindings =
                         zip (varArgs ++ ["return"]) (argIotas ++ [retiota])

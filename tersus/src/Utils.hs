@@ -1,6 +1,6 @@
 module Utils where
-    
-import Debug.Trace (trace)
+
+import Data.Maybe (mapMaybe)
 
 data Result a e = Ok a | Error e deriving (Eq, Show)
 
@@ -12,29 +12,22 @@ zipMap (ah : at) (bh : bt) f =
     let (atr, btr) = zipMap at bt f in (f ah bh : atr, bh : btr)
 zipMap (_ : _) [] _ = error "Second list must be at least length of first"
 
-flatMap :: (a -> Either b c) -> [a] -> Either [b] c
-flatMap _ [] = Left []
-flatMap f (ah : at) = case f ah of
-    Left b -> case flatMap f at of
-        Left bt -> Left (b : bt)
-        Right c -> Right c
-    Right c -> Right c
-
--- TODO: Replace usages with mapMaybe
-flatMaybeMap :: (a -> Maybe b) -> [a] -> Maybe [b]
-flatMaybeMap f as = case flatMap
-    ( \a -> case f a of
-        Just b -> Left b
-        Nothing -> Right ()
-    )
-    as of
-    Left bs -> Just bs
-    Right _ -> Nothing
+collectMaybes :: (a -> Maybe b) -> [a] -> Maybe [b]
+collectMaybes f as =
+    let bs = mapMaybe f as
+     in if length bs == length as
+            then Just bs
+            else Nothing
 
 flatResultMap :: (a -> Result b e) -> [a] -> Result [b] e
-flatResultMap f as = case flatMap (\a -> case f a of Ok b -> Left b; Error e -> Right e) as of
-    Left bs -> Ok bs
-    Right e -> Error e
+flatResultMap _ [] = Ok []
+flatResultMap f (a : as) =
+    case f a of
+        Ok b ->
+            case flatResultMap f as of
+                Ok bs -> Ok (b : bs)
+                Error e -> Error e
+        Error e -> Error e
 
 mapResult :: (a -> b) -> Result a e -> Result b e
 mapResult fn (Ok a) = Ok $ fn a
@@ -45,15 +38,20 @@ unwrapOrThrow _ (Just a) = a
 unwrapOrThrow err Nothing = error err
 
 -- doTrace print passthrough = trace print passthrough
-doTrace print passthrough = passthrough
+doTrace :: a -> b -> b
+doTrace _ passthrough = passthrough
 
 -- doTrace2 = trace
+doTrace2 :: a -> b -> b
 doTrace2 = doTrace
 
 -- doTrace3 = trace
+doTrace3 :: a -> b -> b
 doTrace3 = doTrace2
 
-doTrace4 = trace
--- doTrace4 = doTrace3
+-- Flip this to `trace` locally when debugging.
+doTrace4 :: a -> b -> b
+doTrace4 = doTrace3
 
-doTraceStatements = trace
+doTraceStatements :: a -> b -> b
+doTraceStatements = doTrace

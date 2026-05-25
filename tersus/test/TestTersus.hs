@@ -1,6 +1,7 @@
 module TestTersus where
 
 import Data.Map (Map, fromList, lookup)
+import System.Exit (exitFailure)
 
 import Parse
 import Proof
@@ -22,19 +23,25 @@ testCaseSeq s results =
         s
         (zipWith (\i r -> TestCase (s ++ show i) r) [0 :: Integer ..] results)
 
-runTest :: Test -> IO ()
+runTest :: Test -> IO Int
 runTest (TestCase s r) =
-    putStrLn $
-        s
-            ++ " - "
-            ++ ( case r of
-                    Nothing -> "Pass"
-                    Just e -> "Fail\n" ++ e
-               )
+    let failures = case r of
+            Nothing -> 0
+            Just _ -> 1
+     in do
+            putStrLn $
+                s
+                    ++ " - "
+                    ++ ( case r of
+                            Nothing -> "Pass"
+                            Just e -> "Fail\n" ++ e
+                       )
+            return failures
 runTest (TestList s ts) = do
     putStrLn $ "Running test list: " ++ s
-    mapM_ runTest ts
+    failures <- mapM runTest ts
     putStrLn ""
+    return (sum failures)
 
 testAssertTrue :: Bool -> TestResult
 testAssertTrue True = Nothing
@@ -60,25 +67,65 @@ testParseSimpleAssign :: Test
 testParseSimpleAssign =
     let parseOutput = parseStatementBlock "x = 5"
      in let result = case parseOutput of
-                Left _ -> Nothing
+                Left err -> Just $ "Parse failed: " ++ show err
                 Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
-         in TestCase "testParseSimpleAssign" result
+          in TestCase "testParseSimpleAssign" result
 
 testParseComplexAssign :: Test
 testParseComplexAssign =
     let parseOutput = parseStatementBlock "x = size([5]); rr = 1 - 1;"
      in let result = case parseOutput of
-                Left _ -> Nothing
+                Left err -> Just $ "Parse failed: " ++ show err
                 Right parsed ->
                     testAssertEq
                         parsed
                         [ Assign "x" (F (Var "size") [Val (VIntList [5])])
                         , Assign "rr" (F (Val (builtinFunct Minus)) [Val (VInt 1), Val (VInt 1)])
                         ]
-         in TestCase "testParseComplexAssign" result
+          in TestCase "testParseComplexAssign" result
+
+testParseKeywordBoundaryIdentifiers :: Test
+testParseKeywordBoundaryIdentifiers =
+    testCaseSeq
+        "testParseKeywordBoundaryIdentifiers"
+        [ case parseStatementBlock "returnx = 5" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "returnx" (Val (VInt 5))]
+        , case parseStatementBlock "rewriteRule = 5" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "rewriteRule" (Val (VInt 5))]
+        , case parseStatementBlock "affirmed = 5" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "affirmed" (Val (VInt 5))]
+        , case parseStatementBlock "defineVar = 5" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "defineVar" (Val (VInt 5))]
+        ]
+
+testParseInvalidProofBuiltin :: Test
+testParseInvalidProofBuiltin =
+    TestCase "testParseInvalidProofBuiltin" $
+        case parseStatement "affirm bogus(x)" of
+            Left _ -> Nothing
+            Right parsed -> Just $ "Expected parse failure, got: " ++ show parsed
+
+testParseInvalidRewriteRule :: Test
+testParseInvalidRewriteRule =
+    TestCase "testParseInvalidRewriteRule" $
+        case parseStatement "rewrite noSuchRule x" of
+            Left _ -> Nothing
+            Right parsed -> Just $ "Expected parse failure, got: " ++ show parsed
 
 testParse :: Test
-testParse = TestList "testParse" [testParseSimpleAssign, testParseComplexAssign]
+testParse =
+    TestList
+        "testParse"
+        [ testParseSimpleAssign
+        , testParseComplexAssign
+        , testParseKeywordBoundaryIdentifiers
+        , testParseInvalidProofBuiltin
+        , testParseInvalidRewriteRule
+        ]
 
 -- Evaluate tests
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
@@ -428,6 +475,16 @@ testParseValFunctWInputStatements =
         "ret"
         [FApp eqVarProof [ATerm "ret", CTerm (VInt 3)]]
 
+testParseValLastWInputStatements :: TestResult
+testParseValLastWInputStatements =
+    parseValReturningStmtHelper
+        "{\
+        \  x = [3, 6, 9, 12];\
+        \  return last(x);\
+        \}"
+        "ret"
+        [FApp eqVarProof [ATerm "ret", CTerm (VInt 12)]]
+
 -- TODO: Additional similar tests, including validation failures
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
@@ -522,6 +579,7 @@ testParseVal =
         [ testParseValBlockExpr
         , testParseValWFunctDef
         , testParseValFunctWInputStatements
+        , testParseValLastWInputStatements
         , testParseValWUdfCall
         , testValidateNestedBlocks
         , testParseValFunctReturnNestedBlocks
@@ -569,6 +627,14 @@ testParseValFunctBodyValidationFail =
         \  };\
         \}"
 
+testParseValLastEmptyValidationFail :: TestResult
+testParseValLastEmptyValidationFail =
+    parseValFailStmtHelper
+        "{\
+        \  x = [];\
+        \  return last(x);\
+        \}"
+
 testParseValFunctOutputValidationFail :: TestResult
 testParseValFunctOutputValidationFail =
     parseValFailStmtHelper
@@ -588,16 +654,22 @@ testParseValFail =
         , testParseValAffirmParensFail
         , testParseValFunctBodyValidationFail
         , testParseValFunctOutputValidationFail
+        , testParseValLastEmptyValidationFail
         ]
 
 -- Run tests
 main :: IO ()
 main = do
-    runTest testParse
-    runTest testEvaluateFullContext
-    runTest testParseEval
-    runTest testValidateWithExpectedMatch
-    runTest testValidateWithExpectedMismatch
-    runTest testValidationFail
-    runTest testParseVal
-    runTest testParseValFail
+    failures <-
+        sum <$> mapM
+                runTest
+                [ testParse
+                , testEvaluateFullContext
+                , testParseEval
+                , testValidateWithExpectedMatch
+                , testValidateWithExpectedMismatch
+                , testValidationFail
+                , testParseVal
+                , testParseValFail
+                ]
+    Control.Monad.unless (failures == 0) exitFailure

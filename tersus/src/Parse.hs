@@ -38,6 +38,15 @@ variable = do
     rest <- many $ satisfy isLetter <|> satisfy isDigit
     return (fl : rest)
 
+identifierChar :: Parser Char
+identifierChar = satisfy isLetter <|> satisfy isDigit
+
+keyword :: String -> Parser ()
+keyword kw = try $ do
+    void (string kw)
+    notFollowedBy identifierChar
+    return ()
+
 genericStatementBlock :: Parser a -> Parser [a]
 genericStatementBlock p = do
     statements <- p `sepEndBy` semicolon
@@ -73,7 +82,7 @@ assignStatement = do
 
 returnStatement :: Parser Statement
 returnStatement = do
-    try $ void (string "return")
+    keyword "return"
     whitespace
     expr <- expression
     whitespace
@@ -81,7 +90,7 @@ returnStatement = do
 
 functStatement :: Parser Statement
 functStatement = do
-    void (string "fn")
+    keyword "fn"
     whitespace
     var <- variable
     whitespace
@@ -110,7 +119,7 @@ validationStatement =
 
 rewriteStatement :: Parser ValidationStatement
 rewriteStatement = do
-    void (string "rewrite")
+    keyword "rewrite"
     whitespace
     rule <- rwRule
     whitespace
@@ -118,7 +127,7 @@ rewriteStatement = do
 
 proofAssertStatement :: Parser ValidationStatement
 proofAssertStatement = do
-    void (string "affirm")
+    keyword "affirm"
     whitespace
     p <- proof
     whitespace
@@ -126,7 +135,7 @@ proofAssertStatement = do
 
 assignProofVarStatement :: Parser ValidationStatement
 assignProofVarStatement = do
-    void (string "define")
+    keyword "define"
     whitespace
     var <- variable
     whitespace
@@ -163,12 +172,11 @@ parensProof = parensParse proof
 functionProof :: Parser VariableProof
 functionProof = do
     fname <- variable
-    -- TODO: Udf support
-    let funct = case fname of
-            "size" -> Size
-            "first" -> First
-            "last" -> Last
-            _ -> error "Functions in proofs only support builtins for now"
+    funct <- case fname of
+        "size" -> return Size
+        "first" -> return First
+        "last" -> return Last
+        _ -> fail "Functions in proofs only support builtins for now"
     void (char '(')
     whitespace
     args <- proof `sepBy` skipWhitespace (char ',')
@@ -201,14 +209,12 @@ rwRule = do
             -- TODO: Parens and argument list
             mvar <- optionMaybe variable
             whitespace
-            return
-                ( case (ruleStr, mvar) of
-                    ("eqToLtPlus1", Just var) -> EqToLtPlus1 var
-                    ("eqToGtZero", Just var) -> EqToGtZero var
-                    ("eval", Just var) -> Eval var
-                    ("evalAll", Nothing) -> EvalAll
-                    _ -> error "Unknown rule or wrong number of arguments"
-                )
+            case (ruleStr, mvar) of
+                ("eqToLtPlus1", Just var) -> return (EqToLtPlus1 var)
+                ("eqToGtZero", Just var) -> return (EqToGtZero var)
+                ("eval", Just var) -> return (Eval var)
+                ("evalAll", Nothing) -> return EvalAll
+                _ -> fail "Unknown rule or wrong number of arguments"
 
 -- NOTE: Infix expression must be matched first,
 -- otherwise we will parse the lhs of infix expressions
@@ -255,19 +261,15 @@ vint = do
     whitespace
     return (VInt (read val))
 
-valToInteger :: Value -> Integer
-valToInteger (VInt i) = i
-valToInteger _ = error "Not an integer"
-
 vlist :: Parser Value
 vlist = do
     void (char '[')
     whitespace
-    vals <- vint `sepBy` skipWhitespace (char ',')
+    vals <- ((\v -> case v of VInt i -> i; _ -> error "unreachable") <$> vint) `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ']')
     whitespace
-    return (VIntList (map valToInteger vals))
+    return (VIntList vals)
 
 varExpression :: Parser Expression
 varExpression = do
@@ -302,25 +304,21 @@ arithmeticFunct :: Parser BuiltinFunct
 arithmeticFunct = do
     op <- oneOf "+-" -- TODO: Add */
     whitespace
-    return
-        ( case op of
-            '+' -> Plus
-            '-' -> Minus
-            _ -> error "Unknown operator"
-        )
+    if op == '+'
+        then return Plus
+        else return Minus
 
 relationFunct :: Parser BuiltinFunct
 relationFunct = do
     relstr <- many1 $ oneOf "=<>"
     whitespace
-    let rel = case relstr of
-            "=" -> Eq
-            "<" -> Lt
-            ">" -> Gt
-            "<=" -> LtEq
-            ">=" -> GtEq
-            _ -> error "Unknown relation"
-    return (Rel rel)
+    case relstr of
+        "=" -> return (Rel Eq)
+        "<" -> return (Rel Lt)
+        ">" -> return (Rel Gt)
+        "<=" -> return (Rel LtEq)
+        ">=" -> return (Rel GtEq)
+        _ -> fail "Unknown relation"
 
 topLevelWrap :: Parser a -> Parser a
 topLevelWrap p = do
