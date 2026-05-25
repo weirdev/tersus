@@ -8,12 +8,13 @@ The Haskell implementation has two main execution paths after parsing:
 
 1. `Parse.parseStatementBlock` converts source text into the AST types in `TersusTypes`.
 2. `Proof.evaluate` executes statements concretely with a `State` containing lexical scopes plus the standard library value context. Assignments evaluate expressions and update bindings, `return` writes the top-level return slot, blocks push a child scope, function calls run a native body or builtin, and validation statements are skipped.
-3. `Proof.validate` symbolically validates the same statements with a `VState`. Runtime values are represented by fresh iotas, assignments add equality proofs, function calls check input contracts and instantiate exported output proofs, `affirm` checks that a proof is already derivable, and `rewrite` expands the proof context with supported rewrites.
+3. `Proof.validate` symbolically validates the same statements with a `VState`. Runtime values are represented by fresh iotas, assignments add equality proofs, function calls check input contracts and instantiate exported output proofs, `affirm` asks the internal `ProofEngine` whether a proof is entailed by the current context, and `rewrite` applies supported engine rules to expand that context.
 
 `stack run` currently exposes only the parser CLI in `app/Main.hs`: it reads one line, parses a statement block, and prints the parsed AST. The evaluator and validator are exercised directly from tests and GHCi.
 
 Next steps:
-1. Improved proof representation, proof engine
+1. Generalized user-supplied rewrites
+    `ProofEngine` now centralizes proof context storage, entailment, builtin evaluation rewrites, and equality substitution for the existing named rewrites.
     Proof engine would be able to apply generalized rewritings supplied by functions
     Axioms, replace EqToLtPlus1 with a standard lib impl
     Easier ways to rewrite

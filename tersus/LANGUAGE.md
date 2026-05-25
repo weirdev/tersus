@@ -1,6 +1,6 @@
 # Tersus Language Guide
 
-Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, integer lists, user-defined functions, nested blocks, and a proof validator built around equality, simple rewrites, and builtin function contracts.
+Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, integer lists, user-defined functions, nested blocks, and a proof validator built around an internal proof engine for equality, simple rewrites, and builtin function contracts.
 
 This guide describes the Haskell implementation in this package.
 
@@ -116,7 +116,7 @@ Validation statements are ordinary statements syntactically, but they are used b
 
 ### `affirm`
 
-`affirm` requires a proof to already be available in the current proof context.
+`affirm` requires a proof to be entailed by the current proof context. The proof may be present directly or match through known equality-equivalent terms.
 
 ```tersus
 x = 5;
@@ -143,7 +143,7 @@ Proof variables are especially useful in function contracts, where they can be e
 
 ### `rewrite`
 
-`rewrite` applies a named proof rewrite rule.
+`rewrite` applies a named proof-engine rewrite rule.
 
 ```tersus
 rewrite eqToGtZero s;

@@ -11,50 +11,11 @@ import Data.Map (
 import Data.List (nub)
 import Data.Maybe (mapMaybe)
 
+import qualified ProofEngine as Engine
 import ProofHelpers
 import StdLib
 import TersusTypes
 import Utils
-
--- Given an iota proof and a list of proofs as context,
--- return a list of new proofs
-evalIotaProof :: IotaProof -> [IotaProof] -> (Map Variable Iota, [IotaProof]) -> [IotaProof]
-evalIotaProof
-    ( FApp
-            eqFunct
-            [ ATerm iota
-                , FApp (CTerm (VFunct _ _ _ (BuiltinFunct funct) _)) args
-                ]
-        )
-    proofs
-    ctx | eqFunct == eqProof =
-        -- TODO: Make recursive
-        case collectMaybes maybeATermProofToIota args of
-            Just iotas -> case iotasToValues iotas proofs of
-                -- TODO: Produce FApp with CTerm
-                Just values ->
-                    let (iotaCtx, proofCtx) = ctx
-                     in case evalFunctCall (builtinFunct funct) (iotaMapToConcreteMap iotaCtx proofCtx) values of
-                            Ok val -> [FApp eqFunct [ATerm iota, CTerm val]]
-                            Error _ -> []
-                _ -> []
-            _ -> []
-evalIotaProof _ _ _ = []
-
-evalIota :: Iota -> [IotaProof] -> (Map Variable Iota, [IotaProof]) -> [IotaProof]
-evalIota iota proofs ctx =
-    concatMap (\proof -> evalIotaProofIfForIota iota proof proofs ctx) proofs
-
-evalIotaProofIfForIota :: Iota -> IotaProof -> [IotaProof] -> (Map Variable Iota, [IotaProof]) -> [IotaProof]
-evalIotaProofIfForIota iota proof proofs ctx =
-    case proof of
-        -- TODO: Support other functions
-        (FApp funct [ATerm fiota, FApp _ _])
-            | funct == eqProof ->
-                if fiota == iota
-                    then evalIotaProof proof proofs ctx
-                    else []
-        _ -> []
 
 -- Public fns
 evaluate :: [Statement] -> Result State String
@@ -213,7 +174,7 @@ valEndBlockStatement (VState (VScopeState _ _ _ pscope) iotaCtx proofCtx iotaseq
 -- Rewrite proofs using eq relation
 -- proofs to change -> eq relations -> updated proofs
 reflProofsByProofs :: [IotaProof] -> [IotaProof] -> [IotaProof]
-reflProofsByProofs lproofs = concatMap (reflProofsByProof lproofs)
+reflProofsByProofs = Engine.reflectProofsByProofs
 
 valValidationStatement :: VState -> ValidationStatement -> Result VState String
 valValidationStatement state (Rewrite rwrule) =
@@ -221,16 +182,17 @@ valValidationStatement state (Rewrite rwrule) =
         Ok advancedState -> doTrace "rewrite" (valRewrite advancedState rwrule)
         Error e -> Error e
 valValidationStatement state (ProofAssert varproof) =
-    let (VState (VScopeState _ proofs _ _) _ _ _) = state
-     in case vAdvanceStatement (doTrace "proofAssert" state) of
-            Ok state' ->
-                case varProofToIotaProof varproof state' of
-                    Ok iotaProof ->
-                        if iotaProof `elem` proofs
+    case vAdvanceStatement (doTrace "proofAssert" state) of
+        Ok state' ->
+            case varProofToIotaProof varproof state' of
+                Ok iotaProof ->
+                    let proofs = vGetProofs state'
+                        proofContext = Engine.proofContextFromFacts proofs
+                     in if Engine.entails iotaProof proofContext
                             then Ok state'
                             else doTrace4 ("Had vars: " ++ show (vGetVars state')) (doTrace4 ("Had proofs: " ++ show proofs) (Error $ "Assertion failed: " ++ show varproof))
-                    Error e -> Error e
-            Error e -> Error e
+                Error e -> Error e
+        Error e -> Error e
 valValidationStatement state (AssignProofVar var expr) =
     case vAdvanceStatement state of
         Ok advancedState -> assignProofVarImpl advancedState var expr
@@ -265,52 +227,40 @@ valRewrite state EvalAll = rewriteEvalAll state
 valRewrite state (EqToLtPlus1 var) = rewriteEqToLtPlus1 state var
 valRewrite state (EqToGtZero var) = rewriteEqToGtZero state var
 
+applyEngineRewrite :: VState -> Engine.EngineRewriteRule -> Result VState String
+applyEngineRewrite state rule =
+    let oldContext = Engine.proofContextFromFacts (vGetProofs state)
+     in case Engine.applyRewrite evalBuiltinFunct rule oldContext of
+            Ok newContext ->
+                Ok $ vInsertProofs state (Engine.proofContextDelta oldContext newContext)
+            Error e -> Error e
+
 rewriteRefl :: VState -> VariableProof -> Result VState String
-rewriteRefl state@(VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) varProof =
+rewriteRefl state varProof =
     case varProofToIotaProof varProof state of
         Ok _iotaProof ->
-            let reverseEqProofs =
-                    [ reverseEqProof proof
-                    | proof@(FApp funct [_lhs, _rhs]) <- proofs
-                    , funct == eqProof
-                    ]
-                newProofs = reflProofsByProofs proofs (proofs ++ reverseEqProofs)
-             in Ok $ VState (VScopeState iotas (proofs ++ newProofs) c pscope) iotaCtx proofCtx iotaseq
+            applyEngineRewrite state Engine.EngineRefl
         Error e -> Error e
 
 rewriteEval :: VState -> Variable -> Result VState String
-rewriteEval state@(VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) var =
+rewriteEval state var =
     case vLookupVar state var of
         Nothing -> Error $ "(Eval) Undefined variable: " ++ var
         Just iota ->
-            Ok $
-                VState
-                    (VScopeState iotas (evalIota iota proofs (iotaCtx, proofCtx) ++ proofs) c pscope)
-                    iotaCtx
-                    proofCtx
-                    iotaseq
+            applyEngineRewrite state (Engine.EngineEval iota)
 
 rewriteEvalAll :: VState -> Result VState String
-rewriteEvalAll (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) =
-    let newProofs = concatMap (\p -> evalIotaProof p proofs (iotaCtx, proofCtx)) proofs
-     in Ok $ VState (VScopeState iotas (proofs ++ newProofs) c pscope) iotaCtx proofCtx iotaseq
+rewriteEvalAll state =
+    applyEngineRewrite state Engine.EngineEvalAll
 
 rewriteEqToLtPlus1 :: VState -> Variable -> Result VState String
 rewriteEqToLtPlus1 state@(VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx (niota : c1iota : iotaseq)) var =
     case vLookupVar state var of
         Nothing -> Error $ "(EqToLtPlus1) Undefined variable: " ++ var
         Just iota ->
-            let withNewProofs =
-                    proofs
-                        ++ [ FApp (CTerm (builtinFunct (Rel Lt))) [ATerm iota, ATerm niota]
-                           , FApp eqProof [ATerm niota, FApp (CTerm (builtinFunct Plus)) [ATerm iota, ATerm c1iota]]
-                           , FApp eqProof [ATerm c1iota, CTerm $ VInt 1]
-                           ]
-                withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs (iotaCtx, proofCtx)
-                withRefledNewProofs =
-                    withEvaledProofs
-                        ++ reflProofsByProofs withEvaledProofs withEvaledProofs
-             in Ok $ VState (VScopeState iotas withRefledNewProofs c pscope) iotaCtx proofCtx iotaseq
+            applyEngineRewrite
+                (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq)
+                (Engine.EngineEqToLtPlus1 iota niota c1iota)
 rewriteEqToLtPlus1 _ _ = Error "EqToLtPlus1 requires two fresh iotas"
 
 rewriteEqToGtZero :: VState -> Variable -> Result VState String
@@ -318,42 +268,9 @@ rewriteEqToGtZero state var =
     case vLookupVar state var of
         Nothing -> Error $ "(EqToGtZero) Undefined variable: " ++ var
         Just iota ->
-            case validateGtZeroRewrite state var iota of
-                Ok{} ->
-                    let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
-                        refledNewProof = reflProofsByProofs [gtZeroProof] (vGetProofs state)
-                        newproofs = gtZeroProof : refledNewProof
-                     in Ok $ vInsertProofs state newproofs
-                Error e -> Error e
-
-validateGtZeroRewrite :: VState -> Variable -> Iota -> Result () String
-validateGtZeroRewrite state var iota =
-    case iotaToValue iota state of
-        Nothing ->
-            doTrace4 ("Var lacks concrete definition: " ++ var) $
-                if gtZeroEquivalentProofExists state iota
-                    then Ok ()
-                    else Error $ "Var lacks concrete definition and no equivalent proof exists: " ++ var
-        Just (VInt num) ->
-            doTrace4 ("EqToGtZero found concrete val: " ++ show num) $
-                if num > 0
-                    then Ok ()
-                    else Error $ "Var is not greater than 0: " ++ var
-        Just _ -> Error $ "Var is not an int: " ++ var
-
-gtZeroEquivalentProofExists :: VState -> Iota -> Bool
-gtZeroEquivalentProofExists state iota =
-    let allProofs = doTrace4 ("Vars: " ++ show (vGetVars state) ++ " All proofs: " ++ show (vGetProofs state)) vGetProofs state
-        matcher =
-            let gtProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (builtinFunct (Rel Gt))) allProofs
-                lhsProofs = extractNDegreeEquivalentsInclusive 10 (ATerm iota) allProofs
-                rhsProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (VInt 0)) allProofs
-             in FAppMatch
-                    (ProofMatchTerm (MatchEquivalents gtProofs))
-                    [ ProofMatchTerm (MatchEquivalents lhsProofs)
-                    , ProofMatchTerm (MatchEquivalents rhsProofs)
-                    ]
-     in any (matchIotaProof matcher) allProofs
+            case applyEngineRewrite state (Engine.EngineEqToGtZero iota) of
+                Ok state' -> Ok state'
+                Error e -> Error $ "(EqToGtZero) " ++ e ++ ": " ++ var
 
 evalExpressionList :: State -> [Expression] -> Result (State, [Value]) String
 evalExpressionList state [] = Ok (state, [])

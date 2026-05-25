@@ -225,7 +225,7 @@ vGetProofs (VState scope _ proofCtx _) = vScopeGetProofs scope ++ proofCtx
 
 vScopeInsertProofs :: VScopeState -> [IotaProof] -> VScopeState
 vScopeInsertProofs (VScopeState iotas proofs c pScope) newProofs =
-    VScopeState iotas (proofs ++ newProofs) c pScope
+    VScopeState iotas (nub (proofs ++ newProofs)) c pScope
 
 vInsertProofs :: VState -> [IotaProof] -> VState
 vInsertProofs (VState scope iotaCtx proofCtx iotaseq) newProofs =

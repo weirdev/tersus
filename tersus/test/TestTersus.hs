@@ -8,6 +8,7 @@ import System.Exit (exitFailure)
 
 import Parse
 import Proof
+import qualified ProofEngine as Engine
 import ProofHelpers
 import StdLib
 import TersusTypes
@@ -473,6 +474,63 @@ testValidationFail =
         , validationFailHelper [Assign "x" (Val (VInt 5)), ValidationStatement (ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 4)]))]
         ]
 
+-- Proof engine tests
+testProofEngineInsertDedupes :: TestResult
+testProofEngineInsertDedupes =
+    let knownProof = FApp eqProof [ATerm (Iota "x"), CTerm (VInt 5)]
+        context = Engine.insertProofs [knownProof, knownProof] Engine.emptyProofContext
+     in testAssertEq (Engine.proofContextFacts context) [knownProof]
+
+testProofEngineEntailsEquivalentTerms :: TestResult
+testProofEngineEntailsEquivalentTerms =
+    let iotaX = Iota "x"
+        iotaA = Iota "a"
+        context =
+            Engine.proofContextFromFacts
+                [ FApp eqProof [ATerm iotaX, ATerm iotaA]
+                , FApp eqProof [ATerm iotaA, CTerm (VInt 5)]
+                ]
+        goal = FApp eqProof [ATerm iotaX, CTerm (VInt 5)]
+     in testAssertTrue (Engine.entails goal context)
+
+testProofEngineReflSubstitutesNestedTerms :: TestResult
+testProofEngineReflSubstitutesNestedTerms =
+    let iotaX = Iota "x"
+        iotaA = Iota "a"
+        context =
+            Engine.proofContextFromFacts
+                [ FApp eqProof [ATerm iotaA, CTerm (VInt 5)]
+                , FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iotaX, ATerm iotaA]
+                ]
+        derived = Engine.deriveRefl context
+        goal = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iotaX, CTerm (VInt 5)]
+     in testAssertTrue (Engine.entails goal derived)
+
+testProofEngineEvalDerivesConcreteBuiltinResult :: TestResult
+testProofEngineEvalDerivesConcreteBuiltinResult =
+    let iotaList = Iota "list"
+        iotaSize = Iota "size"
+        context =
+            Engine.proofContextFromFacts
+                [ FApp eqProof [ATerm iotaList, CTerm (VIntList [1, 2])]
+                , FApp eqProof [ATerm iotaSize, FApp (CTerm (builtinFunct Size)) [ATerm iotaList]]
+                ]
+        result = Engine.applyRewrite evalBuiltinFunct (Engine.EngineEval iotaSize) context
+        goal = FApp eqProof [ATerm iotaSize, CTerm (VInt 2)]
+     in case result of
+            Ok derived -> testAssertTrue (Engine.entails goal derived)
+            Error e -> Just $ "Engine eval failed: " ++ e
+
+testProofEngine :: Test
+testProofEngine =
+    testCaseSeq
+        "testProofEngine"
+        [ testProofEngineInsertDedupes
+        , testProofEngineEntailsEquivalentTerms
+        , testProofEngineReflSubstitutesNestedTerms
+        , testProofEngineEvalDerivesConcreteBuiltinResult
+        ]
+
 testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult
 testIotaProofVarProofMatch i ip v vp =
     let varMap = Map.fromList [(v, i)]
@@ -808,6 +866,7 @@ main = do
                 , testValidateWithExpectedMatch
                 , testValidateWithExpectedMismatch
                 , testValidationFail
+                , testProofEngine
                 , testParseVal
                 , testParseValFail
                 , testCrashRegression
