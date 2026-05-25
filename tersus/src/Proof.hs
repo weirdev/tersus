@@ -97,67 +97,89 @@ valReturningBlock state =
             Error e -> Error e
 
 evalNextStatement :: State -> State
-evalNextStatement state = case state of
-    State (ScopeState _ (Continuations (Assign var expr : _)) _) _ ->
-        let (mval, rState) = evalExpression (advanceStatement state) expr
-         in case mval of
-                Just val -> insertVar rState var val
-                -- TODO: Is this an error case?
-                Nothing -> rState
-    State (ScopeState _ (Continuations (Return expr : _)) _) _ ->
-        let (mval, rState) = evalExpression (advanceStatement state) expr
-         in -- Break out of the current block and return the value
-            let prState = topLevelScope rState
-             in case mval of
-                    Just val -> setReturn prState val
-                    -- TODO: Allow this for functions returning nothing
-                    Nothing -> error "Return expression must return a value"
-    State (ScopeState _ (Continuations (ValidationStatement{} : _)) _) _ -> advanceStatement state
-    State (ScopeState _ (Continuations (Block statements : _)) _) _ ->
-        let State scope ctxVals = state
-         in evalBlock $
-                State
-                    (ScopeState empty (Continuations (statements ++ [EndBlock])) (Just $ scopeAdvanceStatement scope))
-                    ctxVals
-    -- TODO: Could we just match on Continuations [] insead of inserting EndBlock?
-    State (ScopeState _ (Continuations (EndBlock : _)) pScope) ctxVals ->
-        -- Any vars declared in the block are not exported,
-        -- but any vars updated in the parent scope must be exported
-        case pScope of
-            Just rpScope -> State rpScope ctxVals
-            _ -> error "EndBlock must have a parent scope"
+evalNextStatement state = case nextStatement state of
+    Assign var expr -> evalAssignStatement state var expr
+    Return expr -> evalReturnStatement state expr
+    ValidationStatement{} -> advanceStatement state
+    Block statements -> evalBlockStatement state statements
+    EndBlock -> evalEndBlockStatement state
+
+nextStatement :: State -> Statement
+nextStatement (State (ScopeState _ (Continuations (stmt : _)) _) _) = stmt
+nextStatement _ = error "No next statement available"
+
+evalAssignStatement :: State -> Variable -> Expression -> State
+evalAssignStatement state var expr =
+    let (mval, rState) = evalExpression (advanceStatement state) expr
+     in case mval of
+            Just val -> insertVar rState var val
+            -- TODO: Is this an error case?
+            Nothing -> rState
+
+evalReturnStatement :: State -> Expression -> State
+evalReturnStatement state expr =
+    let (mval, rState) = evalExpression (advanceStatement state) expr
+        prState = topLevelScope rState
+     in case mval of
+            Just val -> setReturn prState val
+            -- TODO: Allow this for functions returning nothing
+            Nothing -> error "Return expression must return a value"
+
+evalBlockStatement :: State -> [Statement] -> State
+evalBlockStatement (State scope ctxVals) statements =
+    evalBlock $
+        State
+            (ScopeState empty (Continuations (statements ++ [EndBlock])) (Just $ scopeAdvanceStatement scope))
+            ctxVals
+
+evalEndBlockStatement :: State -> State
+evalEndBlockStatement (State (ScopeState _ _ pScope) ctxVals) =
+    case pScope of
+        Just rpScope -> State rpScope ctxVals
+        _ -> error "EndBlock must have a parent scope"
 
 valNextStatement :: VState -> Result VState String
 valNextStatement state =
-    let VState scope iotaCtx proofCtx iotaseq = state
-     in let VScopeState _ _ (Continuations stmts) pscope = scope
-         in let nxtStmt = doTraceStatements ("valNextStatement: " ++ show (head stmts)) (head stmts)
-             in case nxtStmt of
-                    Assign var expr ->
-                        let (niota, state') = doTrace "assign" (popIotaFromSeq (vAdvanceStatement state))
-                         in case valExpression state' niota expr of
-                                 -- TODO: Partition nproofs into 1) those that only use niota and iotas
-                                 -- from scopes higher than where niota is declared and 2) the inverse
-                                 Ok (exprState, nproofs) -> doTrace3 (var ++ " = " ++ show nproofs) (Ok $ vInsertVar exprState var niota nproofs)
-                                 Error e -> Error e
-                    Return expr ->
-                        let (VState (VScopeState _ proofs c _) _ _ _) = state
-                         in let (niota, state') = doTrace ("return: " ++ show c) (popIotaFromSeq (vAdvanceStatement state))
-                              in case valExpression state' niota expr of
-                                     Ok (exprState, nproofs) ->
-                                         -- TODO: Break out of the current block and return the value
-                                         -- TODO: Shoud vSetReturn also pass up the nproofs?
-                                         let refledNProofs = reflProofsByProofs nproofs proofs
-                                          in let visibleIotas = niota : map snd (toList (vGetVars exprState))
-                                           in let state'' = vTopLevelScope exprState
-                                               in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst visibleIotas) (nproofs ++ refledNProofs))
-                                     Error e -> Error e
-                    ValidationStatement valStmt -> valValidationStatement state valStmt
-                    Block bstmts ->
-                        valBlock $ VState (VScopeState empty [] (Continuations $ bstmts ++ [EndBlock]) (Just $ vScopeAdvanceStatement scope)) iotaCtx proofCtx iotaseq
-                    EndBlock -> case pscope of
-                        Just ps -> Ok $ VState ps iotaCtx proofCtx iotaseq
-                        _ -> error "EndBlock must have a parent state"
+    let stmt = doTraceStatements ("valNextStatement: " ++ show (vNextStatement state)) (vNextStatement state)
+     in case stmt of
+            Assign var expr -> valAssignStatement state var expr
+            Return expr -> valReturnStatement state expr
+            ValidationStatement valStmt -> valValidationStatement state valStmt
+            Block bstmts -> valBlockStatement state bstmts
+            EndBlock -> valEndBlockStatement state
+
+vNextStatement :: VState -> Statement
+vNextStatement (VState (VScopeState _ _ (Continuations (stmt : _)) _) _ _ _) = stmt
+vNextStatement _ = error "No next validation statement available"
+
+valAssignStatement :: VState -> Variable -> Expression -> Result VState String
+valAssignStatement state var expr =
+    let (niota, state') = doTrace "assign" (popIotaFromSeq (vAdvanceStatement state))
+     in case valExpression state' niota expr of
+            Ok (exprState, nproofs) -> doTrace3 (var ++ " = " ++ show nproofs) (Ok $ vInsertVar exprState var niota nproofs)
+            Error e -> Error e
+
+valReturnStatement :: VState -> Expression -> Result VState String
+valReturnStatement state expr =
+    let VState (VScopeState _ proofs c _) _ _ _ = state
+        (niota, state') = doTrace ("return: " ++ show c) (popIotaFromSeq (vAdvanceStatement state))
+     in case valExpression state' niota expr of
+            Ok (exprState, nproofs) ->
+                let refledNProofs = reflProofsByProofs nproofs proofs
+                    visibleIotas = niota : map snd (toList (vGetVars exprState))
+                    state'' = vTopLevelScope exprState
+                 in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst visibleIotas) (nproofs ++ refledNProofs))
+            Error e -> Error e
+
+valBlockStatement :: VState -> [Statement] -> Result VState String
+valBlockStatement (VState scope iotaCtx proofCtx iotaseq) bstmts =
+    valBlock $ VState (VScopeState empty [] (Continuations $ bstmts ++ [EndBlock]) (Just $ vScopeAdvanceStatement scope)) iotaCtx proofCtx iotaseq
+
+valEndBlockStatement :: VState -> Result VState String
+valEndBlockStatement (VState (VScopeState _ _ _ pscope) iotaCtx proofCtx iotaseq) =
+    case pscope of
+        Just ps -> Ok $ VState ps iotaCtx proofCtx iotaseq
+        _ -> error "EndBlock must have a parent state"
 
 -- Rewrite proofs using eq relation
 -- proofs to change -> eq relations -> updated proofs
@@ -199,91 +221,99 @@ assignProofVarImpl state var expr =
              Error e -> Error e
 
 valRewrite :: VState -> RwRule -> Result VState String
-valRewrite state (Refl varProof) =
-    let (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) = state
-     in let iotaProof = varProofToIotaProof varProof state
-         in let reverseEqProofs =
-                    [ reverseEqProof proof
-                    | proof@(FApp funct [_lhs, _rhs]) <- proofs
-                    , funct == eqProof
-                    ]
-             in let newProofs = reflProofsByProofs proofs (proofs ++ reverseEqProofs) -- TODO: limit to proofs with iotaProof
-              in Ok $ VState (VScopeState iotas (proofs ++ newProofs) c pscope) iotaCtx proofCtx iotaseq
-valRewrite state (Eval var) =
-    let (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) = state
-     in let oiota = vLookupVar state var
-         in case oiota of
-                Nothing -> Error $ "(Eval) Undefined variable: " ++ var
-                Just iota ->
-                    Ok $
-                        VState
-                            (VScopeState iotas (evalIota iota proofs (iotaCtx, proofCtx) ++ proofs) c pscope)
-                            iotaCtx
-                            proofCtx
-                            iotaseq
-valRewrite (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) EvalAll =
+valRewrite state (Refl varProof) = rewriteRefl state varProof
+valRewrite state (Eval var) = rewriteEval state var
+valRewrite state EvalAll = rewriteEvalAll state
+valRewrite state (EqToLtPlus1 var) = rewriteEqToLtPlus1 state var
+valRewrite state (EqToGtZero var) = rewriteEqToGtZero state var
+
+rewriteRefl :: VState -> VariableProof -> Result VState String
+rewriteRefl state@(VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) varProof =
+    let _iotaProof = varProofToIotaProof varProof state
+        reverseEqProofs =
+            [ reverseEqProof proof
+            | proof@(FApp funct [_lhs, _rhs]) <- proofs
+            , funct == eqProof
+            ]
+        newProofs = reflProofsByProofs proofs (proofs ++ reverseEqProofs)
+     in Ok $ VState (VScopeState iotas (proofs ++ newProofs) c pscope) iotaCtx proofCtx iotaseq
+
+rewriteEval :: VState -> Variable -> Result VState String
+rewriteEval state@(VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) var =
+    case vLookupVar state var of
+        Nothing -> Error $ "(Eval) Undefined variable: " ++ var
+        Just iota ->
+            Ok $
+                VState
+                    (VScopeState iotas (evalIota iota proofs (iotaCtx, proofCtx) ++ proofs) c pscope)
+                    iotaCtx
+                    proofCtx
+                    iotaseq
+
+rewriteEvalAll :: VState -> Result VState String
+rewriteEvalAll (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx iotaseq) =
     let newProofs = concatMap (\p -> evalIotaProof p proofs (iotaCtx, proofCtx)) proofs
      in Ok $ VState (VScopeState iotas (proofs ++ newProofs) c pscope) iotaCtx proofCtx iotaseq
-valRewrite state (EqToLtPlus1 var) =
-    let (VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx (niota : c1iota : iotaseq)) = state
-     in let oiota = vLookupVar state var
-         in case oiota of
-                Nothing -> Error $ "(EqToLtPlus1) Undefined variable: " ++ var
-                Just iota ->
-                    let withNewProofs =
-                            proofs
-                                ++ [ FApp (CTerm (builtinFunct (Rel Lt))) [ATerm iota, ATerm niota]
-                                   , FApp eqProof [ATerm niota, FApp (CTerm (builtinFunct Plus)) [ATerm iota, ATerm c1iota]]
-                                   , -- TODO: Squish this into above
-                                     FApp eqProof [ATerm c1iota, CTerm $ VInt 1]
-                                   ]
-                     in let withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs (iotaCtx, proofCtx)
-                         in let withRefledNewProofs =
-                                    withEvaledProofs
-                                        ++ reflProofsByProofs withEvaledProofs withEvaledProofs -- TODO: Maybe limit to new proofs
-                             in Ok $ VState (VScopeState iotas withRefledNewProofs c pscope) iotaCtx proofCtx iotaseq
--- TODO: Make this EqToGtTarget with two arguments, the var and the target number
-valRewrite state (EqToGtZero var) =
+
+rewriteEqToLtPlus1 :: VState -> Variable -> Result VState String
+rewriteEqToLtPlus1 state@(VState (VScopeState iotas proofs c pscope) iotaCtx proofCtx (niota : c1iota : iotaseq)) var =
+    case vLookupVar state var of
+        Nothing -> Error $ "(EqToLtPlus1) Undefined variable: " ++ var
+        Just iota ->
+            let withNewProofs =
+                    proofs
+                        ++ [ FApp (CTerm (builtinFunct (Rel Lt))) [ATerm iota, ATerm niota]
+                           , FApp eqProof [ATerm niota, FApp (CTerm (builtinFunct Plus)) [ATerm iota, ATerm c1iota]]
+                           , FApp eqProof [ATerm c1iota, CTerm $ VInt 1]
+                           ]
+                withEvaledProofs = withNewProofs ++ evalIota niota withNewProofs (iotaCtx, proofCtx)
+                withRefledNewProofs =
+                    withEvaledProofs
+                        ++ reflProofsByProofs withEvaledProofs withEvaledProofs
+             in Ok $ VState (VScopeState iotas withRefledNewProofs c pscope) iotaCtx proofCtx iotaseq
+rewriteEqToLtPlus1 _ _ = error "EqToLtPlus1 requires two fresh iotas"
+
+rewriteEqToGtZero :: VState -> Variable -> Result VState String
+rewriteEqToGtZero state var =
     case vLookupVar state var of
         Nothing -> Error $ "(EqToGtZero) Undefined variable: " ++ var
         Just iota ->
-            let shouldProduceRewrite =
-                    case iotaToValue iota state of
-                        Nothing ->
-                            doTrace4 ("Var lacks concrete definition: " ++ var) $
-                                -- Do we already have the proof we are trying to produce?
-                                let equivProofExists =
-                                        let allProofs = doTrace4 ("Vars: " ++ show (vGetVars state) ++ " All proofs: " ++ show (vGetProofs state)) vGetProofs state
-                                         in let matcher =
-                                                    let gtProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (builtinFunct (Rel Gt))) allProofs
-                                                     in let lhsProofs = extractNDegreeEquivalentsInclusive 10 (ATerm iota) allProofs
-                                                         in let rhsProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (VInt 0)) allProofs
-                                                             in FAppMatch
-                                                                    (ProofMatchTerm (MatchEquivalents gtProofs))
-                                                                    [ ProofMatchTerm (MatchEquivalents lhsProofs)
-                                                                    , ProofMatchTerm (MatchEquivalents rhsProofs)
-                                                                    ]
-                                             in any (matchIotaProof matcher) allProofs
-                                 in if equivProofExists
-                                        then Ok ()
-                                        else Error $ "Var lacks concrete definition and no equivalent proof exists: " ++ var
-                        -- If we have the proof, we are done
-                        -- doTrace4
-                        -- ("Var w/o def: " ++ var ++ " Iotas: " ++ show (vGetVars state) ++ " Proofs: " ++ show (vGetProofs state))
-                        Just (VInt num) ->
-                            doTrace4 ("EqToGtZero found concrete val: " ++ show num) $
-                                if num > 0
-                                    then
-                                        Ok ()
-                                    else Error $ "Var is not greater than 0: " ++ var
-                        Just _ -> Error $ "Var is not an int: " ++ var
-             in case shouldProduceRewrite of
-                    Ok{} ->
-                        let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
-                         in let refledNewProof = reflProofsByProofs [gtZeroProof] (vGetProofs state)
-                             in let newproofs = gtZeroProof : refledNewProof
-                                 in Ok $ vInsertProofs state newproofs
-                    Error e -> Error e
+            case validateGtZeroRewrite state var iota of
+                Ok{} ->
+                    let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
+                        refledNewProof = reflProofsByProofs [gtZeroProof] (vGetProofs state)
+                        newproofs = gtZeroProof : refledNewProof
+                     in Ok $ vInsertProofs state newproofs
+                Error e -> Error e
+
+validateGtZeroRewrite :: VState -> Variable -> Iota -> Result () String
+validateGtZeroRewrite state var iota =
+    case iotaToValue iota state of
+        Nothing ->
+            doTrace4 ("Var lacks concrete definition: " ++ var) $
+                if gtZeroEquivalentProofExists state iota
+                    then Ok ()
+                    else Error $ "Var lacks concrete definition and no equivalent proof exists: " ++ var
+        Just (VInt num) ->
+            doTrace4 ("EqToGtZero found concrete val: " ++ show num) $
+                if num > 0
+                    then Ok ()
+                    else Error $ "Var is not greater than 0: " ++ var
+        Just _ -> Error $ "Var is not an int: " ++ var
+
+gtZeroEquivalentProofExists :: VState -> Iota -> Bool
+gtZeroEquivalentProofExists state iota =
+    let allProofs = doTrace4 ("Vars: " ++ show (vGetVars state) ++ " All proofs: " ++ show (vGetProofs state)) vGetProofs state
+        matcher =
+            let gtProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (builtinFunct (Rel Gt))) allProofs
+                lhsProofs = extractNDegreeEquivalentsInclusive 10 (ATerm iota) allProofs
+                rhsProofs = extractNDegreeEquivalentsInclusive 10 (CTerm (VInt 0)) allProofs
+             in FAppMatch
+                    (ProofMatchTerm (MatchEquivalents gtProofs))
+                    [ ProofMatchTerm (MatchEquivalents lhsProofs)
+                    , ProofMatchTerm (MatchEquivalents rhsProofs)
+                    ]
+     in any (matchIotaProof matcher) allProofs
 
 evalExpressionList :: State -> [Expression] -> (State, [Value])
 evalExpressionList state [] = (state, [])
@@ -308,34 +338,39 @@ evalExpression sstate (F fnExpr argExprs) =
 
 -- State -> iota of result -> expression -> Result (updated state, proofs about result iota) String
 valExpression :: VState -> Iota -> Expression -> Result (VState, [IotaProof]) String
-valExpression state iota (Val val) =
-    let functValResult = validateValue state val
-     in let r = mapResult (\validatedVal -> (state, [FApp eqProof [ATerm iota, CTerm validatedVal]])) functValResult
-             in doTrace3 (show r) r
-valExpression state iota (Var var) =
-    let omiota = vLookupVar state var
-     in case omiota of
-            Nothing -> Error $ "(Validate Expression) Undefined variable: " ++ var ++ " \nState: " ++ show state
-            Just oiota ->
-                let iotaEq = FApp eqProof [ATerm iota, ATerm oiota]
-                 in let reverseIotaEq = reverseEqProof iotaEq
-                      in -- Propagate proofs across the fresh alias in both directions.
-                         let refledEqProofs =
-                                 reflProofsByProofs (vGetProofs state) [iotaEq, reverseIotaEq]
-                          in Ok (state, iotaEq : reverseIotaEq : refledEqProofs)
-valExpression (VState scope iotaCtx proofCtx iotaseq) iota (F fnexpr argexprs) =
-    let functResults = valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr argexprs iota
-     in case functResults of
-            Ok (nextState, _flatfinputproofs, functProofs, _niotas) ->
-                let nonEvalProof =
-                        FApp
-                            eqProof
-                            [ ATerm iota
-                            , varProofToIotaProof (exprToProof (F fnexpr argexprs)) nextState
-                            ]
-                 in Ok (nextState, nonEvalProof : functProofs)
-            Error e -> Error e
+valExpression state iota (Val val) = valExpressionValue state iota val
+valExpression state iota (Var var) = valExpressionVar state iota var
+valExpression state iota (F fnexpr argexprs) = valExpressionFunction state iota fnexpr argexprs
 valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
+
+valExpressionValue :: VState -> Iota -> Value -> Result (VState, [IotaProof]) String
+valExpressionValue state iota val =
+    let functValResult = validateValue state val
+        r = mapResult (\validatedVal -> (state, [FApp eqProof [ATerm iota, CTerm validatedVal]])) functValResult
+     in doTrace3 (show r) r
+
+valExpressionVar :: VState -> Iota -> Variable -> Result (VState, [IotaProof]) String
+valExpressionVar state iota var =
+    case vLookupVar state var of
+        Nothing -> Error $ "(Validate Expression) Undefined variable: " ++ var ++ " \nState: " ++ show state
+        Just oiota ->
+            let iotaEq = FApp eqProof [ATerm iota, ATerm oiota]
+                reverseIotaEq = reverseEqProof iotaEq
+                refledEqProofs = reflProofsByProofs (vGetProofs state) [iotaEq, reverseIotaEq]
+             in Ok (state, iotaEq : reverseIotaEq : refledEqProofs)
+
+valExpressionFunction :: VState -> Iota -> Expression -> [Expression] -> Result (VState, [IotaProof]) String
+valExpressionFunction (VState scope iotaCtx proofCtx iotaseq) iota fnexpr argexprs =
+    case valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq) fnexpr argexprs iota of
+        Ok (nextState, _flatfinputproofs, functProofs, _niotas) ->
+            let nonEvalProof =
+                    FApp
+                        eqProof
+                        [ ATerm iota
+                        , varProofToIotaProof (exprToProof (F fnexpr argexprs)) nextState
+                        ]
+             in Ok (nextState, nonEvalProof : functProofs)
+        Error e -> Error e
 
 validateValue :: VState -> Value -> Result Value String
 validateValue state val = case val of
@@ -347,17 +382,7 @@ validateValue state val = case val of
 
 valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> FunctBody -> Result [VariableProof] String
 valFunctDef state args inputValStmts outputValStmts (NativeFunct stmts) =
-    let fnValStateResult =
-            let newState = vSetScope state emptyVScopeState
-             in let wContinuations =
-                        doTrace4
-                            ("valFunctDef: Setting conts: " ++ show stmts)
-                            (vSetContinuations newState (Continuations stmts))
-                 in let (niotas, newState') = popNIotasFromSeq wContinuations (length args)
-                     in let (argIotas, _) = zipMap args niotas (,)
-                         in let preInputValState = vInsertVars newState' argIotas []
-                             in assumeValStmts preInputValState inputValStmts
-     in case fnValStateResult of
+    case prepareFunctionValidationState state args inputValStmts stmts of
             Ok fnValState ->
                 let valResult =
                         doTrace4
@@ -368,6 +393,18 @@ valFunctDef state args inputValStmts outputValStmts (NativeFunct stmts) =
                         Error e -> Error e
             Error e -> Error e
 valFunctDef _ _ _ _ BuiltinFunct{} = Ok [] -- Builtin functions assumed to be validly defined
+
+prepareFunctionValidationState :: VState -> [Variable] -> [ValidationStatement] -> [Statement] -> Result VState String
+prepareFunctionValidationState state args inputValStmts stmts =
+    let newState = vSetScope state emptyVScopeState
+        wContinuations =
+            doTrace4
+                ("valFunctDef: Setting conts: " ++ show stmts)
+                (vSetContinuations newState (Continuations stmts))
+        (niotas, newState') = popNIotasFromSeq wContinuations (length args)
+        (argIotas, _) = zipMap args niotas (,)
+        preInputValState = vInsertVars newState' argIotas []
+     in assumeValStmts preInputValState inputValStmts
 
 exportFunctOutputProofs :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Result [VariableProof] String
 exportFunctOutputProofs bodyState args inputValStmts outputValStmts =
@@ -515,34 +552,37 @@ concreteValOfIotaFromProofMaybe iota proof = case proof of
 -- (ex. size(iotaA) = iotaB)
 valFunctCall :: VState -> Iota -> [Iota] -> [IotaProof] -> Iota -> Result (VState, [IotaProof]) String
 valFunctCall state fniota iiotas iproofs retiota =
-    -- Get the concrete function object
-    -- TODO: Support function proof evaluation with less than the full concrete function
+    case resolveValidatedFunction fniota iproofs of
+        Error e -> Error e
+        Ok fnVal@(VFunct varArgs inputValStmts _ _ exportedProofs) ->
+            case valFunctInput state varArgs iiotas iproofs inputValStmts of
+                Error e -> Error $ "Funct input validation failed: " ++ e
+                Ok fnValState ->
+                    case instantiateFunctOutputProofs state varArgs iiotas retiota exportedProofs of
+                        Error e -> Error e
+                        Ok (stateWithExports, instantiatedProofs) ->
+                            Ok (stateWithExports, maybeConcreteFunctionResult fnValState fnVal iiotas iproofs retiota instantiatedProofs)
+
+resolveValidatedFunction :: Iota -> [IotaProof] -> Result Value String
+resolveValidatedFunction fniota iproofs =
     case concreteValOfIotaMaybe fniota iproofs of
-        Just fnVal -> case fnVal of
-            VFunct varArgs inputValStmts _ _ exportedProofs ->
-                -- Validate the inputs are valid wrt the function signature
-                case valFunctInput state varArgs iiotas iproofs inputValStmts of
-                    Error e -> Error $ "Funct input validation failed: " ++ e
-                    Ok fnValState ->
-                        let exportStateResult = instantiateFunctOutputProofs state varArgs iiotas retiota exportedProofs
-                         in case exportStateResult of
-                                Error e -> Error e
-                                Ok (stateWithExports, instantiatedProofs) ->
-                                    let argvalsMaybe = collectMaybes (`concreteValOfIotaMaybe` iproofs) iiotas
-                                     in case argvalsMaybe of
-                                            Just argVals ->
-                                                let (VState _ iotaCtx proofCtx _) = fnValState
-                                                 in let functResult = evalFunctCall fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
-                                                     in Ok (stateWithExports, FApp eqProof [ATerm retiota, CTerm functResult] : instantiatedProofs)
-                                            Nothing ->
-                                                Ok (stateWithExports, instantiatedProofs)
-            _ -> Error "Non-function value called"
+        Just fnVal@VFunct{} -> Ok fnVal
+        Just _ -> Error "Non-function value called"
         Nothing ->
             Error $
                 "Function object not validated. Function iota: "
                     ++ show fniota
                     ++ ". Input proofs: "
                     ++ show iproofs
+
+maybeConcreteFunctionResult :: VState -> Value -> [Iota] -> [IotaProof] -> Iota -> [IotaProof] -> [IotaProof]
+maybeConcreteFunctionResult fnValState fnVal iiotas iproofs retiota instantiatedProofs =
+    case collectMaybes (`concreteValOfIotaMaybe` iproofs) iiotas of
+        Just argVals ->
+            let VState _ iotaCtx proofCtx _ = fnValState
+                functResult = evalFunctCall fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals
+             in FApp eqProof [ATerm retiota, CTerm functResult] : instantiatedProofs
+        Nothing -> instantiatedProofs
 
 instantiateFunctOutputProofs :: VState -> [Variable] -> [Iota] -> Iota -> [VariableProof] -> Result (VState, [IotaProof]) String
 instantiateFunctOutputProofs state _ _ _ [] = Ok (state, [])

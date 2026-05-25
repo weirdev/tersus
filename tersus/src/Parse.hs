@@ -204,17 +204,24 @@ rwRule = do
     ruleStr <- variable
     whitespace
     case ruleStr of
-        "refl" -> Refl <$> proof
-        _ -> do
-            -- TODO: Parens and argument list
-            mvar <- optionMaybe variable
-            whitespace
-            case (ruleStr, mvar) of
-                ("eqToLtPlus1", Just var) -> return (EqToLtPlus1 var)
-                ("eqToGtZero", Just var) -> return (EqToGtZero var)
-                ("eval", Just var) -> return (Eval var)
-                ("evalAll", Nothing) -> return EvalAll
-                _ -> fail "Unknown rule or wrong number of arguments"
+        "refl" -> parseReflRule
+        "eqToLtPlus1" -> parseUnaryVarRule EqToLtPlus1
+        "eqToGtZero" -> parseUnaryVarRule EqToGtZero
+        "eval" -> parseUnaryVarRule Eval
+        "evalAll" -> parseNullaryRule EvalAll
+        _ -> fail "Unknown rule or wrong number of arguments"
+
+parseReflRule :: Parser RwRule
+parseReflRule = Refl <$> proof
+
+parseUnaryVarRule :: (Variable -> RwRule) -> Parser RwRule
+parseUnaryVarRule ctor = do
+    var <- variable
+    whitespace
+    return (ctor var)
+
+parseNullaryRule :: RwRule -> Parser RwRule
+parseNullaryRule = return
 
 -- NOTE: Infix expression must be matched first,
 -- otherwise we will parse the lhs of infix expressions

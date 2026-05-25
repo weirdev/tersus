@@ -1,5 +1,6 @@
 module TestTersus where
 
+import Control.Monad (unless)
 import Data.Map (Map, fromList, lookup)
 import System.Exit (exitFailure)
 
@@ -116,6 +117,27 @@ testParseInvalidRewriteRule =
             Left _ -> Nothing
             Right parsed -> Just $ "Expected parse failure, got: " ++ show parsed
 
+testParseRewriteRules :: Test
+testParseRewriteRules =
+    testCaseSeq
+        "testParseRewriteRules"
+        [ case parseStatement "rewrite refl x = 5" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (Refl (FApp eqVarProof [ATerm "x", CTerm (VInt 5)]))))
+        , case parseStatement "rewrite eqToLtPlus1 x" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (EqToLtPlus1 "x")))
+        , case parseStatement "rewrite eqToGtZero x" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (EqToGtZero "x")))
+        , case parseStatement "rewrite eval x" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (Eval "x")))
+        , case parseStatement "rewrite evalAll" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite EvalAll))
+        ]
+
 testParse :: Test
 testParse =
     TestList
@@ -125,6 +147,7 @@ testParse =
         , testParseKeywordBoundaryIdentifiers
         , testParseInvalidProofBuiltin
         , testParseInvalidRewriteRule
+        , testParseRewriteRules
         ]
 
 -- Evaluate tests
@@ -672,4 +695,4 @@ main = do
                 , testParseVal
                 , testParseValFail
                 ]
-    Control.Monad.unless (failures == 0) exitFailure
+    unless (failures == 0) exitFailure
