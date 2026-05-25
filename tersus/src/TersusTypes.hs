@@ -12,10 +12,10 @@ data Value
     = VInt Integer
     | VIntList [Integer]
     | VBool Bool
-    | -- VFunct inputArgs inputArgAssertions body resultAssertions
+    | -- VFunct inputArgs inputArgAssertions outputAssertions body exportedResultAssertions
       -- Result assertions may contain variables from inputArgs and "return" variable
       -- TODO: Real return slot rather than var
-      VFunct [Variable] [ValidationStatement] FunctBody [VariableProof]
+      VFunct [Variable] [ValidationStatement] [ValidationStatement] FunctBody [VariableProof]
     deriving (Show, Eq)
 
 -- TODO: Call
@@ -45,7 +45,7 @@ data State = State ScopeState (Map Variable Value)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
-newtype Iota = Iota String deriving (Eq, Show)
+newtype Iota = Iota String deriving (Eq, Ord, Show)
 
 -- Function being applied, arguments
 data Proof i = FApp (Proof i) [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)

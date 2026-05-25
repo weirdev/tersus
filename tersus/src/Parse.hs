@@ -91,14 +91,16 @@ functStatement = do
     whitespace
     void (char ')')
     whitespace
-    inputReqs <- option [] functInputReqs
+    inputReqs <- option [] functContractReqs
+    whitespace
+    outputReqs <- option [] functContractReqs
     whitespace
     fnBody <- curlyBracesParse statementBlock
     whitespace
-    return (Assign var (Val (VFunct argNames inputReqs (NativeFunct fnBody) [])))
+    return (Assign var (Val (VFunct argNames inputReqs outputReqs (NativeFunct fnBody) [])))
 
-functInputReqs :: Parser [ValidationStatement]
-functInputReqs = squareBracketsParse (curlyBracesParse validationStatementBlock)
+functContractReqs :: Parser [ValidationStatement]
+functContractReqs = squareBracketsParse (curlyBracesParse validationStatementBlock)
 
 validationStatement :: Parser ValidationStatement
 validationStatement =

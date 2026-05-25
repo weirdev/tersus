@@ -5,9 +5,12 @@ import Data.Map (
     empty,
     insert,
     lookup,
+    fromList,
+    toList,
  )
 
-import Data.Maybe (mapMaybe)
+import Data.List (nub)
+import Data.Maybe (fromMaybe, mapMaybe)
 
 import StdLib
 import TersusTypes
@@ -332,8 +335,8 @@ substituteProofTerm source target (FApp funct args) =
                 then
                     Just
                         ( FApp
-                            (Data.Maybe.fromMaybe funct maybeFunct)
-                            (zipWith (flip Data.Maybe.fromMaybe) maybeArgs args)
+                            (fromMaybe funct maybeFunct)
+                            (zipWith (flip fromMaybe) maybeArgs args)
                         )
                 else Nothing
   where
@@ -400,6 +403,43 @@ exprToProof :: Expression -> VariableProof
 exprToProof (Val val) = CTerm val
 exprToProof (Var var) = ATerm var
 exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof argExprs)
+
+proofVars :: VariableProof -> [Variable]
+proofVars (CTerm _) = []
+proofVars (ATerm var) = [var]
+proofVars (FApp funct args) = nub (proofVars funct ++ concatMap proofVars args)
+
+valStmtDefinedVars :: ValidationStatement -> [Variable]
+valStmtDefinedVars (AssignProofVar var _) = [var]
+valStmtDefinedVars _ = []
+
+proofOnlyOfNamedIotasOrConst :: Map Iota Variable -> IotaProof -> Bool
+proofOnlyOfNamedIotasOrConst namedIotas (ATerm iota) = case Data.Map.lookup iota namedIotas of
+    Just _ -> True
+    Nothing -> False
+proofOnlyOfNamedIotasOrConst _ CTerm{} = True
+proofOnlyOfNamedIotasOrConst namedIotas (FApp funct proofs) =
+    proofOnlyOfNamedIotasOrConst namedIotas funct
+        && all (proofOnlyOfNamedIotasOrConst namedIotas) proofs
+
+iotaProofToVarProof :: Map Iota Variable -> IotaProof -> Maybe VariableProof
+iotaProofToVarProof _ (CTerm val) = Just (CTerm val)
+iotaProofToVarProof namedIotas (ATerm iota) = ATerm <$> Data.Map.lookup iota namedIotas
+iotaProofToVarProof namedIotas (FApp funct args) = do
+    vfunct <- iotaProofToVarProof namedIotas funct
+    vargs <- flatMaybeMap (iotaProofToVarProof namedIotas) args
+    Just (FApp vfunct vargs)
+
+buildVarToIotaState :: VState -> [(Variable, Iota)] -> [IotaProof] -> [Iota] -> VState
+buildVarToIotaState (VState _ iotaCtx proofCtx _) vars proofs iotaseq =
+    VState
+        (VScopeState (fromList vars) proofs emptyContinuations Nothing)
+        iotaCtx
+        proofCtx
+        iotaseq
+
+namedIotaMap :: [(Variable, Iota)] -> Map Iota Variable
+namedIotaMap = fromList . map (\(var, iota) -> (iota, var))
 
 -- proof `p` being searched for -> source equality proof -> other side of equality if p found
 extractFirstDegreeEquivalent :: IotaProof -> IotaProof -> Maybe IotaProof

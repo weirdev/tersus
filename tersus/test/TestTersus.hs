@@ -97,25 +97,25 @@ testEvaluateFullContext =
             ]
             [("x", VInt 1), ("y", VInt 0)]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] (NativeFunct [Return (Val (VInt 3))]) []))
+            [ Assign "f" (Val (VFunct [] [] [] (NativeFunct [Return (Val (VInt 3))]) []))
             , Assign "result" (F (Var "f") [])
             ]
-            [("result", VInt 3), ("f", VFunct [] [] (NativeFunct [Return (Val (VInt 3))]) [])]
+            [("result", VInt 3), ("f", VFunct [] [] [] (NativeFunct [Return (Val (VInt 3))]) [])]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) []))
+            [ Assign "f" (Val (VFunct [] [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) []))
             , Assign "result" (F (Var "f") [])
             ]
-            [("result", VInt 2), ("f", VFunct [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) [])]
+            [("result", VInt 2), ("f", VFunct [] [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) [])]
         , evalFCHelper
-            [ Assign "id" (Val (VFunct ["v"] [] (NativeFunct [Return (Var "v")]) []))
+            [ Assign "id" (Val (VFunct ["v"] [] [] (NativeFunct [Return (Var "v")]) []))
             , Assign "result" (F (Var "id") [Val (VInt 7)])
             ]
-            [("result", VInt 7), ("id", VFunct ["v"] [] (NativeFunct [Return (Var "v")]) [])]
+            [("result", VInt 7), ("id", VFunct ["v"] [] [] (NativeFunct [Return (Var "v")]) [])]
         , evalFCHelper
-            [ Assign "add" (Val (VFunct ["l", "r"] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) []))
+            [ Assign "add" (Val (VFunct ["l", "r"] [] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) []))
             , Assign "result" (F (Var "add") [Val (VInt 7), Val (VInt 13)])
             ]
-            [("result", VInt 20), ("add", VFunct ["l", "r"] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) [])]
+            [("result", VInt 20), ("add", VFunct ["l", "r"] [] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) [])]
         ]
 
 evalExprHelper :: Expression -> Value -> TestResult
@@ -171,7 +171,7 @@ testParseEvalWFunctDef =
         \  };\
         \  return add1;\
         \}"
-        (VFunct ["i"] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])]) [])
+        (VFunct ["i"] [] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])]) [])
 
 testParseEvalWUdfCall :: TestResult
 testParseEvalWUdfCall =
@@ -375,6 +375,13 @@ parseValReturningStmtHelper stmtStr expVar expected =
                     Error e -> Just $ "Validation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
 
+parseValidateWEMatchHelper :: String -> [VariableProof] -> TestResult
+parseValidateWEMatchHelper stmtStr expected =
+    case parseStatement stmtStr of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right (Block stmts) -> validateWEMatchHelper stmts expected
+        Right _ -> Just "Not a block statement"
+
 testParseValBlockExpr :: TestResult
 testParseValBlockExpr =
     parseValReturningStmtHelper
@@ -400,7 +407,14 @@ testParseValWFunctDef =
         [ FApp
             eqVarProof
             [ ATerm "ret"
-            , CTerm (VFunct ["i"] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])]) [])
+            , CTerm
+                ( VFunct
+                    ["i"]
+                    []
+                    []
+                    (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])])
+                    [FApp eqVarProof [ATerm "return", FApp (CTerm (builtinFunct Plus)) [ATerm "i", CTerm (VInt 1)]]]
+                )
             ]
         ]
 
@@ -466,6 +480,41 @@ testParseValFunctReturnNestedBlocks =
         "ret"
         [FApp eqVarProof [ATerm "ret", CTerm (VInt 3)]]
 
+testParseValFunctWOutputStatements :: TestResult
+testParseValFunctWOutputStatements =
+    parseValidateWEMatchHelper
+        "{\
+        \  fn add1(i) [{}] [{\
+        \    affirm return = (i + 1);\
+        \  }] {\
+        \    return i + 1;\
+        \  };\
+        \  x = add1(4);\
+        \  affirm x = 5;\
+        \}"
+        [FApp eqVarProof [ATerm "x", CTerm (VInt 5)]]
+
+testParseValFunctExportsProofVar :: TestResult
+testParseValFunctExportsProofVar =
+    parseValidateWEMatchHelper
+        "{\
+        \  fn getFirstWithSize(lst) [{\
+        \    define s = size(lst);\
+        \    rewrite eqToGtZero s;\
+        \    affirm s > 0;\
+        \  }] [{\
+        \    affirm s > 0;\
+        \  }] {\
+        \    return first(lst);\
+        \  };\
+        \  x = [3, 6, 9, 12];\
+        \  y = getFirstWithSize(x);\
+        \  affirm s > 0;\
+        \}"
+        [ FApp eqVarProof [ATerm "y", CTerm (VInt 3)]
+        , FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "s", CTerm (VInt 0)]
+        ]
+
 testParseVal :: Test
 testParseVal =
     testCaseSeq
@@ -476,6 +525,8 @@ testParseVal =
         , testParseValWUdfCall
         , testValidateNestedBlocks
         , testParseValFunctReturnNestedBlocks
+        , testParseValFunctWOutputStatements
+        , testParseValFunctExportsProofVar
         ]
 
 parseValFailStmtHelper :: String -> TestResult
@@ -504,12 +555,39 @@ testParseValAffirmParensFail =
         \  affirm x < (5 - 1);\
         \}"
 
+testParseValFunctBodyValidationFail :: TestResult
+testParseValFunctBodyValidationFail =
+    parseValFailStmtHelper
+        "{\
+        \  fn bad(lst) [{\
+        \    define s = size(lst);\
+        \    rewrite eqToGtZero s;\
+        \    affirm s > 0;\
+        \  }] {\
+        \    x = [];\
+        \    return first(x);\
+        \  };\
+        \}"
+
+testParseValFunctOutputValidationFail :: TestResult
+testParseValFunctOutputValidationFail =
+    parseValFailStmtHelper
+        "{\
+        \  fn bad(i) [{}] [{\
+        \    affirm return = i;\
+        \  }] {\
+        \    return i + 1;\
+        \  };\
+        \}"
+
 testParseValFail :: Test
 testParseValFail =
     testCaseSeq
         "testParseValFail"
         [ testParseValAffirmFail
         , testParseValAffirmParensFail
+        , testParseValFunctBodyValidationFail
+        , testParseValFunctOutputValidationFail
         ]
 
 -- Run tests

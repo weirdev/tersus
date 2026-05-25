@@ -8,7 +8,7 @@ import TersusTypes
 -- TODO: Write std lib as text to be parsed
 
 builtinFunct :: BuiltinFunct -> Value
-builtinFunct Size = VFunct ["list"] [] (BuiltinFunct Size) []
+builtinFunct Size = VFunct ["list"] [] [] (BuiltinFunct Size) []
 builtinFunct First =
     VFunct
         ["list"]
@@ -20,12 +20,13 @@ builtinFunct First =
                 [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 0)]
             )
         ]
+        []
         (BuiltinFunct First)
         []
-builtinFunct Last = VFunct ["list"] [] (BuiltinFunct Last) []
-builtinFunct Plus = VFunct ["a", "b"] [] (BuiltinFunct Plus) []
-builtinFunct Minus = VFunct ["a", "b"] [] (BuiltinFunct Minus) []
-builtinFunct (Rel rel) = VFunct ["a", "b"] [] (BuiltinFunct (Rel rel)) []
+builtinFunct Last = VFunct ["list"] [] [] (BuiltinFunct Last) []
+builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
+builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
+builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
 
 stdLibCtx :: Map Variable Value
 stdLibCtx =
