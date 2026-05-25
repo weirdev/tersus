@@ -4,13 +4,19 @@ import Data.Maybe (mapMaybe)
 
 data Result a e = Ok a | Error e deriving (Eq, Show)
 
+bindResult :: Result a e -> (a -> Result b e) -> Result b e
+bindResult (Ok a) f = f a
+bindResult (Error e) _ = Error e
+
 -- Map elementwise two lists with a function,
 -- returning the result list and the second list trimmed to the length of the first
-zipMap :: [a] -> [b] -> (a -> b -> c) -> ([c], [b])
-zipMap [] _ _ = ([], [])
+zipMap :: [a] -> [b] -> (a -> b -> c) -> Result ([c], [b]) String
+zipMap [] bs _ = Ok ([], bs)
 zipMap (ah : at) (bh : bt) f =
-    let (atr, btr) = zipMap at bt f in (f ah bh : atr, bh : btr)
-zipMap (_ : _) [] _ = error "Second list must be at least length of first"
+    case zipMap at bt f of
+        Ok (atr, btr) -> Ok (f ah bh : atr, bh : btr)
+        Error e -> Error e
+zipMap (_ : _) [] _ = Error "Second list must be at least length of first"
 
 collectMaybes :: (a -> Maybe b) -> [a] -> Maybe [b]
 collectMaybes f as =

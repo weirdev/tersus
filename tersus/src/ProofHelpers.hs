@@ -188,10 +188,12 @@ getReturn (State (ScopeState vals _ _) _) = Data.Map.lookup "return" vals
 
 -- Return is always set in the top level scope
 -- TODO: We should have a real return slot rather than using a var
-vGetReturn :: VState -> Maybe Iota
+vGetReturn :: VState -> Result Iota String
 vGetReturn (VState (VScopeState iotas _ _ Nothing) _ _ _) =
-    Data.Map.lookup "return" iotas
-vGetReturn _ = error "Not top scope"
+    case Data.Map.lookup "return" iotas of
+        Just iota -> Ok iota
+        Nothing -> Error "Return value not found in top scope"
+vGetReturn _ = Error "Not top scope"
 
 -- Return is always set in the top level scope
 -- NOTE: If we ever have nested functions that implicitly get their parent's scope,
@@ -229,38 +231,46 @@ vInsertProofs :: VState -> [IotaProof] -> VState
 vInsertProofs (VState scope iotaCtx proofCtx iotaseq) newProofs =
     VState (vScopeInsertProofs scope newProofs) iotaCtx proofCtx iotaseq
 
-popIotaFromSeq :: VState -> (Iota, VState)
+popIotaFromSeq :: VState -> Result (Iota, VState) String
 popIotaFromSeq (VState vScopeState iotaCtx proofCtx iotaseq) = case iotaseq of
-    [] -> error "No more iotas to pop"
-    i : is -> (i, VState vScopeState iotaCtx proofCtx is)
+    [] -> Error "No more iotas to pop"
+    i : is -> Ok (i, VState vScopeState iotaCtx proofCtx is)
 
-popNIotasFromSeq :: VState -> Int -> ([Iota], VState)
+popNIotasFromSeq :: VState -> Int -> Result ([Iota], VState) String
 popNIotasFromSeq state n
     | n > 0 =
-        let (iota, state') = popIotaFromSeq state
-         in let (remainingIotas, state'') = popNIotasFromSeq state' (n - 1)
-             in (iota : remainingIotas, state'')
-popNIotasFromSeq state _ = ([], state)
+        case popIotaFromSeq state of
+            Ok (iota, state') ->
+                case popNIotasFromSeq state' (n - 1) of
+                    Ok (remainingIotas, state'') -> Ok (iota : remainingIotas, state'')
+                    Error e -> Error e
+            Error e -> Error e
+popNIotasFromSeq state _ = Ok ([], state)
 
 emptyContinuations :: Continuations
 emptyContinuations = Continuations []
 
-advanceStatement :: State -> State
-advanceStatement (State scope ctxVals) = State (scopeAdvanceStatement scope) ctxVals
+advanceStatement :: State -> Result State String
+advanceStatement (State scope ctxVals) =
+    case scopeAdvanceStatement scope of
+        Ok nscope -> Ok $ State nscope ctxVals
+        Error e -> Error e
 
-scopeAdvanceStatement :: ScopeState -> ScopeState
-scopeAdvanceStatement (ScopeState _ (Continuations []) _) = error "No more statements to advance"
-scopeAdvanceStatement (ScopeState vals (Continuations (_ : nxt)) pState) = ScopeState vals (Continuations nxt) pState
+scopeAdvanceStatement :: ScopeState -> Result ScopeState String
+scopeAdvanceStatement (ScopeState _ (Continuations []) _) = Error "No more statements to advance"
+scopeAdvanceStatement (ScopeState vals (Continuations (_ : nxt)) pState) = Ok $ ScopeState vals (Continuations nxt) pState
 
-vAdvanceStatement :: VState -> VState
+vAdvanceStatement :: VState -> Result VState String
 vAdvanceStatement (VState scope iotaCtx proofCtx iotaseq) =
-    VState (vScopeAdvanceStatement scope) iotaCtx proofCtx iotaseq
+    case vScopeAdvanceStatement scope of
+        Ok nscope -> Ok $ VState nscope iotaCtx proofCtx iotaseq
+        Error e -> Error e
 
-vScopeAdvanceStatement :: VScopeState -> VScopeState
+vScopeAdvanceStatement :: VScopeState -> Result VScopeState String
 vScopeAdvanceStatement (VScopeState _ _ (Continuations []) _) =
-    error "No more statements to advance"
+    Error "No more statements to advance"
 vScopeAdvanceStatement (VScopeState iotas proofs (Continuations (_ : nxt)) pScope) =
-    VScopeState iotas proofs (Continuations nxt) pScope
+    Ok $ VScopeState iotas proofs (Continuations nxt) pScope
 
 topLevelScope :: State -> State
 topLevelScope (State scope ctxVals) = State (scopeTopLevelScope scope) ctxVals
@@ -388,16 +398,19 @@ iotaToValueWProofList iota (proof : ptail) = case proof of
 iotaToValue :: Iota -> VState -> Maybe Value
 iotaToValue iota state = iotaToValueWProofList iota (vGetProofs state)
 
-varProofToIotaProof :: VariableProof -> VState -> IotaProof
-varProofToIotaProof (CTerm val) _ = CTerm val
+varProofToIotaProof :: VariableProof -> VState -> Result IotaProof String
+varProofToIotaProof (CTerm val) _ = Ok (CTerm val)
 varProofToIotaProof (ATerm var) state =
-    let maybeIotaval = vLookupVar state var
-     in case maybeIotaval of
-            Just iotaval -> ATerm iotaval
-            _ -> error "Variable not found in proof map"
+    case vLookupVar state var of
+        Just iotaval -> Ok (ATerm iotaval)
+        Nothing -> Error $ "Variable not found in proof map: " ++ var
 varProofToIotaProof (FApp funct args) state =
-    let iotaproofs = map (`varProofToIotaProof` state) args
-     in FApp (varProofToIotaProof funct state) iotaproofs
+    case varProofToIotaProof funct state of
+        Error e -> Error e
+        Ok functProof ->
+            case flatResultMap (`varProofToIotaProof` state) args of
+                Error e -> Error e
+                Ok iotaproofs -> Ok (FApp functProof iotaproofs)
 
 exprToProof :: Expression -> VariableProof
 exprToProof (Val val) = CTerm val

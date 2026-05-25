@@ -153,8 +153,9 @@ testParse =
 -- Evaluate tests
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
 evalFCHelper stmts expected =
-    let State (ScopeState vals _ _) _ = evaluate stmts
-     in testAssertEq vals (Data.Map.fromList expected)
+    case evaluate stmts of
+        Ok (State (ScopeState vals _ _) _) -> testAssertEq vals (Data.Map.fromList expected)
+        Error e -> Just $ "Evaluation failed with error: " ++ e
 
 testEvaluateFullContext :: Test
 testEvaluateFullContext =
@@ -190,10 +191,9 @@ testEvaluateFullContext =
 
 evalExprHelper :: Expression -> Value -> TestResult
 evalExprHelper expr expected =
-    let (mval, _) = evalExpression initState expr
-     in case mval of
-            Just val -> testAssertEq val expected
-            Nothing -> Just "Expression did not produce a value"
+    case evalExpression initState expr of
+        Ok (val, _) -> testAssertEq val expected
+        Error e -> Just $ "Expression failed with error: " ++ e
 
 parseEvalExprHelper :: String -> Value -> TestResult
 parseEvalExprHelper exprStr expected =
@@ -209,8 +209,9 @@ parseEvalReturningStmtHelper stmtStr expected =
             Left err -> Just $ "Parse failed: " ++ show err
             Right (Block stmts) -> doTrace (show stmts) $
                 case evalReturningBlock (setPScope (initStateWStatements stmts) (Just emptyScopeState)) of
-                    (_, Just val) -> testAssertEq val expected
-                    (_, Nothing) -> Just "No value returned"
+                    Ok (_, Just val) -> testAssertEq val expected
+                    Ok (_, Nothing) -> Just "No value returned"
+                    Error e -> Just $ "Evaluation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
 
 testParseEvalSimpleExpression :: TestResult
