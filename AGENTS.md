@@ -20,6 +20,9 @@ Add or update Haskell tests in `tersus/test/TestTersus.hs` alongside the affecte
 
 Note: the current Haskell test harness is custom and debugging-oriented. It prints `Pass`/`Fail` per case, but `stack test` may still exit successfully even when individual cases report `Fail`, so read the test output rather than trusting the process exit code alone.
 
+## Documentation Guidelines
+Keep `tersus/LANGUAGE.md` in sync with user-visible syntax, builtins, validation statements, rewrite rules, contracts, and known language limitations. Update the interpreter-flow section in `tersus/README.md` when parser, concrete evaluation, validation, scope, function-call, or CLI behavior changes. Include small Tersus snippets when documenting grammar or proof behavior.
+
 ## Commit & Pull Request Guidelines
 Recent history uses short, direct subjects such as `Minor cleanup` and feature-focused summaries. Prefer concise imperative commits that describe behavior, not process; avoid `Checkpoint` for reviewable work. PRs should include a brief problem statement, the chosen approach, and exact verification commands. Link related issues when available and include example Tersus snippets when grammar or proof behavior changes.
 

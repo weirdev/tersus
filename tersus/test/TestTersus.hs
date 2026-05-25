@@ -1,7 +1,9 @@
-module TestTersus where
+module TestTersus (main) where
 
-import Control.Monad (unless)
-import Data.Map (Map, fromList, lookup)
+import qualified Control.Exception as Exception
+import Control.Exception (SomeException, displayException, try)
+import Control.Monad (when)
+import qualified Data.Map as Map
 import System.Exit (exitFailure)
 
 import Parse
@@ -11,38 +13,60 @@ import StdLib
 import TersusTypes
 import Utils
 
--- Core Test data structures
--- Test result is possible error output, else success
 type TestResult = Maybe String
-data Test = TestCase String TestResult | TestList String [Test] deriving (Show)
+data Test = TestCase String (IO TestResult) | TestList String [Test]
 
--- Core Test helper functions
+data TestSummary = TestSummary
+    { summaryPassed :: Int
+    , summaryFailed :: Int
+    }
+
+testSummary :: Int -> Int -> TestSummary
+testSummary = TestSummary
+
+combineSummaries :: TestSummary -> TestSummary -> TestSummary
+combineSummaries
+    (TestSummary passedA failedA)
+    (TestSummary passedB failedB) =
+        TestSummary (passedA + passedB) (failedA + failedB)
+
+testCase :: String -> TestResult -> Test
+testCase name result = TestCase name (pure result)
 
 testCaseSeq :: String -> [TestResult] -> Test
-testCaseSeq s results =
+testCaseSeq name results =
     TestList
-        s
-        (zipWith (\i r -> TestCase (s ++ show i) r) [0 :: Integer ..] results)
+        name
+        (zipWith (\i result -> testCase (show i) result) [0 :: Integer ..] results)
 
-runTest :: Test -> IO Int
-runTest (TestCase s r) =
-    let failures = case r of
-            Nothing -> 0
-            Just _ -> 1
-     in do
-            putStrLn $
-                s
-                    ++ " - "
-                    ++ ( case r of
-                            Nothing -> "Pass"
-                            Just e -> "Fail\n" ++ e
-                       )
-            return failures
-runTest (TestList s ts) = do
-    putStrLn $ "Running test list: " ++ s
-    failures <- mapM runTest ts
+forceTestResult :: TestResult -> ()
+forceTestResult Nothing = ()
+forceTestResult (Just message) = forceString message
+  where
+    forceString [] = ()
+    forceString (c : cs) = c `seq` forceString cs
+
+runTest :: [String] -> Test -> IO TestSummary
+runTest prefixes (TestCase name resultIO) = do
+    let fullName = unwords (prefixes ++ [name])
+    resultOrCrash <- try (resultIO >>= \result -> Exception.evaluate (forceTestResult result) >> pure result) :: IO (Either SomeException TestResult)
+    case resultOrCrash of
+        Right Nothing -> do
+            putStrLn $ "[PASS] " ++ fullName
+            pure (testSummary 1 0)
+        Right (Just err) -> do
+            putStrLn $ "[FAIL] " ++ fullName
+            putStrLn err
+            pure (testSummary 0 1)
+        Left ex -> do
+            putStrLn $ "[CRASH] " ++ fullName
+            putStrLn (displayException ex)
+            pure (testSummary 0 1)
+runTest prefixes (TestList name tests) = do
+    putStrLn $ "Running " ++ unwords (prefixes ++ [name])
+    summaries <- mapM (runTest (prefixes ++ [name])) tests
     putStrLn ""
-    return (sum failures)
+    pure (foldr combineSummaries (testSummary 0 0) summaries)
 
 testAssertTrue :: Bool -> TestResult
 testAssertTrue True = Nothing
@@ -61,6 +85,29 @@ testAllTrue f (x : xs) =
         then testAllTrue f xs
         else Just $ "Failed for: " ++ show x
 
+testAssertErrorContains :: String -> Result a String -> TestResult
+testAssertErrorContains expectedSubstring result =
+    case result of
+        Ok _ -> Just $ "Expected failure containing: " ++ show expectedSubstring
+        Error err ->
+            if expectedSubstring `contains` err
+                then Nothing
+                else
+                    Just $
+                        "Expected failure containing: "
+                            ++ show expectedSubstring
+                            ++ "\nGot: "
+                            ++ show err
+  where
+    contains [] _ = True
+    contains _ [] = False
+    contains needle haystack =
+        startsWith needle haystack || contains needle (tail haystack)
+
+    startsWith [] _ = True
+    startsWith _ [] = False
+    startsWith (n : ns) (h : hs) = n == h && startsWith ns hs
+
 -- Tests
 
 -- Parse tests
@@ -70,7 +117,7 @@ testParseSimpleAssign =
      in let result = case parseOutput of
                 Left err -> Just $ "Parse failed: " ++ show err
                 Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
-          in TestCase "testParseSimpleAssign" result
+          in testCase "testParseSimpleAssign" result
 
 testParseComplexAssign :: Test
 testParseComplexAssign =
@@ -83,7 +130,7 @@ testParseComplexAssign =
                         [ Assign "x" (F (Var "size") [Val (VIntList [5])])
                         , Assign "rr" (F (Val (builtinFunct Minus)) [Val (VInt 1), Val (VInt 1)])
                         ]
-          in TestCase "testParseComplexAssign" result
+          in testCase "testParseComplexAssign" result
 
 testParseKeywordBoundaryIdentifiers :: Test
 testParseKeywordBoundaryIdentifiers =
@@ -105,14 +152,14 @@ testParseKeywordBoundaryIdentifiers =
 
 testParseInvalidProofBuiltin :: Test
 testParseInvalidProofBuiltin =
-    TestCase "testParseInvalidProofBuiltin" $
+    testCase "testParseInvalidProofBuiltin" $
         case parseStatement "affirm bogus(x)" of
             Left _ -> Nothing
             Right parsed -> Just $ "Expected parse failure, got: " ++ show parsed
 
 testParseInvalidRewriteRule :: Test
 testParseInvalidRewriteRule =
-    TestCase "testParseInvalidRewriteRule" $
+    testCase "testParseInvalidRewriteRule" $
         case parseStatement "rewrite noSuchRule x" of
             Left _ -> Nothing
             Right parsed -> Just $ "Expected parse failure, got: " ++ show parsed
@@ -154,7 +201,7 @@ testParse =
 evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
 evalFCHelper stmts expected =
     case evaluate stmts of
-        Ok (State (ScopeState vals _ _) _) -> testAssertEq vals (Data.Map.fromList expected)
+        Ok (State (ScopeState vals _ _) _) -> testAssertEq vals (Map.fromList expected)
         Error e -> Just $ "Evaluation failed with error: " ++ e
 
 testEvaluateFullContext :: Test
@@ -298,13 +345,13 @@ testParseEval =
         ]
 
 -- Validation tests
-expectedProofMatch :: VariableProof -> [IotaProof] -> Map Variable Iota -> Bool
+expectedProofMatch :: VariableProof -> [IotaProof] -> Map.Map Variable Iota -> Bool
 expectedProofMatch _ [] _ = False
 expectedProofMatch vp (ip : ips) varMap = expectedProofCompare vp ip varMap || expectedProofMatch vp ips varMap
 
-expectedProofCompare :: VariableProof -> IotaProof -> Map Variable Iota -> Bool
+expectedProofCompare :: VariableProof -> IotaProof -> Map.Map Variable Iota -> Bool
 expectedProofCompare (CTerm v1) (CTerm v2) _ = v1 == v2
-expectedProofCompare (ATerm var) (ATerm iota2) varMap = case Data.Map.lookup var varMap of
+expectedProofCompare (ATerm var) (ATerm iota2) varMap = case Map.lookup var varMap of
     Just iota1 -> iota1 == iota2
     Nothing -> False
 expectedProofCompare (FApp f1 ps1) (FApp f2 ps2) varMap =
@@ -428,7 +475,7 @@ testValidationFail =
 
 testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult
 testIotaProofVarProofMatch i ip v vp =
-    let varMap = Data.Map.fromList [(v, i)]
+    let varMap = Map.fromList [(v, i)]
      in case testAllTrue (\p -> expectedProofMatch p ip varMap) vp of
             Nothing -> Nothing
             Just e -> Just $ e ++ " had " ++ show ip
@@ -509,7 +556,6 @@ testParseValLastWInputStatements =
         "ret"
         [FApp eqVarProof [ATerm "ret", CTerm (VInt 12)]]
 
--- TODO: Additional similar tests, including validation failures
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
     parseValReturningStmtHelper
@@ -621,6 +667,16 @@ parseValFailStmtHelper stmtStr =
                 Error _ -> Nothing
             Right _ -> Just "Not a block statement"
 
+parseEvalFailStmtHelper :: String -> String -> TestResult
+parseEvalFailStmtHelper stmtStr expectedError =
+    case parseStatement stmtStr of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right (Block stmts) ->
+            testAssertErrorContains
+                expectedError
+                (evalReturningBlock (setPScope (initStateWStatements stmts) (Just emptyScopeState)))
+        Right _ -> Just "Not a block statement"
+
 testParseValAffirmFail :: TestResult
 testParseValAffirmFail =
     parseValFailStmtHelper
@@ -659,6 +715,14 @@ testParseValLastEmptyValidationFail =
         \  return last(x);\
         \}"
 
+testParseValFirstEmptyValidationFail :: TestResult
+testParseValFirstEmptyValidationFail =
+    parseValFailStmtHelper
+        "{\
+        \  x = [];\
+        \  return first(x);\
+        \}"
+
 testParseValFunctOutputValidationFail :: TestResult
 testParseValFunctOutputValidationFail =
     parseValFailStmtHelper
@@ -670,6 +734,54 @@ testParseValFunctOutputValidationFail =
         \  };\
         \}"
 
+testParseValMissingExportedProofValidationFail :: TestResult
+testParseValMissingExportedProofValidationFail =
+    parseValFailStmtHelper
+        "{\
+        \  fn bad(lst) [{\
+        \    define s = size(lst);\
+        \    rewrite eqToGtZero s;\
+        \    affirm s > 0;\
+        \  }] [{\
+        \    affirm missing > 0;\
+        \  }] {\
+        \    return first(lst);\
+        \  };\
+        \}"
+
+testParseEvalFirstEmptyFail :: TestResult
+testParseEvalFirstEmptyFail =
+    parseEvalFailStmtHelper
+        "{\
+        \  return first([]);\
+        \}"
+        "First requires a non-empty IntList"
+
+testParseEvalLastEmptyFail :: TestResult
+testParseEvalLastEmptyFail =
+    parseEvalFailStmtHelper
+        "{\
+        \  return last([]);\
+        \}"
+        "Last requires a non-empty IntList"
+
+testParseEvalFirstWrongTypeFail :: TestResult
+testParseEvalFirstWrongTypeFail =
+    parseEvalFailStmtHelper
+        "{\
+        \  return first(1);\
+        \}"
+        "First only valid for IntList"
+
+testCrashRegression :: Test
+testCrashRegression =
+    testCaseSeq
+        "testCrashRegression"
+        [ testParseEvalFirstEmptyFail
+        , testParseEvalLastEmptyFail
+        , testParseEvalFirstWrongTypeFail
+        ]
+
 testParseValFail :: Test
 testParseValFail =
     testCaseSeq
@@ -679,14 +791,17 @@ testParseValFail =
         , testParseValFunctBodyValidationFail
         , testParseValFunctOutputValidationFail
         , testParseValLastEmptyValidationFail
+        , testParseValFirstEmptyValidationFail
+        , testParseValMissingExportedProofValidationFail
         ]
 
 -- Run tests
 main :: IO ()
 main = do
-    failures <-
-        sum <$> mapM
-                runTest
+    summary <-
+        foldr combineSummaries (testSummary 0 0)
+            <$> mapM
+                (runTest [])
                 [ testParse
                 , testEvaluateFullContext
                 , testParseEval
@@ -695,5 +810,12 @@ main = do
                 , testValidationFail
                 , testParseVal
                 , testParseValFail
+                , testCrashRegression
                 ]
-    unless (failures == 0) exitFailure
+    putStrLn $
+        "Summary: "
+            ++ show (summaryPassed summary)
+            ++ " passed, "
+            ++ show (summaryFailed summary)
+            ++ " failed"
+    when (summaryFailed summary > 0) exitFailure
