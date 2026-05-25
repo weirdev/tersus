@@ -1,14 +1,9 @@
 Well typed implementation of ideas I wrote in black FB notebook.
 
 Next steps:
-0. Validate functions
-    Validation udf function bodies (not just eval them)
-    Export assertions to caller
-    Should input validation vars be available for validation exports
-    Syntax
-1. Control flow
+0. Control flow
     if/else/while
-1.5. Let declarations
+1. Let declarations
 2. Improved proof representation, proof engine
     Proof engine would be able to apply generalized rewritings supplied by functions
     Axioms, replace EqToLtPlus1 with a standard lib impl
@@ -19,6 +14,7 @@ Next steps:
 4. Support setting proofs in parent scope when they only correspond to declared there
     Control flow blocks will need to have their own rules
 5. Functions
+    Apply input-contract rewrites during assumption/instantiation instead of ignoring them
     Dont fully evaluate immediately in validation? ie. rewrite to get result?
 6. Proof transformation v2
 7. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
