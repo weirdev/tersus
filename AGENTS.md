@@ -7,7 +7,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package. Cor
 Work from `tersus/` unless you are touching the Python prototype.
 
 - `stack build`: compile the Haskell package and surface warnings.
-- `stack run`: start the simple parser CLI in `app/Main.hs`.
+- `stack run -- check <file>` / `stack run -- run <file>`: validate, or validate and evaluate, a `.tersus` program via the CLI in `app/Main.hs` (logic in `src/Cli.hs`).
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`.
 - `ghci` then `:load Proof`: quick interactive workflow noted in `tersus/README.md`.
 - `python python/tests.py`: run legacy Python prototype checks from the repository root.

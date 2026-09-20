@@ -2,7 +2,15 @@
 
 Runnable programs showing what the language and standard library can do today. Each file carries `//` comments explaining what it shows; this page gives the overview.
 
-`stack test` loads every file in this directory (`testExamples` in `test/TestTersus.hs`), so the results below are checked. The CLI in `app/Main.hs` only parses a single line, so there is no `stack run` entry point for these files yet.
+`stack test` loads every file in this directory (`testExamples` in `test/TestTersus.hs`), so the results below are checked.
+
+Run one yourself from the `tersus/` directory:
+
+```
+stack run -- run examples/safe_access.tersus     # validates, evaluates, prints 38
+stack run -- check examples/rules.tersus         # validates only, prints OK
+stack run -- run examples/rejected/affirm.tersus # prints the validation error, exits 1
+```
 
 Each program in the top-level directory passes validation, and its concrete evaluation gives the listed result. Each program in `rejected/` is one the validator refuses.
 

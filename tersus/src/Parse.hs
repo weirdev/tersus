@@ -28,7 +28,7 @@ whitespace :: Parser ()
 whitespace = void $ many whitespaceItem
 
 whitespaceItem :: Parser ()
-whitespaceItem = void (oneOf " \n\t") <|> lineComment
+whitespaceItem = void (oneOf " \n\t") <|> (lineComment <?> "")
 
 -- `//` runs to the end of the line (or the end of the input).
 lineComment :: Parser ()

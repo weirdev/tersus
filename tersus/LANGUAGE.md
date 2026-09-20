@@ -27,6 +27,17 @@ x = 5; // trailing comment
 
 There are no block comments.
 
+## Running Programs
+
+From the `tersus/` directory:
+
+```
+stack run -- check program.tersus   # parse and validate; prints OK
+stack run -- run program.tersus     # validate, then evaluate and print the return value
+```
+
+`run` never evaluates a program that fails validation. A program that does not `return` prints nothing. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
+
 ## Values
 
 Tersus currently has four runtime value categories:
@@ -286,4 +297,4 @@ affirm s > 0;
 - No strings, floats, records, or generic lists.
 - No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
-- The CLI currently parses input and prints the AST. Evaluation and validation are exercised through the Haskell API and tests.
+- The CLI runs one file at a time and has no REPL or multi-file programs.

@@ -6,6 +6,7 @@ import Control.Monad (when)
 import qualified Data.Map as Map
 import System.Exit (exitFailure)
 
+import Cli
 import Parse
 import Proof
 import qualified ProofEngine as Engine
@@ -1109,6 +1110,43 @@ testExamples =
         , testExampleFile "examples/rejected/unknown_rule.tersus" (ExpectRejected "Unknown rewrite rule")
         ]
 
+-- CLI tests
+testCliParseCommandLine :: TestResult
+testCliParseCommandLine =
+    testAssertEq
+        (map parseCommandLine [["check", "a.tersus"], ["run", "-"], ["run"], ["frob", "a.tersus"], []])
+        [Just (Check, "a.tersus"), Just (Run, "-"), Nothing, Nothing, Nothing]
+
+testCliRenderValue :: TestResult
+testCliRenderValue =
+    testAssertEq
+        (map renderValue [VInt 5, VIntList [], VIntList [1, 2], VBool True, VBool False])
+        ["5", "[]", "[1, 2]", "true", "false"]
+
+testCliRun :: TestResult
+testCliRun =
+    testAssertEq
+        (map (runSource Run) ["x = [1, 2]; return size(x);", "return [3, 4];", "return 1 < 2;", "x = 5; affirm x = 5;", ""])
+        [Ok "2", Ok "[3, 4]", Ok "true", Ok "", Ok ""]
+
+testCliCheck :: TestResult
+testCliCheck = testAssertEq (runSource Check "x = 5; affirm x = 5; return x;") (Ok "OK")
+
+testCli :: Test
+testCli =
+    testCaseSeq
+        "testCli"
+        [ testCliParseCommandLine
+        , testCliRenderValue
+        , testCliRun
+        , testCliCheck
+        , testAssertErrorContains "Parse error" (runSource Run "x = ;")
+        , testAssertErrorContains "Validation failed" (runSource Run "x = 5; affirm x < 4;")
+        , testAssertErrorContains "Validation failed" (runSource Check "x = 5; affirm x < 4;")
+        , -- Validation must reject the program before it is evaluated
+          testAssertErrorContains "Validation failed" (runSource Run "return first([]);")
+        ]
+
 -- Run tests
 main :: IO ()
 main = do
@@ -1128,6 +1166,7 @@ main = do
                 , testParseValFail
                 , testCrashRegression
                 , testExamples
+                , testCli
                 ]
     putStrLn $
         "Summary: "
