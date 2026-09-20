@@ -12,23 +12,39 @@ The Haskell implementation has two main execution paths after parsing:
 
 `stack run` currently exposes only the parser CLI in `app/Main.hs`: it reads one line, parses a statement block, and prints the parsed AST. The evaluator and validator are exercised directly from tests and GHCi.
 
-Next steps:
-1. Control flow
+Next steps, roughly in priority order:
+1. CLI that runs files
+    `stack run` only parses one line, so the programs in examples/ can only be run through `stack test`
+    Add something like `tersus check|run <file>`: validate, then evaluate, and print errors or the return value
+2. Control flow
     if/else/while
-2. Let declarations
-3. Property objects
+    The biggest gap: booleans have no consumer, and the parallel-iteration and linked-list motivating cases (item 10) are not expressible without it
+    Needs a design pass first: does `if` merge the proof contexts of its branches, and how is a loop invariant written?
+3. Let user functions call other user functions
+    Function bodies currently see only their arguments and the standard library, and argument passing is by value (see LANGUAGE.md)
+    Decide the closure/scoping rules before adding mutable data, since by-value vs by-reference only becomes observable then
+4. Let declarations
+5. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?
-4. Support setting proofs in parent scope when they only correspond to declared there
+6. Support setting proofs in parent scope when they only correspond to declared there
     Control flow blocks will need to have their own rules
-5. Functions
+7. Functions
     Apply input-contract rewrites during assumption/instantiation instead of ignoring them
     Dont fully evaluate immediately in validation? ie. rewrite to get result?
-6. Proof transformation v2
-7. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
-8. Distinguish between proof only vars and regular vars
-9. Introduce a small type layer
+8. Proof transformation v2
+    Validator arithmetic, so `s = 3` implies `s > 0` without a manual `rewrite eqToGtZero s`
+9. Widen operators and literals
+    `*` and `/` (the parser has a TODO for `*`), and negative literals
+10. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+    Safe access is covered by examples/safe_access.tersus
+11. Distinguish between proof only vars and regular vars
+12. Introduce a small type layer
     Cover ints, bools, int lists, and functions to catch builtin/type misuse earlier
+13. Maintenance
+    Remove the redundant-pattern warning in `Proof.hs` (`valExpression _ _ e`)
+    Check whether `deriveRefl` still lets the proof context grow quickly; the equivalence search is bounded, but the number of facts is not
+    Check that the parser handles CRLF line endings, since files may be checked out with them on Windows
 
 Running:
     0. stack run
