@@ -33,6 +33,8 @@ data Statement
     | AxiomDef Variable [Variable] [ValidationStatement] [ValidationStatement]
     | ProofDef Variable [Variable] [ValidationStatement] [ValidationStatement] [ValidationStatement]
     | Block [Statement]
+    | -- If condition thenBranch elseBranch; a missing else is an empty branch
+      If Expression [Statement] [Statement]
     | EndBlock
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 

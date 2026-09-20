@@ -1100,6 +1100,10 @@ testExamples =
         , testExampleFile "examples/safe_access.tersus" (ExpectReturn (VInt 38))
         , testExampleFile "examples/contracts.tersus" (ExpectReturn (VInt 8))
         , testExampleFile "examples/rules.tersus" ExpectValid
+        , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
+        , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "lacks concrete definition")
+        , testExampleFile "examples/rejected/branch_fact.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/return_in_branch.tersus" (ExpectRejected "return inside if is not supported yet")
         , testExampleFile "examples/rejected/affirm.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/first_of_empty.tersus" (ExpectRejected "is not greater than 0")
         , testExampleFile "examples/rejected/unmet_contract.tersus" (ExpectRejected "is not greater than 0")
@@ -1147,6 +1151,142 @@ testCli =
           testAssertErrorContains "Validation failed" (runSource Run "return first([]);")
         ]
 
+-- Control flow tests
+parseEvalProgramHelper :: String -> Maybe Value -> TestResult
+parseEvalProgramHelper source expected =
+    case parseStatementBlock source of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right stmts -> case evaluate stmts of
+            Ok state -> testAssertEq (getReturn state) expected
+            Error e -> Just $ "Evaluation failed with error: " ++ e
+
+parseEvalProgramFailHelper :: String -> String -> TestResult
+parseEvalProgramFailHelper source expectedError =
+    case parseStatementBlock source of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right stmts -> testAssertErrorContains expectedError (evaluate stmts)
+
+parseValidProgramHelper :: String -> TestResult
+parseValidProgramHelper source =
+    case parseStatementBlock source of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right stmts -> case validate stmts of
+            Ok _ -> Nothing
+            Error e -> Just $ "Validation failed with error: " ++ e
+
+parseValidateFailProgramHelper :: String -> String -> TestResult
+parseValidateFailProgramHelper source expectedError =
+    case parseStatementBlock source of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right stmts -> testAssertErrorContains expectedError (validate stmts)
+
+testParseIf :: Test
+testParseIf =
+    let lt1 = F (Val (builtinFunct (Rel Lt))) [Var "x", Val (VInt 1)]
+        setY n = Assign "y" (Val (VInt n))
+     in testCaseSeq
+            "testParseIf"
+            [ case parseStatementBlock "if x < 1 { y = 1; } else { y = 2; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed -> testAssertEq parsed [If lt1 [setY 1] [setY 2]]
+            , case parseStatementBlock "if x < 1 { y = 1; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed -> testAssertEq parsed [If lt1 [setY 1] []]
+            , case parseStatementBlock "if x < 1 { y = 1; } else if x < 2 { y = 2; } else { y = 3; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed ->
+                    testAssertEq
+                        parsed
+                        [If lt1 [setY 1] [If (F (Val (builtinFunct (Rel Lt))) [Var "x", Val (VInt 2)]) [setY 2] [setY 3]]]
+            , case parseStatementBlock "if x < 1 { y = 1; } // done\n// otherwise\nelse { y = 2; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed -> testAssertEq parsed [If lt1 [setY 1] [setY 2]]
+            , -- Keywords are only reserved as whole words
+              case parseStatementBlock "iffy = 1; elsewhere = 2;" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed -> testAssertEq parsed [Assign "iffy" (Val (VInt 1)), Assign "elsewhere" (Val (VInt 2))]
+            ]
+
+testEvalIf :: Test
+testEvalIf =
+    testCaseSeq
+        "testEvalIf"
+        [ parseEvalProgramHelper "x = 5; y = 0; if x < 9 { y = 1; } else { y = 2; }; return y;" (Just (VInt 1))
+        , parseEvalProgramHelper "x = 5; y = 0; if x > 9 { y = 1; } else { y = 2; }; return y;" (Just (VInt 2))
+        , parseEvalProgramHelper "x = 5; y = 7; if x > 9 { y = 1; }; return y;" (Just (VInt 7))
+        , parseEvalProgramHelper "x = 5; y = 0; if x < 4 { y = 1; } else if x < 9 { y = 2; } else { y = 3; }; return y;" (Just (VInt 2))
+        , parseEvalProgramHelper "x = 5; y = 0; if x < 9 { if x < 3 { y = 1; } else { y = 2; }; }; return y;" (Just (VInt 2))
+        , parseEvalProgramHelper "b = 1 < 2; y = 0; if b { y = 4; }; return y;" (Just (VInt 4))
+        , parseEvalProgramFailHelper "if 5 { x = 1; };" "Condition must be a boolean"
+        , -- A variable first assigned in a branch is local to it
+          parseEvalProgramFailHelper "if true { t = 1; }; return t;" "Undefined variable: t"
+        ]
+
+testValidateIf :: Test
+testValidateIf =
+    testCaseSeq
+        "testValidateIf"
+        [ -- Guarding first() with the list size makes it safe for a list only known at runtime
+          parseValidProgramHelper
+            "fn firstOr(lst, d) {\
+            \  r = d;\
+            \  if size(lst) > 0 {\
+            \    define s = size(lst);\
+            \    rewrite eqToGtZero s;\
+            \    r = first(lst);\
+            \  };\
+            \  return r;\
+            \};\
+            \return firstOr([4, 8], 0);"
+        , -- A fact both branches establish about the assigned variable survives the join
+          parseValidProgramHelper
+            "fn f(n) {\
+            \  y = 0;\
+            \  if n < 6 { y = 1; rewrite eqToGtZero y; } else { y = 2; rewrite eqToGtZero y; };\
+            \  affirm y > 0;\
+            \  return y;\
+            \};"
+        , -- The same guard without enough information is rejected
+          parseValidateFailProgramHelper
+            "fn firstOr(lst, d) {\
+            \  r = d;\
+            \  if size(lst) > 1 {\
+            \    r = first(lst);\
+            \  };\
+            \  return r;\
+            \};\
+            \return firstOr([4, 8], 0);"
+            "lacks concrete definition"
+        , -- A fact only one branch establishes does not survive the join
+          parseValidateFailProgramHelper
+            "fn f(n) {\
+            \  y = 0;\
+            \  if n < 6 { y = 1; rewrite eqToGtZero y; } else { y = 2; };\
+            \  affirm y > 0;\
+            \};"
+            "Assertion failed"
+        , -- Soundness: the condition only holds inside its branch
+          parseValidateFailProgramHelper
+            "fn f(n) {\
+            \  y = 0;\
+            \  if n < 6 { y = 1; } else { y = 2; };\
+            \  affirm n < 6;\
+            \};"
+            "Assertion failed"
+        , -- Soundness: a copy made under the condition must not carry the condition out
+          parseValidateFailProgramHelper
+            "fn f(n) {\
+            \  y = 0;\
+            \  if n < 6 { y = n; } else { y = 0; };\
+            \  affirm y < 6;\
+            \};"
+            "Assertion failed"
+        , parseValidateFailProgramHelper "x = 1; if x < 2 { return 1; };" "return inside if is not supported yet"
+        ]
+
+testControlFlow :: Test
+testControlFlow = TestList "testControlFlow" [testParseIf, testEvalIf, testValidateIf]
+
 -- Run tests
 main :: IO ()
 main = do
@@ -1167,6 +1307,7 @@ main = do
                 , testCrashRegression
                 , testExamples
                 , testCli
+                , testControlFlow
                 ]
     putStrLn $
         "Summary: "

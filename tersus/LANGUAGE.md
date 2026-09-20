@@ -47,7 +47,7 @@ Tersus currently has four runtime value categories:
 - Booleans: `true`, `false`
 - Functions: builtin functions from the standard library or user-defined functions
 
-Boolean values can also be produced by relation expressions such as `x < y`, but the language does not yet have control-flow constructs that consume them.
+Boolean values can also be produced by relation expressions such as `x < y`. The condition of an `if` consumes them.
 
 Negative literals are not parsed directly. Use subtraction instead, for example `0 - 1`.
 
@@ -116,6 +116,67 @@ return size(x);
 ```
 
 In the current implementation, assignment searches parent scopes before creating a new local binding. Reassigning `x` inside the nested block updates the outer `x` if it already exists.
+
+### If / Else
+
+`if` runs one of two blocks depending on a boolean condition. `else` is optional, and `else if` chains.
+
+```tersus
+x = 5;
+label = 0;
+if x < 4 {
+    label = 1;
+} else if x < 9 {
+    label = 2;
+} else {
+    label = 3;
+};
+return label;
+```
+
+- The condition is any expression that evaluates to a boolean; anything else fails evaluation with `Condition must be a boolean`.
+- Like `fn` definitions and blocks, an `if` statement is ended with `;`.
+- Each branch is a block. Assignments to variables that already exist outside update them, and a variable first assigned inside a branch is local to it. Declare the variable before the `if` (`label = 0;` above) to use it afterwards.
+- `if`, `else` and `while` are reserved words; `iffy` and `elsewhere` are still ordinary names.
+- `return` is not allowed inside an `if` body yet. The validator rejects it with `return inside if is not supported yet`.
+
+#### Validating branches
+
+The validator checks each branch assuming the condition holds (or, for `else`, that it does not), so a guard can make a builtin's contract provable:
+
+```tersus
+fn firstOr(lst, fallback) {
+    r = fallback;
+    if size(lst) > 0 {
+        define s = size(lst);
+        rewrite eqToGtZero s;
+        r = first(lst);
+    };
+    return r;
+};
+```
+
+For a relation condition the branch assumes the relation (`size(lst) > 0`), and the `else` branch assumes its negation (`<` becomes `>=`, `>` becomes `<=`, and so on). Equality has no negation to record, so the `else` branch of `x = y` learns only that the condition is false. Every condition also records whether its boolean is `true` or `false`.
+
+After the `if`, only facts that **both** branches establish are kept. For each outer variable a branch assigned, the validator introduces a fresh value that equals the variable's final value in either branch, and keeps a fact about it only if both branches prove it. A fact that holds only under the condition, including the condition itself, is not known after the `if`:
+
+```tersus
+fn f(n) {
+    y = 0;
+    if n < 6 {
+        y = 1;
+        rewrite eqToGtZero y;
+    } else {
+        y = 2;
+        rewrite eqToGtZero y;
+    };
+    affirm y > 0;   // both branches proved it, so this validates
+    affirm n < 6;   // rejected: only the then-branch knew this
+    return y;
+};
+```
+
+This is sound but incomplete. Facts a branch derives about values that existed before the `if`, and that the other branch does not also derive, are dropped, so re-derive them after the `if` when you need them.
 
 ### Functions
 
@@ -292,7 +353,7 @@ affirm s > 0;
 
 ## Current Limitations
 
-- No `if`, `else`, `while`, or general control flow yet.
+- No `while` or other loops yet, and `return` is not allowed inside an `if` body.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists.
 - No block comments; only `//` line comments.

@@ -7,6 +7,7 @@ import Data.Map (
     lookup,
     fromList,
     toList,
+    union,
  )
 
 import Data.List (nub)
@@ -79,6 +80,27 @@ vPushNewEmptyScope (VState scope iotaCtx proofCtx iotaseq ruleCtx) =
 -- TODO: Get vars from parent scopes and ctx
 vGetVars :: VState -> Map Variable Iota
 vGetVars (VState (VScopeState iotas _ _ _) _ _ _ _) = iotas
+
+-- Every variable visible from the current scope, with inner bindings shadowing outer ones.
+vVisibleVars :: VState -> Map Variable Iota
+vVisibleVars (VState scope _ _ _ _) = vScopeVisibleVars scope
+
+vScopeVisibleVars :: VScopeState -> Map Variable Iota
+vScopeVisibleVars (VScopeState iotas _ _ Nothing) = iotas
+vScopeVisibleVars (VScopeState iotas _ _ (Just pScope)) =
+    Data.Map.union iotas (vScopeVisibleVars pScope)
+
+vGetIotaSeq :: VState -> [Iota]
+vGetIotaSeq (VState _ _ _ iotaseq _) = iotaseq
+
+vSetIotaSeq :: VState -> [Iota] -> VState
+vSetIotaSeq (VState scope iotaCtx proofCtx _ ruleCtx) iotaseq = VState scope iotaCtx proofCtx iotaseq ruleCtx
+
+-- All iotas a proof mentions
+proofIotas :: Proof Iota -> [Iota]
+proofIotas (ATerm iota) = [iota]
+proofIotas (CTerm _) = []
+proofIotas (FApp funct args) = proofIotas funct ++ concatMap proofIotas args
 
 -- Lookup the value of a var in State, including parent scopes
 lookupVar :: State -> Variable -> Maybe Value

@@ -1,0 +1,29 @@
+// if/else, and a guard that makes first() safe for a list only known at runtime.
+fn firstOr(lst, fallback) {
+    // r has to exist before the if: a variable first assigned inside a branch is local to it.
+    r = fallback;
+    if size(lst) > 0 {
+        // The validator knows size(lst) > 0 inside this branch, which is what first() needs.
+        define s = size(lst);
+        rewrite eqToGtZero s;
+        r = first(lst);
+    };
+    return r;
+};
+
+fn classify(n) {
+    label = 0;
+    if n < 10 {
+        label = 1;
+    } else if n < 100 {
+        label = 2;
+    } else {
+        label = 3;
+    };
+    return label;
+};
+
+a = firstOr([4, 8, 15], 0);
+b = firstOr([], 100);
+// 4 + 100 + 2
+return a + b + classify(50);

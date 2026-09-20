@@ -73,6 +73,7 @@ evalNextStatement state = case nextStatement state of
     Ok AxiomDef{} -> advanceStatement state
     Ok ProofDef{} -> advanceStatement state
     Ok (Block statements) -> evalBlockStatement state statements
+    Ok (If cond thenStmts elseStmts) -> evalIfStatement state cond thenStmts elseStmts
     Ok EndBlock -> evalEndBlockStatement state
     Error e -> Error e
 
@@ -108,6 +109,27 @@ evalBlockStatement (State scope ctxVals) statements =
                     ctxVals
         Error e -> Error e
 
+-- The chosen branch runs as an ordinary block: it gets a child scope, assignments to
+-- existing outer variables update them, and new variables stay local to the branch.
+evalIfStatement :: State -> Expression -> [Statement] -> [Statement] -> Result State String
+evalIfStatement state cond thenStmts elseStmts =
+    case advanceStatement state of
+        Ok advancedState ->
+            case evalExpression advancedState cond of
+                Ok (VBool True, condState) -> evalBlockStatementInPlace condState thenStmts
+                Ok (VBool False, condState) -> evalBlockStatementInPlace condState elseStmts
+                Ok _ -> Error "Condition must be a boolean"
+                Error e -> Error e
+        Error e -> Error e
+
+-- Like evalBlockStatement, for a state whose current statement was already advanced past.
+evalBlockStatementInPlace :: State -> [Statement] -> Result State String
+evalBlockStatementInPlace (State scope ctxVals) statements =
+    evalBlock $
+        State
+            (ScopeState empty (Continuations (statements ++ [EndBlock])) (Just scope))
+            ctxVals
+
 evalEndBlockStatement :: State -> Result State String
 evalEndBlockStatement (State (ScopeState _ _ pScope) ctxVals) =
     case pScope of
@@ -126,6 +148,7 @@ valNextStatement state =
                     AxiomDef name args inputs outputs -> valAxiomDef state name args inputs outputs
                     ProofDef name args inputs outputs body -> valProofDef state name args inputs outputs body
                     Block bstmts -> valBlockStatement state bstmts
+                    If cond thenStmts elseStmts -> valIfStatement state cond thenStmts elseStmts
                     EndBlock -> valEndBlockStatement state
         Error e -> Error e
 
@@ -169,6 +192,133 @@ valBlockStatement (VState scope iotaCtx proofCtx iotaseq ruleCtx) bstmts =
     case vScopeAdvanceStatement scope of
         Ok advancedScope -> valBlock $ VState (VScopeState empty [] (Continuations $ bstmts ++ [EndBlock]) (Just advancedScope)) iotaCtx proofCtx iotaseq ruleCtx
         Error e -> Error e
+
+-- Validates both branches from the state after the condition, then joins them.
+--
+-- Proofs are facts about immutable iotas, but assigning an outer variable inside a block
+-- appends its proofs to the scope that owns the variable. Reusing that for a branch would
+-- leak facts that only hold under the branch condition, so each branch is validated in
+-- isolation and only what both branches establish is carried forward (see joinBranches).
+valIfStatement :: VState -> Expression -> [Statement] -> [Statement] -> Result VState String
+valIfStatement state cond thenStmts elseStmts
+    | containsReturn thenStmts || containsReturn elseStmts =
+        Error "return inside if is not supported yet"
+    | otherwise =
+        case vAdvanceStatement state of
+            Error e -> Error e
+            Ok advanced ->
+                case popIotaFromSeq advanced of
+                    Error e -> Error e
+                    Ok (condIota, state') ->
+                        case valExpression state' condIota cond of
+                            Error e -> Error e
+                            Ok (condState, condProofs) ->
+                                let s0 = vInsertProofs condState condProofs
+                                 in conditionAssumptions True cond condIota s0 `bindResult` \thenAssumed ->
+                                        conditionAssumptions False cond condIota s0 `bindResult` \elseAssumed ->
+                                            valBranch s0 thenAssumed thenStmts `bindResult` \sThen ->
+                                                -- Continue the iota sequence so the two branches never share iotas
+                                                valBranch (vSetIotaSeq s0 (vGetIotaSeq sThen)) elseAssumed elseStmts `bindResult` \sElse ->
+                                                    joinBranches s0 (assignedOuterVars s0 (thenStmts ++ elseStmts)) sThen sElse
+
+-- Runs a branch in a child scope that starts with the branch condition assumed. Unlike a
+-- plain block there is no EndBlock, so the returned state still has the child scope and
+-- everything the branch proved in it. The result is only used to read what the branch
+-- established; it is never continued from.
+valBranch :: VState -> [IotaProof] -> [Statement] -> Result VState String
+valBranch (VState scope iotaCtx proofCtx iotaseq ruleCtx) assumptions stmts =
+    valBlock (VState (VScopeState empty assumptions (Continuations stmts) (Just scope)) iotaCtx proofCtx iotaseq ruleCtx)
+
+-- What holds inside a branch: the branch's truth value for the condition iota and, when the
+-- condition is a relation, the relation itself (negated for the else branch).
+-- Equality has no negation to record, so the else branch of `x = y` learns only the truth value.
+conditionAssumptions :: Bool -> Expression -> Iota -> VState -> Result [IotaProof] String
+conditionAssumptions branch cond condIota state =
+    let truthProof = FApp eqProof [ATerm condIota, CTerm (VBool branch)]
+     in case relationCondition branch cond of
+            Nothing -> Ok [truthProof]
+            Just relCond ->
+                case varProofToIotaProof (exprToProof relCond) state of
+                    Ok relProof -> Ok [truthProof, relProof]
+                    Error e -> Error e
+
+relationCondition :: Bool -> Expression -> Maybe Expression
+relationCondition branch (F (Val (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) args) =
+    fmap (\r -> F (Val (builtinFunct (Rel r))) args) (if branch then Just rel else negateRel rel)
+relationCondition _ _ = Nothing
+
+negateRel :: Rel -> Maybe Rel
+negateRel Lt = Just GtEq
+negateRel Gt = Just LtEq
+negateRel LtEq = Just Gt
+negateRel GtEq = Just Lt
+negateRel Eq = Nothing
+
+containsReturn :: [Statement] -> Bool
+containsReturn = any returns
+  where
+    returns (Return _) = True
+    returns (Block stmts) = containsReturn stmts
+    returns (If _ thenStmts elseStmts) = containsReturn thenStmts || containsReturn elseStmts
+    returns _ = False
+
+-- Variables assigned anywhere in the statements, including nested blocks
+assignedVars :: [Statement] -> [Variable]
+assignedVars = nub . concatMap assigned
+  where
+    assigned (Assign var _) = [var]
+    assigned (Block stmts) = assignedVars stmts
+    assigned (If _ thenStmts elseStmts) = assignedVars thenStmts ++ assignedVars elseStmts
+    assigned _ = []
+
+-- Assigned variables that already exist outside the statements. Assigning any other variable
+-- creates a binding local to the branch, which is gone once the branch ends.
+assignedOuterVars :: VState -> [Statement] -> [Variable]
+assignedOuterVars state stmts =
+    filter (`Map.member` vVisibleVars state) (assignedVars stmts)
+
+-- Continues from the state before the branches. Each outer variable assigned in a branch is
+-- rebound to a fresh iota `m` that equals the variable's final iota in each branch, and a fact
+-- is kept only if both branches establish it. The then-branch's facts are the candidates and
+-- the else-branch's facts are what they must be entailed by, so facts that hold only under
+-- the condition (including the condition itself) are dropped.
+joinBranches :: VState -> [Variable] -> VState -> VState -> Result VState String
+joinBranches s0 vars sThen sElse =
+    case popNIotasFromSeq sElse (length vars) of
+        Error e -> Error e
+        Ok (mergeIotas, sAfter) ->
+            case (traverseResult (finalIota sThen) vars, traverseResult (finalIota sElse) vars) of
+                (Ok thenIotas, Ok elseIotas) ->
+                    let merges = zip3 vars mergeIotas (zip thenIotas elseIotas)
+                        s0Facts = vGetProofs s0
+                        visible =
+                            nub (concatMap proofIotas s0Facts ++ Map.elems (vVisibleVars s0) ++ mergeIotas)
+                        toMerged proof =
+                            foldl
+                                (\p (_, m, (thenIota, _)) -> maybe p id (substituteProofTerm (ATerm thenIota) (ATerm m) p))
+                                proof
+                                merges
+                        candidates =
+                            filter
+                                (\p -> p `notElem` s0Facts && all (`elem` visible) (proofIotas p))
+                                (nub (map toMerged (vGetProofs sThen)))
+                        elseEqualities = [FApp eqProof [ATerm m, ATerm elseIota] | (_, m, (_, elseIota)) <- merges]
+                        elseContext = Engine.proofContextFromFacts (vGetProofs sElse ++ elseEqualities)
+                        kept = filter (`Engine.entails` elseContext) candidates
+                        base = vSetIotaSeq s0 (vGetIotaSeq sAfter)
+                        factsFor m = filter (elem m . proofIotas) kept
+                        rebound = foldl (\s (var, m, _) -> vInsertVar s var m (factsFor m)) base merges
+                        boundFacts = concatMap (\(_, m, _) -> factsFor m) merges
+                     in Ok (vInsertProofs rebound (filter (`notElem` boundFacts) kept))
+                (Error e, _) -> Error e
+                (_, Error e) -> Error e
+  where
+    finalIota state var = case vLookupVar state var of
+        Just iota -> Ok iota
+        Nothing -> Error ("Variable not found while joining branches: " ++ var)
+
+traverseResult :: (a -> Result b String) -> [a] -> Result [b] String
+traverseResult = flatResultMap
 
 valEndBlockStatement :: VState -> Result VState String
 valEndBlockStatement (VState (VScopeState _ _ _ pscope) iotaCtx proofCtx iotaseq ruleCtx) =
@@ -340,7 +490,7 @@ validateUserRuleInputs state valStmts =
     let VState _ iotaCtx proofCtx iotaseq ruleCtx = state
      in valBlock $
             VState
-                (VScopeState (vGetVars state) (vGetProofs state) (Continuations (map ValidationStatement valStmts)) Nothing)
+                (VScopeState (vVisibleVars state) (vGetProofs state) (Continuations (map ValidationStatement valStmts)) Nothing)
                 iotaCtx
                 proofCtx
                 iotaseq

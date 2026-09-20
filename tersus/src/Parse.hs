@@ -73,6 +73,7 @@ validationStatementBlock = genericStatementBlock validationStatement
 statement :: Parser Statement
 statement =
     returnStatement
+        <|> ifStatement
         <|> axiomStatement
         <|> proofStatement
         <|> ( ValidationStatement
@@ -99,6 +100,22 @@ returnStatement = do
     expr <- expression
     whitespace
     return (Return expr)
+
+-- `else if` is an else branch holding a single nested `if`.
+ifStatement :: Parser Statement
+ifStatement = do
+    keyword "if"
+    whitespace
+    cond <- expression
+    whitespace
+    thenBranch <- curlyBracesParse statementBlock
+    elseBranch <- option [] elseBranchParse
+    return (If cond thenBranch elseBranch)
+  where
+    elseBranchParse = do
+        keyword "else"
+        whitespace
+        curlyBracesParse statementBlock <|> ((: []) <$> ifStatement)
 
 functStatement :: Parser Statement
 functStatement = do

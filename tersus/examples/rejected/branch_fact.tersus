@@ -1,0 +1,11 @@
+// Rejected: n < 6 only holds inside the then-branch, so it is not known after the if.
+fn f(n) {
+    y = 0;
+    if n < 6 {
+        y = 1;
+    } else {
+        y = 2;
+    };
+    affirm n < 6;
+    return y;
+};

@@ -26,6 +26,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `safe_access.tersus` | A function that only accepts non-empty lists, so `first` and `last` are provably safe | returns `38` |
 | `contracts.tersus` | Output contracts, and a proof variable (`s`) exported from a callee to its caller | returns `8` |
 | `rules.tersus` | User-defined `axiom` and `proof` rewrite rules | validates |
+| `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 
 ### The safe-access pattern
 
@@ -65,10 +66,14 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/bad_proof_rule.tersus` | A `proof` rule whose body does not establish its declared output |
 | `rejected/axiom_input.tersus` | `rewrite eqToGtZero x` when `x = 0`: the axiom's input contract fails |
 | `rejected/unknown_rule.tersus` | `rewrite madeUpRule x` with no such rule defined |
+| `rejected/unguarded_access.tersus` | The `if` guard says `size(lst) > 1`, which does not show the `size(lst) > 0` that `first` needs |
+| `rejected/branch_fact.tersus` | `affirm n < 6` after an `if n < 6`: the condition only holds inside its branch |
+| `rejected/return_in_branch.tersus` | `return` inside an `if` body, which is not supported yet |
 
 ## Writing your own
 
 - All infix operators share one precedence level and associate left, so write `affirm y = (x + 1)`. Without the parentheses this parses as `(y = x) + 1`.
 - Validation only knows what a rewrite or contract has told it. It does not do arithmetic on its own, for example it cannot conclude `s > 0` from `s = 3` without `rewrite eqToGtZero s`.
 - User functions cannot call other user functions yet, because function bodies only see their arguments and the standard library.
-- There is no control flow yet, so the parallel-iteration and linked-list motivating cases in the main README are not expressible here.
+- A variable first assigned inside an `if` branch is local to that branch, so declare it before the `if` (`r = fallback;`) if you want it afterwards.
+- There are no loops yet, so the parallel-iteration and linked-list motivating cases in the main README are not expressible here.

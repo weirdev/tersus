@@ -19,9 +19,10 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 
 Next steps, roughly in priority order:
 1. Control flow
-    if/else/while
-    The biggest gap: booleans have no consumer, and the parallel-iteration and linked-list motivating cases (item 9) are not expressible without it
-    Needs a design pass first: does `if` merge the proof contexts of its branches, and how is a loop invariant written?
+    `if`/`else` is done: branches are validated under the condition and joined by keeping only the facts both establish (see LANGUAGE.md)
+    `while` with a contract-style invariant is next: `while cond [{ invariant }] { body }`
+    Early-exit `return` (guard clauses such as `if n < 1 { return 0 }`) is not supported yet; the validator rejects `return` inside an `if` body. `return` currently unwinds nested scopes to the top level and keeps executing, so it needs its own design
+    The parallel-iteration and linked-list motivating cases (item 9) need loops
 2. Let user functions call other user functions
     Function bodies currently see only their arguments and the standard library, and argument passing is by value (see LANGUAGE.md)
     Decide the closure/scoping rules before adding mutable data, since by-value vs by-reference only becomes observable then
