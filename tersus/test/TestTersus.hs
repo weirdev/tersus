@@ -1102,13 +1102,15 @@ testExamples =
         , testExampleFile "examples/rules.tersus" ExpectValid
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
+        , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/rejected/invariant_entry.tersus" (ExpectRejected "Loop invariant does not hold on entry")
         , testExampleFile "examples/rejected/invariant_preserved.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/return_in_loop.tersus" (ExpectRejected "return inside while is not supported yet")
         , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "lacks concrete definition")
         , testExampleFile "examples/rejected/branch_fact.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/return_in_branch.tersus" (ExpectRejected "return inside if is not supported yet")
+        , testExampleFile "examples/rejected/guard_condition.tersus" (ExpectRejected "lacks concrete definition")
+        , testExampleFile "examples/rejected/missing_return.tersus" (ExpectRejected "Return value not found")
         , testExampleFile "examples/rejected/affirm.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/first_of_empty.tersus" (ExpectRejected "is not greater than 0")
         , testExampleFile "examples/rejected/unmet_contract.tersus" (ExpectRejected "is not greater than 0")
@@ -1286,7 +1288,6 @@ testValidateIf =
             \  affirm y < 6;\
             \};"
             "Assertion failed"
-        , parseValidateFailProgramHelper "x = 1; if x < 2 { return 1; };" "return inside if is not supported yet"
         ]
 
 testParseWhile :: Test
@@ -1324,6 +1325,10 @@ testEvalWhile =
         , -- The invariant is only used by validation
           parseEvalProgramHelper "i = 0; while i < 3 [{ affirm i <= 3; }] { i = i + 1; }; return i;" (Just (VInt 3))
         , parseEvalProgramFailHelper "while 5 { x = 1; };" "Condition must be a boolean"
+        , -- A loop that never ends is stopped rather than left to hang
+          parseEvalProgramFailHelper "n = 0; while true { n = n + 1; };" "Step limit"
+        , -- Even inside a function called during validation
+          parseValidProgramHelper "fn spin(n) { while true { n = n + 1; }; return n; }; x = 1;"
         ]
 
 -- The validator does no arithmetic, so these two trusted axioms supply the arithmetic facts
@@ -1376,11 +1381,63 @@ testValidateWhile =
         , parseValidateFailProgramHelper "i = 0; while i < 3 { return 1; };" "return inside while is not supported yet"
         ]
 
+testEarlyReturn :: Test
+testEarlyReturn =
+    testCaseSeq
+        "testEarlyReturn"
+        [ -- Evaluation: return ends the program or function where it runs
+          parseEvalProgramHelper "return 1; return 2;" (Just (VInt 1))
+        , parseEvalProgramHelper "x = 5; if x < 9 { return 1; }; return 2;" (Just (VInt 1))
+        , parseEvalProgramHelper "x = 5; if x > 9 { return 1; }; return 2;" (Just (VInt 2))
+        , parseEvalProgramHelper "x = 1; { x = 2; return x; }; return 9;" (Just (VInt 2))
+        , parseEvalProgramHelper "x = 1; if x < 2 { if x < 3 { return 7; }; }; return 9;" (Just (VInt 7))
+        , parseEvalProgramHelper
+            "fn f(n) { if n < 1 { return 0; }; return n + 10; }; return f(0) + f(5);"
+            (Just (VInt 15))
+        , -- Returning from inside a loop stops the loop
+          parseEvalProgramHelper "i = 0; while i < 10 { if i > 2 { return i; }; i = i + 1; }; return 99;" (Just (VInt 3))
+        , -- Statements after the return never run
+          parseEvalProgramHelper "return 1; x = first([]);" (Just (VInt 1))
+        , -- Validation: a guard clause makes the rest of the function safe
+          parseValidProgramHelper
+            "fn firstOr(lst, d) { if size(lst) > 0 { } else { return d; }; define s = size(lst); rewrite eqToGtZero s; return first(lst); }; return firstOr([4, 8], 0) + firstOr([], 5);"
+        , -- A return inside the taken branch
+          parseValidProgramHelper
+            "fn firstOr(lst, d) { if size(lst) > 0 { define s = size(lst); rewrite eqToGtZero s; return first(lst); }; return d; };"
+        , -- A chain of guard clauses
+          parseValidProgramHelper
+            "fn sign(n) { if n < 0 { return 0 - 1; }; if n > 0 { return 1; }; return 0; }; return sign(3);"
+        , -- A program may return on only some paths
+          parseValidProgramHelper "x = 1; if x < 2 { return 1; };"
+        , -- Every return can establish an output fact
+          parseValidProgramHelper
+            "fn f(n) [{ }] [{ affirm return > 0; }] { if n < 6 { y = 1; rewrite eqToGtZero y; return y; }; z = 2; rewrite eqToGtZero z; return z; }; r = f(3); affirm r > 0;"
+        , -- Rejected: the guard only helps on the path where it did not return
+          parseValidateFailProgramHelper
+            "fn f(lst, d) { if size(lst) > 0 { return d; }; return first(lst); };"
+            "lacks concrete definition"
+        , parseValidateFailProgramHelper
+            "fn f(lst, d) { if size(lst) > 1 { } else { return d; }; return first(lst); };"
+            "lacks concrete definition"
+        , -- Soundness: the return branch's condition is not known afterwards
+          parseValidateFailProgramHelper
+            "fn f(n) { if n < 6 { return 1; }; affirm n < 6; return 2; };"
+            "Assertion failed"
+        , -- Soundness: a fact only one return establishes is not an output fact
+          parseValidateFailProgramHelper
+            "fn f(n) [{ }] [{ affirm return > 0; }] { if n < 6 { y = 1; rewrite eqToGtZero y; return y; }; return 0; };"
+            "Assertion failed"
+        , -- A function where some path does not return has no return value
+          parseValidateFailProgramHelper "fn f(n) { if n < 6 { return 1; }; }; x = f(1);" "Return value not found"
+        , -- Returning from inside a loop is still not supported
+          parseValidateFailProgramHelper "i = 0; while i < 3 { if i > 1 { return i; }; i = i + 1; };" "return inside while is not supported yet"
+        ]
+
 testControlFlow :: Test
 testControlFlow =
     TestList
         "testControlFlow"
-        [testParseIf, testEvalIf, testValidateIf, testParseWhile, testEvalWhile, testValidateWhile]
+        [testParseIf, testEvalIf, testValidateIf, testParseWhile, testEvalWhile, testValidateWhile, testEarlyReturn]
 
 -- Run tests
 main :: IO ()

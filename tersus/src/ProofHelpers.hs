@@ -217,14 +217,15 @@ vGetReturn (VState (VScopeState iotas _ _ Nothing) _ _ _ _) =
         Nothing -> Error "Return value not found in top scope"
 vGetReturn _ = Error "Not top scope"
 
--- Return is always set in the top level scope
+-- Return is always set in the top level scope, and it ends the program (or function body):
+-- the top level scope's remaining statements are dropped.
 -- NOTE: If we ever have nested functions that implicitly get their parent's scope,
 -- this will need to be updated to indicate on which scope to set the return value
 setReturn :: State -> Value -> State
 setReturn (State scope ctxVals) val = State (scopeSetReturn scope val) ctxVals
 
 scopeSetReturn :: ScopeState -> Value -> ScopeState
-scopeSetReturn (ScopeState vals c Nothing) val = ScopeState (insert "return" val vals) c Nothing
+scopeSetReturn (ScopeState vals _ Nothing) val = ScopeState (insert "return" val vals) emptyContinuations Nothing
 scopeSetReturn (ScopeState _ _ (Just pScope)) val = scopeSetReturn pScope val
 
 vSetReturn :: VState -> Iota -> [IotaProof] -> VState
@@ -232,8 +233,8 @@ vSetReturn (VState scope iotaCtx proofCtx iotaseq ruleCtx) niota nproofs =
     VState (vScopeSetReturn scope niota nproofs) iotaCtx proofCtx iotaseq ruleCtx
 
 vScopeSetReturn :: VScopeState -> Iota -> [IotaProof] -> VScopeState
-vScopeSetReturn (VScopeState iotas proofs c Nothing) niota nproofs =
-    VScopeState (insert "return" niota iotas) (proofs ++ nproofs) c Nothing
+vScopeSetReturn (VScopeState iotas proofs _ Nothing) niota nproofs =
+    VScopeState (insert "return" niota iotas) (proofs ++ nproofs) emptyContinuations Nothing
 vScopeSetReturn (VScopeState iotas proofs c (Just pScope)) niota nproofs =
     VScopeState iotas proofs c (Just $ vScopeSetReturn pScope niota nproofs)
 

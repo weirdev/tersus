@@ -1,0 +1,8 @@
+// Rejected: the guard returns when the list is non-empty, so the statements after it only run
+// when size(lst) <= 0. Nothing shows size(lst) > 0, and first() needs it.
+fn firstOr(lst, fallback) {
+    if size(lst) > 0 {
+        return fallback;
+    };
+    return first(lst);
+};

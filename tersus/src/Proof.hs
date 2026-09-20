@@ -33,13 +33,23 @@ validate l = case valBlock $ initVStateWStatements l of
     Error e -> Error e
 
 -- Private fns
+-- The most statements a single evaluation runs before it is stopped, so a loop that never
+-- ends fails instead of hanging. Each function call gets its own budget.
+stepLimit :: Int
+stepLimit = 1000000
+
 evalBlock :: State -> Result State String
-evalBlock state = case state of
+evalBlock = evalBlockWithin stepLimit
+
+evalBlockWithin :: Int -> State -> Result State String
+evalBlockWithin fuel state = case state of
     State (ScopeState _ (Continuations []) _) _ -> Ok state
-    State (ScopeState _ (Continuations (_ : _)) _) _ ->
-        case evalNextStatement state of
-            Ok nState -> evalBlock nState
-            Error e -> Error e
+    State (ScopeState _ (Continuations (_ : _)) _) _
+        | fuel <= 0 -> Error ("Step limit of " ++ show stepLimit ++ " statements exceeded, the program may not terminate")
+        | otherwise ->
+            case evalNextStatement state of
+                Ok nState -> evalBlockWithin (fuel - 1) nState
+                Error e -> Error e
 
 evalReturningBlock :: State -> Result (State, Maybe Value) String
 evalReturningBlock state =
@@ -104,7 +114,7 @@ evalBlockStatement :: State -> [Statement] -> Result State String
 evalBlockStatement (State scope ctxVals) statements =
     case scopeAdvanceStatement scope of
         Ok advancedScope ->
-            evalBlock $
+            Ok $
                 State
                     (ScopeState empty (Continuations (statements ++ [EndBlock])) (Just advancedScope))
                     ctxVals
@@ -125,7 +135,6 @@ evalIfStatement state cond thenStmts elseStmts =
 
 -- While the condition holds, run one iteration of the body as a block and then the loop
 -- again, by putting both at the front of the statements that are still to run.
--- There is no step limit, so a loop that never ends never returns.
 evalWhileStatement :: State -> Statement -> Expression -> [Statement] -> Result State String
 evalWhileStatement state loop cond body =
     case advanceStatement state of
@@ -142,7 +151,7 @@ evalWhileStatement state loop cond body =
 -- Like evalBlockStatement, for a state whose current statement was already advanced past.
 evalBlockStatementInPlace :: State -> [Statement] -> Result State String
 evalBlockStatementInPlace (State scope ctxVals) statements =
-    evalBlock $
+    Ok $
         State
             (ScopeState empty (Continuations (statements ++ [EndBlock])) (Just scope))
             ctxVals
@@ -190,7 +199,8 @@ valAssignStatement state var expr =
 -- iotas do not leak out when a function or block returns a value.
 valReturnStatement :: VState -> Expression -> Result VState String
 valReturnStatement state expr =
-    let VState (VScopeState _ proofs _ _) _ _ _ _ = state
+    let VState scope _ _ _ _ = state
+        proofs = vScopeGetProofs scope
      in case vAdvanceStatement state of
             Ok advancedState ->
                 case popIotaFromSeq advancedState of
@@ -198,7 +208,7 @@ valReturnStatement state expr =
                         case valExpression state' niota expr of
                             Ok (exprState, nproofs) ->
                                 let refledNProofs = reflProofsByProofs nproofs proofs
-                                    visibleIotas = niota : map snd (toList (vGetVars exprState))
+                                    visibleIotas = niota : map snd (toList (vVisibleVars exprState))
                                     state'' = vTopLevelScope exprState
                                  in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst visibleIotas) (nproofs ++ refledNProofs))
                             Error e -> Error e
@@ -217,27 +227,82 @@ valBlockStatement (VState scope iotaCtx proofCtx iotaseq ruleCtx) bstmts =
 -- appends its proofs to the scope that owns the variable. Reusing that for a branch would
 -- leak facts that only hold under the branch condition, so each branch is validated in
 -- isolation and only what both branches establish is carried forward (see joinBranches).
+--
+-- A branch that contains `return` cannot be joined this way, because the statements after the
+-- `if` do not run on the path that returned. Those are validated separately (valReturningIf).
 valIfStatement :: VState -> Expression -> [Statement] -> [Statement] -> Result VState String
-valIfStatement state cond thenStmts elseStmts
-    | containsReturn thenStmts || containsReturn elseStmts =
-        Error "return inside if is not supported yet"
-    | otherwise =
-        case vAdvanceStatement state of
-            Error e -> Error e
-            Ok advanced ->
-                case popIotaFromSeq advanced of
-                    Error e -> Error e
-                    Ok (condIota, state') ->
-                        case valExpression state' condIota cond of
-                            Error e -> Error e
-                            Ok (condState, condProofs) ->
-                                let s0 = vInsertProofs condState condProofs
-                                 in conditionAssumptions True cond condIota s0 `bindResult` \thenAssumed ->
-                                        conditionAssumptions False cond condIota s0 `bindResult` \elseAssumed ->
-                                            valBranch s0 thenAssumed thenStmts `bindResult` \sThen ->
-                                                -- Continue the iota sequence so the two branches never share iotas
-                                                valBranch (vSetIotaSeq s0 (vGetIotaSeq sThen)) elseAssumed elseStmts `bindResult` \sElse ->
-                                                    joinBranches s0 (assignedOuterVars s0 (thenStmts ++ elseStmts)) sThen sElse
+valIfStatement state cond thenStmts elseStmts =
+    vAdvanceStatement state `bindResult` \advanced ->
+        popIotaFromSeq advanced `bindResult` \(condIota, state') ->
+            valExpression state' condIota cond `bindResult` \(condState, condProofs) ->
+                let s0 = vInsertProofs condState condProofs
+                 in conditionAssumptions True cond condIota s0 `bindResult` \thenAssumed ->
+                        conditionAssumptions False cond condIota s0 `bindResult` \elseAssumed ->
+                            if containsReturn (thenStmts ++ elseStmts)
+                                then valReturningIf s0 thenAssumed thenStmts elseAssumed elseStmts
+                                else
+                                    valBranch s0 thenAssumed thenStmts `bindResult` \sThen ->
+                                        -- Continue the iota sequence so the two branches never share iotas
+                                        valBranch (vSetIotaSeq s0 (vGetIotaSeq sThen)) elseAssumed elseStmts `bindResult` \sElse ->
+                                            joinBranches s0 (assignedOuterVars s0 (thenStmts ++ elseStmts)) sThen sElse
+
+-- An `if` with a `return` in a branch. Each branch is followed by the rest of the program (the
+-- statements after the `if`, then those after the block around it, and so on) and validated to
+-- the end. A `return` ends its path, so a guard clause such as `if n < 1 { return 0; }` leaves
+-- the rest of the program to be validated only under `n >= 1`. The two paths are then joined
+-- by joinReturnPaths.
+--
+-- A path validates the rest of the program again, so `if` statements that both fall through
+-- and contain a `return` somewhere multiply the work.
+valReturningIf :: VState -> [IotaProof] -> [Statement] -> [IotaProof] -> [Statement] -> Result VState String
+valReturningIf s0 thenAssumed thenStmts elseAssumed elseStmts =
+    valPath s0 thenAssumed thenStmts `bindResult` \pThen ->
+        valPath (vSetIotaSeq s0 (vGetIotaSeq pThen)) elseAssumed elseStmts `bindResult` \pElse ->
+            joinReturnPaths s0 pThen pElse
+
+-- Runs the branch as a block, followed by whatever statements come after it, with the
+-- branch condition assumed. The result is the state where the program ended, which is the top
+-- level scope either after a `return` or after the last statement.
+valPath :: VState -> [IotaProof] -> [Statement] -> Result VState String
+valPath state assumptions stmts =
+    let VState (VScopeState iotas proofs (Continuations rest) parent) iotaCtx proofCtx iotaseq ruleCtx = state
+     in valBlock $
+            VState
+                (VScopeState iotas (nub (proofs ++ assumptions)) (Continuations (Block stmts : rest)) parent)
+                iotaCtx
+                proofCtx
+                iotaseq
+                ruleCtx
+
+-- Continues from the top level scope as it was before the `if`, since both paths have ended.
+-- What both paths establish is kept, in the same way as joinBranches. If both paths return,
+-- their return values are replaced by one fresh iota. If one falls off the end without
+-- returning, the joined state has no return value.
+joinReturnPaths :: VState -> VState -> VState -> Result VState String
+joinReturnPaths s0 pThen pElse =
+    let base = vSetContinuations (vTopLevelScope s0) emptyContinuations
+        returns = case (vGetReturn pThen, vGetReturn pElse) of
+            (Ok thenRet, Ok elseRet) -> [(thenRet, elseRet)]
+            _ -> []
+     in popNIotasFromSeq pElse (length returns) `bindResult` \(mergeIotas, sAfter) ->
+            let merges = zip mergeIotas returns
+                baseFacts = vGetProofs base
+                visible = nub (concatMap proofIotas baseFacts ++ Map.elems (vVisibleVars base) ++ mergeIotas)
+                toMerged proof =
+                    foldl
+                        (\p (m, (thenRet, _)) -> maybe p id (substituteProofTerm (ATerm thenRet) (ATerm m) p))
+                        proof
+                        merges
+                candidates =
+                    filter
+                        (\p -> p `notElem` baseFacts && all (`elem` visible) (proofIotas p))
+                        (nub (map toMerged (vGetProofs pThen)))
+                elseEqualities = [FApp eqProof [ATerm m, ATerm elseRet] | (m, (_, elseRet)) <- merges]
+                elseContext = Engine.proofContextFromFacts (vGetProofs pElse ++ elseEqualities)
+                kept = filter (`Engine.entails` elseContext) candidates
+                based = vSetIotaSeq base (vGetIotaSeq sAfter)
+                withReturn = foldl (\s (m, _) -> vSetReturn s m []) based merges
+             in Ok (vInsertProofs withReturn kept)
 
 -- Runs a branch in a child scope that starts with the branch condition assumed. Unlike a
 -- plain block there is no EndBlock, so the returned state still has the child scope and

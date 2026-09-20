@@ -1,0 +1,7 @@
+// Rejected: when n >= 6 the function reaches the end without returning a value.
+fn f(n) {
+    if n < 6 {
+        return 1;
+    };
+};
+x = f(1);

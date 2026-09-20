@@ -1,7 +1,0 @@
-// Rejected: return inside an if body is not supported yet.
-fn f(n) {
-    if n < 6 {
-        return 1;
-    };
-    return 2;
-};

@@ -7,8 +7,8 @@ See [LANGUAGE.md](LANGUAGE.md) for the current syntax and language constructs.
 The Haskell implementation has two main execution paths after parsing:
 
 1. `Parse.parseStatementBlock` converts source text into the AST types in `TersusTypes`. `//` line comments are skipped as whitespace.
-2. `Proof.evaluate` executes statements concretely with a `State` containing lexical scopes plus the standard library value context. Assignments evaluate expressions and update bindings, `return` writes the top-level return slot, blocks push a child scope, function calls run a native body or builtin, and validation statements are skipped.
-3. `Proof.validate` symbolically validates the same statements with a `VState`. Runtime values are represented by fresh iotas, assignments add equality proofs, function calls check input contracts and instantiate exported output proofs, `axiom` and `proof` declarations register validation-only rewrite rules, `affirm` asks the internal `ProofEngine` whether a proof is entailed by the current context, and `rewrite` applies primitive or user-defined rules to expand that context.
+2. `Proof.evaluate` executes statements concretely with a `State` containing lexical scopes plus the standard library value context. Assignments evaluate expressions and update bindings, `return` writes the top-level return slot and ends the program or function body (the remaining statements are dropped), blocks push a child scope, function calls run a native body or builtin (and must pass exactly as many arguments as the function has parameters), and validation statements are skipped. `if` runs the chosen branch as a block, and `while` runs its body as a block and then puts itself back at the front of the remaining statements until the condition is false. Evaluation stops with an error after `stepLimit` (1,000,000) statements, so a loop that never ends does not hang.
+3. `Proof.validate` symbolically validates the same statements with a `VState`. Runtime values are represented by fresh iotas, assignments add equality proofs, function calls check input contracts and instantiate exported output proofs, `axiom` and `proof` declarations register validation-only rewrite rules, `affirm` asks the internal `ProofEngine` whether a proof is entailed by the current context, and `rewrite` applies primitive or user-defined rules to expand that context. `if` validates each branch from the state after the condition with the condition (or its negation) assumed, then joins them by keeping only the facts both branches establish about the variables they assign. `while` checks its invariant on entry, treats the variables its body assigns as unknown, checks the invariant is preserved, and afterwards assumes the invariant and the negated condition. An `if` with a `return` in a branch cannot be joined, since the statements after it do not run on the path that returned. Instead each branch is validated followed by the rest of the program (`valReturningIf`), and the two ends are joined by keeping the facts both establish and merging the return values (`joinReturnPaths`). `return` inside a `while` body is rejected.
 
 The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cli.hs`):
 
@@ -19,9 +19,9 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 
 Next steps, roughly in priority order:
 1. Control flow
-    `if`/`else` and `while` are done (see LANGUAGE.md). Branches are validated under the condition and joined by keeping only the facts both establish; loops are validated by a contract-style invariant, `while cond [{ invariant }] { body }`
-    Remaining: early-exit `return` (guard clauses such as `if n < 1 { return 0 }`). The validator rejects `return` inside an `if` or `while` body. `return` currently unwinds nested scopes to the top level and keeps executing, so it needs its own design
-    Remaining: loop termination (loops are checked for partial correctness only), and a step limit for concrete evaluation
+    `if`/`else`, `while` and early-exit `return` are done (see LANGUAGE.md). Branches are validated under the condition and joined by keeping only the facts both establish; loops are validated by a contract-style invariant, `while cond [{ invariant }] { body }`; `return` in an `if` branch (guard clauses such as `if n < 1 { return 0; }`) is validated path by path; concrete evaluation stops after 1,000,000 statements
+    Remaining: `return` inside a `while` body (for example a search loop). The loop's exit paths would need joining with the return paths, and the invariant only has to be preserved on the paths that do not return
+    Remaining: loop termination (loops are checked for partial correctness only). A decreasing measure (variant) that the body must reduce, checked with the same axiom-based arithmetic as invariants
     The parallel-iteration and linked-list motivating cases (item 10) also need indexable/updatable data (see item 2)
 2. List element access and construction
     `get(list, i)` with an input contract requiring `i >= 0` and `i < size(list)`, following the `first`/`last` pattern
@@ -57,18 +57,17 @@ Next steps, roughly in priority order:
     Check whether `deriveRefl` still lets the proof context grow quickly; the equivalence search is bounded, but the number of facts is not
     Check that the parser handles CRLF line endings, since files may be checked out with them on Windows
 
-Running:
+Running (from this (tersus/) directory):
     0. stack run -- run examples/basics.tersus
     1. stack run -- check <file>
 Tests:
     0. stack test
 Examples:
     0. See examples/README.md; `stack test` checks every program in examples/
-OR:
-    0. From this (tersus/) directory
-    1. `ghci`
-    2. `:load Proof`
-    3. Enter one of the cases below
+Interactive use:
+    0. `ghci` from this (tersus/) directory
+    1. `:load Proof`
+    2. Call `evaluate` or `validate` on the result of `parseStatementBlock`
 
 Notes:
 - Input validation statements form the function's contract

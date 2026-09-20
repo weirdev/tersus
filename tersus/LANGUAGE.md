@@ -97,11 +97,13 @@ n = size(xs);
 
 ### Return
 
-`return` evaluates an expression and stores it as the return value for the top-level active block or function call.
+`return` evaluates an expression, stores it as the return value of the program or function call, and ends it. Statements after a `return` do not run, including when the `return` is inside a nested block, `if` or `while`.
 
 ```tersus
 return size(xs);
 ```
+
+A program that ends without `return` has no return value, and a function that does so fails evaluation.
 
 ### Blocks
 
@@ -138,7 +140,7 @@ return label;
 - Like `fn` definitions and blocks, an `if` statement is ended with `;`.
 - Each branch is a block. Assignments to variables that already exist outside update them, and a variable first assigned inside a branch is local to it. Declare the variable before the `if` (`label = 0;` above) to use it afterwards.
 - `if`, `else` and `while` are reserved words; `iffy` and `elsewhere` are still ordinary names.
-- `return` is not allowed inside an `if` body yet. The validator rejects it with `return inside if is not supported yet`.
+- `return` is allowed inside an `if` body (see Early return below).
 - Loops are described in the next section.
 
 #### Validating branches
@@ -179,6 +181,31 @@ fn f(n) {
 
 This is sound but incomplete. Facts a branch derives about values that existed before the `if`, and that the other branch does not also derive, are dropped, so re-derive them after the `if` when you need them.
 
+#### Early return
+
+A `return` inside an `if` body ends the function there, so a guard clause can handle a case and leave the rest of the function to the others:
+
+```tersus
+fn firstOr(lst, fallback) {
+    if size(lst) > 0 {
+    } else {
+        return fallback;
+    };
+    // Only reached when size(lst) > 0
+    define s = size(lst);
+    rewrite eqToGtZero s;
+    return first(lst);
+};
+```
+
+The validator cannot join a branch that returned with one that did not, because the statements after the `if` do not run on the path that returned. Instead it validates each path to the end of the function separately: the then-branch followed by the rest of the function, and the else-branch followed by the rest of the function, each assuming its own condition. A path that returns ends there, so the rest of the function is only validated under the paths that reach it. In the example above, `first(lst)` is checked assuming `size(lst) > 0`, and the guard `if size(lst) > 0 { return fallback; };` would be rejected because the code after it only knows `size(lst) <= 0`.
+
+The paths are then joined. If they all return, the return value becomes one new value, and a fact about it (for example an output contract `affirm return > 0;`) is known only if every returning path established it. If some path reaches the end without returning, there is no return value: a program may do that, and a function that does so is rejected with `Return value not found in top scope`.
+
+Because each path validates the rest of the function again, an `if` whose branches both fall through and contain a `return` somewhere inside doubles the work for the statements after it. Ordinary guard clauses do not, since the path that returns has nothing left to validate.
+
+A `return` inside a `while` body is not supported yet, and the validator rejects it with `return inside while is not supported yet`.
+
 ### While
 
 `while` repeats a block for as long as its condition is true.
@@ -193,7 +220,7 @@ while i < 3 {
 return n;
 ```
 
-The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. There is no step limit, so a loop that never ends never finishes when run. `return` is not allowed inside a `while` body yet.
+The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. Evaluation stops a run after 1,000,000 statements with `Step limit of 1000000 statements exceeded`, so a loop that never ends fails instead of hanging. `return` is not allowed inside a `while` body yet.
 
 #### Loop invariants
 
@@ -405,8 +432,8 @@ affirm s > 0;
 
 ## Current Limitations
 
-- No `for` loops, `break` or `continue`, and `return` is not allowed inside an `if` or `while` body.
-- Loops are validated for partial correctness only, and a loop that never ends hangs `run`.
+- No `for` loops, `break` or `continue`, and `return` is not allowed inside a `while` body.
+- Loops are validated for partial correctness only. Nothing proves a loop ends, and `run` stops a program after 1,000,000 statements.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists.
 - No block comments; only `//` line comments.

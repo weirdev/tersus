@@ -28,6 +28,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `rules.tersus` | User-defined `axiom` and `proof` rewrite rules | validates |
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 | `loops.tersus` | A `while` loop with an invariant, using trusted axioms for the arithmetic | returns `30` |
+| `early_return.tersus` | Guard clauses: `return` inside an `if` ends the function, and the rest is validated under the guard | returns `104` |
 
 ### The safe-access pattern
 
@@ -69,7 +70,8 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/unknown_rule.tersus` | `rewrite madeUpRule x` with no such rule defined |
 | `rejected/unguarded_access.tersus` | The `if` guard says `size(lst) > 1`, which does not show the `size(lst) > 0` that `first` needs |
 | `rejected/branch_fact.tersus` | `affirm n < 6` after an `if n < 6`: the condition only holds inside its branch |
-| `rejected/return_in_branch.tersus` | `return` inside an `if` body, which is not supported yet |
+| `rejected/guard_condition.tersus` | A guard that returns when `size(lst) > 0`, so the code after it only knows `size(lst) <= 0` and `first` is not provably safe |
+| `rejected/missing_return.tersus` | A function whose `if` returns in one case and reaches the end without a return value in the other |
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
 | `rejected/loop_stale_fact.tersus` | `affirm i = 0` after a loop that changes `i`: earlier facts about `i` are not carried out of the loop |
