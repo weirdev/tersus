@@ -22,32 +22,37 @@ Next steps, roughly in priority order:
     `if`/`else` and `while` are done (see LANGUAGE.md). Branches are validated under the condition and joined by keeping only the facts both establish; loops are validated by a contract-style invariant, `while cond [{ invariant }] { body }`
     Remaining: early-exit `return` (guard clauses such as `if n < 1 { return 0 }`). The validator rejects `return` inside an `if` or `while` body. `return` currently unwinds nested scopes to the top level and keeps executing, so it needs its own design
     Remaining: loop termination (loops are checked for partial correctness only), and a step limit for concrete evaluation
-    The parallel-iteration and linked-list motivating cases (item 9) also need indexable/updatable data
-2. Let user functions call other user functions
+    The parallel-iteration and linked-list motivating cases (item 10) also need indexable/updatable data (see item 2)
+2. List element access and construction
+    `get(list, i)` with an input contract requiring `i >= 0` and `i < size(list)`, following the `first`/`last` pattern
+    `push(list, x)` and an empty-list builtin, with output contracts on `size`, so a function can build a result list
+    Unlocks the parallel-iteration motivating case: a function taking two lists of the same length (`affirm size(a) = size(b)`) and summing each element pair in an index loop, with a loop invariant on `i`
+    Write the example with trusted `axiom` rules for the index arithmetic first (as in `examples/loops.tersus`), to see whether validator arithmetic (item 8) is needed before it is readable
+3. Let user functions call other user functions
     Function bodies currently see only their arguments and the standard library, and argument passing is by value (see LANGUAGE.md)
     Decide the closure/scoping rules before adding mutable data, since by-value vs by-reference only becomes observable then
-3. Let declarations
-4. Property objects
+4. Let declarations
+5. Property objects
     includes arrays
     Since data, as refed by iotas, not vars, is immutable, should all "properties" just be functions?
-5. Support setting proofs in parent scope when they only correspond to declared there
+6. Support setting proofs in parent scope when they only correspond to declared there
     Control flow blocks will need to have their own rules
-6. Functions
+7. Functions
     Apply input-contract rewrites during assumption/instantiation instead of ignoring them
     Dont fully evaluate immediately in validation? ie. rewrite to get result?
-7. Proof transformation v2
+8. Proof transformation v2
     Validator arithmetic, so `s = 3` implies `s > 0` without a manual `rewrite eqToGtZero s`
-8. Widen operators and literals
+9. Widen operators and literals
     `*` and `/` (the parser has a TODO for `*`), and negative literals
-9. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
+10. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
     Safe access is covered by examples/safe_access.tersus
-10. Distinguish between proof only vars and regular vars
-11. Introduce a small type layer
+11. Distinguish between proof only vars and regular vars
+12. Introduce a small type layer
     Cover ints, bools, int lists, and functions to catch builtin/type misuse earlier
-12. Pretty-print proofs in error messages
+13. Pretty-print proofs in error messages
     A failed `affirm x < 4` currently reports the raw AST (`Assertion failed: FApp (CTerm (VFunct ["a","b"] ...`); render it in source syntax instead (`x < 4`)
     Also applies to the other validation errors that embed proofs or iotas
-13. Maintenance
+14. Maintenance
     Remove the redundant-pattern warning in `Proof.hs` (`valExpression _ _ e`)
     Check whether `deriveRefl` still lets the proof context grow quickly; the equivalence search is bounded, but the number of facts is not
     Check that the parser handles CRLF line endings, since files may be checked out with them on Windows
