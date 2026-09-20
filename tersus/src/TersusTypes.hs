@@ -35,6 +35,8 @@ data Statement
     | Block [Statement]
     | -- If condition thenBranch elseBranch; a missing else is an empty branch
       If Expression [Statement] [Statement]
+    | -- While condition invariant body; the invariant is only used by the validator
+      While Expression [ValidationStatement] [Statement]
     | EndBlock
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 

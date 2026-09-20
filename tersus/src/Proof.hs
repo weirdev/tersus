@@ -74,6 +74,7 @@ evalNextStatement state = case nextStatement state of
     Ok ProofDef{} -> advanceStatement state
     Ok (Block statements) -> evalBlockStatement state statements
     Ok (If cond thenStmts elseStmts) -> evalIfStatement state cond thenStmts elseStmts
+    Ok loop@(While cond _ body) -> evalWhileStatement state loop cond body
     Ok EndBlock -> evalEndBlockStatement state
     Error e -> Error e
 
@@ -122,6 +123,22 @@ evalIfStatement state cond thenStmts elseStmts =
                 Error e -> Error e
         Error e -> Error e
 
+-- While the condition holds, run one iteration of the body as a block and then the loop
+-- again, by putting both at the front of the statements that are still to run.
+-- There is no step limit, so a loop that never ends never returns.
+evalWhileStatement :: State -> Statement -> Expression -> [Statement] -> Result State String
+evalWhileStatement state loop cond body =
+    case advanceStatement state of
+        Ok advancedState ->
+            case evalExpression advancedState cond of
+                Ok (VBool True, condState) ->
+                    let Continuations rest = getContinuations condState
+                     in Ok (setContinuations condState (Continuations (Block body : loop : rest)))
+                Ok (VBool False, condState) -> Ok condState
+                Ok _ -> Error "Condition must be a boolean"
+                Error e -> Error e
+        Error e -> Error e
+
 -- Like evalBlockStatement, for a state whose current statement was already advanced past.
 evalBlockStatementInPlace :: State -> [Statement] -> Result State String
 evalBlockStatementInPlace (State scope ctxVals) statements =
@@ -149,6 +166,7 @@ valNextStatement state =
                     ProofDef name args inputs outputs body -> valProofDef state name args inputs outputs body
                     Block bstmts -> valBlockStatement state bstmts
                     If cond thenStmts elseStmts -> valIfStatement state cond thenStmts elseStmts
+                    While cond invariant body -> valWhileStatement state cond invariant body
                     EndBlock -> valEndBlockStatement state
         Error e -> Error e
 
@@ -260,6 +278,7 @@ containsReturn = any returns
     returns (Return _) = True
     returns (Block stmts) = containsReturn stmts
     returns (If _ thenStmts elseStmts) = containsReturn thenStmts || containsReturn elseStmts
+    returns (While _ _ body) = containsReturn body
     returns _ = False
 
 -- Variables assigned anywhere in the statements, including nested blocks
@@ -269,6 +288,7 @@ assignedVars = nub . concatMap assigned
     assigned (Assign var _) = [var]
     assigned (Block stmts) = assignedVars stmts
     assigned (If _ thenStmts elseStmts) = assignedVars thenStmts ++ assignedVars elseStmts
+    assigned (While _ _ body) = assignedVars body
     assigned _ = []
 
 -- Assigned variables that already exist outside the statements. Assigning any other variable
@@ -319,6 +339,44 @@ joinBranches s0 vars sThen sElse =
 
 traverseResult :: (a -> Result b String) -> [a] -> Result [b] String
 traverseResult = flatResultMap
+
+-- Validates a loop by its invariant, without unrolling it. This proves partial correctness
+-- only: nothing shows the loop terminates.
+--
+-- 1. The invariant must hold before the first iteration.
+-- 2. Every outer variable the body assigns is rebound to a fresh value with no facts, so
+--    nothing about its earlier values is assumed. Facts about other values stay true because
+--    values are immutable.
+-- 3. Assuming the invariant and the condition, the body must re-establish the invariant.
+-- 4. After the loop, the invariant holds and the condition does not.
+valWhileStatement :: VState -> Expression -> [ValidationStatement] -> [Statement] -> Result VState String
+valWhileStatement state cond invariant body
+    | containsReturn body = Error "return inside while is not supported yet"
+    | otherwise =
+        vAdvanceStatement state `bindResult` \advanced ->
+            prefixError "Loop invariant does not hold on entry: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
+                let loopVars = assignedOuterVars advanced body
+                 in popNIotasFromSeq advanced (length loopVars) `bindResult` \(freshIotas, popped) ->
+                        let havocked = foldl (\s (var, iota) -> vInsertVar s var iota []) popped (zip loopVars freshIotas)
+                         in assumeValStmts havocked invariant `bindResult` \assumed ->
+                                valLoopCondition assumed cond `bindResult` \(condState, condIota) ->
+                                    conditionAssumptions True cond condIota condState `bindResult` \bodyAssumptions ->
+                                        valBranch condState bodyAssumptions body `bindResult` \bodyState ->
+                                            prefixError "Loop invariant is not preserved: " (validateUserRuleInputs bodyState invariant) `bindResult` \_ ->
+                                                valLoopCondition (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond `bindResult` \(exitState, exitIota) ->
+                                                    conditionAssumptions False cond exitIota exitState `bindResult` \exitAssumptions ->
+                                                        Ok (vInsertProofs exitState exitAssumptions)
+
+-- Validates the loop condition in the given state, recording what it says about its result
+valLoopCondition :: VState -> Expression -> Result (VState, Iota) String
+valLoopCondition state cond =
+    popIotaFromSeq state `bindResult` \(condIota, state') ->
+        valExpression state' condIota cond `bindResult` \(condState, condProofs) ->
+            Ok (vInsertProofs condState condProofs, condIota)
+
+prefixError :: String -> Result a String -> Result a String
+prefixError _ (Ok a) = Ok a
+prefixError prefix (Error e) = Error (prefix ++ e)
 
 valEndBlockStatement :: VState -> Result VState String
 valEndBlockStatement (VState (VScopeState _ _ _ pscope) iotaCtx proofCtx iotaseq ruleCtx) =

@@ -19,10 +19,10 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 
 Next steps, roughly in priority order:
 1. Control flow
-    `if`/`else` is done: branches are validated under the condition and joined by keeping only the facts both establish (see LANGUAGE.md)
-    `while` with a contract-style invariant is next: `while cond [{ invariant }] { body }`
-    Early-exit `return` (guard clauses such as `if n < 1 { return 0 }`) is not supported yet; the validator rejects `return` inside an `if` body. `return` currently unwinds nested scopes to the top level and keeps executing, so it needs its own design
-    The parallel-iteration and linked-list motivating cases (item 9) need loops
+    `if`/`else` and `while` are done (see LANGUAGE.md). Branches are validated under the condition and joined by keeping only the facts both establish; loops are validated by a contract-style invariant, `while cond [{ invariant }] { body }`
+    Remaining: early-exit `return` (guard clauses such as `if n < 1 { return 0 }`). The validator rejects `return` inside an `if` or `while` body. `return` currently unwinds nested scopes to the top level and keeps executing, so it needs its own design
+    Remaining: loop termination (loops are checked for partial correctness only), and a step limit for concrete evaluation
+    The parallel-iteration and linked-list motivating cases (item 9) also need indexable/updatable data
 2. Let user functions call other user functions
     Function bodies currently see only their arguments and the standard library, and argument passing is by value (see LANGUAGE.md)
     Decide the closure/scoping rules before adding mutable data, since by-value vs by-reference only becomes observable then

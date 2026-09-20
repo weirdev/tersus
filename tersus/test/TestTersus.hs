@@ -1101,6 +1101,11 @@ testExamples =
         , testExampleFile "examples/contracts.tersus" (ExpectReturn (VInt 8))
         , testExampleFile "examples/rules.tersus" ExpectValid
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
+        , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
+        , testExampleFile "examples/rejected/invariant_entry.tersus" (ExpectRejected "Loop invariant does not hold on entry")
+        , testExampleFile "examples/rejected/invariant_preserved.tersus" (ExpectRejected "Loop invariant is not preserved")
+        , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/return_in_loop.tersus" (ExpectRejected "return inside while is not supported yet")
         , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "lacks concrete definition")
         , testExampleFile "examples/rejected/branch_fact.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/return_in_branch.tersus" (ExpectRejected "return inside if is not supported yet")
@@ -1284,8 +1289,98 @@ testValidateIf =
         , parseValidateFailProgramHelper "x = 1; if x < 2 { return 1; };" "return inside if is not supported yet"
         ]
 
+testParseWhile :: Test
+testParseWhile =
+    let lt3 = F (Val (builtinFunct (Rel Lt))) [Var "i", Val (VInt 3)]
+        inc = Assign "i" (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])
+        leProof = ProofAssert (FApp (CTerm (builtinFunct (Rel LtEq))) [ATerm "i", CTerm (VInt 3)])
+     in testCaseSeq
+            "testParseWhile"
+            [ case parseStatementBlock "while i < 3 { i = i + 1; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed -> testAssertEq parsed [While lt3 [] [inc]]
+            , case parseStatementBlock "while i < 3 [{ affirm i <= 3; }] { i = i + 1; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed -> testAssertEq parsed [While lt3 [leProof] [inc]]
+            , -- The condition may call functions, and the invariant may hold several statements
+              case parseStatementBlock "while size(xs) > 0 [{ define s = size(xs); affirm s > 0; }] { xs = [1]; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right [While _ inv _] -> testAssertEq (length inv) 2
+                Right parsed -> Just $ "Unexpected parse: " ++ show parsed
+            , case parseStatementBlock "whiley = 1;" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right parsed -> testAssertEq parsed [Assign "whiley" (Val (VInt 1))]
+            ]
+
+testEvalWhile :: Test
+testEvalWhile =
+    testCaseSeq
+        "testEvalWhile"
+        [ parseEvalProgramHelper "i = 0; n = 0; while i < 3 { i = i + 1; n = n + 2; }; return n;" (Just (VInt 6))
+        , -- The body never runs
+          parseEvalProgramHelper "i = 5; while i < 3 { i = i + 1; }; return i;" (Just (VInt 5))
+        , parseEvalProgramHelper "i = 0; n = 0; while i < 4 { if i < 2 { n = n + 10; } else { n = n + 1; }; i = i + 1; }; return n;" (Just (VInt 22))
+        , parseEvalProgramHelper "i = 0; while i < 2 { j = 0; while j < 2 { i = i + 1; j = j + 1; }; }; return i;" (Just (VInt 2))
+        , -- The invariant is only used by validation
+          parseEvalProgramHelper "i = 0; while i < 3 [{ affirm i <= 3; }] { i = i + 1; }; return i;" (Just (VInt 3))
+        , parseEvalProgramFailHelper "while 5 { x = 1; };" "Condition must be a boolean"
+        ]
+
+-- The validator does no arithmetic, so these two trusted axioms supply the arithmetic facts
+loopAxioms :: String
+loopAxioms =
+    "axiom zeroWithinBound(i) [{ affirm i = 0; }] [{ affirm i <= 3; }];\
+    \axiom stepWithinBound(i) [{ affirm i < 3; }] [{ affirm (i + 1) <= 3; }];"
+
+testValidateWhile :: Test
+testValidateWhile =
+    testCaseSeq
+        "testValidateWhile"
+        [ -- The invariant holds on entry, is preserved, and with the negated condition gives i >= 3
+          parseValidProgramHelper
+            ( loopAxioms
+                ++ "i = 0; rewrite zeroWithinBound i;\
+                   \while i < 3 [{ affirm i <= 3; }] { rewrite stepWithinBound i; i = i + 1; };\
+                   \affirm i <= 3; affirm i >= 3;"
+            )
+        , -- Without an invariant the loop still validates, it just proves nothing about i afterwards
+          parseValidProgramHelper "i = 0; n = 0; while i < 3 { i = i + 1; n = n + 2; };"
+        , -- A loop nested in a function body
+          parseValidProgramHelper
+            ( loopAxioms
+                ++ "fn f(k) { i = 0; rewrite zeroWithinBound i;\
+                   \  while i < 3 [{ affirm i <= 3; }] { rewrite stepWithinBound i; i = i + 1; };\
+                   \  return i; };\
+                   \return f(1);"
+            )
+        , parseValidateFailProgramHelper
+            ( loopAxioms
+                ++ "i = 5; while i < 3 [{ affirm i <= 3; }] { rewrite stepWithinBound i; i = i + 1; };"
+            )
+            "Loop invariant does not hold on entry"
+        , parseValidateFailProgramHelper
+            ( loopAxioms
+                ++ "i = 0; rewrite zeroWithinBound i; while i < 3 [{ affirm i <= 3; }] { i = i + 1; };"
+            )
+            "Loop invariant is not preserved"
+        , -- Soundness: what was known about i before the loop says nothing about i after it
+          parseValidateFailProgramHelper "i = 0; while i < 3 { i = i + 1; }; affirm i = 0;" "Assertion failed"
+        , -- Soundness: the loop condition does not hold once the loop is done
+          parseValidateFailProgramHelper
+            ( loopAxioms
+                ++ "i = 0; rewrite zeroWithinBound i;\
+                   \while i < 3 [{ affirm i <= 3; }] { rewrite stepWithinBound i; i = i + 1; };\
+                   \affirm i < 3;"
+            )
+            "Assertion failed"
+        , parseValidateFailProgramHelper "i = 0; while i < 3 { return 1; };" "return inside while is not supported yet"
+        ]
+
 testControlFlow :: Test
-testControlFlow = TestList "testControlFlow" [testParseIf, testEvalIf, testValidateIf]
+testControlFlow =
+    TestList
+        "testControlFlow"
+        [testParseIf, testEvalIf, testValidateIf, testParseWhile, testEvalWhile, testValidateWhile]
 
 -- Run tests
 main :: IO ()

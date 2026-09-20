@@ -27,6 +27,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `contracts.tersus` | Output contracts, and a proof variable (`s`) exported from a callee to its caller | returns `8` |
 | `rules.tersus` | User-defined `axiom` and `proof` rewrite rules | validates |
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
+| `loops.tersus` | A `while` loop with an invariant, using trusted axioms for the arithmetic | returns `30` |
 
 ### The safe-access pattern
 
@@ -69,6 +70,10 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/unguarded_access.tersus` | The `if` guard says `size(lst) > 1`, which does not show the `size(lst) > 0` that `first` needs |
 | `rejected/branch_fact.tersus` | `affirm n < 6` after an `if n < 6`: the condition only holds inside its branch |
 | `rejected/return_in_branch.tersus` | `return` inside an `if` body, which is not supported yet |
+| `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
+| `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
+| `rejected/loop_stale_fact.tersus` | `affirm i = 0` after a loop that changes `i`: earlier facts about `i` are not carried out of the loop |
+| `rejected/return_in_loop.tersus` | `return` inside a `while` body, which is not supported yet |
 
 ## Writing your own
 
@@ -76,4 +81,5 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 - Validation only knows what a rewrite or contract has told it. It does not do arithmetic on its own, for example it cannot conclude `s > 0` from `s = 3` without `rewrite eqToGtZero s`.
 - User functions cannot call other user functions yet, because function bodies only see their arguments and the standard library.
 - A variable first assigned inside an `if` branch is local to that branch, so declare it before the `if` (`r = fallback;`) if you want it afterwards.
-- There are no loops yet, so the parallel-iteration and linked-list motivating cases in the main README are not expressible here.
+- Loop invariants about counters need arithmetic facts, and the validator has none of its own, so `loops.tersus` supplies them with trusted `axiom` rules.
+- There are no lists you can index or update yet, so the parallel-iteration and linked-list motivating cases in the main README are still not expressible here.

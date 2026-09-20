@@ -1,0 +1,19 @@
+// A while loop checked with an invariant. The validator does no arithmetic, so the two
+// arithmetic facts the invariant needs come from trusted axioms.
+axiom zeroWithinBound(i) [{ affirm i = 0; }] [{ affirm i <= 3; }];
+axiom stepWithinBound(i) [{ affirm i < 3; }] [{ affirm (i + 1) <= 3; }];
+
+i = 0;
+total = 0;
+rewrite zeroWithinBound i;
+// The invariant must hold before the first iteration, is assumed at the start of the body,
+// and must hold again at the end of the body.
+while i < 3 [{ affirm i <= 3; }] {
+    rewrite stepWithinBound i;
+    i = i + 1;
+    total = total + 10;
+};
+// After the loop the invariant holds and the condition does not.
+affirm i <= 3;
+affirm i >= 3;
+return total;

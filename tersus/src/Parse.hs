@@ -74,6 +74,7 @@ statement :: Parser Statement
 statement =
     returnStatement
         <|> ifStatement
+        <|> whileStatement
         <|> axiomStatement
         <|> proofStatement
         <|> ( ValidationStatement
@@ -116,6 +117,18 @@ ifStatement = do
         keyword "else"
         whitespace
         curlyBracesParse statementBlock <|> ((: []) <$> ifStatement)
+
+-- The loop invariant uses the contract syntax and is optional: `while c [{ affirm ...; }] { ... }`.
+whileStatement :: Parser Statement
+whileStatement = do
+    keyword "while"
+    whitespace
+    cond <- expression
+    whitespace
+    invariant <- option [] functContractReqs
+    whitespace
+    body <- curlyBracesParse statementBlock
+    return (While cond invariant body)
 
 functStatement :: Parser Statement
 functStatement = do

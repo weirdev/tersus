@@ -1,0 +1,8 @@
+// Rejected: the body increments i without showing that i <= 3 still holds afterwards.
+axiom zeroWithinBound(i) [{ affirm i = 0; }] [{ affirm i <= 3; }];
+
+i = 0;
+rewrite zeroWithinBound i;
+while i < 3 [{ affirm i <= 3; }] {
+    i = i + 1;
+};

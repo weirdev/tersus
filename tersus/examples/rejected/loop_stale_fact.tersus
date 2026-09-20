@@ -1,0 +1,6 @@
+// Rejected: the loop changes i, so what was true of i before it (i = 0) is not known after it.
+i = 0;
+while i < 3 {
+    i = i + 1;
+};
+affirm i = 0;

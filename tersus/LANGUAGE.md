@@ -139,6 +139,7 @@ return label;
 - Each branch is a block. Assignments to variables that already exist outside update them, and a variable first assigned inside a branch is local to it. Declare the variable before the `if` (`label = 0;` above) to use it afterwards.
 - `if`, `else` and `while` are reserved words; `iffy` and `elsewhere` are still ordinary names.
 - `return` is not allowed inside an `if` body yet. The validator rejects it with `return inside if is not supported yet`.
+- Loops are described in the next section.
 
 #### Validating branches
 
@@ -177,6 +178,57 @@ fn f(n) {
 ```
 
 This is sound but incomplete. Facts a branch derives about values that existed before the `if`, and that the other branch does not also derive, are dropped, so re-derive them after the `if` when you need them.
+
+### While
+
+`while` repeats a block for as long as its condition is true.
+
+```tersus
+i = 0;
+n = 0;
+while i < 3 {
+    i = i + 1;
+    n = n + 2;
+};
+return n;
+```
+
+The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. There is no step limit, so a loop that never ends never finishes when run. `return` is not allowed inside a `while` body yet.
+
+#### Loop invariants
+
+The validator does not unroll loops. A loop can carry an invariant, written with the same `[{ ... }]` contract syntax as functions, between the condition and the body:
+
+```tersus
+while i < 3 [{ affirm i <= 3; }] {
+    rewrite stepWithinBound i;
+    i = i + 1;
+};
+```
+
+The invariant is optional; without one the loop still validates but proves nothing about the variables it changes. Validation works like this:
+
+1. The invariant must hold before the first iteration.
+2. Every outer variable the body assigns is treated as an unknown value from then on. Facts about its earlier values are not carried over, but facts about variables the body does not assign are.
+3. Assuming the invariant and the loop condition, the body must establish the invariant again at its end. The invariant's `rewrite` statements run when it is being checked, and are skipped when it is assumed, exactly as for function contracts.
+4. After the loop the invariant holds and the condition does not. An invariant `i <= 3` on `while i < 3` therefore gives `i >= 3` afterwards.
+
+This proves partial correctness only: nothing shows that the loop ends. The validator also does no arithmetic, so a counting loop needs the arithmetic facts from somewhere, usually trusted `axiom` rules:
+
+```tersus
+axiom zeroWithinBound(i) [{ affirm i = 0; }] [{ affirm i <= 3; }];
+axiom stepWithinBound(i) [{ affirm i < 3; }] [{ affirm (i + 1) <= 3; }];
+
+i = 0;
+rewrite zeroWithinBound i;
+while i < 3 [{ affirm i <= 3; }] {
+    rewrite stepWithinBound i;
+    i = i + 1;
+};
+affirm i >= 3;
+```
+
+`while` is a reserved word; `whiley` is still an ordinary name.
 
 ### Functions
 
@@ -353,7 +405,8 @@ affirm s > 0;
 
 ## Current Limitations
 
-- No `while` or other loops yet, and `return` is not allowed inside an `if` body.
+- No `for` loops, `break` or `continue`, and `return` is not allowed inside an `if` or `while` body.
+- Loops are validated for partial correctness only, and a loop that never ends hangs `run`.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists.
 - No block comments; only `//` line comments.

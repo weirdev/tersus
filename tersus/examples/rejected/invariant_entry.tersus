@@ -1,0 +1,8 @@
+// Rejected: the invariant i <= 3 cannot be shown before the loop starts, because i is 5.
+axiom stepWithinBound(i) [{ affirm i < 3; }] [{ affirm (i + 1) <= 3; }];
+
+i = 5;
+while i < 3 [{ affirm i <= 3; }] {
+    rewrite stepWithinBound i;
+    i = i + 1;
+};
