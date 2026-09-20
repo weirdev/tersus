@@ -1,3 +1,4 @@
+// Rejected: the output contract says return = i, but the body returns i + 1.
 fn bad(i) [{}] [{
     affirm return = i;
 }] {

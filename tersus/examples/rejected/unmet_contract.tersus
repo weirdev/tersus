@@ -1,3 +1,4 @@
+// Rejected: the call cannot show size([]) > 0, so it fails spread's input contract.
 fn spread(lst) [{
     define s = size(lst);
     rewrite eqToGtZero s;

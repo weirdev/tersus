@@ -1,12 +1,15 @@
+// affirm, define, and the eval / eqToGtZero / eqToLtPlus1 rewrites.
 x = 5;
 y = x + 1;
 affirm x = 5;
+// Infix operators share one precedence level, so parenthesize the right-hand side.
 affirm y = (x + 1);
 affirm y = 6;
 
 define s = size([1, 2, 3]);
 rewrite eval s;
 affirm s = 3;
+// The validator does no arithmetic of its own: s = 3 does not give s > 0 until this rewrite.
 rewrite eqToGtZero s;
 affirm s > 0;
 

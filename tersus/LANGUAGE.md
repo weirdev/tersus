@@ -16,6 +16,17 @@ affirm y = 4;
 
 Whitespace can be spaces, tabs, or newlines. Identifiers must start with a letter and may contain letters and digits.
 
+## Comments
+
+`//` starts a comment that runs to the end of the line. Comments are treated as whitespace, so they can appear anywhere whitespace can, including inside contracts and lists.
+
+```tersus
+// Whole-line comment
+x = 5; // trailing comment
+```
+
+There are no block comments.
+
 ## Values
 
 Tersus currently has four runtime value categories:
@@ -254,6 +265,6 @@ affirm s > 0;
 - No `if`, `else`, `while`, or general control flow yet.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists.
-- No comments in the parser.
+- No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
 - The CLI currently parses input and prints the AST. Evaluation and validation are exercised through the Haskell API and tests.

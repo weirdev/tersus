@@ -18,10 +18,10 @@ Follow the existing style in `tersus/src`: 4-space indentation, explicit type si
 ## Testing Guidelines
 Add or update Haskell tests in `tersus/test/TestTersus.hs` alongside the affected parser, evaluator, or validator behavior. Existing tests group cases with names like `testParseEval` and `testValidationFail`; follow that pattern and make failures readable. Run `stack test` before opening a PR. If you change prototype-only Python code, run `python python/tests.py` as a secondary check.
 
-Note: the current Haskell test harness is custom and debugging-oriented. It prints `Pass`/`Fail` per case, but `stack test` may still exit successfully even when individual cases report `Fail`, so read the test output rather than trusting the process exit code alone.
+Note: the Haskell test harness is custom. It prints `[PASS]`/`[FAIL]` per case and a final `Summary: N passed, M failed` line, and exits non-zero if any case fails, so the process exit code is reliable. Example programs in `tersus/examples/` are loaded and checked by `testExamples`, so a new or edited example needs a matching expectation in `tersus/test/TestTersus.hs`.
 
 ## Documentation Guidelines
-Keep `tersus/LANGUAGE.md` in sync with user-visible syntax, builtins, validation statements, rewrite rules, contracts, and known language limitations. Update the interpreter-flow section in `tersus/README.md` when parser, concrete evaluation, validation, scope, function-call, or CLI behavior changes. Include small Tersus snippets when documenting grammar or proof behavior.
+Keep `tersus/LANGUAGE.md` in sync with user-visible syntax (including comments), builtins, validation statements, rewrite rules, contracts, and known language limitations. Keep `tersus/examples/README.md` in sync with the programs in `tersus/examples/`. Update the interpreter-flow section in `tersus/README.md` when parser, concrete evaluation, validation, scope, function-call, or CLI behavior changes. Include small Tersus snippets when documenting grammar or proof behavior.
 
 ## Commit & Pull Request Guidelines
 Recent history uses short, direct subjects such as `Minor cleanup` and feature-focused summaries. Prefer concise imperative commits that describe behavior, not process; avoid `Checkpoint` for reviewable work. PRs should include a brief problem statement, the chosen approach, and exact verification commands. Link related issues when available and include example Tersus snippets when grammar or proof behavior changes.

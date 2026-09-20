@@ -1,9 +1,12 @@
+// The primitive refl and evalAll rewrites.
 x = 5;
 copy = x;
+// Substitutes through known equalities, giving copy = 5.
 rewrite refl x = 5;
 affirm copy = 5;
 
 zs = [1, 2, 3];
 count = size(zs);
+// Evaluates every builtin call whose inputs are known.
 rewrite evalAll;
 affirm count = 3;

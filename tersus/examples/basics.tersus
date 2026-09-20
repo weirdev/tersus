@@ -1,3 +1,4 @@
+// Lists, builtins, arithmetic, and a nested block that updates an outer variable.
 xs = [3, 6, 9, 12];
 n = size(xs);
 head = first(xs);
@@ -5,6 +6,8 @@ tail = last(xs);
 span = tail - head;
 {
     inner = span + 1;
+    // xs already exists in the outer scope, so this updates it rather than shadowing it.
     xs = [1, 2];
 };
+// 4 + 2
 return n + size(xs);

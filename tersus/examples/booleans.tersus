@@ -1,3 +1,4 @@
+// Relations produce booleans, and true/false are literals.
 x = 5;
 below = x < 6;
 affirm below = true;

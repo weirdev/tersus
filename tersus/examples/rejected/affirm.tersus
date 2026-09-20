@@ -1,2 +1,3 @@
+// Rejected: x is 5, so the assertion x < 4 is not entailed.
 x = 5;
 affirm x < 4;

@@ -1,6 +1,6 @@
 # Tersus Examples
 
-Runnable programs showing what the language and standard library can do today. The parser has no comment syntax, so the explanations live here instead of in the `.tersus` files.
+Runnable programs showing what the language and standard library can do today. Each file carries `//` comments explaining what it shows; this page gives the overview.
 
 `stack test` loads every file in this directory (`testExamples` in `test/TestTersus.hs`), so the results below are checked. The CLI in `app/Main.hs` only parses a single line, so there is no `stack run` entry point for these files yet.
 
@@ -24,6 +24,8 @@ Each program in the top-level directory passes validation, and its concrete eval
 `first` and `last` require a non-empty list. A function can carry that requirement in its input contract:
 
 ```tersus
+// spread only accepts non-empty lists, which makes first and last safe inside it.
+// The input contract is assumed in the body and checked at every call.
 fn spread(lst) [{
     define s = size(lst);
     rewrite eqToGtZero s;

@@ -1,3 +1,4 @@
+// Functions with one and several arguments, and one that relies on an input contract.
 fn add1(i) {
     return i + 1;
 };
@@ -6,6 +7,7 @@ fn addThree(a, b, c) {
     return a + b + c;
 };
 
+// first and last need a non-empty list, so the contract has to show size(lst) > 0.
 fn sumFirstLast(lst) [{
     define s = size(lst);
     rewrite eqToGtZero s;

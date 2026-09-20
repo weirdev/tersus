@@ -21,10 +21,20 @@ semicolon = do
     return ()
 
 requiredWhitespace :: Parser ()
-requiredWhitespace = void $ many1 $ oneOf " \n\t"
+requiredWhitespace = void $ many1 whitespaceItem
 
+-- Comments count as whitespace, so they are accepted anywhere whitespace is.
 whitespace :: Parser ()
-whitespace = void $ many $ oneOf " \n\t"
+whitespace = void $ many whitespaceItem
+
+whitespaceItem :: Parser ()
+whitespaceItem = void (oneOf " \n\t") <|> lineComment
+
+-- `//` runs to the end of the line (or the end of the input).
+lineComment :: Parser ()
+lineComment = do
+    void (try (string "//"))
+    skipMany (noneOf "\n")
 
 skipWhitespace :: Parser a -> Parser a
 skipWhitespace p = do

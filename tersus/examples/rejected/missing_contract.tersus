@@ -1,3 +1,4 @@
+// Rejected: nothing in firstOf shows lst is non-empty, so first(lst) is unsafe.
 fn firstOf(lst) {
     return first(lst);
 };

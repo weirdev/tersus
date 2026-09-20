@@ -1,2 +1,3 @@
+// Rejected: no rewrite rule named madeUpRule has been defined.
 x = 5;
 rewrite madeUpRule x;

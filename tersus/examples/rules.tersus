@@ -1,9 +1,13 @@
+// User-defined rewrite rules.
+
+// An axiom's output is trusted, but its input is checked at every rewrite site.
 axiom positiveMeansOne(x) [{
     affirm x > 0;
 }] [{
     affirm x = 1;
 }];
 
+// A proof rule's body is validated once, when the rule is defined.
 proof keepPositive(x) [{
     affirm x > 0;
 }] [{

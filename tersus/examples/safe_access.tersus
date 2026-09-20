@@ -1,3 +1,5 @@
+// spread only accepts non-empty lists, which makes first and last safe inside it.
+// The input contract is assumed in the body and checked at every call.
 fn spread(lst) [{
     define s = size(lst);
     rewrite eqToGtZero s;

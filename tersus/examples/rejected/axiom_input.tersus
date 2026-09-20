@@ -1,2 +1,3 @@
+// Rejected: eqToGtZero needs x > 0, but x is 0, so its input contract fails.
 x = 0;
 rewrite eqToGtZero x;

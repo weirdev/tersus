@@ -6,7 +6,7 @@ See [LANGUAGE.md](LANGUAGE.md) for the current syntax and language constructs.
 
 The Haskell implementation has two main execution paths after parsing:
 
-1. `Parse.parseStatementBlock` converts source text into the AST types in `TersusTypes`.
+1. `Parse.parseStatementBlock` converts source text into the AST types in `TersusTypes`. `//` line comments are skipped as whitespace.
 2. `Proof.evaluate` executes statements concretely with a `State` containing lexical scopes plus the standard library value context. Assignments evaluate expressions and update bindings, `return` writes the top-level return slot, blocks push a child scope, function calls run a native body or builtin, and validation statements are skipped.
 3. `Proof.validate` symbolically validates the same statements with a `VState`. Runtime values are represented by fresh iotas, assignments add equality proofs, function calls check input contracts and instantiate exported output proofs, `axiom` and `proof` declarations register validation-only rewrite rules, `affirm` asks the internal `ProofEngine` whether a proof is entailed by the current context, and `rewrite` applies primitive or user-defined rules to expand that context.
 

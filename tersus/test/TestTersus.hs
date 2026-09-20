@@ -223,11 +223,36 @@ testParseUserRuleDefinitions =
                  in testAssertEq parsed (ProofDef "keepGt" ["x"] [gtZero] [gtZero] [gtZero])
         ]
 
+testParseComments :: Test
+testParseComments =
+    testCaseSeq
+        "testParseComments"
+        [ case parseStatementBlock "x = 5; // trailing\n// whole line\ny = x;" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5)), Assign "y" (Var "x")]
+        , case parseStatementBlock "// leading\nx = 5 // before the semicolon\n;// no space\n" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
+        , case parseStatementBlock "x = 5; // ends the input" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
+        , case parseStatementBlock "x = [1, // one\n 2];\nfn f(a) [{ // in\n affirm a = 1; // out\n}] { // body\n return a; };" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertTrue (length parsed == 2)
+        , case parseStatementBlock "x = 5; // y = 6;\n" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
+        , case parseStatementBlock "x = 5 / 2" of
+            Left _ -> Nothing
+            Right parsed -> Just $ "Expected parse failure for a single slash, got: " ++ show parsed
+        ]
+
 testParse :: Test
 testParse =
     TestList
         "testParse"
         [ testParseSimpleAssign
+        , testParseComments
         , testParseComplexAssign
         , testParseBoolLiteral
         , testParseKeywordBoundaryIdentifiers
