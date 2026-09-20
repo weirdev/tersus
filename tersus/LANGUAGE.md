@@ -122,6 +122,25 @@ Function arguments are comma-separated. Function bodies are ordinary statement b
 
 The evaluator runs a function body with its argument bindings and expects the body to set a return value. If a function completes without `return`, evaluation fails.
 
+### Argument Passing
+
+Arguments are passed by value. Each argument expression is evaluated before the call and bound to the matching parameter in a fresh scope. The caller's variable is not moved and is still usable afterwards, and nothing the function does to a parameter, including reassigning it, is visible to the caller.
+
+```tersus
+fn reset(xs) {
+    xs = [];
+    return size(xs);
+};
+
+xs = [1, 2, 3];
+n = reset(xs);
+return size(xs) - n; // 3, because the caller's xs is unchanged
+```
+
+A function body's scope has no parent scope, so assignments inside it never reach caller variables, unlike assignments in nested blocks. The number of arguments must match the number of parameters exactly, for both user-defined functions and builtins. A mismatch fails evaluation and validation.
+
+During validation, arguments are symbolic values. Proofs the caller has established about an argument are visible to the callee's input contract, which is how a call such as `spread(x)` can rely on `size(x) > 0` proven at the call site.
+
 ## Validation Statements
 
 Validation statements are ordinary statements syntactically, but they are used by the validator rather than by concrete evaluation. Concrete evaluation skips them.

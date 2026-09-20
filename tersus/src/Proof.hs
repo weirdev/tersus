@@ -564,6 +564,8 @@ valExpressionSeq state (expr : exprs) (iota : iotas) =
 valExpressionSeq _ _ _ = Error "Expression/iota arity mismatch"
 
 evalFunctCall :: Value -> Map Variable Value -> [Value] -> Result Value String
+evalFunctCall (VFunct vars _ _ _ _) _ args
+    | length vars /= length args = Error (arityMismatchMessage vars args)
 evalFunctCall (VFunct _ _ _ (BuiltinFunct builtin) _) valCtx args =
     evalBuiltinFunct builtin args
 evalFunctCall (VFunct vars _ _ (NativeFunct block) _) valCtx args =
@@ -577,6 +579,10 @@ evalFunctCall (VFunct vars _ _ (NativeFunct block) _) valCtx args =
                     Error e -> Error e
         Error e -> Error e
 evalFunctCall _ _ _ = Error "Object being called must be a function"
+
+arityMismatchMessage :: [Variable] -> [a] -> String
+arityMismatchMessage formals actuals =
+    "Function expected " ++ show (length formals) ++ " arguments, got " ++ show (length actuals)
 
 evalBuiltinFunct :: BuiltinFunct -> [Value] -> Result Value String
 evalBuiltinFunct Size [VIntList l] = Ok $ VInt (fromIntegral (length l))
@@ -633,6 +639,8 @@ valFunctCall :: VState -> Iota -> [Iota] -> [IotaProof] -> Iota -> Result (VStat
 valFunctCall state fniota iiotas iproofs retiota =
     case resolveValidatedFunction fniota iproofs of
         Error e -> Error e
+        Ok (VFunct varArgs _ _ _ _)
+            | length varArgs /= length iiotas -> Error (arityMismatchMessage varArgs iiotas)
         Ok fnVal@(VFunct varArgs inputValStmts _ _ exportedProofs) ->
             case valFunctInput state varArgs iiotas iproofs inputValStmts of
                 Error e -> Error $ "Funct input validation failed: " ++ e

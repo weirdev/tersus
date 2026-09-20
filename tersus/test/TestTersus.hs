@@ -969,6 +969,66 @@ testParseEvalFirstWrongTypeFail =
         \}"
         "First only valid for IntList"
 
+-- The LANGUAGE.md "Argument Passing" example: the callee's reassignment of a parameter
+-- must not reach the caller's variable, in evaluation or after validation.
+argPassingSource :: String
+argPassingSource =
+    "fn reset(xs) { xs = []; return size(xs); };\
+    \xs = [1, 2, 3];\
+    \n = reset(xs);\
+    \return size(xs) - n;"
+
+testArgPassingByValue :: TestResult
+testArgPassingByValue =
+    case parseStatementBlock argPassingSource of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right stmts ->
+            case (valReturningBlock (initVStateWStatements stmts), evalReturningBlock (initStateWStatements stmts)) of
+                (Error e, _) -> Just $ "Validation failed with error: " ++ e
+                (_, Error e) -> Just $ "Evaluation failed with error: " ++ e
+                (Ok _, Ok (_, ret)) -> testAssertEq ret (Just (VInt 3))
+
+testParseEvalUdfExtraArgsFail :: TestResult
+testParseEvalUdfExtraArgsFail =
+    parseEvalFailStmtHelper
+        "{\
+        \  fn f(a) { return a; };\
+        \  return f(1, 2);\
+        \}"
+        "expected 1 arguments, got 2"
+
+testParseEvalUdfMissingArgsFail :: TestResult
+testParseEvalUdfMissingArgsFail =
+    parseEvalFailStmtHelper
+        "{\
+        \  fn f(a, b) { return a; };\
+        \  return f(1);\
+        \}"
+        "expected 2 arguments, got 1"
+
+testParseValUdfExtraArgsFail :: TestResult
+testParseValUdfExtraArgsFail =
+    parseValFailStmtHelper
+        "{\
+        \  fn f(a) { return a; };\
+        \  return f(1, 2);\
+        \}"
+
+testParseValUdfMissingArgsFail :: TestResult
+testParseValUdfMissingArgsFail =
+    parseValFailStmtHelper
+        "{\
+        \  fn f(a, b) { return a; };\
+        \  return f(1);\
+        \}"
+
+testParseValBuiltinExtraArgsFail :: TestResult
+testParseValBuiltinExtraArgsFail =
+    parseValFailStmtHelper
+        "{\
+        \  return size([1], [2]);\
+        \}"
+
 testCrashRegression :: Test
 testCrashRegression =
     testCaseSeq
@@ -976,6 +1036,12 @@ testCrashRegression =
         [ testParseEvalFirstEmptyFail
         , testParseEvalLastEmptyFail
         , testParseEvalFirstWrongTypeFail
+        , testArgPassingByValue
+        , testParseEvalUdfExtraArgsFail
+        , testParseEvalUdfMissingArgsFail
+        , testParseValUdfExtraArgsFail
+        , testParseValUdfMissingArgsFail
+        , testParseValBuiltinExtraArgsFail
         ]
 
 testParseValFail :: Test
