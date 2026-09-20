@@ -1327,10 +1327,6 @@ testEvalWhile =
         , -- The invariant is only used by validation
           parseEvalProgramHelper "i = 0; while i < 3 [{ affirm i <= 3; }] { i = i + 1; }; return i;" (Just (VInt 3))
         , parseEvalProgramFailHelper "while 5 { x = 1; };" "Condition must be a boolean"
-        , -- A loop that never ends is stopped rather than left to hang
-          parseEvalProgramFailHelper "n = 0; while true { n = n + 1; };" "Step limit"
-        , -- Even inside a function called during validation
-          parseValidProgramHelper "fn spin(n) { while true { n = n + 1; }; return n; }; x = 1;"
         ]
 
 -- The validator does no arithmetic, so these two trusted axioms supply the arithmetic facts

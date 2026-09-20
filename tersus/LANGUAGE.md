@@ -220,7 +220,7 @@ while i < 3 {
 return n;
 ```
 
-The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. Evaluation stops a run after 1,000,000 statements with `Step limit of 1000000 statements exceeded`, so a loop that never ends fails instead of hanging. A `return` inside the body ends the function or program, and stops the loop.
+The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. Nothing checks that the loop ends, and a loop whose condition never becomes false runs forever. A `return` inside the body ends the function or program, and stops the loop.
 
 #### Loop invariants
 
@@ -458,7 +458,7 @@ affirm s > 0;
 ## Current Limitations
 
 - No `for` loops, `break` or `continue`.
-- Loops are validated for partial correctness only. Nothing proves a loop ends, and `run` stops a program after 1,000,000 statements.
+- Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` (and validation of a call with known arguments, which evaluates it) will not return.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists.
 - No block comments; only `//` line comments.

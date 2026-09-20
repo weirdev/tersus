@@ -33,23 +33,13 @@ validate l = case valBlock $ initVStateWStatements l of
     Error e -> Error e
 
 -- Private fns
--- The most statements a single evaluation runs before it is stopped, so a loop that never
--- ends fails instead of hanging. Each function call gets its own budget.
-stepLimit :: Int
-stepLimit = 1000000
-
 evalBlock :: State -> Result State String
-evalBlock = evalBlockWithin stepLimit
-
-evalBlockWithin :: Int -> State -> Result State String
-evalBlockWithin fuel state = case state of
+evalBlock state = case state of
     State (ScopeState _ (Continuations []) _) _ -> Ok state
-    State (ScopeState _ (Continuations (_ : _)) _) _
-        | fuel <= 0 -> Error ("Step limit of " ++ show stepLimit ++ " statements exceeded, the program may not terminate")
-        | otherwise ->
-            case evalNextStatement state of
-                Ok nState -> evalBlockWithin (fuel - 1) nState
-                Error e -> Error e
+    State (ScopeState _ (Continuations (_ : _)) _) _ ->
+        case evalNextStatement state of
+            Ok nState -> evalBlock nState
+            Error e -> Error e
 
 evalReturningBlock :: State -> Result (State, Maybe Value) String
 evalReturningBlock state =
@@ -412,7 +402,7 @@ traverseResult :: (a -> Result b String) -> [a] -> Result [b] String
 traverseResult = flatResultMap
 
 -- Validates a loop by its invariant, without unrolling it. This proves partial correctness
--- only: nothing shows the loop terminates.
+-- only: nothing shows the loop terminates, and that is deliberately not checked.
 --
 -- 1. The invariant must hold before the first iteration.
 -- 2. Every outer variable the body assigns is rebound to a fresh value with no facts, so
