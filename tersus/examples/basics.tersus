@@ -1,0 +1,10 @@
+xs = [3, 6, 9, 12];
+n = size(xs);
+head = first(xs);
+tail = last(xs);
+span = tail - head;
+{
+    inner = span + 1;
+    xs = [1, 2];
+};
+return n + size(xs);

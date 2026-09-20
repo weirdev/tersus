@@ -1,0 +1,9 @@
+x = 5;
+copy = x;
+rewrite refl x = 5;
+affirm copy = 5;
+
+zs = [1, 2, 3];
+count = size(zs);
+rewrite evalAll;
+affirm count = 3;

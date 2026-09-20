@@ -1,0 +1,22 @@
+axiom positiveMeansOne(x) [{
+    affirm x > 0;
+}] [{
+    affirm x = 1;
+}];
+
+proof keepPositive(x) [{
+    affirm x > 0;
+}] [{
+    affirm x > 0;
+}] {
+    affirm x > 0;
+};
+
+x = 5;
+rewrite eqToGtZero x;
+rewrite keepPositive x;
+affirm x > 0;
+rewrite positiveMeansOne x;
+affirm x = 1;
+rewrite eqToLtPlus1 x;
+affirm x < 6;

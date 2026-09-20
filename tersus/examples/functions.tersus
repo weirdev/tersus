@@ -1,0 +1,19 @@
+fn add1(i) {
+    return i + 1;
+};
+
+fn addThree(a, b, c) {
+    return a + b + c;
+};
+
+fn sumFirstLast(lst) [{
+    define s = size(lst);
+    rewrite eqToGtZero s;
+    affirm s > 0;
+}] {
+    return first(lst) + last(lst);
+};
+
+x = add1(4);
+y = sumFirstLast([3, 6, 9, 12]);
+return addThree(x, y, 1);

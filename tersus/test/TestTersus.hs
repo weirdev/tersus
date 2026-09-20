@@ -948,6 +948,58 @@ testParseValFail =
         , testParseValMissingExportedProofValidationFail
         ]
 
+-- Example program tests
+-- Programs in examples/ must keep behaving as documented in examples/README.md.
+-- Paths are relative to the package root, which is where `stack test` runs.
+data ExampleExpectation
+    = -- Validates, evaluates, and returns this value
+      ExpectReturn Value
+    | -- Validates and evaluates without a return value
+      ExpectValid
+    | -- Validation fails with an error containing this text
+      ExpectRejected String
+
+testExampleFile :: FilePath -> ExampleExpectation -> Test
+testExampleFile path expectation = TestCase path $ do
+    source <- readFile path
+    pure $ case parseStatementBlock source of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right stmts -> checkExample stmts expectation
+
+checkExample :: [Statement] -> ExampleExpectation -> TestResult
+checkExample stmts (ExpectRejected expectedError) =
+    testAssertErrorContains expectedError (validate stmts)
+checkExample stmts expectation =
+    case validate stmts of
+        Error e -> Just $ "Validation failed with error: " ++ e
+        Ok _ -> case evaluate stmts of
+            Error e -> Just $ "Evaluation failed with error: " ++ e
+            Ok state -> case expectation of
+                ExpectReturn expected -> testAssertEq (getReturn state) (Just expected)
+                _ -> testAssertEq (getReturn state) Nothing
+
+testExamples :: Test
+testExamples =
+    TestList
+        "testExamples"
+        [ testExampleFile "examples/basics.tersus" (ExpectReturn (VInt 6))
+        , testExampleFile "examples/functions.tersus" (ExpectReturn (VInt 21))
+        , testExampleFile "examples/booleans.tersus" (ExpectReturn (VBool True))
+        , testExampleFile "examples/proofs.tersus" ExpectValid
+        , testExampleFile "examples/rewrites.tersus" ExpectValid
+        , testExampleFile "examples/safe_access.tersus" (ExpectReturn (VInt 38))
+        , testExampleFile "examples/contracts.tersus" (ExpectReturn (VInt 8))
+        , testExampleFile "examples/rules.tersus" ExpectValid
+        , testExampleFile "examples/rejected/affirm.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/first_of_empty.tersus" (ExpectRejected "is not greater than 0")
+        , testExampleFile "examples/rejected/unmet_contract.tersus" (ExpectRejected "is not greater than 0")
+        , testExampleFile "examples/rejected/missing_contract.tersus" (ExpectRejected "lacks concrete definition")
+        , testExampleFile "examples/rejected/output_contract.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/bad_proof_rule.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/axiom_input.tersus" (ExpectRejected "is not greater than 0")
+        , testExampleFile "examples/rejected/unknown_rule.tersus" (ExpectRejected "Unknown rewrite rule")
+        ]
+
 -- Run tests
 main :: IO ()
 main = do
@@ -966,6 +1018,7 @@ main = do
                 , testParseVal
                 , testParseValFail
                 , testCrashRegression
+                , testExamples
                 ]
     putStrLn $
         "Summary: "

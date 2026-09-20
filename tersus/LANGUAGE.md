@@ -2,7 +2,7 @@
 
 Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, integer lists, user-defined functions, nested blocks, and a proof validator built around an internal proof engine for equality, simple rewrites, and builtin function contracts.
 
-This guide describes the Haskell implementation in this package.
+This guide describes the Haskell implementation in this package. Runnable programs that demonstrate the features below are in [`examples/`](examples/README.md).
 
 ## Program Shape
 
@@ -253,7 +253,7 @@ affirm s > 0;
 
 - No `if`, `else`, `while`, or general control flow yet.
 - No declarations separate from assignment.
-- No strings, floats, records, generic lists, or source-level booleans.
+- No strings, floats, records, or generic lists.
 - No comments in the parser.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
 - The CLI currently parses input and prints the AST. Evaluation and validation are exercised through the Haskell API and tests.

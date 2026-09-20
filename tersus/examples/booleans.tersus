@@ -1,0 +1,6 @@
+x = 5;
+below = x < 6;
+affirm below = true;
+flag = false;
+affirm flag = false;
+return below;

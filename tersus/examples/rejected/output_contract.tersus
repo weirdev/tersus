@@ -1,0 +1,5 @@
+fn bad(i) [{}] [{
+    affirm return = i;
+}] {
+    return i + 1;
+};

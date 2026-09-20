@@ -1,0 +1,7 @@
+proof positiveIsZero(x) [{
+    affirm x > 0;
+}] [{
+    affirm x = 0;
+}] {
+    affirm x > 0;
+};

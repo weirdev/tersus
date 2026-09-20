@@ -34,6 +34,8 @@ Running:
     0. stack run
 Tests:
     0. stack test
+Examples:
+    0. See examples/README.md; `stack test` checks every program in examples/
 OR:
     0. From this (tersus/) directory
     1. `ghci`

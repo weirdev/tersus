@@ -1,0 +1,22 @@
+fn add1(i) [{}] [{
+    affirm return = (i + 1);
+}] {
+    return i + 1;
+};
+
+fn firstWithSize(lst) [{
+    define s = size(lst);
+    rewrite eqToGtZero s;
+    affirm s > 0;
+}] [{
+    affirm s > 0;
+}] {
+    return first(lst);
+};
+
+x = add1(4);
+affirm x = 5;
+y = firstWithSize([3, 6, 9, 12]);
+affirm y = 3;
+affirm s > 0;
+return y + x;

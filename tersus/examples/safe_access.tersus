@@ -1,0 +1,11 @@
+fn spread(lst) [{
+    define s = size(lst);
+    rewrite eqToGtZero s;
+    affirm s > 0;
+}] [{
+    affirm s > 0;
+}] {
+    return last(lst) - first(lst);
+};
+
+return spread([4, 8, 15, 16, 23, 42]);

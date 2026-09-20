@@ -1,0 +1,5 @@
+fn firstOf(lst) {
+    return first(lst);
+};
+
+return firstOf([1, 2]);
