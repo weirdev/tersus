@@ -34,7 +34,9 @@ fn spread(lst) [{
     return last(lst) - first(lst);
 };
 
-return spread([4, 8, 15, 16, 23, 42]);
+a = spread([4, 8, 15, 16, 23, 42]);
+b = spread([7]);
+return a + b;
 ```
 
 The contract is assumed while validating the body, which is what makes `first(lst)` and `last(lst)` legal. It is checked at every call site, so a call that cannot show `size(lst) > 0` never passes validation. That is what `rejected/unmet_contract.tersus` demonstrates.

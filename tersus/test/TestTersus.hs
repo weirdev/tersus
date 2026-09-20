@@ -616,11 +616,29 @@ testProofEngineEvalDerivesConcreteBuiltinResult =
             Ok derived -> testAssertTrue (Engine.entails goal derived)
             Error e -> Just $ "Engine eval failed: " ++ e
 
+-- Every iota in the clique equals every other, so an unmemoized equivalence walk is
+-- exponential. The unrelated fact comes first so entailment must exhaust the clique's
+-- equivalence class before reaching the fact that matches.
+testProofEngineEntailsDenseEqualitiesTerminates :: TestResult
+testProofEngineEntailsDenseEqualitiesTerminates =
+    let firstIota = Iota "i1"
+        secondIota = Iota "i2"
+        iotas = firstIota : secondIota : map (Iota . ("i" ++) . show) [3 .. 8 :: Int]
+        context =
+            Engine.proofContextFromFacts
+                ( FApp eqProof [ATerm (Iota "outsideA"), ATerm (Iota "outsideB")]
+                    : [FApp eqProof [ATerm a, ATerm b] | a <- iotas, b <- iotas, a /= b]
+                )
+        related = FApp eqProof [ATerm firstIota, ATerm secondIota]
+        unrelated = FApp eqProof [ATerm firstIota, ATerm (Iota "unrelated")]
+     in testAssertEq (Engine.entails related context, Engine.entails unrelated context) (True, False)
+
 testProofEngine :: Test
 testProofEngine =
     testCaseSeq
         "testProofEngine"
         [ testProofEngineInsertDedupes
+        , testProofEngineEntailsDenseEqualitiesTerminates
         , testProofEngineEntailsEquivalentTerms
         , testProofEngineReflSubstitutesNestedTerms
         , testProofEngineEvalDerivesConcreteBuiltinResult

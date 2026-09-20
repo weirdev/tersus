@@ -8,4 +8,6 @@ fn spread(lst) [{
     return last(lst) - first(lst);
 };
 
-return spread([4, 8, 15, 16, 23, 42]);
+a = spread([4, 8, 15, 16, 23, 42]);
+b = spread([7]);
+return a + b;

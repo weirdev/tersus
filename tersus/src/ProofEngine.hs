@@ -160,15 +160,25 @@ proofEquivalent context (FApp goalFunct goalArgs) (FApp factFunct factArgs) =
 proofEquivalent context goal fact =
     fact `elem` equivalentTermsInclusive 10 context goal
 
+-- Terms reachable from the proof through at most `depth` equalities, including the
+-- proof itself. Breadth-first with a seen list: equalities are symmetric once
+-- deriveRefl adds their reversals, so an unmemoized walk revisits terms
+-- exponentially often.
 equivalentTermsInclusive :: Int -> ProofContext -> IotaProof -> [IotaProof]
-equivalentTermsInclusive depth context proof =
-    proof : equivalentTerms depth context proof
+equivalentTermsInclusive depth context proof = expandEquivalentTerms depth context [proof] [proof]
 
-equivalentTerms :: Int -> ProofContext -> IotaProof -> [IotaProof]
-equivalentTerms 0 _ _ = []
-equivalentTerms depth context proof =
-    let nextProofs = firstDegreeEquivalentTerms context proof
-     in nub (nextProofs ++ concatMap (equivalentTerms (depth - 1) context) nextProofs)
+expandEquivalentTerms :: Int -> ProofContext -> [IotaProof] -> [IotaProof] -> [IotaProof]
+expandEquivalentTerms 0 _ _ seen = seen
+expandEquivalentTerms _ _ [] seen = seen
+expandEquivalentTerms depth context frontier seen =
+    let nextFrontier =
+            nub
+                [ next
+                | current <- frontier
+                , next <- firstDegreeEquivalentTerms context current
+                , next `notElem` seen
+                ]
+     in expandEquivalentTerms (depth - 1) context nextFrontier (seen ++ nextFrontier)
 
 firstDegreeEquivalentTerms :: ProofContext -> IotaProof -> [IotaProof]
 firstDegreeEquivalentTerms (ProofContext facts) proof =
