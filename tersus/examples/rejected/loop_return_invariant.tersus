@@ -1,0 +1,15 @@
+// Rejected: a return in the body does not excuse the paths that keep looping. When the if is
+// not taken, i is incremented without re-establishing the invariant i <= 3.
+axiom zeroWithinBound(i) [{ affirm i = 0; }] [{ affirm i <= 3; }];
+
+fn firstOver(n) {
+    i = 0;
+    rewrite zeroWithinBound i;
+    while i < 3 [{ affirm i <= 3; }] {
+        if (i + i) > n {
+            return i;
+        };
+        i = i + 1;
+    };
+    return i;
+};

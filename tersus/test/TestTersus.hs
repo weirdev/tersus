@@ -1103,10 +1103,12 @@ testExamples =
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
+        , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
         , testExampleFile "examples/rejected/invariant_entry.tersus" (ExpectRejected "Loop invariant does not hold on entry")
         , testExampleFile "examples/rejected/invariant_preserved.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/return_in_loop.tersus" (ExpectRejected "return inside while is not supported yet")
+        , testExampleFile "examples/rejected/loop_return_invariant.tersus" (ExpectRejected "Loop invariant is not preserved")
+        , testExampleFile "examples/rejected/loop_missing_return.tersus" (ExpectRejected "Return value not found")
         , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "lacks concrete definition")
         , testExampleFile "examples/rejected/branch_fact.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/guard_condition.tersus" (ExpectRejected "lacks concrete definition")
@@ -1378,7 +1380,8 @@ testValidateWhile =
                    \affirm i < 3;"
             )
             "Assertion failed"
-        , parseValidateFailProgramHelper "i = 0; while i < 3 { return 1; };" "return inside while is not supported yet"
+        , -- A loop whose body returns is validated too
+          parseValidProgramHelper "i = 0; while i < 3 { return i; }; return 9;"
         ]
 
 testEarlyReturn :: Test
@@ -1429,8 +1432,43 @@ testEarlyReturn =
             "Assertion failed"
         , -- A function where some path does not return has no return value
           parseValidateFailProgramHelper "fn f(n) { if n < 6 { return 1; }; }; x = f(1);" "Return value not found"
-        , -- Returning from inside a loop is still not supported
-          parseValidateFailProgramHelper "i = 0; while i < 3 { if i > 1 { return i; }; i = i + 1; };" "return inside while is not supported yet"
+        , -- Returning from inside a loop stops it
+          parseValidProgramHelper "fn f(n) { i = 0; while i < 3 { if i > n { return i; }; i = i + 1; }; return 0; }; x = f(1);"
+        , parseEvalProgramHelper "fn f(n) { i = 0; while i < 5 { if i > n { return i; }; i = i + 1; }; return 0; }; return f(2) + f(9);" (Just (VInt 3))
+        , -- The invariant is checked on the paths that keep looping, and holds for the return too
+          parseValidProgramHelper
+            ( loopAxioms
+                ++ "fn f(n) [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
+                   \ while i < 3 [{ affirm i <= 3; }] { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
+                   \ affirm i >= 3; return i; }; x = f(1);"
+            )
+        , parseValidateFailProgramHelper
+            ( loopAxioms
+                ++ "fn f(n) { i = 0; rewrite zeroWithinBound i;\
+                   \ while i < 3 [{ affirm i <= 3; }] { if i > n { return i; }; i = i + 1; };\
+                   \ return i; };"
+            )
+            "Loop invariant is not preserved"
+        , -- Soundness: the returning path's condition is not known after the loop
+          parseValidateFailProgramHelper
+            "fn f(n) { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm n > 5; return 0; };"
+            "Assertion failed"
+        , -- Soundness: only the path after the loop knows the loop condition is false
+          parseValidateFailProgramHelper
+            "fn f(n) { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm i < 3; return 0; };"
+            "Assertion failed"
+        , -- Soundness: a fact only the returning path establishes is not an output fact
+          parseValidateFailProgramHelper
+            ( loopAxioms
+                ++ "fn f(n) [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
+                   \ while i < 3 [{ affirm i <= 3; }] { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
+                   \ return 100; };"
+            )
+            "Assertion failed"
+        , parseValidateFailProgramHelper "fn f(n) { i = 0; while i < n { return i; }; }; x = f(1);" "Return value not found"
+        , -- A nested loop that returns
+          parseValidProgramHelper
+            "fn f(n) { i = 0; while i < 2 { j = 0; while j < 2 { if j > n { return j; }; j = j + 1; }; i = i + 1; }; return 0; }; x = f(1);"
         ]
 
 testControlFlow :: Test

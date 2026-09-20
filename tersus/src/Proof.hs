@@ -85,6 +85,7 @@ evalNextStatement state = case nextStatement state of
     Ok (Block statements) -> evalBlockStatement state statements
     Ok (If cond thenStmts elseStmts) -> evalIfStatement state cond thenStmts elseStmts
     Ok loop@(While cond _ body) -> evalWhileStatement state loop cond body
+    Ok LoopEnd{} -> Error "LoopEnd is only used during validation"
     Ok EndBlock -> evalEndBlockStatement state
     Error e -> Error e
 
@@ -176,6 +177,7 @@ valNextStatement state =
                     Block bstmts -> valBlockStatement state bstmts
                     If cond thenStmts elseStmts -> valIfStatement state cond thenStmts elseStmts
                     While cond invariant body -> valWhileStatement state cond invariant body
+                    LoopEnd invariant -> valLoopEnd state invariant
                     EndBlock -> valEndBlockStatement state
         Error e -> Error e
 
@@ -277,8 +279,12 @@ valPath state assumptions stmts =
 -- Continues from the top level scope as it was before the `if`, since both paths have ended.
 -- What both paths establish is kept, in the same way as joinBranches. If both paths return,
 -- their return values are replaced by one fresh iota. If one falls off the end without
--- returning, the joined state has no return value.
+-- returning, the joined state has no return value. A path that only went back to a loop
+-- condition (see vMarkLoopBack) places no requirement on the other, which is used as is.
 joinReturnPaths :: VState -> VState -> VState -> Result VState String
+joinReturnPaths _ pThen pElse
+    | vIsLoopBack pThen = Ok pElse
+    | vIsLoopBack pElse = Ok (vSetIotaSeq pThen (vGetIotaSeq pElse))
 joinReturnPaths s0 pThen pElse =
     let base = vSetContinuations (vTopLevelScope s0) emptyContinuations
         returns = case (vGetReturn pThen, vGetReturn pElse) of
@@ -414,23 +420,55 @@ traverseResult = flatResultMap
 --    values are immutable.
 -- 3. Assuming the invariant and the condition, the body must re-establish the invariant.
 -- 4. After the loop, the invariant holds and the condition does not.
+--
+-- A body that contains `return` is validated as paths, see valReturningWhile.
 valWhileStatement :: VState -> Expression -> [ValidationStatement] -> [Statement] -> Result VState String
-valWhileStatement state cond invariant body
-    | containsReturn body = Error "return inside while is not supported yet"
-    | otherwise =
-        vAdvanceStatement state `bindResult` \advanced ->
-            prefixError "Loop invariant does not hold on entry: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
-                let loopVars = assignedOuterVars advanced body
-                 in popNIotasFromSeq advanced (length loopVars) `bindResult` \(freshIotas, popped) ->
-                        let havocked = foldl (\s (var, iota) -> vInsertVar s var iota []) popped (zip loopVars freshIotas)
-                         in assumeValStmts havocked invariant `bindResult` \assumed ->
-                                valLoopCondition assumed cond `bindResult` \(condState, condIota) ->
-                                    conditionAssumptions True cond condIota condState `bindResult` \bodyAssumptions ->
-                                        valBranch condState bodyAssumptions body `bindResult` \bodyState ->
-                                            prefixError "Loop invariant is not preserved: " (validateUserRuleInputs bodyState invariant) `bindResult` \_ ->
-                                                valLoopCondition (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond `bindResult` \(exitState, exitIota) ->
-                                                    conditionAssumptions False cond exitIota exitState `bindResult` \exitAssumptions ->
-                                                        Ok (vInsertProofs exitState exitAssumptions)
+valWhileStatement state cond invariant body =
+    vAdvanceStatement state `bindResult` \advanced ->
+        prefixError "Loop invariant does not hold on entry: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
+            let loopVars = assignedOuterVars advanced body
+             in popNIotasFromSeq advanced (length loopVars) `bindResult` \(freshIotas, popped) ->
+                    let havocked = foldl (\s (var, iota) -> vInsertVar s var iota []) popped (zip loopVars freshIotas)
+                     in assumeValStmts havocked invariant `bindResult` \assumed ->
+                            valLoopCondition assumed cond `bindResult` \(condState, condIota) ->
+                                conditionAssumptions True cond condIota condState `bindResult` \bodyAssumptions ->
+                                    if containsReturn body
+                                        then valReturningWhile assumed cond invariant body bodyAssumptions
+                                        else
+                                            valBranch condState bodyAssumptions body `bindResult` \bodyState ->
+                                                prefixError "Loop invariant is not preserved: " (validateUserRuleInputs bodyState invariant) `bindResult` \_ ->
+                                                    valLoopExit (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond
+
+-- The state after a loop: the invariant holds (already assumed in the given state) and the
+-- condition is false
+valLoopExit :: VState -> Expression -> Result VState String
+valLoopExit state cond =
+    valLoopCondition state cond `bindResult` \(exitState, exitIota) ->
+        conditionAssumptions False cond exitIota exitState `bindResult` \exitAssumptions ->
+            Ok (vInsertProofs exitState exitAssumptions)
+
+-- A loop whose body contains `return`. The body ends when it returns, so it is validated as a
+-- path of its own (like the branches in valReturningIf), and the program after the loop is a
+-- second path that starts from the state where the loop condition is false.
+--
+-- The body path ends with LoopEnd, which checks that the invariant is preserved on every way
+-- of reaching the end of the body and then discards that path, since control only goes back
+-- to the condition. Only the paths that return are joined with the path after the loop.
+valReturningWhile :: VState -> Expression -> [ValidationStatement] -> [Statement] -> [IotaProof] -> Result VState String
+valReturningWhile assumed cond invariant body bodyAssumptions =
+    valLoopCondition assumed cond `bindResult` \(condState, _) ->
+        valPath (vSetContinuations condState emptyContinuations) bodyAssumptions (body ++ [LoopEnd invariant]) `bindResult` \pBody ->
+            valLoopExit (vSetIotaSeq assumed (vGetIotaSeq pBody)) cond `bindResult` \exitState ->
+                valBlock exitState `bindResult` \pExit ->
+                    joinReturnPaths assumed pBody pExit
+
+-- The end of a loop body: the invariant must hold again. The path then stops, as control
+-- goes back to the loop condition.
+valLoopEnd :: VState -> [ValidationStatement] -> Result VState String
+valLoopEnd state invariant =
+    vAdvanceStatement state `bindResult` \advanced ->
+        prefixError "Loop invariant is not preserved: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
+            Ok (vMarkLoopBack (vSetContinuations (vTopLevelScope advanced) emptyContinuations))
 
 -- Validates the loop condition in the given state, recording what it says about its result
 valLoopCondition :: VState -> Expression -> Result (VState, Iota) String

@@ -5,6 +5,7 @@ import Data.Map (
     empty,
     insert,
     lookup,
+    member,
     fromList,
     toList,
     union,
@@ -237,6 +238,18 @@ vScopeSetReturn (VScopeState iotas proofs _ Nothing) niota nproofs =
     VScopeState (insert "return" niota iotas) (proofs ++ nproofs) emptyContinuations Nothing
 vScopeSetReturn (VScopeState iotas proofs c (Just pScope)) niota nproofs =
     VScopeState iotas proofs c (Just $ vScopeSetReturn pScope niota nproofs)
+
+-- A validation path that reaches the end of a loop body has not ended the program: control
+-- goes back to the loop condition, which is validated separately. Such a path is marked so
+-- that joining paths ignores it. The name cannot be written as a Tersus variable.
+loopBackVar :: Variable
+loopBackVar = "%loopback"
+
+vMarkLoopBack :: VState -> VState
+vMarkLoopBack state = vInsertVar state loopBackVar (Iota loopBackVar) []
+
+vIsLoopBack :: VState -> Bool
+vIsLoopBack state = Data.Map.member loopBackVar (vVisibleVars state)
 
 vScopeGetProofs :: VScopeState -> [IotaProof]
 vScopeGetProofs (VScopeState _ proofs _ Nothing) = proofs

@@ -1,0 +1,25 @@
+// return inside a while body: a bounded search that stops at the first hit.
+// The validator does no arithmetic, so the two arithmetic facts the invariant needs
+// come from trusted axioms (as in loops.tersus).
+axiom zeroWithinBound(i) [{ affirm i = 0; }] [{ affirm i <= 3; }];
+axiom stepWithinBound(i) [{ affirm i < 3; }] [{ affirm (i + 1) <= 3; }];
+
+// The smallest i in 0..3 with i + i > n, or 3 if there is none.
+fn firstOver(n) [{ }] [{ affirm return <= 3; }] {
+    i = 0;
+    rewrite zeroWithinBound i;
+    while i < 3 [{ affirm i <= 3; }] {
+        if (i + i) > n {
+            // Leaves the function. i <= 3 holds here, which the output contract needs.
+            return i;
+        };
+        // Reached only when the loop keeps going, so the invariant must hold again here.
+        rewrite stepWithinBound i;
+        i = i + 1;
+    };
+    // The loop ended without returning: the invariant holds and the condition does not.
+    return i;
+};
+
+// 3 + 1 + 3
+return firstOver(4) + firstOver(0) + firstOver(100);

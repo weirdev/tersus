@@ -37,6 +37,8 @@ data Statement
       If Expression [Statement] [Statement]
     | -- While condition invariant body; the invariant is only used by the validator
       While Expression [ValidationStatement] [Statement]
+    | -- Never parsed: the validator ends a loop body with this to check the invariant, see valReturningWhile
+      LoopEnd [ValidationStatement]
     | EndBlock
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 

@@ -1,0 +1,8 @@
+// Rejected: the loop can end without reaching its return, and nothing returns after it.
+fn f(n) {
+    i = 0;
+    while i < n {
+        return i;
+    };
+};
+x = f(1);

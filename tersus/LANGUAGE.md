@@ -204,7 +204,7 @@ The paths are then joined. If they all return, the return value becomes one new 
 
 Because each path validates the rest of the function again, an `if` whose branches both fall through and contain a `return` somewhere inside doubles the work for the statements after it. Ordinary guard clauses do not, since the path that returns has nothing left to validate.
 
-A `return` inside a `while` body is not supported yet, and the validator rejects it with `return inside while is not supported yet`.
+A `return` inside a `while` body works the same way, see Returning from a loop below.
 
 ### While
 
@@ -220,7 +220,7 @@ while i < 3 {
 return n;
 ```
 
-The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. Evaluation stops a run after 1,000,000 statements with `Step limit of 1000000 statements exceeded`, so a loop that never ends fails instead of hanging. `return` is not allowed inside a `while` body yet.
+The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. Evaluation stops a run after 1,000,000 statements with `Step limit of 1000000 statements exceeded`, so a loop that never ends fails instead of hanging. A `return` inside the body ends the function or program, and stops the loop.
 
 #### Loop invariants
 
@@ -256,6 +256,31 @@ affirm i >= 3;
 ```
 
 `while` is a reserved word; `whiley` is still an ordinary name.
+
+#### Returning from a loop
+
+A body that contains `return` is validated as paths, in the same way as an `if` with a `return`:
+
+```tersus
+fn firstOver(n) [{ }] [{ affirm return <= 3; }] {
+    i = 0;
+    rewrite zeroWithinBound i;
+    while i < 3 [{ affirm i <= 3; }] {
+        if (i + i) > n {
+            return i;
+        };
+        rewrite stepWithinBound i;
+        i = i + 1;
+    };
+    return i;
+};
+```
+
+- The invariant must hold on entry, as before.
+- Every way of reaching the end of the body without returning must re-establish the invariant. A `return` does not excuse the paths that keep looping, so removing the `rewrite stepWithinBound i;` above is rejected with `Loop invariant is not preserved`.
+- A path that returns assumes the invariant, the loop condition and whatever its own `if` conditions say. Its return value is joined with the value returned after the loop, so an output contract holds only if every returning path establishes it. Above, `return <= 3` holds for the `return i` in the body (from the invariant) and for the one after the loop.
+- The statements after the loop are validated once, from the state where the invariant holds and the condition is false. Facts that only a returning path knew, such as an `if` condition inside the body, are not known there.
+- As for an `if`, a function where some path (including leaving the loop) does not return has no return value and is rejected with `Return value not found in top scope`.
 
 ### Functions
 
@@ -432,7 +457,7 @@ affirm s > 0;
 
 ## Current Limitations
 
-- No `for` loops, `break` or `continue`, and `return` is not allowed inside a `while` body.
+- No `for` loops, `break` or `continue`.
 - Loops are validated for partial correctness only. Nothing proves a loop ends, and `run` stops a program after 1,000,000 statements.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists.
