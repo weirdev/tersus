@@ -18,13 +18,14 @@ Whitespace can be spaces, tabs, or newlines. Identifiers must start with a lette
 
 ## Values
 
-Tersus currently has three runtime value categories:
+Tersus currently has four runtime value categories:
 
 - Integers: `0`, `1`, `42`
 - Integer lists: `[]`, `[1]`, `[3, 6, 9]`
+- Booleans: `true`, `false`
 - Functions: builtin functions from the standard library or user-defined functions
 
-There are no source-level boolean literals. Boolean values can be produced by relation expressions such as `x < y`, but the language does not yet have control-flow constructs that consume them.
+Boolean values can also be produced by relation expressions such as `x < y`, but the language does not yet have control-flow constructs that consume them.
 
 Negative literals are not parsed directly. Use subtraction instead, for example `0 - 1`.
 
@@ -58,7 +59,7 @@ The standard library seeds these builtin functions:
 - `+` and `-`: integer arithmetic.
 - `=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
-`first` and `last` have builtin input contracts requiring the list size to be greater than zero. Validation fails before accepting calls that cannot prove this condition. Concrete evaluation also rejects empty lists and wrong argument types.
+`first` and `last` have builtin input contracts requiring the list size to be greater than zero. Their current validation proof relies on the standard-library `eqToGtZero` axiom, whose input contract is checked by the primitive `checkGtZero` rewrite. Concrete evaluation still rejects empty lists and wrong argument types.
 
 ## Statements
 
@@ -143,22 +144,67 @@ Proof variables are especially useful in function contracts, where they can be e
 
 ### `rewrite`
 
-`rewrite` applies a named proof-engine rewrite rule.
+`rewrite` applies a named proof-engine rewrite rule or a user-defined axiom/proof rule.
 
 ```tersus
 rewrite eqToGtZero s;
+rewrite myRule x;
 rewrite refl x = 5;
 rewrite eval y;
 rewrite evalAll;
 ```
 
-Current rewrite rules:
+Primitive rewrite rules:
 
 - `rewrite refl <proof>`: uses known equalities to derive reflected/substituted proofs.
-- `rewrite eqToLtPlus1 <var>`: from a value equal to `n`, derives a proof that it is less than `n + 1`.
-- `rewrite eqToGtZero <var>`: proves a variable is greater than zero when it has a concrete positive integer value or an equivalent proof already exists.
 - `rewrite eval <var>`: evaluates builtin-function proofs related to a variable when concrete inputs are known.
 - `rewrite evalAll`: attempts builtin evaluation for all available evaluable proofs.
+- `rewrite checkGtZero <proof>`: validates and inserts `<proof> > 0` when that proof is already entailed or when the proof term has a concrete positive integer value.
+
+The standard library also provides trusted axiom rules:
+
+- `rewrite eqToLtPlus1 <proof>`: assumes the argument is less than itself plus one.
+- `rewrite eqToGtZero <proof>`: exports the argument as greater than zero after its input contract validates through `checkGtZero`.
+
+Unknown rule names parse as user rewrites and fail during validation if no matching rule has been defined.
+
+## Axioms And Proof Rules
+
+User-defined rules are validation-only declarations. Concrete evaluation skips them.
+
+`axiom` registers trusted output proofs. Its input contract is checked at each rewrite site, but its output contract is assumed rather than validated:
+
+```tersus
+axiom positiveMeansOne(x) [{
+    affirm x > 0;
+}] [{
+    affirm x = 1;
+}];
+
+x = 5;
+rewrite eqToGtZero x;
+rewrite positiveMeansOne x;
+affirm x = 1;
+```
+
+`proof` has the same input/output contract shape, but the body must validate when the rule is defined. Only validated exported output proofs are made available to callers:
+
+```tersus
+proof keepPositive(x) [{
+    affirm x > 0;
+}] [{
+    affirm x > 0;
+}] {
+    affirm x > 0;
+};
+
+x = 5;
+rewrite eqToGtZero x;
+rewrite keepPositive x;
+affirm x > 0;
+```
+
+Rule names share one validation rule namespace. Defining the same name twice fails validation. Rule bodies contain validation statements only.
 
 ## Function Contracts
 

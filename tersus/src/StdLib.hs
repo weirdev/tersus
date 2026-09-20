@@ -13,7 +13,7 @@ builtinFunct First =
     VFunct
         ["list"]
         [ AssignProofVar "s" (F (Val (builtinFunct Size)) [Var "list"])
-        , Rewrite (EqToGtZero "s")
+        , Rewrite (UserRewrite "eqToGtZero" [ATerm "s"])
         , ProofAssert
             ( FApp
                 (CTerm (builtinFunct (Rel Gt)))
@@ -27,7 +27,7 @@ builtinFunct Last =
     VFunct
         ["list"]
         [ AssignProofVar "s" (F (Val (builtinFunct Size)) [Var "list"])
-        , Rewrite (EqToGtZero "s")
+        , Rewrite (UserRewrite "eqToGtZero" [ATerm "s"])
         , ProofAssert
             ( FApp
                 (CTerm (builtinFunct (Rel Gt)))
@@ -64,6 +64,31 @@ eqVarProof = CTerm (builtinFunct (Rel Eq))
 
 stdLibValCtx :: (Map Variable Iota, [IotaProof])
 stdLibValCtx = stdLibCtxToValCtx stdLibCtx
+
+stdLibRuleCtx :: RuleContext
+stdLibRuleCtx =
+    fromList
+        [ ( "eqToLtPlus1"
+          , AxiomRule
+                ["x"]
+                []
+                [ AssignProofVar "xPlusOne" (F (Val (builtinFunct Plus)) [Var "x", Val (VInt 1)])
+                , ProofAssert
+                    ( FApp
+                        (CTerm (builtinFunct (Rel Lt)))
+                        [ATerm "x", ATerm "xPlusOne"]
+                    )
+                ]
+          )
+        , ( "eqToGtZero"
+          , AxiomRule
+                ["x"]
+                [ Rewrite (CheckGtZero (ATerm "x"))
+                , ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])
+                ]
+                [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
+          )
+        ]
 
 -- NOTE: Could also take iotaseq as input here
 stdLibCtxToValCtx :: Map Variable Value -> (Map Variable Iota, [IotaProof])

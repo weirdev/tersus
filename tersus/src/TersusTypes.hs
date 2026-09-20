@@ -30,6 +30,8 @@ data Statement
     = Assign Variable Expression
     | Return Expression
     | ValidationStatement ValidationStatement
+    | AxiomDef Variable [Variable] [ValidationStatement] [ValidationStatement]
+    | ProofDef Variable [Variable] [ValidationStatement] [ValidationStatement] [ValidationStatement]
     | Block [Statement]
     | EndBlock
     deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
@@ -59,11 +61,19 @@ type VariableProof = Proof Variable
 -- TODO: As with BuiltinFunct, the rule name should be a separate type from the arguments
 data RwRule
     = Refl VariableProof
-    | EqToLtPlus1 Variable
-    | EqToGtZero Variable
     | Eval Variable
     | EvalAll
+    | CheckGtZero VariableProof
+    | UserRewrite Variable [VariableProof]
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
+
+data UserRule
+    = AxiomRule [Variable] [ValidationStatement] [ValidationStatement]
+    | ProofRule [Variable] [ValidationStatement] [VariableProof]
+    deriving (Show, Eq)
+
+type RuleContext = Map Variable UserRule
+
 data VScopeState
     = VScopeState
         (Map Variable Iota)
@@ -71,8 +81,8 @@ data VScopeState
         Continuations
         (Maybe VScopeState)
     deriving (Show)
-data VState = VState VScopeState (Map Variable Iota) [IotaProof] [Iota]
+data VState = VState VScopeState (Map Variable Iota) [IotaProof] [Iota] RuleContext
 
 instance Show VState where
-    show (VState scope iotaCtx proofCtx iotaseq) =
-        "VState (" ++ show (scope, iotaCtx, proofCtx) ++ ")"
+    show (VState scope iotaCtx proofCtx _ ruleCtx) =
+        "VState (" ++ show (scope, iotaCtx, proofCtx, ruleCtx) ++ ")"

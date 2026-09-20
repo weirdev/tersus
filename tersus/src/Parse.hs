@@ -63,6 +63,8 @@ validationStatementBlock = genericStatementBlock validationStatement
 statement :: Parser Statement
 statement =
     returnStatement
+        <|> axiomStatement
+        <|> proofStatement
         <|> ( ValidationStatement
                 <$> validationStatement
             )
@@ -112,6 +114,36 @@ functContractReqs :: Parser [ValidationStatement]
 -- Function contracts are written as `[{ ... }]`: square brackets mark the presence
 -- of a contract section and the inner braces hold ordinary validation statements.
 functContractReqs = squareBracketsParse (curlyBracesParse validationStatementBlock)
+
+axiomStatement :: Parser Statement
+axiomStatement = do
+    keyword "axiom"
+    whitespace
+    name <- variable
+    whitespace
+    args <- parensParse (variable `sepBy` skipWhitespace (char ','))
+    whitespace
+    inputReqs <- functContractReqs
+    whitespace
+    outputReqs <- functContractReqs
+    whitespace
+    return (AxiomDef name args inputReqs outputReqs)
+
+proofStatement :: Parser Statement
+proofStatement = do
+    keyword "proof"
+    whitespace
+    name <- variable
+    whitespace
+    args <- parensParse (variable `sepBy` skipWhitespace (char ','))
+    whitespace
+    inputReqs <- functContractReqs
+    whitespace
+    outputReqs <- functContractReqs
+    whitespace
+    body <- curlyBracesParse validationStatementBlock
+    whitespace
+    return (ProofDef name args inputReqs outputReqs body)
 
 validationStatement :: Parser ValidationStatement
 validationStatement =
@@ -207,11 +239,10 @@ rwRule = do
     whitespace
     case ruleStr of
         "refl" -> parseReflRule
-        "eqToLtPlus1" -> parseUnaryVarRule EqToLtPlus1
-        "eqToGtZero" -> parseUnaryVarRule EqToGtZero
         "eval" -> parseUnaryVarRule Eval
         "evalAll" -> parseNullaryRule EvalAll
-        _ -> fail "Unknown rule or wrong number of arguments"
+        "checkGtZero" -> CheckGtZero <$> proof
+        _ -> UserRewrite ruleStr <$> many proof
 
 parseReflRule :: Parser RwRule
 parseReflRule = Refl <$> proof
@@ -263,7 +294,12 @@ parensExpression :: Parser Expression
 parensExpression = parensParse expression
 
 value :: Parser Value
-value = vint <|> vlist
+value = vbool <|> vint <|> vlist
+
+vbool :: Parser Value
+vbool =
+    (keyword "true" >> whitespace >> return (VBool True))
+        <|> (keyword "false" >> whitespace >> return (VBool False))
 
 vint :: Parser Value
 vint = do

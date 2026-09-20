@@ -133,6 +133,18 @@ testParseComplexAssign =
                         ]
           in testCase "testParseComplexAssign" result
 
+testParseBoolLiteral :: Test
+testParseBoolLiteral =
+    testCaseSeq
+        "testParseBoolLiteral"
+        [ case parseStatementBlock "x = true" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed [Assign "x" (Val (VBool True))]
+        , case parseStatement "affirm b = false" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (ProofAssert (FApp eqVarProof [ATerm "b", CTerm (VBool False)])))
+        ]
+
 testParseKeywordBoundaryIdentifiers :: Test
 testParseKeywordBoundaryIdentifiers =
     testCaseSeq
@@ -162,8 +174,8 @@ testParseInvalidRewriteRule :: Test
 testParseInvalidRewriteRule =
     testCase "testParseInvalidRewriteRule" $
         case parseStatement "rewrite noSuchRule x" of
-            Left _ -> Nothing
-            Right parsed -> Just $ "Expected parse failure, got: " ++ show parsed
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (UserRewrite "noSuchRule" [ATerm "x"])))
 
 testParseRewriteRules :: Test
 testParseRewriteRules =
@@ -174,16 +186,41 @@ testParseRewriteRules =
             Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (Refl (FApp eqVarProof [ATerm "x", CTerm (VInt 5)]))))
         , case parseStatement "rewrite eqToLtPlus1 x" of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (EqToLtPlus1 "x")))
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (UserRewrite "eqToLtPlus1" [ATerm "x"])))
         , case parseStatement "rewrite eqToGtZero x" of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (EqToGtZero "x")))
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (UserRewrite "eqToGtZero" [ATerm "x"])))
         , case parseStatement "rewrite eval x" of
             Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (Eval "x")))
         , case parseStatement "rewrite evalAll" of
             Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite EvalAll))
+        , case parseStatement "rewrite checkGtZero x" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (CheckGtZero (ATerm "x"))))
+        ]
+
+testParseUserRuleDefinitions :: Test
+testParseUserRuleDefinitions =
+    testCaseSeq
+        "testParseUserRuleDefinitions"
+        [ case parseStatement "axiom five(x) [{}] [{ affirm x = 5; }]" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed ->
+                testAssertEq
+                    parsed
+                    ( AxiomDef
+                        "five"
+                        ["x"]
+                        []
+                        [ProofAssert (FApp eqVarProof [ATerm "x", CTerm (VInt 5)])]
+                    )
+        , case parseStatement "proof keepGt(x) [{ affirm x > 0; }] [{ affirm x > 0; }] { affirm x > 0; }" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed ->
+                let gtZero = ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])
+                 in testAssertEq parsed (ProofDef "keepGt" ["x"] [gtZero] [gtZero] [gtZero])
         ]
 
 testParse :: Test
@@ -192,10 +229,12 @@ testParse =
         "testParse"
         [ testParseSimpleAssign
         , testParseComplexAssign
+        , testParseBoolLiteral
         , testParseKeywordBoundaryIdentifiers
         , testParseInvalidProofBuiltin
         , testParseInvalidRewriteRule
         , testParseRewriteRules
+        , testParseUserRuleDefinitions
         ]
 
 -- Evaluate tests
@@ -364,7 +403,7 @@ expectedProofCompare _ _ _ = False
 validateWEMatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMatchHelper stmts expected =
     case validate stmts of
-        Ok (VState (VScopeState varMap iproofs _ _) _ _ _) ->
+        Ok (VState (VScopeState varMap iproofs _ _) _ _ _ _) ->
             testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
         -- Just $ show (varMap, iproofs)
         Error e -> Just $ "Validation failed with error: " ++ e
@@ -372,7 +411,7 @@ validateWEMatchHelper stmts expected =
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMismatchHelper stmts expected =
     case validate stmts of
-        Ok (VState (VScopeState varMap iproofs _ _) _ _ _) ->
+        Ok (VState (VScopeState varMap iproofs _ _) _ _ _ _) ->
             testAssertTrue (not (all (\vp -> expectedProofMatch vp iproofs varMap) expected))
         Error e -> Just $ "Validation failed with error: " ++ e
 
@@ -411,7 +450,7 @@ testValidateWithExpectedMatch =
             [FApp eqVarProof [ATerm "x", CTerm (VInt 5)]]
         , validateWEMatchHelper
             [ Assign "x" (Val (VInt 5))
-            , ValidationStatement (Rewrite (EqToLtPlus1 "x"))
+            , ValidationStatement (Rewrite (UserRewrite "eqToLtPlus1" [ATerm "x"]))
             , ValidationStatement (ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 6)]))
             ]
             [ FApp eqVarProof [ATerm "x", CTerm (VInt 5)]
@@ -472,6 +511,62 @@ testValidationFail =
         "testValidationFail"
         [ validationFailHelper [ValidationStatement (ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 5)]))]
         , validationFailHelper [Assign "x" (Val (VInt 5)), ValidationStatement (ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 4)]))]
+        ]
+
+testUserRewriteValidation :: Test
+testUserRewriteValidation =
+    testCaseSeq
+        "testUserRewriteValidation"
+        [ validateWEMatchHelper
+            [ AxiomDef
+                "five"
+                ["x"]
+                []
+                [ProofAssert (FApp eqVarProof [ATerm "x", CTerm (VInt 5)])]
+            , Assign "x" (Val (VInt 0))
+            , ValidationStatement (Rewrite (UserRewrite "five" [ATerm "x"]))
+            , ValidationStatement (ProofAssert (FApp eqVarProof [ATerm "x", CTerm (VInt 5)]))
+            ]
+            [FApp eqVarProof [ATerm "x", CTerm (VInt 5)]]
+        , validateWEMatchHelper
+            [ ProofDef
+                "keepGt"
+                ["x"]
+                [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
+                [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
+                [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
+            , Assign "x" (Val (VInt 5))
+            , ValidationStatement (Rewrite (UserRewrite "eqToGtZero" [ATerm "x"]))
+            , ValidationStatement (Rewrite (UserRewrite "keepGt" [ATerm "x"]))
+            , ValidationStatement (ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)]))
+            ]
+            [FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)]]
+        , validationFailHelper
+            [ AxiomDef
+                "guarded"
+                ["x"]
+                [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
+                [ProofAssert (FApp eqVarProof [ATerm "x", CTerm (VInt 1)])]
+            , Assign "x" (Val (VInt 0))
+            , ValidationStatement (Rewrite (UserRewrite "guarded" [ATerm "x"]))
+            ]
+        , validationFailHelper
+            [ Assign "x" (Val (VInt 0))
+            , ValidationStatement (Rewrite (UserRewrite "eqToGtZero" [ATerm "x"]))
+            ]
+        , validationFailHelper
+            [ ProofDef
+                "badProof"
+                ["x"]
+                []
+                [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
+                [ProofAssert (FApp eqVarProof [ATerm "x", CTerm (VInt 0)])]
+            ]
+        , validationFailHelper
+            [ AxiomDef "dupe" ["x"] [] [ProofAssert (FApp eqVarProof [ATerm "x", ATerm "x"])]
+            , ProofDef "dupe" ["x"] [] [ProofAssert (FApp eqVarProof [ATerm "x", ATerm "x"])] [ProofAssert (FApp eqVarProof [ATerm "x", ATerm "x"])]
+            ]
+        , validationFailHelper [Assign "x" (Val (VInt 5)), ValidationStatement (Rewrite (UserRewrite "missing" [ATerm "x"]))]
         ]
 
 -- Proof engine tests
@@ -546,7 +641,7 @@ parseValReturningStmtHelper stmtStr expVar expected =
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
             Right (Block stmts) -> doTrace3 (show stmts) $
                 case valReturningBlock (initVStateWStatements stmts) of
-                    Ok (VState (VScopeState _ proofs _ _) _ _ _, Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
+                    Ok (VState (VScopeState _ proofs _ _) _ _ _ _, Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
                     Ok (_, Nothing) -> Just "No value returned"
                     Error e -> Just $ "Validation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
@@ -866,6 +961,7 @@ main = do
                 , testValidateWithExpectedMatch
                 , testValidateWithExpectedMismatch
                 , testValidationFail
+                , testUserRewriteValidation
                 , testProofEngine
                 , testParseVal
                 , testParseValFail

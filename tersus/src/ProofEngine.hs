@@ -28,8 +28,7 @@ data EngineRewriteRule
     = EngineRefl
     | EngineEval Iota
     | EngineEvalAll
-    | EngineEqToLtPlus1 Iota Iota Iota
-    | EngineEqToGtZero Iota
+    | EngineCheckGtZero IotaProof
     deriving (Show, Eq)
 
 emptyProofContext :: ProofContext
@@ -58,10 +57,19 @@ applyRewrite evalBuiltin (EngineEval iota) context =
     Ok (insertProofs (evalIota evalBuiltin iota context) context)
 applyRewrite evalBuiltin EngineEvalAll context =
     Ok (insertProofs (evalAll evalBuiltin context) context)
-applyRewrite evalBuiltin (EngineEqToLtPlus1 iota resultIota oneIota) context =
-    Ok (deriveEqToLtPlus1 evalBuiltin iota resultIota oneIota context)
-applyRewrite _ (EngineEqToGtZero iota) context =
-    deriveEqToGtZero iota context
+applyRewrite evalBuiltin (EngineCheckGtZero proof) context =
+    checkGtZero evalBuiltin proof context
+
+checkGtZero :: BuiltinEvaluator -> IotaProof -> ProofContext -> Result ProofContext String
+checkGtZero evalBuiltin proof context =
+    let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]
+     in if entails gtZeroProof context
+            then Ok (insertProofs [gtZeroProof] context)
+            else case evalProofTerm evalBuiltin proof context of
+                Just (VInt num) | num > 0 -> Ok (deriveRefl (insertProofs [gtZeroProof] context))
+                Just (VInt _) -> Error "Proof term is not greater than 0"
+                Just _ -> Error "Proof term is not an int"
+                Nothing -> Error "Proof term lacks concrete definition and no equivalent proof exists"
 
 deriveRefl :: ProofContext -> ProofContext
 deriveRefl context@(ProofContext facts) =
@@ -69,39 +77,6 @@ deriveRefl context@(ProofContext facts) =
         reversedEqFacts = map reverseEqProof eqFacts
         derivedFacts = reflectProofsByProofs facts (eqFacts ++ reversedEqFacts)
      in insertProofs derivedFacts context
-
-deriveEqToLtPlus1 :: BuiltinEvaluator -> Iota -> Iota -> Iota -> ProofContext -> ProofContext
-deriveEqToLtPlus1 evalBuiltin iota resultIota oneIota context =
-    let newFacts =
-            [ FApp (CTerm (builtinFunct (Rel Lt))) [ATerm iota, ATerm resultIota]
-            , FApp eqProof [ATerm resultIota, FApp (CTerm (builtinFunct Plus)) [ATerm iota, ATerm oneIota]]
-            , FApp eqProof [ATerm oneIota, CTerm $ VInt 1]
-            ]
-        withNewFacts = insertProofs newFacts context
-        withEvaledFacts = insertProofs (evalIota evalBuiltin resultIota withNewFacts) withNewFacts
-     in deriveRefl withEvaledFacts
-
-deriveEqToGtZero :: Iota -> ProofContext -> Result ProofContext String
-deriveEqToGtZero iota context =
-    case validateGtZero iota context of
-        Ok () ->
-            let gtZeroProof = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]
-                withGtZeroProof = insertProofs [gtZeroProof] context
-             in Ok (deriveRefl withGtZeroProof)
-        Error e -> Error e
-
-validateGtZero :: Iota -> ProofContext -> Result () String
-validateGtZero iota context =
-    case concreteValueOfIota iota context of
-        Nothing ->
-            if entails (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iota, CTerm (VInt 0)]) context
-                then Ok ()
-                else Error "Iota lacks concrete definition and no equivalent proof exists"
-        Just (VInt num) ->
-            if num > 0
-                then Ok ()
-                else Error "Iota is not greater than 0"
-        Just _ -> Error "Iota is not an int"
 
 evalAll :: BuiltinEvaluator -> ProofContext -> [IotaProof]
 evalAll evalBuiltin context@(ProofContext facts) =
@@ -130,34 +105,40 @@ evalProof
                 ]
         )
         | eqFunct == eqProof =
-            case collectIotaTerms args of
-                Just iotas ->
-                    case iotasToValues iotas context of
-                        Just values ->
-                            case evalBuiltin funct values of
-                                Ok val -> [FApp eqFunct [ATerm iota, CTerm val]]
-                                Error _ -> []
-                        Nothing -> []
+            case proofArgsToValues args context of
+                Just values ->
+                    case evalBuiltin funct values of
+                        Ok val -> [FApp eqFunct [ATerm iota, CTerm val]]
+                        Error _ -> []
                 Nothing -> []
 evalProof _ _ _ = []
 
-collectIotaTerms :: [IotaProof] -> Maybe [Iota]
-collectIotaTerms [] = Just []
-collectIotaTerms (ATerm iota : proofs) =
-    case collectIotaTerms proofs of
-        Just iotas -> Just (iota : iotas)
-        Nothing -> Nothing
-collectIotaTerms _ = Nothing
-
-iotasToValues :: [Iota] -> ProofContext -> Maybe [Value]
-iotasToValues [] _ = Just []
-iotasToValues (iota : iotas) context =
+proofArgsToValues :: [IotaProof] -> ProofContext -> Maybe [Value]
+proofArgsToValues [] _ = Just []
+proofArgsToValues (ATerm iota : proofs) context =
     case concreteValueOfIota iota context of
         Just value ->
-            case iotasToValues iotas context of
+            case proofArgsToValues proofs context of
                 Just values -> Just (value : values)
                 Nothing -> Nothing
         Nothing -> Nothing
+proofArgsToValues (CTerm value : proofs) context =
+    case proofArgsToValues proofs context of
+        Just values -> Just (value : values)
+        Nothing -> Nothing
+proofArgsToValues _ _ = Nothing
+
+evalProofTerm :: BuiltinEvaluator -> IotaProof -> ProofContext -> Maybe Value
+evalProofTerm _ (CTerm value) _ = Just value
+evalProofTerm _ (ATerm iota) context = concreteValueOfIota iota context
+evalProofTerm evalBuiltin (FApp (CTerm (VFunct _ _ _ (BuiltinFunct funct) _)) args) context =
+    case proofArgsToValues args context of
+        Just values ->
+            case evalBuiltin funct values of
+                Ok value -> Just value
+                Error _ -> Nothing
+        Nothing -> Nothing
+evalProofTerm _ _ _ = Nothing
 
 concreteValueOfIota :: Iota -> ProofContext -> Maybe Value
 concreteValueOfIota iota (ProofContext facts) =
