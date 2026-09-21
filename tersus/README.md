@@ -8,7 +8,7 @@ The Haskell implementation has two main execution paths after parsing:
 
 1. `Parse.parseStatementBlock` converts source text into the AST types in `TersusTypes`. `//` line comments are skipped as whitespace.
 2. `Proof.evaluate` executes statements concretely with a `State` containing lexical scopes plus the standard library value context. Assignments evaluate expressions and update bindings, `return` writes the top-level return slot and ends the program or function body (the remaining statements are dropped), blocks push a child scope, function calls run a native body or builtin (and must pass exactly as many arguments as the function has parameters), and validation statements are skipped. `if` runs the chosen branch as a block, and `while` runs its body as a block and then puts itself back at the front of the remaining statements until the condition is false. Nothing bounds evaluation, so a loop that never ends never returns.
-3. `Proof.validate` symbolically validates the same statements with a `VState`. Runtime values are represented by fresh iotas, assignments add equality proofs, function calls check input contracts and instantiate exported output proofs, `axiom` and `proof` declarations register validation-only rewrite rules, `affirm` asks the internal `ProofEngine` whether a proof is entailed by the current context, and `rewrite` applies primitive or user-defined rules to expand that context. `if` validates each branch from the state after the condition with the condition (or its negation) assumed, then joins them by keeping only the facts both branches establish about the variables they assign. `while` checks its invariant on entry, treats the variables its body assigns as unknown, checks the invariant is preserved, and afterwards assumes the invariant and the negated condition. An `if` with a `return` in a branch cannot be joined, since the statements after it do not run on the path that returned. Instead each branch is validated followed by the rest of the program (`valReturningIf`), and the two ends are joined by keeping the facts both establish and merging the return values (`joinReturnPaths`). A `while` whose body contains `return` works the same way (`valReturningWhile`): the body is validated as a path that ends in a `LoopEnd` statement checking the invariant (such paths only go back to the condition, so joins ignore them), and the program after the loop is the other path, starting from the state where the condition is false.
+3. `Proof.validate` symbolically validates the same statements with a `VState`. Runtime values are represented by fresh iotas, assignments add equality proofs, function calls check input contracts and instantiate exported output proofs (tied to the caller's variables by equalities between each argument's fresh iota and the variable, so a contract like `push`'s `size(return) = size(list) + 1` is usable), `axiom` and `proof` declarations register validation-only rewrite rules, `affirm` asks the internal `ProofEngine` whether a proof is entailed by the current context, and `rewrite` applies primitive or user-defined rules to expand that context. `if` validates each branch from the state after the condition with the condition (or its negation) assumed, then joins them by keeping only the facts both branches establish about the variables they assign. `while` checks its invariant on entry, treats the variables its body assigns as unknown, checks the invariant is preserved, and afterwards assumes the invariant and the negated condition. An `if` with a `return` in a branch cannot be joined, since the statements after it do not run on the path that returned. Instead each branch is validated followed by the rest of the program (`valReturningIf`), and the two ends are joined by keeping the facts both establish and merging the return values (`joinReturnPaths`). A `while` whose body contains `return` works the same way (`valReturningWhile`): the body is validated as a path that ends in a `LoopEnd` statement checking the invariant (such paths only go back to the condition, so joins ignore them), and the program after the loop is the other path, starting from the state where the condition is false.
 
 The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cli.hs`):
 
@@ -18,15 +18,14 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 - Errors go to standard error, prefixed with `Parse error:`, `Validation failed:` or `Evaluation failed:`. The exit code is 1 for a failed program and 2 for bad command-line usage.
 
 Next steps, roughly in priority order:
-1. Control flow
-    `if`/`else`, `while` and early-exit `return` are done (see LANGUAGE.md). Branches are validated under the condition and joined by keeping only the facts both establish; loops are validated by a contract-style invariant, `while cond [{ invariant }] { body }`; `return` in an `if` branch or a `while` body (guard clauses such as `if n < 1 { return 0; }`, search loops) is validated path by path
-    Out of scope: termination. Loops are checked for partial correctness only, which is enough for the safe-access goals, and there is no step limit on evaluation
-    The parallel-iteration and linked-list motivating cases (item 10) also need indexable/updatable data (see item 2)
-2. List element access and construction
-    `get(list, i)` with an input contract requiring `i >= 0` and `i < size(list)`, following the `first`/`last` pattern
-    `push(list, x)` and an empty-list builtin, with output contracts on `size`, so a function can build a result list
-    Unlocks the parallel-iteration motivating case: a function taking two lists of the same length (`affirm size(a) = size(b)`) and summing each element pair in an index loop, with a loop invariant on `i`
-    Write the example with trusted `axiom` rules for the index arithmetic first (as in `examples/loops.tersus`), to see whether validator arithmetic (item 8) is needed before it is readable
+1. List element updates
+    `get` and `push` are done (see LANGUAGE.md), and the parallel-iteration case is `examples/parallel_sum.tersus`. There is still no way to replace an element of a list, which the linked-list motivating case (item 10) needs
+    Reading the two list examples, validator arithmetic (item 8) is what they need most: every index counter needs trusted axioms for `i >= 0`, `i <= n` and `i = n` after the loop, and `size(out) = i` needs `rewrite refl` in the loop, which is slow
+2. Element-level facts about lists
+    Contracts can only state sizes today: `push` and `get` say nothing about elements, and there is no way to say something about every index, so `pairSums` (examples/parallel_sum.tersus) cannot state that each result element is the sum of the corresponding pair
+    Give `push` output facts (`get(return, size(list)) = x`, and `get(return, j) = get(list, j)` for `j < size(list)`)
+    Some way to state a fact for every index, usable in output contracts and loop invariants (design left open)
+    Carrying such an invariant through a loop needs index arithmetic (item 8)
 3. Let user functions call other user functions
     Function bodies currently see only their arguments and the standard library, and argument passing is by value (see LANGUAGE.md)
     Decide the closure/scoping rules before adding mutable data, since by-value vs by-reference only becomes observable then
@@ -44,7 +43,7 @@ Next steps, roughly in priority order:
 9. Widen operators and literals
     `*` and `/` (the parser has a TODO for `*`), and negative literals
 10. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
-    Safe access is covered by examples/safe_access.tersus
+    Safe access is covered by examples/safe_access.tersus, and parallel iteration of two lists by examples/parallel_sum.tersus
 11. Distinguish between proof only vars and regular vars
 12. Introduce a small type layer
     Cover ints, bools, int lists, and functions to catch builtin/type misuse earlier

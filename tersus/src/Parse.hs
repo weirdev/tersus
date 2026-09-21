@@ -250,6 +250,8 @@ functionProof = do
         "size" -> return Size
         "first" -> return First
         "last" -> return Last
+        "get" -> return Get
+        "push" -> return Push
         _ -> fail "Functions in proofs only support builtins for now"
     void (char '(')
     whitespace
@@ -282,6 +284,7 @@ rwRule = do
         "eval" -> parseUnaryVarRule Eval
         "evalAll" -> parseNullaryRule EvalAll
         "checkGtZero" -> CheckGtZero <$> proof
+        "checkRel" -> CheckRel <$> proof
         _ -> UserRewrite ruleStr <$> many proof
 
 parseReflRule :: Parser RwRule

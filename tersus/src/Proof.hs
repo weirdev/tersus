@@ -199,7 +199,9 @@ valReturnStatement state expr =
                     Ok (niota, state') ->
                         case valExpression state' niota expr of
                             Ok (exprState, nproofs) ->
-                                let refledNProofs = reflProofsByProofs nproofs proofs
+                                let -- nproofs are also equality sources: they link the arguments of a returned call to the
+                                    -- caller's variables, which the call's output contract needs
+                                    refledNProofs = filter (not . isTrivialEq) (reflProofsByProofs nproofs (proofs ++ nproofs))
                                     visibleIotas = niota : map snd (toList (vVisibleVars exprState))
                                     state'' = vTopLevelScope exprState
                                  in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst visibleIotas) (nproofs ++ refledNProofs))
@@ -562,6 +564,7 @@ valRewrite state (Refl varProof) = rewriteRefl state varProof
 valRewrite state (Eval var) = rewriteEval state var
 valRewrite state EvalAll = rewriteEvalAll state
 valRewrite state (CheckGtZero varProof) = rewriteCheckGtZero state varProof
+valRewrite state (CheckRel varProof) = rewriteCheckRel state varProof
 valRewrite state (UserRewrite name args) = rewriteUserRule state name args
 
 applyEngineRewrite :: VState -> Engine.EngineRewriteRule -> Result VState String
@@ -594,6 +597,12 @@ rewriteCheckGtZero :: VState -> VariableProof -> Result VState String
 rewriteCheckGtZero state varProof =
     case varProofToIotaProof varProof state of
         Ok iotaProof -> applyEngineRewrite state (Engine.EngineCheckGtZero iotaProof)
+        Error e -> Error e
+
+rewriteCheckRel :: VState -> VariableProof -> Result VState String
+rewriteCheckRel state varProof =
+    case varProofToIotaProof varProof state of
+        Ok iotaProof -> applyEngineRewrite state (Engine.EngineCheckRel iotaProof)
         Error e -> Error e
 
 rewriteUserRule :: VState -> Variable -> [VariableProof] -> Result VState String
@@ -657,6 +666,7 @@ substituteRwRule bindings (Refl varproof) = Refl (substituteVariableProof bindin
 substituteRwRule _ (Eval var) = Eval var
 substituteRwRule _ EvalAll = EvalAll
 substituteRwRule bindings (CheckGtZero varproof) = CheckGtZero (substituteVariableProof bindings varproof)
+substituteRwRule bindings (CheckRel varproof) = CheckRel (substituteVariableProof bindings varproof)
 substituteRwRule bindings (UserRewrite name args) = UserRewrite name (map (substituteVariableProof bindings) args)
 
 substituteVariableProof :: Map Variable VariableProof -> VariableProof -> VariableProof
@@ -733,13 +743,26 @@ valExpressionVar state iota var =
 valExpressionFunction :: VState -> Iota -> Expression -> [Expression] -> Result (VState, [IotaProof]) String
 valExpressionFunction (VState scope iotaCtx proofCtx iotaseq ruleCtx) iota fnexpr argexprs =
     case valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq ruleCtx) fnexpr argexprs iota of
-        Ok (nextState, _flatfinputproofs, functProofs, _niotas) ->
+        Ok (nextState, flatInputProofs, functProofs, argIotas) ->
             case varProofToIotaProof (exprToProof (F fnexpr argexprs)) nextState of
                 Ok fnProof ->
                     let nonEvalProof = FApp eqProof [ATerm iota, fnProof]
-                     in Ok (nextState, nonEvalProof : functProofs)
+                        -- Only the direct equalities between an argument's fresh iota and another
+                        -- iota are kept: the reflected copies of every other fact would bloat the context.
+                        argLinks = filter (isArgLink argIotas) flatInputProofs
+                     in -- The links tie each argument's fresh iota to the caller's variable, which output
+                        -- contracts that mention the arguments (size(return) = size(list) + 1) need
+                        Ok (nextState, nonEvalProof : functProofs ++ argLinks)
                 Error e -> Error e
         Error e -> Error e
+
+isTrivialEq :: IotaProof -> Bool
+isTrivialEq (FApp funct [lhs, rhs]) = funct == eqProof && lhs == rhs
+isTrivialEq _ = False
+
+isArgLink :: [Iota] -> IotaProof -> Bool
+isArgLink argIotas (FApp funct [ATerm lhs, ATerm rhs]) = funct == eqProof && (lhs `elem` argIotas || rhs `elem` argIotas)
+isArgLink _ _ = False
 
 validateValue :: VState -> Value -> Result Value String
 validateValue state val = case val of
@@ -894,6 +917,12 @@ evalBuiltinFunct First _ = Error "First only valid for IntList"
 evalBuiltinFunct Last [VIntList []] = Error "Last requires a non-empty IntList"
 evalBuiltinFunct Last [VIntList l] = Ok $ VInt (last l)
 evalBuiltinFunct Last _ = Error "Last only valid for IntList"
+evalBuiltinFunct Get [VIntList l, VInt i]
+    | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
+    | otherwise = Ok $ VInt (l !! fromIntegral i)
+evalBuiltinFunct Get _ = Error "Get only valid for an IntList and an int"
+evalBuiltinFunct Push [VIntList l, VInt x] = Ok $ VIntList (l ++ [x])
+evalBuiltinFunct Push _ = Error "Push only valid for an IntList and an int"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
 evalBuiltinFunct Minus _ = Error "Plus only valid for two ints"
 evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)

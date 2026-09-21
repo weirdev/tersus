@@ -3,7 +3,7 @@ module TersusTypes where
 import Data.Map (Map)
 
 type Variable = String
-data BuiltinFunct = Size | First | Last | Plus | Minus | Rel Rel deriving (Show, Eq)
+data BuiltinFunct = Size | First | Last | Get | Push | Plus | Minus | Rel Rel deriving (Show, Eq)
 
 data FunctBody = NativeFunct [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq)
 
@@ -70,6 +70,7 @@ data RwRule
     | Eval Variable
     | EvalAll
     | CheckGtZero VariableProof
+    | CheckRel VariableProof
     | UserRewrite Variable [VariableProof]
     deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 

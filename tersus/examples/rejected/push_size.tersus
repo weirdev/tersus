@@ -1,0 +1,5 @@
+// push adds one element, so the result is not the same size as the input.
+fn append(lst, x) [{ }] [{ affirm size(return) = size(lst); }] {
+    return push(lst, x);
+};
+return size(append([1, 2], 3));

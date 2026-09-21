@@ -1,0 +1,19 @@
+// dot walks b with an index that is only known to be inside a. Without a contract that says
+// size(a) = size(b), get(b, i) might read past the end of b.
+axiom startsAtZero(i) [{ affirm i = 0; }] [{ affirm i >= 0; }];
+axiom staysNonNegative(i) [{ affirm i >= 0; }] [{ affirm (i + 1) >= 0; }];
+
+fn dot(a, b) {
+    n = size(a);
+    i = 0;
+    total = 0;
+    rewrite startsAtZero i;
+    while i < n [{ affirm i >= 0; }] {
+        total = total + (get(a, i) + get(b, i));
+        rewrite staysNonNegative i;
+        i = i + 1;
+    };
+    return total;
+};
+
+return dot([1, 2, 3], [10, 20, 30]);

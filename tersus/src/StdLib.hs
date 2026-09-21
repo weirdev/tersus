@@ -37,6 +37,33 @@ builtinFunct Last =
         []
         (BuiltinFunct Last)
         []
+-- get requires a valid index. The contract is checked with checkRel so that a concrete
+-- list and index need no proof from the caller, while symbolic ones must already have
+-- 0 <= index < size(list) in the proof context.
+builtinFunct Get =
+    VFunct
+        ["list", "index"]
+        [ Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)]))
+        , Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]]))
+        , ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)])
+        , ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]])
+        ]
+        []
+        (BuiltinFunct Get)
+        []
+-- push adds an element at the end, so the result is one longer than the input list.
+builtinFunct Push =
+    VFunct
+        ["list", "x"]
+        []
+        []
+        (BuiltinFunct Push)
+        [ FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
+            , FApp (CTerm (builtinFunct Plus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)]
+            ]
+        ]
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
@@ -47,6 +74,8 @@ stdLibCtx =
         [ ("size", builtinFunct Size)
         , ("first", builtinFunct First)
         , ("last", builtinFunct Last)
+        , ("get", builtinFunct Get)
+        , ("push", builtinFunct Push)
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
         , ("=", builtinFunct (Rel Eq))

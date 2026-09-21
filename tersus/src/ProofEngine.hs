@@ -29,6 +29,7 @@ data EngineRewriteRule
     | EngineEval Iota
     | EngineEvalAll
     | EngineCheckGtZero IotaProof
+    | EngineCheckRel IotaProof
     deriving (Show, Eq)
 
 emptyProofContext :: ProofContext
@@ -59,6 +60,23 @@ applyRewrite evalBuiltin EngineEvalAll context =
     Ok (insertProofs (evalAll evalBuiltin context) context)
 applyRewrite evalBuiltin (EngineCheckGtZero proof) context =
     checkGtZero evalBuiltin proof context
+applyRewrite evalBuiltin (EngineCheckRel proof) context =
+    checkRel evalBuiltin proof context
+
+-- Succeeds, adding the relation as a fact, when it is already entailed or when both sides
+-- have concrete values and the relation holds between them. Fails otherwise.
+checkRel :: BuiltinEvaluator -> IotaProof -> ProofContext -> Result ProofContext String
+checkRel evalBuiltin proof@(FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs]) context =
+    if entails proof context
+        then Ok (insertProofs [proof] context)
+        else case (evalProofTerm evalBuiltin lhs context, evalProofTerm evalBuiltin rhs context) of
+            (Just l, Just r) ->
+                case evalBuiltin (Rel rel) [l, r] of
+                    Ok (VBool True) -> Ok (deriveRefl (insertProofs [proof] context))
+                    Ok _ -> Error "Relation does not hold"
+                    Error e -> Error e
+            _ -> Error "Relation lacks a proof and its terms lack concrete definitions"
+checkRel _ _ _ = Error "checkRel requires a relation such as x < y"
 
 checkGtZero :: BuiltinEvaluator -> IotaProof -> ProofContext -> Result ProofContext String
 checkGtZero evalBuiltin proof context =

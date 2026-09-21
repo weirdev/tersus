@@ -1,0 +1,44 @@
+// Parallel iteration: pairSums walks two lists of the same length with one index and builds
+// a list of the sums of each element pair. get is only legal for 0 <= index < size(list), so
+// the validator has to show that for both lists. The loop condition gives index < size(a), and
+// the input contract (size(a) = size(b)) carries it over to b. push's output contract lets the
+// invariant track the size of the result, which becomes the function's output contract.
+// The validator does no arithmetic, so the counter facts come from trusted axioms.
+axiom startsAtZero(i, l) [{ affirm i = 0; }] [{ affirm i >= 0; affirm i <= size(l); }];
+axiom step(i, n) [{ affirm i >= 0; affirm i < n; }] [{ affirm (i + 1) >= 0; affirm (i + 1) <= n; }];
+axiom endsAtBound(i, n) [{ affirm i <= n; affirm i >= n; }] [{ affirm i = n; }];
+
+fn pairSums(a, b) [{
+    affirm size(a) = size(b);
+}] [{
+    affirm size(return) = size(a);
+}] {
+    n = size(a);
+    i = 0;
+    out = [];
+    rewrite startsAtZero i a;
+    define s0 = size(out);
+    rewrite refl s0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; }] {
+        out = push(out, get(a, i) + get(b, i));
+        rewrite step i n;
+        i = i + 1;
+        rewrite refl i;
+    };
+    rewrite endsAtBound i n;
+    return out;
+};
+
+x = [1, 2, 3];
+y = [10, 20, 30];
+// The call site has to show the contract: both lists have three elements.
+define nx = size(x);
+define ny = size(y);
+rewrite refl nx;
+affirm size(x) = size(y);
+sums = pairSums(x, y);
+// The output contract says the result is as long as the inputs.
+define ns = size(sums);
+rewrite refl ns;
+affirm size(sums) = size(x);
+return sums;

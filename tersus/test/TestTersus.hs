@@ -200,6 +200,12 @@ testParseRewriteRules =
         , case parseStatement "rewrite checkGtZero x" of
             Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> testAssertEq parsed (ValidationStatement (Rewrite (CheckGtZero (ATerm "x"))))
+        , case parseStatement "rewrite checkRel i < 3" of
+            Left err -> Just $ "Parse failed: " ++ show err
+            Right parsed ->
+                testAssertEq
+                    parsed
+                    (ValidationStatement (Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "i", CTerm (VInt 3)]))))
         ]
 
 testParseUserRuleDefinitions :: Test
@@ -1104,6 +1110,12 @@ testExamples =
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
+        , testExampleFile "examples/parallel_sum.tersus" (ExpectReturn (VIntList [11, 22, 33]))
+        , testExampleFile "examples/build_list.tersus" (ExpectReturn (VIntList [2, 4, 6]))
+        , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
+        , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
+        , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
+        , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/invariant_entry.tersus" (ExpectRejected "Loop invariant does not hold on entry")
         , testExampleFile "examples/rejected/invariant_preserved.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
@@ -1467,6 +1479,53 @@ testEarlyReturn =
             "fn f(n) { i = 0; while i < 2 { j = 0; while j < 2 { if j > n { return j; }; j = j + 1; }; i = i + 1; }; return 0; }; x = f(1);"
         ]
 
+testLists :: Test
+testLists =
+    testCaseSeq
+        "testLists"
+        [ -- Evaluation
+          parseEvalProgramHelper "return get([5, 6, 7], 0);" (Just (VInt 5))
+        , parseEvalProgramHelper "a = [5, 6, 7]; i = 1 + 1; return get(a, i);" (Just (VInt 7))
+        , parseEvalProgramHelper "return push([1, 2], 3);" (Just (VIntList [1, 2, 3]))
+        , parseEvalProgramHelper "return push([], 4);" (Just (VIntList [4]))
+        , parseEvalProgramHelper "return get(push(push([], 4), 9), 1);" (Just (VInt 9))
+        , parseEvalProgramHelper "a = [1]; b = push(a, 2); return size(a) + size(b);" (Just (VInt 3))
+        , parseEvalFailStmtHelper "{ return get([5], 1); }" "Get index out of range"
+        , parseEvalFailStmtHelper "{ return get([5], 0 - 1); }" "Get index out of range"
+        , parseEvalFailStmtHelper "{ return push([1], [2]); }" "Push only valid"
+        , parseEvalFailStmtHelper "{ return get(1, 0); }" "Get only valid"
+        , -- Validation: a concrete list and index need no proof from the caller
+          parseValidProgramHelper "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;"
+        , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"
+        , -- A symbolic index must be shown by the function's contract
+          parseValidProgramHelper
+            "fn at(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; return at([4, 5], 1);"
+        , -- push's output contract reaches a caller that only knows the list symbolically
+          parseValidProgramHelper
+            "fn f(l) [{ }] [{ affirm size(return) = (size(l) + 1); }] { return push(l, 5); };"
+        , parseValidProgramHelper
+            "fn f(l) [{ }] [{ affirm size(return) = (size(l) + 1); }] { r = push(l, 5); return r; };"
+        , -- Rejected: out of range, unproven, or a wrong size claim
+          parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 3);" "Relation does not hold"
+        , parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 0 - 1);" "Relation does not hold"
+        , parseValidateFailProgramHelper "a = []; x = get(a, 0);" "Relation does not hold"
+        , parseValidateFailProgramHelper "fn at(l, i) { return get(l, i); };" "Relation lacks a proof"
+        , parseValidateFailProgramHelper
+            "fn at(l, i) [{ affirm i >= 0; }] [{ }] { return get(l, i); };"
+            "Relation lacks a proof"
+        , parseValidateFailProgramHelper
+            "fn f(l) [{ }] [{ affirm size(return) = size(l); }] { return push(l, 5); };"
+            "Assertion failed"
+        , parseValidateFailProgramHelper
+            "fn f(l) { r = push(l, 5); affirm size(r) = size(l); return r; };"
+            "Assertion failed"
+        , -- checkRel: adds a relation only when it holds, and refuses anything else
+          parseValidProgramHelper "x = 2; rewrite checkRel x < 3; affirm x < 3;"
+        , parseValidateFailProgramHelper "x = 5; rewrite checkRel x < 3;" "Relation does not hold"
+        , parseValidateFailProgramHelper "fn f(x) { rewrite checkRel x < 3; return 1; };" "Relation lacks a proof"
+        , parseValidateFailProgramHelper "x = 5; rewrite checkRel x;" "requires a relation"
+        ]
+
 testControlFlow :: Test
 testControlFlow =
     TestList
@@ -1494,6 +1553,7 @@ main = do
                 , testExamples
                 , testCli
                 , testControlFlow
+                , testLists
                 ]
     putStrLn $
         "Summary: "

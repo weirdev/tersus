@@ -78,10 +78,34 @@ The standard library seeds these builtin functions:
 - `size(list)`: returns the length of an integer list.
 - `first(list)`: returns the first element of a non-empty integer list.
 - `last(list)`: returns the last element of a non-empty integer list.
+- `get(list, index)`: returns the element at `index`, counting from 0. The index must satisfy `0 <= index < size(list)`.
+- `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
 - `+` and `-`: integer arithmetic.
 - `=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
 `first` and `last` have builtin input contracts requiring the list size to be greater than zero. Their current validation proof relies on the standard-library `eqToGtZero` axiom, whose input contract is checked by the primitive `checkGtZero` rewrite. Concrete evaluation still rejects empty lists and wrong argument types.
+
+`get` has a builtin input contract requiring `index >= 0` and `index < size(list)`. It is checked with the primitive `checkRel` rewrite, so a call with a concrete list and index needs no proof, while a symbolic index must already be provable at the call site, usually from the enclosing function's contract or a loop invariant:
+
+```tersus
+a = [5, 6, 7];
+x = get(a, 2);          // fine: 0 <= 2 < 3
+// y = get(a, 3);       // rejected: 3 < 3 does not hold
+
+// The contract has to show both bounds, since the body can only assume them.
+fn at(lst, i) [{
+    rewrite checkRel i >= 0;
+    rewrite checkRel i < size(lst);
+    affirm i >= 0;
+    affirm i < size(lst);
+}] [{ }] {
+    return get(lst, i);
+};
+```
+
+`push` has a builtin output contract, `size(return) = size(list) + 1`, which is instantiated at every call. That is what lets a function that builds a list state its size in its own output contract (see `examples/build_list.tersus`). An empty list is the literal `[]`.
+
+Lists can only be built by `push` and read by `get`, `first` and `last`. There is no way to update an element in place, and lists hold integers only.
 
 ## Statements
 
@@ -366,6 +390,7 @@ Primitive rewrite rules:
 - `rewrite eval <var>`: evaluates builtin-function proofs related to a variable when concrete inputs are known.
 - `rewrite evalAll`: attempts builtin evaluation for all available evaluable proofs.
 - `rewrite checkGtZero <proof>`: validates and inserts `<proof> > 0` when that proof is already entailed or when the proof term has a concrete positive integer value.
+- `rewrite checkRel <relation>`: validates and inserts a relation such as `i < size(l)` when it is already entailed or when both sides have concrete values and the relation holds between them. It fails otherwise. `get`'s contract uses it.
 
 The standard library also provides trusted axiom rules:
 
@@ -460,7 +485,9 @@ affirm s > 0;
 - No `for` loops, `break` or `continue`.
 - Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` (and validation of a call with known arguments, which evaluates it) will not return.
 - No declarations separate from assignment.
-- No strings, floats, records, or generic lists.
+- No strings, floats, records, or generic lists. Integer lists can be read with `get` and extended with `push`, but not updated in place.
+- The validator has no arithmetic, so a counting loop over a list needs trusted `axiom` rules for its index facts (`i >= 0` after `i = i + 1`, and so on). `examples/parallel_sum.tersus` and `examples/build_list.tersus` show the shape.
+- `rewrite refl` gets slow as the number of known facts grows (a `refl` inside a loop body took over a minute in one list-building program), so use it sparingly inside loops.
 - No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
 - The CLI runs one file at a time and has no REPL or multi-file programs.

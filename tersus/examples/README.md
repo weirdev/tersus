@@ -29,6 +29,8 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 | `loops.tersus` | A `while` loop with an invariant, using trusted axioms for the arithmetic | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
+| `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes and the result's size stated in the function's contract | returns `[11, 22, 33]` |
+| `build_list.tersus` | Building a list with `push` in a loop, with the result's size stated in an output contract | returns `[2, 4, 6]` |
 | `early_return.tersus` | Guard clauses: `return` inside an `if` ends the function, and the rest is validated under the guard | returns `104` |
 
 ### The safe-access pattern
@@ -75,6 +77,10 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/loop_return_invariant.tersus` | A loop that returns in one case but increments `i` without re-establishing the invariant in the other |
 | `rejected/loop_missing_return.tersus` | A function whose loop can end without reaching its `return`, with nothing returning after the loop |
 | `rejected/missing_return.tersus` | A function whose `if` returns in one case and reaches the end without a return value in the other |
+| `rejected/get_out_of_range.tersus` | `get(a, 3)` on a three-element list: `3 < size(a)` does not hold |
+| `rejected/get_unproven_index.tersus` | A function calls `get(lst, i)` without any contract on `i`, so nothing proves it is in range |
+| `rejected/parallel_length.tersus` | A `dot` function indexes `b` with a counter bounded by `size(a)`, and no contract says the sizes match |
+| `rejected/push_size.tersus` | An output contract claims `push` leaves the size unchanged |
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
 | `rejected/loop_stale_fact.tersus` | `affirm i = 0` after a loop that changes `i`: earlier facts about `i` are not carried out of the loop |
@@ -86,4 +92,6 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 - User functions cannot call other user functions yet, because function bodies only see their arguments and the standard library.
 - A variable first assigned inside an `if` branch is local to that branch, so declare it before the `if` (`r = fallback;`) if you want it afterwards.
 - Loop invariants about counters need arithmetic facts, and the validator has none of its own, so `loops.tersus` supplies them with trusted `axiom` rules.
-- There are no lists you can index or update yet, so the parallel-iteration and linked-list motivating cases in the main README are still not expressible here.
+- Lists can be read with `get` and extended with `push`, but not updated in place, so the linked-list motivating case in the main README is still not expressible here.
+- `get` needs `0 <= index < size(list)` proved at the call. Concrete lists and indexes are checked directly, and a symbolic index needs a contract or loop invariant that says so (`rewrite checkRel` establishes the fact for concrete arguments at the call).
+- Counters in list loops need trusted axioms, because the validator has no arithmetic (`parallel_sum.tersus`, `build_list.tersus`). A `rewrite refl` in a loop body can be slow once many facts are known.

@@ -1,0 +1,27 @@
+// Building a list: doubled returns a new list with every element twice as large. push has an
+// output contract (size(return) = size(list) + 1), which the loop invariant turns into the
+// function's own output contract, size(return) = size(a).
+// The validator does no arithmetic, so the counter facts come from trusted axioms.
+axiom startsAtZero(i, l) [{ affirm i = 0; }] [{ affirm i >= 0; affirm i <= size(l); }];
+axiom step(i, n) [{ affirm i >= 0; affirm i < n; }] [{ affirm (i + 1) >= 0; affirm (i + 1) <= n; }];
+axiom endsAtBound(i, n) [{ affirm i <= n; affirm i >= n; }] [{ affirm i = n; }];
+
+fn doubled(a) [{ }] [{ affirm size(return) = size(a); }] {
+    n = size(a);
+    i = 0;
+    out = [];
+    rewrite startsAtZero i a;
+    define s0 = size(out);
+    rewrite refl s0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; }] {
+        out = push(out, get(a, i) + get(a, i));
+        rewrite step i n;
+        i = i + 1;
+        rewrite refl i;
+    };
+    rewrite endsAtBound i n;
+    return out;
+};
+
+r = doubled([1, 2, 3]);
+return r;

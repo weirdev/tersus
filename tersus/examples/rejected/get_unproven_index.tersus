@@ -1,0 +1,5 @@
+// at is called with any index, so nothing shows that 0 <= i < size(lst) inside it.
+fn at(lst, i) {
+    return get(lst, i);
+};
+return at([5, 6, 7], 1);
