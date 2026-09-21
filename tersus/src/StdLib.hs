@@ -51,7 +51,8 @@ builtinFunct Get =
         []
         (BuiltinFunct Get)
         []
--- push adds an element at the end, so the result is one longer than the input list.
+-- push adds an element at the end, so the result is one longer than the input list and its
+-- last element (at the old size) is x.
 builtinFunct Push =
     VFunct
         ["list", "x"]
@@ -63,9 +64,15 @@ builtinFunct Push =
             [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
             , FApp (CTerm (builtinFunct Plus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)]
             ]
+        , FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ FApp (CTerm (builtinFunct Get)) [ATerm "return", FApp (CTerm (builtinFunct Size)) [ATerm "list"]]
+            , ATerm "x"
+            ]
         ]
 -- set replaces one element, so it needs a valid index like get, and the result has the same
--- size as the input list. The list itself is not changed: the result is a new list.
+-- size as the input list, and x at that index. The list itself is not changed: the result is
+-- a new list. What happens to the other elements is not stated yet.
 builtinFunct Set =
     VFunct
         ["list", "index", "x"]
@@ -80,6 +87,11 @@ builtinFunct Set =
             (CTerm (builtinFunct (Rel Eq)))
             [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
             , FApp (CTerm (builtinFunct Size)) [ATerm "list"]
+            ]
+        , FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ FApp (CTerm (builtinFunct Get)) [ATerm "return", ATerm "index"]
+            , ATerm "x"
             ]
         ]
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []

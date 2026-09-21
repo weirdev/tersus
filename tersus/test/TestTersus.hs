@@ -1154,12 +1154,14 @@ testExamples =
         , testExampleFile "examples/parallel_sum.tersus" (ExpectReturn (VIntList [11, 22, 33]))
         , testExampleFile "examples/build_list.tersus" (ExpectReturn (VIntList [2, 4, 6]))
         , testExampleFile "examples/update_list.tersus" (ExpectReturn (VIntList [101, 102, 103]))
+        , testExampleFile "examples/element_facts.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/set_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/set_size.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/element_wrong.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/invariant_entry.tersus" (ExpectRejected "Loop invariant does not hold on entry")
         , testExampleFile "examples/rejected/invariant_preserved.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
@@ -1563,6 +1565,22 @@ testLists =
           parseValidProgramHelper "a = [5, 6, 7]; b = set(a, 2, 0); affirm size(b) = size(a);"
         , parseValidProgramHelper
             "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = size(l); }] { return set(l, i, 5); };"
+        , -- Element facts: set leaves x at the index and push leaves x at the old size
+          parseValidProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 20;"
+        , parseValidProgramHelper "a = [1, 2, 3]; i = 1; v = 20; b = set(a, i, v); affirm get(b, i) = v;"
+        , parseValidProgramHelper "l = [4, 5]; x = 9; r = push(l, x); define n = size(l); affirm get(r, n) = x;"
+        , parseValidProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 9;"
+        , parseValidProgramHelper
+            "fn f(l, i, x) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = x; }] { return set(l, i, x); }; r = f([1, 2, 3], 1, 7); affirm get(r, 1) = 7;"
+        , parseValidProgramHelper
+            "fn g(l, x) [{ }] [{ affirm get(return, size(l)) = x; }] { return push(l, x); };"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 21;" "Assertion failed"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = 20;" "Assertion failed"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = get(a, 0);" "Assertion failed"
+        , parseValidateFailProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 8;" "Assertion failed"
+        , parseValidateFailProgramHelper
+            "fn f(l, i, x) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = get(l, i); }] { return set(l, i, x); };"
+            "Assertion failed"
         , -- Rejected: out of range, unproven, or a wrong size claim
           parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 3, 0);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 0 - 1, 0);" "Relation does not hold"

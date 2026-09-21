@@ -1,0 +1,10 @@
+// set puts x at the index, so claiming the old element is still there is not provable.
+fn replace(l, i, x) [{
+    rewrite checkRel i >= 0;
+    rewrite checkRel i < size(l);
+    affirm i >= 0;
+    affirm i < size(l);
+}] [{ affirm get(return, i) = get(l, i); }] {
+    return set(l, i, x);
+};
+return get(replace([1, 2, 3], 1, 9), 1);

@@ -200,8 +200,12 @@ valReturnStatement state expr =
                         case valExpression state' niota expr of
                             Ok (exprState, nproofs) ->
                                 let -- nproofs are also equality sources: they link the arguments of a returned call to the
-                                    -- caller's variables, which the call's output contract needs
-                                    refledNProofs = filter (not . isTrivialEq) (reflProofsByProofs nproofs (proofs ++ nproofs))
+                                    -- caller's variables, which the call's output contract needs. Two rounds, because a
+                                    -- fact such as get(return, size(list)) = x needs both list and x replaced.
+                                    eqSources = proofs ++ nproofs
+                                    reflectedOnce = reflProofsByProofs nproofs eqSources
+                                    reflectedTwice = reflProofsByProofs (nproofs ++ reflectedOnce) eqSources
+                                    refledNProofs = filter (not . isTrivialEq) (nub (reflectedOnce ++ reflectedTwice))
                                     visibleIotas = niota : map snd (toList (vVisibleVars exprState))
                                     state'' = vTopLevelScope exprState
                                  in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst visibleIotas) (nproofs ++ refledNProofs))
@@ -749,7 +753,10 @@ valExpressionFunction (VState scope iotaCtx proofCtx iotaseq ruleCtx) iota fnexp
                     let nonEvalProof = FApp eqProof [ATerm iota, fnProof]
                         -- Only the direct equalities between an argument's fresh iota and another
                         -- iota are kept: the reflected copies of every other fact would bloat the context.
-                        argLinks = filter (isArgLink argIotas) flatInputProofs
+                        -- The exception is an argument that is a literal, when the callee's output proofs
+                        -- mention it: set(a, i, 20) leaves get(return, i) = x, and x is 20.
+                        outputIotas = concatMap proofIotas functProofs
+                        argLinks = filter (\p -> isArgLink argIotas p || isLiteralArgLink outputIotas argIotas p) flatInputProofs
                      in -- The links tie each argument's fresh iota to the caller's variable, which output
                         -- contracts that mention the arguments (size(return) = size(list) + 1) need
                         Ok (nextState, nonEvalProof : functProofs ++ argLinks)
@@ -760,9 +767,17 @@ isTrivialEq :: IotaProof -> Bool
 isTrivialEq (FApp funct [lhs, rhs]) = funct == eqProof && lhs == rhs
 isTrivialEq _ = False
 
+-- An equality between an argument's fresh iota and another iota
 isArgLink :: [Iota] -> IotaProof -> Bool
 isArgLink argIotas (FApp funct [ATerm lhs, ATerm rhs]) = funct == eqProof && (lhs `elem` argIotas || rhs `elem` argIotas)
 isArgLink _ _ = False
+
+-- An equality between an argument's fresh iota and a constant, for an argument that the callee's
+-- output proofs mention
+isLiteralArgLink :: [Iota] -> [Iota] -> IotaProof -> Bool
+isLiteralArgLink outputIotas argIotas (FApp funct [ATerm lhs, CTerm _]) =
+    funct == eqProof && lhs `elem` argIotas && lhs `elem` outputIotas
+isLiteralArgLink _ _ _ = False
 
 validateValue :: VState -> Value -> Result Value String
 validateValue state val = case val of

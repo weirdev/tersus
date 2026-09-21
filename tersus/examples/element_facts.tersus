@@ -1,0 +1,27 @@
+// What set and push say about elements. set(list, index, x) leaves x at that index and
+// push(list, x) leaves x at the old size, and both facts reach the caller of a function whose
+// output contract repeats them. Nothing yet says the other elements are unchanged, so a
+// program can only rely on the element it just wrote.
+fn replace(l, i, x) [{
+    rewrite checkRel i >= 0;
+    rewrite checkRel i < size(l);
+    affirm i >= 0;
+    affirm i < size(l);
+}] [{
+    affirm get(return, i) = x;
+    affirm size(return) = size(l);
+}] {
+    return set(l, i, x);
+};
+
+fn append(l, x) [{ }] [{ affirm get(return, size(l)) = x; }] {
+    return push(l, x);
+};
+
+a = [10, 20, 30];
+b = replace(a, 1, 99);
+affirm get(b, 1) = 99;
+c = append(b, 7);
+define n = size(b);
+affirm get(c, n) = 7;
+return get(c, 1) + get(c, 3);

@@ -104,9 +104,9 @@ fn at(lst, i) [{
 };
 ```
 
-`push` has a builtin output contract, `size(return) = size(list) + 1`, which is instantiated at every call. That is what lets a function that builds a list state its size in its own output contract (see `examples/build_list.tersus`). An empty list is the literal `[]`.
+`push` has a builtin output contract, `size(return) = size(list) + 1` and `get(return, size(list)) = x` (the new element sits at the old size), which is instantiated at every call. That is what lets a function that builds a list state its size in its own output contract (see `examples/build_list.tersus`). An empty list is the literal `[]`.
 
-`set` has the same input contract as `get`, and a builtin output contract, `size(return) = size(list)`. Since lists are values, `set` does not change its argument: update a variable by assigning the result back to it.
+`set` has the same input contract as `get`, and a builtin output contract, `size(return) = size(list)` and `get(return, index) = x`. Since lists are values, `set` does not change its argument: update a variable by assigning the result back to it.
 
 ```tersus
 a = [1, 2, 3];
@@ -115,7 +115,22 @@ a = set(a, 0, 9);       // [9, 2, 3]
 // c = set(a, 3, 0);    // rejected: 3 < size(a) does not hold
 ```
 
-Nothing states what the elements of the result are (`push` and `set` only have size facts), so a proof about `get(set(a, i, x), i)` is not available yet. `examples/update_list.tersus` updates every element of a list in a loop, with the invariant tracking only its size.
+So `push` and `set` say what they wrote, and a function can repeat it in its own output contract (see `examples/element_facts.tersus`):
+
+```tersus
+l = [4, 5];
+r = push(l, 9);
+define n = size(l);
+affirm get(r, n) = 9;         // the new last element
+
+a = [1, 2, 3];
+i = 1;
+b = set(a, i, 20);
+affirm get(b, i) = 20;        // the element just written
+// affirm get(b, 0) = get(a, 0);   // rejected: the other elements are not covered yet
+```
+
+What happens to the other elements is not stated yet (`get(set(a, i, x), j) = get(a, j)` for `j` different from `i`), and neither is a fact about every index, so an elementwise contract like "each result element is the sum of a pair" cannot be stated. `examples/update_list.tersus` updates every element of a list in a loop, with the invariant tracking only its size.
 
 Lists are built with `push`, updated with `set`, and read by `get`, `first` and `last`. Lists hold integers only.
 

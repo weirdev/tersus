@@ -32,6 +32,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes and the result's size stated in the function's contract | returns `[11, 22, 33]` |
 | `build_list.tersus` | Building a list with `push` in a loop, with the result's size stated in an output contract | returns `[2, 4, 6]` |
 | `update_list.tersus` | Updating a list: `set` replaces an element of a copy in a loop, with the size carried by the invariant and stated in the output contract | returns `[101, 102, 103]` |
+| `element_facts.tersus` | What `set` and `push` say about elements: the element just written, repeated in a function's output contract and used by its caller | returns `106` |
 | `early_return.tersus` | Guard clauses: `return` inside an `if` ends the function, and the rest is validated under the guard | returns `104` |
 
 ### The safe-access pattern
@@ -84,6 +85,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/push_size.tersus` | An output contract claims `push` leaves the size unchanged |
 | `rejected/set_out_of_range.tersus` | `set(a, 3, 0)` on a three-element list: `3 < size(a)` does not hold |
 | `rejected/set_size.tersus` | An output contract claims `set` makes the list one longer |
+| `rejected/element_wrong.tersus` | An output contract claims `set` left the old element at the index it overwrote |
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
 | `rejected/loop_stale_fact.tersus` | `affirm i = 0` after a loop that changes `i`: earlier facts about `i` are not carried out of the loop |
@@ -95,6 +97,6 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 - User functions cannot call other user functions yet, because function bodies only see their arguments and the standard library.
 - A variable first assigned inside an `if` branch is local to that branch, so declare it before the `if` (`r = fallback;`) if you want it afterwards.
 - Loop invariants about counters need arithmetic facts, and the validator has none of its own, so `loops.tersus` supplies them with trusted `axiom` rules.
-- Lists can be read with `get`, extended with `push` and updated with `set`, which returns a new list (`a = set(a, i, x)`). Nothing yet says what the elements of the result are, so the linked-list motivating case in the main README is still not expressible here.
+- Lists can be read with `get`, extended with `push` and updated with `set`, which returns a new list (`a = set(a, i, x)`). `push` and `set` say which element they wrote (`element_facts.tersus`) but nothing yet says the others are unchanged, so the linked-list motivating case in the main README is still not expressible here.
 - `get` and `set` need `0 <= index < size(list)` proved at the call. Concrete lists and indexes are checked directly, and a symbolic index needs a contract or loop invariant that says so (`rewrite checkRel` establishes the fact for concrete arguments at the call).
 - Counters in list loops need trusted axioms, because the validator has no arithmetic (`parallel_sum.tersus`, `build_list.tersus`, `update_list.tersus`). `affirm` and invariants see through equalities on their own, so a loop needs no `rewrite refl`.
