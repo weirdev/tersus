@@ -665,6 +665,44 @@ testProofEngineEntailsDenseEqualitiesTerminates =
         unrelated = FApp eqProof [ATerm firstIota, ATerm (Iota "unrelated")]
      in testAssertEq (Engine.entails related context, Engine.entails unrelated context) (True, False)
 
+-- Equal arguments give equal results without any fact having been rewritten (no refl):
+-- size(q) = size(s) + 1, s = k and size(k) = l give size(q) = l + 1.
+nestedCongruenceFacts :: [IotaProof]
+nestedCongruenceFacts =
+    let sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
+        plus a b = FApp (CTerm (builtinFunct Plus)) [a, b]
+     in [ FApp eqProof [sizeOf (ATerm (Iota "q")), plus (sizeOf (ATerm (Iota "s"))) (CTerm (VInt 1))]
+        , FApp eqProof [ATerm (Iota "s"), ATerm (Iota "k")]
+        , FApp eqProof [sizeOf (ATerm (Iota "k")), ATerm (Iota "l")]
+        , FApp eqProof [ATerm (Iota "d"), plus (ATerm (Iota "l")) (CTerm (VInt 1))]
+        ]
+
+testProofEngineEntailsNestedCongruence :: TestResult
+testProofEngineEntailsNestedCongruence =
+    let goal = FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
+        ltGoal = FApp (CTerm (builtinFunct (Rel LtEq))) [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
+        context = Engine.proofContextFromFacts nestedCongruenceFacts
+     in testAssertEq (Engine.entails goal context, Engine.entails ltGoal context) (True, False)
+
+-- Dropping the link between s and k breaks the chain, so the goal is no longer entailed
+testProofEngineEntailsNestedCongruenceNeedsEveryLink :: TestResult
+testProofEngineEntailsNestedCongruenceNeedsEveryLink =
+    let goal = FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
+        context = Engine.proofContextFromFacts (filter (/= (nestedCongruenceFacts !! 1)) nestedCongruenceFacts)
+     in testAssertEq (Engine.entails goal context) False
+
+-- A relation that is a fact holds for terms equal to its arguments, and entailsAll answers each goal
+testProofEngineEntailsRelationOfEqualTerms :: TestResult
+testProofEngineEntailsRelationOfEqualTerms =
+    let lt a b = FApp (CTerm (builtinFunct (Rel Lt))) [a, b]
+        context =
+            Engine.proofContextFromFacts
+                [ lt (ATerm (Iota "x")) (ATerm (Iota "n"))
+                , FApp eqProof [ATerm (Iota "x"), ATerm (Iota "y")]
+                ]
+        goals = [lt (ATerm (Iota "y")) (ATerm (Iota "n")), lt (ATerm (Iota "n")) (ATerm (Iota "y"))]
+     in testAssertEq (Engine.entailsAll goals context) [True, False]
+
 testProofEngine :: Test
 testProofEngine =
     testCaseSeq
@@ -672,6 +710,9 @@ testProofEngine =
         [ testProofEngineInsertDedupes
         , testProofEngineEntailsDenseEqualitiesTerminates
         , testProofEngineEntailsEquivalentTerms
+        , testProofEngineEntailsNestedCongruence
+        , testProofEngineEntailsNestedCongruenceNeedsEveryLink
+        , testProofEngineEntailsRelationOfEqualTerms
         , testProofEngineReflSubstitutesNestedTerms
         , testProofEngineEvalDerivesConcreteBuiltinResult
         ]

@@ -94,4 +94,4 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 - Loop invariants about counters need arithmetic facts, and the validator has none of its own, so `loops.tersus` supplies them with trusted `axiom` rules.
 - Lists can be read with `get` and extended with `push`, but not updated in place, so the linked-list motivating case in the main README is still not expressible here.
 - `get` needs `0 <= index < size(list)` proved at the call. Concrete lists and indexes are checked directly, and a symbolic index needs a contract or loop invariant that says so (`rewrite checkRel` establishes the fact for concrete arguments at the call).
-- Counters in list loops need trusted axioms, because the validator has no arithmetic (`parallel_sum.tersus`, `build_list.tersus`). A `rewrite refl` in a loop body can be slow once many facts are known.
+- Counters in list loops need trusted axioms, because the validator has no arithmetic (`parallel_sum.tersus`, `build_list.tersus`). `affirm` and invariants see through equalities on their own, so a loop needs no `rewrite refl`.

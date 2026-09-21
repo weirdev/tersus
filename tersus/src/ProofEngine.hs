@@ -8,12 +8,15 @@ module ProofEngine
     , insertProofs
     , proofContextDelta
     , entails
+    , entailsAll
     , applyRewrite
     , deriveRefl
     , reflectProofsByProofs
     ) where
 
-import Data.List (nub)
+import qualified Data.IntMap.Strict as IntMap
+import Data.List (foldl', mapAccumL, nub)
+import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 
 import StdLib
@@ -49,8 +52,103 @@ proofContextDelta (ProofContext oldFacts) (ProofContext newFacts) =
     filter (`notElem` oldFacts) newFacts
 
 entails :: IotaProof -> ProofContext -> Bool
-entails goal context@(ProofContext facts) =
-    any (proofEquivalent context goal) facts
+entails goal context = and (entailsAll [goal] context)
+
+-- Which of the goals the context entails, sharing one congruence closure between them.
+entailsAll :: [IotaProof] -> ProofContext -> [Bool]
+entailsAll goals (ProofContext facts) =
+    let (table1, factIds) = internAll emptyTable facts
+        (table2, goalIds) = internAll table1 goals
+        (table3, trueId) = internTerm table2 (CTerm (VBool True))
+        equalities =
+            concat
+                [ (factId, trueId) : [(idOf table3 lhs, idOf table3 rhs) | FApp funct [lhs, rhs] <- [fact], funct == eqProof]
+                | (fact, factId) <- zip facts factIds
+                ]
+        classes = congruenceClosure (tableApps table3) equalities
+        sameClass a b = rep classes a == rep classes b
+        entailed goal goalId =
+            sameClass goalId trueId
+                || or [sameClass (idOf table3 lhs) (idOf table3 rhs) | FApp funct [lhs, rhs] <- [goal], funct == eqProof]
+     in zipWith entailed goals goalIds
+
+-- Congruence closure
+--
+-- Every term and subterm gets a number, and two numbers are in one class when the facts force
+-- the terms to be equal. An equality joins its two sides, and two terms built from the same
+-- function on equal arguments are joined too. So size(s0) + 1 is equal to l0 + 1 once
+-- s0 = k0 and size(k0) = l0, although no fact was ever rewritten to say so (which is what
+-- `rewrite refl` does, at the cost of a copy of every fact). A relation that is a fact is
+-- equal to true, so a goal is entailed when its term is in the class of true. An equality
+-- goal also holds when both of its sides are in one class.
+
+data TermKey = KIota Iota | KConst Int | KApp Int [Int] deriving (Eq, Ord)
+
+data TermTable = TermTable
+    { tableKeys :: Map.Map TermKey Int
+    , tableConsts :: [(Value, Int)]
+    , tableApps :: [(Int, (Int, [Int]))] -- applications: term, function term, argument terms
+    }
+
+emptyTable :: TermTable
+emptyTable = TermTable Map.empty [] []
+
+internAll :: TermTable -> [IotaProof] -> (TermTable, [Int])
+internAll = mapAccumL internTerm
+
+internTerm :: TermTable -> IotaProof -> (TermTable, Int)
+internTerm table (ATerm iota) = internKey table (KIota iota)
+internTerm table (CTerm value) =
+    case lookup value (tableConsts table) of
+        Just constId -> internKey table (KConst constId)
+        Nothing ->
+            let constId = length (tableConsts table)
+             in internKey table{tableConsts = (value, constId) : tableConsts table} (KConst constId)
+internTerm table (FApp funct args) =
+    let (table1, functId) = internTerm table funct
+        (table2, argIds) = internAll table1 args
+        key = KApp functId argIds
+        (table3, termId) = internKey table2 key
+     in if Map.member key (tableKeys table2)
+            then (table3, termId)
+            else (table3{tableApps = (termId, (functId, argIds)) : tableApps table3}, termId)
+
+internKey :: TermTable -> TermKey -> (TermTable, Int)
+internKey table key =
+    case Map.lookup key (tableKeys table) of
+        Just termId -> (table, termId)
+        Nothing ->
+            let termId = Map.size (tableKeys table)
+             in (table{tableKeys = Map.insert key termId (tableKeys table)}, termId)
+
+-- The number of a term that is already in the table
+idOf :: TermTable -> IotaProof -> Int
+idOf table term = snd (internTerm table term)
+
+-- Maps term numbers to their class representative (a number missing from the map is its own)
+congruenceClosure :: [(Int, (Int, [Int]))] -> [(Int, Int)] -> IntMap.IntMap Int
+congruenceClosure apps equalities = settle (foldl' unionClasses IntMap.empty equalities)
+  where
+    settle classes =
+        let flat = IntMap.map (findClass classes) classes
+            bySignature = Map.fromListWith (++) [((rep flat functId, map (rep flat) argIds), [termId]) | (termId, (functId, argIds)) <- apps]
+            merges = [(a, b) | (a : rest) <- Map.elems bySignature, b <- rest, rep flat a /= rep flat b]
+         in if null merges then flat else settle (foldl' unionClasses flat merges)
+
+rep :: IntMap.IntMap Int -> Int -> Int
+rep classes x = IntMap.findWithDefault x x classes
+
+findClass :: IntMap.IntMap Int -> Int -> Int
+findClass classes x =
+    case IntMap.lookup x classes of
+        Just parent | parent /= x -> findClass classes parent
+        _ -> x
+
+unionClasses :: IntMap.IntMap Int -> (Int, Int) -> IntMap.IntMap Int
+unionClasses classes (a, b) =
+    let ra = findClass classes a
+        rb = findClass classes b
+     in if ra == rb then classes else IntMap.insert ra rb classes
 
 applyRewrite :: BuiltinEvaluator -> EngineRewriteRule -> ProofContext -> Result ProofContext String
 applyRewrite _ EngineRefl context = Ok (deriveRefl context)
@@ -72,7 +170,7 @@ checkRel evalBuiltin proof@(FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _
         else case (evalProofTerm evalBuiltin lhs context, evalProofTerm evalBuiltin rhs context) of
             (Just l, Just r) ->
                 case evalBuiltin (Rel rel) [l, r] of
-                    Ok (VBool True) -> Ok (deriveRefl (insertProofs [proof] context))
+                    Ok (VBool True) -> Ok (insertProofs [proof] context)
                     Ok _ -> Error "Relation does not hold"
                     Error e -> Error e
             _ -> Error "Relation lacks a proof and its terms lack concrete definitions"
@@ -84,7 +182,7 @@ checkGtZero evalBuiltin proof context =
      in if entails gtZeroProof context
             then Ok (insertProofs [gtZeroProof] context)
             else case evalProofTerm evalBuiltin proof context of
-                Just (VInt num) | num > 0 -> Ok (deriveRefl (insertProofs [gtZeroProof] context))
+                Just (VInt num) | num > 0 -> Ok (insertProofs [gtZeroProof] context)
                 Just (VInt _) -> Error "Proof term is not greater than 0"
                 Just _ -> Error "Proof term is not an int"
                 Nothing -> Error "Proof term lacks concrete definition and no equivalent proof exists"
@@ -170,44 +268,6 @@ concreteValueOfIotaFromFacts iota (proof : proofs) =
             | funct == eqProof && proofIota == iota -> Just val
         _ -> concreteValueOfIotaFromFacts iota proofs
 
-proofEquivalent :: ProofContext -> IotaProof -> IotaProof -> Bool
-proofEquivalent context (FApp goalFunct goalArgs) (FApp factFunct factArgs) =
-    length goalArgs == length factArgs
-        && proofEquivalent context goalFunct factFunct
-        && all (uncurry (proofEquivalent context)) (zip goalArgs factArgs)
-proofEquivalent context goal fact =
-    fact `elem` equivalentTermsInclusive 10 context goal
-
--- Terms reachable from the proof through at most `depth` equalities, including the
--- proof itself. Breadth-first with a seen list: equalities are symmetric once
--- deriveRefl adds their reversals, so an unmemoized walk revisits terms
--- exponentially often.
-equivalentTermsInclusive :: Int -> ProofContext -> IotaProof -> [IotaProof]
-equivalentTermsInclusive depth context proof = expandEquivalentTerms depth context [proof] [proof]
-
-expandEquivalentTerms :: Int -> ProofContext -> [IotaProof] -> [IotaProof] -> [IotaProof]
-expandEquivalentTerms 0 _ _ seen = seen
-expandEquivalentTerms _ _ [] seen = seen
-expandEquivalentTerms depth context frontier seen =
-    let nextFrontier =
-            nub
-                [ next
-                | current <- frontier
-                , next <- firstDegreeEquivalentTerms context current
-                , next `notElem` seen
-                ]
-     in expandEquivalentTerms (depth - 1) context nextFrontier (seen ++ nextFrontier)
-
-firstDegreeEquivalentTerms :: ProofContext -> IotaProof -> [IotaProof]
-firstDegreeEquivalentTerms (ProofContext facts) proof =
-    mapMaybeProof (firstDegreeEquivalentTerm proof) facts
-
-firstDegreeEquivalentTerm :: IotaProof -> IotaProof -> Maybe IotaProof
-firstDegreeEquivalentTerm proof (FApp funct [lhs, rhs])
-    | funct == eqProof && lhs == proof = Just rhs
-    | funct == eqProof && rhs == proof = Just lhs
-firstDegreeEquivalentTerm _ _ = Nothing
-
 equalityFacts :: [IotaProof] -> [IotaProof]
 equalityFacts facts =
     [ proof
@@ -252,13 +312,6 @@ reverseEqProof :: IotaProof -> IotaProof
 reverseEqProof (FApp funct [lhs, rhs])
     | funct == eqProof = FApp eqProof [rhs, lhs]
 reverseEqProof _ = error "Only Eq relation supported"
-
-mapMaybeProof :: (a -> Maybe b) -> [a] -> [b]
-mapMaybeProof _ [] = []
-mapMaybeProof f (x : xs) =
-    case f x of
-        Just y -> y : mapMaybeProof f xs
-        Nothing -> mapMaybeProof f xs
 
 isJustProof :: Maybe a -> Bool
 isJustProof Just{} = True

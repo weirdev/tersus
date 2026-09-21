@@ -12,12 +12,10 @@ fn doubled(a) [{ }] [{ affirm size(return) = size(a); }] {
     out = [];
     rewrite startsAtZero i a;
     define s0 = size(out);
-    rewrite refl s0;
     while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; }] {
         out = push(out, get(a, i) + get(a, i));
         rewrite step i n;
         i = i + 1;
-        rewrite refl i;
     };
     rewrite endsAtBound i n;
     return out;

@@ -297,7 +297,7 @@ joinReturnPaths s0 pThen pElse =
                         (nub (map toMerged (vGetProofs pThen)))
                 elseEqualities = [FApp eqProof [ATerm m, ATerm elseRet] | (m, (_, elseRet)) <- merges]
                 elseContext = Engine.proofContextFromFacts (vGetProofs pElse ++ elseEqualities)
-                kept = filter (`Engine.entails` elseContext) candidates
+                kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
                 based = vSetIotaSeq base (vGetIotaSeq sAfter)
                 withReturn = foldl (\s (m, _) -> vSetReturn s m []) based merges
              in Ok (vInsertProofs withReturn kept)
@@ -387,7 +387,7 @@ joinBranches s0 vars sThen sElse =
                                 (nub (map toMerged (vGetProofs sThen)))
                         elseEqualities = [FApp eqProof [ATerm m, ATerm elseIota] | (_, m, (_, elseIota)) <- merges]
                         elseContext = Engine.proofContextFromFacts (vGetProofs sElse ++ elseEqualities)
-                        kept = filter (`Engine.entails` elseContext) candidates
+                        kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
                         base = vSetIotaSeq s0 (vGetIotaSeq sAfter)
                         factsFor m = filter (elem m . proofIotas) kept
                         rebound = foldl (\s (var, m, _) -> vInsertVar s var m (factsFor m)) base merges

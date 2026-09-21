@@ -347,7 +347,7 @@ Validation statements are ordinary statements syntactically, but they are used b
 
 ### `affirm`
 
-`affirm` requires a proof to be entailed by the current proof context. The proof may be present directly or match through known equality-equivalent terms.
+`affirm` requires a proof to be entailed by the current proof context. The proof may be present directly or match through known equalities, including equalities between the parts of a term: if `s = k` and `size(k) = l` are known then `size(s) + 1` is known to equal `l + 1`, with no `rewrite` needed to say so.
 
 ```tersus
 x = 5;
@@ -386,7 +386,7 @@ rewrite evalAll;
 
 Primitive rewrite rules:
 
-- `rewrite refl <proof>`: uses known equalities to derive reflected/substituted proofs.
+- `rewrite refl <proof>`: uses known equalities to derive reflected/substituted proofs, which are added to the context as facts. `affirm` already sees through equalities, so this is rarely needed. A function's output contract exports the facts that are recorded in the context, not what the equalities imply, so `refl` can still add a fact that a caller then receives.
 - `rewrite eval <var>`: evaluates builtin-function proofs related to a variable when concrete inputs are known.
 - `rewrite evalAll`: attempts builtin evaluation for all available evaluable proofs.
 - `rewrite checkGtZero <proof>`: validates and inserts `<proof> > 0` when that proof is already entailed or when the proof term has a concrete positive integer value.
@@ -487,7 +487,7 @@ affirm s > 0;
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists. Integer lists can be read with `get` and extended with `push`, but not updated in place.
 - The validator has no arithmetic, so a counting loop over a list needs trusted `axiom` rules for its index facts (`i >= 0` after `i = i + 1`, and so on). `examples/parallel_sum.tersus` and `examples/build_list.tersus` show the shape.
-- `rewrite refl` gets slow as the number of known facts grows (a `refl` inside a loop body took over a minute in one list-building program), so use it sparingly inside loops.
+- `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it.
 - No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
 - The CLI runs one file at a time and has no REPL or multi-file programs.
