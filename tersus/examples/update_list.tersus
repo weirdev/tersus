@@ -1,0 +1,27 @@
+// Updating a list: set(list, index, x) returns a new list with one element replaced, and the
+// old list is unchanged. Like get it needs 0 <= index < size(list), and its output contract
+// says the result has the same size, which the loop invariant carries so that every get and set
+// in the loop is provably in range. bumpAll starts from a copy of its argument and rewrites
+// each element in place, so its result is as long as its input.
+// The validator does no arithmetic, so the counter facts come from trusted axioms.
+axiom startsAtZero(i, l) [{ affirm i = 0; }] [{ affirm i >= 0; affirm i <= size(l); }];
+axiom step(i, n) [{ affirm i >= 0; affirm i < n; }] [{ affirm (i + 1) >= 0; affirm (i + 1) <= n; }];
+axiom endsAtBound(i, n) [{ affirm i <= n; affirm i >= n; }] [{ affirm i = n; }];
+
+fn bumpAll(a) [{ }] [{ affirm size(return) = size(a); }] {
+    n = size(a);
+    i = 0;
+    out = a;
+    rewrite startsAtZero i a;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = size(a); }] {
+        out = set(out, i, get(out, i) + 100);
+        rewrite step i n;
+        i = i + 1;
+    };
+    rewrite endsAtBound i n;
+    return out;
+};
+
+original = [1, 2, 3];
+bumped = bumpAll(original);
+return bumped;

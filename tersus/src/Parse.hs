@@ -252,6 +252,7 @@ functionProof = do
         "last" -> return Last
         "get" -> return Get
         "push" -> return Push
+        "set" -> return Set
         _ -> fail "Functions in proofs only support builtins for now"
     void (char '(')
     whitespace

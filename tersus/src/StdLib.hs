@@ -64,6 +64,24 @@ builtinFunct Push =
             , FApp (CTerm (builtinFunct Plus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)]
             ]
         ]
+-- set replaces one element, so it needs a valid index like get, and the result has the same
+-- size as the input list. The list itself is not changed: the result is a new list.
+builtinFunct Set =
+    VFunct
+        ["list", "index", "x"]
+        [ Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)]))
+        , Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]]))
+        , ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)])
+        , ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]])
+        ]
+        []
+        (BuiltinFunct Set)
+        [ FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
+            , FApp (CTerm (builtinFunct Size)) [ATerm "list"]
+            ]
+        ]
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
@@ -76,6 +94,7 @@ stdLibCtx =
         , ("last", builtinFunct Last)
         , ("get", builtinFunct Get)
         , ("push", builtinFunct Push)
+        , ("set", builtinFunct Set)
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
         , ("=", builtinFunct (Rel Eq))

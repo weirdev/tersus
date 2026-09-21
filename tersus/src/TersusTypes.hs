@@ -3,7 +3,7 @@ module TersusTypes where
 import Data.Map (Map)
 
 type Variable = String
-data BuiltinFunct = Size | First | Last | Get | Push | Plus | Minus | Rel Rel deriving (Show, Eq)
+data BuiltinFunct = Size | First | Last | Get | Push | Set | Plus | Minus | Rel Rel deriving (Show, Eq)
 
 data FunctBody = NativeFunct [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq)
 

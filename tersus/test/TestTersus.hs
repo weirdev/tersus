@@ -1153,10 +1153,13 @@ testExamples =
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
         , testExampleFile "examples/parallel_sum.tersus" (ExpectReturn (VIntList [11, 22, 33]))
         , testExampleFile "examples/build_list.tersus" (ExpectReturn (VIntList [2, 4, 6]))
+        , testExampleFile "examples/update_list.tersus" (ExpectReturn (VIntList [101, 102, 103]))
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/set_out_of_range.tersus" (ExpectRejected "Relation does not hold")
+        , testExampleFile "examples/rejected/set_size.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/invariant_entry.tersus" (ExpectRejected "Loop invariant does not hold on entry")
         , testExampleFile "examples/rejected/invariant_preserved.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
@@ -1535,6 +1538,16 @@ testLists =
         , parseEvalFailStmtHelper "{ return get([5], 0 - 1); }" "Get index out of range"
         , parseEvalFailStmtHelper "{ return push([1], [2]); }" "Push only valid"
         , parseEvalFailStmtHelper "{ return get(1, 0); }" "Get only valid"
+        , parseEvalProgramHelper "return set([1, 2, 3], 1, 20);" (Just (VIntList [1, 20, 3]))
+        , parseEvalProgramHelper "return set([1, 2, 3], 0, 9);" (Just (VIntList [9, 2, 3]))
+        , parseEvalProgramHelper "return set([1, 2, 3], 2, 9);" (Just (VIntList [1, 2, 9]))
+        , parseEvalProgramHelper "a = [1, 2, 3]; b = set(a, 0, 9); return first(a) + first(b);" (Just (VInt 10))
+        , parseEvalProgramHelper "return set(push([1], 2), 1, 5);" (Just (VIntList [1, 5]))
+        , parseEvalFailStmtHelper "{ return set([5], 1, 0); }" "Set index out of range"
+        , parseEvalFailStmtHelper "{ return set([5], 0 - 1, 0); }" "Set index out of range"
+        , parseEvalFailStmtHelper "{ return set([], 0, 0); }" "Set index out of range"
+        , parseEvalFailStmtHelper "{ return set(1, 0, 0); }" "Set only valid"
+        , parseEvalFailStmtHelper "{ return set([5], 0, [1]); }" "Set only valid"
         , -- Validation: a concrete list and index need no proof from the caller
           parseValidProgramHelper "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;"
         , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"
@@ -1546,7 +1559,18 @@ testLists =
             "fn f(l) [{ }] [{ affirm size(return) = (size(l) + 1); }] { return push(l, 5); };"
         , parseValidProgramHelper
             "fn f(l) [{ }] [{ affirm size(return) = (size(l) + 1); }] { r = push(l, 5); return r; };"
+        , -- set: a concrete list and index need no proof, and the result is as long as the input
+          parseValidProgramHelper "a = [5, 6, 7]; b = set(a, 2, 0); affirm size(b) = size(a);"
+        , parseValidProgramHelper
+            "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = size(l); }] { return set(l, i, 5); };"
         , -- Rejected: out of range, unproven, or a wrong size claim
+          parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 3, 0);" "Relation does not hold"
+        , parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 0 - 1, 0);" "Relation does not hold"
+        , parseValidateFailProgramHelper "fn f(l, i) { return set(l, i, 0); };" "Relation lacks a proof"
+        , parseValidateFailProgramHelper
+            "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = (size(l) + 1); }] { return set(l, i, 5); };"
+            "Assertion failed"
+        , -- get and the rest of the rejected cases
           parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 3);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 0 - 1);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = []; x = get(a, 0);" "Relation does not hold"

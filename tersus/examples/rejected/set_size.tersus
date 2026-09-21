@@ -1,0 +1,10 @@
+// set replaces an element, so the result is the same size as the input, not one longer.
+fn overwrite(lst, i) [{
+    rewrite checkRel i >= 0;
+    rewrite checkRel i < size(lst);
+    affirm i >= 0;
+    affirm i < size(lst);
+}] [{ affirm size(return) = (size(lst) + 1); }] {
+    return set(lst, i, 7);
+};
+return size(overwrite([1, 2], 0));

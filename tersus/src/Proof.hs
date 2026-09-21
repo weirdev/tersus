@@ -923,6 +923,10 @@ evalBuiltinFunct Get [VIntList l, VInt i]
 evalBuiltinFunct Get _ = Error "Get only valid for an IntList and an int"
 evalBuiltinFunct Push [VIntList l, VInt x] = Ok $ VIntList (l ++ [x])
 evalBuiltinFunct Push _ = Error "Push only valid for an IntList and an int"
+evalBuiltinFunct Set [VIntList l, VInt i, VInt x]
+    | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
+    | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VIntList (before ++ x : drop 1 after)
+evalBuiltinFunct Set _ = Error "Set only valid for an IntList and two ints"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
 evalBuiltinFunct Minus _ = Error "Plus only valid for two ints"
 evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)

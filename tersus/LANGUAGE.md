@@ -80,12 +80,13 @@ The standard library seeds these builtin functions:
 - `last(list)`: returns the last element of a non-empty integer list.
 - `get(list, index)`: returns the element at `index`, counting from 0. The index must satisfy `0 <= index < size(list)`.
 - `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
+- `set(list, index, x)`: returns a new list with the element at `index` replaced by `x`. The index must satisfy `0 <= index < size(list)`, and the argument list is unchanged.
 - `+` and `-`: integer arithmetic.
 - `=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
 `first` and `last` have builtin input contracts requiring the list size to be greater than zero. Their current validation proof relies on the standard-library `eqToGtZero` axiom, whose input contract is checked by the primitive `checkGtZero` rewrite. Concrete evaluation still rejects empty lists and wrong argument types.
 
-`get` has a builtin input contract requiring `index >= 0` and `index < size(list)`. It is checked with the primitive `checkRel` rewrite, so a call with a concrete list and index needs no proof, while a symbolic index must already be provable at the call site, usually from the enclosing function's contract or a loop invariant:
+`get` and `set` have a builtin input contract requiring `index >= 0` and `index < size(list)`. It is checked with the primitive `checkRel` rewrite, so a call with a concrete list and index needs no proof, while a symbolic index must already be provable at the call site, usually from the enclosing function's contract or a loop invariant:
 
 ```tersus
 a = [5, 6, 7];
@@ -105,7 +106,18 @@ fn at(lst, i) [{
 
 `push` has a builtin output contract, `size(return) = size(list) + 1`, which is instantiated at every call. That is what lets a function that builds a list state its size in its own output contract (see `examples/build_list.tersus`). An empty list is the literal `[]`.
 
-Lists can only be built by `push` and read by `get`, `first` and `last`. There is no way to update an element in place, and lists hold integers only.
+`set` has the same input contract as `get`, and a builtin output contract, `size(return) = size(list)`. Since lists are values, `set` does not change its argument: update a variable by assigning the result back to it.
+
+```tersus
+a = [1, 2, 3];
+b = set(a, 1, 20);      // [1, 20, 3]; a is still [1, 2, 3]
+a = set(a, 0, 9);       // [9, 2, 3]
+// c = set(a, 3, 0);    // rejected: 3 < size(a) does not hold
+```
+
+Nothing states what the elements of the result are (`push` and `set` only have size facts), so a proof about `get(set(a, i, x), i)` is not available yet. `examples/update_list.tersus` updates every element of a list in a loop, with the invariant tracking only its size.
+
+Lists are built with `push`, updated with `set`, and read by `get`, `first` and `last`. Lists hold integers only.
 
 ## Statements
 
@@ -485,7 +497,7 @@ affirm s > 0;
 - No `for` loops, `break` or `continue`.
 - Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` (and validation of a call with known arguments, which evaluates it) will not return.
 - No declarations separate from assignment.
-- No strings, floats, records, or generic lists. Integer lists can be read with `get` and extended with `push`, but not updated in place.
+- No strings, floats, records, or generic lists. Integer lists can be read with `get`, extended with `push` and updated with `set`, which return new lists.
 - The validator has no arithmetic, so a counting loop over a list needs trusted `axiom` rules for its index facts (`i >= 0` after `i = i + 1`, and so on). `examples/parallel_sum.tersus` and `examples/build_list.tersus` show the shape.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it.
 - No block comments; only `//` line comments.
