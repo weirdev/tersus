@@ -1554,6 +1554,9 @@ testArithmetic =
             , engineNot [rel Lt (iota "a") (iota "b")] (rel Lt (iota "b") (iota "a"))
             , engineNot [] (rel Gt (sizeOf (iota "l")) (int 0))
             , engineNot [rel LtEq (iota "a") (iota "b")] (rel NotEq (iota "a") (iota "b"))
+            , -- Engine: a contradiction anywhere proves every comparison, also between unrelated terms
+              engine [rel Lt (sizeOf (iota "xs")) (int 0)] (rel Lt (iota "a") (iota "b"))
+            , engine [rel Lt (iota "p") (iota "q"), rel Lt (iota "q") (iota "p")] (rel Gt (iota "a") (iota "b"))
             , -- != parses, evaluates and validates
               parseEvalProgramHelper "return 3 != 4;" (Just (VBool True))
             , parseEvalProgramHelper "return 3 != 3;" (Just (VBool False))
@@ -1569,6 +1572,8 @@ testArithmetic =
             , parseValidateFailProgramHelper "x = 5; y = x + 1; affirm y > 6;" "Assertion failed"
             , parseValidateFailProgramHelper "x = 5; y = x - 1; affirm y > 4;" "Assertion failed"
             , parseValidateFailProgramHelper "fn f(i, n) [{ affirm i <= n; }] [{ }] { j = i + 1; affirm j <= n; return j; };" "Assertion failed"
+            , -- The guard of an unreachable branch proves anything inside it
+              parseValidProgramHelper "fn f(xs, a, b) { if size(xs) < 0 { affirm a < b; }; return 0; };"
             , -- A counting loop needs no axioms
               parseValidProgramHelper
                 "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] { i = i + 1; }; affirm i = 3;"
