@@ -400,7 +400,7 @@ affirm y = (x + 1);
 
 ### `forall`
 
-`forall` states a fact about every index in a range, for use in `affirm`, contracts and loop invariants. The validator can use a `forall` it knows, but cannot prove one yet. An axiom or an input contract can assume a `forall`, it reaches the caller of a function through the output contract, and `affirm` of the same `forall` (up to equal terms: `forall j in 0..size(r): get(r, j) = 0` is the same as the one about `l` when `r = l`) holds. Any other `affirm forall` fails, and a `forall` cannot be passed to a rewrite rule as an argument. Evaluation ignores it like any validation statement.
+`forall` states a fact about every index in a range, for use in `affirm`, contracts and loop invariants. The validator can both prove and use a `forall`. Evaluation ignores it like any validation statement.
 
 ```tersus
 affirm forall j in 0..size(l): get(l, j) = 0;            // 0 <= j < size(l)
@@ -409,6 +409,7 @@ affirm forall j where j >= 0, j < n, j != 2: get(l, j) = 0;
 
 - `forall j in lo..hi: P` is shorthand for `forall j where j >= lo, j < hi: P`, so the range is half open.
 - `forall j where g1, g2, ...: P` holds `P` for every `j` for which all the guards hold. A guard is any relation.
+- To prove a `forall` (in `affirm`, an output contract, or a loop invariant) the validator takes an index that meets the guards, and proves the body for it from everything it knows. So `affirm forall j in 0..3: j < 3;` holds, a narrower range of a known `forall` holds when its bound is known to be within the original one, and an empty range holds for any body. The name of the index does not matter. A `forall` cannot be passed to a rewrite rule as an argument.
 - A `forall` is used at the elements the program reads. For every `get(l, t)` in the proof context whose list is equal to the list of a `get(l, j)` in `P`, the validator instantiates `j := t`. If the guards hold for `t` it adds `P` for `t` as a fact. So with `forall j in 0..size(l): get(l, j) = 0` and `0 <= i < size(l)` known, `get(l, i) = 0` follows. A `forall` whose `P` has no `get(l, j)` is never used. `get(l, i)` is equal to the proof term `get(l, i)`, so `x = get(l, i)` gives `x = get(l, i)` as a fact.
 - `j` is bound in the guards and in `P`. Other names refer to variables as usual, and `forall` does not nest.
 
@@ -559,7 +560,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 - Arithmetic is limited to comparisons and adding or subtracting a known constant (see Arithmetic). There is no `*` or `/`, and a relation between `x + y` terms where neither is known is not understood.
 - The size of a list built by a literal or loop is not computed by the validator on its own: `out = []; define s0 = size(out);` is how `examples/build_list.tersus` gets `size(out) = 0`.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it.
-- `forall` is used at the elements a program reads, but cannot be proved yet.
+- `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`.
 - No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
 - The CLI runs one file at a time and has no REPL or multi-file programs.

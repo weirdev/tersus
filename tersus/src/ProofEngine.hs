@@ -56,8 +56,18 @@ entails goal context = and (entailsAll [goal] context)
 
 -- Which of the goals the context entails, sharing one congruence closure between them.
 entailsAll :: [IotaProof] -> ProofContext -> [Bool]
-entailsAll goals (ProofContext facts) = saturate (0 :: Int) facts
+entailsAll goals (ProofContext facts) = zipWith provedAsForall goals (saturate (0 :: Int) facts)
   where
+    -- A forall goal that is not already a known fact is proved for an arbitrary index
+    provedAsForall goal entailed = entailed || proveForall goal
+    -- Takes a fresh index that meets the guards, and asks for the body at that index. The name
+    -- cannot be written in a program, so no fact is about it. A range with no index in it has
+    -- guards that contradict each other, which entail everything.
+    proveForall (Forall index guards body) =
+        let fresh = ATerm (Iota ("$" ++ index))
+            guardFacts = map (substituteIndex index fresh) guards
+         in and (entailsAll [substituteIndex index fresh body] (ProofContext (nub (facts ++ guardFacts))))
+    proveForall _ = False
     -- Facts that are foralls are instantiated, and the closure is rebuilt with the instances
     -- that hold, until no new instance appears or the rounds run out. Without a forall this is
     -- one closure.

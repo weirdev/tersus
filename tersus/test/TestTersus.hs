@@ -1649,6 +1649,59 @@ testForallInstantiation =
                 "fn g(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { x = get(l, i); y = get(l, i); affirm x = y; return x; };"
             ]
 
+-- forall goals are proved for an arbitrary index that meets the guards
+testForallProof :: Test
+testForallProof =
+    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
+        getOf l t = FApp (CTerm (builtinFunct Get)) [l, t]
+        sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
+        iota = ATerm . Iota
+        int = CTerm . VInt
+        range hi = [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") hi]
+        forallJ hi body = Forall "j" (range hi) body
+        elementIsZero l = rel Eq (getOf l (BVar "j")) (int 0)
+        engine facts goal = testAssertTrue (Engine.entails goal (Engine.proofContextFromFacts facts))
+        engineNot facts goal = testAssertTrue (not (Engine.entails goal (Engine.proofContextFromFacts facts)))
+     in testCaseSeq
+            "testForallProof"
+            [ -- Facts about the index alone
+              engine [] (forallJ (int 3) (rel Lt (BVar "j") (int 3)))
+            , engineNot [] (forallJ (int 3) (rel Lt (BVar "j") (int 2)))
+            , engine [rel Eq (iota "n") (int 2)] (forallJ (iota "n") (rel Lt (BVar "j") (int 2)))
+            , engineNot [] (forallJ (iota "n") (rel Lt (BVar "j") (int 2)))
+            , -- A narrower range than a known forall, when the bound is known to be within it
+              engine [forallJ (sizeOf (iota "l")) (elementIsZero (iota "l")), rel LtEq (iota "k") (sizeOf (iota "l"))] (forallJ (iota "k") (elementIsZero (iota "l")))
+            , engineNot [forallJ (sizeOf (iota "l")) (elementIsZero (iota "l"))] (forallJ (iota "k") (elementIsZero (iota "l")))
+            , -- The same forall about an equal list
+              engine [forallJ (sizeOf (iota "l")) (elementIsZero (iota "l")), rel Eq (iota "m") (iota "l")] (forallJ (sizeOf (iota "m")) (elementIsZero (iota "m")))
+            , -- Equal elements of two equal lists, and of two lists that are not known to be equal
+              engine [rel Eq (iota "m") (iota "l")] (forallJ (sizeOf (iota "l")) (rel Eq (getOf (iota "l") (BVar "j")) (getOf (iota "m") (BVar "j"))))
+            , engineNot [] (forallJ (sizeOf (iota "l")) (rel Eq (getOf (iota "l") (BVar "j")) (getOf (iota "m") (BVar "j"))))
+            , -- An empty range holds for any body
+              engine [] (forallJ (int 0) (rel Eq (int 1) (int 2)))
+            , engine [rel LtEq (iota "n") (int 0)] (forallJ (iota "n") (rel Eq (int 1) (int 2)))
+            , engineNot [] (forallJ (int 1) (rel Eq (int 1) (int 2)))
+            , -- A guard other than a range
+              engine [] (Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") (int 3), rel NotEq (BVar "j") (int 1)] (rel NotEq (BVar "j") (int 1)))
+            , engineNot [] (Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") (int 3)] (rel NotEq (BVar "j") (int 1)))
+            , -- Programs
+              parseValidProgramHelper "affirm forall j in 0..3: j >= 0;"
+            , parseValidProgramHelper "n = 2; affirm forall j in 0..n: j < 2;"
+            , parseValidateFailProgramHelper "n = 3; affirm forall j in 0..n: j < 2;" "Assertion failed"
+            , parseValidProgramHelper "affirm forall j in 3..3: 1 = 2;"
+            , -- Facts the program knows about other variables are used
+              parseValidProgramHelper "fn f(n) [{ affirm n <= 2; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };"
+            , parseValidateFailProgramHelper "fn f(n) [{ affirm n <= 3; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };" "Assertion failed"
+            , -- A function proves a forall about its result from one about its argument
+              parseValidProgramHelper
+                "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };"
+            , parseValidProgramHelper
+                "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 7; }] [{ affirm forall j in 0..size(return): get(return, j) = 7; }] { return l; };"
+            , parseValidateFailProgramHelper
+                "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 1; }] { return l; };"
+                "Assertion failed"
+            ]
+
 zeroAxiom :: String
 zeroAxiom = "axiom zeros(l) [{ }] [{ affirm forall j in 0..size(l): get(l, j) = 0; }];"
 
@@ -1713,19 +1766,23 @@ testForallSyntax =
                 Right stmts -> testAssertEq stmts [Assign "forallx" (Val (VInt 1))]
             , -- Evaluation ignores validation statements, so a program with forall still runs
               parseEvalProgramHelper "affirm forall j in 0..2: j < 2; return 5;" (Just (VInt 5))
-            , -- The engine cannot prove a forall yet, so a bare affirm of one fails
-              parseValidateFailProgramHelper "affirm forall j in 0..2: j < 2;" "Assertion failed"
-            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };" "Assertion failed"
-            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };" "Loop invariant does not hold on entry"
+            , -- A forall that holds for every index in its range is accepted, and one that does not is rejected
+              parseValidProgramHelper "affirm forall j in 0..3: j < 3;"
+            , parseValidateFailProgramHelper "affirm forall j in 0..3: j < 2;" "Assertion failed"
+            , parseValidProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };"
+            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..3: j < 2; }] { return l; };" "Assertion failed"
+            , parseValidProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };"
+            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 2; }] { i = i + 1; };" "Loop invariant is not preserved"
             , -- A forall assumed by an axiom is kept as a fact, and is entailed again when it is the same forall
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 0;")
             , -- The rule's argument is substituted into the forall
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; rewrite zeros b; affirm forall j in 0..size(b): get(b, j) = 0;")
             , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; affirm forall j in 0..size(b): get(b, j) = 0;") "Assertion failed"
-            , -- A different range, body or guard is a different forall
+            , -- A range the fact does not cover, or another body, is not proved
               parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..1: get(a, j) = 0;") "Assertion failed"
             , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 1;") "Assertion failed"
-            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall k in 0..size(a): get(a, k) = 0;") "Assertion failed"
+            , -- The name of the index does not matter
+              parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall k in 0..size(a): get(a, k) = 0;")
             , -- Through a function: the input contract is checked at the call, and the output reaches the caller
               parseValidProgramHelper
                 ( zeroAxiom
@@ -1867,6 +1924,7 @@ main = do
                 , testArithmetic
                 , testForallSyntax
                 , testForallInstantiation
+                , testForallProof
                 ]
     putStrLn $
         "Summary: "
