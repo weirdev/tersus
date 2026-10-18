@@ -1,0 +1,19 @@
+// What push and set leave alone. Both contracts export the equal term (return = push(list, x)
+// or set(list, index, x)), and the rules pushKeeps l x j, setKeepsBelow l i x j and
+// setKeepsAbove l i x j use it: for an index j in range, the element of the new list at j is
+// the element of the old one. set changes only index i, so its rules split the other indices
+// into j < i and j > i.
+fn appendKeeping(l, x) [{ }] [{ }] {
+    return push(l, x);
+};
+
+a = [10, 20, 30];
+b = push(a, 40);
+rewrite pushKeeps a 40 1;
+affirm get(b, 1) = get(a, 1);
+c = set(b, 2, 99);
+rewrite setKeepsBelow b 2 99 0;
+rewrite setKeepsAbove b 2 99 3;
+affirm get(c, 0) = get(b, 0);
+affirm get(c, 3) = get(b, 3);
+return get(c, 0) + get(c, 2) + get(c, 3);
