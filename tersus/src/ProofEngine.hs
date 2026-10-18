@@ -59,7 +59,8 @@ entailsAll :: [IotaProof] -> ProofContext -> [Bool]
 entailsAll goals (ProofContext facts) =
     let (table1, factIds) = internAll emptyTable facts
         (table2, goalIds) = internAll table1 goals
-        (table3, trueId) = internTerm table2 (CTerm (VBool True))
+        (table3a, trueId) = internTerm table2 (CTerm (VBool True))
+        (table3, zeroId) = internTerm table3a (CTerm (VInt 0))
         equalities =
             concat
                 [ (factId, trueId) : [(idOf table3 lhs, idOf table3 rhs) | FApp funct [lhs, rhs] <- [fact], funct == eqProof]
@@ -67,9 +68,14 @@ entailsAll goals (ProofContext facts) =
                 ]
         classes = congruenceClosure (tableApps table3) equalities
         sameClass a b = rep classes a == rep classes b
+        arithmetic = arithmeticEdges table3 classes trueId zeroId
         entailed goal goalId =
             sameClass goalId trueId
                 || or [sameClass (idOf table3 lhs) (idOf table3 rhs) | FApp funct [lhs, rhs] <- [goal], funct == eqProof]
+                || or
+                    [ arithmeticEntails arithmetic rel (rep classes (idOf table3 lhs)) (rep classes (idOf table3 rhs))
+                    | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
+                    ]
      in zipWith entailed goals goalIds
 
 -- Congruence closure
@@ -149,6 +155,86 @@ unionClasses classes (a, b) =
     let ra = findClass classes a
         rb = findClass classes b
      in if ra == rb then classes else IntMap.insert ra rb classes
+
+-- Integer arithmetic
+--
+-- Integer relations are decided by difference constraints x - y <= c between classes of the
+-- congruence closure, the way a shortest path problem is: an edge from y to x of weight c says
+-- x - y <= c, and a goal x - y <= k holds when the shortest path from y to x weighs at most k.
+-- The constraints come from
+--   * the relation facts (x < y is x - y <= -1, and so on),
+--   * x + c and x - c where c is a class with a known integer value (t = x + c is t - x = c),
+--   * a class with a known integer value n (it differs from 0 by n), and
+--   * size(l) >= 0.
+-- So s = 3 gives s > 0, and i = j + 1 with i < n gives j + 1 < n, without a rewrite rule.
+-- A negative cycle means the facts contradict each other, and then every relation is entailed.
+
+type Edge = (Int, Int, Integer)
+
+newtype Arithmetic = Arithmetic [Edge]
+
+arithmeticEdges :: TermTable -> IntMap.IntMap Int -> Int -> Int -> Arithmetic
+arithmeticEdges table classes trueId zeroId =
+    let node = rep classes
+        constTerms = [(Map.lookup (KConst constId) (tableKeys table), value) | (value, constId) <- tableConsts table]
+        builtinOfClass = Map.fromList [(node termId, funct) | (Just termId, VFunct _ _ _ (BuiltinFunct funct) _) <- constTerms]
+        intOfClass = Map.fromList [(node termId, n) | (Just termId, VInt n) <- constTerms]
+        diff t a n = [(node a, node t, n), (node t, node a, negate n)]
+        relEdges rel l r =
+            case rel of
+                Lt -> [(node r, node l, -1)]
+                LtEq -> [(node r, node l, 0)]
+                Gt -> [(node l, node r, -1)]
+                GtEq -> [(node l, node r, 0)]
+                Eq -> [(node r, node l, 0), (node l, node r, 0)]
+                NotEq -> []
+        appEdges t functId args =
+            case (Map.lookup (node functId) builtinOfClass, args) of
+                (Just Plus, [a, b])
+                    | Just n <- Map.lookup (node b) intOfClass -> diff t a n
+                    | Just n <- Map.lookup (node a) intOfClass -> diff t b n
+                (Just Minus, [a, b])
+                    | Just n <- Map.lookup (node b) intOfClass -> diff t a (negate n)
+                (Just Size, [_]) -> [(node t, node zeroId, 0)]
+                (Just (Rel rel), [l, r]) | node t == node trueId -> relEdges rel l r
+                _ -> []
+        constEdges = concat [diff termId zeroId n | (termId, n) <- Map.toList intOfClass]
+     in Arithmetic (constEdges ++ concat [appEdges t functId args | (t, (functId, args)) <- tableApps table])
+
+-- Whether lhs rel rhs follows from the constraints, for the class representatives lhs and rhs
+arithmeticEntails :: Arithmetic -> Rel -> Int -> Int -> Bool
+arithmeticEntails (Arithmetic edges) rel lhs rhs =
+    case rel of
+        Lt -> bound rhs lhs (-1)
+        LtEq -> bound rhs lhs 0
+        Gt -> bound lhs rhs (-1)
+        GtEq -> bound lhs rhs 0
+        Eq -> bound rhs lhs 0 && bound lhs rhs 0
+        NotEq -> bound rhs lhs (-1) || bound lhs rhs (-1)
+  where
+    -- Whether the shortest path from source to target weighs at most k
+    bound source target k =
+        case shortestPaths edges source of
+            Nothing -> True
+            Just dist -> maybe (source == target && 0 <= k) (<= k) (Map.lookup target dist)
+
+-- Bellman-Ford from one node; Nothing when a negative cycle is reachable from it
+shortestPaths :: [Edge] -> Int -> Maybe (Map.Map Int Integer)
+shortestPaths edges source = go (length edges + 1) (Map.singleton source 0)
+  where
+    go :: Int -> Map.Map Int Integer -> Maybe (Map.Map Int Integer)
+    go rounds dist =
+        let dist' = foldl' relax dist edges
+         in if dist' == dist
+                then Just dist
+                else if rounds <= 0 then Nothing else go (rounds - 1) dist'
+    relax dist (from, to, weight) =
+        case Map.lookup from dist of
+            Nothing -> dist
+            Just d ->
+                case Map.lookup to dist of
+                    Just current | current <= d + weight -> dist
+                    _ -> Map.insert to (d + weight) dist
 
 applyRewrite :: BuiltinEvaluator -> EngineRewriteRule -> ProofContext -> Result ProofContext String
 applyRewrite _ EngineRefl context = Ok (deriveRefl context)

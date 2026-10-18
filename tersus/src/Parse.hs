@@ -400,10 +400,11 @@ arithmeticFunct = do
 
 relationFunct :: Parser BuiltinFunct
 relationFunct = do
-    relstr <- many1 $ oneOf "=<>"
+    relstr <- many1 $ oneOf "=<>!"
     whitespace
     case relstr of
         "=" -> return (Rel Eq)
+        "!=" -> return (Rel NotEq)
         "<" -> return (Rel Lt)
         ">" -> return (Rel Gt)
         "<=" -> return (Rel LtEq)
