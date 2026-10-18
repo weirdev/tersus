@@ -37,7 +37,8 @@ builtinFunct Last =
         []
         (BuiltinFunct Last)
         []
--- get requires a valid index. The contract is checked with checkRel so that a concrete
+-- get requires a valid index, and its result is equal to the term get(list, index), which is what
+-- forall facts about the list are instantiated at. The contract is checked with checkRel so that a concrete
 -- list and index need no proof from the caller, while symbolic ones must already have
 -- 0 <= index < size(list) in the proof context.
 builtinFunct Get =
@@ -50,7 +51,10 @@ builtinFunct Get =
         ]
         []
         (BuiltinFunct Get)
-        []
+        [ FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ATerm "return", FApp (CTerm getSymbol) [ATerm "list", ATerm "index"]]
+        ]
 -- push adds an element at the end, so the result is one longer than the input list and its
 -- last element (at the old size) is x. The result is also equal to the term push(list, x), which
 -- is what the frame rule pushKeeps hangs the unchanged elements on.
@@ -175,6 +179,9 @@ stdLibRuleCtx =
 
 -- Function symbols for the terms push(list, x) and set(list, index, x) in contracts and frame
 -- rules. They cannot be the full builtin values, which contain these very contracts.
+getSymbol :: Value
+getSymbol = VFunct ["list", "index"] [] [] (BuiltinFunct Get) []
+
 pushSymbol :: Value
 pushSymbol = VFunct ["list", "x"] [] [] (BuiltinFunct Push) []
 

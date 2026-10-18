@@ -56,7 +56,29 @@ entails goal context = and (entailsAll [goal] context)
 
 -- Which of the goals the context entails, sharing one congruence closure between them.
 entailsAll :: [IotaProof] -> ProofContext -> [Bool]
-entailsAll goals (ProofContext facts) =
+entailsAll goals (ProofContext facts) = saturate (0 :: Int) facts
+  where
+    -- Facts that are foralls are instantiated, and the closure is rebuilt with the instances
+    -- that hold, until no new instance appears or the rounds run out. Without a forall this is
+    -- one closure.
+    saturate round currentFacts =
+        let (table, classes, flags) = solve currentFacts goals
+            instances = forallInstances table classes currentFacts
+         in if round >= maxInstantiationRounds || null instances
+                then flags
+                else
+                    let guardGoals = concatMap fst instances
+                        (_, _, guardFlags) = solve currentFacts (goals ++ guardGoals)
+                        guardHolds = zip guardGoals (drop (length goals) guardFlags)
+                        accepted = [body | (guards, body) <- instances, all (\g -> lookup g guardHolds == Just True) guards]
+                     in if null accepted then flags else saturate (round + 1) (nub (currentFacts ++ accepted))
+
+maxInstantiationRounds :: Int
+maxInstantiationRounds = 5
+
+-- Interns the facts and goals, builds the classes, and says which goals hold
+solve :: [IotaProof] -> [IotaProof] -> (TermTable, IntMap.IntMap Int, [Bool])
+solve facts goals =
     let (table1, factIds) = internAll emptyTable facts
         (table2, goalIds) = internAll table1 goals
         (table3a, trueId) = internTerm table2 (CTerm (VBool True))
@@ -76,7 +98,84 @@ entailsAll goals (ProofContext facts) =
                     [ arithmeticEntails arithmetic rel (rep classes (idOf table3 lhs)) (rep classes (idOf table3 rhs))
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
                     ]
-     in zipWith entailed goals goalIds
+     in (table3, classes, zipWith entailed goals goalIds)
+
+-- Forall instances
+--
+-- A forall fact `forall j where guards: body` is used at the indexes where its body is about
+-- an element: for every get(L, t) in the closure with L equal to the list of a get(L, j) in the
+-- body, the index j is replaced by t. An instance is the instantiated guards, which must be
+-- entailed, and the instantiated body, which then becomes a fact. A forall whose body has no
+-- get(L, j) is never instantiated.
+
+forallInstances :: TermTable -> IntMap.IntMap Int -> [IotaProof] -> [([IotaProof], IotaProof)]
+forallInstances table classes facts =
+    nub
+        [ (map (substituteIndex index indexTerm) guards, instantiated)
+        | Forall index guards body <- facts
+        , listTerm <- indexedLists index body
+        , indexTerm <- getIndexesOf listTerm
+        , let instantiated = substituteIndex index indexTerm body
+        , instantiated `notElem` facts
+        ]
+  where
+    getClasses = Map.keys (builtinsByClass table classes (== Get))
+    -- The index terms t of the get(L', t) in the closure with L' equal to the list
+    getIndexesOf listTerm =
+        let listClass = rep classes (idOf table listTerm)
+         in [ termOf table indexId
+            | (_, (functId, [listId, indexId])) <- tableApps table
+            , rep classes functId `elem` getClasses
+            , rep classes listId == listClass
+            ]
+
+-- The lists L of the get(L, index) in a proof, where L does not mention the index
+indexedLists :: Variable -> IotaProof -> [IotaProof]
+indexedLists index (FApp funct args) =
+    [ listTerm
+    | FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [listTerm, BVar bound] <- [FApp funct args]
+    , bound == index
+    , not (mentionsIndex index listTerm)
+    ]
+        ++ concatMap (indexedLists index) (funct : args)
+indexedLists _ _ = []
+
+mentionsIndex :: Variable -> IotaProof -> Bool
+mentionsIndex index (BVar bound) = bound == index
+mentionsIndex index (FApp funct args) = any (mentionsIndex index) (funct : args)
+mentionsIndex _ _ = False
+
+substituteIndex :: Variable -> IotaProof -> IotaProof -> IotaProof
+substituteIndex index replacement (BVar bound) | bound == index = replacement
+substituteIndex index replacement (FApp funct args) =
+    FApp (substituteIndex index replacement funct) (map (substituteIndex index replacement) args)
+substituteIndex _ _ other = other
+
+-- The classes of the builtin functions satisfying the predicate, with which builtin each is
+builtinsByClass :: TermTable -> IntMap.IntMap Int -> (BuiltinFunct -> Bool) -> Map.Map Int BuiltinFunct
+builtinsByClass table classes wanted =
+    Map.fromList
+        [ (rep classes termId, funct)
+        | (value, constId) <- tableConsts table
+        , VFunct _ _ _ (BuiltinFunct funct) _ <- [value]
+        , wanted funct
+        , Just termId <- [Map.lookup (KConst constId) (tableKeys table)]
+        ]
+
+-- A proof for a term number of the table
+termOf :: TermTable -> Int -> IotaProof
+termOf table = build
+  where
+    keyOf = IntMap.fromList [(termId, key) | (key, termId) <- Map.toList (tableKeys table)]
+    valueOf = IntMap.fromList [(constId, value) | (value, constId) <- tableConsts table]
+    build termId =
+        case IntMap.lookup termId keyOf of
+            Just (KIota iota) -> ATerm iota
+            Just (KConst constId) -> maybe (ATerm (Iota "?")) CTerm (IntMap.lookup constId valueOf)
+            Just (KApp functId argIds) -> FApp (build functId) (map build argIds)
+            Just (KBound index) -> BVar index
+            Just (KForall index guardIds bodyId) -> Forall index (map build guardIds) (build bodyId)
+            Nothing -> ATerm (Iota "?")
 
 -- Congruence closure
 --
@@ -116,11 +215,12 @@ internTerm table (Forall index guards body) =
             then (table3, termId)
             else (table3{tableForalls = (termId, (index, guardIds, bodyId)) : tableForalls table3}, termId)
 internTerm table (CTerm value) =
-    case lookup value (tableConsts table) of
+    -- A builtin function is the same term however it was written, with or without its contracts
+    case lookup (canonicalValue value) (tableConsts table) of
         Just constId -> internKey table (KConst constId)
         Nothing ->
             let constId = length (tableConsts table)
-             in internKey table{tableConsts = (value, constId) : tableConsts table} (KConst constId)
+             in internKey table{tableConsts = (canonicalValue value, constId) : tableConsts table} (KConst constId)
 internTerm table (FApp funct args) =
     let (table1, functId) = internTerm table funct
         (table2, argIds) = internAll table1 args
@@ -129,6 +229,10 @@ internTerm table (FApp funct args) =
      in if Map.member key (tableKeys table2)
             then (table3, termId)
             else (table3{tableApps = (termId, (functId, argIds)) : tableApps table3}, termId)
+
+canonicalValue :: Value -> Value
+canonicalValue (VFunct _ _ _ (BuiltinFunct funct) _) = VFunct [] [] [] (BuiltinFunct funct) []
+canonicalValue value = value
 
 internKey :: TermTable -> TermKey -> (TermTable, Int)
 internKey table key =
@@ -196,7 +300,7 @@ arithmeticEdges :: TermTable -> IntMap.IntMap Int -> Int -> Int -> Arithmetic
 arithmeticEdges table classes trueId zeroId =
     let node = rep classes
         constTerms = [(Map.lookup (KConst constId) (tableKeys table), value) | (value, constId) <- tableConsts table]
-        builtinOfClass = Map.fromList [(node termId, funct) | (Just termId, VFunct _ _ _ (BuiltinFunct funct) _) <- constTerms]
+        builtinOfClass = builtinsByClass table classes (const True)
         intOfClass = Map.fromList [(node termId, n) | (Just termId, VInt n) <- constTerms]
         diff t a n = [(node a, node t, n), (node t, node a, negate n)]
         relEdges rel l r =

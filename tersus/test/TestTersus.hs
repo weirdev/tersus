@@ -1594,6 +1594,61 @@ testArithmetic =
             ]
 
 -- forall parses into a bound index (BVar) with its guards, and the validator rejects it for now
+-- forall facts are instantiated at the elements the program reads
+testForallInstantiation :: Test
+testForallInstantiation =
+    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
+        getOf l t = FApp (CTerm (builtinFunct Get)) [l, t]
+        sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
+        iota = ATerm . Iota
+        int = CTerm . VInt
+        allZero l = Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") (sizeOf l)] (rel Eq (getOf l (BVar "j")) (int 0))
+        engine facts goal = testAssertTrue (Engine.entails goal (Engine.proofContextFromFacts facts))
+        engineNot facts goal = testAssertTrue (not (Engine.entails goal (Engine.proofContextFromFacts facts)))
+        inRange i l = [rel GtEq (iota i) (int 0), rel Lt (iota i) (sizeOf (iota l))]
+        zeroAt l i = rel Eq (getOf (iota l) (iota i)) (int 0)
+        -- reads element i of l under the contract that every element of l is 0
+        reader = "fn f(l, i) [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] "
+     in testCaseSeq
+            "testForallInstantiation"
+            [ -- Engine: an instance is used at the elements in the goal, when its guards hold
+              engine (allZero (iota "l") : inRange "i" "l") (zeroAt "l" "i")
+            , -- It also reaches elements of an equal list
+              engine (allZero (iota "l") : rel Eq (iota "m") (iota "l") : inRange "i" "m") (zeroAt "m" "i")
+            , -- and an index known only by its value
+              engine [allZero (iota "l"), rel Eq (sizeOf (iota "l")) (int 3), rel Eq (iota "i") (int 2)] (zeroAt "l" "i")
+            , -- Two elements, each with its own instance
+              engine (allZero (iota "l") : inRange "i" "l" ++ inRange "k" "l") (rel Eq (getOf (iota "l") (iota "i")) (getOf (iota "l") (iota "k")))
+            , -- Engine: an index outside the guards, another list, or no get term at all gets nothing
+              engineNot (allZero (iota "l") : [rel GtEq (iota "i") (int 0)]) (zeroAt "l" "i")
+            , engineNot (allZero (iota "l") : rel Lt (iota "i") (int 0) : [rel Lt (iota "i") (sizeOf (iota "l"))]) (zeroAt "l" "i")
+            , engineNot (allZero (iota "l") : inRange "i" "m") (zeroAt "m" "i")
+            , engineNot (inRange "i" "l") (zeroAt "l" "i")
+            , engineNot (allZero (iota "l") : inRange "i" "l") (rel Eq (getOf (iota "l") (iota "i")) (int 1))
+            , -- Programs: the contract's forall gives the element a function reads
+              parseValidProgramHelper
+                (reader ++ "[{ affirm return = 0; }] { x = get(l, i); return x; };")
+            , parseValidProgramHelper
+                ( zeroAxiom
+                    ++ reader
+                    ++ "[{ affirm return = 0; }] { x = get(l, i); return x; };\
+                       \a = [0, 0]; rewrite zeros a; r = f(a, 1); affirm r = 0;"
+                )
+            , -- Without the forall, or with a guard that does not cover the index, nothing is known
+              parseValidateFailProgramHelper
+                "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
+                "Assertion failed"
+            , parseValidateFailProgramHelper
+                "fn f(l, i) [{ affirm forall j in 0..1: get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
+                "Assertion failed"
+            , parseValidateFailProgramHelper
+                "fn f(l, m, i) [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(m); affirm i >= 0; affirm i < size(m); }] [{ affirm return = 0; }] { x = get(m, i); return x; };"
+                "Assertion failed"
+            , -- get's result is the term get(list, index), also without a forall
+              parseValidProgramHelper
+                "fn g(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { x = get(l, i); y = get(l, i); affirm x = y; return x; };"
+            ]
+
 zeroAxiom :: String
 zeroAxiom = "axiom zeros(l) [{ }] [{ affirm forall j in 0..size(l): get(l, j) = 0; }];"
 
@@ -1811,6 +1866,7 @@ main = do
                 , testLists
                 , testArithmetic
                 , testForallSyntax
+                , testForallInstantiation
                 ]
     putStrLn $
         "Summary: "
