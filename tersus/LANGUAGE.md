@@ -533,6 +533,16 @@ affirm y = 3;
 affirm s > 0;
 ```
 
+A contract can contain a `forall` (see `forall` above). In an input contract it is proved at every call, and assumed in the body. In an output contract it is proved after the body, and instantiated for the caller with the actual arguments and the result:
+
+```tersus
+fn keep(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] {
+    return l;
+};
+```
+
+See `examples/forall_facts.tersus`.
+
 ## Arithmetic
 
 The validator decides integer comparisons itself, so `affirm`, loop invariants, `checkRel` and `if` guards need no helper rewrites for them. It treats `x - y <= c` facts as a graph and answers a goal by the shortest path between the two sides. The facts come from:

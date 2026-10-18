@@ -1,0 +1,11 @@
+// Rejected: readZero's input contract is a forall over the whole list, but only the first two
+// elements are known to be 0 (the forall covers 0..2, not 0..size(l)).
+axiom firstTwoZero(l) [{ }] [{ affirm forall j in 0..2: get(l, j) = 0; }];
+
+fn keep(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] {
+    return l;
+};
+
+a = [0, 0, 5];
+rewrite firstTwoZero a;
+b = keep(a);
