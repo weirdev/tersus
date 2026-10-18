@@ -1156,6 +1156,8 @@ testExamples =
         , testExampleFile "examples/update_list.tersus" (ExpectReturn (VIntList [101, 102, 103]))
         , testExampleFile "examples/element_facts.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/frame_facts.tersus" (ExpectReturn (VInt 149))
+        , testExampleFile "examples/forall_facts.tersus" (ExpectReturn (VInt 5))
+        , testExampleFile "examples/rejected/forall_unproven.tersus" (ExpectRejected "input validation failed")
         , testExampleFile "examples/rejected/frame_changed_index.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")

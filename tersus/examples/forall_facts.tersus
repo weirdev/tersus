@@ -1,0 +1,32 @@
+// forall states a fact about every index in a range: forall j in 0..n: P holds P for each j with
+// 0 <= j < n. The validator proves one for an arbitrary index in the range, and uses one at the
+// elements the program reads with get.
+//
+// allZero is a trusted axiom here, standing for a list built or checked elsewhere.
+axiom allZero(l) [{ }] [{ affirm forall j in 0..size(l): get(l, j) = 0; }];
+
+// readZero's input contract demands the forall, so its body may rely on it: reading any valid
+// index gives 0.
+fn readZero(l, i) [{
+    affirm forall j in 0..size(l): get(l, j) = 0;
+    rewrite checkRel i >= 0;
+    rewrite checkRel i < size(l);
+    affirm i >= 0;
+    affirm i < size(l);
+}] [{ affirm return = 0; }] {
+    return get(l, i);
+};
+
+// keep returns its argument, and its output contract passes the forall on to the caller.
+fn keep(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] {
+    return l;
+};
+
+a = [0, 0, 0];
+rewrite allZero a;
+b = keep(a);
+// The caller gets the forall about the result (the name of the index does not matter) ...
+affirm forall k in 0..size(b): get(b, k) = 0;
+// ... and a forall over a range that is empty or known to be small needs no list at all.
+affirm forall j in 0..3: j < 3;
+return readZero(b, 2) + 5;
