@@ -1,0 +1,6 @@
+// set changes the element at its index, so the frame rules do not cover it: setKeepsBelow
+// needs j < i and setKeepsAbove needs j > i, and here j = i.
+a = [10, 20, 30];
+b = set(a, 1, 99);
+rewrite setKeepsBelow a 1 99 1;
+return get(b, 1);

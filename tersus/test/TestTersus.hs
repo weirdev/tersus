@@ -485,9 +485,9 @@ testValidateWithExpectedMatch =
             , ValidationStatement (Rewrite (UserRewrite "eqToLtPlus1" [ATerm "x"]))
             , ValidationStatement (ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 6)]))
             ]
-            [ FApp eqVarProof [ATerm "x", CTerm (VInt 5)]
-            , FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "x", CTerm (VInt 6)]
-            ]
+            -- x < 6 is entailed (the ProofAssert above checks it) but no longer stored as a fact,
+            -- since applying a rule does not copy every fact with refl
+            [FApp eqVarProof [ATerm "x", CTerm (VInt 5)]]
         , validateWEMatchHelper
             [ Assign "x" (Val (VInt 5))
             , ValidationStatement (AssignProofVar "a" (Val (VInt 5)))
@@ -1155,6 +1155,8 @@ testExamples =
         , testExampleFile "examples/build_list.tersus" (ExpectReturn (VIntList [2, 4, 6]))
         , testExampleFile "examples/update_list.tersus" (ExpectReturn (VIntList [101, 102, 103]))
         , testExampleFile "examples/element_facts.tersus" (ExpectReturn (VInt 106))
+        , testExampleFile "examples/frame_facts.tersus" (ExpectReturn (VInt 149))
+        , testExampleFile "examples/rejected/frame_changed_index.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
@@ -1550,6 +1552,15 @@ testLists =
         , parseEvalFailStmtHelper "{ return set([], 0, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set(1, 0, 0); }" "Set only valid"
         , parseEvalFailStmtHelper "{ return set([5], 0, [1]); }" "Set only valid"
+        , -- Frame rules: push and set leave the other elements as they were
+          parseValidProgramHelper "a = [1, 2]; b = push(a, 3); rewrite pushKeeps a 3 1; affirm get(b, 1) = get(a, 1);"
+        , parseValidProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeepsAbove a 1 9 2; affirm get(b, 2) = get(a, 2);"
+        , parseValidProgramHelper
+            "fn keep(l, x, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); affirm j >= 0; affirm j < size(l); }] [{ }] { r = push(l, x); rewrite pushKeeps l x j; affirm get(r, j) = get(l, j); return r; }; return keep([4, 5], 6, 1);"
+        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); rewrite pushKeeps a 3 2;" "Relation does not hold"
+        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);" "Assertion failed"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeepsAbove a 1 9 1;" "Relation does not hold"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeepsBelow a 1 9 0; affirm get(b, 1) = get(a, 1);" "Assertion failed"
         , -- Validation: a concrete list and index need no proof from the caller
           parseValidProgramHelper "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;"
         , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"

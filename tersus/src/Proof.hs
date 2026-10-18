@@ -631,7 +631,7 @@ applyUserRule state name formals inputValStmts outputValStmts actualArgs
                 Ok _ ->
                     case assumeValStmts state instOutputs of
                         Error e -> Error $ "Rewrite rule " ++ name ++ " output instantiation failed: " ++ e
-                        Ok stateWithOutputs -> applyEngineRewrite stateWithOutputs Engine.EngineRefl
+                        Ok stateWithOutputs -> Ok stateWithOutputs
 
 applyProofRule :: VState -> Variable -> [Variable] -> [ValidationStatement] -> [VariableProof] -> [VariableProof] -> Result VState String
 applyProofRule state name formals inputValStmts exportedProofs actualArgs
@@ -646,7 +646,7 @@ applyProofRule state name formals inputValStmts exportedProofs actualArgs
                 Ok _ ->
                     case flatResultMap (`varProofToIotaProof` state) instOutputs of
                         Error e -> Error $ "Rewrite rule " ++ name ++ " output instantiation failed: " ++ e
-                        Ok iotaProofs -> applyEngineRewrite (vInsertProofs state iotaProofs) Engine.EngineRefl
+                        Ok iotaProofs -> Ok (vInsertProofs state iotaProofs)
 
 validateUserRuleInputs :: VState -> [ValidationStatement] -> Result VState String
 validateUserRuleInputs state [] = Ok state

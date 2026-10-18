@@ -52,7 +52,8 @@ builtinFunct Get =
         (BuiltinFunct Get)
         []
 -- push adds an element at the end, so the result is one longer than the input list and its
--- last element (at the old size) is x.
+-- last element (at the old size) is x. The result is also equal to the term push(list, x), which
+-- is what the frame rule pushKeeps hangs the unchanged elements on.
 builtinFunct Push =
     VFunct
         ["list", "x"]
@@ -60,6 +61,9 @@ builtinFunct Push =
         []
         (BuiltinFunct Push)
         [ FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ATerm "return", FApp (CTerm pushSymbol) [ATerm "list", ATerm "x"]]
+        , FApp
             (CTerm (builtinFunct (Rel Eq)))
             [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
             , FApp (CTerm (builtinFunct Plus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)]
@@ -72,7 +76,8 @@ builtinFunct Push =
         ]
 -- set replaces one element, so it needs a valid index like get, and the result has the same
 -- size as the input list, and x at that index. The list itself is not changed: the result is
--- a new list. What happens to the other elements is not stated yet.
+-- a new list. The other elements are unchanged, which the frame rules setKeepsBelow and
+-- setKeepsAbove state through the equal term set(list, index, x).
 builtinFunct Set =
     VFunct
         ["list", "index", "x"]
@@ -84,6 +89,9 @@ builtinFunct Set =
         []
         (BuiltinFunct Set)
         [ FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ATerm "return", FApp (CTerm setSymbol) [ATerm "list", ATerm "index", ATerm "x"]]
+        , FApp
             (CTerm (builtinFunct (Rel Eq)))
             [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
             , FApp (CTerm (builtinFunct Size)) [ATerm "list"]
@@ -148,7 +156,56 @@ stdLibRuleCtx =
                 ]
                 [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
           )
+        , ( "pushKeeps"
+          , AxiomRule
+                ["l", "x", "j"]
+                (inRange "l" "j")
+                [frameFact pushSymbol ["l", "x"] "j" (ATerm "l")]
+          )
+        , ( "setKeepsBelow"
+          , AxiomRule
+                ["l", "i", "x", "j"]
+                ( inRange "l" "j"
+                    ++ [Rewrite (CheckRel (relProof Lt (ATerm "j") (ATerm "i")))]
+                )
+                [frameFact setSymbol ["l", "i", "x"] "j" (ATerm "l")]
+          )
+        , ( "setKeepsAbove"
+          , AxiomRule
+                ["l", "i", "x", "j"]
+                ( inRange "l" "j"
+                    ++ [Rewrite (CheckRel (relProof Gt (ATerm "j") (ATerm "i")))]
+                )
+                [frameFact setSymbol ["l", "i", "x"] "j" (ATerm "l")]
+          )
         ]
+
+-- Function symbols for the terms push(list, x) and set(list, index, x) in contracts and frame
+-- rules. They cannot be the full builtin values, which contain these very contracts.
+pushSymbol :: Value
+pushSymbol = VFunct ["list", "x"] [] [] (BuiltinFunct Push) []
+
+setSymbol :: Value
+setSymbol = VFunct ["list", "index", "x"] [] [] (BuiltinFunct Set) []
+
+relProof :: Rel -> VariableProof -> VariableProof -> VariableProof
+relProof rel lhs rhs = FApp (CTerm (builtinFunct (Rel rel))) [lhs, rhs]
+
+-- Input of a frame rule: j is a valid index of l, checked like the input of get.
+inRange :: Variable -> Variable -> [ValidationStatement]
+inRange l j =
+    [ Rewrite (CheckRel (relProof GtEq (ATerm j) (CTerm (VInt 0))))
+    , Rewrite (CheckRel (relProof Lt (ATerm j) (FApp (CTerm (builtinFunct Size)) [ATerm l])))
+    ]
+
+-- get(funct(args), j) = get(source, j): the element at j of the new list is the old one
+frameFact :: Value -> [Variable] -> Variable -> VariableProof -> ValidationStatement
+frameFact funct args j source =
+    ProofAssert $
+        relProof
+            Eq
+            (FApp (CTerm (builtinFunct Get)) [FApp (CTerm funct) (map ATerm args), ATerm j])
+            (FApp (CTerm (builtinFunct Get)) [source, ATerm j])
 
 -- NOTE: Could also take iotaseq as input here
 stdLibCtxToValCtx :: Map Variable Value -> (Map Variable Iota, [IotaProof])
