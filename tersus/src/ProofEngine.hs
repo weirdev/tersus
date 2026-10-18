@@ -171,7 +171,8 @@ unionClasses classes (a, b) =
 
 type Edge = (Int, Int, Integer)
 
-newtype Arithmetic = Arithmetic [Edge]
+-- The constraints, and whether they contradict each other anywhere (not only near a goal)
+data Arithmetic = Arithmetic [Edge] Bool
 
 arithmeticEdges :: TermTable -> IntMap.IntMap Int -> Int -> Int -> Arithmetic
 arithmeticEdges table classes trueId zeroId =
@@ -199,12 +200,13 @@ arithmeticEdges table classes trueId zeroId =
                 (Just (Rel rel), [l, r]) | node t == node trueId -> relEdges rel l r
                 _ -> []
         constEdges = concat [diff termId zeroId n | (termId, n) <- Map.toList intOfClass]
-     in Arithmetic (constEdges ++ concat [appEdges t functId args | (t, (functId, args)) <- tableApps table])
+        edges = constEdges ++ concat [appEdges t functId args | (t, (functId, args)) <- tableApps table]
+     in Arithmetic edges (not (consistent edges))
 
 -- Whether lhs rel rhs follows from the constraints, for the class representatives lhs and rhs
 arithmeticEntails :: Arithmetic -> Rel -> Int -> Int -> Bool
-arithmeticEntails (Arithmetic edges) rel lhs rhs =
-    case rel of
+arithmeticEntails (Arithmetic edges inconsistent) rel lhs rhs =
+    inconsistent || case rel of
         Lt -> bound rhs lhs (-1)
         LtEq -> bound rhs lhs 0
         Gt -> bound lhs rhs (-1)
@@ -214,13 +216,20 @@ arithmeticEntails (Arithmetic edges) rel lhs rhs =
   where
     -- Whether the shortest path from source to target weighs at most k
     bound source target k =
-        case shortestPaths edges source of
+        case shortestPaths edges (Map.singleton source 0) of
             Nothing -> True
             Just dist -> maybe (source == target && 0 <= k) (<= k) (Map.lookup target dist)
 
--- Bellman-Ford from one node; Nothing when a negative cycle is reachable from it
-shortestPaths :: [Edge] -> Int -> Maybe (Map.Map Int Integer)
-shortestPaths edges source = go (length edges + 1) (Map.singleton source 0)
+-- Whether the constraints have a solution, which is when no cycle of edges weighs less than
+-- zero. Starting every node at distance 0 finds a negative cycle anywhere in the graph, whether
+-- or not a goal can reach it.
+consistent :: [Edge] -> Bool
+consistent edges = shortestPaths edges (Map.fromList [(node, 0) | (from, to, _) <- edges, node <- [from, to]]) /= Nothing
+
+-- Bellman-Ford from the given starting distances; Nothing when it keeps improving, which is a
+-- negative cycle reachable from them
+shortestPaths :: [Edge] -> Map.Map Int Integer -> Maybe (Map.Map Int Integer)
+shortestPaths edges start = go (length edges + 1) start
   where
     go :: Int -> Map.Map Int Integer -> Maybe (Map.Map Int Integer)
     go rounds dist =
