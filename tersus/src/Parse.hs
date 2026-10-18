@@ -3,7 +3,7 @@ module Parse where
 import Text.Parsec
 import Text.Parsec.String (Parser)
 
-import Control.Monad (void)
+import Control.Monad (void, when)
 import Data.Char (isDigit, isLetter)
 
 import StdLib
@@ -221,9 +221,50 @@ assignProofVarStatement = do
 
 proof :: Parser VariableProof
 proof =
-    try
-        infixProof
+    forallProof
+        <|> try infixProof
         <|> nonInfixProof
+
+-- forall j where j >= 0, j < i: P
+-- forall j in 0..i: P            (shorthand for: forall j where j >= 0, j < i: P)
+-- The index is bound in the guards and the body, and forall does not nest.
+forallProof :: Parser VariableProof
+forallProof = do
+    keyword "forall"
+    whitespace
+    index <- variable
+    whitespace
+    (guards, body) <- forallRange index <|> forallWhere
+    when (any proofHasForall (body : guards)) $ fail "forall does not nest"
+    return (Forall index (map (bindIndex index) guards) (bindIndex index body))
+  where
+    forallWhere = do
+        keyword "where"
+        whitespace
+        guards <- proof `sepBy1` skipWhitespace (char ',')
+        body <- forallBody
+        return (guards, body)
+    forallRange index = do
+        keyword "in"
+        whitespace
+        lower <- proof
+        void (string "..")
+        whitespace
+        upper <- proof
+        body <- forallBody
+        let geq = FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm index, lower]
+            lt = FApp (CTerm (builtinFunct (Rel Lt))) [ATerm index, upper]
+        return ([geq, lt], body)
+    forallBody = do
+        void (char ':')
+        whitespace
+        proof
+
+-- Occurrences of the index become BVar
+bindIndex :: Variable -> VariableProof -> VariableProof
+bindIndex index (ATerm var) | var == index = BVar index
+bindIndex index (FApp funct args) = FApp (bindIndex index funct) (map (bindIndex index) args)
+bindIndex _ other = other
 
 nonInfixProof :: Parser VariableProof
 nonInfixProof =

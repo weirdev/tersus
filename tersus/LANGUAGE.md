@@ -398,6 +398,19 @@ affirm size(xs) > 0;
 affirm y = (x + 1);
 ```
 
+### `forall`
+
+`forall` states a fact about every index in a range, for use in `affirm`, contracts and loop invariants. It parses today, but the validator does not understand it yet: a program that contains one is rejected with `forall is not supported by the validator yet`. Evaluation ignores it like any validation statement.
+
+```tersus
+affirm forall j in 0..size(l): get(l, j) = 0;            // 0 <= j < size(l)
+affirm forall j where j >= 0, j < n, j != 2: get(l, j) = 0;
+```
+
+- `forall j in lo..hi: P` is shorthand for `forall j where j >= lo, j < hi: P`, so the range is half open.
+- `forall j where g1, g2, ...: P` holds `P` for every `j` for which all the guards hold. A guard is any relation.
+- `j` is bound in the guards and in `P`. Other names refer to variables as usual, and `forall` does not nest.
+
 ### `define`
 
 `define` introduces a proof variable by validating an expression and recording equality between the new proof variable and that expression.
@@ -545,6 +558,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 - Arithmetic is limited to comparisons and adding or subtracting a known constant (see Arithmetic). There is no `*` or `/`, and a relation between `x + y` terms where neither is known is not understood.
 - The size of a list built by a literal or loop is not computed by the validator on its own: `out = []; define s0 = size(out);` is how `examples/build_list.tersus` gets `size(out) = 0`.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it.
+- `forall` parses but is not validated yet.
 - No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
 - The CLI runs one file at a time and has no REPL or multi-file programs.
