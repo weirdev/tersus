@@ -76,8 +76,8 @@ builtinFunct Push =
         ]
 -- set replaces one element, so it needs a valid index like get, and the result has the same
 -- size as the input list, and x at that index. The list itself is not changed: the result is
--- a new list. The other elements are unchanged, which the frame rules setKeepsBelow and
--- setKeepsAbove state through the equal term set(list, index, x).
+-- a new list. The other elements are unchanged, which the frame rule setKeeps
+-- states through the equal term set(list, index, x).
 builtinFunct Set =
     VFunct
         ["list", "index", "x"]
@@ -118,6 +118,7 @@ stdLibCtx =
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
         , ("=", builtinFunct (Rel Eq))
+        , ("!=", builtinFunct (Rel NotEq))
         , ("<", builtinFunct (Rel Lt))
         , (">", builtinFunct (Rel Gt))
         , ("<=", builtinFunct (Rel LtEq))
@@ -162,19 +163,11 @@ stdLibRuleCtx =
                 (inRange "l" "j")
                 [frameFact pushSymbol ["l", "x"] "j" (ATerm "l")]
           )
-        , ( "setKeepsBelow"
+        , ( "setKeeps"
           , AxiomRule
                 ["l", "i", "x", "j"]
                 ( inRange "l" "j"
-                    ++ [Rewrite (CheckRel (relProof Lt (ATerm "j") (ATerm "i")))]
-                )
-                [frameFact setSymbol ["l", "i", "x"] "j" (ATerm "l")]
-          )
-        , ( "setKeepsAbove"
-          , AxiomRule
-                ["l", "i", "x", "j"]
-                ( inRange "l" "j"
-                    ++ [Rewrite (CheckRel (relProof Gt (ATerm "j") (ATerm "i")))]
+                    ++ [Rewrite (CheckRel (relProof NotEq (ATerm "j") (ATerm "i")))]
                 )
                 [frameFact setSymbol ["l", "i", "x"] "j" (ATerm "l")]
           )

@@ -682,7 +682,7 @@ testProofEngineEntailsNestedCongruence =
     let goal = FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
         ltGoal = FApp (CTerm (builtinFunct (Rel LtEq))) [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
         context = Engine.proofContextFromFacts nestedCongruenceFacts
-     in testAssertEq (Engine.entails goal context, Engine.entails ltGoal context) (True, False)
+     in testAssertEq (Engine.entails goal context, Engine.entails ltGoal context) (True, True)
 
 -- Dropping the link between s and k breaks the chain, so the goal is no longer entailed
 testProofEngineEntailsNestedCongruenceNeedsEveryLink :: TestResult
@@ -1319,7 +1319,7 @@ testValidateIf =
           parseValidateFailProgramHelper
             "fn firstOr(lst, d) {\
             \  r = d;\
-            \  if size(lst) > 1 {\
+            \  if size(lst) >= 0 {\
             \    r = first(lst);\
             \  };\
             \  return r;\
@@ -1330,7 +1330,7 @@ testValidateIf =
           parseValidateFailProgramHelper
             "fn f(n) {\
             \  y = 0;\
-            \  if n < 6 { y = 1; rewrite eqToGtZero y; } else { y = 2; };\
+            \  if n < 6 { y = 1; rewrite eqToGtZero y; } else { y = 0 - 1; };\
             \  affirm y > 0;\
             \};"
             "Assertion failed"
@@ -1346,7 +1346,7 @@ testValidateIf =
           parseValidateFailProgramHelper
             "fn f(n) {\
             \  y = 0;\
-            \  if n < 6 { y = n; } else { y = 0; };\
+            \  if n < 6 { y = n; } else { y = 9; };\
             \  affirm y < 6;\
             \};"
             "Assertion failed"
@@ -1423,7 +1423,7 @@ testValidateWhile =
             "Loop invariant does not hold on entry"
         , parseValidateFailProgramHelper
             ( loopAxioms
-                ++ "i = 0; rewrite zeroWithinBound i; while i < 3 [{ affirm i <= 3; }] { i = i + 1; };"
+                ++ "i = 0; rewrite zeroWithinBound i; while i < 3 [{ affirm i <= 2; }] { i = i + 1; };"
             )
             "Loop invariant is not preserved"
         , -- Soundness: what was known about i before the loop says nothing about i after it
@@ -1476,7 +1476,7 @@ testEarlyReturn =
             "fn f(lst, d) { if size(lst) > 0 { return d; }; return first(lst); };"
             "lacks concrete definition"
         , parseValidateFailProgramHelper
-            "fn f(lst, d) { if size(lst) > 1 { } else { return d; }; return first(lst); };"
+            "fn f(lst, d) { if size(lst) < 5 { } else { return d; }; return first(lst); };"
             "lacks concrete definition"
         , -- Soundness: the return branch's condition is not known afterwards
           parseValidateFailProgramHelper
@@ -1501,7 +1501,7 @@ testEarlyReturn =
         , parseValidateFailProgramHelper
             ( loopAxioms
                 ++ "fn f(n) { i = 0; rewrite zeroWithinBound i;\
-                   \ while i < 3 [{ affirm i <= 3; }] { if i > n { return i; }; i = i + 1; };\
+                   \ while i < 3 [{ affirm i <= 2; }] { if i > n { return i; }; i = i + 1; };\
                    \ return i; };"
             )
             "Loop invariant is not preserved"
@@ -1526,6 +1526,67 @@ testEarlyReturn =
           parseValidProgramHelper
             "fn f(n) { i = 0; while i < 2 { j = 0; while j < 2 { if j > n { return j; }; j = j + 1; }; i = i + 1; }; return 0; }; x = f(1);"
         ]
+
+testArithmetic :: Test
+testArithmetic =
+    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
+        plus a b = FApp (CTerm (builtinFunct Plus)) [a, b]
+        sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
+        iota = ATerm . Iota
+        int = CTerm . VInt
+        ctx = Engine.proofContextFromFacts
+        engine facts goal = testAssertTrue (Engine.entails goal (ctx facts))
+        engineNot facts goal = testAssertTrue (not (Engine.entails goal (ctx facts)))
+     in testCaseSeq
+            "testArithmetic"
+            [ -- Engine: relations follow from known values and from x + c
+              engine [FApp eqProof [iota "s", int 3]] (rel Gt (iota "s") (int 0))
+            , engine [FApp eqProof [iota "j", plus (iota "i") (int 1)], rel Lt (iota "i") (iota "n")] (rel LtEq (iota "j") (iota "n"))
+            , engine [rel Lt (iota "a") (iota "b"), rel Lt (iota "b") (iota "c")] (rel Lt (iota "a") (iota "c"))
+            , engine [rel Lt (iota "a") (iota "b")] (rel NotEq (iota "a") (iota "b"))
+            , engine [FApp eqProof [iota "x", iota "y"]] (rel LtEq (iota "x") (iota "y"))
+            , engine [] (rel GtEq (sizeOf (iota "l")) (int 0))
+            , engine [] (rel Lt (int 2) (int 3))
+            , -- Engine: nothing follows from too little
+              engineNot [rel LtEq (iota "a") (iota "b")] (rel Lt (iota "a") (iota "b"))
+            , engineNot [rel Lt (iota "i") (iota "n")] (rel Lt (plus (iota "i") (int 2)) (iota "n"))
+            , engineNot [FApp eqProof [iota "s", int 0]] (rel Gt (iota "s") (int 0))
+            , engineNot [rel Lt (iota "a") (iota "b")] (rel Lt (iota "b") (iota "a"))
+            , engineNot [] (rel Gt (sizeOf (iota "l")) (int 0))
+            , engineNot [rel LtEq (iota "a") (iota "b")] (rel NotEq (iota "a") (iota "b"))
+            , -- != parses, evaluates and validates
+              parseEvalProgramHelper "return 3 != 4;" (Just (VBool True))
+            , parseEvalProgramHelper "return 3 != 3;" (Just (VBool False))
+            , parseEvalProgramHelper "x = 2; if x != 2 { return 1; } else { return 0; };" (Just (VInt 0))
+            , parseValidProgramHelper "x = 2; affirm x != 3;"
+            , parseValidateFailProgramHelper "x = 2; affirm x != 2;" "Assertion failed"
+            , parseValidProgramHelper "fn f(n) { if n != 0 { affirm n != 0; } else { affirm n = 0; }; return 1; }; return f(4);"
+            , -- Programs: no manual rewrites for the arithmetic
+              parseValidProgramHelper "s = 3; affirm s > 0; affirm s >= 3; affirm s != 0;"
+            , parseValidProgramHelper "x = 5; y = x + 1; affirm y > x; affirm y = 6;"
+            , parseValidProgramHelper "fn f(l) { n = size(l); affirm n >= 0; return n; }; return f([1, 2]);"
+            , parseValidProgramHelper "fn f(i, n) [{ affirm i < n; }] [{ }] { j = i + 1; affirm j <= n; return j; }; return f(1, 2);"
+            , parseValidateFailProgramHelper "x = 5; y = x + 1; affirm y > 6;" "Assertion failed"
+            , parseValidateFailProgramHelper "x = 5; y = x - 1; affirm y > 4;" "Assertion failed"
+            , parseValidateFailProgramHelper "fn f(i, n) [{ affirm i <= n; }] [{ }] { j = i + 1; affirm j <= n; return j; };" "Assertion failed"
+            , -- A counting loop needs no axioms
+              parseValidProgramHelper
+                "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] { i = i + 1; }; affirm i = 3;"
+            , parseValidateFailProgramHelper
+                "i = 0; while i < 3 [{ affirm i <= 2; }] { i = i + 1; };"
+                "Loop invariant is not preserved"
+            , parseValidateFailProgramHelper
+                "i = 0; while i < 3 [{ affirm i >= 1; }] { i = i + 1; };"
+                "Loop invariant does not hold on entry"
+            , -- != lets one frame rule cover the indexes below and above the one set wrote
+              parseValidProgramHelper
+                "fn f(l, i, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); rewrite checkRel i >= 0; rewrite checkRel i < size(l); rewrite checkRel j < i; affirm j >= 0; affirm j < size(l); affirm i >= 0; affirm i < size(l); affirm j < i; }] [{ }] { r = set(l, i, 7); rewrite setKeeps l i 7 j; affirm get(r, j) = get(l, j); return r; }; return f([1, 2, 3], 2, 0);"
+            , parseValidProgramHelper
+                "fn f(l, i, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); rewrite checkRel i >= 0; rewrite checkRel i < size(l); rewrite checkRel j > i; affirm j >= 0; affirm j < size(l); affirm i >= 0; affirm i < size(l); affirm j > i; }] [{ }] { r = set(l, i, 7); rewrite setKeeps l i 7 j; affirm get(r, j) = get(l, j); return r; }; return f([1, 2, 3], 0, 2);"
+            , parseValidateFailProgramHelper
+                "fn f(l, i, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm j >= 0; affirm j < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { r = set(l, i, 7); rewrite setKeeps l i 7 j; return r; };"
+                "Relation lacks a proof"
+            ]
 
 testLists :: Test
 testLists =
@@ -1554,13 +1615,13 @@ testLists =
         , parseEvalFailStmtHelper "{ return set([5], 0, [1]); }" "Set only valid"
         , -- Frame rules: push and set leave the other elements as they were
           parseValidProgramHelper "a = [1, 2]; b = push(a, 3); rewrite pushKeeps a 3 1; affirm get(b, 1) = get(a, 1);"
-        , parseValidProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeepsAbove a 1 9 2; affirm get(b, 2) = get(a, 2);"
+        , parseValidProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeeps a 1 9 2; affirm get(b, 2) = get(a, 2);"
         , parseValidProgramHelper
             "fn keep(l, x, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); affirm j >= 0; affirm j < size(l); }] [{ }] { r = push(l, x); rewrite pushKeeps l x j; affirm get(r, j) = get(l, j); return r; }; return keep([4, 5], 6, 1);"
         , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); rewrite pushKeeps a 3 2;" "Relation does not hold"
         , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);" "Assertion failed"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeepsAbove a 1 9 1;" "Relation does not hold"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeepsBelow a 1 9 0; affirm get(b, 1) = get(a, 1);" "Assertion failed"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeeps a 1 9 1;" "Relation does not hold"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeeps a 1 9 0; affirm get(b, 1) = get(a, 1);" "Assertion failed"
         , -- Validation: a concrete list and index need no proof from the caller
           parseValidProgramHelper "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;"
         , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"
@@ -1648,6 +1709,7 @@ main = do
                 , testCli
                 , testControlFlow
                 , testLists
+                , testArithmetic
                 ]
     putStrLn $
         "Summary: "

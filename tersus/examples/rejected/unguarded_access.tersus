@@ -1,7 +1,7 @@
-// Rejected: the guard says size(lst) > 1, which does not show the size(lst) > 0 that first needs.
+// Rejected: the guard says size(lst) >= 0, which does not show the size(lst) > 0 that first needs.
 fn firstOr(lst, fallback) {
     r = fallback;
-    if size(lst) > 1 {
+    if size(lst) >= 0 {
         r = first(lst);
     };
     return r;

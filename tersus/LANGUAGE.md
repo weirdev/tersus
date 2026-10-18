@@ -67,7 +67,7 @@ first(xs) + last(xs)
 The current infix operators are:
 
 - Arithmetic: `+`, `-`
-- Relations: `=`, `<`, `>`, `<=`, `>=`
+- Relations: `=`, `!=`, `<`, `>`, `<=`, `>=`
 
 All infix operators currently share one precedence level and associate left. Use parentheses when the intended grouping matters.
 
@@ -82,7 +82,7 @@ The standard library seeds these builtin functions:
 - `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
 - `set(list, index, x)`: returns a new list with the element at `index` replaced by `x`. The index must satisfy `0 <= index < size(list)`, and the argument list is unchanged.
 - `+` and `-`: integer arithmetic.
-- `=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
+- `=`, `!=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
 `first` and `last` have builtin input contracts requiring the list size to be greater than zero. Their current validation proof relies on the standard-library `eqToGtZero` axiom, whose input contract is checked by the primitive `checkGtZero` rewrite. Concrete evaluation still rejects empty lists and wrong argument types.
 
@@ -133,15 +133,14 @@ affirm get(b, i) = 20;        // the element just written
 The other elements are unchanged, and that is stated by rewrite rules rather than by the contract, because it only holds for some indexes. Both contracts also export `return = push(list, x)` (or `set(list, index, x)`), and these rules say what that term keeps. Each checks `0 <= j < size(l)` like `get` does:
 
 - `rewrite pushKeeps l x j`: assumes `get(push(l, x), j) = get(l, j)`.
-- `rewrite setKeepsBelow l i x j`: assumes `get(set(l, i, x), j) = get(l, j)` and also needs `j < i`.
-- `rewrite setKeepsAbove l i x j`: the same, and needs `j > i`.
+- `rewrite setKeeps l i x j`: assumes `get(set(l, i, x), j) = get(l, j)`, and also needs `j != i`, since `set` changes that element.
 
 ```
 a = [10, 20, 30];
 b = set(a, 1, 99);
-rewrite setKeepsBelow a 1 99 0;
+rewrite setKeeps a 1 99 0;
 affirm get(b, 0) = get(a, 0);   // the element before the one written
-// rewrite setKeepsBelow a 1 99 1;   // rejected: 1 < 1 does not hold
+// rewrite setKeeps a 1 99 1;   // rejected: 1 != 1 does not hold
 ```
 
 See `examples/frame_facts.tersus`. There is no fact about every index yet, so an elementwise contract like "each result element is the sum of a pair" cannot be stated. `examples/update_list.tersus` updates every element of a list in a loop, with the invariant tracking only its size.
@@ -305,20 +304,17 @@ The invariant is optional; without one the loop still validates but proves nothi
 3. Assuming the invariant and the loop condition, the body must establish the invariant again at its end. The invariant's `rewrite` statements run when it is being checked, and are skipped when it is assumed, exactly as for function contracts.
 4. After the loop the invariant holds and the condition does not. An invariant `i <= 3` on `while i < 3` therefore gives `i >= 3` afterwards.
 
-This proves partial correctness only: nothing shows that the loop ends. The validator also does no arithmetic, so a counting loop needs the arithmetic facts from somewhere, usually trusted `axiom` rules:
+This proves partial correctness only: nothing shows that the loop ends. The validator reasons about integer comparisons itself (see Arithmetic below), so a counting loop needs no helper rules:
 
 ```tersus
-axiom zeroWithinBound(i) [{ affirm i = 0; }] [{ affirm i <= 3; }];
-axiom stepWithinBound(i) [{ affirm i < 3; }] [{ affirm (i + 1) <= 3; }];
-
 i = 0;
-rewrite zeroWithinBound i;
 while i < 3 [{ affirm i <= 3; }] {
-    rewrite stepWithinBound i;
     i = i + 1;
 };
 affirm i >= 3;
 ```
+
+`i = 0` gives the invariant on entry, `i < 3` gives `i + 1 <= 3` at the end of the body, and the negated condition gives `i >= 3` afterwards.
 
 `while` is a reserved word; `whiley` is still an ordinary name.
 
@@ -436,7 +432,7 @@ Primitive rewrite rules:
 The standard library also provides trusted axiom rules:
 
 - `rewrite eqToLtPlus1 <proof>`: assumes the argument is less than itself plus one.
-- `rewrite pushKeeps`, `rewrite setKeepsBelow`, `rewrite setKeepsAbove`: the unchanged elements of a list after `push` or `set`, described under Lists.
+- `rewrite pushKeeps`, `rewrite setKeeps`: the unchanged elements of a list after `push` or `set`, described under Lists.
 - `rewrite eqToGtZero <proof>`: exports the argument as greater than zero after its input contract validates through `checkGtZero`.
 
 Unknown rule names parse as user rewrites and fail during validation if no matching rule has been defined.
@@ -522,13 +518,32 @@ affirm y = 3;
 affirm s > 0;
 ```
 
+## Arithmetic
+
+The validator decides integer comparisons itself, so `affirm`, loop invariants, `checkRel` and `if` guards need no helper rewrites for them. It treats `x - y <= c` facts as a graph and answers a goal by the shortest path between the two sides. The facts come from:
+
+- relations in the context (`i < n`, `a <= b`, and `x != y` only as a goal),
+- `x + c` and `x - c` where `c` has a known integer value,
+- any term with a known integer value, and
+- `size(l) >= 0`.
+
+```tersus
+s = 3;
+affirm s > 0;           // no rewrite eqToGtZero needed
+y = s + 1;
+affirm y != s;
+```
+
+A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such as the guard of an unreachable branch, prove every comparison.
+
 ## Current Limitations
 
 - No `for` loops, `break` or `continue`.
 - Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` (and validation of a call with known arguments, which evaluates it) will not return.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists. Integer lists can be read with `get`, extended with `push` and updated with `set`, which return new lists.
-- The validator has no arithmetic, so a counting loop over a list needs trusted `axiom` rules for its index facts (`i >= 0` after `i = i + 1`, and so on). `examples/parallel_sum.tersus` and `examples/build_list.tersus` show the shape.
+- Arithmetic is limited to comparisons and adding or subtracting a known constant (see Arithmetic). There is no `*` or `/`, and a relation between `x + y` terms where neither is known is not understood.
+- The size of a list built by a literal or loop is not computed by the validator on its own: `out = []; define s0 = size(out);` is how `examples/build_list.tersus` gets `size(out) = 0`.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it.
 - No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.

@@ -337,7 +337,8 @@ negateRel Lt = Just GtEq
 negateRel Gt = Just LtEq
 negateRel LtEq = Just Gt
 negateRel GtEq = Just Lt
-negateRel Eq = Nothing
+negateRel Eq = Just NotEq
+negateRel NotEq = Just Eq
 
 containsReturn :: [Statement] -> Bool
 containsReturn = any returns
@@ -948,6 +949,8 @@ evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)
 evalBuiltinFunct Plus _ = Error "Plus only valid for two ints"
 evalBuiltinFunct (Rel Eq) [VInt v1, VInt v2] = Ok $ VBool (v1 == v2)
 evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two ints"
+evalBuiltinFunct (Rel NotEq) [VInt v1, VInt v2] = Ok $ VBool (v1 /= v2)
+evalBuiltinFunct (Rel NotEq) _ = Error "NotEq only valid for two ints"
 evalBuiltinFunct (Rel Lt) [VInt v1, VInt v2] = Ok $ VBool (v1 < v2)
 evalBuiltinFunct (Rel Lt) _ = Error "Lt only valid for two ints"
 evalBuiltinFunct (Rel Gt) [VInt v1, VInt v2] = Ok $ VBool (v1 > v2)

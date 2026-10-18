@@ -55,7 +55,7 @@ data ScopeState = ScopeState (Map Variable Value) Continuations (Maybe ScopeStat
 data State = State ScopeState (Map Variable Value)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
-data Rel = Eq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
+data Rel = Eq | NotEq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
 newtype Iota = Iota String deriving (Eq, Ord, Show)
 
 -- Function being applied, arguments

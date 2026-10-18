@@ -9,7 +9,7 @@ affirm y = 6;
 define s = size([1, 2, 3]);
 rewrite eval s;
 affirm s = 3;
-// The validator does no arithmetic of its own: s = 3 does not give s > 0 until this rewrite.
+// The validator also knows s > 0 from s = 3 on its own; this rewrite is the explicit form.
 rewrite eqToGtZero s;
 affirm s > 0;
 
