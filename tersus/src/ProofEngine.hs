@@ -66,7 +66,7 @@ entailsAll goals (ProofContext facts) =
                 [ (factId, trueId) : [(idOf table3 lhs, idOf table3 rhs) | FApp funct [lhs, rhs] <- [fact], funct == eqProof]
                 | (fact, factId) <- zip facts factIds
                 ]
-        classes = congruenceClosure (tableApps table3) equalities
+        classes = congruenceClosure (tableApps table3) (tableForalls table3) equalities
         sameClass a b = rep classes a == rep classes b
         arithmetic = arithmeticEdges table3 classes trueId zeroId
         entailed goal goalId =
@@ -88,22 +88,33 @@ entailsAll goals (ProofContext facts) =
 -- equal to true, so a goal is entailed when its term is in the class of true. An equality
 -- goal also holds when both of its sides are in one class.
 
-data TermKey = KIota Iota | KConst Int | KApp Int [Int] deriving (Eq, Ord)
+-- A forall is one opaque term built from its guards and body, so the same forall twice is one term
+data TermKey = KIota Iota | KConst Int | KApp Int [Int] | KBound Variable | KForall Variable [Int] Int deriving (Eq, Ord)
 
 data TermTable = TermTable
     { tableKeys :: Map.Map TermKey Int
     , tableConsts :: [(Value, Int)]
     , tableApps :: [(Int, (Int, [Int]))] -- applications: term, function term, argument terms
+    , tableForalls :: [(Int, (Variable, [Int], Int))] -- foralls: term, index, guard terms, body term
     }
 
 emptyTable :: TermTable
-emptyTable = TermTable Map.empty [] []
+emptyTable = TermTable Map.empty [] [] []
 
 internAll :: TermTable -> [IotaProof] -> (TermTable, [Int])
 internAll = mapAccumL internTerm
 
 internTerm :: TermTable -> IotaProof -> (TermTable, Int)
 internTerm table (ATerm iota) = internKey table (KIota iota)
+internTerm table (BVar index) = internKey table (KBound index)
+internTerm table (Forall index guards body) =
+    let (table1, guardIds) = internAll table guards
+        (table2, bodyId) = internTerm table1 body
+        key = KForall index guardIds bodyId
+        (table3, termId) = internKey table2 key
+     in if Map.member key (tableKeys table2)
+            then (table3, termId)
+            else (table3{tableForalls = (termId, (index, guardIds, bodyId)) : tableForalls table3}, termId)
 internTerm table (CTerm value) =
     case lookup value (tableConsts table) of
         Just constId -> internKey table (KConst constId)
@@ -132,12 +143,19 @@ idOf :: TermTable -> IotaProof -> Int
 idOf table term = snd (internTerm table term)
 
 -- Maps term numbers to their class representative (a number missing from the map is its own)
-congruenceClosure :: [(Int, (Int, [Int]))] -> [(Int, Int)] -> IntMap.IntMap Int
-congruenceClosure apps equalities = settle (foldl' unionClasses IntMap.empty equalities)
+congruenceClosure :: [(Int, (Int, [Int]))] -> [(Int, (Variable, [Int], Int))] -> [(Int, Int)] -> IntMap.IntMap Int
+congruenceClosure apps foralls equalities = settle (foldl' unionClasses IntMap.empty equalities)
   where
+    -- Two terms are congruent when they have the same shape on equal parts. foralls with the same
+    -- index and equal guards and body are equal, as for applications.
     settle classes =
         let flat = IntMap.map (findClass classes) classes
-            bySignature = Map.fromListWith (++) [((rep flat functId, map (rep flat) argIds), [termId]) | (termId, (functId, argIds)) <- apps]
+            bySignature =
+                Map.fromListWith
+                    (++)
+                    ( [(Left (rep flat functId, map (rep flat) argIds), [termId]) | (termId, (functId, argIds)) <- apps]
+                        ++ [(Right (index, map (rep flat) guardIds, rep flat bodyId), [termId]) | (termId, (index, guardIds, bodyId)) <- foralls]
+                    )
             merges = [(a, b) | (a : rest) <- Map.elems bySignature, b <- rest, rep flat a /= rep flat b]
          in if null merges then flat else settle (foldl' unionClasses flat merges)
 

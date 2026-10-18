@@ -21,7 +21,7 @@ Next steps, roughly in priority order:
 1. Element-level facts about lists
     Contracts can only state sizes, the element just written (`push` and `set`, see `examples/element_facts.tersus`) and, through the rules `pushKeeps` and `setKeeps`, that one given index is unchanged (`examples/frame_facts.tersus`). There is still no way to say something about every index, so `pairSums` (examples/parallel_sum.tersus) cannot state that each result element is the sum of the corresponding pair
     The frame rules are applied one index at a time. The same facts could be exported by the contract itself once guarded facts exist
-    (In progress) `forall` parses into `Forall index guards body` with the index as `BVar`; the validator rejects it until the engine can instantiate and prove it
+    (In progress) `forall` parses into `Forall index guards body` with the index as `BVar`, and the engine keeps it as an opaque term in the congruence closure (equal guards and body, up to equal parts, are one term); it cannot yet instantiate or prove one
     A bounded quantified fact, usable in output contracts and loop invariants: `forall j where j >= 0, j < i: P` with `forall j in 0..i: P` as shorthand (half-open range). Facts are instantiated at the `get(L, t)` terms the closure contains whose guard is entailed, and proving one introduces a fresh index with the guard assumed
     Carrying such an invariant through a loop needs the index arithmetic the validator now has (item 7)
 2. Let user functions call other user functions

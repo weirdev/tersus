@@ -101,6 +101,8 @@ vSetIotaSeq (VState scope iotaCtx proofCtx _ ruleCtx) iotaseq = VState scope iot
 proofIotas :: Proof Iota -> [Iota]
 proofIotas (ATerm iota) = [iota]
 proofIotas (CTerm _) = []
+proofIotas (BVar _) = []
+proofIotas (Forall _ guards body) = concatMap proofIotas (body : guards)
 proofIotas (FApp funct args) = proofIotas funct ++ concatMap proofIotas args
 
 -- Lookup the value of a var in State, including parent scopes
@@ -351,10 +353,13 @@ proofLIota iota (FApp _ args) = case args of
     -- TODO: checking first arg only is arbitrary
     ATerm piota : _ -> piota == iota
     _ -> False
+proofLIota _ _ = False
 
 proofOnlyOfIotasOrConst :: [Iota] -> IotaProof -> Bool
 proofOnlyOfIotasOrConst iotas (ATerm i) = i `elem` iotas
 proofOnlyOfIotasOrConst _ CTerm{} = True
+proofOnlyOfIotasOrConst _ BVar{} = True
+proofOnlyOfIotasOrConst iotas (Forall _ guards body) = all (proofOnlyOfIotasOrConst iotas) (body : guards)
 proofOnlyOfIotasOrConst iotas (FApp _ proofs) = all (proofOnlyOfIotasOrConst iotas) proofs
 
 -- Does the proof use the given relation
@@ -445,6 +450,12 @@ iotaToValue iota state = iotaToValueWProofList iota (vGetProofs state)
 
 varProofToIotaProof :: VariableProof -> VState -> Result IotaProof String
 varProofToIotaProof (CTerm val) _ = Ok (CTerm val)
+varProofToIotaProof (BVar index) _ = Ok (BVar index)
+varProofToIotaProof (Forall index guards body) state =
+    case (flatResultMap (`varProofToIotaProof` state) guards, varProofToIotaProof body state) of
+        (Ok iotaGuards, Ok iotaBody) -> Ok (Forall index iotaGuards iotaBody)
+        (Error e, _) -> Error e
+        (_, Error e) -> Error e
 varProofToIotaProof (ATerm var) state =
     case vLookupVar state var of
         Just iotaval -> Ok (ATerm iotaval)
@@ -479,12 +490,18 @@ proofOnlyOfNamedIotasOrConst namedIotas (ATerm iota) = case Data.Map.lookup iota
     Just _ -> True
     Nothing -> False
 proofOnlyOfNamedIotasOrConst _ CTerm{} = True
+proofOnlyOfNamedIotasOrConst _ BVar{} = True
+proofOnlyOfNamedIotasOrConst namedIotas (Forall _ guards body) =
+    all (proofOnlyOfNamedIotasOrConst namedIotas) (body : guards)
 proofOnlyOfNamedIotasOrConst namedIotas (FApp funct proofs) =
     proofOnlyOfNamedIotasOrConst namedIotas funct
         && all (proofOnlyOfNamedIotasOrConst namedIotas) proofs
 
 iotaProofToVarProof :: Map Iota Variable -> IotaProof -> Maybe VariableProof
 iotaProofToVarProof _ (CTerm val) = Just (CTerm val)
+iotaProofToVarProof _ (BVar index) = Just (BVar index)
+iotaProofToVarProof namedIotas (Forall index guards body) =
+    Forall index <$> collectMaybes (iotaProofToVarProof namedIotas) guards <*> iotaProofToVarProof namedIotas body
 iotaProofToVarProof namedIotas (ATerm iota) = ATerm <$> Data.Map.lookup iota namedIotas
 iotaProofToVarProof namedIotas (FApp funct args) = do
     vfunct <- iotaProofToVarProof namedIotas funct
