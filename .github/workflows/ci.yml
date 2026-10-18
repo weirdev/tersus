@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  haskell:
+    name: Haskell build and tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tersus
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Stack
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.stack
+            tersus/.stack-work
+          key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock', 'tersus/package.yaml') }}
+          restore-keys: stack-${{ runner.os }}-
+
+      - name: Build
+        run: stack build --test --no-run-tests
+
+      # The harness prints [PASS]/[FAIL] per case and exits non-zero if any case fails.
+      # It loads examples/ relative to the package directory, so run from tersus/.
+      - name: Test
+        run: stack test
+
+      - name: Check an example through the CLI
+        run: stack run -- run examples/frame_facts.tersus
+
+  python:
+    name: Python prototype tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test
+        run: python python/tests.py
