@@ -1594,6 +1594,9 @@ testArithmetic =
             ]
 
 -- forall parses into a bound index (BVar) with its guards, and the validator rejects it for now
+zeroAxiom :: String
+zeroAxiom = "axiom zeros(l) [{ }] [{ affirm forall j in 0..size(l): get(l, j) = 0; }];"
+
 testForallSyntax :: Test
 testForallSyntax =
     let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
@@ -1655,10 +1658,33 @@ testForallSyntax =
                 Right stmts -> testAssertEq stmts [Assign "forallx" (Val (VInt 1))]
             , -- Evaluation ignores validation statements, so a program with forall still runs
               parseEvalProgramHelper "affirm forall j in 0..2: j < 2; return 5;" (Just (VInt 5))
-            , -- The validator does not support it yet and says so
-              parseValidateFailProgramHelper "affirm forall j in 0..2: j < 2;" "forall is not supported"
-            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };" "forall is not supported"
-            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };" "forall is not supported"
+            , -- The engine cannot prove a forall yet, so a bare affirm of one fails
+              parseValidateFailProgramHelper "affirm forall j in 0..2: j < 2;" "Assertion failed"
+            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };" "Assertion failed"
+            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };" "Loop invariant does not hold on entry"
+            , -- A forall assumed by an axiom is kept as a fact, and is entailed again when it is the same forall
+              parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 0;")
+            , -- The rule's argument is substituted into the forall
+              parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; rewrite zeros b; affirm forall j in 0..size(b): get(b, j) = 0;")
+            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; affirm forall j in 0..size(b): get(b, j) = 0;") "Assertion failed"
+            , -- A different range, body or guard is a different forall
+              parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..1: get(a, j) = 0;") "Assertion failed"
+            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 1;") "Assertion failed"
+            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall k in 0..size(a): get(a, k) = 0;") "Assertion failed"
+            , -- Through a function: the input contract is checked at the call, and the output reaches the caller
+              parseValidProgramHelper
+                ( zeroAxiom
+                    ++ "fn same(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };\
+                       \a = [0, 0]; rewrite zeros a; r = same(a); affirm forall j in 0..size(r): get(r, j) = 0;"
+                )
+            , parseValidateFailProgramHelper
+                ( zeroAxiom
+                    ++ "fn same(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { return l; };\
+                       \a = [0, 0]; r = same(a);"
+                )
+                "Assertion failed"
+            , -- A forall is not a rule argument
+              parseValidateFailProgramHelper (zeroAxiom ++ "rewrite zeros forall j in 0..2: j < 2;") "cannot take a forall"
             , parseValidProgramHelper "x = 1; affirm x = 1;"
             ]
 

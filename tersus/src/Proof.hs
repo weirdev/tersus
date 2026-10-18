@@ -24,7 +24,6 @@ evaluate [] = Ok initState
 evaluate l = evalBlock $ initStateWStatements l
 
 validate :: [Statement] -> Result VState String
-validate l | statementsHaveForall l = Error "forall is not supported by the validator yet"
 validate [] = Ok $ VState emptyVScopeState empty [] [] stdLibRuleCtx
 validate l = case valBlock $ initVStateWStatements l of
     Ok (VState vScopeState iotaCtx proofCtx remainingIotas ruleCtx) ->
@@ -34,47 +33,6 @@ validate l = case valBlock $ initVStateWStatements l of
     Error e -> Error e
 
 -- Private fns
-
--- Whether a program uses forall anywhere, in any statement, contract or rewrite argument
-statementsHaveForall :: [Statement] -> Bool
-statementsHaveForall = any statementHasForall
-
-statementHasForall :: Statement -> Bool
-statementHasForall (Assign _ expr) = expressionHasForall expr
-statementHasForall (Return expr) = expressionHasForall expr
-statementHasForall (ValidationStatement valStmt) = valStmtHasForall valStmt
-statementHasForall (AxiomDef _ _ inputs outputs) = any valStmtHasForall (inputs ++ outputs)
-statementHasForall (ProofDef _ _ inputs outputs body) = any valStmtHasForall (inputs ++ outputs ++ body)
-statementHasForall (Block stmts) = statementsHaveForall stmts
-statementHasForall (If cond thenStmts elseStmts) =
-    expressionHasForall cond || statementsHaveForall thenStmts || statementsHaveForall elseStmts
-statementHasForall (While cond invariant body) =
-    expressionHasForall cond || any valStmtHasForall invariant || statementsHaveForall body
-statementHasForall (LoopEnd invariant) = any valStmtHasForall invariant
-statementHasForall EndBlock = False
-
-expressionHasForall :: Expression -> Bool
-expressionHasForall (Val (VFunct _ inputs outputs body exported)) =
-    any valStmtHasForall (inputs ++ outputs)
-        || any proofHasForall exported
-        || case body of
-            NativeFunct stmts -> statementsHaveForall stmts
-            BuiltinFunct _ -> False
-expressionHasForall (Val _) = False
-expressionHasForall (Var _) = False
-expressionHasForall (F funct args) = any expressionHasForall (funct : args)
-
-valStmtHasForall :: ValidationStatement -> Bool
-valStmtHasForall (ProofAssert proof) = proofHasForall proof
-valStmtHasForall (AssignProofVar _ expr) = expressionHasForall expr
-valStmtHasForall (Rewrite rule) =
-    case rule of
-        Refl proof -> proofHasForall proof
-        CheckGtZero proof -> proofHasForall proof
-        CheckRel proof -> proofHasForall proof
-        UserRewrite _ args -> any proofHasForall args
-        Eval _ -> False
-        EvalAll -> False
 
 evalBlock :: State -> Result State String
 evalBlock state = case state of
@@ -666,6 +624,7 @@ applyUserRule :: VState -> Variable -> [Variable] -> [ValidationStatement] -> [V
 applyUserRule state name formals inputValStmts outputValStmts actualArgs
     | length formals /= length actualArgs =
         Error $ "Rewrite rule " ++ name ++ " expected " ++ show (length formals) ++ " arguments, got " ++ show (length actualArgs)
+    | any proofHasForall actualArgs = Error $ "Rewrite rule " ++ name ++ " cannot take a forall as an argument"
     | otherwise =
         let bindings = Map.fromList (zip formals actualArgs)
             instInputs = map (substituteValidationStatement bindings) inputValStmts
@@ -681,6 +640,7 @@ applyProofRule :: VState -> Variable -> [Variable] -> [ValidationStatement] -> [
 applyProofRule state name formals inputValStmts exportedProofs actualArgs
     | length formals /= length actualArgs =
         Error $ "Rewrite rule " ++ name ++ " expected " ++ show (length formals) ++ " arguments, got " ++ show (length actualArgs)
+    | any proofHasForall actualArgs = Error $ "Rewrite rule " ++ name ++ " cannot take a forall as an argument"
     | otherwise =
         let bindings = Map.fromList (zip formals actualArgs)
             instInputs = map (substituteValidationStatement bindings) inputValStmts
@@ -740,6 +700,9 @@ substituteExpression bindings (F funct args) =
 
 proofToExpression :: VariableProof -> Expression
 proofToExpression (ATerm var) = Var var
+-- A forall cannot be an expression: applyUserRule and applyProofRule reject forall arguments
+proofToExpression (BVar index) = Var index
+proofToExpression Forall{} = error "proofToExpression: forall is not an expression"
 proofToExpression (CTerm val) = Val val
 proofToExpression (FApp funct args) = F (proofToExpression funct) (map proofToExpression args)
 
