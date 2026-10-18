@@ -1593,6 +1593,75 @@ testArithmetic =
                 "Relation lacks a proof"
             ]
 
+-- forall parses into a bound index (BVar) with its guards, and the validator rejects it for now
+testForallSyntax :: Test
+testForallSyntax =
+    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
+        getProof l t = FApp (CTerm (builtinFunct Get)) [l, t]
+        parseAffirm source expected =
+            case parseStatementBlock source of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right stmts -> testAssertEq stmts [ValidationStatement (ProofAssert expected)]
+        parseFails source =
+            case parseStatementBlock source of
+                Left _ -> Nothing
+                Right stmts -> Just $ "Expected a parse error, got: " ++ show stmts
+        body = rel Eq (getProof (ATerm "l") (BVar "j")) (CTerm (VInt 0))
+     in testCaseSeq
+            "testForallSyntax"
+            [ -- The range form is shorthand for a lower and an upper guard
+              parseAffirm
+                "affirm forall j in 0..n: get(l, j) = 0;"
+                (Forall "j" [rel GtEq (BVar "j") (CTerm (VInt 0)), rel Lt (BVar "j") (ATerm "n")] body)
+            , parseAffirm
+                "affirm forall j where j >= 0, j < n: get(l, j) = 0;"
+                (Forall "j" [rel GtEq (BVar "j") (CTerm (VInt 0)), rel Lt (BVar "j") (ATerm "n")] body)
+            , -- The range bounds may be expressions, and the guards may use any relation
+              parseAffirm
+                "affirm forall j in 0..(n + 1): get(l, j) = 0;"
+                ( Forall
+                    "j"
+                    [ rel GtEq (BVar "j") (CTerm (VInt 0))
+                    , rel Lt (BVar "j") (FApp (CTerm (builtinFunct Plus)) [ATerm "n", CTerm (VInt 1)])
+                    ]
+                    body
+                )
+            , parseAffirm
+                "affirm forall j where j != 2: get(l, j) = 0;"
+                (Forall "j" [rel NotEq (BVar "j") (CTerm (VInt 2))] body)
+            , -- Only the index is bound: other names stay ordinary variables
+              parseAffirm
+                "affirm forall k where k < j: get(l, k) = j;"
+                ( Forall
+                    "k"
+                    [rel Lt (BVar "k") (ATerm "j")]
+                    (rel Eq (getProof (ATerm "l") (BVar "k")) (ATerm "j"))
+                )
+            , -- It is allowed in contracts and invariants too
+              case parseStatementBlock "fn f(l) [{ }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right _ -> Nothing
+            , case parseStatementBlock "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right _ -> Nothing
+            , -- Malformed or unsupported forms
+              parseFails "affirm forall j in 0..n get(l, j) = 0;"
+            , parseFails "affirm forall j: get(l, j) = 0;"
+            , parseFails "affirm forall in 0..n: 1 = 1;"
+            , parseFails "affirm forall j in 0..n: forall k in 0..n: get(l, j) = get(l, k);"
+            , -- A name that merely starts with forall is still an ordinary variable
+              case parseStatementBlock "forallx = 1;" of
+                Left err -> Just $ "Parse failed: " ++ show err
+                Right stmts -> testAssertEq stmts [Assign "forallx" (Val (VInt 1))]
+            , -- Evaluation ignores validation statements, so a program with forall still runs
+              parseEvalProgramHelper "affirm forall j in 0..2: j < 2; return 5;" (Just (VInt 5))
+            , -- The validator does not support it yet and says so
+              parseValidateFailProgramHelper "affirm forall j in 0..2: j < 2;" "forall is not supported"
+            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };" "forall is not supported"
+            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };" "forall is not supported"
+            , parseValidProgramHelper "x = 1; affirm x = 1;"
+            ]
+
 testLists :: Test
 testLists =
     testCaseSeq
@@ -1715,6 +1784,7 @@ main = do
                 , testControlFlow
                 , testLists
                 , testArithmetic
+                , testForallSyntax
                 ]
     putStrLn $
         "Summary: "

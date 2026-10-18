@@ -465,6 +465,8 @@ exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof arg
 proofVars :: VariableProof -> [Variable]
 proofVars (CTerm _) = []
 proofVars (ATerm var) = [var]
+proofVars BVar{} = []
+proofVars (Forall _ guards body) = nub (concatMap proofVars guards ++ proofVars body)
 proofVars (FApp funct args) = nub (proofVars funct ++ concatMap proofVars args)
 
 valStmtDefinedVars :: ValidationStatement -> [Variable]

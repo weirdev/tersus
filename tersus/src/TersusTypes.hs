@@ -60,7 +60,20 @@ newtype Iota = Iota String deriving (Eq, Ord, Show)
 
 -- Function being applied, arguments
 -- Proof terms reuse the same tree shape for both concrete values and symbolic placeholders.
-data Proof i = FApp (Proof i) [Proof i] | ATerm i | CTerm Value deriving (Show, Eq)
+-- Forall index guards body: body holds for every index meeting all the guards. The index occurs
+-- in the guards and the body as BVar, which no substitution touches, so it cannot be captured.
+data Proof i
+    = FApp (Proof i) [Proof i]
+    | ATerm i
+    | CTerm Value
+    | Forall Variable [Proof i] (Proof i)
+    | BVar Variable
+    deriving (Show, Eq)
+
+proofHasForall :: Proof i -> Bool
+proofHasForall Forall{} = True
+proofHasForall (FApp funct args) = proofHasForall funct || any proofHasForall args
+proofHasForall _ = False
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 
