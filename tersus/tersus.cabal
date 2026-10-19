@@ -29,6 +29,7 @@ library
       ProofHelpers
       StdLib
       TersusTypes
+      TypeCheck
       Utils
   other-modules:
       Paths_tersus

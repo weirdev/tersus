@@ -1,0 +1,22 @@
+// Every parameter and return value has a type, and the program is type checked before it is validated.
+// Types: Int, Bool, List<Int>, and fn(Int) -> Int for a function value. Locals take the type of their first assignment.
+fn isPositive(n: Int) -> Bool {
+    return n > 0;
+};
+
+fn scale(values: List<Int>, factor: Int) -> List<Int> {
+    out = [];
+    i = 0;
+    while i < size(values) [{ affirm i >= 0; }] {
+        out = push(out, get(values, i) * factor);
+        i = i + 1;
+    };
+    return out;
+};
+
+scaled = scale([1, 2, 3], 2);
+total = 0;
+if isPositive(first(scaled)) {
+    total = last(scaled);
+};
+return total;

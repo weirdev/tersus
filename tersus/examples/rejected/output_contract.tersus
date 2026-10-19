@@ -1,5 +1,5 @@
 // Rejected: the output contract says return = i, but the body returns i + 1.
-fn bad(i) [{}] [{
+fn bad(i: Int) -> Int [{}] [{
     affirm return = i;
 }] {
     return i + 1;

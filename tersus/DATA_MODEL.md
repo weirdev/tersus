@@ -193,7 +193,7 @@ If Tersus is later compiled instead of interpreted, a recursive type will need p
 
 Each phase is one PR with examples, rejected examples, tests and docs, as before.
 
-1. **Type layer.** `Type`, the checker for the existing language (`Int`, `Bool`, `List<Int>`, functions), required parameter and return annotations, local inference, and the mechanical migration of every example and test program. No new data. Type errors move from evaluation to checking.
+1. **Type layer** (done, `TypeCheck.hs`). `Type`, the checker for the existing language (`Int`, `Bool`, `List<Int>`, functions), required parameter and return annotations, local inference, and the mechanical migration of every example and test program. No new data. Type errors move from evaluation to checking.
 2. **Generalized lists.** `VIntList [Integer]` becomes `VList [Value]` and `List<T>` typing replaces integer lists. Lists of `Bool` and lists of lists fall out, and `ProofEngine.ConstKey` needs a case for lists of constants.
 3. **Structs.** `struct`, literals, `.f`, `..base`, eta, and variant/selector normalization in the closure. First examples: points, a `Node` used on its own, a function that updates one field, and a rejected example that breaks the frame.
 4. **Enums.** `enum`, namespaced variants, `match` (both forms), `is`, partial field access contracts, and distinctness. First examples: an `Option`-like enum and `Shape`, a recursive `Tree` with a recursive function over it, and non-exhaustive and wrong-variant rejections.

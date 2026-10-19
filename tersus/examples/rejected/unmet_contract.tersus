@@ -1,5 +1,5 @@
 // Rejected: the call cannot show size([]) > 0, so it fails spread's input contract.
-fn spread(lst) [{
+fn spread(lst: List<Int>) -> Int [{
     define s = size(lst);
     rewrite eqToGtZero s;
     affirm s > 0;

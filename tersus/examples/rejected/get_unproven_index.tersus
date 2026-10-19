@@ -1,5 +1,5 @@
 // at is called with any index, so nothing shows that 0 <= i < size(lst) inside it.
-fn at(lst, i) {
+fn at(lst: List<Int>, i: Int) -> Int {
     return get(lst, i);
 };
 return at([5, 6, 7], 1);

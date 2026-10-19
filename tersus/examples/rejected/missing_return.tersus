@@ -1,5 +1,5 @@
 // Rejected: when n >= 6 the function reaches the end without returning a value.
-fn f(n) {
+fn f(n: Int) -> Int {
     if n < 6 {
         return 1;
     };

@@ -1,13 +1,13 @@
 // The output contract is checked against the body, then instantiated at each call.
 // The empty input contract [{}] is required to write an output contract alone.
-fn add1(i) [{}] [{
+fn add1(i: Int) -> Int [{}] [{
     affirm return = (i + 1);
 }] {
     return i + 1;
 };
 
 // Proof variables defined in a contract (here s) are exported to the caller.
-fn firstWithSize(lst) [{
+fn firstWithSize(lst: List<Int>) -> Int [{
     define s = size(lst);
     rewrite eqToGtZero s;
     affirm s > 0;

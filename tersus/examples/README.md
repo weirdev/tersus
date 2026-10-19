@@ -30,6 +30,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `arithmetic.tersus` | `*`, `/` (rounding down, with a non-zero divisor contract), operator precedence and negative literals | returns `6` |
 | `helper_functions.tersus` | Functions calling the functions defined before them, with each call checked against the callee's contract | returns `11` |
 | `recursion.tersus` | A function calling itself, validated assuming its own output contract, including recursion over a list | returns `26` |
+| `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
 | `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes, the result's size and each element (the sum of its pair, a `forall`) stated in the function's contract and the loop invariant | returns `[11, 22, 33]` |
@@ -47,7 +48,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 ```tersus
 // spread only accepts non-empty lists, which makes first and last safe inside it.
 // The input contract is assumed in the body and checked at every call.
-fn spread(lst) [{
+fn spread(lst: List<Int>) -> Int [{
     define s = size(lst);
     rewrite eqToGtZero s;
     affirm s > 0;
@@ -90,6 +91,8 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/call_violates_contract.tersus` | A function calls another without establishing its input contract |
 | `rejected/recursion_wrong_contract.tersus` | A recursive function whose base case breaks its output contract |
 | `rejected/recursion_input.tersus` | A recursive call that does not meet the function's own input contract |
+| `rejected/type_return_mismatch.tersus` | A function declared to return an `Int` returns a list |
+| `rejected/type_argument_mismatch.tersus` | `size` is applied to an `Int` |
 | `rejected/call_before_definition.tersus` | A function calls one defined after it |
 | `rejected/division_by_zero.tersus` | A function divides by an argument that nothing shows is non-zero |
 | `rejected/push_size.tersus` | An output contract claims `push` leaves the size unchanged |

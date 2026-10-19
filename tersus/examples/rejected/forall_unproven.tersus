@@ -2,7 +2,7 @@
 // elements are known to be 0 (the forall covers 0..2, not 0..size(l)).
 axiom firstTwoZero(l) [{ }] [{ affirm forall j in 0..2: get(l, j) = 0; }];
 
-fn keep(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] {
+fn keep(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] {
     return l;
 };
 

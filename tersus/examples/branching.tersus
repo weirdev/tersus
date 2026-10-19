@@ -1,5 +1,5 @@
 // if/else, and a guard that makes first() safe for a list only known at runtime.
-fn firstOr(lst, fallback) {
+fn firstOr(lst: List<Int>, fallback: Int) -> Int {
     // r has to exist before the if: a variable first assigned inside a branch is local to it.
     r = fallback;
     if size(lst) > 0 {
@@ -11,7 +11,7 @@ fn firstOr(lst, fallback) {
     return r;
 };
 
-fn classify(n) {
+fn classify(n: Int) -> Int {
     label = 0;
     if n < 10 {
         label = 1;

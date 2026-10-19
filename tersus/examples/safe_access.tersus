@@ -1,6 +1,6 @@
 // spread only accepts non-empty lists, which makes first and last safe inside it.
 // The input contract is assumed in the body and checked at every call.
-fn spread(lst) [{
+fn spread(lst: List<Int>) -> Int [{
     define s = size(lst);
     rewrite eqToGtZero s;
     affirm s > 0;

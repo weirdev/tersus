@@ -1,4 +1,4 @@
 // Rejected: the recursive call passes n - 3, which nothing shows is above 0.
-fn down(n) [{ affirm n > 0; }] [{ affirm return = 0; }] {
+fn down(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return = 0; }] {
     if n < 2 { return 0; } else { return down(n - 3); };
 };

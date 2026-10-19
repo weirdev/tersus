@@ -17,6 +17,7 @@ import Pretty (renderVarProof)
 import ProofHelpers
 import StdLib
 import TersusTypes
+import TypeCheck (typeCheck)
 import Utils
 
 -- Public fns
@@ -26,7 +27,10 @@ evaluate l = evalBlock $ initStateWStatements l
 
 validate :: [Statement] -> Result VState String
 validate [] = Ok $ VState emptyVScopeState empty [] [] stdLibRuleCtx
-validate l = case valBlock $ initVStateWStatements l of
+validate l = case typeCheck l of {Error e -> Error e; Ok () -> validateTyped l}
+
+validateTyped :: [Statement] -> Result VState String
+validateTyped l = case valBlock $ initVStateWStatements l of
     Ok (VState vScopeState iotaCtx proofCtx remainingIotas ruleCtx) ->
         case remainingIotas of
             nextIota : _ -> Ok $ VState vScopeState iotaCtx proofCtx [nextIota] ruleCtx
@@ -864,7 +868,7 @@ validateValue state val = case val of
     _ -> Ok val
 
 valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> FunctBody -> Result [VariableProof] String
-valFunctDef state args inputValStmts outputValStmts (NativeFunct stmts) =
+valFunctDef state args inputValStmts outputValStmts (NativeFunct _ stmts) =
     case prepareFunctionValidationState state args inputValStmts stmts of
             Ok fnValState ->
                 let valResult =
@@ -988,7 +992,7 @@ evalFunctCallWithContext (VFunct vars _ _ _ _) _ args
     | length vars /= length args = Error (arityMismatchMessage vars args)
 evalFunctCallWithContext (VFunct _ _ _ (BuiltinFunct builtin) _) valCtx args =
     mapResult (\val -> (val, valCtx)) (evalBuiltinFunct builtin args)
-evalFunctCallWithContext (VFunct vars _ _ (NativeFunct block) _) valCtx args =
+evalFunctCallWithContext (VFunct vars _ _ (NativeFunct _ block) _) valCtx args =
     case zipMap vars args (,) of
         Ok (argVals, _) ->
             let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals

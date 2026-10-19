@@ -1,7 +1,7 @@
 // What push and set leave alone. Their contracts say that every element the list already had is
 // unchanged: forall j in 0..size(list): get(return, j) = get(list, j) for push, and the same
 // for set except at j = index. A program gets these facts for any element it reads.
-fn appendKeeping(l, x) [{ }] [{ }] {
+fn appendKeeping(l: List<Int>, x: Int) -> List<Int> [{ }] [{ }] {
     return push(l, x);
 };
 
