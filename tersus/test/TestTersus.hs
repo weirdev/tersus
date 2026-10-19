@@ -1704,6 +1704,44 @@ testForallProof =
                 "Assertion failed"
             ]
 
+-- A list that grew by one: the old elements are kept, and the new one sits at the old size
+testForallGrownList :: Test
+testForallGrownList =
+    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
+        getOf l t = FApp (CTerm (builtinFunct Get)) [l, t]
+        sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
+        plus a b = FApp (CTerm (builtinFunct Plus)) [a, b]
+        iota = ATerm . Iota
+        int = CTerm . VInt
+        forallJ hi body = Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") hi] body
+        copiesA l = rel Eq (getOf l (BVar "j")) (getOf (iota "a") (BVar "j"))
+        -- out0 copies a below i0, out1 keeps out0 below its size, and has a's element i0 after it
+        grown =
+            [ forallJ (iota "i0") (copiesA (iota "out0"))
+            , forallJ (sizeOf (iota "out0")) (rel Eq (getOf (iota "out1") (BVar "j")) (getOf (iota "out0") (BVar "j")))
+            , rel Eq (sizeOf (iota "out0")) (iota "i0")
+            , rel Eq (getOf (iota "out1") (sizeOf (iota "out0"))) (getOf (iota "a") (iota "i0"))
+            , rel Eq (iota "i1") (plus (iota "i0") (int 1))
+            , rel GtEq (iota "i0") (int 0)
+            ]
+        engine facts goal = testAssertTrue (Engine.entails goal (Engine.proofContextFromFacts facts))
+        engineNot facts goal = testAssertTrue (not (Engine.entails goal (Engine.proofContextFromFacts facts)))
+     in testCaseSeq
+            "testForallGrownList"
+            [ -- Old elements come from the old fact, the new one from its own, and the cases are told apart
+              engine grown (forallJ (iota "i1") (copiesA (iota "out1")))
+            , -- The old range alone still holds for the new list
+              engine grown (forallJ (iota "i0") (copiesA (iota "out1")))
+            , -- Not past the new element
+              engineNot grown (forallJ (plus (iota "i1") (int 1)) (copiesA (iota "out1")))
+            , -- Without the new element's fact, or without the old elements', it does not hold
+              engineNot (filter (/= (grown !! 3)) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
+            , engineNot (filter (/= head grown) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
+            , engineNot (filter (/= (grown !! 1)) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
+            , -- Without knowing the old size is i0, the new element is not at the end of the range
+              engineNot (filter (/= (grown !! 2)) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
+            ]
+
 zeroAxiom :: String
 zeroAxiom = "axiom zeros(l) [{ }] [{ affirm forall j in 0..size(l): get(l, j) = 0; }];"
 
@@ -1927,6 +1965,7 @@ main = do
                 , testForallSyntax
                 , testForallInstantiation
                 , testForallProof
+                , testForallGrownList
                 ]
     putStrLn $
         "Summary: "
