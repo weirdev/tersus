@@ -127,6 +127,8 @@ builtinFunct Set =
         ]
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
+builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []
+builtinFunct (Project variant field) = VFunct ["value"] [] [] (BuiltinFunct (Project variant field)) []
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
 builtinFunct Times = VFunct ["a", "b"] [] [] (BuiltinFunct Times) []
@@ -192,6 +194,12 @@ evalBuiltinFunct (Field owner field) [VData name fields]
     case lookup field fields of
         Just value -> Ok value
         Nothing -> Error ("Struct " ++ name ++ " has no field " ++ field)
+evalBuiltinFunct (Is variant) [VData name _] = Ok $ VBool (name == variant)
+evalBuiltinFunct (Is _) _ = Error "Is only tests the variant of an enum value"
+evalBuiltinFunct (Project variant field) [VData name fields]
+    | name /= variant = Error ("Expected a " ++ variant ++ " but got a " ++ name)
+    | otherwise = maybe (Error ("Variant " ++ variant ++ " has no field " ++ field)) Ok (lookup field fields)
+evalBuiltinFunct (Project _ _) _ = Error "A field can only be read from an enum value"
 evalBuiltinFunct (Field _ _) _ = Error "A field can only be read from a struct"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
 evalBuiltinFunct Minus _ = Error "Minus only valid for two ints"
@@ -286,5 +294,5 @@ comparable _ VFunct{} = False
 comparable (VInt _) (VInt _) = True
 comparable (VBool _) (VBool _) = True
 comparable (VList _) (VList _) = True
-comparable (VData n _) (VData m _) = n == m
+comparable (VData _ _) (VData _ _) = True
 comparable _ _ = False

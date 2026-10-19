@@ -28,12 +28,19 @@ renderType (TVar _) = "?"
 
 -- The checking monad: a substitution for the type variables, a counter for new ones, and failure
 
-data TcState = TcState {tcSubst :: Map Int Type, tcNext :: Int, tcStructs :: Map Name [(Variable, Type)]}
+-- Every struct is a type with one constructor named like it, and every enum a type with a constructor for
+-- each variant (named Enum::Variant)
+data TcState = TcState
+    { tcSubst :: Map Int Type
+    , tcNext :: Int
+    , tcTypes :: Map Name [Name]
+    , tcCtors :: Map Name (Name, [(Variable, Type)])
+    }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
 
 runTc :: TC a -> Either String a
-runTc (TC f) = fmap fst (f (TcState Map.empty 0 Map.empty))
+runTc (TC f) = fmap fst (f (TcState Map.empty 0 Map.empty Map.empty))
 
 instance Functor TC where
     fmap f (TC g) = TC (\s -> fmap (\(a, s') -> (f a, s')) (g s))
@@ -162,22 +169,30 @@ assignVar _ env var t =
 
 -- Structs
 
-structFields :: Name -> TC [(Variable, Type)]
-structFields name = do
+ctorInfo :: Name -> TC (Name, [(Variable, Type)])
+ctorInfo name = do
     s <- getState
-    case Map.lookup name (tcStructs s) of
-        Just fields -> return fields
+    case Map.lookup name (tcCtors s) of
+        Just info -> return info
+        Nothing -> failTc ("Type error: unknown struct or variant " ++ name)
+
+-- The constructors of a type
+typeCtors :: Name -> TC [Name]
+typeCtors name = do
+    s <- getState
+    case Map.lookup name (tcTypes s) of
+        Just ctors -> return ctors
         Nothing -> failTc ("Type error: unknown type " ++ name)
 
 -- A struct built from values for its fields, which are given in declaration order
 checkConstruct :: Name -> [Variable] -> [Type] -> TC Type
 checkConstruct name fields argTys = do
-    declared <- structFields name
+    (typeName, declared) <- ctorInfo name
     if map fst declared /= fields || length fields /= length argTys
-        then failTc ("Type error: struct " ++ name ++ " is built with the wrong fields")
+        then failTc ("Type error: " ++ name ++ " is built with the wrong fields")
         else do
             mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) fieldTy argTy) (zip declared argTys)
-            return (TNamed name)
+            return (TNamed typeName)
 
 -- Reading a field; the base of an update must be the struct being built
 readField :: Maybe Name -> Variable -> Type -> TC Type
@@ -193,16 +208,35 @@ fieldType field structTy = do
     t <- zonk structTy
     case t of
         TNamed name -> do
-            declared <- structFields name
-            case lookup field declared of
-                Just fieldTy -> return fieldTy
-                Nothing -> failTc ("Type error: " ++ name ++ " has no field " ++ field)
+            ctors <- typeCtors name
+            case ctors of
+                [ctor] -> do
+                    (_, declared) <- ctorInfo ctor
+                    case lookup field declared of
+                        Just fieldTy -> return fieldTy
+                        Nothing -> failTc ("Type error: " ++ name ++ " has no field " ++ field)
+                _ -> failTc ("Type error: " ++ name ++ " has several variants, so its field " ++ field ++ " may be absent: take the value apart with match")
         TVar _ -> failTc ("Type error: the type of the value whose field " ++ field ++ " is read is not known yet; annotate it")
         other -> failTc ("Type error: field " ++ field ++ " is read from a " ++ renderType other ++ ", which is not a struct")
 
+declareType :: Name -> TC ()
+declareType name = declareTypeWith name [name]
+
+declareTypeWith :: Name -> [Name] -> TC ()
+declareTypeWith name ctors = do
+    s <- getState
+    if Map.member name (tcTypes s)
+        then failTc ("Type already defined: " ++ name)
+        else putState s{tcTypes = Map.insert name ctors (tcTypes s)}
+
+registerCtors :: Name -> [(Name, [(Variable, Type)])] -> TC ()
+registerCtors typeName ctors = do
+    s <- getState
+    putState s{tcCtors = foldr (\(ctor, fields) -> Map.insert ctor (typeName, fields)) (tcCtors s) ctors}
+
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
-checkType (TNamed name) = () <$ structFields name
+checkType (TNamed name) = () <$ typeCtors name
 checkType (TList t) = checkType t
 checkType (TFn args ret) = mapM_ checkType (ret : args)
 checkType _ = return ()
@@ -226,10 +260,18 @@ builtinType funct =
         Rel NotEq -> list (\a -> TFn [a, a] TBool)
         Rel _ -> return (TFn [TInt, TInt] TBool)
         Ctor name fields -> do
-            declared <- structFields name
+            (typeName, declared) <- ctorInfo name
             if map fst declared == fields
-                then return (TFn (map snd declared) (TNamed name))
-                else failTc ("Type error: struct " ++ name ++ " is built with the wrong fields")
+                then return (TFn (map snd declared) (TNamed typeName))
+                else failTc ("Type error: " ++ name ++ " is built with the wrong fields")
+        Is variant -> do
+            (typeName, _) <- ctorInfo variant
+            return (TFn [TNamed typeName] TBool)
+        Project variant field -> do
+            (typeName, declared) <- ctorInfo variant
+            case lookup field declared of
+                Just fieldTy -> return (TFn [TNamed typeName] fieldTy)
+                Nothing -> failTc ("Type error: " ++ variant ++ " has no field " ++ field)
         Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
   where
     list build = build <$> freshVar
@@ -238,7 +280,7 @@ builtinType funct =
 valueType :: Value -> TC Type
 valueType (VInt _) = return TInt
 valueType (VBool _) = return TBool
-valueType (VData name _) = return (TNamed name)
+valueType (VData name _) = TNamed . fst <$> ctorInfo name
 valueType (VList elements) = do
     element <- freshVar
     types <- mapM valueType elements
@@ -285,14 +327,16 @@ checkStatement top ctx env stmt =
             env' <- checkValidation ctx env vs
             return (ctx, env')
         StructDef name fields -> do
-            s <- getState
-            if Map.member name (tcStructs s)
-                then failTc ("Struct already defined: " ++ name)
-                else do
-                    mapM_ (checkType . snd) fields
-                    s' <- getState
-                    putState s'{tcStructs = Map.insert name fields (tcStructs s')}
-                    return (ctx, env)
+            declareType name
+            mapM_ (checkType . snd) fields
+            registerCtors name [(name, fields)]
+            return (ctx, env)
+        EnumDef name variants -> do
+            -- the type is known before its fields are checked, so a variant may hold the enum itself
+            declareTypeWith name (map fst variants)
+            mapM_ (mapM_ (checkType . snd) . snd) variants
+            registerCtors name variants
+            return (ctx, env)
         AxiomDef{} -> return (ctx, env)
         ProofDef{} -> return (ctx, env)
         Block stmts -> do

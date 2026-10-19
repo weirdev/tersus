@@ -1,0 +1,8 @@
+// Rejected: the value is a Circle, not a Rect.
+enum Shape {
+    Circle { radius: Int },
+    Rect { width: Int, height: Int },
+};
+
+s = Shape::Circle { radius: 4 };
+affirm s is Shape::Rect;

@@ -1,0 +1,17 @@
+// Rejected: radiusOf needs a Circle, and the shape passed is a Rect.
+enum Shape {
+    Circle { radius: Int },
+    Rect { width: Int, height: Int },
+};
+
+fn radiusOf(s: Shape) -> Int
+    [{ affirm s is Shape::Circle; }]
+    [{ }]
+{
+    return match s {
+        Shape::Circle { radius: r } => r,
+        Shape::Rect { width: w, height: h } => 0,
+    };
+};
+
+r = radiusOf(Shape::Rect { width: 1, height: 2 });

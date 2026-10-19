@@ -99,6 +99,7 @@ evalNextStatementWithFuel state = case nextStatement state of
     Ok ValidationStatement{} -> advanceStatement state
     Ok AxiomDef{} -> advanceStatement state
     Ok StructDef{} -> advanceStatement state
+    Ok EnumDef{} -> advanceStatement state
     Ok ProofDef{} -> advanceStatement state
     Ok (Block statements) -> evalBlockStatement state statements
     Ok (If cond thenStmts elseStmts) -> evalIfStatement state cond thenStmts elseStmts
@@ -200,6 +201,7 @@ valNextStatement state =
                     Return expr -> valReturnStatement state expr
                     ValidationStatement valStmt -> valValidationStatement state valStmt
                     StructDef{} -> vAdvanceStatement state
+                    EnumDef{} -> vAdvanceStatement state
                     AxiomDef name args inputs outputs -> valAxiomDef state name args inputs outputs
                     ProofDef name args inputs outputs body -> valProofDef state name args inputs outputs body
                     Block bstmts -> valBlockStatement state bstmts
@@ -341,7 +343,12 @@ joinReturnPaths :: VState -> VState -> VState -> Result VState String
 joinReturnPaths _ pThen pElse
     | vIsLoopBack pThen = Ok pElse
     | vIsLoopBack pElse = Ok (vSetIotaSeq pThen (vGetIotaSeq pElse))
-joinReturnPaths s0 pThen pElse =
+joinReturnPaths s0 pThen pElse
+    | vacuous pThen && not (vacuous pElse) = joinReturnPathsFrom s0 pElse (vSetIotaSeq pThen (vGetIotaSeq pElse))
+    | otherwise = joinReturnPathsFrom s0 pThen pElse
+
+joinReturnPathsFrom :: VState -> VState -> VState -> Result VState String
+joinReturnPathsFrom s0 pThen pElse =
     let base = vSetContinuations (vTopLevelScope s0) emptyContinuations
         returns = case (vGetReturn pThen, vGetReturn pElse) of
             (Ok thenRet, Ok elseRet) -> [(thenRet, elseRet)]
@@ -430,8 +437,20 @@ assignedOuterVars state stmts =
 -- is kept only if both branches establish it. The then-branch's facts are the candidates and
 -- the else-branch's facts are what they must be entailed by, so facts that hold only under
 -- the condition (including the condition itself) are dropped.
+-- A branch whose facts contradict each other cannot run, so the join is the other branch: the facts are
+-- taken from the branch that can run. (Otherwise they come from the first branch and must hold in the second.)
+vacuous :: VState -> Bool
+vacuous state = Engine.entails zeroBelowZero (Engine.proofContextFromFacts (vGetProofs state))
+  where
+    zeroBelowZero = FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]
+
 joinBranches :: VState -> [Variable] -> VState -> VState -> Result VState String
-joinBranches s0 vars sThen sElse =
+joinBranches s0 vars sThen sElse
+    | vacuous sThen && not (vacuous sElse) = joinBranchesFrom s0 vars sElse (vSetIotaSeq sThen (vGetIotaSeq sElse))
+    | otherwise = joinBranchesFrom s0 vars sThen sElse
+
+joinBranchesFrom :: VState -> [Variable] -> VState -> VState -> Result VState String
+joinBranchesFrom s0 vars sThen sElse =
     case popNIotasFromSeq sElse (length vars) of
         Error e -> Error e
         Ok (mergeIotas, sAfter) ->

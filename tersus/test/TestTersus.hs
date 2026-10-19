@@ -1153,6 +1153,7 @@ testExamples =
         , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/types.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/structs.tersus" (ExpectReturn (VInt 11))
+        , testExampleFile "examples/enums.tersus" (ExpectReturn (VInt 27))
         , testExampleFile "examples/generic_lists.tersus" (ExpectReturn (VList [VList [VInt 1, VInt 2], VList [VInt 3, VInt 4], VList [VInt 1, VInt 2]]))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
@@ -1180,6 +1181,8 @@ testExamples =
         , testExampleFile "examples/rejected/list_element_mismatch.tersus" (ExpectRejected "argument 2 of push: expected Bool, got Int")
         , testExampleFile "examples/rejected/struct_update_frame.tersus" (ExpectRejected "Could not prove: return.y = p.x")
         , testExampleFile "examples/rejected/struct_field_type.tersus" (ExpectRejected "field value of Node: expected Int, got Bool")
+        , testExampleFile "examples/rejected/enum_contract_unmet.tersus" (ExpectRejected "Could not prove: s is Shape::Circle")
+        , testExampleFile "examples/rejected/enum_wrong_variant.tersus" (ExpectRejected "Could not prove: s is Shape::Rect")
         , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
@@ -2022,7 +2025,7 @@ testStructs =
             , parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Int { return p; };") "returned value: expected Int, got Point"
             , parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Int { return 1; }; x = f(3);") "argument 1 of f: expected Point, got Int"
             , parseValidateFailProgramHelper "fn f(p: Missing) -> Int { return 1; };" "unknown type Missing"
-            , parseValidateFailProgramHelper (point ++ point) "Struct already defined: Point"
+            , parseValidateFailProgramHelper (point ++ point) "Type already defined: Point"
             , parseValidateFailProgramHelper (point ++ "struct Other { x: Int, y: Int }; p = Point { x: 1, y: 2 }; o = Other { x: 1, y: 2 }; affirm p = o;") "expected Point, got Other"
             , parseValidateFailProgramHelper "struct S { a: Missing };" "unknown type Missing"
             , -- Validation: fields of a literal, updates and their frame
@@ -2053,6 +2056,84 @@ testStructs =
         case parseStatementBlock source of
             Left err -> if expected `isInfixOf` show err then Nothing else Just ("Wrong parse error: " ++ show err)
             Right _ -> Just ("Expected a parse error for: " ++ source)
+
+testEnums :: Test
+testEnums =
+    let shape = "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
+        opt = "enum Opt { None, Some { value: Int } };"
+        tree = "enum Tree { Leaf, Branch { left: Tree, value: Int, right: Tree } };"
+        parseFailsWith source expected =
+            case parseStatementBlock source of
+                Left err -> if expected `isInfixOf` show err then Nothing else Just ("Wrong parse error: " ++ show err)
+                Right _ -> Just ("Expected a parse error for: " ++ source)
+     in testCaseSeq
+            "testEnums"
+            [ -- Values
+              parseEvalProgramHelper (shape ++ "return Shape::Circle { radius: 2 };") (Just (VData "Shape::Circle" [("radius", VInt 2)]))
+            , parseEvalProgramHelper (shape ++ "return Shape::Empty;") (Just (VData "Shape::Empty" []))
+            , parseEvalProgramHelper (shape ++ "return Shape::Empty = Shape::Empty;") (Just (VBool True))
+            , parseEvalProgramHelper (shape ++ "return Shape::Empty = Shape::Circle { radius: 1 };") (Just (VBool False))
+            , parseEvalProgramHelper (shape ++ "return Shape::Circle { radius: 1 } != Shape::Circle { radius: 2 };") (Just (VBool True))
+            , -- is
+              parseEvalProgramHelper (shape ++ "s = Shape::Rect { width: 1, height: 2 }; return s is Shape::Rect;") (Just (VBool True))
+            , parseEvalProgramHelper (shape ++ "s = Shape::Rect { width: 1, height: 2 }; return s is Shape::Circle;") (Just (VBool False))
+            , parseEvalProgramHelper (shape ++ "s = Shape::Empty; if s is Shape::Empty { return 1; } else { return 2; };") (Just (VInt 1))
+            , -- match as a statement and after return or =
+              parseEvalProgramHelper (shape ++ "s = Shape::Rect { width: 3, height: 4 }; total = 0; match s { Shape::Circle { radius: r } => { total = r; }, Shape::Rect { width: w, height: h } => { total = w * h; }, Shape::Empty => { }, }; return total;") (Just (VInt 12))
+            , parseEvalProgramHelper (shape ++ "s = Shape::Circle { radius: 3 }; a = 0; a = match s { Shape::Circle { radius: r } => r * 2, Shape::Rect { width: w } => w, Shape::Empty => 0 }; return a;") (Just (VInt 6))
+            , parseEvalProgramHelper (shape ++ "fn area(s: Shape) -> Int { return match s { Shape::Circle { radius: r } => r * r * 3, Shape::Rect { width: w, height: h } => w * h, Shape::Empty => 0 }; }; return area(Shape::Rect { width: 2, height: 5 });") (Just (VInt 10))
+            , parseEvalProgramHelper (opt ++ "o = Opt::Some { value: 4 }; return match o { Opt::None => 0, Opt::Some { value: v } => v };") (Just (VInt 4))
+            , -- A struct can be matched as the only variant of its type
+              parseEvalProgramHelper "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return match p { P { y: b } => b };" (Just (VInt 2))
+            , -- Recursive types
+              parseEvalProgramHelper (tree ++ "fn sum(t: Tree) -> Int { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; return sum(Tree::Branch { left: Tree::Branch { left: Tree::Leaf, value: 1, right: Tree::Leaf }, value: 2, right: Tree::Leaf });") (Just (VInt 3))
+            , -- Parse errors
+              parseFailsWith (shape ++ "s = Shape::Empty; match s { Shape::Empty => { } };") "does not cover Shape::Circle Shape::Rect"
+            , parseFailsWith (shape ++ "s = Shape::Empty; match s { Shape::Empty => { }, Shape::Empty => { }, Shape::Circle { radius: r } => { }, Shape::Rect { width: w } => { } };") "repeats a variant"
+            , parseFailsWith (shape ++ opt ++ "s = Shape::Empty; match s { Shape::Empty => { }, Opt::None => { } };") "arm of another type"
+            , parseFailsWith (shape ++ "s = Shape::Empty; match s { Shape::Nope => { } };") "Unknown struct or variant Shape::Nope"
+            , parseFailsWith (shape ++ "s = Shape::Circle { radius: 1 }; match s { Shape::Circle { diameter: d } => { }, Shape::Rect { width: w } => { }, Shape::Empty => { } };") "has no field diameter"
+            , parseFailsWith (shape ++ "x = Shape::Circle { };") "lacks field radius"
+            , parseFailsWith (shape ++ "x = Shape::Circle { radius: 1, ..y };") "Update syntax is for structs"
+            , parseFailsWith (shape ++ "x = Shape::Empty is Shape::Nope;") "unexpected"
+            , parseFailsWith "enum E { };" "has no variants"
+            , parseFailsWith "enum E { A, A };" "repeats a variant"
+            , parseFailsWith "enum Bool { A };" "builtin type"
+            , -- Type checking
+              parseValidateFailProgramHelper (shape ++ "x = Shape::Circle { radius: true };") "field radius of Shape::Circle: expected Int, got Bool"
+            , parseValidateFailProgramHelper (shape ++ "fn f(s: Shape) -> Int { return s.radius; };") "has several variants, so its field radius may be absent"
+            , parseValidateFailProgramHelper (shape ++ opt ++ "x = Shape::Empty = Opt::None;") "expected Shape, got Opt"
+            , parseValidateFailProgramHelper (shape ++ "x = 1 is Shape::Empty;") "expected Shape, got Int"
+            , parseValidateFailProgramHelper (shape ++ shape) "Type already defined: Shape"
+            , parseValidateFailProgramHelper (shape ++ "fn f(s: Shape) -> Bool { return s; };") "returned value: expected Bool, got Shape"
+            , parseValidateFailProgramHelper (shape ++ "s = Shape::Empty; match s { Shape::Circle { radius: r } => { x = r + true; }, Shape::Rect { width: w } => { }, Shape::Empty => { } };") "expected Int, got Bool"
+            , -- Validation: the value's variant is known from where it was built
+              parseValidProgramHelper (shape ++ "s = Shape::Circle { radius: 4 }; affirm s is Shape::Circle;")
+            , parseValidateFailProgramHelper (shape ++ "s = Shape::Circle { radius: 4 }; affirm s is Shape::Rect;") "Could not prove: s is Shape::Rect"
+            , parseValidProgramHelper (shape ++ "s = Shape::Circle { radius: 4 }; affirm s != Shape::Empty; affirm s != Shape::Circle { radius: 5 };")
+            , parseValidateFailProgramHelper (shape ++ "s = Shape::Circle { radius: 4 }; affirm s != Shape::Circle { radius: 4 };") "Could not prove: s != Shape::Circle { radius: 4 }"
+            , -- Only the arm of the known variant runs, so the join keeps its facts
+              parseValidProgramHelper (shape ++ "s = Shape::Circle { radius: 4 }; total = 0; match s { Shape::Circle { radius: r } => { total = r; }, Shape::Rect { width: w, height: h } => { total = w; }, Shape::Empty => { } }; affirm total = 4;")
+            , parseValidProgramHelper (shape ++ "s = Shape::Rect { width: 3, height: 5 }; total = 0; total = match s { Shape::Circle { radius: r } => r, Shape::Rect { width: w, height: h } => w + h, Shape::Empty => 0 }; affirm total = 8;")
+            , parseValidateFailProgramHelper (shape ++ "s = Shape::Circle { radius: 4 }; total = 0; match s { Shape::Circle { radius: r } => { total = r; }, Shape::Rect { width: w, height: h } => { total = w; }, Shape::Empty => { } }; affirm total = 5;") "Could not prove: total = 5"
+            , -- An unknown value: each arm is checked, and the arms' bindings are fields of the variant
+              parseValidProgramHelper (shape ++ "fn area(s: Shape) -> Int [{ }] [{ }] { return match s { Shape::Circle { radius: r } => r, Shape::Rect { width: w, height: h } => w * h, Shape::Empty => 0 }; };")
+            , parseValidProgramHelper (opt ++ "fn f(o: Opt) -> Int [{ }] [{ affirm return = 1; }] { return match o { Opt::None => 1, Opt::Some { value: v } => 1 }; };")
+            , parseValidateFailProgramHelper (opt ++ "fn f(o: Opt) -> Int [{ }] [{ affirm return = 1; }] { return match o { Opt::None => 1, Opt::Some { value: v } => v }; };") "Could not prove: return = 1"
+            , parseValidProgramHelper (opt ++ "fn f(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ affirm return = 7; }] { return match o { Opt::None => 1, Opt::Some { value: v } => 7 }; };")
+            , parseValidProgramHelper (opt ++ "fn f(o: Opt) -> Int [{ affirm o is Opt::None; }] [{ affirm return = 1; }] { return match o { Opt::None => 1, Opt::Some { value: v } => v }; };")
+            , -- Contracts naming a variant
+              parseValidProgramHelper (opt ++ "fn needsSome(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ }] { return 1; }; x = needsSome(Opt::Some { value: 2 });")
+            , parseValidateFailProgramHelper (opt ++ "fn needsSome(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ }] { return 1; }; x = needsSome(Opt::None);") "Could not prove: o is Opt::Some"
+            , parseValidateFailProgramHelper (opt ++ "fn needsSome(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ }] { return 1; }; fn caller(o: Opt) -> Int [{ }] [{ }] { return needsSome(o); };") "Could not prove: o is Opt::Some"
+            , parseValidProgramHelper (opt ++ "fn needsSome(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ }] { return 1; }; fn caller(o: Opt) -> Int [{ }] [{ }] { if o is Opt::Some { return needsSome(o); } else { return 0; }; };")
+            , -- Two variants of one value cannot both hold
+              parseValidProgramHelper (opt ++ "fn f(o: Opt) -> Int [{ affirm o is Opt::None; affirm o is Opt::Some; }] [{ affirm return = 9; }] { return 1; };")
+            , -- Enums in lists
+              parseValidProgramHelper (opt ++ "l = push(push([], Opt::None), Opt::Some { value: 2 }); affirm get(l, 0) is Opt::None; affirm size(l) = 2;")
+            , -- Recursive types
+              parseValidProgramHelper (tree ++ "fn sum(t: Tree) -> Int [{ }] [{ }] { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; x = sum(Tree::Leaf); affirm x = 0;")
+            ]
 
 testCrlf :: Test
 testCrlf =
@@ -2388,6 +2469,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testEnums
                 , testStructs
                 , testGenericLists
                 , testTypeCheck
