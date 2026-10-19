@@ -38,6 +38,28 @@ stack run -- run program.tersus     # validate, then evaluate and print the retu
 
 `run` never evaluates a program that fails validation. A program that does not `return` prints nothing. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
 
+## How Validation Works
+
+Checking every proposition a real program could need is not feasible, so validation is a bounded search that is sound but incomplete:
+
+1. **Heuristics do the common work.** The validator tries, without any help from the program: equalities between terms and their parts, integer comparisons (see Arithmetic), evaluation of builtins on known values, `forall` facts at the elements the program reads, and the facts that function contracts export. Each search is bounded: a fixed number of `forall` instantiation rounds, a fixed number of index case splits, and a fixed budget of statements when a call with known arguments is evaluated.
+2. **Whatever they cannot prove is rejected.** A statement is never accepted on a guess. When the search runs out, the validator reports `Could not prove: P`, which means "not provable by these heuristics", not "false". The one definite failure is a `checkRel` over concrete values, which says `Relation does not hold`.
+3. **The program supplies the rest.** You move the proof context closer to the goal until the heuristics can finish, with:
+   - an intermediate `affirm` (proved, then available as a fact),
+   - `define`, which names a term so it exists in the context,
+   - `rewrite` with `eval`, `evalAll`, `refl`, `checkRel`, or your own `axiom` and `proof` rules,
+   - a stronger input contract, output contract or loop invariant.
+
+```tersus
+fn f(l) [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] {
+    define v = get(l, 1);   // puts the term get(l, 1) in the context, so the forall is used at 1
+    affirm v = 0;           // without that term nothing mentions an element of l
+    return 1;
+};
+```
+
+A `forall` fact is only used at elements that appear in the context, so naming one with `define` or in an earlier `affirm` is how you ask for it. Facts you add with `axiom` are assumed, not checked, so they are the part of a program to review.
+
 ## Values
 
 Tersus currently has four runtime value categories:
@@ -84,7 +106,7 @@ The standard library seeds these builtin functions:
 - `+` and `-`: integer arithmetic.
 - `=`, `!=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
-`first` and `last` have builtin input contracts requiring the list size to be greater than zero. The validator checks that with the arithmetic (see Arithmetic), so a call such as `first(l)` needs `size(l) > 0` to be known (from a literal list, a guard or an earlier `affirm`) and fails with `Assertion failed: size(list) > 0` otherwise. Concrete evaluation still rejects empty lists and wrong argument types.
+`first` and `last` have builtin input contracts requiring the list size to be greater than zero. The validator checks that with the arithmetic (see Arithmetic), so a call such as `first(l)` needs `size(l) > 0` to be known (from a literal list, a guard or an earlier `affirm`) and fails with `Could not prove: size(list) > 0` otherwise. Concrete evaluation still rejects empty lists and wrong argument types.
 
 `get` and `set` have a builtin input contract requiring `index >= 0` and `index < size(list)`. It is checked with the primitive `checkRel` rewrite, so a call with a concrete list and index needs no proof, while a symbolic index must already be provable at the call site, usually from the enclosing function's contract or a loop invariant:
 
@@ -418,7 +440,7 @@ affirm y = (x + 1);
 When an `affirm` (or a contract check) cannot be proved, the error shows the failed proof in this same syntax:
 
 ```
-Validation failed: Assertion failed: forall j in 0..size(l): get(l, j) = 0
+Validation failed: Could not prove: forall j in 0..size(l): get(l, j) = 0
 ```
 
 ### `forall`
@@ -461,7 +483,7 @@ rewrite evalAll;
 
 Primitive rewrite rules:
 
-- `rewrite refl <proof>`: uses known equalities to derive reflected/substituted proofs, which are added to the context as facts. `affirm` already sees through equalities, so this is rarely needed. A function's output contract exports the facts that are recorded in the context, not what the equalities imply, so `refl` can still add a fact that a caller then receives.
+- `rewrite refl <proof>`: uses known equalities to derive reflected/substituted proofs, which are added to the context as facts. `affirm` already sees through equalities, so it is rarely needed for that, but it is a legitimate way to put a substituted fact in the context when a proof needs one. A function's output contract exports the facts that are recorded in the context, not what the equalities imply, so `refl` can still add a fact that a caller then receives.
 - `rewrite eval <var>`: evaluates builtin-function proofs related to a variable when concrete inputs are known.
 - `rewrite evalAll`: attempts builtin evaluation for all available evaluable proofs.
 - `rewrite checkGtZero <proof>`: validates and inserts `<proof> > 0` when that proof is already entailed or when the proof term has a concrete positive integer value.
@@ -597,13 +619,13 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 ## Current Limitations
 
 - No `for` loops, `break` or `continue`.
-- Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` (and validation of a call with known arguments, which evaluates it) will not return.
+- Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists. Integer lists can be read with `get`, extended with `push` and updated with `set`, which return new lists.
 - Arithmetic is limited to comparisons, adding or subtracting a known constant, and multiplying by 0 or 1 or dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known.
 - The size of a list built by a literal or loop is not computed by the validator on its own: `out = []; define s0 = size(out);` is how `examples/build_list.tersus` gets `size(out) = 0`.
-- `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it.
-- `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`.
+- `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
+- `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.
 - Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
 - The CLI runs one file at a time and has no REPL or multi-file programs.

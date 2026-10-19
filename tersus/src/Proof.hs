@@ -67,8 +67,29 @@ valReturningBlock state =
                     Error e -> Error e
             Error e -> Error e
 
+-- Concrete evaluation normally runs until the program ends. When the validator evaluates a call to learn
+-- its result, the evaluation carries a budget of statements in a name no program can write, and fails
+-- once the budget is spent, so that validating a program cannot depend on a long or endless computation.
+fuelKey :: Variable
+fuelKey = "$fuel"
+
+validationFuel :: Integer
+validationFuel = 100000
+
+-- Takes one statement's worth of fuel, if the evaluation has any
+spendFuel :: State -> Result State String
+spendFuel state@(State scope ctxVals) =
+    case Map.lookup fuelKey ctxVals of
+        Just (VInt n)
+            | n <= 0 -> Error "Evaluation ran out of fuel"
+            | otherwise -> Ok (State scope (Map.insert fuelKey (VInt (n - 1)) ctxVals))
+        _ -> Ok state
+
 evalNextStatement :: State -> Result State String
-evalNextStatement state = case nextStatement state of
+evalNextStatement fuelState = spendFuel fuelState `bindResult` evalNextStatementWithFuel
+
+evalNextStatementWithFuel :: State -> Result State String
+evalNextStatementWithFuel state = case nextStatement state of
     Ok (Assign var expr) -> evalAssignStatement state var expr
     Ok (Return expr) -> evalReturnStatement state expr
     Ok ValidationStatement{} -> advanceStatement state
@@ -505,7 +526,7 @@ valValidationStatement state (ProofAssert varproof) =
                         proofContext = Engine.proofContextFromFacts proofs
                      in if Engine.entails iotaProof proofContext
                             then Ok state'
-                            else doTrace4 ("Had vars: " ++ show (vGetVars state')) (doTrace4 ("Had proofs: " ++ show proofs) (Error $ "Assertion failed: " ++ renderVarProof varproof))
+                            else doTrace4 ("Had vars: " ++ show (vGetVars state')) (doTrace4 ("Had proofs: " ++ show proofs) (Error $ "Could not prove: " ++ renderVarProof varproof))
                 Error e -> Error e
         Error e -> Error e
 valValidationStatement state (AssignProofVar var expr) =
@@ -726,8 +747,8 @@ evalExpression state (Var var) =
 evalExpression sstate (F fnExpr argExprs) =
     case evalExpressionList sstate (fnExpr : argExprs) of
         Ok (State scope valCtx, fval : argVals) ->
-            case evalFunctCall fval valCtx argVals of
-                Ok val -> Ok (val, State scope valCtx)
+            case evalFunctCallWithContext fval valCtx argVals of
+                Ok (val, valCtx') -> Ok (val, State scope valCtx')
                 Error e -> Error e
         Ok (_, []) -> Error "Function expression must produce a value"
         Error e -> Error e
@@ -928,21 +949,26 @@ valExpressionSeq state (expr : exprs) (iota : iotas) =
 valExpressionSeq _ _ _ = Error "Expression/iota arity mismatch"
 
 evalFunctCall :: Value -> Map Variable Value -> [Value] -> Result Value String
-evalFunctCall (VFunct vars _ _ _ _) _ args
+evalFunctCall funct valCtx args = mapResult fst (evalFunctCallWithContext funct valCtx args)
+
+-- Also returns the context after the call, which is the one place a call can change it: it carries
+-- the fuel that is left (see fuelKey)
+evalFunctCallWithContext :: Value -> Map Variable Value -> [Value] -> Result (Value, Map Variable Value) String
+evalFunctCallWithContext (VFunct vars _ _ _ _) _ args
     | length vars /= length args = Error (arityMismatchMessage vars args)
-evalFunctCall (VFunct _ _ _ (BuiltinFunct builtin) _) valCtx args =
-    evalBuiltinFunct builtin args
-evalFunctCall (VFunct vars _ _ (NativeFunct block) _) valCtx args =
+evalFunctCallWithContext (VFunct _ _ _ (BuiltinFunct builtin) _) valCtx args =
+    mapResult (\val -> (val, valCtx)) (evalBuiltinFunct builtin args)
+evalFunctCallWithContext (VFunct vars _ _ (NativeFunct block) _) valCtx args =
     case zipMap vars args (,) of
         Ok (argVals, _) ->
             let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
                 scope = ScopeState varMap (Continuations block) (Just emptyScopeState)
              in case evalReturningBlock (State scope valCtx) of
-                    Ok (_, Just val) -> Ok val
+                    Ok (State _ valCtx', Just val) -> Ok (val, valCtx')
                     Ok (_, Nothing) -> Error "Function did not return a value"
                     Error e -> Error e
         Error e -> Error e
-evalFunctCall _ _ _ = Error "Object being called must be a function"
+evalFunctCallWithContext _ _ _ = Error "Object being called must be a function"
 
 arityMismatchMessage :: [Variable] -> [a] -> String
 arityMismatchMessage formals actuals =
@@ -1008,7 +1034,7 @@ maybeConcreteFunctionResult fnValState fnVal iiotas iproofs retiota instantiated
     case collectMaybes (`concreteValOfIotaMaybe` iproofs) iiotas of
         Just argVals ->
             let VState _ iotaCtx proofCtx _ _ = fnValState
-             in case evalFunctCall fnVal (iotaMapToConcreteMap iotaCtx proofCtx) argVals of
+             in case evalFunctCall fnVal (Map.insert fuelKey (VInt validationFuel) (iotaMapToConcreteMap iotaCtx proofCtx)) argVals of
                     Ok functResult -> FApp eqProof [ATerm retiota, CTerm functResult] : instantiatedProofs
                     Error _ -> instantiatedProofs
         Nothing -> instantiatedProofs

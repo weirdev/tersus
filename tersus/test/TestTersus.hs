@@ -1159,33 +1159,33 @@ testExamples =
         , testExampleFile "examples/element_facts.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/frame_facts.tersus" (ExpectReturn (VInt 149))
         , testExampleFile "examples/forall_facts.tersus" (ExpectReturn (VInt 5))
-        , testExampleFile "examples/rejected/forall_wrong_element.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/forall_wrong_element.tersus" (ExpectRejected "Could not prove")
         , testExampleFile "examples/rejected/forall_invariant_gap.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/forall_unproven.tersus" (ExpectRejected "input validation failed")
-        , testExampleFile "examples/rejected/frame_changed_index.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/frame_changed_index.tersus" (ExpectRejected "Could not prove")
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
-        , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
         , testExampleFile "examples/rejected/set_out_of_range.tersus" (ExpectRejected "Relation does not hold")
-        , testExampleFile "examples/rejected/set_size.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/element_wrong.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/set_size.tersus" (ExpectRejected "Could not prove")
+        , testExampleFile "examples/rejected/element_wrong.tersus" (ExpectRejected "Could not prove")
         , testExampleFile "examples/rejected/invariant_entry.tersus" (ExpectRejected "Loop invariant does not hold on entry")
         , testExampleFile "examples/rejected/invariant_preserved.tersus" (ExpectRejected "Loop invariant is not preserved")
-        , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Could not prove")
         , testExampleFile "examples/rejected/loop_return_invariant.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/loop_missing_return.tersus" (ExpectRejected "Return value not found")
-        , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
-        , testExampleFile "examples/rejected/branch_fact.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/guard_condition.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
+        , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "Could not prove: size(list) > 0")
+        , testExampleFile "examples/rejected/branch_fact.tersus" (ExpectRejected "Could not prove")
+        , testExampleFile "examples/rejected/guard_condition.tersus" (ExpectRejected "Could not prove: size(list) > 0")
         , testExampleFile "examples/rejected/missing_return.tersus" (ExpectRejected "Return value not found")
-        , testExampleFile "examples/rejected/affirm.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/first_of_empty.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
+        , testExampleFile "examples/rejected/affirm.tersus" (ExpectRejected "Could not prove")
+        , testExampleFile "examples/rejected/first_of_empty.tersus" (ExpectRejected "Could not prove: size(list) > 0")
         , testExampleFile "examples/rejected/unmet_contract.tersus" (ExpectRejected "is not greater than 0")
-        , testExampleFile "examples/rejected/missing_contract.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
-        , testExampleFile "examples/rejected/output_contract.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/bad_proof_rule.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/missing_contract.tersus" (ExpectRejected "Could not prove: size(list) > 0")
+        , testExampleFile "examples/rejected/output_contract.tersus" (ExpectRejected "Could not prove")
+        , testExampleFile "examples/rejected/bad_proof_rule.tersus" (ExpectRejected "Could not prove")
         , testExampleFile "examples/rejected/axiom_input.tersus" (ExpectRejected "is not greater than 0")
         , testExampleFile "examples/rejected/unknown_rule.tersus" (ExpectRejected "Unknown rewrite rule")
         ]
@@ -1332,7 +1332,7 @@ testValidateIf =
             \  return r;\
             \};\
             \return firstOr([4, 8], 0);"
-            "Assertion failed: size(list) > 0"
+            "Could not prove: size(list) > 0"
         , -- A fact only one branch establishes does not survive the join
           parseValidateFailProgramHelper
             "fn f(n) {\
@@ -1340,7 +1340,7 @@ testValidateIf =
             \  if n < 6 { y = 1; rewrite eqToGtZero y; } else { y = 0 - 1; };\
             \  affirm y > 0;\
             \};"
-            "Assertion failed"
+            "Could not prove"
         , -- Soundness: the condition only holds inside its branch
           parseValidateFailProgramHelper
             "fn f(n) {\
@@ -1348,7 +1348,7 @@ testValidateIf =
             \  if n < 6 { y = 1; } else { y = 2; };\
             \  affirm n < 6;\
             \};"
-            "Assertion failed"
+            "Could not prove"
         , -- Soundness: a copy made under the condition must not carry the condition out
           parseValidateFailProgramHelper
             "fn f(n) {\
@@ -1356,7 +1356,7 @@ testValidateIf =
             \  if n < 6 { y = n; } else { y = 9; };\
             \  affirm y < 6;\
             \};"
-            "Assertion failed"
+            "Could not prove"
         ]
 
 testParseWhile :: Test
@@ -1434,7 +1434,7 @@ testValidateWhile =
             )
             "Loop invariant is not preserved"
         , -- Soundness: what was known about i before the loop says nothing about i after it
-          parseValidateFailProgramHelper "i = 0; while i < 3 { i = i + 1; }; affirm i = 0;" "Assertion failed"
+          parseValidateFailProgramHelper "i = 0; while i < 3 { i = i + 1; }; affirm i = 0;" "Could not prove"
         , -- Soundness: the loop condition does not hold once the loop is done
           parseValidateFailProgramHelper
             ( loopAxioms
@@ -1442,7 +1442,7 @@ testValidateWhile =
                    \while i < 3 [{ affirm i <= 3; }] { rewrite stepWithinBound i; i = i + 1; };\
                    \affirm i < 3;"
             )
-            "Assertion failed"
+            "Could not prove"
         , -- A loop whose body returns is validated too
           parseValidProgramHelper "i = 0; while i < 3 { return i; }; return 9;"
         ]
@@ -1481,18 +1481,18 @@ testEarlyReturn =
         , -- Rejected: the guard only helps on the path where it did not return
           parseValidateFailProgramHelper
             "fn f(lst, d) { if size(lst) > 0 { return d; }; return first(lst); };"
-            "Assertion failed: size(list) > 0"
+            "Could not prove: size(list) > 0"
         , parseValidateFailProgramHelper
             "fn f(lst, d) { if size(lst) < 5 { } else { return d; }; return first(lst); };"
-            "Assertion failed: size(list) > 0"
+            "Could not prove: size(list) > 0"
         , -- Soundness: the return branch's condition is not known afterwards
           parseValidateFailProgramHelper
             "fn f(n) { if n < 6 { return 1; }; affirm n < 6; return 2; };"
-            "Assertion failed"
+            "Could not prove"
         , -- Soundness: a fact only one return establishes is not an output fact
           parseValidateFailProgramHelper
             "fn f(n) [{ }] [{ affirm return > 0; }] { if n < 6 { y = 1; rewrite eqToGtZero y; return y; }; return 0; };"
-            "Assertion failed"
+            "Could not prove"
         , -- A function where some path does not return has no return value
           parseValidateFailProgramHelper "fn f(n) { if n < 6 { return 1; }; }; x = f(1);" "Return value not found"
         , -- Returning from inside a loop stops it
@@ -1515,11 +1515,11 @@ testEarlyReturn =
         , -- Soundness: the returning path's condition is not known after the loop
           parseValidateFailProgramHelper
             "fn f(n) { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm n > 5; return 0; };"
-            "Assertion failed"
+            "Could not prove"
         , -- Soundness: only the path after the loop knows the loop condition is false
           parseValidateFailProgramHelper
             "fn f(n) { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm i < 3; return 0; };"
-            "Assertion failed"
+            "Could not prove"
         , -- Soundness: a fact only the returning path establishes is not an output fact
           parseValidateFailProgramHelper
             ( loopAxioms
@@ -1527,7 +1527,7 @@ testEarlyReturn =
                    \ while i < 3 [{ affirm i <= 3; }] { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
                    \ return 100; };"
             )
-            "Assertion failed"
+            "Could not prove"
         , parseValidateFailProgramHelper "fn f(n) { i = 0; while i < n { return i; }; }; x = f(1);" "Return value not found"
         , -- A nested loop that returns
           parseValidProgramHelper
@@ -1569,16 +1569,16 @@ testArithmetic =
             , parseEvalProgramHelper "return 3 != 3;" (Just (VBool False))
             , parseEvalProgramHelper "x = 2; if x != 2 { return 1; } else { return 0; };" (Just (VInt 0))
             , parseValidProgramHelper "x = 2; affirm x != 3;"
-            , parseValidateFailProgramHelper "x = 2; affirm x != 2;" "Assertion failed"
+            , parseValidateFailProgramHelper "x = 2; affirm x != 2;" "Could not prove"
             , parseValidProgramHelper "fn f(n) { if n != 0 { affirm n != 0; } else { affirm n = 0; }; return 1; }; return f(4);"
             , -- Programs: no manual rewrites for the arithmetic
               parseValidProgramHelper "s = 3; affirm s > 0; affirm s >= 3; affirm s != 0;"
             , parseValidProgramHelper "x = 5; y = x + 1; affirm y > x; affirm y = 6;"
             , parseValidProgramHelper "fn f(l) { n = size(l); affirm n >= 0; return n; }; return f([1, 2]);"
             , parseValidProgramHelper "fn f(i, n) [{ affirm i < n; }] [{ }] { j = i + 1; affirm j <= n; return j; }; return f(1, 2);"
-            , parseValidateFailProgramHelper "x = 5; y = x + 1; affirm y > 6;" "Assertion failed"
-            , parseValidateFailProgramHelper "x = 5; y = x - 1; affirm y > 4;" "Assertion failed"
-            , parseValidateFailProgramHelper "fn f(i, n) [{ affirm i <= n; }] [{ }] { j = i + 1; affirm j <= n; return j; };" "Assertion failed"
+            , parseValidateFailProgramHelper "x = 5; y = x + 1; affirm y > 6;" "Could not prove"
+            , parseValidateFailProgramHelper "x = 5; y = x - 1; affirm y > 4;" "Could not prove"
+            , parseValidateFailProgramHelper "fn f(i, n) [{ affirm i <= n; }] [{ }] { j = i + 1; affirm j <= n; return j; };" "Could not prove"
             , -- The guard of an unreachable branch proves anything inside it
               parseValidProgramHelper "fn f(xs, a, b) { if size(xs) < 0 { affirm a < b; }; return 0; };"
             , -- A counting loop needs no axioms
@@ -1636,13 +1636,13 @@ testForallInstantiation =
             , -- Without the forall, or with a guard that does not cover the index, nothing is known
               parseValidateFailProgramHelper
                 "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
-                "Assertion failed"
+                "Could not prove"
             , parseValidateFailProgramHelper
                 "fn f(l, i) [{ affirm forall j in 0..1: get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
-                "Assertion failed"
+                "Could not prove"
             , parseValidateFailProgramHelper
                 "fn f(l, m, i) [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(m); affirm i >= 0; affirm i < size(m); }] [{ affirm return = 0; }] { x = get(m, i); return x; };"
-                "Assertion failed"
+                "Could not prove"
             , -- get's result is the term get(list, index), also without a forall
               parseValidProgramHelper
                 "fn g(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { x = get(l, i); y = get(l, i); affirm x = y; return x; };"
@@ -1686,11 +1686,11 @@ testForallProof =
             , -- Programs
               parseValidProgramHelper "affirm forall j in 0..3: j >= 0;"
             , parseValidProgramHelper "n = 2; affirm forall j in 0..n: j < 2;"
-            , parseValidateFailProgramHelper "n = 3; affirm forall j in 0..n: j < 2;" "Assertion failed"
+            , parseValidateFailProgramHelper "n = 3; affirm forall j in 0..n: j < 2;" "Could not prove"
             , parseValidProgramHelper "affirm forall j in 3..3: 1 = 2;"
             , -- Facts the program knows about other variables are used
               parseValidProgramHelper "fn f(n) [{ affirm n <= 2; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };"
-            , parseValidateFailProgramHelper "fn f(n) [{ affirm n <= 3; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };" "Assertion failed"
+            , parseValidateFailProgramHelper "fn f(n) [{ affirm n <= 3; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };" "Could not prove"
             , -- A function proves a forall about its result from one about its argument
               parseValidProgramHelper
                 "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };"
@@ -1698,7 +1698,7 @@ testForallProof =
                 "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 7; }] [{ affirm forall j in 0..size(return): get(return, j) = 7; }] { return l; };"
             , parseValidateFailProgramHelper
                 "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 1; }] { return l; };"
-                "Assertion failed"
+                "Could not prove"
             ]
 
 -- A list that grew by one: the old elements are kept, and the new one sits at the old size
@@ -1740,6 +1740,29 @@ testForallGrownList =
             ]
 
 -- forall in loop invariants and the contracts of functions that build lists
+testValidationFuel :: Test
+testValidationFuel =
+    let twice n =
+            "fn twice(n) [{ affirm n >= 0; }] [{ }] { i = 0; c = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] { i = i + 1; c = c + 2; }; return c; };"
+                ++ "x = twice("
+                ++ show (n :: Int)
+                ++ "); affirm x = "
+                ++ show (2 * n)
+                ++ ";"
+     in testCaseSeq
+            "testValidationFuel"
+            [ -- Validation evaluates a call whose arguments are known, so its result is a fact
+              parseValidProgramHelper (twice 1000)
+            , -- A computation longer than the budget is given up on, so its result is not known
+              -- (the program still runs: concrete evaluation has no budget)
+              parseValidateFailProgramHelper (twice 50000) "Could not prove: x = 100000"
+            , parseEvalProgramHelper (twice 50000 ++ " return x;") (Just (VInt 100000))
+            , -- Naming an element with define is how a forall fact gets used at it (LANGUAGE.md, How Validation Works)
+              parseValidProgramHelper "fn f(l) [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { define v = get(l, 1); affirm v = 0; return 1; };"
+            , -- A callee that never ends does not stop validation
+              parseValidProgramHelper "fn spin(n) [{ }] [{ }] { i = 0; while i >= 0 [{ affirm i >= 0; }] { i = i + 1; }; return i; }; x = spin(1);"
+            ]
+
 testCrlf :: Test
 testCrlf =
     testCaseSeq
@@ -1766,15 +1789,15 @@ testMulDivNegative =
           parseValidProgramHelper "x = 3; y = x * 4; affirm y = 12; z = y / 5; affirm z = 2;"
         , parseValidProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 1; }; x = f(3);"
         , parseValidProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return = 0; }] { return n * 0; }; x = f(3);"
-        , parseValidateFailProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);" "Assertion failed: return > 0"
-        , parseValidateFailProgramHelper "x = 3; y = x + -1; affirm y = 3;" "Assertion failed: y = 3"
+        , parseValidateFailProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);" "Could not prove: return > 0"
+        , parseValidateFailProgramHelper "x = 3; y = x + -1; affirm y = 3;" "Could not prove: y = 3"
         , -- Division needs a divisor known to be non-zero
           parseValidProgramHelper "fn f(a, b) [{ affirm b != 0; }] [{ }] { return a / b; }; x = f(8, 2);"
         , parseValidProgramHelper "fn f(a, b) [{ affirm b < 0; }] [{ }] { return a / b; }; x = f(8, -2);"
         , parseValidateFailProgramHelper "fn f(a, b) [{ }] [{ }] { return a / b; }; x = f(8, 2);" "Relation lacks a proof"
         , parseValidateFailProgramHelper "x = 3 / 0;" "Relation does not hold"
         , -- Proofs print with the same precedence
-          parseValidateFailProgramHelper "x = 2; affirm x * (x + 1) = 5;" "Assertion failed: x * (x + 1) = 5"
+          parseValidateFailProgramHelper "x = 2; affirm x * (x + 1) = 5;" "Could not prove: x * (x + 1) = 5"
         ]
 
 testPrettyProofs :: Test
@@ -1782,11 +1805,11 @@ testPrettyProofs =
     testCaseSeq
         "testPrettyProofs"
         [ -- Failed assertions are reported in source syntax rather than as a raw AST
-          parseValidateFailProgramHelper "x = 1; affirm x < 4; affirm x = 2;" "Assertion failed: x = 2"
-        , parseValidateFailProgramHelper "l = [1, 2]; affirm size(l) + 1 = 4;" "Assertion failed: size(l) + 1 = 4"
-        , parseValidateFailProgramHelper "x = 1; affirm x - (1 - 1) != 1;" "Assertion failed: x - (1 - 1) != 1"
-        , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j in 0..size(l): get(l, j) = 0;" "Assertion failed: forall j in 0..size(l): get(l, j) = 0"
-        , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j where j > 0: get(l, j) = 0;" "Assertion failed: forall j where j > 0: get(l, j) = 0"
+          parseValidateFailProgramHelper "x = 1; affirm x < 4; affirm x = 2;" "Could not prove: x = 2"
+        , parseValidateFailProgramHelper "l = [1, 2]; affirm size(l) + 1 = 4;" "Could not prove: size(l) + 1 = 4"
+        , parseValidateFailProgramHelper "x = 1; affirm x - (1 - 1) != 1;" "Could not prove: x - (1 - 1) != 1"
+        , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j in 0..size(l): get(l, j) = 0;" "Could not prove: forall j in 0..size(l): get(l, j) = 0"
+        , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j where j > 0: get(l, j) = 0;" "Could not prove: forall j where j > 0: get(l, j) = 0"
         , case parseStatementBlock "l = [1]; affirm 1 = 2;" of
             Right stmts -> case validate stmts of
                 Error e | "FApp" `isInfixOf` e || "VFunct" `isInfixOf` e -> Just $ "Raw AST in error: " ++ e
@@ -1819,13 +1842,13 @@ testForallLoops =
             , -- Rejected: the invariant covers one element too many on entry
               parseValidateFailProgramHelper (copyLoop "affirm forall j in 0..(i + 1): get(out, j) = get(a, j);" "get(a, i)") "Loop invariant does not hold on entry"
             , -- Without the forall in the invariant the output contract's forall cannot be proved
-              parseValidateFailProgramHelper (copyLoop "" "get(a, i)") "Assertion failed"
+              parseValidateFailProgramHelper (copyLoop "" "get(a, i)") "Could not prove"
             , -- A call nested in an argument keeps its link to the caller's variables
               parseValidProgramHelper
                 "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, i); return y; };"
             , parseValidateFailProgramHelper
                 "fn g(l, i, k) [{ affirm i >= 0; affirm i < size(l); affirm k >= 0; affirm k < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, k); return y; };"
-                "Assertion failed"
+                "Could not prove"
             , parseValidProgramHelper
                 "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i) + 1); affirm get(y, size(l)) = (get(l, i) + 1); return y; };"
             , -- The elementwise contract reaches the caller
@@ -1901,20 +1924,20 @@ testForallSyntax =
               parseEvalProgramHelper "affirm forall j in 0..2: j < 2; return 5;" (Just (VInt 5))
             , -- A forall that holds for every index in its range is accepted, and one that does not is rejected
               parseValidProgramHelper "affirm forall j in 0..3: j < 3;"
-            , parseValidateFailProgramHelper "affirm forall j in 0..3: j < 2;" "Assertion failed"
+            , parseValidateFailProgramHelper "affirm forall j in 0..3: j < 2;" "Could not prove"
             , parseValidProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };"
-            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..3: j < 2; }] { return l; };" "Assertion failed"
+            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..3: j < 2; }] { return l; };" "Could not prove"
             , parseValidProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };"
             , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 2; }] { i = i + 1; };" "Loop invariant is not preserved"
             , -- A forall assumed by an axiom is kept as a fact, and is entailed again when it is the same forall
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 0;")
             , -- The rule's argument is substituted into the forall
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; rewrite zeros b; affirm forall j in 0..size(b): get(b, j) = 0;")
-            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; affirm forall j in 0..size(b): get(b, j) = 0;") "Assertion failed"
+            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; affirm forall j in 0..size(b): get(b, j) = 0;") "Could not prove"
             , -- A range the fact does not cover, or another body, is not proved
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..1: get(a, j) = 0;")
-            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..3: get(a, j) = 0;") "Assertion failed"
-            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 1;") "Assertion failed"
+            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..3: get(a, j) = 0;") "Could not prove"
+            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 1;") "Could not prove"
             , -- The name of the index does not matter
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall k in 0..size(a): get(a, k) = 0;")
             , -- Through a function: the input contract is checked at the call, and the output reaches the caller
@@ -1928,7 +1951,7 @@ testForallSyntax =
                     ++ "fn same(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { return l; };\
                        \a = [0, 0]; r = same(a);"
                 )
-                "Assertion failed"
+                "Could not prove"
             , -- A forall is not a rule argument
               parseValidateFailProgramHelper (zeroAxiom ++ "rewrite zeros forall j in 0..2: j < 2;") "cannot take a forall"
             , parseValidProgramHelper "x = 1; affirm x = 1;"
@@ -1961,7 +1984,7 @@ testLists =
         , parseEvalFailStmtHelper "{ return set([5], 0, [1]); }" "Set only valid"
         , -- Frame facts: push's contract keeps the old elements, and nothing else is known
           parseValidProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);"
-        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 2) = get(a, 1);" "Assertion failed"
+        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 2) = get(a, 1);" "Could not prove"
         , -- Validation: a concrete list and index need no proof from the caller
           parseValidProgramHelper "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;"
         , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"
@@ -1986,33 +2009,33 @@ testLists =
             "fn f(l, i, x) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = x; }] { return set(l, i, x); }; r = f([1, 2, 3], 1, 7); affirm get(r, 1) = 7;"
         , parseValidProgramHelper
             "fn g(l, x) [{ }] [{ affirm get(return, size(l)) = x; }] { return push(l, x); };"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 21;" "Assertion failed"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = 20;" "Assertion failed"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 21;" "Could not prove"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = 20;" "Could not prove"
         , -- set's contract keeps the other elements without a rule, and not the one it wrote
           parseValidProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = get(a, 0); affirm get(b, 2) = get(a, 2);"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 1) = get(a, 1);" "Assertion failed"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 1) = get(a, 1);" "Could not prove"
         , -- With a symbolic list the elements are kept for any index in range, and only those
           parseValidProgramHelper
             "fn f(l, i, j) [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); affirm j != i; }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
         , parseValidateFailProgramHelper
             "fn f(l, i, j) [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
-            "Assertion failed"
+            "Could not prove"
         , parseValidProgramHelper
             "fn f(l, j) [{ affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
         , parseValidateFailProgramHelper
             "fn f(l, j) [{ affirm j >= 0; affirm j <= size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
-            "Assertion failed"
-        , parseValidateFailProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 8;" "Assertion failed"
+            "Could not prove"
+        , parseValidateFailProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 8;" "Could not prove"
         , parseValidateFailProgramHelper
             "fn f(l, i, x) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = get(l, i); }] { return set(l, i, x); };"
-            "Assertion failed"
+            "Could not prove"
         , -- Rejected: out of range, unproven, or a wrong size claim
           parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 3, 0);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 0 - 1, 0);" "Relation does not hold"
         , parseValidateFailProgramHelper "fn f(l, i) { return set(l, i, 0); };" "Relation lacks a proof"
         , parseValidateFailProgramHelper
             "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = (size(l) + 1); }] { return set(l, i, 5); };"
-            "Assertion failed"
+            "Could not prove"
         , -- get and the rest of the rejected cases
           parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 3);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 0 - 1);" "Relation does not hold"
@@ -2023,10 +2046,10 @@ testLists =
             "Relation lacks a proof"
         , parseValidateFailProgramHelper
             "fn f(l) [{ }] [{ affirm size(return) = size(l); }] { return push(l, 5); };"
-            "Assertion failed"
+            "Could not prove"
         , parseValidateFailProgramHelper
             "fn f(l) { r = push(l, 5); affirm size(r) = size(l); return r; };"
-            "Assertion failed"
+            "Could not prove"
         , -- checkRel: adds a relation only when it holds, and refuses anything else
           parseValidProgramHelper "x = 2; rewrite checkRel x < 3; affirm x < 3;"
         , parseValidateFailProgramHelper "x = 5; rewrite checkRel x < 3;" "Relation does not hold"
@@ -2071,6 +2094,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testValidationFuel
                 ]
     putStrLn $
         "Summary: "
