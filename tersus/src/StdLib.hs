@@ -163,24 +163,24 @@ stdLibCtx =
 
 -- Evaluates a builtin function on concrete arguments
 evalBuiltinFunct :: BuiltinFunct -> [Value] -> Result Value String
-evalBuiltinFunct Size [VIntList l] = Ok $ VInt (fromIntegral (length l))
-evalBuiltinFunct Size _ = Error "Size only valid for IntList"
-evalBuiltinFunct First [VIntList []] = Error "First requires a non-empty IntList"
-evalBuiltinFunct First [VIntList l] = Ok $ VInt (head l)
-evalBuiltinFunct First _ = Error "First only valid for IntList"
-evalBuiltinFunct Last [VIntList []] = Error "Last requires a non-empty IntList"
-evalBuiltinFunct Last [VIntList l] = Ok $ VInt (last l)
-evalBuiltinFunct Last _ = Error "Last only valid for IntList"
-evalBuiltinFunct Get [VIntList l, VInt i]
+evalBuiltinFunct Size [VList l] = Ok $ VInt (fromIntegral (length l))
+evalBuiltinFunct Size _ = Error "Size only valid for a list"
+evalBuiltinFunct First [VList []] = Error "First requires a non-empty list"
+evalBuiltinFunct First [VList l] = Ok $ head l
+evalBuiltinFunct First _ = Error "First only valid for a list"
+evalBuiltinFunct Last [VList []] = Error "Last requires a non-empty list"
+evalBuiltinFunct Last [VList l] = Ok $ last l
+evalBuiltinFunct Last _ = Error "Last only valid for a list"
+evalBuiltinFunct Get [VList l, VInt i]
     | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
-    | otherwise = Ok $ VInt (l !! fromIntegral i)
-evalBuiltinFunct Get _ = Error "Get only valid for an IntList and an int"
-evalBuiltinFunct Push [VIntList l, VInt x] = Ok $ VIntList (l ++ [x])
-evalBuiltinFunct Push _ = Error "Push only valid for an IntList and an int"
-evalBuiltinFunct Set [VIntList l, VInt i, VInt x]
+    | otherwise = Ok $ l !! fromIntegral i
+evalBuiltinFunct Get _ = Error "Get only valid for a list and an int"
+evalBuiltinFunct Push [VList l, x] = Ok $ VList (l ++ [x])
+evalBuiltinFunct Push _ = Error "Push only valid for a list and an element"
+evalBuiltinFunct Set [VList l, VInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
-    | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VIntList (before ++ x : drop 1 after)
-evalBuiltinFunct Set _ = Error "Set only valid for an IntList and two ints"
+    | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VList (before ++ x : drop 1 after)
+evalBuiltinFunct Set _ = Error "Set only valid for a list, an int and an element"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
 evalBuiltinFunct Minus _ = Error "Minus only valid for two ints"
 evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)

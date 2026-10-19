@@ -1,6 +1,6 @@
 # Tersus Language Guide
 
-Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, integer lists, user-defined functions, nested blocks, and a proof validator built around an internal proof engine for equality, simple rewrites, and builtin function contracts.
+Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, booleans, lists, user-defined functions, nested blocks, and a proof validator built around an internal proof engine for equality, simple rewrites, and builtin function contracts.
 
 This guide describes the Haskell implementation in this package. Runnable programs that demonstrate the features below are in [`examples/`](examples/README.md).
 
@@ -65,7 +65,7 @@ A `forall` fact is only used at elements that appear in the context, so naming o
 Tersus currently has four runtime value categories:
 
 - Integers: `0`, `1`, `42`
-- Integer lists: `[]`, `[1]`, `[3, 6, 9]`
+- Lists of one element type: `[]`, `[1]`, `[3, 6, 9]`, `[true, false]`, `[[1, 2], [3]]`. List literals contain literals only.
 - Booleans: `true`, `false`
 - Functions: builtin functions from the standard library or user-defined functions
 
@@ -77,7 +77,7 @@ Integer literals can be negative: `-1`, `[-1, 2]`.
 
 Every value has a type, and programs are type checked before they are validated:
 
-- `Int`, `Bool`, and `List<Int>` (a list of integers; other element types come later, see DATA_MODEL.md),
+- `Int`, `Bool`, and `List<T>` for any element type `T`, such as `List<Int>`, `List<Bool>` or `List<List<Int>>`. All the elements of a list have the same type, and `[]` takes its element type from how it is used. A variable holding `[]` has one type for its whole life, so `e = []` cannot be pushed an `Int` once and a list later,
 - `fn(Int, Int) -> Int` for a function value.
 
 A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Types exist only for checking: validation and evaluation never look at them.
@@ -94,7 +94,7 @@ fn scale(values: List<Int>, factor: Int) -> List<Int> {
 };
 ```
 
-The builtins have these signatures: `size : fn(List<a>) -> Int`, `first` and `last : fn(List<a>) -> a`, `get : fn(List<a>, Int) -> a`, `push : fn(List<a>, a) -> List<a>`, `set : fn(List<a>, Int, a) -> List<a>`, `+ - * /` on `Int`, `=` and `!=` on two values of the same type, and `< <= > >=` on `Int`. A mismatch is reported before anything runs:
+The builtins have these signatures: `size : fn(List<a>) -> Int` (`a` is any one type, chosen anew at each use), `first` and `last : fn(List<a>) -> a`, `get : fn(List<a>, Int) -> a`, `push : fn(List<a>, a) -> List<a>`, `set : fn(List<a>, Int, a) -> List<a>`, `+ - * /` on `Int`, `=` and `!=` on two values of the same type, and `< <= > >=` on `Int`. A mismatch is reported before anything runs:
 
 ```
 Type error: argument 1 of size: expected List<?>, got Int
@@ -127,9 +127,9 @@ Infix operators bind in three levels, tightest first: `*` and `/`, then `+` and 
 
 The standard library seeds these builtin functions:
 
-- `size(list)`: returns the length of an integer list.
-- `first(list)`: returns the first element of a non-empty integer list.
-- `last(list)`: returns the last element of a non-empty integer list.
+- `size(list)`: returns the length of a list.
+- `first(list)`: returns the first element of a non-empty list.
+- `last(list)`: returns the last element of a non-empty list.
 - `get(list, index)`: returns the element at `index`, counting from 0. The index must satisfy `0 <= index < size(list)`.
 - `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
 - `set(list, index, x)`: returns a new list with the element at `index` replaced by `x`. The index must satisfy `0 <= index < size(list)`, and the argument list is unchanged.
@@ -194,7 +194,7 @@ affirm get(b, 2) = get(a, 2);   // and one after it
 
 See `examples/frame_facts.tersus`. `examples/update_list.tersus` updates every element of a list in a loop.
 
-Lists are built with `push`, updated with `set`, and read by `get`, `first` and `last`. Lists hold integers only.
+Lists are built with `push`, updated with `set`, and read by `get`, `first` and `last`. A list holds elements of one type, and the element type is part of the list's type (`List<Bool>`).
 
 ## Statements
 
@@ -670,7 +670,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 - No `for` loops, `break` or `continue`.
 - Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
 - No declarations separate from assignment.
-- No strings, floats, records, or generic lists. Integer lists can be read with `get`, extended with `push` and updated with `set`, which return new lists.
+- No strings, floats, or records yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
 - Arithmetic is limited to comparisons, adding or subtracting a known constant, and multiplying by 0 or 1 or dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known.
 - The size of a list built by a literal or loop is not computed by the validator on its own: `out = []; define s0 = size(out);` is how `examples/build_list.tersus` gets `size(out) = 0`.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.

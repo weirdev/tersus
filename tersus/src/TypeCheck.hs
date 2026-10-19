@@ -133,7 +133,10 @@ lookupVar ctx env var =
         t : _ -> return t
         [] -> case Map.lookup var (ctxFns ctx) of
             Just t -> return t
-            Nothing -> failTc ("Undefined variable: " ++ var)
+            Nothing -> case Map.lookup var stdLibCtx of
+                -- a builtin is instantiated afresh at each use, so push can be used at several element types
+                Just builtin -> valueType builtin
+                Nothing -> failTc ("Undefined variable: " ++ var)
 
 -- A proof can name a proof variable that a called function's contract defined and exported
 -- (examples/contracts.tersus), which is not in scope here as far as this check can tell, so an unknown name
@@ -142,7 +145,9 @@ lookupProofVar :: Ctx -> Env -> Variable -> TC Type
 lookupProofVar ctx env var =
     case [t | scope <- env, Just t <- [Map.lookup var scope]] ++ maybe [] pure (Map.lookup var (ctxFns ctx)) of
         t : _ -> return t
-        [] -> freshVar
+        [] -> case Map.lookup var stdLibCtx of
+            Just builtin -> valueType builtin
+            Nothing -> freshVar
 
 -- Assigning an existing variable keeps its type, and a new one is local to the innermost scope
 assignVar :: Ctx -> Env -> Variable -> Type -> TC Env
@@ -178,7 +183,11 @@ builtinType funct =
 valueType :: Value -> TC Type
 valueType (VInt _) = return TInt
 valueType (VBool _) = return TBool
-valueType (VIntList _) = return (TList TInt)
+valueType (VList elements) = do
+    element <- freshVar
+    types <- mapM valueType elements
+    mapM_ (expect "list element" element) types
+    return (TList element)
 valueType (VFunct _ _ _ (BuiltinFunct funct) _) = builtinType funct
 valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty) _) _) = return (TFn ptys rty)
 
@@ -186,8 +195,7 @@ valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty) _) _) = return (TFn pt
 
 checkProgram :: [Statement] -> TC ()
 checkProgram stmts = do
-    fns <- Map.fromList <$> mapM (\(name, value) -> (,) name <$> valueType value) (Map.toList stdLibCtx)
-    _ <- checkStatements True (Ctx fns Nothing) [Map.empty] stmts
+    _ <- checkStatements True (Ctx Map.empty Nothing) [Map.empty] stmts
     return ()
 
 -- Statements run in order; a top-level function is visible to the functions after it, and the

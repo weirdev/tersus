@@ -436,11 +436,11 @@ vlist :: Parser Value
 vlist = do
     void (char '[')
     whitespace
-    vals <- ((\v -> case v of VInt i -> i; _ -> error "unreachable") <$> vint) `sepBy` skipWhitespace (char ',')
+    vals <- value `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ']')
     whitespace
-    return (VIntList vals)
+    return (VList vals)
 
 varExpression :: Parser Expression
 varExpression = do

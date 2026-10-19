@@ -1,0 +1,4 @@
+// Rejected: a list of Bool cannot take an Int element.
+fn add(flags: List<Bool>, n: Int) -> List<Bool> {
+    return push(flags, n);
+};

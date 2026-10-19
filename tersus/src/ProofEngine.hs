@@ -186,7 +186,7 @@ evaluatedTerms table classes =
             , Just termId <- [Map.lookup (KConst constId) (tableKeys table)]
             ]
     concrete (VInt _) = True
-    concrete (VIntList _) = True
+    concrete (VList _) = True
     concrete (VBool _) = True
     concrete _ = False
 
@@ -285,11 +285,11 @@ data TermKey = KIota Iota | KConst Int | KApp Int [Int] | KBound Variable | KFor
 
 -- What tells constants apart. Builtin functions are one constant each, however they were written.
 -- Any other constant (a user function) has no key and is found by comparing whole values.
-data ConstKey = CInt Integer | CList [Integer] | CBool Bool | CBuiltin String deriving (Eq, Ord)
+data ConstKey = CInt Integer | CList [ConstKey] | CBool Bool | CBuiltin String deriving (Eq, Ord)
 
 constKey :: Value -> Maybe ConstKey
 constKey (VInt n) = Just (CInt n)
-constKey (VIntList l) = Just (CList l)
+constKey (VList l) = CList <$> mapM constKey l
 constKey (VBool b) = Just (CBool b)
 constKey (VFunct _ _ _ (BuiltinFunct funct) _) = Just (CBuiltin (show funct))
 constKey _ = Nothing

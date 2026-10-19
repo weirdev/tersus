@@ -30,6 +30,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `arithmetic.tersus` | `*`, `/` (rounding down, with a non-zero divisor contract), operator precedence and negative literals | returns `6` |
 | `helper_functions.tersus` | Functions calling the functions defined before them, with each call checked against the callee's contract | returns `11` |
 | `recursion.tersus` | A function calling itself, validated assuming its own output contract, including recursion over a list | returns `26` |
+| `generic_lists.tersus` | Lists of `Bool` and of lists, built by a loop with an invariant, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
@@ -91,6 +92,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/call_violates_contract.tersus` | A function calls another without establishing its input contract |
 | `rejected/recursion_wrong_contract.tersus` | A recursive function whose base case breaks its output contract |
 | `rejected/recursion_input.tersus` | A recursive call that does not meet the function's own input contract |
+| `rejected/list_element_mismatch.tersus` | A `List<Bool>` is pushed an `Int` |
 | `rejected/type_return_mismatch.tersus` | A function declared to return an `Int` returns a list |
 | `rejected/type_argument_mismatch.tersus` | `size` is applied to an `Int` |
 | `rejected/call_before_definition.tersus` | A function calls one defined after it |
