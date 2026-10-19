@@ -1797,6 +1797,9 @@ testFunctionCalls =
               parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return g(n); }; fn g(n: Int) -> Int [{ }] [{ }] { return n; };" "Undefined variable: g"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
             , parseEvalProgramFailHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
+            , -- A function defined inside a body is local to it: a later local function cannot call it
+              parseValidProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; return helper(n); }; x = outer(1);"
+            , parseValidateFailProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; fn user(m: Int) -> Int { return helper(m); }; return user(n); };" "Undefined variable: helper"
             , -- An argument or local variable with the same name hides the function
               parseEvalProgramHelper "fn inc(n: Int) -> Int [{ }] [{ }] { return n + 1; }; fn f(inc: Int) -> Int [{ }] [{ }] { return inc + 1; }; return f(3);" (Just (VInt 4))
             , -- The calls made by a function are not visible to its caller's other statements
@@ -1916,6 +1919,9 @@ testTypeCheck =
             , typeError "fn f(n: Int) -> Int { return n; }; x = f(1, 2);" "f takes 1 arguments, got 2"
             , typeError "fn f(n: Int) -> Bool { return n; };" "returned value: expected Bool, got Int"
             , typeError "x = 1; y = x(2);" "x is not a function"
+            , -- Equality is structural, which functions do not have
+              typeError "fn f(n: Int) -> Int { return n; }; b = f = f;" "functions cannot be compared"
+            , typeError "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; affirm f != g;" "functions cannot be compared"
             , -- Bodies see only their parameters and earlier functions
               typeError "y = 1; fn f(n: Int) -> Int { return y; };" "Undefined variable: y"
             , typeError "fn f(n: Int) -> Int { return g(n); }; fn g(n: Int) -> Int { return n; };" "Undefined variable: g"
@@ -1973,7 +1979,8 @@ testStructs =
     let node = "struct Node { value: Int, prev: Int, next: Int };"
         point = "struct Point { x: Int, y: Int };"
         ctor name fields = builtinFunct (Ctor name fields)
-        field name = builtinFunct (Field name)
+        field name = builtinFunct (Field Nothing name)
+        fieldOf struct name = builtinFunct (Field (Just struct) name)
      in testCaseSeq
             "testStructs"
             [ -- Parsing: a literal is the application of the constructor, in declaration order
@@ -1981,7 +1988,7 @@ testStructs =
                 Right [_, Assign "p" expr] -> testAssertEq expr (F (Val (ctor "Point" ["x", "y"])) [Val (VInt 1), Val (VInt 2)])
                 other -> Just ("Unexpected parse: " ++ show other)
             , case parseStatementBlock (point ++ "q = Point { x: 5, ..p };") of
-                Right [_, Assign "q" expr] -> testAssertEq expr (F (Val (ctor "Point" ["x", "y"])) [Val (VInt 5), F (Val (field "y")) [Var "p"]])
+                Right [_, Assign "q" expr] -> testAssertEq expr (F (Val (ctor "Point" ["x", "y"])) [Val (VInt 5), F (Val (fieldOf "Point" "y")) [Var "p"]])
                 other -> Just ("Unexpected parse: " ++ show other)
             , case parseStatementBlock (point ++ "v = p.x + 1;") of
                 Right [_, Assign "v" expr] -> testAssertEq expr (F (Val (builtinFunct Plus)) [F (Val (field "x")) [Var "p"], Val (VInt 1)])
@@ -1990,6 +1997,12 @@ testStructs =
             , -- Chains of fields and ranges that use `..`
               parseEvalProgramHelper (point ++ "struct Line { from: Point, to: Point }; l = Line { from: Point { x: 1, y: 2 }, to: Point { x: 3, y: 4 } }; return l.to.x;") (Just (VInt 3))
             , parseValidProgramHelper "fn f(l: List<Int>, n: Int) -> Int [{ affirm forall j in 0..n: j < n; }] [{ }] { return n; };"
+            , -- The base of an update has the struct's type, and an update must copy something
+              parseValidateFailProgramHelper (point ++ "struct Other { x: Int, y: Int }; p = Point { x: 1, ..Other { x: 2, y: 3 } };") "base of an update of Point: expected Point, got Other"
+            , parseValidateFailProgramHelper (point ++ "p = Point { x: 1, ..5 };") "base of an update of Point: expected Point, got Int"
+            , parseFailsWith (point ++ "p = Point { x: 1, y: 2, ..p };") "copies nothing"
+            , parseFailsWith "struct Int { x: Int };" "builtin type"
+            , parseFailsWith "struct List { x: Int };" "builtin type"
             , -- Parse errors
               parseFailsWith (point ++ "p = Point { x: 1 };") "lacks field y"
             , parseFailsWith (point ++ "p = Point { x: 1, y: 2, z: 3 };") "has no field z"

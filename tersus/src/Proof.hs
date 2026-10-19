@@ -227,7 +227,7 @@ valAssignStatement state var expr =
 -- This is partial correctness, as for a loop: nothing shows the recursion ends.
 bindFunctionToItself :: Variable -> Expression -> VState -> Result VState String
 bindFunctionToItself var (Val (VFunct args ins outs body@NativeFunct{} _)) state@(VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx _ ruleCtx)
-    | Map.member var iotaCtx = Ok state
+    | Map.member var iotaCtx || Map.member functionBodyMarker iotaCtx = Ok state
     | otherwise =
         popIotaFromSeq state `bindResult` \(selfIota, VState _ _ _ iotaseq _) ->
             let assumed = VFunct args ins outs body [p | ProofAssert p <- outs, all (`elem` ("return" : args)) (proofVars p)]
@@ -241,7 +241,8 @@ withGlobalsOf (VState _ iotaCtx proofCtx _ _) (VState scope _ _ iotaseq ruleCtx)
 -- The validation counterpart of registerGlobalFunction: the function's iota and the proof of its value
 -- join the global context, which the bodies of later functions are validated in.
 registerGlobalFunctionProof :: Variable -> Iota -> Expression -> [IotaProof] -> VState -> Result VState String
-registerGlobalFunctionProof var niota (Val (VFunct _ _ _ NativeFunct{} _)) nproofs (VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx iotaseq ruleCtx)
+registerGlobalFunctionProof var niota (Val (VFunct _ _ _ NativeFunct{} _)) nproofs state@(VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx iotaseq ruleCtx)
+    | Map.member functionBodyMarker iotaCtx = Ok state
     | Map.member var iotaCtx = Error ("Function already defined: " ++ var)
     | otherwise = Ok (VState scope (Map.insert var niota iotaCtx) (proofCtx ++ nproofs) iotaseq ruleCtx)
 registerGlobalFunctionProof _ _ _ _ state = Ok state
@@ -885,7 +886,7 @@ valFunctDef _ _ _ _ BuiltinFunct{} = Ok [] -- Builtin functions assumed to be va
 
 prepareFunctionValidationState :: VState -> [Variable] -> [ValidationStatement] -> [Statement] -> Result VState String
 prepareFunctionValidationState state args inputValStmts stmts =
-    let newState = vSetScope state emptyVScopeState
+    let newState = markFunctionBody (vSetScope state emptyVScopeState)
         wContinuations =
             doTrace4
                 ("valFunctDef: Setting conts: " ++ show stmts)
@@ -898,6 +899,15 @@ prepareFunctionValidationState state args inputValStmts stmts =
                          in assumeValStmts preInputValState inputValStmts
                     Error e -> Error e
             Error e -> Error e
+
+-- A function body is validated in a scope with no parent, like the program, but a function defined
+-- inside it is local and is not a global function, so the body's state is marked
+functionBodyMarker :: Variable
+functionBodyMarker = "$body"
+
+markFunctionBody :: VState -> VState
+markFunctionBody (VState scope iotaCtx proofCtx iotaseq ruleCtx) =
+    VState scope (Map.insert functionBodyMarker (Iota functionBodyMarker) iotaCtx) proofCtx iotaseq ruleCtx
 
 exportFunctOutputProofs :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Result [VariableProof] String
 exportFunctOutputProofs bodyState args inputValStmts outputValStmts =

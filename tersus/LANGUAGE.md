@@ -95,7 +95,7 @@ fn scale(values: List<Int>, factor: Int) -> List<Int> {
 };
 ```
 
-The builtins have these signatures: `size : fn(List<a>) -> Int` (`a` is any one type, chosen anew at each use), `first` and `last : fn(List<a>) -> a`, `get : fn(List<a>, Int) -> a`, `push : fn(List<a>, a) -> List<a>`, `set : fn(List<a>, Int, a) -> List<a>`, `+ - * /` on `Int`, `=` and `!=` on two values of the same type, and `< <= > >=` on `Int`. A mismatch is reported before anything runs:
+The builtins have these signatures: `size : fn(List<a>) -> Int` (`a` is any one type, chosen anew at each use), `first` and `last : fn(List<a>) -> a`, `get : fn(List<a>, Int) -> a`, `push : fn(List<a>, a) -> List<a>`, `set : fn(List<a>, Int, a) -> List<a>`, `+ - * /` on `Int`, `=` and `!=` on two values of the same type (any type but a function), and `< <= > >=` on `Int`. A mismatch is reported before anything runs:
 
 ```
 Type error: argument 1 of size: expected List<?>, got Int
@@ -116,7 +116,7 @@ v = n.value;                               // read a field
 m = Node { next: 3, ..n };                 // a new Node: next replaced, the rest copied from n
 ```
 
-- A literal gives every field, or names the fields that change and ends with `..base` to copy the rest. A missing, repeated or unknown field is a parse error.
+- A literal gives every field, or names the fields that change and ends with `..base` to copy the rest. The base must be a value of the same struct. A missing, repeated or unknown field is a parse error, so is a `..base` that has nothing to copy, and so is a struct named `Int`, `Bool` or `List`.
 - Structs are values. Nothing is mutated: `Node { next: 3, ..n }` is a new struct and `n` is unchanged. There is no field assignment, so write `n = Node { next: 3, ..n };`.
 - `=` and `!=` compare structs field by field, and a struct can hold any type, including lists and other structs declared earlier. A struct cannot contain itself yet.
 - Field reads and literals work in proofs too, so a contract can say `affirm return.next = target;`.
@@ -470,7 +470,7 @@ fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] {
     if i < n { return upTo(i + 1, n); } else { return n; };
 };
 ```
- A function name can be defined only once. An argument or local variable with the same name hides the function. See `examples/helper_functions.tersus` and `examples/recursion.tersus`.
+ A function name can be defined only once. A function defined inside another function's body is local to that body: functions defined after it there cannot call it. The definition order is enforced by validation (the type checker and the validator), while `evaluate` alone looks a function up when it is called, so run `check` (or `run`, which validates first) rather than relying on evaluation to reject a program. An argument or local variable with the same name hides the function. See `examples/helper_functions.tersus` and `examples/recursion.tersus`.
 
 The evaluator runs a function body with its argument bindings and expects the body to set a return value. If a function completes without `return`, evaluation fails.
 
@@ -479,7 +479,7 @@ The evaluator runs a function body with its argument bindings and expects the bo
 Arguments are passed by value. Each argument expression is evaluated before the call and bound to the matching parameter in a fresh scope. The caller's variable is not moved and is still usable afterwards, and nothing the function does to a parameter, including reassigning it, is visible to the caller.
 
 ```tersus
-fn reset(xs: List<Int>) -> List<Int> {
+fn reset(xs: List<Int>) -> Int {
     xs = [];
     return size(xs);
 };

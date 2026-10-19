@@ -126,7 +126,7 @@ builtinFunct Set =
             (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
         ]
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
-builtinFunct (Field field) = VFunct ["struct"] [] [] (BuiltinFunct (Field field)) []
+builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
 builtinFunct Times = VFunct ["a", "b"] [] [] (BuiltinFunct Times) []
@@ -186,11 +186,13 @@ evalBuiltinFunct Set _ = Error "Set only valid for a list, an int and an element
 evalBuiltinFunct (Ctor name fields) args
     | length fields == length args = Ok $ VData name (zip fields args)
     | otherwise = Error ("Struct " ++ name ++ " takes " ++ show (length fields) ++ " fields, got " ++ show (length args))
-evalBuiltinFunct (Field field) [VData name fields] =
+evalBuiltinFunct (Field owner field) [VData name fields]
+    | maybe False (/= name) owner = Error ("Expected a " ++ maybe "" id owner ++ " but got a " ++ name)
+    | otherwise =
     case lookup field fields of
         Just value -> Ok value
         Nothing -> Error ("Struct " ++ name ++ " has no field " ++ field)
-evalBuiltinFunct (Field _) _ = Error "A field can only be read from a struct"
+evalBuiltinFunct (Field _ _) _ = Error "A field can only be read from a struct"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
 evalBuiltinFunct Minus _ = Error "Minus only valid for two ints"
 evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)
