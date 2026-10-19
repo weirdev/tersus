@@ -1,0 +1,5 @@
+// Rejected: nothing shows the divisor is non-zero.
+fn average(total, count) [{ }] [{ }] {
+    return total / count;
+};
+x = average(10, 2);

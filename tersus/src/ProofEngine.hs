@@ -421,6 +421,11 @@ arithmeticEdges table classes trueId zeroId =
         constTerms = [(Map.lookup (KConst constId) (tableKeys table), value) | (value, constId) <- tableConsts table]
         builtinOfClass = builtinsByClass table classes (const True)
         intOfClass = Map.fromList [(node termId, n) | (Just termId, VInt n) <- constTerms]
+        -- t = a * n is only a difference constraint when n is 0 or 1
+        scaled t a n
+            | n == 0 = diff t zeroId 0
+            | n == 1 = diff t a 0
+            | otherwise = []
         diff t a n = [(node a, node t, n), (node t, node a, negate n)]
         relEdges rel l r =
             case rel of
@@ -437,6 +442,11 @@ arithmeticEdges table classes trueId zeroId =
                     | Just n <- Map.lookup (node a) intOfClass -> diff t b n
                 (Just Minus, [a, b])
                     | Just n <- Map.lookup (node b) intOfClass -> diff t a (negate n)
+                (Just Times, [a, b])
+                    | Just n <- Map.lookup (node b) intOfClass -> scaled t a n
+                    | Just n <- Map.lookup (node a) intOfClass -> scaled t b n
+                (Just Div, [a, b])
+                    | Just 1 <- Map.lookup (node b) intOfClass -> diff t a 0
                 (Just Size, [_]) -> [(node t, node zeroId, 0)]
                 (Just (Rel rel), [l, r]) | node t == node trueId -> relEdges rel l r
                 _ -> []

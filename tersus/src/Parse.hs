@@ -274,8 +274,12 @@ nonInfixProof =
         <|> try abstractProof
 
 infixProof :: Parser VariableProof
-infixProof = chainl1 nonInfixProof op
+infixProof = chainl1 (chainl1 nonInfixProof mulOp) op
   where
+    mulOp = do
+        funct <- multiplicativeFunct
+        whitespace
+        return (\lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof])
     op = do
         funct <- infixFunct
         whitespace
@@ -345,7 +349,8 @@ parseNullaryRule = return
 -- otherwise we will parse the lhs of infix expressions
 -- as one of the other expression types,
 -- not matching the infix operator and rhs
--- All infix operators currently share the same precedence and associate left.
+-- `*` and `/` bind tighter than every other infix operator. The rest (`+`, `-` and the relations) share one
+-- precedence, and all infix operators associate left.
 expression :: Parser Expression
 expression = try infixExpression <|> nonInfixExpression
 
@@ -388,9 +393,10 @@ vbool =
 
 vint :: Parser Value
 vint = do
+    sign <- option id (char '-' >> whitespace >> return negate)
     val <- many1 digit
     whitespace
-    return (VInt (read val))
+    return (VInt (sign (read val)))
 
 vlist :: Parser Value
 vlist = do
@@ -420,8 +426,12 @@ fExpression = do
     return $ F (Var fname) args
 
 infixExpression :: Parser Expression
-infixExpression = chainl1 nonInfixExpression op
+infixExpression = chainl1 (chainl1 nonInfixExpression mulOp) op
   where
+    mulOp = do
+        funct <- multiplicativeFunct
+        whitespace
+        return (\lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr])
     op = do
         funct <- infixFunct
         whitespace
@@ -433,11 +443,14 @@ infixFunct = arithmeticFunct <|> relationFunct
 
 arithmeticFunct :: Parser BuiltinFunct
 arithmeticFunct = do
-    op <- oneOf "+-" -- TODO: Add */
+    op <- oneOf "+-"
     whitespace
     if op == '+'
         then return Plus
         else return Minus
+
+multiplicativeFunct :: Parser BuiltinFunct
+multiplicativeFunct = (char '*' >> whitespace >> return Times) <|> (char '/' >> whitespace >> return Div)
 
 relationFunct :: Parser BuiltinFunct
 relationFunct = do
