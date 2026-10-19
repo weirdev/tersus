@@ -111,9 +111,18 @@ evalAssignStatement state var expr =
     case advanceStatement state of
         Ok advancedState ->
             case evalExpression advancedState expr of
-                Ok (val, rState) -> Ok $ insertVar rState var val
+                Ok (val, rState) -> registerGlobalFunction var val (insertVar rState var val)
                 Error e -> Error e
         Error e -> Error e
+
+-- A function defined at the top level can be called from the functions defined after it, which
+-- see it by name like the standard library. It is not a closure: the bodies of those functions
+-- see only their own arguments, the standard library and these functions. A name is defined once.
+registerGlobalFunction :: Variable -> Value -> State -> Result State String
+registerGlobalFunction var val@(VFunct _ _ _ NativeFunct{} _) (State scope@(ScopeState _ _ Nothing) ctxVals)
+    | Map.member var ctxVals = Error ("Function already defined: " ++ var)
+    | otherwise = Ok (State scope (Map.insert var val ctxVals))
+registerGlobalFunction _ _ state = Ok state
 
 evalReturnStatement :: State -> Expression -> Result State String
 evalReturnStatement state expr =
@@ -205,10 +214,19 @@ valAssignStatement state var expr =
             case popIotaFromSeq advancedState of
                 Ok (niota, state') ->
                     case valExpression state' niota expr of
-                        Ok (exprState, nproofs) -> doTrace3 (var ++ " = " ++ show nproofs) (Ok $ vInsertVar exprState var niota nproofs)
+                        Ok (exprState, nproofs) ->
+                            registerGlobalFunctionProof var niota expr nproofs (vInsertVar exprState var niota nproofs)
                         Error e -> Error e
                 Error e -> Error e
         Error e -> Error e
+
+-- The validation counterpart of registerGlobalFunction: the function's iota and the proof of its value
+-- join the global context, which the bodies of later functions are validated in.
+registerGlobalFunctionProof :: Variable -> Iota -> Expression -> [IotaProof] -> VState -> Result VState String
+registerGlobalFunctionProof var niota (Val (VFunct _ _ _ NativeFunct{} _)) nproofs (VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx iotaseq ruleCtx)
+    | Map.member var iotaCtx = Error ("Function already defined: " ++ var)
+    | otherwise = Ok (VState scope (Map.insert var niota iotaCtx) (proofCtx ++ nproofs) iotaseq ruleCtx)
+registerGlobalFunctionProof _ _ _ _ state = Ok state
 
 -- Return proofs are trimmed to names visible at the call boundary so nested block-local
 -- iotas do not leak out when a function or block returns a value.
@@ -768,7 +786,7 @@ valExpressionValue state iota val =
 valExpressionVar :: VState -> Iota -> Variable -> Result (VState, [IotaProof]) String
 valExpressionVar state iota var =
     case vLookupVar state var of
-        Nothing -> Error $ "(Validate Expression) Undefined variable: " ++ var ++ " \nState: " ++ show state
+        Nothing -> Error $ "Undefined variable: " ++ var ++ " (a function must be defined before the functions that call it)"
         Just oiota ->
             let iotaEq = FApp eqProof [ATerm iota, ATerm oiota]
                 reverseIotaEq = reverseEqProof iotaEq
