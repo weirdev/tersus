@@ -179,6 +179,14 @@ checkConstruct name fields argTys = do
             mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) fieldTy argTy) (zip declared argTys)
             return (TNamed name)
 
+-- Reading a field; the base of an update must be the struct being built
+readField :: Maybe Name -> Variable -> Type -> TC Type
+readField owner field structTy = do
+    case owner of
+        Just name -> expect ("base of an update of " ++ name) (TNamed name) structTy
+        Nothing -> return ()
+    fieldType field structTy
+
 -- The type of reading a field from a value of the given type
 fieldType :: Variable -> Type -> TC Type
 fieldType field structTy = do
@@ -222,7 +230,7 @@ builtinType funct =
             if map fst declared == fields
                 then return (TFn (map snd declared) (TNamed name))
                 else failTc ("Type error: struct " ++ name ++ " is built with the wrong fields")
-        Field field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
+        Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
   where
     list build = build <$> freshVar
     arith = return (TFn [TInt, TInt] TInt)
@@ -352,14 +360,16 @@ inferExpr ctx env expr =
     case expr of
         Val value -> valueType value
         Var var -> lookupVar ctx env var
-        F (Val (VFunct _ _ _ (BuiltinFunct (Field field)) _)) [struct] ->
-            inferExpr ctx env struct >>= fieldType field
+        F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] ->
+            inferExpr ctx env struct >>= readField owner field
         F (Val (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args ->
             mapM (inferExpr ctx env) args >>= checkConstruct name fields
         F funct args -> do
             ft <- inferExpr ctx env funct
             ats <- mapM (inferExpr ctx env) args
-            checkCall (describe funct) ft ats
+            result <- checkCall (describe funct) ft ats
+            comparing funct ats
+            return result
   where
     describe (Var name) = name
     describe _ = "call"
@@ -370,19 +380,35 @@ inferProof ctx env proof =
         ATerm var -> lookupProofVar ctx env var
         BVar var -> lookupVar ctx env var
         CTerm value -> valueType value
-        FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field field)) _)) [struct] ->
-            inferProof ctx env struct >>= fieldType field
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] ->
+            inferProof ctx env struct >>= readField owner field
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args ->
             mapM (inferProof ctx env) args >>= checkConstruct name fields
         FApp funct args -> do
             ft <- inferProof ctx env funct
             ats <- mapM (inferProof ctx env) args
-            checkCall "call" ft ats
+            result <- checkCall "call" ft ats
+            comparing (proofHead funct) ats
+            return result
         Forall index guards body -> do
             let env' = Map.singleton index TInt : env
             mapM_ (\g -> inferProof ctx env' g >>= expect "guard of forall" TBool) guards
             inferProof ctx env' body >>= expect "body of forall" TBool
             return TBool
+
+-- Equality is structural, which functions do not have
+comparing :: Expression -> [Type] -> TC ()
+comparing (Val (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) (t : _)
+    | rel `elem` [Eq, NotEq] = do
+        t' <- zonk t
+        case t' of
+            TFn{} -> failTc "Type error: functions cannot be compared"
+            _ -> return ()
+comparing _ _ = return ()
+
+proofHead :: VariableProof -> Expression
+proofHead (CTerm value) = Val value
+proofHead _ = Var ""
 
 -- The result of applying a function type to argument types
 checkCall :: String -> Type -> [Type] -> TC Type

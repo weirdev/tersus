@@ -114,9 +114,9 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 
 ## Writing your own
 
-- All infix operators share one precedence level and associate left, so write `affirm y = (x + 1)`. Without the parentheses this parses as `(y = x) + 1`.
-- Validation knows what rewrites and contracts have told it, plus integer comparisons and adding or subtracting a known constant, for example `s > 0` from `s = 3`. It has no `*` or `/`.
-- User functions cannot call other user functions yet, because function bodies only see their arguments and the standard library.
+- Infix operators bind in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations, so `affirm y = x + 1` means `y = (x + 1)`. Each level associates left.
+- Validation knows what rewrites and contracts have told it, plus integer comparisons and adding or subtracting a known constant, for example `s > 0` from `s = 3`. It also understands `x * 0`, `x * 1` and `x / 1`, and folds `*` and `/` on known values.
+- A function body sees its arguments, the standard library, the functions defined before it, and itself, so functions can call earlier functions and recurse (see `helper_functions.tersus` and `recursion.tersus`).
 - A variable first assigned inside an `if` branch is local to that branch, so declare it before the `if` (`r = fallback;`) if you want it afterwards.
 - Lists can be read with `get`, extended with `push` and updated with `set`, which returns a new list (`a = set(a, i, x)`). `push` and `set` say which element they wrote (`element_facts.tersus`) and the frame rules say the others are unchanged (`frame_facts.tersus`), one index at a time. There is no fact about every index yet, so the linked-list motivating case in the main README is still not expressible here.
 - `get` and `set` need `0 <= index < size(list)` proved at the call. Concrete lists and indexes are checked directly, and a symbolic index needs a contract or loop invariant that says so (`rewrite checkRel` establishes the fact for concrete arguments at the call).

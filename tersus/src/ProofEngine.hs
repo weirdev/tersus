@@ -174,7 +174,7 @@ selections table classes = reads ++ injectivity
     reads =
         [ (termId, arg)
         | (termId, (functId, [structId])) <- tableApps table
-        , Just (Field field) <- [Map.lookup (rep classes functId) builtinOfClass]
+        , Just (Field _ field) <- [Map.lookup (rep classes functId) builtinOfClass]
         , (fields, args) <- Map.findWithDefault [] (rep classes structId) constructions
         , (name, arg) <- zip fields args
         , name == field
@@ -331,7 +331,7 @@ constKey (VInt n) = Just (CInt n)
 constKey (VList l) = CList <$> mapM constKey l
 constKey (VData name fields) = CData name <$> mapM (\(field, value) -> (,) field <$> constKey value) fields
 constKey (VBool b) = Just (CBool b)
-constKey (VFunct _ _ _ (BuiltinFunct funct) _) = Just (CBuiltin (show funct))
+constKey (VFunct _ _ _ (BuiltinFunct funct) _) = Just (CBuiltin (show (unowned funct)))
 constKey _ = Nothing
 
 data TermTable = TermTable
@@ -394,8 +394,15 @@ lightProof (FApp funct args) = FApp (lightProof funct) (map lightProof args)
 lightProof (Forall index guards body) = Forall index (map lightProof guards) (lightProof body)
 lightProof other = other
 
+-- Which struct the base of an update must be is for the type checker: for the proof engine a field is
+-- the same function however it was written
+unowned :: BuiltinFunct -> BuiltinFunct
+unowned (Field _ field) = Field Nothing field
+unowned funct = funct
+
 canonicalValue :: Value -> Value
-canonicalValue (VFunct _ _ _ (BuiltinFunct funct) _) = VFunct [] [] [] (BuiltinFunct funct) []
+canonicalValue (VFunct _ _ _ (BuiltinFunct funct) _) = VFunct [] [] [] (BuiltinFunct (unowned funct)) []
+canonicalValue (VData name fields) = VData name [(field, canonicalValue value) | (field, value) <- fields]
 canonicalValue value = value
 
 internKey :: TermTable -> TermKey -> (TermTable, Int)

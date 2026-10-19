@@ -5,6 +5,7 @@ import qualified Data.Map as Map
 
 import Control.Monad (void, when)
 import Data.Char (isDigit, isLetter)
+import Data.Maybe (isJust)
 
 import StdLib
 import TersusTypes
@@ -149,6 +150,7 @@ structStatement = do
     void (char '}')
     whitespace
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
+    when (name `elem` ["Int", "Bool", "List"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
     updateState (Map.insert name (map fst fields))
     return (StructDef name fields)
   where
@@ -183,6 +185,8 @@ structLiteral element apply = do
     mapM_ (\(field, _) -> when (field `notElem` declared) (fail ("Struct " ++ name ++ " has no field " ++ field))) inits
     when (length (map fst inits) /= length (foldr (\f rest -> if f `elem` rest then rest else f : rest) [] (map fst inits))) $
         fail ("Struct " ++ name ++ " literal repeats a field")
+    when (isJust base && all (`elem` map fst inits) declared) $
+        fail ("Struct " ++ name ++ " literal gives every field, so ..base copies nothing")
     args <- mapM (argument name base inits) declared
     return (apply (builtinFunct (Ctor name declared)) args)
   where
@@ -198,7 +202,7 @@ structLiteral element apply = do
     argument name base inits field =
         case (lookup field inits, base) of
             (Just given, _) -> return given
-            (Nothing, Just from) -> return (apply (builtinFunct (Field field)) [from])
+            (Nothing, Just from) -> return (apply (builtinFunct (Field (Just name) field)) [from])
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
 
 -- x.field, repeated. A `..` after a term is a range, not a field.
@@ -206,7 +210,7 @@ withFields :: (Value -> [a] -> a) -> Parser a -> Parser a
 withFields apply term = do
     base <- term
     fields <- many (try (char '.' >> notFollowedBy (char '.') >> variable <* whitespace))
-    return (foldl (\acc field -> apply (builtinFunct (Field field)) [acc]) base fields)
+    return (foldl (\acc field -> apply (builtinFunct (Field Nothing field)) [acc]) base fields)
 
 expressionApply :: Value -> [Expression] -> Expression
 expressionApply funct = F (Val funct)

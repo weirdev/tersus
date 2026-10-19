@@ -5,13 +5,13 @@ import Data.Map (Map)
 type Variable = String
 type Name = String
 
--- Ctor builds a struct from its fields, given in declaration order, and Field reads one by name.
+-- Ctor builds a struct from its fields, given in declaration order, and Field reads one by name. The Field of a `..base` update names the struct the base must be.
 -- A struct literal is the application of its Ctor, so the proof engine sees structs as ordinary terms.
 data BuiltinFunct
     = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div
     | Rel Rel
     | Ctor Name [Variable]
-    | Field Variable
+    | Field (Maybe Name) Variable
     deriving (Show, Eq, Ord)
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
