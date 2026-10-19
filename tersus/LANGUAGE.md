@@ -77,6 +77,7 @@ Integer literals can be negative: `-1`, `[-1, 2]`.
 
 Every value has a type, and programs are type checked before they are validated:
 
+- A declared struct, such as `Node`,
 - `Int`, `Bool`, and `List<T>` for any element type `T`, such as `List<Int>`, `List<Bool>` or `List<List<Int>>`. All the elements of a list have the same type, and `[]` takes its element type from how it is used. A variable holding `[]` has one type for its whole life, so `e = []` cannot be pushed an `Int` once and a list later,
 - `fn(Int, Int) -> Int` for a function value.
 
@@ -102,6 +103,32 @@ Type error: returned value: expected Int, got List<Int>
 ```
 
 A proof is a `Bool` expression and is checked the same way. The bodies of `axiom` and `proof` rules are not type checked (their parameters have no types), and a proof may name a proof variable exported by a called function's contract without the checker knowing its type.
+
+## Structs
+
+A struct is a named record whose fields are fixed at compile time. It is declared before it is used.
+
+```tersus
+struct Node { value: Int, prev: Int, next: Int };
+
+n = Node { value: 1, prev: 0, next: 2 };   // every field, in any order
+v = n.value;                               // read a field
+m = Node { next: 3, ..n };                 // a new Node: next replaced, the rest copied from n
+```
+
+- A literal gives every field, or names the fields that change and ends with `..base` to copy the rest. A missing, repeated or unknown field is a parse error.
+- Structs are values. Nothing is mutated: `Node { next: 3, ..n }` is a new struct and `n` is unchanged. There is no field assignment, so write `n = Node { next: 3, ..n };`.
+- `=` and `!=` compare structs field by field, and a struct can hold any type, including lists and other structs declared earlier. A struct cannot contain itself yet.
+- Field reads and literals work in proofs too, so a contract can say `affirm return.next = target;`.
+- The validator treats a literal as a constructor applied to its fields. Reading a field of a literal gives the field (`Node { next: 3, ..n }.value` is `n.value`), two equal constructions agree field by field, and so an update's other fields are known without a `forall`. It does not yet know that a struct equals a rebuilt copy of its own fields (`Node { value: n.value, prev: n.prev, next: n.next } = n`), so state that with the fields you need.
+
+```tersus
+fn relink(n: Node, target: Int) -> Node [{ }] [{ affirm return.next = target; affirm return.value = n.value; }] {
+    return Node { next: target, ..n };
+};
+```
+
+Lists of structs work like any list: `set(nodes, i, Node { next: 5, ..get(nodes, i) })` changes one element, and the `forall` frame of `set` says the others are unchanged. See `examples/structs.tersus`.
 
 ## Expressions
 

@@ -1,0 +1,6 @@
+// Rejected: the field value is an Int, not a Bool.
+struct Node { value: Int, next: Int };
+
+fn make(flag: Bool) -> Node {
+    return Node { value: flag, next: 0 };
+};

@@ -3,11 +3,20 @@ module TersusTypes where
 import Data.Map (Map)
 
 type Variable = String
-data BuiltinFunct = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Rel Rel deriving (Show, Eq, Ord)
+type Name = String
+
+-- Ctor builds a struct from its fields, given in declaration order, and Field reads one by name.
+-- A struct literal is the application of its Ctor, so the proof engine sees structs as ordinary terms.
+data BuiltinFunct
+    = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div
+    | Rel Rel
+    | Ctor Name [Variable]
+    | Field Variable
+    deriving (Show, Eq, Ord)
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
 -- look at them. TVar is the checker's own unknown and is never written by a program.
-data Type = TInt | TBool | TList Type | TFn [Type] Type | TVar Int
+data Type = TInt | TBool | TList Type | TFn [Type] Type | TNamed Name | TVar Int
     deriving (Show, Eq, Ord)
 
 -- The declared parameter types and return type of a user function
@@ -19,6 +28,8 @@ data Value
     = VInt Integer
     | VList [Value]
     | VBool Bool
+    | -- A struct value: the struct's name and its fields, in declaration order
+      VData Name [(Variable, Value)]
     | -- VFunct inputArgs inputArgAssertions outputAssertions body exportedResultAssertions
       -- Result assertions may contain variables from inputArgs and "return" variable
       -- TODO: Real return slot rather than var
@@ -34,6 +45,7 @@ instance Ord Value where
     compare (VInt a) (VInt b) = compare a b
     compare (VList a) (VList b) = compare a b
     compare (VBool a) (VBool b) = compare a b
+    compare (VData n a) (VData m b) = compare (n, a) (m, b)
     compare (VFunct _ _ _ (BuiltinFunct a) _) (VFunct _ _ _ (BuiltinFunct b) _) = compare a b
     compare (VFunct a b c d e) (VFunct a' b' c' d' e') = compare (a, b, c, d, e) (a', b', c', d', e')
     compare a b = compare (rank a) (rank b)
@@ -42,7 +54,8 @@ instance Ord Value where
         rank VInt{} = 0
         rank VList{} = 1
         rank VBool{} = 2
-        rank VFunct{} = 3
+        rank VData{} = 3
+        rank VFunct{} = 4
 
 -- TODO: Call
 data Expression = Val Value | Var Variable | F Expression [Expression]
@@ -56,6 +69,8 @@ data Statement
     = Assign Variable Expression
     | Return Expression
     | ValidationStatement ValidationStatement
+    | -- struct Name { field: Type, ... }; it only matters to the type checker
+      StructDef Name [(Variable, Type)]
     | AxiomDef Variable [Variable] [ValidationStatement] [ValidationStatement]
     | ProofDef Variable [Variable] [ValidationStatement] [ValidationStatement] [ValidationStatement]
     | Block [Statement]

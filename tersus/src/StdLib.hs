@@ -125,6 +125,8 @@ builtinFunct Set =
             ]
             (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
         ]
+builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
+builtinFunct (Field field) = VFunct ["struct"] [] [] (BuiltinFunct (Field field)) []
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
 builtinFunct Times = VFunct ["a", "b"] [] [] (BuiltinFunct Times) []
@@ -181,6 +183,14 @@ evalBuiltinFunct Set [VList l, VInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VList (before ++ x : drop 1 after)
 evalBuiltinFunct Set _ = Error "Set only valid for a list, an int and an element"
+evalBuiltinFunct (Ctor name fields) args
+    | length fields == length args = Ok $ VData name (zip fields args)
+    | otherwise = Error ("Struct " ++ name ++ " takes " ++ show (length fields) ++ " fields, got " ++ show (length args))
+evalBuiltinFunct (Field field) [VData name fields] =
+    case lookup field fields of
+        Just value -> Ok value
+        Nothing -> Error ("Struct " ++ name ++ " has no field " ++ field)
+evalBuiltinFunct (Field _) _ = Error "A field can only be read from a struct"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
 evalBuiltinFunct Minus _ = Error "Minus only valid for two ints"
 evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)
@@ -190,10 +200,10 @@ evalBuiltinFunct Times _ = Error "Times only valid for two ints"
 evalBuiltinFunct Div [VInt _, VInt 0] = Error "Division by zero"
 evalBuiltinFunct Div [VInt v1, VInt v2] = Ok $ VInt (v1 `div` v2)
 evalBuiltinFunct Div _ = Error "Div only valid for two ints"
-evalBuiltinFunct (Rel Eq) [VInt v1, VInt v2] = Ok $ VBool (v1 == v2)
-evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two ints"
-evalBuiltinFunct (Rel NotEq) [VInt v1, VInt v2] = Ok $ VBool (v1 /= v2)
-evalBuiltinFunct (Rel NotEq) _ = Error "NotEq only valid for two ints"
+evalBuiltinFunct (Rel Eq) [v1, v2] | comparable v1 v2 = Ok $ VBool (v1 == v2)
+evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two values of the same kind that are not functions"
+evalBuiltinFunct (Rel NotEq) [v1, v2] | comparable v1 v2 = Ok $ VBool (v1 /= v2)
+evalBuiltinFunct (Rel NotEq) _ = Error "NotEq only valid for two values of the same kind that are not functions"
 evalBuiltinFunct (Rel Lt) [VInt v1, VInt v2] = Ok $ VBool (v1 < v2)
 evalBuiltinFunct (Rel Lt) _ = Error "Lt only valid for two ints"
 evalBuiltinFunct (Rel Gt) [VInt v1, VInt v2] = Ok $ VBool (v1 > v2)
@@ -266,3 +276,13 @@ stdLibCtxToValCtxHelper ((var, functDef) : rest) =
      in let newProof = FApp eqProof [ATerm (Iota var), CTerm functDef]
          in let (restVarIota, restProof) = stdLibCtxToValCtxHelper rest
              in (newVarIota : restVarIota, newProof : restProof)
+
+-- Equality is structural, for any two values that are not functions
+comparable :: Value -> Value -> Bool
+comparable VFunct{} _ = False
+comparable _ VFunct{} = False
+comparable (VInt _) (VInt _) = True
+comparable (VBool _) (VBool _) = True
+comparable (VList _) (VList _) = True
+comparable (VData n _) (VData m _) = n == m
+comparable _ _ = False

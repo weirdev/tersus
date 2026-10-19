@@ -1152,6 +1152,7 @@ testExamples =
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/types.tersus" (ExpectReturn (VInt 6))
+        , testExampleFile "examples/structs.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/generic_lists.tersus" (ExpectReturn (VList [VList [VInt 1, VInt 2], VList [VInt 3, VInt 4], VList [VInt 1, VInt 2]]))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
@@ -1177,6 +1178,8 @@ testExamples =
         , testExampleFile "examples/rejected/type_return_mismatch.tersus" (ExpectRejected "returned value: expected Int, got List<Int>")
         , testExampleFile "examples/rejected/type_argument_mismatch.tersus" (ExpectRejected "argument 1 of size")
         , testExampleFile "examples/rejected/list_element_mismatch.tersus" (ExpectRejected "argument 2 of push: expected Bool, got Int")
+        , testExampleFile "examples/rejected/struct_update_frame.tersus" (ExpectRejected "Could not prove: return.y = p.x")
+        , testExampleFile "examples/rejected/struct_field_type.tersus" (ExpectRejected "field value of Node: expected Int, got Bool")
         , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
@@ -1925,7 +1928,7 @@ testTypeCheck =
             , -- Annotations are required
               parseFails "fn f(n) -> Int { return n; };"
             , parseFails "fn f(n: Int) { return n; };"
-            , parseFails "fn f(n: Float) -> Int { return n; };"
+            , typeError "fn f(n: Float) -> Int { return 1; };" "unknown type Float"
             , -- validate runs the check first
               parseValidateFailProgramHelper "fn f(n: Int) -> List<Int> { return n; }; x = 1;" "returned value: expected List<Int>, got Int"
             ]
@@ -1941,6 +1944,8 @@ testGenericLists =
             , parseEvalProgramHelper "return get([[1, 2], [3]], 1);" (Just (ints [3]))
             , parseEvalProgramHelper "return size([[1, 2], [3], []]);" (Just (VInt 3))
             , parseEvalProgramHelper "return push([[1]], [2, 3]);" (Just (VList [ints [1], ints [2, 3]]))
+            , parseEvalProgramHelper "return [1, 2] = [1, 2];" (Just (VBool True))
+            , parseEvalProgramHelper "return [true] != [false];" (Just (VBool True))
             , parseEvalProgramHelper "return first([true]);" (Just (VBool True))
             , parseEvalProgramHelper "return set([true, true], 1, false);" (Just (VList [VBool True, VBool False]))
             , parseEvalProgramHelper "return [-1, 2];" (Just (ints [-1, 2]))
@@ -1962,6 +1967,79 @@ testGenericLists =
             , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; }] [{ affirm size(return) = size(m) + 1; affirm get(return, size(m)) = get(m, 0); }] { return push(m, first(m)); };"
             , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; affirm forall j in 0..size(m): size(get(m, j)) = 2; }] [{ affirm forall j in 0..size(return): size(get(return, j)) = 2; }] { return push(m, first(m)); };"
             ]
+
+testStructs :: Test
+testStructs =
+    let node = "struct Node { value: Int, prev: Int, next: Int };"
+        point = "struct Point { x: Int, y: Int };"
+        ctor name fields = builtinFunct (Ctor name fields)
+        field name = builtinFunct (Field name)
+     in testCaseSeq
+            "testStructs"
+            [ -- Parsing: a literal is the application of the constructor, in declaration order
+              case parseStatementBlock (point ++ "p = Point { y: 2, x: 1 };") of
+                Right [_, Assign "p" expr] -> testAssertEq expr (F (Val (ctor "Point" ["x", "y"])) [Val (VInt 1), Val (VInt 2)])
+                other -> Just ("Unexpected parse: " ++ show other)
+            , case parseStatementBlock (point ++ "q = Point { x: 5, ..p };") of
+                Right [_, Assign "q" expr] -> testAssertEq expr (F (Val (ctor "Point" ["x", "y"])) [Val (VInt 5), F (Val (field "y")) [Var "p"]])
+                other -> Just ("Unexpected parse: " ++ show other)
+            , case parseStatementBlock (point ++ "v = p.x + 1;") of
+                Right [_, Assign "v" expr] -> testAssertEq expr (F (Val (builtinFunct Plus)) [F (Val (field "x")) [Var "p"], Val (VInt 1)])
+                other -> Just ("Unexpected parse: " ++ show other)
+            , parseEvalProgramHelper (point ++ "p = Point { x: 1, y: 2 }; return p.y;") (Just (VInt 2))
+            , -- Chains of fields and ranges that use `..`
+              parseEvalProgramHelper (point ++ "struct Line { from: Point, to: Point }; l = Line { from: Point { x: 1, y: 2 }, to: Point { x: 3, y: 4 } }; return l.to.x;") (Just (VInt 3))
+            , parseValidProgramHelper "fn f(l: List<Int>, n: Int) -> Int [{ affirm forall j in 0..n: j < n; }] [{ }] { return n; };"
+            , -- Parse errors
+              parseFailsWith (point ++ "p = Point { x: 1 };") "lacks field y"
+            , parseFailsWith (point ++ "p = Point { x: 1, y: 2, z: 3 };") "has no field z"
+            , parseFailsWith (point ++ "p = Point { x: 1, x: 2, y: 3 };") "repeats a field"
+            , parseFailsWith "struct S { a: Int, a: Int };" "repeats a field"
+            , -- Evaluation
+              parseEvalProgramHelper (point ++ "p = Point { x: 1, y: 2 }; return p;") (Just (VData "Point" [("x", VInt 1), ("y", VInt 2)]))
+            , parseEvalProgramHelper (point ++ "p = Point { x: 1, y: 2 }; q = Point { y: 9, ..p }; return q;") (Just (VData "Point" [("x", VInt 1), ("y", VInt 9)]))
+            , parseEvalProgramHelper (point ++ "return Point { x: 1, y: 2 } = Point { y: 2, x: 1 };") (Just (VBool True))
+            , parseEvalProgramHelper (point ++ "return Point { x: 1, y: 2 } = Point { x: 1, y: 3 };") (Just (VBool False))
+            , parseEvalProgramHelper (point ++ "fn sum(p: Point) -> Int { return p.x + p.y; }; return sum(Point { x: 3, y: 4 });") (Just (VInt 7))
+            , parseEvalProgramHelper (point ++ "l = push([], Point { x: 1, y: 2 }); return get(l, 0).y;") (Just (VInt 2))
+            , -- Type checking
+              parseValidateFailProgramHelper (point ++ "p = Point { x: true, y: 2 };") "field x of Point: expected Int, got Bool"
+            , parseValidateFailProgramHelper (point ++ "p = Point { x: 1, y: 2 }; z = p.z;") "Point has no field z"
+            , parseValidateFailProgramHelper "x = 1; y = x.f;" "is read from a Int"
+            , parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Int { return p; };") "returned value: expected Int, got Point"
+            , parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Int { return 1; }; x = f(3);") "argument 1 of f: expected Point, got Int"
+            , parseValidateFailProgramHelper "fn f(p: Missing) -> Int { return 1; };" "unknown type Missing"
+            , parseValidateFailProgramHelper (point ++ point) "Struct already defined: Point"
+            , parseValidateFailProgramHelper (point ++ "struct Other { x: Int, y: Int }; p = Point { x: 1, y: 2 }; o = Other { x: 1, y: 2 }; affirm p = o;") "expected Point, got Other"
+            , parseValidateFailProgramHelper "struct S { a: Missing };" "unknown type Missing"
+            , -- Validation: fields of a literal, updates and their frame
+              parseValidProgramHelper (point ++ "p = Point { x: 1, y: 2 }; affirm p.x = 1; affirm p.y = 2;")
+            , parseValidProgramHelper (point ++ "fn f(p: Point) -> Point [{ }] [{ affirm return.x = 5; affirm return.y = p.y; }] { return Point { x: 5, ..p }; };")
+            , parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Point [{ }] [{ affirm return.y = p.x; }] { return Point { x: 5, ..p }; };") "Could not prove: return.y = p.x"
+            , parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Point [{ }] [{ affirm return.x = p.x; }] { return Point { x: 5, ..p }; };") "Could not prove: return.x = p.x"
+            , parseValidProgramHelper (point ++ "fn f(p: Point, q: Point) -> Int [{ affirm p = q; }] [{ affirm return = 0; }] { affirm p.x = q.x; return 0; };")
+            , -- Two constructions that are equal agree field by field
+              parseValidProgramHelper (point ++ "fn f(a: Int, b: Int, c: Int, d: Int) -> Int [{ affirm Point { x: a, y: b } = Point { x: c, y: d }; }] [{ }] { affirm a = c; affirm b = d; return 0; };")
+            , parseValidateFailProgramHelper (point ++ "fn f(a: Int, b: Int, c: Int, d: Int) -> Int [{ affirm Point { x: a, y: b } = Point { x: c, y: d }; }] [{ }] { affirm a = d; return 0; };") "Could not prove: a = d"
+            , parseValidateFailProgramHelper (point ++ "fn f(a: Int, b: Int, c: Int, d: Int) -> Int [{ }] [{ }] { affirm Point { x: a, y: b } = Point { x: c, y: d }; return 0; };") "Could not prove"
+            , -- Known values
+              parseValidProgramHelper (point ++ "p = Point { x: 1, y: 2 }; q = Point { y: 2, x: 1 }; affirm p = q;")
+            , parseValidateFailProgramHelper (point ++ "p = Point { x: 1, y: 2 }; q = Point { x: 1, y: 3 }; affirm p = q;") "Could not prove: p = q"
+            , -- Arithmetic reaches the fields
+              parseValidProgramHelper (point ++ "fn f(p: Point) -> Int [{ affirm p.x > 0; }] [{ affirm return > 1; }] { return p.x + 1; };")
+            , parseValidProgramHelper (node ++ "fn f(n: Node) -> Node [{ affirm n.next < 5; }] [{ affirm return.next < 6; }] { return Node { next: n.next + 1, ..n }; };")
+            , -- Lists of structs
+              parseValidProgramHelper (node ++ "fn f(nodes: List<Node>, i: Int) -> List<Node> [{ affirm i >= 0; affirm i < size(nodes); }] [{ affirm get(return, i).next = 5; affirm get(return, i).value = get(nodes, i).value; affirm forall j where j >= 0, j < size(nodes), j != i: get(return, j) = get(nodes, j); }] { return set(nodes, i, Node { next: 5, ..get(nodes, i) }); };")
+            , parseValidateFailProgramHelper (node ++ "fn f(nodes: List<Node>, i: Int) -> List<Node> [{ affirm i >= 0; affirm i < size(nodes); }] [{ affirm get(return, i).prev = 5; }] { return set(nodes, i, Node { next: 5, ..get(nodes, i) }); };") "Could not prove: get(return, i).prev = 5"
+            , parseValidProgramHelper (node ++ "fn f(nodes: List<Node>) -> List<Node> [{ }] [{ affirm size(return) = size(nodes) + 1; affirm get(return, size(nodes)).value = 7; }] { return push(nodes, Node { value: 7, prev: 0, next: 0 }); };")
+            , -- Eta is not known: a struct is not equal to a rebuilt copy of its fields
+              parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Int [{ }] [{ }] { affirm Point { x: p.x, y: p.y } = p; return 0; };") "Could not prove: Point { x: p.x, y: p.y } = p"
+            ]
+  where
+    parseFailsWith source expected =
+        case parseStatementBlock source of
+            Left err -> if expected `isInfixOf` show err then Nothing else Just ("Wrong parse error: " ++ show err)
+            Right _ -> Just ("Expected a parse error for: " ++ source)
 
 testCrlf :: Test
 testCrlf =
@@ -2297,6 +2375,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testStructs
                 , testGenericLists
                 , testTypeCheck
                 , testRecursion

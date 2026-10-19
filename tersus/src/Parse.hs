@@ -1,13 +1,19 @@
 module Parse where
 
 import Text.Parsec
-import Text.Parsec.String (Parser)
+import qualified Data.Map as Map
 
 import Control.Monad (void, when)
 import Data.Char (isDigit, isLetter)
 
 import StdLib
 import TersusTypes
+
+-- The parser remembers the structs declared so far, which a struct literal needs: the fields of a
+-- struct in declaration order. A struct must be declared before it is used.
+type Structs = Map.Map Name [Variable]
+
+type Parser = Parsec String Structs
 
 -- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
 -- https://hackage.haskell.org/package/parsec-3.1.17.0/docs/Text-Parsec-Combinator.html
@@ -80,6 +86,7 @@ statement =
         <|> ( ValidationStatement
                 <$> validationStatement
             )
+        <|> structStatement
         <|> functStatement
         <|> assignStatement
         <|> blockStatement
@@ -129,6 +136,83 @@ whileStatement = do
     whitespace
     body <- curlyBracesParse statementBlock
     return (While cond invariant body)
+
+structStatement :: Parser Statement
+structStatement = do
+    keyword "struct"
+    whitespace
+    name <- variable
+    whitespace
+    void (char '{')
+    whitespace
+    fields <- structField `sepEndBy` (char ',' >> whitespace)
+    void (char '}')
+    whitespace
+    when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
+    updateState (Map.insert name (map fst fields))
+    return (StructDef name fields)
+  where
+    nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
+
+-- field: Type
+structField :: Parser (Variable, Type)
+structField = do
+    field <- variable
+    whitespace
+    void (char ':')
+    whitespace
+    ty <- typeAnnotation
+    return (field, ty)
+
+-- Name { field: value, ..., ..base }: every field of the struct, or the ones that change and a base
+-- struct to copy the rest from. The result applies the struct's constructor, so it is an ordinary term.
+structLiteral :: Parser a -> (Value -> [a] -> a) -> Parser a
+structLiteral element apply = do
+    (name, declared) <- try $ do
+        candidate <- variable
+        structs <- getState
+        known <- maybe (fail "not a struct") return (Map.lookup candidate structs)
+        whitespace
+        void (char '{')
+        return (candidate, known)
+    whitespace
+    inits <- many fieldInit
+    base <- optionMaybe (string ".." >> whitespace >> element <* whitespace <* optional (char ',' >> whitespace))
+    void (char '}')
+    whitespace
+    mapM_ (\(field, _) -> when (field `notElem` declared) (fail ("Struct " ++ name ++ " has no field " ++ field))) inits
+    when (length (map fst inits) /= length (foldr (\f rest -> if f `elem` rest then rest else f : rest) [] (map fst inits))) $
+        fail ("Struct " ++ name ++ " literal repeats a field")
+    args <- mapM (argument name base inits) declared
+    return (apply (builtinFunct (Ctor name declared)) args)
+  where
+    fieldInit = do
+        field <- variable
+        whitespace
+        void (char ':')
+        whitespace
+        value' <- element
+        whitespace
+        optional (char ',' >> whitespace)
+        return (field, value')
+    argument name base inits field =
+        case (lookup field inits, base) of
+            (Just given, _) -> return given
+            (Nothing, Just from) -> return (apply (builtinFunct (Field field)) [from])
+            (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
+
+-- x.field, repeated. A `..` after a term is a range, not a field.
+withFields :: (Value -> [a] -> a) -> Parser a -> Parser a
+withFields apply term = do
+    base <- term
+    fields <- many (try (char '.' >> notFollowedBy (char '.') >> variable <* whitespace))
+    return (foldl (\acc field -> apply (builtinFunct (Field field)) [acc]) base fields)
+
+expressionApply :: Value -> [Expression] -> Expression
+expressionApply funct = F (Val funct)
+
+proofApply :: Value -> [VariableProof] -> VariableProof
+proofApply funct = FApp (CTerm funct)
 
 functStatement :: Parser Statement
 functStatement = do
@@ -192,7 +276,7 @@ typeAnnotation = do
                 element <- typeAnnotation
                 void (char '>')
                 return (TList element)
-            _ -> fail ("Unknown type " ++ name)
+            _ -> return (TNamed name)
 
 functContractReqs :: Parser [ValidationStatement]
 -- Function contracts are written as `[{ ... }]`: square brackets mark the presence
@@ -313,9 +397,7 @@ bindIndex _ other = other
 nonInfixProof :: Parser VariableProof
 nonInfixProof =
     concreteProof
-        <|> parensProof
-        <|> try functionProof
-        <|> try abstractProof
+        <|> withFields proofApply (parensProof <|> structLiteral proof proofApply <|> try functionProof <|> try abstractProof)
 
 infixProof :: Parser VariableProof
 infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof])
@@ -390,10 +472,9 @@ expression = try infixExpression <|> nonInfixExpression
 
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
-    try fExpression
+    withFields expressionApply (structLiteral expression expressionApply <|> try fExpression)
         <|> (Val <$> value)
-        <|> varExpression
-        <|> parensExpression
+        <|> withFields expressionApply (varExpression <|> parensExpression)
 
 bracketsParse :: Parser o -> Parser c -> Parser a -> Parser a
 bracketsParse open close innerParser = do
@@ -507,12 +588,12 @@ topLevelWrap p = do
 
 -- Function to run the parser
 parseStatement :: String -> Either ParseError Statement
-parseStatement = parse (topLevelWrap statement) ""
+parseStatement = runParser (topLevelWrap statement) Map.empty ""
 
 -- Function to run the parser
 parseStatementBlock :: String -> Either ParseError [Statement]
-parseStatementBlock = parse (topLevelWrap statementBlock) ""
+parseStatementBlock = runParser (topLevelWrap statementBlock) Map.empty ""
 
 -- Function to run the parser
 parseExpression :: String -> Either ParseError Expression
-parseExpression = parse (topLevelWrap expression) ""
+parseExpression = runParser (topLevelWrap expression) Map.empty ""
