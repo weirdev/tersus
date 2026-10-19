@@ -51,7 +51,7 @@ Checking every proposition a real program could need is not feasible, so validat
    - a stronger input contract, output contract or loop invariant.
 
 ```tersus
-fn f(l) [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] {
+fn f(l: List<Int>) -> Int [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] {
     define v = get(l, 1);   // puts the term get(l, 1) in the context, so the forall is used at 1
     affirm v = 0;           // without that term nothing mentions an element of l
     return 1;
@@ -72,6 +72,36 @@ Tersus currently has four runtime value categories:
 Boolean values can also be produced by relation expressions such as `x < y`. The condition of an `if` consumes them.
 
 Integer literals can be negative: `-1`, `[-1, 2]`.
+
+## Types
+
+Every value has a type, and programs are type checked before they are validated:
+
+- `Int`, `Bool`, and `List<Int>` (a list of integers; other element types come later, see DATA_MODEL.md),
+- `fn(Int, Int) -> Int` for a function value.
+
+A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Types exist only for checking: validation and evaluation never look at them.
+
+```tersus
+fn scale(values: List<Int>, factor: Int) -> List<Int> {
+    out = [];
+    i = 0;
+    while i < size(values) [{ affirm i >= 0; }] {
+        out = push(out, get(values, i) * factor);
+        i = i + 1;
+    };
+    return out;
+};
+```
+
+The builtins have these signatures: `size : fn(List<a>) -> Int`, `first` and `last : fn(List<a>) -> a`, `get : fn(List<a>, Int) -> a`, `push : fn(List<a>, a) -> List<a>`, `set : fn(List<a>, Int, a) -> List<a>`, `+ - * /` on `Int`, `=` and `!=` on two values of the same type, and `< <= > >=` on `Int`. A mismatch is reported before anything runs:
+
+```
+Type error: argument 1 of size: expected List<?>, got Int
+Type error: returned value: expected Int, got List<Int>
+```
+
+A proof is a `Bool` expression and is checked the same way. The bodies of `axiom` and `proof` rules are not type checked (their parameters have no types), and a proof may name a proof variable exported by a called function's contract without the checker knowing its type.
 
 ## Expressions
 
@@ -116,7 +146,7 @@ x = get(a, 2);          // fine: 0 <= 2 < 3
 // y = get(a, 3);       // rejected: 3 < 3 does not hold
 
 // The contract has to show both bounds, since the body can only assume them.
-fn at(lst, i) [{
+fn at(lst: List<Int>, i: Int) -> Int [{
     rewrite checkRel i >= 0;
     rewrite checkRel i < size(lst);
     affirm i >= 0;
@@ -231,7 +261,7 @@ return label;
 The validator checks each branch assuming the condition holds (or, for `else`, that it does not), so a guard can make a builtin's contract provable:
 
 ```tersus
-fn firstOr(lst, fallback) {
+fn firstOr(lst: List<Int>, fallback: Int) -> Int {
     r = fallback;
     if size(lst) > 0 {
         define s = size(lst);
@@ -247,7 +277,7 @@ For a relation condition the branch assumes the relation (`size(lst) > 0`), and 
 After the `if`, only facts that **both** branches establish are kept. For each outer variable a branch assigned, the validator introduces a fresh value that equals the variable's final value in either branch, and keeps a fact about it only if both branches prove it. A fact that holds only under the condition, including the condition itself, is not known after the `if`:
 
 ```tersus
-fn f(n) {
+fn f(n: Int) -> Int {
     y = 0;
     if n < 6 {
         y = 1;
@@ -269,7 +299,7 @@ This is sound but incomplete. Facts a branch derives about values that existed b
 A `return` inside an `if` body ends the function there, so a guard clause can handle a case and leave the rest of the function to the others:
 
 ```tersus
-fn firstOr(lst, fallback) {
+fn firstOr(lst: List<Int>, fallback: Int) -> Int {
     if size(lst) > 0 {
     } else {
         return fallback;
@@ -338,7 +368,7 @@ affirm i >= 3;
 An invariant can use `forall` to describe a list that is built or updated element by element. The validator proves it for the new element and, with the frame facts of `push` and `set`, for the old ones:
 
 ```tersus
-fn doubled(a) [{ }] [{ affirm forall j in 0..size(a): get(return, j) = (get(a, j) + get(a, j)); }] {
+fn doubled(a: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..size(a): get(return, j) = (get(a, j) + get(a, j)); }] {
     n = size(a);
     i = 0;
     out = [];
@@ -362,7 +392,7 @@ See `examples/parallel_sum.tersus`, `examples/build_list.tersus` and `examples/u
 A body that contains `return` is validated as paths, in the same way as an `if` with a `return`:
 
 ```tersus
-fn firstOver(n) [{ }] [{ affirm return <= 3; }] {
+fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
     i = 0;
     rewrite zeroWithinBound i;
     while i < 3 [{ affirm i <= 3; }] {
@@ -384,10 +414,10 @@ fn firstOver(n) [{ }] [{ affirm return <= 3; }] {
 
 ### Functions
 
-Functions are defined with `fn` and assigned to the given name.
+Functions are defined with `fn` and assigned to the given name. Each parameter and the return value has a type: `fn name(param: Type, ...) -> Type { ... }`.
 
 ```tersus
-fn add1(i) {
+fn add1(i: Int) -> Int {
     return i + 1;
 };
 
@@ -399,17 +429,17 @@ Function arguments are comma-separated. Function bodies are ordinary statement b
 A function defined at the top level can be called by the functions defined after it, by name. A call is checked against the callee's contract, as it is in the main program, so a caller must establish the callee's input contract and can use its output contract.
 
 ```tersus
-fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };
-fn inc(n) [{ }] [{ affirm return = n + 1; }] { return n + 1; };
-fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };
+fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };
+fn inc(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; };
+fn bump(n: Int) -> Int [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };
 ```
 
 A function sees only the functions defined before it and itself, so there is no mutual recursion, and calling a later function is a validation error (`Undefined variable`).
 
-A function can call itself. Its body is validated assuming its own output contract, and the contract is then checked against the body, so every recursive call must meet the input contract and the base cases must establish the output contract. As for loops this is partial correctness: termination is not checked, and `fn spin(n) [{ }] [{ affirm return = 0; }] { return spin(n); }` validates.
+A function can call itself. Its body is validated assuming its own output contract, and the contract is then checked against the body, so every recursive call must meet the input contract and the base cases must establish the output contract. As for loops this is partial correctness: termination is not checked, and `fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] { return spin(n); }` validates.
 
 ```tersus
-fn upTo(i, n) [{ affirm i <= n; }] [{ affirm return = n; }] {
+fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] {
     if i < n { return upTo(i + 1, n); } else { return n; };
 };
 ```
@@ -422,7 +452,7 @@ The evaluator runs a function body with its argument bindings and expects the bo
 Arguments are passed by value. Each argument expression is evaluated before the call and bound to the matching parameter in a fresh scope. The caller's variable is not moved and is still usable afterwards, and nothing the function does to a parameter, including reassigning it, is visible to the caller.
 
 ```tersus
-fn reset(xs) {
+fn reset(xs: List<Int>) -> List<Int> {
     xs = [];
     return size(xs);
 };
@@ -558,7 +588,7 @@ Rule names share one validation rule namespace. Defining the same name twice fai
 Function definitions can include validation contract sections between the argument list and body:
 
 ```tersus
-fn name(arg1, arg2) [{ input validation }] [{ output validation }] {
+fn name(arg1: Type1, arg2: Type2) -> ReturnType [{ input validation }] [{ output validation }] {
     body
 };
 ```
@@ -566,7 +596,7 @@ fn name(arg1, arg2) [{ input validation }] [{ output validation }] {
 Both contract sections are optional. If one contract section is present, it is treated as the input contract. To specify only an output contract, write an empty input contract first:
 
 ```tersus
-fn add1(i) [{}] [{
+fn add1(i: Int) -> Int [{}] [{
     affirm return = (i + 1);
 }] {
     return i + 1;
@@ -580,7 +610,7 @@ Output contracts are validated after the body has been validated. Proofs involvi
 Example:
 
 ```tersus
-fn getFirstWithSize(lst) [{
+fn getFirstWithSize(lst: List<Int>) -> Int [{
     define s = size(lst);
     rewrite eqToGtZero s;
     affirm s > 0;
@@ -599,7 +629,7 @@ affirm s > 0;
 A contract can contain a `forall` (see `forall` above). In an input contract it is proved at every call, and assumed in the body. In an output contract it is proved after the body, and instantiated for the caller with the actual arguments and the result:
 
 ```tersus
-fn keep(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] {
+fn keep(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] {
     return l;
 };
 ```
@@ -626,7 +656,7 @@ affirm y != s;
 `*` and `/` bind tighter than `+` and `-`: `2 + 3 * 4` is `14`. `/` rounds down (`-7 / 2` is `-4`). Integer literals can be negative (`x = -4;`, `[-1, 2]`, `3 - -2`). Dividing needs a divisor the validator can show is non-zero, checked like the index of `get`; evaluating `1 / 0` is an error.
 
 ```tersus
-fn average(total, count) [{ affirm count > 0; }] [{ }] {
+fn average(total: Int, count: Int) -> Int [{ affirm count > 0; }] [{ }] {
     return total / count;
 };
 ```

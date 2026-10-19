@@ -8,7 +8,7 @@
 // The counter facts (0 <= i <= n, and i = n after the loop) follow from the loop condition
 // and the invariant, so no axioms are needed.
 
-fn pairSums(a, b) [{
+fn pairSums(a: List<Int>, b: List<Int>) -> List<Int> [{
     affirm size(a) = size(b);
 }] [{
     affirm size(return) = size(a);

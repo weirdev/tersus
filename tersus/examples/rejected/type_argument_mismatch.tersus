@@ -1,0 +1,4 @@
+// Rejected: size needs a list, but n is an Int.
+fn count(n: Int) -> Int {
+    return size(n);
+};

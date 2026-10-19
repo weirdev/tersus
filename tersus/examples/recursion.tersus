@@ -4,18 +4,18 @@
 // gets closer to the base case" is shown. Termination itself is not checked (partial correctness).
 
 // Counts up to n: the call's input contract i + 1 <= n follows from the branch condition i < n.
-fn upTo(i, n) [{ affirm i <= n; }] [{ affirm return = n; }] {
+fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] {
     if i < n { return upTo(i + 1, n); } else { return n; };
 };
 
 // Adds up the elements of l from index i on.
-fn sumFrom(l, i) [{ affirm i >= 0; affirm i <= size(l); }] [{ affirm size(l) >= 0; }] {
+fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ affirm size(l) >= 0; }] {
     if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; };
 };
 
 // Walks to the last element. The arithmetic knows i = size(l) - 1 in the last step, but the term
 // get(l, i) is only linked to get(l, size(l) - 1) once that is affirmed, and affirms become facts.
-fn endOf(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] {
+fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] {
     if i + 1 < size(l) {
         return endOf(l, i + 1);
     } else {

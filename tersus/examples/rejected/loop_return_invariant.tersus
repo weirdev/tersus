@@ -1,6 +1,6 @@
 // Rejected: a return in the body does not excuse the paths that keep looping. When the if is
 // not taken, i goes from 2 to 3, which breaks the invariant i <= 2.
-fn firstOver(n) {
+fn firstOver(n: Int) -> Int {
     i = 0;
     while i < 3 [{ affirm i <= 2; }] {
         if (i + i) > n {

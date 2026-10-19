@@ -7,7 +7,7 @@ axiom allZero(l) [{ }] [{ affirm forall j in 0..size(l): get(l, j) = 0; }];
 
 // readZero's input contract demands the forall, so its body may rely on it: reading any valid
 // index gives 0.
-fn readZero(l, i) [{
+fn readZero(l: List<Int>, i: Int) -> Int [{
     affirm forall j in 0..size(l): get(l, j) = 0;
     rewrite checkRel i >= 0;
     rewrite checkRel i < size(l);
@@ -18,7 +18,7 @@ fn readZero(l, i) [{
 };
 
 // keep returns its argument, and its output contract passes the forall on to the caller.
-fn keep(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] {
+fn keep(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] {
     return l;
 };
 

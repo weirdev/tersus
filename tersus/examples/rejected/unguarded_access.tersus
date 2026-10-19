@@ -1,5 +1,5 @@
 // Rejected: the guard says size(lst) >= 0, which does not show the size(lst) > 0 that first needs.
-fn firstOr(lst, fallback) {
+fn firstOr(lst: List<Int>, fallback: Int) -> Int {
     r = fallback;
     if size(lst) >= 0 {
         r = first(lst);

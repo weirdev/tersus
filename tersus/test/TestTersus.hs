@@ -14,6 +14,7 @@ import qualified ProofEngine as Engine
 import ProofHelpers
 import StdLib
 import TersusTypes
+import TypeCheck
 import Utils
 
 type TestResult = Maybe String
@@ -244,7 +245,7 @@ testParseComments =
         , case parseStatementBlock "x = 5; // ends the input" of
             Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
-        , case parseStatementBlock "x = [1, // one\n 2];\nfn f(a) [{ // in\n affirm a = 1; // out\n}] { // body\n return a; };" of
+        , case parseStatementBlock "x = [1, // one\n 2];\nfn f(a: List<Int>) -> List<Int> [{ // in\n affirm a = 1; // out\n}] { // body\n return a; };" of
             Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> testAssertTrue (length parsed == 2)
         , case parseStatementBlock "x = 5; // y = 6;\n" of
@@ -288,25 +289,25 @@ testEvaluateFullContext =
             ]
             [("x", VInt 1), ("y", VInt 0)]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] [] (NativeFunct [Return (Val (VInt 3))]) []))
+            [ Assign "f" (Val (VFunct [] [] [] (nativeInts 1 [Return (Val (VInt 3))]) []))
             , Assign "result" (F (Var "f") [])
             ]
-            [("result", VInt 3), ("f", VFunct [] [] [] (NativeFunct [Return (Val (VInt 3))]) [])]
+            [("result", VInt 3), ("f", VFunct [] [] [] (nativeInts 1 [Return (Val (VInt 3))]) [])]
         , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) []))
+            [ Assign "f" (Val (VFunct [] [] [] (nativeInts 1 [Assign "y" (Val (VInt 2)), Return (Var "y")]) []))
             , Assign "result" (F (Var "f") [])
             ]
-            [("result", VInt 2), ("f", VFunct [] [] [] (NativeFunct [Assign "y" (Val (VInt 2)), Return (Var "y")]) [])]
+            [("result", VInt 2), ("f", VFunct [] [] [] (nativeInts 1 [Assign "y" (Val (VInt 2)), Return (Var "y")]) [])]
         , evalFCHelper
-            [ Assign "id" (Val (VFunct ["v"] [] [] (NativeFunct [Return (Var "v")]) []))
+            [ Assign "id" (Val (VFunct ["v"] [] [] (nativeInts 1 [Return (Var "v")]) []))
             , Assign "result" (F (Var "id") [Val (VInt 7)])
             ]
-            [("result", VInt 7), ("id", VFunct ["v"] [] [] (NativeFunct [Return (Var "v")]) [])]
+            [("result", VInt 7), ("id", VFunct ["v"] [] [] (nativeInts 1 [Return (Var "v")]) [])]
         , evalFCHelper
-            [ Assign "add" (Val (VFunct ["l", "r"] [] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) []))
+            [ Assign "add" (Val (VFunct ["l", "r"] [] [] (nativeInts 2 [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) []))
             , Assign "result" (F (Var "add") [Val (VInt 7), Val (VInt 13)])
             ]
-            [("result", VInt 20), ("add", VFunct ["l", "r"] [] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) [])]
+            [("result", VInt 20), ("add", VFunct ["l", "r"] [] [] (nativeInts 2 [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) [])]
         ]
 
 evalExprHelper :: Expression -> Value -> TestResult
@@ -357,19 +358,19 @@ testParseEvalWFunctDef =
     parseEvalReturningStmtHelper
         "{\
         \  x = 6;\
-        \  fn add1(i) {\
+        \  fn add1(i: Int) -> Int {\
         \    return i + 1;\
         \  };\
         \  return add1;\
         \}"
-        (VFunct ["i"] [] [] (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])]) [])
+        (VFunct ["i"] [] [] (nativeInts 1 [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])]) [])
 
 testParseEvalWUdfCall :: TestResult
 testParseEvalWUdfCall =
     parseEvalReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
-        \  fn sumFirstLast(lst) {\
+        \  fn sumFirstLast(lst: List<Int>) -> Int {\
         \    return first(lst) + last(lst);\
         \  };\
         \  return sumFirstLast(x);\
@@ -393,7 +394,7 @@ testParseFunctReturnNestedBlocks =
     parseEvalReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
-        \  fn getFirst(y) {\
+        \  fn getFirst(y: Int) -> Int {\
         \    x = [1];\
         \    {\
         \      return first(y);\
@@ -761,7 +762,7 @@ testParseValWFunctDef =
     parseValReturningStmtHelper
         "{\
         \  x = 6;\
-        \  fn add1(i) {\
+        \  fn add1(i: Int) -> Int {\
         \    return i + 1;\
         \  };\
         \  return add1;\
@@ -775,7 +776,7 @@ testParseValWFunctDef =
                     ["i"]
                     []
                     []
-                    (NativeFunct [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])])
+                    (nativeInts 1 [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])])
                     [FApp eqVarProof [ATerm "return", FApp (CTerm (builtinFunct Plus)) [ATerm "i", CTerm (VInt 1)]]]
                 )
             ]
@@ -805,7 +806,7 @@ testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
     parseValReturningStmtHelper
         "{\
-        \  fn sumFirstLast(lst) [{\
+        \  fn sumFirstLast(lst: List<Int>) -> Int [{\
         \    define s = size(lst);\
         \    rewrite eqToGtZero s;\
         \    affirm s > 0;\
@@ -836,7 +837,7 @@ testParseValFunctReturnNestedBlocks =
     parseValReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
-        \  fn getFirst(y) [{\
+        \  fn getFirst(y: Int) -> Int [{\
         \    define s = size(y);\
         \    rewrite eqToGtZero s;\
         \    affirm s > 0;\
@@ -856,7 +857,7 @@ testParseValFunctWOutputStatements :: TestResult
 testParseValFunctWOutputStatements =
     parseValidateWEMatchHelper
         "{\
-        \  fn add1(i) [{}] [{\
+        \  fn add1(i: Int) -> Int [{}] [{\
         \    affirm return = (i + 1);\
         \  }] {\
         \    return i + 1;\
@@ -870,7 +871,7 @@ testParseValFunctExportsProofVar :: TestResult
 testParseValFunctExportsProofVar =
     parseValidateWEMatchHelper
         "{\
-        \  fn getFirstWithSize(lst) [{\
+        \  fn getFirstWithSize(lst: List<Int>) -> Int [{\
         \    define s = size(lst);\
         \    rewrite eqToGtZero s;\
         \    affirm s > 0;\
@@ -942,7 +943,7 @@ testParseValFunctBodyValidationFail :: TestResult
 testParseValFunctBodyValidationFail =
     parseValFailStmtHelper
         "{\
-        \  fn bad(lst) [{\
+        \  fn bad(lst: List<Int>) -> Int [{\
         \    define s = size(lst);\
         \    rewrite eqToGtZero s;\
         \    affirm s > 0;\
@@ -972,7 +973,7 @@ testParseValFunctOutputValidationFail :: TestResult
 testParseValFunctOutputValidationFail =
     parseValFailStmtHelper
         "{\
-        \  fn bad(i) [{}] [{\
+        \  fn bad(i: Int) -> Int [{}] [{\
         \    affirm return = i;\
         \  }] {\
         \    return i + 1;\
@@ -983,7 +984,7 @@ testParseValMissingExportedProofValidationFail :: TestResult
 testParseValMissingExportedProofValidationFail =
     parseValFailStmtHelper
         "{\
-        \  fn bad(lst) [{\
+        \  fn bad(lst: List<Int>) -> Int [{\
         \    define s = size(lst);\
         \    rewrite eqToGtZero s;\
         \    affirm s > 0;\
@@ -1022,7 +1023,7 @@ testParseEvalFirstWrongTypeFail =
 -- must not reach the caller's variable, in evaluation or after validation.
 argPassingSource :: String
 argPassingSource =
-    "fn reset(xs) { xs = []; return size(xs); };\
+    "fn reset(xs: List<Int>) -> Int { xs = []; return size(xs); };\
     \xs = [1, 2, 3];\
     \n = reset(xs);\
     \return size(xs) - n;"
@@ -1041,7 +1042,7 @@ testParseEvalUdfExtraArgsFail :: TestResult
 testParseEvalUdfExtraArgsFail =
     parseEvalFailStmtHelper
         "{\
-        \  fn f(a) { return a; };\
+        \  fn f(a: List<Int>) -> List<Int> { return a; };\
         \  return f(1, 2);\
         \}"
         "expected 1 arguments, got 2"
@@ -1050,7 +1051,7 @@ testParseEvalUdfMissingArgsFail :: TestResult
 testParseEvalUdfMissingArgsFail =
     parseEvalFailStmtHelper
         "{\
-        \  fn f(a, b) { return a; };\
+        \  fn f(a: Int, b: Int) -> Int { return a; };\
         \  return f(1);\
         \}"
         "expected 2 arguments, got 1"
@@ -1059,7 +1060,7 @@ testParseValUdfExtraArgsFail :: TestResult
 testParseValUdfExtraArgsFail =
     parseValFailStmtHelper
         "{\
-        \  fn f(a) { return a; };\
+        \  fn f(a: List<Int>) -> List<Int> { return a; };\
         \  return f(1, 2);\
         \}"
 
@@ -1067,7 +1068,7 @@ testParseValUdfMissingArgsFail :: TestResult
 testParseValUdfMissingArgsFail =
     parseValFailStmtHelper
         "{\
-        \  fn f(a, b) { return a; };\
+        \  fn f(a: Int, b: Int) -> Int { return a; };\
         \  return f(1);\
         \}"
 
@@ -1150,6 +1151,7 @@ testExamples =
         , testExampleFile "examples/rules.tersus" ExpectValid
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
+        , testExampleFile "examples/types.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
@@ -1171,6 +1173,8 @@ testExamples =
         , testExampleFile "examples/rejected/call_violates_contract.tersus" (ExpectRejected "Could not prove: n > 0")
         , testExampleFile "examples/rejected/recursion_wrong_contract.tersus" (ExpectRejected "Could not prove: return = 0")
         , testExampleFile "examples/rejected/recursion_input.tersus" (ExpectRejected "Could not prove: n > 0")
+        , testExampleFile "examples/rejected/type_return_mismatch.tersus" (ExpectRejected "returned value: expected Int, got List<Int>")
+        , testExampleFile "examples/rejected/type_argument_mismatch.tersus" (ExpectRejected "argument 1 of size")
         , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
@@ -1310,7 +1314,7 @@ testValidateIf =
         "testValidateIf"
         [ -- Guarding first() with the list size makes it safe for a list only known at runtime
           parseValidProgramHelper
-            "fn firstOr(lst, d) {\
+            "fn firstOr(lst: List<Int>, d: Int) -> Int {\
             \  r = d;\
             \  if size(lst) > 0 {\
             \    define s = size(lst);\
@@ -1322,7 +1326,7 @@ testValidateIf =
             \return firstOr([4, 8], 0);"
         , -- A fact both branches establish about the assigned variable survives the join
           parseValidProgramHelper
-            "fn f(n) {\
+            "fn f(n: Int) -> Int {\
             \  y = 0;\
             \  if n < 6 { y = 1; rewrite eqToGtZero y; } else { y = 2; rewrite eqToGtZero y; };\
             \  affirm y > 0;\
@@ -1330,7 +1334,7 @@ testValidateIf =
             \};"
         , -- The same guard without enough information is rejected
           parseValidateFailProgramHelper
-            "fn firstOr(lst, d) {\
+            "fn firstOr(lst: List<Int>, d: Int) -> Int {\
             \  r = d;\
             \  if size(lst) >= 0 {\
             \    r = first(lst);\
@@ -1341,7 +1345,7 @@ testValidateIf =
             "Could not prove: size(list) > 0"
         , -- A fact only one branch establishes does not survive the join
           parseValidateFailProgramHelper
-            "fn f(n) {\
+            "fn f(n: Int) -> Int {\
             \  y = 0;\
             \  if n < 6 { y = 1; rewrite eqToGtZero y; } else { y = 0 - 1; };\
             \  affirm y > 0;\
@@ -1349,7 +1353,7 @@ testValidateIf =
             "Could not prove"
         , -- Soundness: the condition only holds inside its branch
           parseValidateFailProgramHelper
-            "fn f(n) {\
+            "fn f(n: Int) -> Int {\
             \  y = 0;\
             \  if n < 6 { y = 1; } else { y = 2; };\
             \  affirm n < 6;\
@@ -1357,7 +1361,7 @@ testValidateIf =
             "Could not prove"
         , -- Soundness: a copy made under the condition must not carry the condition out
           parseValidateFailProgramHelper
-            "fn f(n) {\
+            "fn f(n: Int) -> Int {\
             \  y = 0;\
             \  if n < 6 { y = n; } else { y = 9; };\
             \  affirm y < 6;\
@@ -1424,7 +1428,7 @@ testValidateWhile =
         , -- A loop nested in a function body
           parseValidProgramHelper
             ( loopAxioms
-                ++ "fn f(k) { i = 0; rewrite zeroWithinBound i;\
+                ++ "fn f(k: Int) -> Int { i = 0; rewrite zeroWithinBound i;\
                    \  while i < 3 [{ affirm i <= 3; }] { rewrite stepWithinBound i; i = i + 1; };\
                    \  return i; };\
                    \return f(1);"
@@ -1464,7 +1468,7 @@ testEarlyReturn =
         , parseEvalProgramHelper "x = 1; { x = 2; return x; }; return 9;" (Just (VInt 2))
         , parseEvalProgramHelper "x = 1; if x < 2 { if x < 3 { return 7; }; }; return 9;" (Just (VInt 7))
         , parseEvalProgramHelper
-            "fn f(n) { if n < 1 { return 0; }; return n + 10; }; return f(0) + f(5);"
+            "fn f(n: Int) -> Int { if n < 1 { return 0; }; return n + 10; }; return f(0) + f(5);"
             (Just (VInt 15))
         , -- Returning from inside a loop stops the loop
           parseEvalProgramHelper "i = 0; while i < 10 { if i > 2 { return i; }; i = i + 1; }; return 99;" (Just (VInt 3))
@@ -1472,72 +1476,72 @@ testEarlyReturn =
           parseEvalProgramHelper "return 1; x = first([]);" (Just (VInt 1))
         , -- Validation: a guard clause makes the rest of the function safe
           parseValidProgramHelper
-            "fn firstOr(lst, d) { if size(lst) > 0 { } else { return d; }; define s = size(lst); rewrite eqToGtZero s; return first(lst); }; return firstOr([4, 8], 0) + firstOr([], 5);"
+            "fn firstOr(lst: List<Int>, d: Int) -> Int { if size(lst) > 0 { } else { return d; }; define s = size(lst); rewrite eqToGtZero s; return first(lst); }; return firstOr([4, 8], 0) + firstOr([], 5);"
         , -- A return inside the taken branch
           parseValidProgramHelper
-            "fn firstOr(lst, d) { if size(lst) > 0 { define s = size(lst); rewrite eqToGtZero s; return first(lst); }; return d; };"
+            "fn firstOr(lst: List<Int>, d: Int) -> Int { if size(lst) > 0 { define s = size(lst); rewrite eqToGtZero s; return first(lst); }; return d; };"
         , -- A chain of guard clauses
           parseValidProgramHelper
-            "fn sign(n) { if n < 0 { return 0 - 1; }; if n > 0 { return 1; }; return 0; }; return sign(3);"
+            "fn sign(n: Int) -> Int { if n < 0 { return 0 - 1; }; if n > 0 { return 1; }; return 0; }; return sign(3);"
         , -- A program may return on only some paths
           parseValidProgramHelper "x = 1; if x < 2 { return 1; };"
         , -- Every return can establish an output fact
           parseValidProgramHelper
-            "fn f(n) [{ }] [{ affirm return > 0; }] { if n < 6 { y = 1; rewrite eqToGtZero y; return y; }; z = 2; rewrite eqToGtZero z; return z; }; r = f(3); affirm r > 0;"
+            "fn f(n: Int) -> Int [{ }] [{ affirm return > 0; }] { if n < 6 { y = 1; rewrite eqToGtZero y; return y; }; z = 2; rewrite eqToGtZero z; return z; }; r = f(3); affirm r > 0;"
         , -- Rejected: the guard only helps on the path where it did not return
           parseValidateFailProgramHelper
-            "fn f(lst, d) { if size(lst) > 0 { return d; }; return first(lst); };"
+            "fn f(lst: List<Int>, d: Int) -> Int { if size(lst) > 0 { return d; }; return first(lst); };"
             "Could not prove: size(list) > 0"
         , parseValidateFailProgramHelper
-            "fn f(lst, d) { if size(lst) < 5 { } else { return d; }; return first(lst); };"
+            "fn f(lst: List<Int>, d: Int) -> Int { if size(lst) < 5 { } else { return d; }; return first(lst); };"
             "Could not prove: size(list) > 0"
         , -- Soundness: the return branch's condition is not known afterwards
           parseValidateFailProgramHelper
-            "fn f(n) { if n < 6 { return 1; }; affirm n < 6; return 2; };"
+            "fn f(n: Int) -> Int { if n < 6 { return 1; }; affirm n < 6; return 2; };"
             "Could not prove"
         , -- Soundness: a fact only one return establishes is not an output fact
           parseValidateFailProgramHelper
-            "fn f(n) [{ }] [{ affirm return > 0; }] { if n < 6 { y = 1; rewrite eqToGtZero y; return y; }; return 0; };"
+            "fn f(n: Int) -> Int [{ }] [{ affirm return > 0; }] { if n < 6 { y = 1; rewrite eqToGtZero y; return y; }; return 0; };"
             "Could not prove"
         , -- A function where some path does not return has no return value
-          parseValidateFailProgramHelper "fn f(n) { if n < 6 { return 1; }; }; x = f(1);" "Return value not found"
+          parseValidateFailProgramHelper "fn f(n: Int) -> Int { if n < 6 { return 1; }; }; x = f(1);" "Return value not found"
         , -- Returning from inside a loop stops it
-          parseValidProgramHelper "fn f(n) { i = 0; while i < 3 { if i > n { return i; }; i = i + 1; }; return 0; }; x = f(1);"
-        , parseEvalProgramHelper "fn f(n) { i = 0; while i < 5 { if i > n { return i; }; i = i + 1; }; return 0; }; return f(2) + f(9);" (Just (VInt 3))
+          parseValidProgramHelper "fn f(n: Int) -> Int { i = 0; while i < 3 { if i > n { return i; }; i = i + 1; }; return 0; }; x = f(1);"
+        , parseEvalProgramHelper "fn f(n: Int) -> Int { i = 0; while i < 5 { if i > n { return i; }; i = i + 1; }; return 0; }; return f(2) + f(9);" (Just (VInt 3))
         , -- The invariant is checked on the paths that keep looping, and holds for the return too
           parseValidProgramHelper
             ( loopAxioms
-                ++ "fn f(n) [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
+                ++ "fn f(n: Int) -> Int [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
                    \ while i < 3 [{ affirm i <= 3; }] { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
                    \ affirm i >= 3; return i; }; x = f(1);"
             )
         , parseValidateFailProgramHelper
             ( loopAxioms
-                ++ "fn f(n) { i = 0; rewrite zeroWithinBound i;\
+                ++ "fn f(n: Int) -> Int { i = 0; rewrite zeroWithinBound i;\
                    \ while i < 3 [{ affirm i <= 2; }] { if i > n { return i; }; i = i + 1; };\
                    \ return i; };"
             )
             "Loop invariant is not preserved"
         , -- Soundness: the returning path's condition is not known after the loop
           parseValidateFailProgramHelper
-            "fn f(n) { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm n > 5; return 0; };"
+            "fn f(n: Int) -> Int { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm n > 5; return 0; };"
             "Could not prove"
         , -- Soundness: only the path after the loop knows the loop condition is false
           parseValidateFailProgramHelper
-            "fn f(n) { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm i < 3; return 0; };"
+            "fn f(n: Int) -> Int { i = 0; while i < 3 { if n > 5 { return 1; }; i = i + 1; }; affirm i < 3; return 0; };"
             "Could not prove"
         , -- Soundness: a fact only the returning path establishes is not an output fact
           parseValidateFailProgramHelper
             ( loopAxioms
-                ++ "fn f(n) [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
+                ++ "fn f(n: Int) -> Int [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
                    \ while i < 3 [{ affirm i <= 3; }] { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
                    \ return 100; };"
             )
             "Could not prove"
-        , parseValidateFailProgramHelper "fn f(n) { i = 0; while i < n { return i; }; }; x = f(1);" "Return value not found"
+        , parseValidateFailProgramHelper "fn f(n: Int) -> Int { i = 0; while i < n { return i; }; }; x = f(1);" "Return value not found"
         , -- A nested loop that returns
           parseValidProgramHelper
-            "fn f(n) { i = 0; while i < 2 { j = 0; while j < 2 { if j > n { return j; }; j = j + 1; }; i = i + 1; }; return 0; }; x = f(1);"
+            "fn f(n: Int) -> Int { i = 0; while i < 2 { j = 0; while j < 2 { if j > n { return j; }; j = j + 1; }; i = i + 1; }; return 0; }; x = f(1);"
         ]
 
 testArithmetic :: Test
@@ -1576,17 +1580,17 @@ testArithmetic =
             , parseEvalProgramHelper "x = 2; if x != 2 { return 1; } else { return 0; };" (Just (VInt 0))
             , parseValidProgramHelper "x = 2; affirm x != 3;"
             , parseValidateFailProgramHelper "x = 2; affirm x != 2;" "Could not prove"
-            , parseValidProgramHelper "fn f(n) { if n != 0 { affirm n != 0; } else { affirm n = 0; }; return 1; }; return f(4);"
+            , parseValidProgramHelper "fn f(n: Int) -> Int { if n != 0 { affirm n != 0; } else { affirm n = 0; }; return 1; }; return f(4);"
             , -- Programs: no manual rewrites for the arithmetic
               parseValidProgramHelper "s = 3; affirm s > 0; affirm s >= 3; affirm s != 0;"
             , parseValidProgramHelper "x = 5; y = x + 1; affirm y > x; affirm y = 6;"
-            , parseValidProgramHelper "fn f(l) { n = size(l); affirm n >= 0; return n; }; return f([1, 2]);"
-            , parseValidProgramHelper "fn f(i, n) [{ affirm i < n; }] [{ }] { j = i + 1; affirm j <= n; return j; }; return f(1, 2);"
+            , parseValidProgramHelper "fn f(l: List<Int>) -> Int { n = size(l); affirm n >= 0; return n; }; return f([1, 2]);"
+            , parseValidProgramHelper "fn f(i: Int, n: Int) -> Int [{ affirm i < n; }] [{ }] { j = i + 1; affirm j <= n; return j; }; return f(1, 2);"
             , parseValidateFailProgramHelper "x = 5; y = x + 1; affirm y > 6;" "Could not prove"
             , parseValidateFailProgramHelper "x = 5; y = x - 1; affirm y > 4;" "Could not prove"
-            , parseValidateFailProgramHelper "fn f(i, n) [{ affirm i <= n; }] [{ }] { j = i + 1; affirm j <= n; return j; };" "Could not prove"
+            , parseValidateFailProgramHelper "fn f(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ }] { j = i + 1; affirm j <= n; return j; };" "Could not prove"
             , -- The guard of an unreachable branch proves anything inside it
-              parseValidProgramHelper "fn f(xs, a, b) { if size(xs) < 0 { affirm a < b; }; return 0; };"
+              parseValidProgramHelper "fn f(xs: List<Int>, a: Int, b: Int) -> Int { if size(xs) < 0 { affirm a < b; }; return 0; };"
             , -- A counting loop needs no axioms
               parseValidProgramHelper
                 "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] { i = i + 1; }; affirm i = 3;"
@@ -1613,7 +1617,7 @@ testForallInstantiation =
         inRange i l = [rel GtEq (iota i) (int 0), rel Lt (iota i) (sizeOf (iota l))]
         zeroAt l i = rel Eq (getOf (iota l) (iota i)) (int 0)
         -- reads element i of l under the contract that every element of l is 0
-        reader = "fn f(l, i) [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] "
+        reader = "fn f(l: List<Int>, i: Int) -> Int [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] "
      in testCaseSeq
             "testForallInstantiation"
             [ -- Engine: an instance is used at the elements in the goal, when its guards hold
@@ -1641,17 +1645,17 @@ testForallInstantiation =
                 )
             , -- Without the forall, or with a guard that does not cover the index, nothing is known
               parseValidateFailProgramHelper
-                "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
+                "fn f(l: List<Int>, i: Int) -> Int [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
                 "Could not prove"
             , parseValidateFailProgramHelper
-                "fn f(l, i) [{ affirm forall j in 0..1: get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
+                "fn f(l: List<Int>, i: Int) -> Int [{ affirm forall j in 0..1: get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm return = 0; }] { x = get(l, i); return x; };"
                 "Could not prove"
             , parseValidateFailProgramHelper
-                "fn f(l, m, i) [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(m); affirm i >= 0; affirm i < size(m); }] [{ affirm return = 0; }] { x = get(m, i); return x; };"
+                "fn f(l: List<Int>, m: List<Int>, i: Int) -> Int [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(m); affirm i >= 0; affirm i < size(m); }] [{ affirm return = 0; }] { x = get(m, i); return x; };"
                 "Could not prove"
             , -- get's result is the term get(list, index), also without a forall
               parseValidProgramHelper
-                "fn g(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { x = get(l, i); y = get(l, i); affirm x = y; return x; };"
+                "fn g(l: List<Int>, i: Int) -> Int [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { x = get(l, i); y = get(l, i); affirm x = y; return x; };"
             ]
 
 -- forall goals are proved for an arbitrary index that meets the guards
@@ -1695,15 +1699,15 @@ testForallProof =
             , parseValidateFailProgramHelper "n = 3; affirm forall j in 0..n: j < 2;" "Could not prove"
             , parseValidProgramHelper "affirm forall j in 3..3: 1 = 2;"
             , -- Facts the program knows about other variables are used
-              parseValidProgramHelper "fn f(n) [{ affirm n <= 2; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };"
-            , parseValidateFailProgramHelper "fn f(n) [{ affirm n <= 3; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };" "Could not prove"
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n <= 2; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n <= 3; }] [{ affirm forall j in 0..n: j < 2; }] { return n; };" "Could not prove"
             , -- A function proves a forall about its result from one about its argument
               parseValidProgramHelper
-                "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };"
+                "fn id(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };"
             , parseValidProgramHelper
-                "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 7; }] [{ affirm forall j in 0..size(return): get(return, j) = 7; }] { return l; };"
+                "fn id(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 7; }] [{ affirm forall j in 0..size(return): get(return, j) = 7; }] { return l; };"
             , parseValidateFailProgramHelper
-                "fn id(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 1; }] { return l; };"
+                "fn id(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 1; }] { return l; };"
                 "Could not prove"
             ]
 
@@ -1749,7 +1753,7 @@ testForallGrownList =
 testValidationFuel :: Test
 testValidationFuel =
     let twice n =
-            "fn twice(n) [{ affirm n >= 0; }] [{ }] { i = 0; c = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] { i = i + 1; c = c + 2; }; return c; };"
+            "fn twice(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; c = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] { i = i + 1; c = c + 2; }; return c; };"
                 ++ "x = twice("
                 ++ show (n :: Int)
                 ++ "); affirm x = "
@@ -1764,34 +1768,34 @@ testValidationFuel =
               parseValidateFailProgramHelper (twice 50000) "Could not prove: x = 100000"
             , parseEvalProgramHelper (twice 50000 ++ " return x;") (Just (VInt 100000))
             , -- Naming an element with define is how a forall fact gets used at it (LANGUAGE.md, How Validation Works)
-              parseValidProgramHelper "fn f(l) [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { define v = get(l, 1); affirm v = 0; return 1; };"
+              parseValidProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { define v = get(l, 1); affirm v = 0; return 1; };"
             , -- A callee that never ends does not stop validation
-              parseValidProgramHelper "fn spin(n) [{ }] [{ }] { i = 0; while i >= 0 [{ affirm i >= 0; }] { i = i + 1; }; return i; }; x = spin(1);"
+              parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ }] { i = 0; while i >= 0 [{ affirm i >= 0; }] { i = i + 1; }; return i; }; x = spin(1);"
             ]
 
 testFunctionCalls :: Test
 testFunctionCalls =
-    let inc = "fn inc(n) [{ }] [{ affirm return = (n + 1); }] { return n + 1; };"
-        positive = "fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };"
+    let inc = "fn inc(n: Int) -> Int [{ }] [{ affirm return = (n + 1); }] { return n + 1; };"
+        positive = "fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };"
      in testCaseSeq
             "testFunctionCalls"
             [ -- A function calls the functions defined before it
-              parseEvalProgramHelper (inc ++ "fn twice(n) [{ }] [{ }] { return inc(inc(n)); }; return twice(3);") (Just (VInt 5))
-            , parseValidProgramHelper (inc ++ "fn twice(n) [{ }] [{ affirm return = (n + 2); }] { return inc(inc(n)); }; x = twice(3); affirm x = 5;")
+              parseEvalProgramHelper (inc ++ "fn twice(n: Int) -> Int [{ }] [{ }] { return inc(inc(n)); }; return twice(3);") (Just (VInt 5))
+            , parseValidProgramHelper (inc ++ "fn twice(n: Int) -> Int [{ }] [{ affirm return = (n + 2); }] { return inc(inc(n)); }; x = twice(3); affirm x = 5;")
             , -- Chains of calls and calls with contracts of their own
-              parseEvalProgramHelper (inc ++ positive ++ "fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); }; return bump(5);") (Just (VInt 6))
-            , parseValidProgramHelper (inc ++ positive ++ "fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };")
+              parseEvalProgramHelper (inc ++ positive ++ "fn bump(n: Int) -> Int [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); }; return bump(5);") (Just (VInt 6))
+            , parseValidProgramHelper (inc ++ positive ++ "fn bump(n: Int) -> Int [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };")
             , -- Rejected: the callee's input contract is not met, or the caller's own output contract is not
-              parseValidateFailProgramHelper (positive ++ "fn bump(n) [{ }] [{ }] { return positive(n); };") "Could not prove: n > 0"
-            , parseValidateFailProgramHelper (inc ++ "fn twice(n) [{ }] [{ affirm return = (n + 3); }] { return inc(inc(n)); };") "Could not prove"
+              parseValidateFailProgramHelper (positive ++ "fn bump(n: Int) -> Int [{ }] [{ }] { return positive(n); };") "Could not prove: n > 0"
+            , parseValidateFailProgramHelper (inc ++ "fn twice(n: Int) -> Int [{ }] [{ affirm return = (n + 3); }] { return inc(inc(n)); };") "Could not prove"
             , -- A function cannot call one defined after it, and a name is defined once
-              parseValidateFailProgramHelper "fn f(n) [{ }] [{ }] { return g(n); }; fn g(n) [{ }] [{ }] { return n; };" "Undefined variable: g"
-            , parseValidateFailProgramHelper "fn f(n) [{ }] [{ }] { return n; }; fn f(n) [{ }] [{ }] { return n + 1; };" "Function already defined: f"
-            , parseEvalProgramFailHelper "fn f(n) [{ }] [{ }] { return n; }; fn f(n) [{ }] [{ }] { return n + 1; };" "Function already defined: f"
+              parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return g(n); }; fn g(n: Int) -> Int [{ }] [{ }] { return n; };" "Undefined variable: g"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
+            , parseEvalProgramFailHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
             , -- An argument or local variable with the same name hides the function
-              parseEvalProgramHelper "fn inc(n) [{ }] [{ }] { return n + 1; }; fn f(inc) [{ }] [{ }] { return inc + 1; }; return f(3);" (Just (VInt 4))
+              parseEvalProgramHelper "fn inc(n: Int) -> Int [{ }] [{ }] { return n + 1; }; fn f(inc: Int) -> Int [{ }] [{ }] { return inc + 1; }; return f(3);" (Just (VInt 4))
             , -- The calls made by a function are not visible to its caller's other statements
-              parseValidProgramHelper (inc ++ "fn twice(n) [{ }] [{ }] { return inc(inc(n)); }; inc2 = 1; affirm inc2 = 1;")
+              parseValidProgramHelper (inc ++ "fn twice(n: Int) -> Int [{ }] [{ }] { return inc(inc(n)); }; inc2 = 1; affirm inc2 = 1;")
             ]
 
 testPrecedence :: Test
@@ -1812,52 +1816,115 @@ testPrecedence =
             , parseEvalProgramHelper "return 1 + 2 = 3;" (Just (VBool True))
             , parseEvalProgramHelper "return 2 * 3 < 4 + 3;" (Just (VBool True))
             , -- Relations in proofs follow the same levels, so contracts need no parentheses
-              parseValidProgramHelper "fn inc(n) [{ }] [{ affirm return = n + 1; }] { return n + 1; }; x = inc(2); affirm x = 3; affirm x - 1 = 2 * 1;"
+              parseValidProgramHelper "fn inc(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; x = inc(2); affirm x = 3; affirm x - 1 = 2 * 1;"
             , parseValidateFailProgramHelper "x = 2; affirm x + 1 = 4;" "Could not prove: x + 1 = 4"
             ]
 
 testFirstLast :: Test
 testFirstLast =
-    let guarded body = "fn f(l) [{ affirm size(l) > 1; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm return = 0; }] { return " ++ body ++ "; };"
+    let guarded body = "fn f(l: List<Int>) -> Int [{ affirm size(l) > 1; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm return = 0; }] { return " ++ body ++ "; };"
      in testCaseSeq
             "testFirstLast"
             [ -- first and last are get at the first and the last index
-              parseValidProgramHelper "fn f(l) [{ affirm size(l) > 0; }] [{ affirm return = get(l, 0); }] { return first(l); };"
-            , parseValidProgramHelper "fn f(l) [{ affirm size(l) > 0; }] [{ affirm return = get(l, size(l) - 1); }] { return last(l); };"
-            , parseValidProgramHelper "fn f(l) [{ affirm size(l) = 2; }] [{ affirm return = get(l, 1); }] { return last(l); };"
+              parseValidProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 0; }] [{ affirm return = get(l, 0); }] { return first(l); };"
+            , parseValidProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 0; }] [{ affirm return = get(l, size(l) - 1); }] { return last(l); };"
+            , parseValidProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) = 2; }] [{ affirm return = get(l, 1); }] { return last(l); };"
             , parseValidProgramHelper "l = [4, 5, 6]; affirm first(l) = 4; affirm last(l) = 6;"
             , -- A forall about the elements reaches them
               parseValidProgramHelper (guarded "first(l) + last(l)")
             , -- Rejected: the other end of the list, or an index that is not the last one
-              parseValidateFailProgramHelper "fn f(l) [{ affirm size(l) > 1; }] [{ affirm return = get(l, 0); }] { return last(l); };" "Could not prove: return = get(l, 0)"
-            , parseValidateFailProgramHelper "fn f(l) [{ affirm size(l) > 2; }] [{ affirm return = get(l, 1); }] { return last(l); };" "Could not prove: return = get(l, 1)"
+              parseValidateFailProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 1; }] [{ affirm return = get(l, 0); }] { return last(l); };" "Could not prove: return = get(l, 0)"
+            , parseValidateFailProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 2; }] [{ affirm return = get(l, 1); }] { return last(l); };" "Could not prove: return = get(l, 1)"
             ]
 
 testRecursion :: Test
 testRecursion =
-    let upTo = "fn upTo(i, n) [{ affirm i <= n; }] [{ affirm return = n; }] { if i < n { return upTo(i + 1, n); } else { return n; }; };"
+    let upTo = "fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] { if i < n { return upTo(i + 1, n); } else { return n; }; };"
      in testCaseSeq
             "testRecursion"
             [ -- A function calls itself, in evaluation and in validation
               parseEvalProgramHelper (upTo ++ "return upTo(0, 5);") (Just (VInt 5))
             , parseValidProgramHelper (upTo ++ "x = upTo(0, 5); affirm x = 5;")
-            , parseValidProgramHelper (upTo ++ "fn useIt(n) [{ affirm n >= 0; }] [{ affirm return = n; }] { return upTo(0, n); };")
+            , parseValidProgramHelper (upTo ++ "fn useIt(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { return upTo(0, n); };")
             , -- The recursive call must meet the input contract
-              parseValidateFailProgramHelper "fn down(n) [{ affirm n > 0; }] [{ affirm return = 0; }] { if n < 2 { return 0; } else { return down(n - 3); }; };" "Could not prove: n > 0"
+              parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return = 0; }] { if n < 2 { return 0; } else { return down(n - 3); }; };" "Could not prove: n > 0"
             , -- The body must establish the output contract, which is assumed only for the recursive calls
-              parseValidateFailProgramHelper "fn down(n) [{ affirm n >= 0; }] [{ affirm return = 0; }] { if n < 1 { return 1; } else { return down(n - 1); }; };" "Could not prove: return = 0"
+              parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = 0; }] { if n < 1 { return 1; } else { return down(n - 1); }; };" "Could not prove: return = 0"
             , -- Recursion over a list, with an affirm that becomes a fact in the last step
-              parseValidProgramHelper "fn sumFrom(l, i) [{ affirm i >= 0; affirm i <= size(l); }] [{ }] { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; };"
-            , parseEvalProgramHelper "fn sumFrom(l, i) [{ affirm i >= 0; affirm i <= size(l); }] [{ }] { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; }; return sumFrom([4, 5, 6], 0);" (Just (VInt 15))
-            , parseValidProgramHelper "fn endOf(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] { if i + 1 < size(l) { return endOf(l, i + 1); } else { affirm i = size(l) - 1; return get(l, i); }; };"
-            , parseValidateFailProgramHelper "fn endOf(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] { if i + 1 < size(l) { return endOf(l, i + 1); } else { return get(l, i); }; };" "Could not prove: return = get(l, size(l) - 1)"
+              parseValidProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; };"
+            , parseEvalProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; }; return sumFrom([4, 5, 6], 0);" (Just (VInt 15))
+            , parseValidProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] { if i + 1 < size(l) { return endOf(l, i + 1); } else { affirm i = size(l) - 1; return get(l, i); }; };"
+            , parseValidateFailProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] { if i + 1 < size(l) { return endOf(l, i + 1); } else { return get(l, i); }; };" "Could not prove: return = get(l, size(l) - 1)"
             , -- Termination is not checked: a function that never returns satisfies any output contract
-              parseValidProgramHelper "fn spin(n) [{ }] [{ affirm return = 0; }] { return spin(n); };"
+              parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] { return spin(n); };"
             , -- A name is still defined once
               parseValidateFailProgramHelper (upTo ++ upTo) "Function already defined: upTo"
             , -- An affirm that is proved becomes a fact: it links i to size(l) - 1 so get(l, i) is get(l, size(l) - 1)
-              parseValidProgramHelper "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { affirm i = size(l) - 1; return get(l, i); };"
-            , parseValidateFailProgramHelper "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };" "Could not prove: return = get(l, size(l) - 1)"
+              parseValidProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { affirm i = size(l) - 1; return get(l, i); };"
+            , parseValidateFailProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };" "Could not prove: return = get(l, size(l) - 1)"
+            ]
+
+testTypeCheck :: Test
+testTypeCheck =
+    let typeError source expected =
+            case parseStatementBlock source of
+                Left err -> Just ("Parse failed: " ++ show err)
+                Right stmts -> testAssertErrorContains expected (typeCheck stmts)
+        typeOk source =
+            case parseStatementBlock source of
+                Left err -> Just ("Parse failed: " ++ show err)
+                Right stmts -> case typeCheck stmts of
+                    Ok () -> Nothing
+                    Error e -> Just ("Type check failed: " ++ e)
+        parseFails source =
+            case parseStatementBlock source of
+                Left _ -> Nothing
+                Right _ -> Just ("Expected a parse error for: " ++ source)
+     in testCaseSeq
+            "testTypeCheck"
+            [ -- Well typed programs
+              typeOk "x = 1; l = [1, 2]; y = size(l) + x; b = y < 3; affirm b = b;"
+            , typeOk "fn f(l: List<Int>, i: Int) -> List<Int> { return push(l, get(l, i)); }; r = f([1], 0);"
+            , typeOk "fn isBig(n: Int) -> Bool { return n > 9; }; if isBig(10) { x = 1; };"
+            , typeOk "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; r = apply(inc, 1);"
+            , typeOk "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; x = f(2);"
+            , typeOk "l = []; l = push(l, 1); m = set(l, 0, 5); x = first(m) + last(m);"
+            , -- Equality works on any type, ordering only on Int
+              typeOk "affirm [1] = [1]; affirm true = true;"
+            , typeError "affirm [1] < [2];" "expected Int, got List<Int>"
+            , -- Builtins
+              typeError "x = size(5);" "argument 1 of size: expected List<?>, got Int"
+            , typeError "l = [1]; x = push(l, [2]);" "expected Int, got List<Int>"
+            , typeError "x = get([1], [0]);" "argument 2 of get: expected Int, got List<Int>"
+            , typeError "x = 1 + [1];" "expected Int, got List<Int>"
+            , -- Variables keep their type
+              typeError "x = 1; x = [1];" "assignment to x: expected Int, got List<Int>"
+            , typeError "x = y;" "Undefined variable: y"
+            , typeError "if 1 { x = 2; };" "condition of if: expected Bool, got Int"
+            , typeError "while 1 [{ }] { x = 2; };" "condition of while: expected Bool, got Int"
+            , -- A variable assigned in a branch is local to it
+              typeError "if true { t = 1; }; x = t;" "Undefined variable: t"
+            , -- Functions: parameters, return and arity
+              typeError "fn f(n: Int) -> Int { l = [1]; return l; };" "returned value: expected Int, got List<Int>"
+            , typeError "fn f(n: Int) -> Int { return n; }; x = f([1]);" "argument 1 of f: expected Int, got List<Int>"
+            , typeError "fn f(n: Int) -> Int { return n; }; x = f(1, 2);" "f takes 1 arguments, got 2"
+            , typeError "fn f(n: Int) -> Bool { return n; };" "returned value: expected Bool, got Int"
+            , typeError "x = 1; y = x(2);" "x is not a function"
+            , -- Bodies see only their parameters and earlier functions
+              typeError "y = 1; fn f(n: Int) -> Int { return y; };" "Undefined variable: y"
+            , typeError "fn f(n: Int) -> Int { return g(n); }; fn g(n: Int) -> Int { return n; };" "Undefined variable: g"
+            , typeOk "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return f(n); };"
+            , -- Contracts and proofs are typed too
+              typeError "fn f(n: Int) -> Int [{ affirm n; }] [{ }] { return n; };" "affirmed proof: expected Bool, got Int"
+            , typeError "fn f(l: List<Int>) -> Int [{ }] [{ affirm return = l; }] { return 1; };" "expected Int, got List<Int>"
+            , typeError "fn f(l: List<Int>) -> Int [{ affirm forall j in 0..size(l): get(l, j); }] [{ }] { return 1; };" "body of forall: expected Bool"
+            , typeOk "fn f(l: List<Int>) -> Int [{ affirm size(l) > 0; define s = size(l); }] [{ affirm s > 0; }] { return first(l); };"
+            , -- Annotations are required
+              parseFails "fn f(n) -> Int { return n; };"
+            , parseFails "fn f(n: Int) { return n; };"
+            , parseFails "fn f(n: Float) -> Int { return n; };"
+            , -- validate runs the check first
+              parseValidateFailProgramHelper "fn f(n: Int) -> List<Int> { return n; }; x = 1;" "returned value: expected List<Int>, got Int"
             ]
 
 testCrlf :: Test
@@ -1884,14 +1951,14 @@ testMulDivNegative =
         , parseEvalProgramFailHelper "return 1 / 0;" "Division by zero"
         , -- Validation: constants fold, `* 1` and `/ 1` keep their operand, other products are opaque
           parseValidProgramHelper "x = 3; y = x * 4; affirm y = 12; z = y / 5; affirm z = 2;"
-        , parseValidProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 1; }; x = f(3);"
-        , parseValidProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return = 0; }] { return n * 0; }; x = f(3);"
-        , parseValidateFailProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);" "Could not prove: return > 0"
+        , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 1; }; x = f(3);"
+        , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return = 0; }] { return n * 0; }; x = f(3);"
+        , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);" "Could not prove: return > 0"
         , parseValidateFailProgramHelper "x = 3; y = x + -1; affirm y = 3;" "Could not prove: y = 3"
         , -- Division needs a divisor known to be non-zero
-          parseValidProgramHelper "fn f(a, b) [{ affirm b != 0; }] [{ }] { return a / b; }; x = f(8, 2);"
-        , parseValidProgramHelper "fn f(a, b) [{ affirm b < 0; }] [{ }] { return a / b; }; x = f(8, -2);"
-        , parseValidateFailProgramHelper "fn f(a, b) [{ }] [{ }] { return a / b; }; x = f(8, 2);" "Relation lacks a proof"
+          parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ affirm b != 0; }] [{ }] { return a / b; }; x = f(8, 2);"
+        , parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ affirm b < 0; }] [{ }] { return a / b; }; x = f(8, -2);"
+        , parseValidateFailProgramHelper "fn f(a: Int, b: Int) -> Int [{ }] [{ }] { return a / b; }; x = f(8, 2);" "Relation lacks a proof"
         , parseValidateFailProgramHelper "x = 3 / 0;" "Relation does not hold"
         , -- Proofs print with the same precedence
           parseValidateFailProgramHelper "x = 2; affirm x * (x + 1) = 5;" "Could not prove: x * (x + 1) = 5"
@@ -1919,7 +1986,7 @@ testForallLoops =
     let copyLoop invariant element = loopWith "get(a, j)" invariant element
         -- the output contract says every element of the result is `claim`
         loopWith claim invariant element =
-            "fn copy(a) [{ }] [{ affirm size(return) = size(a); affirm forall j in 0..size(a): get(return, j) = " ++ claim ++ "; }] {\
+            "fn copy(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); affirm forall j in 0..size(a): get(return, j) = " ++ claim ++ "; }] {\
             \  n = size(a); i = 0; out = [];\
             \  while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; "
                 ++ invariant
@@ -1942,12 +2009,12 @@ testForallLoops =
               parseValidateFailProgramHelper (copyLoop "" "get(a, i)") "Could not prove"
             , -- A call nested in an argument keeps its link to the caller's variables
               parseValidProgramHelper
-                "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, i); return y; };"
+                "fn g(l: List<Int>, i: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, i); return y; };"
             , parseValidateFailProgramHelper
-                "fn g(l, i, k) [{ affirm i >= 0; affirm i < size(l); affirm k >= 0; affirm k < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, k); return y; };"
+                "fn g(l: List<Int>, i: Int, k: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); affirm k >= 0; affirm k < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, k); return y; };"
                 "Could not prove"
             , parseValidProgramHelper
-                "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i) + 1); affirm get(y, size(l)) = (get(l, i) + 1); return y; };"
+                "fn g(l: List<Int>, i: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i) + 1); affirm get(y, size(l)) = (get(l, i) + 1); return y; };"
             , -- The elementwise contract reaches the caller
               parseValidProgramHelper
                 ( copyLoop copyInvariant "get(a, i)"
@@ -2002,7 +2069,7 @@ testForallSyntax =
                     (rel Eq (getProof (ATerm "l") (BVar "k")) (ATerm "j"))
                 )
             , -- It is allowed in contracts and invariants too
-              case parseStatementBlock "fn f(l) [{ }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };" of
+              case parseStatementBlock "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };" of
                 Left err -> Just $ "Parse failed: " ++ show err
                 Right _ -> Nothing
             , case parseStatementBlock "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };" of
@@ -2022,8 +2089,8 @@ testForallSyntax =
             , -- A forall that holds for every index in its range is accepted, and one that does not is rejected
               parseValidProgramHelper "affirm forall j in 0..3: j < 3;"
             , parseValidateFailProgramHelper "affirm forall j in 0..3: j < 2;" "Could not prove"
-            , parseValidProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };"
-            , parseValidateFailProgramHelper "fn f(l) [{ }] [{ affirm forall j in 0..3: j < 2; }] { return l; };" "Could not prove"
+            , parseValidProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };"
+            , parseValidateFailProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..3: j < 2; }] { return l; };" "Could not prove"
             , parseValidProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] { i = i + 1; };"
             , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 2; }] { i = i + 1; };" "Loop invariant is not preserved"
             , -- A forall assumed by an axiom is kept as a fact, and is entailed again when it is the same forall
@@ -2040,12 +2107,12 @@ testForallSyntax =
             , -- Through a function: the input contract is checked at the call, and the output reaches the caller
               parseValidProgramHelper
                 ( zeroAxiom
-                    ++ "fn same(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };\
+                    ++ "fn same(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] { return l; };\
                        \a = [0, 0]; rewrite zeros a; r = same(a); affirm forall j in 0..size(r): get(r, j) = 0;"
                 )
             , parseValidateFailProgramHelper
                 ( zeroAxiom
-                    ++ "fn same(l) [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { return l; };\
+                    ++ "fn same(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { return l; };\
                        \a = [0, 0]; r = same(a);"
                 )
                 "Could not prove"
@@ -2087,25 +2154,25 @@ testLists =
         , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"
         , -- A symbolic index must be shown by the function's contract
           parseValidProgramHelper
-            "fn at(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; return at([4, 5], 1);"
+            "fn at(l: List<Int>, i: Int) -> Int [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; return at([4, 5], 1);"
         , -- push's output contract reaches a caller that only knows the list symbolically
           parseValidProgramHelper
-            "fn f(l) [{ }] [{ affirm size(return) = (size(l) + 1); }] { return push(l, 5); };"
+            "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = (size(l) + 1); }] { return push(l, 5); };"
         , parseValidProgramHelper
-            "fn f(l) [{ }] [{ affirm size(return) = (size(l) + 1); }] { r = push(l, 5); return r; };"
+            "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = (size(l) + 1); }] { r = push(l, 5); return r; };"
         , -- set: a concrete list and index need no proof, and the result is as long as the input
           parseValidProgramHelper "a = [5, 6, 7]; b = set(a, 2, 0); affirm size(b) = size(a);"
         , parseValidProgramHelper
-            "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = size(l); }] { return set(l, i, 5); };"
+            "fn f(l: List<Int>, i: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = size(l); }] { return set(l, i, 5); };"
         , -- Element facts: set leaves x at the index and push leaves x at the old size
           parseValidProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 20;"
         , parseValidProgramHelper "a = [1, 2, 3]; i = 1; v = 20; b = set(a, i, v); affirm get(b, i) = v;"
         , parseValidProgramHelper "l = [4, 5]; x = 9; r = push(l, x); define n = size(l); affirm get(r, n) = x;"
         , parseValidProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 9;"
         , parseValidProgramHelper
-            "fn f(l, i, x) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = x; }] { return set(l, i, x); }; r = f([1, 2, 3], 1, 7); affirm get(r, 1) = 7;"
+            "fn f(l: List<Int>, i: Int, x: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = x; }] { return set(l, i, x); }; r = f([1, 2, 3], 1, 7); affirm get(r, 1) = 7;"
         , parseValidProgramHelper
-            "fn g(l, x) [{ }] [{ affirm get(return, size(l)) = x; }] { return push(l, x); };"
+            "fn g(l: List<Int>, x: Int) -> List<Int> [{ }] [{ affirm get(return, size(l)) = x; }] { return push(l, x); };"
         , parseValidateFailProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 21;" "Could not prove"
         , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = 20;" "Could not prove"
         , -- set's contract keeps the other elements without a rule, and not the one it wrote
@@ -2113,44 +2180,44 @@ testLists =
         , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 1) = get(a, 1);" "Could not prove"
         , -- With a symbolic list the elements are kept for any index in range, and only those
           parseValidProgramHelper
-            "fn f(l, i, j) [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); affirm j != i; }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
+            "fn f(l: List<Int>, i: Int, j: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); affirm j != i; }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
         , parseValidateFailProgramHelper
-            "fn f(l, i, j) [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
+            "fn f(l: List<Int>, i: Int, j: Int) -> List<Int> [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
             "Could not prove"
         , parseValidProgramHelper
-            "fn f(l, j) [{ affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
+            "fn f(l: List<Int>, j: Int) -> List<Int> [{ affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
         , parseValidateFailProgramHelper
-            "fn f(l, j) [{ affirm j >= 0; affirm j <= size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
+            "fn f(l: List<Int>, j: Int) -> List<Int> [{ affirm j >= 0; affirm j <= size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
             "Could not prove"
         , parseValidateFailProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 8;" "Could not prove"
         , parseValidateFailProgramHelper
-            "fn f(l, i, x) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = get(l, i); }] { return set(l, i, x); };"
+            "fn f(l: List<Int>, i: Int, x: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = get(l, i); }] { return set(l, i, x); };"
             "Could not prove"
         , -- Rejected: out of range, unproven, or a wrong size claim
           parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 3, 0);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = [5, 6, 7]; b = set(a, 0 - 1, 0);" "Relation does not hold"
-        , parseValidateFailProgramHelper "fn f(l, i) { return set(l, i, 0); };" "Relation lacks a proof"
+        , parseValidateFailProgramHelper "fn f(l: List<Int>, i: Int) -> List<Int> { return set(l, i, 0); };" "Relation lacks a proof"
         , parseValidateFailProgramHelper
-            "fn f(l, i) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = (size(l) + 1); }] { return set(l, i, 5); };"
+            "fn f(l: List<Int>, i: Int) -> List<Int> [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm size(return) = (size(l) + 1); }] { return set(l, i, 5); };"
             "Could not prove"
         , -- get and the rest of the rejected cases
           parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 3);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = [5, 6, 7]; x = get(a, 0 - 1);" "Relation does not hold"
         , parseValidateFailProgramHelper "a = []; x = get(a, 0);" "Relation does not hold"
-        , parseValidateFailProgramHelper "fn at(l, i) { return get(l, i); };" "Relation lacks a proof"
+        , parseValidateFailProgramHelper "fn at(l: List<Int>, i: Int) -> Int { return get(l, i); };" "Relation lacks a proof"
         , parseValidateFailProgramHelper
-            "fn at(l, i) [{ affirm i >= 0; }] [{ }] { return get(l, i); };"
+            "fn at(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; }] [{ }] { return get(l, i); };"
             "Relation lacks a proof"
         , parseValidateFailProgramHelper
-            "fn f(l) [{ }] [{ affirm size(return) = size(l); }] { return push(l, 5); };"
+            "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l); }] { return push(l, 5); };"
             "Could not prove"
         , parseValidateFailProgramHelper
-            "fn f(l) { r = push(l, 5); affirm size(r) = size(l); return r; };"
+            "fn f(l: List<Int>) -> List<Int> { r = push(l, 5); affirm size(r) = size(l); return r; };"
             "Could not prove"
         , -- checkRel: adds a relation only when it holds, and refuses anything else
           parseValidProgramHelper "x = 2; rewrite checkRel x < 3; affirm x < 3;"
         , parseValidateFailProgramHelper "x = 5; rewrite checkRel x < 3;" "Relation does not hold"
-        , parseValidateFailProgramHelper "fn f(x) { rewrite checkRel x < 3; return 1; };" "Relation lacks a proof"
+        , parseValidateFailProgramHelper "fn f(x: Int) -> Int { rewrite checkRel x < 3; return 1; };" "Relation lacks a proof"
         , parseValidateFailProgramHelper "x = 5; rewrite checkRel x;" "requires a relation"
         ]
 
@@ -2161,6 +2228,10 @@ testControlFlow =
         [testParseIf, testEvalIf, testValidateIf, testParseWhile, testEvalWhile, testValidateWhile, testEarlyReturn]
 
 -- Run tests
+-- A function over integers only
+nativeInts :: Int -> [Statement] -> FunctBody
+nativeInts n = NativeFunct (Signature (replicate n TInt) TInt)
+
 main :: IO ()
 main = do
     summary <-
@@ -2191,6 +2262,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testTypeCheck
                 , testRecursion
                 , testPrecedence
                 , testFirstLast

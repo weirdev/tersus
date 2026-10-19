@@ -1,11 +1,11 @@
 // Multiplication, division and negative literals.
 // `*` and `/` bind tighter than `+`, `-` and the relations; division rounds down.
 // `/` requires a divisor the validator can show is non-zero.
-fn average(total, count) [{ affirm count > 0; }] [{ }] {
+fn average(total: Int, count: Int) -> Int [{ affirm count > 0; }] [{ }] {
     return total / count;
 };
 
-fn scale(n) [{ affirm n > 0; }] [{ affirm return > 0; }] {
+fn scale(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] {
     return n * 1;
 };
 

@@ -138,9 +138,11 @@ functStatement = do
     whitespace
     void (char '(')
     whitespace
-    argNames <- variable `sepBy` skipWhitespace (char ',')
+    params <- parameter `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ')')
+    whitespace
+    returnType <- string "->" >> whitespace >> typeAnnotation
     whitespace
     inputReqs <- option [] functContractReqs
     whitespace
@@ -148,7 +150,49 @@ functStatement = do
     whitespace
     fnBody <- curlyBracesParse statementBlock
     whitespace
-    return (Assign var (Val (VFunct argNames inputReqs outputReqs (NativeFunct fnBody) [])))
+    return (Assign var (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType) fnBody) [])))
+
+-- A parameter is a name and its type: `n: Int`
+parameter :: Parser (Variable, Type)
+parameter = do
+    name <- variable
+    whitespace
+    void (char ':')
+    whitespace
+    ty <- typeAnnotation
+    return (name, ty)
+
+-- Int, Bool, List<T>, and fn(T, ...) -> T for a function value
+typeAnnotation :: Parser Type
+typeAnnotation = do
+    ty <- try functionType <|> namedType
+    whitespace
+    return ty
+  where
+    functionType = do
+        keyword "fn"
+        whitespace
+        void (char '(')
+        whitespace
+        args <- typeAnnotation `sepBy` skipWhitespace (char ',')
+        void (char ')')
+        whitespace
+        void (string "->")
+        whitespace
+        TFn args <$> typeAnnotation
+    namedType = do
+        name <- variable
+        case name of
+            "Int" -> return TInt
+            "Bool" -> return TBool
+            "List" -> do
+                whitespace
+                void (char '<')
+                whitespace
+                element <- typeAnnotation
+                void (char '>')
+                return (TList element)
+            _ -> fail ("Unknown type " ++ name)
 
 functContractReqs :: Parser [ValidationStatement]
 -- Function contracts are written as `[{ ... }]`: square brackets mark the presence

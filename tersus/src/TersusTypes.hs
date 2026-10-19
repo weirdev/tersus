@@ -5,7 +5,15 @@ import Data.Map (Map)
 type Variable = String
 data BuiltinFunct = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Rel Rel deriving (Show, Eq, Ord)
 
-data FunctBody = NativeFunct [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord)
+-- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
+-- look at them. TVar is the checker's own unknown and is never written by a program.
+data Type = TInt | TBool | TList Type | TFn [Type] Type | TVar Int
+    deriving (Show, Eq, Ord)
+
+-- The declared parameter types and return type of a user function
+data Signature = Signature [Type] Type deriving (Show, Eq, Ord)
+
+data FunctBody = NativeFunct Signature [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord)
 
 -- TODO: Generic list type
 data Value

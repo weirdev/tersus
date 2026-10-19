@@ -1,5 +1,5 @@
 // Rejected: nothing in firstOf shows lst is non-empty, so first(lst) is unsafe.
-fn firstOf(lst) {
+fn firstOf(lst: List<Int>) -> Int {
     return first(lst);
 };
 

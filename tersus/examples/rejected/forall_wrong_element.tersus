@@ -1,6 +1,6 @@
 // Rejected: the loop builds the sums of the pairs, but the output contract claims one more than
 // each sum. The invariant is right, so the loop validates, and the contract fails after it.
-fn pairSums(a, b) [{
+fn pairSums(a: List<Int>, b: List<Int>) -> List<Int> [{
     affirm size(a) = size(b);
 }] [{
     affirm forall j in 0..size(a): get(return, j) = ((get(a, j) + get(b, j)) + 1);

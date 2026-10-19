@@ -7,7 +7,7 @@
 // a forall: the elements below i are done, and the ones from i on are untouched.
 // The counter facts follow from the loop condition and the invariant, so no axioms are needed.
 
-fn bumpAll(a) [{ }] [{
+fn bumpAll(a: List<Int>) -> List<Int> [{ }] [{
     affirm size(return) = size(a);
     affirm forall j in 0..size(a): get(return, j) = (get(a, j) + 100);
 }] {

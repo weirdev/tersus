@@ -1,5 +1,5 @@
 // set puts x at the index, so claiming the old element is still there is not provable.
-fn replace(l, i, x) [{
+fn replace(l: List<Int>, i: Int, x: Int) -> List<Int> [{
     rewrite checkRel i >= 0;
     rewrite checkRel i < size(l);
     affirm i >= 0;

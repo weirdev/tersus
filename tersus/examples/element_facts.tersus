@@ -2,7 +2,7 @@
 // push(list, x) leaves x at the old size, and both facts reach the caller of a function whose
 // output contract repeats them. Nothing yet says the other elements are unchanged, so a
 // program can only rely on the element it just wrote.
-fn replace(l, i, x) [{
+fn replace(l: List<Int>, i: Int, x: Int) -> List<Int> [{
     rewrite checkRel i >= 0;
     rewrite checkRel i < size(l);
     affirm i >= 0;
@@ -14,7 +14,7 @@ fn replace(l, i, x) [{
     return set(l, i, x);
 };
 
-fn append(l, x) [{ }] [{ affirm get(return, size(l)) = x; }] {
+fn append(l: List<Int>, x: Int) -> List<Int> [{ }] [{ affirm get(return, size(l)) = x; }] {
     return push(l, x);
 };
 

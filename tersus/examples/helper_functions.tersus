@@ -1,20 +1,20 @@
 // Functions that call functions defined before them.
 // A function is visible by its name to the functions defined after it, and a call is checked
 // against the callee's contract: `positive` needs n > 0 and promises return > 0.
-fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] {
+fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] {
     return n;
 };
 
-fn inc(n) [{ }] [{ affirm return = n + 1; }] {
+fn inc(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] {
     return n + 1;
 };
 
 // The caller's own contract is proved from the callees' contracts.
-fn incTwice(n) [{ }] [{ affirm return = n + 2; }] {
+fn incTwice(n: Int) -> Int [{ }] [{ affirm return = n + 2; }] {
     return inc(inc(n));
 };
 
-fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] {
+fn bump(n: Int) -> Int [{ affirm n >= 5; }] [{ affirm return > 5; }] {
     return positive(inc(n));
 };
 

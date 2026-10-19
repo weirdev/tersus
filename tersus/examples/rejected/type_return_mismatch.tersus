@@ -1,0 +1,5 @@
+// Rejected: the function says it returns an Int but returns a list.
+fn count(values: List<Int>) -> Int {
+    out = push(values, 1);
+    return out;
+};

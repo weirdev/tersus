@@ -1,5 +1,5 @@
 // Rejected: n < 6 only holds inside the then-branch, so it is not known after the if.
-fn f(n) {
+fn f(n: Int) -> Int {
     y = 0;
     if n < 6 {
         y = 1;

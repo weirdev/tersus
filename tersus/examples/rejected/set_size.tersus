@@ -1,5 +1,5 @@
 // set replaces an element, so the result is the same size as the input, not one longer.
-fn overwrite(lst, i) [{
+fn overwrite(lst: List<Int>, i: Int) -> List<Int> [{
     rewrite checkRel i >= 0;
     rewrite checkRel i < size(lst);
     affirm i >= 0;

@@ -1,7 +1,7 @@
 // return inside a while body: a bounded search that stops at the first hit.
 
 // The smallest i in 0..3 with i + i > n, or 3 if there is none.
-fn firstOver(n) [{ }] [{ affirm return <= 3; }] {
+fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
     i = 0;
     while i < 3 [{ affirm i <= 3; }] {
         if (i + i) > n {
