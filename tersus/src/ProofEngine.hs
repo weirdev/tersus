@@ -62,11 +62,22 @@ entailsAll goals (ProofContext facts) = zipWith provedAsForall goals (saturate (
     provedAsForall goal entailed = entailed || proveForall goal
     -- Takes a fresh index that meets the guards, and asks for the body at that index. The name
     -- cannot be written in a program, so no fact is about it. A range with no index in it has
-    -- guards that contradict each other, which entail everything.
+    -- guards that contradict each other, which entail everything. If the body does not follow
+    -- directly, the index is compared with an index the program reads, and the body must follow
+    -- in each case: below it, equal to it, and above it. This is how the new element of a list
+    -- that grew by one is told apart from the old ones.
     proveForall (Forall index guards body) =
         let fresh = ATerm (Iota ("$" ++ index))
             guardFacts = map (substituteIndex index fresh) guards
-         in and (entailsAll [substituteIndex index fresh body] (ProofContext (nub (facts ++ guardFacts))))
+            bodyGoal = substituteIndex index fresh body
+            known = nub (facts ++ guardFacts)
+            holdsUnder extra = and (entailsAll [bodyGoal] (ProofContext (nub (known ++ extra))))
+            comparisons t =
+                [ [FApp (CTerm (builtinFunct (Rel Lt))) [fresh, t]]
+                , [FApp eqProof [fresh, t]]
+                , [FApp (CTerm (builtinFunct (Rel Gt))) [fresh, t]]
+                ]
+         in holdsUnder [] || any (all holdsUnder . comparisons) (splitIndexes known fresh bodyGoal)
     proveForall _ = False
     -- Facts that are foralls are instantiated, and the closure is rebuilt with the instances
     -- that hold, until no new instance appears or the rounds run out. Without a forall this is
@@ -82,6 +93,24 @@ entailsAll goals (ProofContext facts) = zipWith provedAsForall goals (saturate (
                         guardHolds = zip guardGoals (drop (length goals) guardFlags)
                         accepted = [body | (guards, body) <- instances, all (\g -> lookup g guardHolds == Just True) guards]
                      in if null accepted then flags else saturate (round + 1) (nub (currentFacts ++ accepted))
+
+-- The indexes of the get(L, t) in the facts and the goal, one for each class of equal indexes, other
+-- than the index itself. Only the first few are tried, to bound the work of a proof.
+splitIndexes :: [IotaProof] -> IotaProof -> IotaProof -> [IotaProof]
+splitIndexes facts fresh goal =
+    let (table, classes, _) = solve facts [goal, fresh]
+        getClasses = Map.keys (builtinsByClass table classes (== Get))
+        indexIds =
+            [ indexId
+            | (_, (functId, [_, indexId])) <- tableApps table
+            , rep classes functId `elem` getClasses
+            , rep classes indexId /= rep classes (idOf table fresh)
+            ]
+        firstOfEachClass = Map.elems (Map.fromListWith (\_ old -> old) [(rep classes indexId, indexId) | indexId <- reverse indexIds])
+     in take maxSplitIndexes (map (termOf table) firstOfEachClass)
+
+maxSplitIndexes :: Int
+maxSplitIndexes = 6
 
 maxInstantiationRounds :: Int
 maxInstantiationRounds = 5
