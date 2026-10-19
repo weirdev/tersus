@@ -19,6 +19,9 @@ renderProof name = go 0
         | Just (op, level) <- infixOp b =
             let text = go (max level 1) l ++ " " ++ op ++ " " ++ go (if level == 0 then 1 else level + 1) r
              in if prec > level then "(" ++ text ++ ")" else text
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field field)) _)) [struct]) = go 3 struct ++ "." ++ field
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args)
+        | length fields == length args = name ++ " { " ++ intercalate ", " (zipWith (\f a -> f ++ ": " ++ go 0 a) fields args) ++ " }"
     go _ (FApp f args) = renderHead f ++ "(" ++ intercalate ", " (map (go 0) args) ++ ")"
     go prec (Forall v guards body) =
         let text = "forall " ++ v ++ guardText v guards ++ ": " ++ go 0 body
@@ -62,9 +65,12 @@ builtinName Minus = "-"
 builtinName Times = "*"
 builtinName Div = "/"
 builtinName (Rel r) = relName r
+builtinName (Ctor name _) = name
+builtinName (Field field) = "." ++ field
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
 renderValue (VBool b) = if b then "true" else "false"
+renderValue (VData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderValue v | (f, v) <- fields] ++ " }"
 renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VFunct args _ _ _ _) = "fn(" ++ intercalate ", " args ++ ")"

@@ -1,0 +1,9 @@
+// Rejected: only x changes, but the contract claims y became the old x.
+struct Point { x: Int, y: Int };
+
+fn shift(p: Point, dx: Int) -> Point
+    [{ }]
+    [{ affirm return.y = p.x; }]
+{
+    return Point { x: p.x + dx, ..p };
+};

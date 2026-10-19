@@ -23,16 +23,17 @@ renderType TInt = "Int"
 renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
+renderType (TNamed name) = name
 renderType (TVar _) = "?"
 
 -- The checking monad: a substitution for the type variables, a counter for new ones, and failure
 
-data TcState = TcState {tcSubst :: Map Int Type, tcNext :: Int}
+data TcState = TcState {tcSubst :: Map Int Type, tcNext :: Int, tcStructs :: Map Name [(Variable, Type)]}
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
 
 runTc :: TC a -> Either String a
-runTc (TC f) = fmap fst (f (TcState Map.empty 0))
+runTc (TC f) = fmap fst (f (TcState Map.empty 0 Map.empty))
 
 instance Functor TC where
     fmap f (TC g) = TC (\s -> fmap (\(a, s') -> (f a, s')) (g s))
@@ -96,6 +97,7 @@ unify a b = do
         (t, TVar n) | not (occurs n t) -> bindVar n t >> return True
         (TInt, TInt) -> return True
         (TBool, TBool) -> return True
+        (TNamed x, TNamed y) -> return (x == y)
         (TList x, TList y) -> unify x y
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
@@ -158,6 +160,45 @@ assignVar _ env var t =
             scope : outer -> return (Map.insert var t scope : outer)
             [] -> return [Map.singleton var t]
 
+-- Structs
+
+structFields :: Name -> TC [(Variable, Type)]
+structFields name = do
+    s <- getState
+    case Map.lookup name (tcStructs s) of
+        Just fields -> return fields
+        Nothing -> failTc ("Type error: unknown type " ++ name)
+
+-- A struct built from values for its fields, which are given in declaration order
+checkConstruct :: Name -> [Variable] -> [Type] -> TC Type
+checkConstruct name fields argTys = do
+    declared <- structFields name
+    if map fst declared /= fields || length fields /= length argTys
+        then failTc ("Type error: struct " ++ name ++ " is built with the wrong fields")
+        else do
+            mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) fieldTy argTy) (zip declared argTys)
+            return (TNamed name)
+
+-- The type of reading a field from a value of the given type
+fieldType :: Variable -> Type -> TC Type
+fieldType field structTy = do
+    t <- zonk structTy
+    case t of
+        TNamed name -> do
+            declared <- structFields name
+            case lookup field declared of
+                Just fieldTy -> return fieldTy
+                Nothing -> failTc ("Type error: " ++ name ++ " has no field " ++ field)
+        TVar _ -> failTc ("Type error: the type of the value whose field " ++ field ++ " is read is not known yet; annotate it")
+        other -> failTc ("Type error: field " ++ field ++ " is read from a " ++ renderType other ++ ", which is not a struct")
+
+-- Every struct a type names must be declared
+checkType :: Type -> TC ()
+checkType (TNamed name) = () <$ structFields name
+checkType (TList t) = checkType t
+checkType (TFn args ret) = mapM_ checkType (ret : args)
+checkType _ = return ()
+
 -- Builtins
 
 builtinType :: BuiltinFunct -> TC Type
@@ -176,6 +217,12 @@ builtinType funct =
         Rel Eq -> list (\a -> TFn [a, a] TBool)
         Rel NotEq -> list (\a -> TFn [a, a] TBool)
         Rel _ -> return (TFn [TInt, TInt] TBool)
+        Ctor name fields -> do
+            declared <- structFields name
+            if map fst declared == fields
+                then return (TFn (map snd declared) (TNamed name))
+                else failTc ("Type error: struct " ++ name ++ " is built with the wrong fields")
+        Field field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
   where
     list build = build <$> freshVar
     arith = return (TFn [TInt, TInt] TInt)
@@ -183,6 +230,7 @@ builtinType funct =
 valueType :: Value -> TC Type
 valueType (VInt _) = return TInt
 valueType (VBool _) = return TBool
+valueType (VData name _) = return (TNamed name)
 valueType (VList elements) = do
     element <- freshVar
     types <- mapM valueType elements
@@ -228,6 +276,15 @@ checkStatement top ctx env stmt =
         ValidationStatement vs -> do
             env' <- checkValidation ctx env vs
             return (ctx, env')
+        StructDef name fields -> do
+            s <- getState
+            if Map.member name (tcStructs s)
+                then failTc ("Struct already defined: " ++ name)
+                else do
+                    mapM_ (checkType . snd) fields
+                    s' <- getState
+                    putState s'{tcStructs = Map.insert name fields (tcStructs s')}
+                    return (ctx, env)
         AxiomDef{} -> return (ctx, env)
         ProofDef{} -> return (ctx, env)
         Block stmts -> do
@@ -251,6 +308,7 @@ checkStatement top ctx env stmt =
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
 checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [ValidationStatement] -> [ValidationStatement] -> [Statement] -> TC ()
 checkFunction ctx name params ptys rty ins outs body = do
+    mapM_ checkType (rty : ptys)
     if length params /= length ptys
         then failTc ("Type error: function " ++ name ++ " has " ++ show (length params) ++ " parameters but " ++ show (length ptys) ++ " types")
         else return ()
@@ -294,6 +352,10 @@ inferExpr ctx env expr =
     case expr of
         Val value -> valueType value
         Var var -> lookupVar ctx env var
+        F (Val (VFunct _ _ _ (BuiltinFunct (Field field)) _)) [struct] ->
+            inferExpr ctx env struct >>= fieldType field
+        F (Val (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args ->
+            mapM (inferExpr ctx env) args >>= checkConstruct name fields
         F funct args -> do
             ft <- inferExpr ctx env funct
             ats <- mapM (inferExpr ctx env) args
@@ -308,6 +370,10 @@ inferProof ctx env proof =
         ATerm var -> lookupProofVar ctx env var
         BVar var -> lookupVar ctx env var
         CTerm value -> valueType value
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field field)) _)) [struct] ->
+            inferProof ctx env struct >>= fieldType field
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args ->
+            mapM (inferProof ctx env) args >>= checkConstruct name fields
         FApp funct args -> do
             ft <- inferProof ctx env funct
             ats <- mapM (inferProof ctx env) args

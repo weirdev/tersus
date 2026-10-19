@@ -151,14 +151,52 @@ evaluateClosure :: Int -> TermTable -> [(Int, Int)] -> (TermTable, IntMap.IntMap
 evaluateClosure round table equalities =
     let classes = congruenceClosure (tableApps table) (tableForalls table) equalities
         values = evaluatedTerms table classes
-     in if null values || round >= maxEvaluationRounds
+        links = [link | link@(term, field) <- selections table classes, rep classes term /= rep classes field]
+     in if (null values && null links) || round >= maxEvaluationRounds
             then (table, classes)
             else
                 let (table', valueIds) = internAll table [CTerm value | (_, value) <- values]
-                 in evaluateClosure (round + 1) table' (equalities ++ zip (map fst values) valueIds)
+                 in evaluateClosure (round + 1) table' (equalities ++ zip (map fst values) valueIds ++ links)
 
 maxEvaluationRounds :: Int
 maxEvaluationRounds = 8
+
+-- Struct fields
+--
+-- Reading a field of a struct built by a constructor is the field's value, however the struct got
+-- its name: field(Name(a, b), f) = a. Together with congruence this makes two constructor applications
+-- in one class agree field by field, and it needs no rule for an update, which is a constructor
+-- applied to the old struct's fields. A struct that is a known value is handled by evaluation.
+
+selections :: TermTable -> IntMap.IntMap Int -> [(Int, Int)]
+selections table classes = reads ++ injectivity
+  where
+    reads =
+        [ (termId, arg)
+        | (termId, (functId, [structId])) <- tableApps table
+        , Just (Field field) <- [Map.lookup (rep classes functId) builtinOfClass]
+        , (fields, args) <- Map.findWithDefault [] (rep classes structId) constructions
+        , (name, arg) <- zip fields args
+        , name == field
+        ]
+    -- Two constructions in one class are of equal structs, so their fields are equal
+    injectivity =
+        [ link
+        | group <- Map.elems constructions
+        , (fields, args) : others <- [group]
+        , (fields', args') <- others
+        , fields == fields'
+        , link <- zip args args'
+        ]
+    builtinOfClass = builtinsByClass table classes (const True)
+    constructions =
+        Map.fromListWith
+            (++)
+            [ (rep classes termId, [(fields, args)])
+            | (termId, (functId, args)) <- tableApps table
+            , Just (Ctor _ fields) <- [Map.lookup (rep classes functId) builtinOfClass]
+            , length fields == length args
+            ]
 
 -- Evaluation
 --
@@ -187,6 +225,7 @@ evaluatedTerms table classes =
             ]
     concrete (VInt _) = True
     concrete (VList _) = True
+    concrete (VData _ _) = True
     concrete (VBool _) = True
     concrete _ = False
 
@@ -285,11 +324,12 @@ data TermKey = KIota Iota | KConst Int | KApp Int [Int] | KBound Variable | KFor
 
 -- What tells constants apart. Builtin functions are one constant each, however they were written.
 -- Any other constant (a user function) has no key and is found by comparing whole values.
-data ConstKey = CInt Integer | CList [ConstKey] | CBool Bool | CBuiltin String deriving (Eq, Ord)
+data ConstKey = CInt Integer | CList [ConstKey] | CBool Bool | CData Name [(Variable, ConstKey)] | CBuiltin String deriving (Eq, Ord)
 
 constKey :: Value -> Maybe ConstKey
 constKey (VInt n) = Just (CInt n)
 constKey (VList l) = CList <$> mapM constKey l
+constKey (VData name fields) = CData name <$> mapM (\(field, value) -> (,) field <$> constKey value) fields
 constKey (VBool b) = Just (CBool b)
 constKey (VFunct _ _ _ (BuiltinFunct funct) _) = Just (CBuiltin (show funct))
 constKey _ = Nothing

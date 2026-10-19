@@ -98,6 +98,7 @@ evalNextStatementWithFuel state = case nextStatement state of
     Ok (Return expr) -> evalReturnStatement state expr
     Ok ValidationStatement{} -> advanceStatement state
     Ok AxiomDef{} -> advanceStatement state
+    Ok StructDef{} -> advanceStatement state
     Ok ProofDef{} -> advanceStatement state
     Ok (Block statements) -> evalBlockStatement state statements
     Ok (If cond thenStmts elseStmts) -> evalIfStatement state cond thenStmts elseStmts
@@ -198,6 +199,7 @@ valNextStatement state =
                     Assign var expr -> valAssignStatement state var expr
                     Return expr -> valReturnStatement state expr
                     ValidationStatement valStmt -> valValidationStatement state valStmt
+                    StructDef{} -> vAdvanceStatement state
                     AxiomDef name args inputs outputs -> valAxiomDef state name args inputs outputs
                     ProofDef name args inputs outputs body -> valProofDef state name args inputs outputs body
                     Block bstmts -> valBlockStatement state bstmts

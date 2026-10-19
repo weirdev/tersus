@@ -1,0 +1,36 @@
+// A struct is a named record with fields fixed at compile time. Values are immutable:
+// `Node { next: 5, ..n }` is a new Node whose other fields are copied from n.
+struct Node { value: Int, prev: Int, next: Int };
+
+// Updating one field leaves the others as they were, which the contract states and the validator proves.
+fn relink(n: Node, target: Int) -> Node
+    [{ }]
+    [{
+        affirm return.next = target;
+        affirm return.value = n.value;
+        affirm return.prev = n.prev;
+    }]
+{
+    return Node { next: target, ..n };
+};
+
+// Updating one element of a list of structs: the others are unchanged.
+fn relinkAt(nodes: List<Node>, i: Int, target: Int) -> List<Node>
+    [{ affirm i >= 0; affirm i < size(nodes); }]
+    [{
+        affirm size(return) = size(nodes);
+        affirm get(return, i).next = target;
+        affirm get(return, i).value = get(nodes, i).value;
+        affirm forall j where j >= 0, j < size(nodes), j != i: get(return, j) = get(nodes, j);
+    }]
+{
+    return set(nodes, i, Node { next: target, ..get(nodes, i) });
+};
+
+a = Node { value: 10, prev: 0, next: 1 };
+b = relink(a, 7);
+affirm b.next = 7;
+affirm b.value = 10;
+nodes = relinkAt(push(push([], a), b), 0, 4);
+affirm get(nodes, 0).next = 4;
+return get(nodes, 0).next + get(nodes, 1).next;
