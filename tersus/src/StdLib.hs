@@ -3,6 +3,7 @@ module StdLib where
 import Data.Map (Map, fromList, toList)
 
 import TersusTypes
+import Utils
 
 -- TODO: Separate this into primitive functions and true std lib
 -- TODO: Write std lib as text to be parsed
@@ -56,8 +57,8 @@ builtinFunct Get =
             [ATerm "return", FApp (CTerm getSymbol) [ATerm "list", ATerm "index"]]
         ]
 -- push adds an element at the end, so the result is one longer than the input list and its
--- last element (at the old size) is x. The result is also equal to the term push(list, x), which
--- is what the frame rule pushKeeps hangs the unchanged elements on.
+-- last element (at the old size) is x. The elements it already had are unchanged. The result is
+-- also equal to the term push(list, x).
 builtinFunct Push =
     VFunct
         ["list", "x"]
@@ -77,11 +78,18 @@ builtinFunct Push =
             [ FApp (CTerm (builtinFunct Get)) [ATerm "return", FApp (CTerm (builtinFunct Size)) [ATerm "list"]]
             , ATerm "x"
             ]
+        , -- The elements the list already had are unchanged
+          Forall
+            "j"
+            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
+            , relProof Lt (BVar "j") (FApp (CTerm (builtinFunct Size)) [ATerm "list"])
+            ]
+            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
         ]
 -- set replaces one element, so it needs a valid index like get, and the result has the same
 -- size as the input list, and x at that index. The list itself is not changed: the result is
--- a new list. The other elements are unchanged, which the frame rule setKeeps
--- states through the equal term set(list, index, x).
+-- a new list. Every other element is unchanged. The result is also equal to the term
+-- set(list, index, x).
 builtinFunct Set =
     VFunct
         ["list", "index", "x"]
@@ -105,6 +113,14 @@ builtinFunct Set =
             [ FApp (CTerm (builtinFunct Get)) [ATerm "return", ATerm "index"]
             , ATerm "x"
             ]
+        , -- Every other element is unchanged
+          Forall
+            "j"
+            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
+            , relProof Lt (BVar "j") (FApp (CTerm (builtinFunct Size)) [ATerm "list"])
+            , relProof NotEq (BVar "j") (ATerm "index")
+            ]
+            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
         ]
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
@@ -128,6 +144,43 @@ stdLibCtx =
         , ("<=", builtinFunct (Rel LtEq))
         , (">=", builtinFunct (Rel GtEq))
         ]
+
+-- Evaluates a builtin function on concrete arguments
+evalBuiltinFunct :: BuiltinFunct -> [Value] -> Result Value String
+evalBuiltinFunct Size [VIntList l] = Ok $ VInt (fromIntegral (length l))
+evalBuiltinFunct Size _ = Error "Size only valid for IntList"
+evalBuiltinFunct First [VIntList []] = Error "First requires a non-empty IntList"
+evalBuiltinFunct First [VIntList l] = Ok $ VInt (head l)
+evalBuiltinFunct First _ = Error "First only valid for IntList"
+evalBuiltinFunct Last [VIntList []] = Error "Last requires a non-empty IntList"
+evalBuiltinFunct Last [VIntList l] = Ok $ VInt (last l)
+evalBuiltinFunct Last _ = Error "Last only valid for IntList"
+evalBuiltinFunct Get [VIntList l, VInt i]
+    | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
+    | otherwise = Ok $ VInt (l !! fromIntegral i)
+evalBuiltinFunct Get _ = Error "Get only valid for an IntList and an int"
+evalBuiltinFunct Push [VIntList l, VInt x] = Ok $ VIntList (l ++ [x])
+evalBuiltinFunct Push _ = Error "Push only valid for an IntList and an int"
+evalBuiltinFunct Set [VIntList l, VInt i, VInt x]
+    | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
+    | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VIntList (before ++ x : drop 1 after)
+evalBuiltinFunct Set _ = Error "Set only valid for an IntList and two ints"
+evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
+evalBuiltinFunct Minus _ = Error "Plus only valid for two ints"
+evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)
+evalBuiltinFunct Plus _ = Error "Plus only valid for two ints"
+evalBuiltinFunct (Rel Eq) [VInt v1, VInt v2] = Ok $ VBool (v1 == v2)
+evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two ints"
+evalBuiltinFunct (Rel NotEq) [VInt v1, VInt v2] = Ok $ VBool (v1 /= v2)
+evalBuiltinFunct (Rel NotEq) _ = Error "NotEq only valid for two ints"
+evalBuiltinFunct (Rel Lt) [VInt v1, VInt v2] = Ok $ VBool (v1 < v2)
+evalBuiltinFunct (Rel Lt) _ = Error "Lt only valid for two ints"
+evalBuiltinFunct (Rel Gt) [VInt v1, VInt v2] = Ok $ VBool (v1 > v2)
+evalBuiltinFunct (Rel Gt) _ = Error "Rt only valid for two ints"
+evalBuiltinFunct (Rel LtEq) [VInt v1, VInt v2] = Ok $ VBool (v1 <= v2)
+evalBuiltinFunct (Rel LtEq) _ = Error "LtEq only valid for two ints"
+evalBuiltinFunct (Rel GtEq) [VInt v1, VInt v2] = Ok $ VBool (v1 >= v2)
+evalBuiltinFunct (Rel GtEq) _ = Error "GtEq only valid for two ints"
 
 eqProof :: IotaProof
 eqProof = CTerm (builtinFunct (Rel Eq))
@@ -161,20 +214,6 @@ stdLibRuleCtx =
                 ]
                 [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
           )
-        , ( "pushKeeps"
-          , AxiomRule
-                ["l", "x", "j"]
-                (inRange "l" "j")
-                [frameFact pushSymbol ["l", "x"] "j" (ATerm "l")]
-          )
-        , ( "setKeeps"
-          , AxiomRule
-                ["l", "i", "x", "j"]
-                ( inRange "l" "j"
-                    ++ [Rewrite (CheckRel (relProof NotEq (ATerm "j") (ATerm "i")))]
-                )
-                [frameFact setSymbol ["l", "i", "x"] "j" (ATerm "l")]
-          )
         ]
 
 -- Function symbols for the terms push(list, x) and set(list, index, x) in contracts and frame
@@ -190,22 +229,6 @@ setSymbol = VFunct ["list", "index", "x"] [] [] (BuiltinFunct Set) []
 
 relProof :: Rel -> VariableProof -> VariableProof -> VariableProof
 relProof rel lhs rhs = FApp (CTerm (builtinFunct (Rel rel))) [lhs, rhs]
-
--- Input of a frame rule: j is a valid index of l, checked like the input of get.
-inRange :: Variable -> Variable -> [ValidationStatement]
-inRange l j =
-    [ Rewrite (CheckRel (relProof GtEq (ATerm j) (CTerm (VInt 0))))
-    , Rewrite (CheckRel (relProof Lt (ATerm j) (FApp (CTerm (builtinFunct Size)) [ATerm l])))
-    ]
-
--- get(funct(args), j) = get(source, j): the element at j of the new list is the old one
-frameFact :: Value -> [Variable] -> Variable -> VariableProof -> ValidationStatement
-frameFact funct args j source =
-    ProofAssert $
-        relProof
-            Eq
-            (FApp (CTerm (builtinFunct Get)) [FApp (CTerm funct) (map ATerm args), ATerm j])
-            (FApp (CTerm (builtinFunct Get)) [source, ATerm j])
 
 -- NOTE: Could also take iotaseq as input here
 stdLibCtxToValCtx :: Map Variable Value -> (Map Variable Iota, [IotaProof])

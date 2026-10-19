@@ -130,20 +130,17 @@ affirm get(b, i) = 20;        // the element just written
 // affirm get(b, 0) = get(a, 0);   // rejected: the other elements are not covered yet
 ```
 
-The other elements are unchanged, and that is stated by rewrite rules rather than by the contract, because it only holds for some indexes. Both contracts also export `return = push(list, x)` (or `set(list, index, x)`), and these rules say what that term keeps. Each checks `0 <= j < size(l)` like `get` does:
-
-- `rewrite pushKeeps l x j`: assumes `get(push(l, x), j) = get(l, j)`.
-- `rewrite setKeeps l i x j`: assumes `get(set(l, i, x), j) = get(l, j)`, and also needs `j != i`, since `set` changes that element.
+Every other element is unchanged, which the contracts state with a `forall` (see `forall` below). `push(l, x)` exports `forall j in 0..size(l): get(return, j) = get(l, j)`, and `set(l, i, x)` exports the same with the guard `j != i`. Like any `forall`, they are used at the elements a program reads:
 
 ```
 a = [10, 20, 30];
 b = set(a, 1, 99);
-rewrite setKeeps a 1 99 0;
-affirm get(b, 0) = get(a, 0);   // the element before the one written
-// rewrite setKeeps a 1 99 1;   // rejected: 1 != 1 does not hold
+affirm get(b, 0) = get(a, 0);   // an element before the one written
+affirm get(b, 2) = get(a, 2);   // and one after it
+// affirm get(b, 1) = get(a, 1);   // rejected: set changed this one
 ```
 
-See `examples/frame_facts.tersus`. There is no fact about every index yet, so an elementwise contract like "each result element is the sum of a pair" cannot be stated. `examples/update_list.tersus` updates every element of a list in a loop, with the invariant tracking only its size.
+See `examples/frame_facts.tersus`. `examples/update_list.tersus` updates every element of a list in a loop.
 
 Lists are built with `push`, updated with `set`, and read by `get`, `first` and `last`. Lists hold integers only.
 
@@ -447,7 +444,6 @@ Primitive rewrite rules:
 The standard library also provides trusted axiom rules:
 
 - `rewrite eqToLtPlus1 <proof>`: assumes the argument is less than itself plus one.
-- `rewrite pushKeeps`, `rewrite setKeeps`: the unchanged elements of a list after `push` or `set`, described under Lists.
 - `rewrite eqToGtZero <proof>`: exports the argument as greater than zero after its input contract validates through `checkGtZero`.
 
 Unknown rule names parse as user rewrites and fail during validation if no matching rule has been defined.

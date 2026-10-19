@@ -12,7 +12,7 @@ import Data.Map (
  )
 
 import Data.List (nub)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
 
 import StdLib
 import TersusTypes
@@ -399,9 +399,12 @@ substituteProofTerm source target (FApp funct args) =
                             (zipWith (flip fromMaybe) maybeArgs args)
                         )
                 else Nothing
-  where
-    isJust (Just _) = True
-    isJust _ = False
+substituteProofTerm source target (Forall index guards body) =
+    let maybeGuards = map (substituteProofTerm source target) guards
+        maybeBody = substituteProofTerm source target body
+     in if any isJust (maybeBody : maybeGuards)
+            then Just (Forall index (zipWith (`maybe` id) guards maybeGuards) (fromMaybe body maybeBody))
+            else Nothing
 substituteProofTerm _ _ _ = Nothing
 
 reverseEqProof :: IotaProof -> IotaProof
