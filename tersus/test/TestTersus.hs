@@ -1151,6 +1151,7 @@ testExamples =
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
+        , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
@@ -1168,6 +1169,8 @@ testExamples =
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/call_violates_contract.tersus" (ExpectRejected "Could not prove: n > 0")
+        , testExampleFile "examples/rejected/recursion_wrong_contract.tersus" (ExpectRejected "Could not prove: return = 0")
+        , testExampleFile "examples/rejected/recursion_input.tersus" (ExpectRejected "Could not prove: n > 0")
         , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
@@ -1830,6 +1833,33 @@ testFirstLast =
             , parseValidateFailProgramHelper "fn f(l) [{ affirm size(l) > 2; }] [{ affirm return = get(l, 1); }] { return last(l); };" "Could not prove: return = get(l, 1)"
             ]
 
+testRecursion :: Test
+testRecursion =
+    let upTo = "fn upTo(i, n) [{ affirm i <= n; }] [{ affirm return = n; }] { if i < n { return upTo(i + 1, n); } else { return n; }; };"
+     in testCaseSeq
+            "testRecursion"
+            [ -- A function calls itself, in evaluation and in validation
+              parseEvalProgramHelper (upTo ++ "return upTo(0, 5);") (Just (VInt 5))
+            , parseValidProgramHelper (upTo ++ "x = upTo(0, 5); affirm x = 5;")
+            , parseValidProgramHelper (upTo ++ "fn useIt(n) [{ affirm n >= 0; }] [{ affirm return = n; }] { return upTo(0, n); };")
+            , -- The recursive call must meet the input contract
+              parseValidateFailProgramHelper "fn down(n) [{ affirm n > 0; }] [{ affirm return = 0; }] { if n < 2 { return 0; } else { return down(n - 3); }; };" "Could not prove: n > 0"
+            , -- The body must establish the output contract, which is assumed only for the recursive calls
+              parseValidateFailProgramHelper "fn down(n) [{ affirm n >= 0; }] [{ affirm return = 0; }] { if n < 1 { return 1; } else { return down(n - 1); }; };" "Could not prove: return = 0"
+            , -- Recursion over a list, with an affirm that becomes a fact in the last step
+              parseValidProgramHelper "fn sumFrom(l, i) [{ affirm i >= 0; affirm i <= size(l); }] [{ }] { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; };"
+            , parseEvalProgramHelper "fn sumFrom(l, i) [{ affirm i >= 0; affirm i <= size(l); }] [{ }] { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; }; return sumFrom([4, 5, 6], 0);" (Just (VInt 15))
+            , parseValidProgramHelper "fn endOf(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] { if i + 1 < size(l) { return endOf(l, i + 1); } else { affirm i = size(l) - 1; return get(l, i); }; };"
+            , parseValidateFailProgramHelper "fn endOf(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] { if i + 1 < size(l) { return endOf(l, i + 1); } else { return get(l, i); }; };" "Could not prove: return = get(l, size(l) - 1)"
+            , -- Termination is not checked: a function that never returns satisfies any output contract
+              parseValidProgramHelper "fn spin(n) [{ }] [{ affirm return = 0; }] { return spin(n); };"
+            , -- A name is still defined once
+              parseValidateFailProgramHelper (upTo ++ upTo) "Function already defined: upTo"
+            , -- An affirm that is proved becomes a fact: it links i to size(l) - 1 so get(l, i) is get(l, size(l) - 1)
+              parseValidProgramHelper "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { affirm i = size(l) - 1; return get(l, i); };"
+            , parseValidateFailProgramHelper "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };" "Could not prove: return = get(l, size(l) - 1)"
+            ]
+
 testCrlf :: Test
 testCrlf =
     testCaseSeq
@@ -2161,6 +2191,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testRecursion
                 , testPrecedence
                 , testFirstLast
                 , testFunctionCalls

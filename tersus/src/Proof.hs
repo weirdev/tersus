@@ -209,16 +209,28 @@ vNextStatement _ = Error "No next validation statement available"
 
 valAssignStatement :: VState -> Variable -> Expression -> Result VState String
 valAssignStatement state var expr =
-    case vAdvanceStatement state of
-        Ok advancedState ->
-            case popIotaFromSeq advancedState of
-                Ok (niota, state') ->
-                    case valExpression state' niota expr of
-                        Ok (exprState, nproofs) ->
-                            registerGlobalFunctionProof var niota expr nproofs (vInsertVar exprState var niota nproofs)
-                        Error e -> Error e
-                Error e -> Error e
-        Error e -> Error e
+    vAdvanceStatement state `bindResult` \advancedState ->
+        popIotaFromSeq advancedState `bindResult` \(niota, state') ->
+            bindFunctionToItself var expr state' `bindResult` \stateWithSelf ->
+                valExpression stateWithSelf niota expr `bindResult` \(exprState, nproofs) ->
+                    registerGlobalFunctionProof var niota expr nproofs (vInsertVar (withGlobalsOf state' exprState) var niota nproofs)
+
+-- A function defined at the top level can call itself. Its body is validated with its own name bound to
+-- a copy of the function that exports what its output contract asserts, without having shown it yet:
+-- the body is validated assuming the contract, and the contract is then checked against the body.
+-- This is partial correctness, as for a loop: nothing shows the recursion ends.
+bindFunctionToItself :: Variable -> Expression -> VState -> Result VState String
+bindFunctionToItself var (Val (VFunct args ins outs body@NativeFunct{} _)) state@(VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx _ ruleCtx)
+    | Map.member var iotaCtx = Ok state
+    | otherwise =
+        popIotaFromSeq state `bindResult` \(selfIota, VState _ _ _ iotaseq _) ->
+            let assumed = VFunct args ins outs body [p | ProofAssert p <- outs, all (`elem` ("return" : args)) (proofVars p)]
+             in Ok (VState scope (Map.insert var selfIota iotaCtx) (proofCtx ++ [FApp eqProof [ATerm selfIota, CTerm assumed]]) iotaseq ruleCtx)
+bindFunctionToItself _ _ state = Ok state
+
+-- The state after an expression, without the global bindings that were added only to validate it
+withGlobalsOf :: VState -> VState -> VState
+withGlobalsOf (VState _ iotaCtx proofCtx _ _) (VState scope _ _ iotaseq ruleCtx) = VState scope iotaCtx proofCtx iotaseq ruleCtx
 
 -- The validation counterpart of registerGlobalFunction: the function's iota and the proof of its value
 -- join the global context, which the bodies of later functions are validated in.
@@ -543,7 +555,7 @@ valValidationStatement state (ProofAssert varproof) =
                     let proofs = vGetProofs state'
                         proofContext = Engine.proofContextFromFacts proofs
                      in if Engine.entails iotaProof proofContext
-                            then Ok state'
+                            then Ok (vInsertProofs state' [iotaProof])
                             else doTrace4 ("Had vars: " ++ show (vGetVars state')) (doTrace4 ("Had proofs: " ++ show proofs) (Error $ "Could not prove: " ++ renderVarProof varproof))
                 Error e -> Error e
         Error e -> Error e

@@ -1,0 +1,4 @@
+// Rejected: the base case returns 1, so the output contract return = 0 does not hold.
+fn down(n) [{ affirm n >= 0; }] [{ affirm return = 0; }] {
+    if n < 1 { return 1; } else { return down(n - 1); };
+};
