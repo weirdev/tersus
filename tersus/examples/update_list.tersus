@@ -2,14 +2,26 @@
 // old list is unchanged. Like get it needs 0 <= index < size(list), and its output contract
 // says the result has the same size, which the loop invariant carries so that every get and set
 // in the loop is provably in range. bumpAll starts from a copy of its argument and rewrites
-// each element in place, so its result is as long as its input.
+// each element in place, so its result is as long as its input, and every element of the result
+// is 100 more than the matching element of the input. The loop invariant carries that fact with
+// a forall: the elements below i are done, and the ones from i on are untouched.
 // The counter facts follow from the loop condition and the invariant, so no axioms are needed.
 
-fn bumpAll(a) [{ }] [{ affirm size(return) = size(a); }] {
+fn bumpAll(a) [{ }] [{
+    affirm size(return) = size(a);
+    affirm forall j in 0..size(a): get(return, j) = (get(a, j) + 100);
+}] {
     n = size(a);
     i = 0;
     out = a;
-    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = size(a); }] {
+    while i < n [{
+        affirm i >= 0;
+        affirm i <= n;
+        affirm size(out) = size(a);
+        // the elements already visited are bumped, and the rest are as they were
+        affirm forall j in 0..i: get(out, j) = (get(a, j) + 100);
+        affirm forall j in i..n: get(out, j) = get(a, j);
+    }] {
         out = set(out, i, get(out, i) + 100);
         i = i + 1;
     };
@@ -18,4 +30,6 @@ fn bumpAll(a) [{ }] [{ affirm size(return) = size(a); }] {
 
 original = [1, 2, 3];
 bumped = bumpAll(original);
+// The elementwise contract reaches the caller.
+affirm get(bumped, 1) = (get(original, 1) + 100);
 return bumped;

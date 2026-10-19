@@ -1,0 +1,18 @@
+// Rejected: bumpAll's invariant says the elements below i are bumped, but not that the ones from
+// i on are untouched, so the element at i that the body reads is unknown and the invariant is
+// not preserved. update_list.tersus has the second forall.
+fn bumpAll(a) [{ }] [{ affirm forall j in 0..size(a): get(return, j) = (get(a, j) + 100); }] {
+    n = size(a);
+    i = 0;
+    out = a;
+    while i < n [{
+        affirm i >= 0;
+        affirm i <= n;
+        affirm size(out) = size(a);
+        affirm forall j in 0..i: get(out, j) = (get(a, j) + 100);
+    }] {
+        out = set(out, i, get(out, i) + 100);
+        i = i + 1;
+    };
+    return out;
+};

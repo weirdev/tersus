@@ -18,12 +18,11 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 - Errors go to standard error, prefixed with `Parse error:`, `Validation failed:` or `Evaluation failed:`. The exit code is 1 for a failed program and 2 for bad command-line usage.
 
 Next steps, roughly in priority order:
-1. Element-level facts about lists
-    Contracts can only state sizes, the element just written (`push` and `set`, see `examples/element_facts.tersus`) and, through the rules `pushKeeps` and `setKeeps`, that one given index is unchanged (`examples/frame_facts.tersus`). There is still no way to say something about every index, so `pairSums` (examples/parallel_sum.tersus) cannot state that each result element is the sum of the corresponding pair
-    The frame rules are applied one index at a time. The same facts could be exported by the contract itself once guarded facts exist
-    (In progress) `forall` parses into `Forall index guards body` with the index as `BVar`, and the engine keeps it as an opaque term in the congruence closure (equal guards and body, up to equal parts, are one term); instantiates it at the `get(L, t)` terms of the closure whose guards hold (`ProofEngine.forallInstances`); proves one for a fresh index that meets the guards, splitting on the indexes the program reads when the body does not follow directly (`ProofEngine.entailsAll`)
-    A bounded quantified fact, usable in output contracts and loop invariants: `forall j where j >= 0, j < i: P` with `forall j in 0..i: P` as shorthand (half-open range). Facts are instantiated at the `get(L, t)` terms the closure contains whose guard is entailed, and proving one introduces a fresh index with the guard assumed
-    Carrying such an invariant through a loop needs the index arithmetic the validator now has (item 7)
+1. Element-level facts about lists (mostly done)
+    `forall j in lo..hi: P` is implemented (see LANGUAGE.md): it is a proof form `Forall index guards body` whose index is a `BVar`, proved for a fresh index and instantiated at the `get(L, t)` terms of the closure, and `push`/`set` export frame foralls, so `examples/parallel_sum.tersus` states that each result element is the sum of its pair
+    Instances come only from `get(L, j)` terms in the body, so a body that does not read elements is never used; `exists` is not implemented; and `forall` does not nest
+    Proving a `forall` over a range that grew by one splits the index on the indexes the program reads, up to `maxSplitIndexes`; a program with many reads may need a smarter choice
+    Benchmark `entailsAll` on large contexts: `frame_facts.tersus` takes about 0.2s because every `affirm` re-solves the closure and instantiates the frame foralls again
 2. Let user functions call other user functions
     Function bodies currently see only their arguments and the standard library, and argument passing is by value (see LANGUAGE.md)
     Decide the closure/scoping rules before adding mutable data, since by-value vs by-reference only becomes observable then
