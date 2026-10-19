@@ -1158,7 +1158,7 @@ testExamples =
         , testExampleFile "examples/frame_facts.tersus" (ExpectReturn (VInt 149))
         , testExampleFile "examples/forall_facts.tersus" (ExpectReturn (VInt 5))
         , testExampleFile "examples/rejected/forall_unproven.tersus" (ExpectRejected "input validation failed")
-        , testExampleFile "examples/rejected/frame_changed_index.tersus" (ExpectRejected "Relation does not hold")
+        , testExampleFile "examples/rejected/frame_changed_index.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
@@ -1585,14 +1585,6 @@ testArithmetic =
             , parseValidateFailProgramHelper
                 "i = 0; while i < 3 [{ affirm i >= 1; }] { i = i + 1; };"
                 "Loop invariant does not hold on entry"
-            , -- != lets one frame rule cover the indexes below and above the one set wrote
-              parseValidProgramHelper
-                "fn f(l, i, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); rewrite checkRel i >= 0; rewrite checkRel i < size(l); rewrite checkRel j < i; affirm j >= 0; affirm j < size(l); affirm i >= 0; affirm i < size(l); affirm j < i; }] [{ }] { r = set(l, i, 7); rewrite setKeeps l i 7 j; affirm get(r, j) = get(l, j); return r; }; return f([1, 2, 3], 2, 0);"
-            , parseValidProgramHelper
-                "fn f(l, i, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); rewrite checkRel i >= 0; rewrite checkRel i < size(l); rewrite checkRel j > i; affirm j >= 0; affirm j < size(l); affirm i >= 0; affirm i < size(l); affirm j > i; }] [{ }] { r = set(l, i, 7); rewrite setKeeps l i 7 j; affirm get(r, j) = get(l, j); return r; }; return f([1, 2, 3], 0, 2);"
-            , parseValidateFailProgramHelper
-                "fn f(l, i, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm j >= 0; affirm j < size(l); affirm i >= 0; affirm i < size(l); }] [{ }] { r = set(l, i, 7); rewrite setKeeps l i 7 j; return r; };"
-                "Relation lacks a proof"
             ]
 
 -- forall parses into a bound index (BVar) with its guards, and the validator rejects it for now
@@ -1819,7 +1811,8 @@ testForallSyntax =
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; rewrite zeros b; affirm forall j in 0..size(b): get(b, j) = 0;")
             , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; b = [0]; rewrite zeros a; affirm forall j in 0..size(b): get(b, j) = 0;") "Assertion failed"
             , -- A range the fact does not cover, or another body, is not proved
-              parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..1: get(a, j) = 0;") "Assertion failed"
+              parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..1: get(a, j) = 0;")
+            , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..3: get(a, j) = 0;") "Assertion failed"
             , parseValidateFailProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 1;") "Assertion failed"
             , -- The name of the index does not matter
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall k in 0..size(a): get(a, k) = 0;")
@@ -1865,15 +1858,9 @@ testLists =
         , parseEvalFailStmtHelper "{ return set([], 0, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set(1, 0, 0); }" "Set only valid"
         , parseEvalFailStmtHelper "{ return set([5], 0, [1]); }" "Set only valid"
-        , -- Frame rules: push and set leave the other elements as they were
-          parseValidProgramHelper "a = [1, 2]; b = push(a, 3); rewrite pushKeeps a 3 1; affirm get(b, 1) = get(a, 1);"
-        , parseValidProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeeps a 1 9 2; affirm get(b, 2) = get(a, 2);"
-        , parseValidProgramHelper
-            "fn keep(l, x, j) [{ rewrite checkRel j >= 0; rewrite checkRel j < size(l); affirm j >= 0; affirm j < size(l); }] [{ }] { r = push(l, x); rewrite pushKeeps l x j; affirm get(r, j) = get(l, j); return r; }; return keep([4, 5], 6, 1);"
-        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); rewrite pushKeeps a 3 2;" "Relation does not hold"
-        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);" "Assertion failed"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeeps a 1 9 1;" "Relation does not hold"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 9); rewrite setKeeps a 1 9 0; affirm get(b, 1) = get(a, 1);" "Assertion failed"
+        , -- Frame facts: push's contract keeps the old elements, and nothing else is known
+          parseValidProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);"
+        , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 2) = get(a, 1);" "Assertion failed"
         , -- Validation: a concrete list and index need no proof from the caller
           parseValidProgramHelper "a = [5, 6, 7]; x = get(a, 2); affirm x = 7;"
         , parseValidProgramHelper "a = push(push([], 1), 2); n = size(a); affirm n = 2;"
@@ -1900,7 +1887,20 @@ testLists =
             "fn g(l, x) [{ }] [{ affirm get(return, size(l)) = x; }] { return push(l, x); };"
         , parseValidateFailProgramHelper "a = [1, 2, 3]; i = 1; b = set(a, i, 20); affirm get(b, i) = 21;" "Assertion failed"
         , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = 20;" "Assertion failed"
-        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = get(a, 0);" "Assertion failed"
+        , -- set's contract keeps the other elements without a rule, and not the one it wrote
+          parseValidProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 0) = get(a, 0); affirm get(b, 2) = get(a, 2);"
+        , parseValidateFailProgramHelper "a = [1, 2, 3]; b = set(a, 1, 20); affirm get(b, 1) = get(a, 1);" "Assertion failed"
+        , -- With a symbolic list the elements are kept for any index in range, and only those
+          parseValidProgramHelper
+            "fn f(l, i, j) [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); affirm j != i; }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
+        , parseValidateFailProgramHelper
+            "fn f(l, i, j) [{ affirm i >= 0; affirm i < size(l); affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return set(l, i, 0); };"
+            "Assertion failed"
+        , parseValidProgramHelper
+            "fn f(l, j) [{ affirm j >= 0; affirm j < size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
+        , parseValidateFailProgramHelper
+            "fn f(l, j) [{ affirm j >= 0; affirm j <= size(l); }] [{ affirm get(return, j) = get(l, j); }] { return push(l, 7); };"
+            "Assertion failed"
         , parseValidateFailProgramHelper "l = [4, 5]; r = push(l, 9); define n = size(l); affirm get(r, n) = 8;" "Assertion failed"
         , parseValidateFailProgramHelper
             "fn f(l, i, x) [{ rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] [{ affirm get(return, i) = get(l, i); }] { return set(l, i, x); };"

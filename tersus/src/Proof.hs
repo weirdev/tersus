@@ -933,41 +933,6 @@ arityMismatchMessage :: [Variable] -> [a] -> String
 arityMismatchMessage formals actuals =
     "Function expected " ++ show (length formals) ++ " arguments, got " ++ show (length actuals)
 
-evalBuiltinFunct :: BuiltinFunct -> [Value] -> Result Value String
-evalBuiltinFunct Size [VIntList l] = Ok $ VInt (fromIntegral (length l))
-evalBuiltinFunct Size _ = Error "Size only valid for IntList"
-evalBuiltinFunct First [VIntList []] = Error "First requires a non-empty IntList"
-evalBuiltinFunct First [VIntList l] = Ok $ VInt (head l)
-evalBuiltinFunct First _ = Error "First only valid for IntList"
-evalBuiltinFunct Last [VIntList []] = Error "Last requires a non-empty IntList"
-evalBuiltinFunct Last [VIntList l] = Ok $ VInt (last l)
-evalBuiltinFunct Last _ = Error "Last only valid for IntList"
-evalBuiltinFunct Get [VIntList l, VInt i]
-    | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
-    | otherwise = Ok $ VInt (l !! fromIntegral i)
-evalBuiltinFunct Get _ = Error "Get only valid for an IntList and an int"
-evalBuiltinFunct Push [VIntList l, VInt x] = Ok $ VIntList (l ++ [x])
-evalBuiltinFunct Push _ = Error "Push only valid for an IntList and an int"
-evalBuiltinFunct Set [VIntList l, VInt i, VInt x]
-    | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
-    | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VIntList (before ++ x : drop 1 after)
-evalBuiltinFunct Set _ = Error "Set only valid for an IntList and two ints"
-evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
-evalBuiltinFunct Minus _ = Error "Plus only valid for two ints"
-evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)
-evalBuiltinFunct Plus _ = Error "Plus only valid for two ints"
-evalBuiltinFunct (Rel Eq) [VInt v1, VInt v2] = Ok $ VBool (v1 == v2)
-evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two ints"
-evalBuiltinFunct (Rel NotEq) [VInt v1, VInt v2] = Ok $ VBool (v1 /= v2)
-evalBuiltinFunct (Rel NotEq) _ = Error "NotEq only valid for two ints"
-evalBuiltinFunct (Rel Lt) [VInt v1, VInt v2] = Ok $ VBool (v1 < v2)
-evalBuiltinFunct (Rel Lt) _ = Error "Lt only valid for two ints"
-evalBuiltinFunct (Rel Gt) [VInt v1, VInt v2] = Ok $ VBool (v1 > v2)
-evalBuiltinFunct (Rel Gt) _ = Error "Rt only valid for two ints"
-evalBuiltinFunct (Rel LtEq) [VInt v1, VInt v2] = Ok $ VBool (v1 <= v2)
-evalBuiltinFunct (Rel LtEq) _ = Error "LtEq only valid for two ints"
-evalBuiltinFunct (Rel GtEq) [VInt v1, VInt v2] = Ok $ VBool (v1 >= v2)
-evalBuiltinFunct (Rel GtEq) _ = Error "GtEq only valid for two ints"
 
 iotaMapToConcreteMap :: (Ord a) => Map a Iota -> [IotaProof] -> Map a Value
 iotaMapToConcreteMap imap proofs =

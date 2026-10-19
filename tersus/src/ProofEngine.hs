@@ -56,8 +56,12 @@ entails goal context = and (entailsAll [goal] context)
 
 -- Which of the goals the context entails, sharing one congruence closure between them.
 entailsAll :: [IotaProof] -> ProofContext -> [Bool]
-entailsAll goals (ProofContext facts) = zipWith provedAsForall goals (saturate (0 :: Int) facts)
+entailsAll originalGoals (ProofContext originalFacts) = zipWith provedAsForall goals (saturate (0 :: Int) facts)
   where
+    -- The list builtins carry their contracts, which are large, and every fact and goal is
+    -- compared with the others many times. They are replaced by plain symbols up front.
+    facts = map lightProof originalFacts
+    goals = map lightProof originalGoals
     -- A forall goal that is not already a known fact is proved for an arbitrary index
     provedAsForall goal entailed = entailed || proveForall goal
     -- Takes a fresh index that meets the guards, and asks for the body at that index. The name
@@ -127,17 +131,62 @@ solve facts goals =
                 [ (factId, trueId) : [(idOf table3 lhs, idOf table3 rhs) | FApp funct [lhs, rhs] <- [fact], funct == eqProof]
                 | (fact, factId) <- zip facts factIds
                 ]
-        classes = congruenceClosure (tableApps table3) (tableForalls table3) equalities
+        (table4, classes) = evaluateClosure (0 :: Int) table3 equalities
         sameClass a b = rep classes a == rep classes b
-        arithmetic = arithmeticEdges table3 classes trueId zeroId
+        arithmetic = arithmeticEdges table4 classes trueId zeroId
         entailed goal goalId =
             sameClass goalId trueId
-                || or [sameClass (idOf table3 lhs) (idOf table3 rhs) | FApp funct [lhs, rhs] <- [goal], funct == eqProof]
+                || or [sameClass (idOf table4 lhs) (idOf table4 rhs) | FApp funct [lhs, rhs] <- [goal], funct == eqProof]
                 || or
-                    [ arithmeticEntails arithmetic rel (rep classes (idOf table3 lhs)) (rep classes (idOf table3 rhs))
+                    [ arithmeticEntails arithmetic rel (rep classes (idOf table4 lhs)) (rep classes (idOf table4 rhs))
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
                     ]
-     in (table3, classes, zipWith entailed goals goalIds)
+     in (table4, classes, zipWith entailed goals goalIds)
+
+-- The classes, once every builtin applied to concrete values is equal to its value. Evaluating
+-- gives new constants, which can make more applications concrete, so it repeats.
+evaluateClosure :: Int -> TermTable -> [(Int, Int)] -> (TermTable, IntMap.IntMap Int)
+evaluateClosure round table equalities =
+    let classes = congruenceClosure (tableApps table) (tableForalls table) equalities
+        values = evaluatedTerms table classes
+     in if null values || round >= maxEvaluationRounds
+            then (table, classes)
+            else
+                let (table', valueIds) = internAll table [CTerm value | (_, value) <- values]
+                 in evaluateClosure (round + 1) table' (equalities ++ zip (map fst values) valueIds)
+
+maxEvaluationRounds :: Int
+maxEvaluationRounds = 8
+
+-- Evaluation
+--
+-- A builtin applied to arguments that are known to be concrete values has that value, so
+-- size([1, 2]) = 2 needs no `define` and `rewrite eval`. The term is joined to its value when
+-- the closure is built.
+
+evaluatedTerms :: TermTable -> IntMap.IntMap Int -> [(Int, Value)]
+evaluatedTerms table classes =
+    [ (termId, value)
+    | (termId, (functId, argIds)) <- tableApps table
+    , Map.notMember (rep classes termId) concreteOfClass
+    , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
+    , Just args <- [mapM ((`Map.lookup` concreteOfClass) . rep classes) argIds]
+    , Ok value <- [evalBuiltinFunct funct args]
+    , concrete value
+    ]
+  where
+    builtinOfClass = builtinsByClass table classes (const True)
+    concreteOfClass =
+        Map.fromList
+            [ (rep classes termId, value)
+            | (value, constId) <- tableConsts table
+            , concrete value
+            , Just termId <- [Map.lookup (KConst constId) (tableKeys table)]
+            ]
+    concrete (VInt _) = True
+    concrete (VIntList _) = True
+    concrete (VBool _) = True
+    concrete _ = False
 
 -- Forall instances
 --
@@ -229,15 +278,28 @@ termOf table = build
 -- A forall is one opaque term built from its guards and body, so the same forall twice is one term
 data TermKey = KIota Iota | KConst Int | KApp Int [Int] | KBound Variable | KForall Variable [Int] Int deriving (Eq, Ord)
 
+-- What tells constants apart. Builtin functions are one constant each, however they were written.
+-- Any other constant (a user function) has no key and is found by comparing whole values.
+data ConstKey = CInt Integer | CList [Integer] | CBool Bool | CBuiltin String deriving (Eq, Ord)
+
+constKey :: Value -> Maybe ConstKey
+constKey (VInt n) = Just (CInt n)
+constKey (VIntList l) = Just (CList l)
+constKey (VBool b) = Just (CBool b)
+constKey (VFunct _ _ _ (BuiltinFunct funct) _) = Just (CBuiltin (show funct))
+constKey _ = Nothing
+
 data TermTable = TermTable
     { tableKeys :: Map.Map TermKey Int
     , tableConsts :: [(Value, Int)]
+    , tableConstIds :: Map.Map ConstKey Int -- the number of each constant, found without comparing whole values
+    , tableOtherConsts :: [(Value, Int)] -- constants with no key
     , tableApps :: [(Int, (Int, [Int]))] -- applications: term, function term, argument terms
     , tableForalls :: [(Int, (Variable, [Int], Int))] -- foralls: term, index, guard terms, body term
     }
 
 emptyTable :: TermTable
-emptyTable = TermTable Map.empty [] [] []
+emptyTable = TermTable Map.empty [] Map.empty [] [] []
 
 internAll :: TermTable -> [IotaProof] -> (TermTable, [Int])
 internAll = mapAccumL internTerm
@@ -255,11 +317,21 @@ internTerm table (Forall index guards body) =
             else (table3{tableForalls = (termId, (index, guardIds, bodyId)) : tableForalls table3}, termId)
 internTerm table (CTerm value) =
     -- A builtin function is the same term however it was written, with or without its contracts
-    case lookup (canonicalValue value) (tableConsts table) of
-        Just constId -> internKey table (KConst constId)
-        Nothing ->
-            let constId = length (tableConsts table)
-             in internKey table{tableConsts = (canonicalValue value, constId) : tableConsts table} (KConst constId)
+    let found =
+            case constKey value of
+                Just key -> Map.lookup key (tableConstIds table)
+                Nothing -> lookup value (tableOtherConsts table)
+     in case found of
+            Just constId -> internKey table (KConst constId)
+            Nothing ->
+                let constId = length (tableConsts table)
+                    withConst = table{tableConsts = (canonicalValue value, constId) : tableConsts table}
+                 in internKey
+                        ( case constKey value of
+                            Just key -> withConst{tableConstIds = Map.insert key constId (tableConstIds table)}
+                            Nothing -> withConst{tableOtherConsts = (value, constId) : tableOtherConsts table}
+                        )
+                        (KConst constId)
 internTerm table (FApp funct args) =
     let (table1, functId) = internTerm table funct
         (table2, argIds) = internAll table1 args
@@ -268,6 +340,14 @@ internTerm table (FApp funct args) =
      in if Map.member key (tableKeys table2)
             then (table3, termId)
             else (table3{tableApps = (termId, (functId, argIds)) : tableApps table3}, termId)
+
+-- A proof with the large builtin function values replaced by plain symbols
+lightProof :: IotaProof -> IotaProof
+lightProof (CTerm value@(VFunct _ _ _ (BuiltinFunct funct) _))
+    | funct `elem` [Get, Push, Set, First, Last] = CTerm (canonicalValue value)
+lightProof (FApp funct args) = FApp (lightProof funct) (map lightProof args)
+lightProof (Forall index guards body) = Forall index (map lightProof guards) (lightProof body)
+lightProof other = other
 
 canonicalValue :: Value -> Value
 canonicalValue (VFunct _ _ _ (BuiltinFunct funct) _) = VFunct [] [] [] (BuiltinFunct funct) []
@@ -561,6 +641,12 @@ substituteProofTerm source target (FApp funct args) =
                         (fromMaybe funct maybeFunct)
                         (zipWith (`maybe` id) args maybeArgs)
                     )
+            else Nothing
+substituteProofTerm source target (Forall index guards body) =
+    let maybeGuards = map (substituteProofTerm source target) guards
+        maybeBody = substituteProofTerm source target body
+     in if any isJustProof (maybeBody : maybeGuards)
+            then Just (Forall index (zipWith (`maybe` id) guards maybeGuards) (fromMaybe body maybeBody))
             else Nothing
 substituteProofTerm _ _ _ = Nothing
 
