@@ -5,16 +5,24 @@ import qualified Data.Map as Map
 
 import Control.Monad (void, when)
 import Data.Char (isDigit, isLetter)
+import Data.List (isInfixOf, nub, (\\))
 import Data.Maybe (isJust)
 
 import StdLib
 import TersusTypes
 
--- The parser remembers the structs declared so far, which a struct literal needs: the fields of a
--- struct in declaration order. A struct must be declared before it is used.
-type Structs = Map.Map Name [Variable]
+-- The parser remembers the structs and enums declared so far. A literal needs the fields of a constructor
+-- in declaration order (a struct is a constructor named like its type, a variant is Enum::Variant), and a
+-- match needs the variants of a type. A type must be declared before it is used.
+data Decls = Decls
+    { declCtors :: Map.Map Name [Variable]
+    , declTypes :: Map.Map Name [Name]
+    }
 
-type Parser = Parsec String Structs
+emptyDecls :: Decls
+emptyDecls = Decls Map.empty Map.empty
+
+type Parser = Parsec String Decls
 
 -- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
 -- https://hackage.haskell.org/package/parsec-3.1.17.0/docs/Text-Parsec-Combinator.html
@@ -72,7 +80,11 @@ genericStatementBlock p = do
 
 -- Tersus parsers
 statementBlock :: Parser [Statement]
-statementBlock = genericStatementBlock statement
+statementBlock = concat <$> genericStatementBlock statements
+
+-- A match is rewritten as the statements it stands for, so it can be several statements
+statements :: Parser [Statement]
+statements = matchAssign <|> matchReturn <|> matchStatement <|> (pure <$> statement)
 
 validationStatementBlock :: Parser [ValidationStatement]
 validationStatementBlock = genericStatementBlock validationStatement
@@ -88,6 +100,7 @@ statement =
                 <$> validationStatement
             )
         <|> structStatement
+        <|> enumStatement
         <|> functStatement
         <|> assignStatement
         <|> blockStatement
@@ -138,6 +151,37 @@ whileStatement = do
     body <- curlyBracesParse statementBlock
     return (While cond invariant body)
 
+-- enum Name { Variant, Variant { field: Type, ... }, ... }
+enumStatement :: Parser Statement
+enumStatement = do
+    keyword "enum"
+    whitespace
+    name <- variable
+    whitespace
+    void (char '{')
+    whitespace
+    variants <- variant name `sepEndBy` (char ',' >> whitespace)
+    void (char '}')
+    whitespace
+    when (name `elem` ["Int", "Bool", "List"]) $ fail (name ++ " is a builtin type and cannot be an enum name")
+    when (null variants) $ fail ("Enum " ++ name ++ " has no variants")
+    when (length (nub (map fst variants)) /= length variants) $ fail ("Enum " ++ name ++ " repeats a variant")
+    modifyState
+        ( \d ->
+            d
+                { declCtors = foldr (\(v, fields) m -> Map.insert v (map fst fields) m) (declCtors d) variants
+                , declTypes = Map.insert name (map fst variants) (declTypes d)
+                }
+        )
+    return (EnumDef name variants)
+  where
+    variant enumName = do
+        v <- variable
+        whitespace
+        fields <- option [] (do void (char '{'); whitespace; fs <- structField `sepEndBy` (char ',' >> whitespace); void (char '}'); whitespace; return fs)
+        when (length (nub (map fst fields)) /= length fields) $ fail ("Variant " ++ v ++ " repeats a field")
+        return (enumName ++ "::" ++ v, fields)
+
 structStatement :: Parser Statement
 structStatement = do
     keyword "struct"
@@ -151,7 +195,7 @@ structStatement = do
     whitespace
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
     when (name `elem` ["Int", "Bool", "List"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
-    updateState (Map.insert name (map fst fields))
+    modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
     return (StructDef name fields)
   where
     nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
@@ -171,18 +215,29 @@ structField = do
 structLiteral :: Parser a -> (Value -> [a] -> a) -> Parser a
 structLiteral element apply = do
     (name, declared) <- try $ do
-        candidate <- variable
-        structs <- getState
-        known <- maybe (fail "not a struct") return (Map.lookup candidate structs)
-        whitespace
-        void (char '{')
-        return (candidate, known)
+        candidate <- qualifiedName
+        ctors <- declCtors <$> getState
+        known <- maybe (fail "not a struct or variant") return (Map.lookup candidate ctors)
+        if null known && isVariant candidate
+            then return (candidate, known)
+            else do
+                whitespace
+                void (char '{')
+                return (candidate, known)
+    if null declared && isVariant name then whitespace >> return (apply (builtinFunct (Ctor name [])) []) else structFields element apply name declared
+  where
+    isVariant = ("::" `isInfixOf`)
+
+-- The braces of a struct or variant literal, after its name and the opening brace
+structFields :: Parser a -> (Value -> [a] -> a) -> Name -> [Variable] -> Parser a
+structFields element apply name declared = do
     whitespace
     inits <- many fieldInit
     base <- optionMaybe (string ".." >> whitespace >> element <* whitespace <* optional (char ',' >> whitespace))
     void (char '}')
     whitespace
     mapM_ (\(field, _) -> when (field `notElem` declared) (fail ("Struct " ++ name ++ " has no field " ++ field))) inits
+    when (isJust base && "::" `isInfixOf` name) $ fail ("Update syntax is for structs, not the variant " ++ name)
     when (length (map fst inits) /= length (foldr (\f rest -> if f `elem` rest then rest else f : rest) [] (map fst inits))) $
         fail ("Struct " ++ name ++ " literal repeats a field")
     when (isJust base && all (`elem` map fst inits) declared) $
@@ -204,6 +259,98 @@ structLiteral element apply = do
             (Just given, _) -> return given
             (Nothing, Just from) -> return (apply (builtinFunct (Field (Just name) field)) [from])
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
+
+-- Name or Enum::Variant
+qualifiedName :: Parser Name
+qualifiedName = do
+    first <- variable
+    option first (try (string "::" >> variable) >>= \second -> return (first ++ "::" ++ second))
+
+-- A struct or variant that has been declared, with its fields
+declaredCtor :: Parser (Name, [Variable])
+declaredCtor = do
+    name <- qualifiedName
+    ctors <- declCtors <$> getState
+    maybe (fail ("Unknown struct or variant " ++ name)) (\fields -> return (name, fields)) (Map.lookup name ctors)
+
+-- match scrutinee { Pattern => body, ... } where a pattern is a variant and the fields it binds:
+-- `Shape::Circle { radius: r }`. The body is a block in a statement and an expression after `=` or `return`.
+matchArms :: Parser body -> Parser (Expression, [(Name, [(Variable, Variable)], body)])
+matchArms bodyParser = do
+    keyword "match"
+    whitespace
+    scrutinee <- expression
+    whitespace
+    void (char '{')
+    whitespace
+    arms <- many arm
+    void (char '}')
+    whitespace
+    return (scrutinee, arms)
+  where
+    arm = do
+        (name, declared) <- declaredCtor
+        whitespace
+        binds <- option [] (do void (char '{'); whitespace; bs <- bind `sepEndBy` (char ',' >> whitespace); void (char '}'); whitespace; return bs)
+        mapM_ (\(field, _) -> when (field `notElem` declared) (fail ("Variant " ++ name ++ " has no field " ++ field))) binds
+        when (length (nub (map fst binds)) /= length binds) $ fail ("Pattern " ++ name ++ " repeats a field")
+        void (string "=>")
+        whitespace
+        body <- bodyParser
+        whitespace
+        optional (char ',' >> whitespace)
+        return (name, binds, body)
+    bind = do
+        field <- variable
+        whitespace
+        void (char ':')
+        whitespace
+        var <- variable
+        whitespace
+        return (field, var)
+
+-- The statements a match stands for: a test of each variant but the last, in order, and the last
+-- variant in the final else, since the arms must cover the type. A pattern's fields are read from the
+-- scrutinee at the start of its arm.
+desugarMatch :: Expression -> [(Name, [(Variable, Variable)], [Statement])] -> Parser [Statement]
+desugarMatch _ [] = fail "A match needs at least one arm"
+desugarMatch scrutinee arms@((first, _, _) : _) = do
+    types <- declTypes <$> getState
+    (typeName, variants) <- case [(t, vs) | (t, vs) <- Map.toList types, first `elem` vs] of
+        found : _ -> return found
+        [] -> fail ("Unknown variant " ++ first)
+    let names = [name | (name, _, _) <- arms]
+    when (any (`notElem` variants) names) $ fail ("A match over " ++ typeName ++ " has an arm of another type")
+    when (length (nub names) /= length names) $ fail ("A match over " ++ typeName ++ " repeats a variant")
+    when (not (null (variants \\ names))) $ fail ("A match over " ++ typeName ++ " does not cover " ++ unwords (variants \\ names))
+    return (chain arms)
+  where
+    chain [] = []
+    chain [(name, binds, body)] = bindings name binds ++ body
+    chain ((name, binds, body) : rest) =
+        [If (F (Val (builtinFunct (Is name))) [scrutinee]) (bindings name binds ++ body) (chain rest)]
+    bindings name binds = [Assign var (F (Val (builtinFunct (Project name field))) [scrutinee]) | (field, var) <- binds]
+
+-- match scrutinee { Pattern => { statements }, ... }
+matchStatement :: Parser [Statement]
+matchStatement = do
+    (scrutinee, arms) <- matchArms (curlyBracesParse statementBlock)
+    desugarMatch scrutinee arms
+
+-- var = match scrutinee { Pattern => expression, ... }: the variable must already exist, since a variable first
+-- assigned in a branch is local to it
+matchAssign :: Parser [Statement]
+matchAssign = do
+    var <- try (do v <- variable; whitespace; void (char '='); whitespace; lookAhead (keyword "match"); return v)
+    (scrutinee, arms) <- matchArms expression
+    desugarMatch scrutinee [(name, binds, [Assign var body]) | (name, binds, body) <- arms]
+
+-- return match scrutinee { Pattern => expression, ... }
+matchReturn :: Parser [Statement]
+matchReturn = do
+    try (keyword "return" >> whitespace >> lookAhead (keyword "match"))
+    (scrutinee, arms) <- matchArms expression
+    desugarMatch scrutinee [(name, binds, [Return body]) | (name, binds, body) <- arms]
 
 -- x.field, repeated. A `..` after a term is a range, not a field.
 withFields :: (Value -> [a] -> a) -> Parser a -> Parser a
@@ -404,7 +551,7 @@ nonInfixProof =
         <|> withFields proofApply (parensProof <|> structLiteral proof proofApply <|> try functionProof <|> try abstractProof)
 
 infixProof :: Parser VariableProof
-infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof])
+infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof]) (\funct proof' -> FApp (CTerm (builtinFunct funct)) [proof'])
 
 parensProof :: Parser VariableProof
 parensProof = parensParse proof
@@ -546,17 +693,19 @@ fExpression = do
 
 infixExpression :: Parser Expression
 -- TODO: Function should be Var expression like fExpression produces not Val
-infixExpression = infixLevels nonInfixExpression (\funct lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr])
+infixExpression = infixLevels nonInfixExpression (\funct lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr]) (\funct expr -> F (Val (builtinFunct funct)) [expr])
 
 -- Infix operators in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations.
 -- Each level associates left, so `a + 1 < b * 2` is `(a + 1) < (b * 2)`.
-infixLevels :: Parser a -> (BuiltinFunct -> a -> a -> a) -> Parser a
-infixLevels operand combine = relations
+infixLevels :: Parser a -> (BuiltinFunct -> a -> a -> a) -> (BuiltinFunct -> a -> a) -> Parser a
+infixLevels operand combine testVariant = relations
   where
     level opParser next = chainl1 next (do funct <- opParser; whitespace; return (combine funct))
     multiplicative = level multiplicativeFunct operand
     additive = level arithmeticFunct multiplicative
-    relations = level relationFunct additive
+    relations = do
+        compared <- level relationFunct additive
+        option compared (do keyword "is"; whitespace; (variant, _) <- declaredCtor; whitespace; return (testVariant (Is variant) compared))
 
 arithmeticFunct :: Parser BuiltinFunct
 arithmeticFunct = do
@@ -592,12 +741,12 @@ topLevelWrap p = do
 
 -- Function to run the parser
 parseStatement :: String -> Either ParseError Statement
-parseStatement = runParser (topLevelWrap statement) Map.empty ""
+parseStatement = runParser (topLevelWrap statement) emptyDecls ""
 
 -- Function to run the parser
 parseStatementBlock :: String -> Either ParseError [Statement]
-parseStatementBlock = runParser (topLevelWrap statementBlock) Map.empty ""
+parseStatementBlock = runParser (topLevelWrap statementBlock) emptyDecls ""
 
 -- Function to run the parser
 parseExpression :: String -> Either ParseError Expression
-parseExpression = runParser (topLevelWrap expression) Map.empty ""
+parseExpression = runParser (topLevelWrap expression) emptyDecls ""

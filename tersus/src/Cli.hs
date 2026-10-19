@@ -52,6 +52,7 @@ runSource command source =
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
+renderValue (VData name []) = name
 renderValue (VData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderValue v | (f, v) <- fields] ++ " }"
 renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VBool True) = "true"

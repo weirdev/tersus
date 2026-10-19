@@ -1,0 +1,52 @@
+// An enum is a type with several variants, each with its own named fields. Variants are written
+// Enum::Variant, and `x is Enum::Variant` tests which one a value is. A match takes a value apart:
+// every variant needs an arm, and an arm binds the fields it names.
+enum Shape {
+    Circle { radius: Int },
+    Rect { width: Int, height: Int },
+    Empty,
+};
+
+fn area(s: Shape) -> Int {
+    return match s {
+        Shape::Circle { radius: r } => r * r * 3,
+        Shape::Rect { width: w, height: h } => w * h,
+        Shape::Empty => 0,
+    };
+};
+
+// A variant can be demanded in a contract; the caller has to show it.
+fn radiusOf(s: Shape) -> Int
+    [{ affirm s is Shape::Circle; }]
+    [{ }]
+{
+    return match s {
+        Shape::Circle { radius: r } => r,
+        Shape::Rect { width: w, height: h } => 0,
+        Shape::Empty => 0,
+    };
+};
+
+// A type can contain itself, so a function over it recurses.
+enum Tree {
+    Leaf,
+    Branch { left: Tree, value: Int, right: Tree },
+};
+
+fn sum(t: Tree) -> Int {
+    return match t {
+        Tree::Leaf => 0,
+        Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r),
+    };
+};
+
+circle = Shape::Circle { radius: 2 };
+affirm circle is Shape::Circle;
+radius = radiusOf(circle);
+affirm radius = 2;
+tree = Tree::Branch {
+    left: Tree::Branch { left: Tree::Leaf, value: 1, right: Tree::Leaf },
+    value: 2,
+    right: Tree::Leaf,
+};
+return area(circle) + area(Shape::Rect { width: 3, height: 4 }) + sum(tree);

@@ -77,7 +77,7 @@ Integer literals can be negative: `-1`, `[-1, 2]`.
 
 Every value has a type, and programs are type checked before they are validated:
 
-- A declared struct, such as `Node`,
+- A declared struct or enum, such as `Node` or `Shape`,
 - `Int`, `Bool`, and `List<T>` for any element type `T`, such as `List<Int>`, `List<Bool>` or `List<List<Int>>`. All the elements of a list have the same type, and `[]` takes its element type from how it is used. A variable holding `[]` has one type for its whole life, so `e = []` cannot be pushed an `Int` once and a list later,
 - `fn(Int, Int) -> Int` for a function value.
 
@@ -129,6 +129,50 @@ fn relink(n: Node, target: Int) -> Node [{ }] [{ affirm return.next = target; af
 ```
 
 Lists of structs work like any list: `set(nodes, i, Node { next: 5, ..get(nodes, i) })` changes one element, and the `forall` frame of `set` says the others are unchanged. See `examples/structs.tersus`.
+
+## Enums
+
+An enum is a type with several variants, each with its own named fields (or none). A variant is written `Enum::Variant`.
+
+```tersus
+enum Shape {
+    Circle { radius: Int },
+    Rect { width: Int, height: Int },
+    Empty,
+};
+
+s = Shape::Circle { radius: 4 };
+e = Shape::Empty;
+affirm s is Shape::Circle;       // `is` tests the variant, in an expression or a proof
+```
+
+A `match` takes a value apart. Every variant needs an arm, and an arm binds the fields it names (it may leave fields out):
+
+```tersus
+fn area(s: Shape) -> Int {
+    return match s {
+        Shape::Circle { radius: r } => r * r * 3,
+        Shape::Rect { width: w, height: h } => w * h,
+        Shape::Empty => 0,
+    };
+};
+
+match s {                                   // as a statement, the arms are blocks
+    Shape::Circle { radius: r } => { total = r; },
+    Shape::Rect { width: w, height: h } => { total = w; },
+    Shape::Empty => { },
+};
+```
+
+- `return match ...` and `variable = match ...` take an expression in each arm. A `match` is not an expression inside a larger expression, and `variable = match ...` needs the variable to exist already, like any variable assigned in a branch (declare it first: `area = 0;`).
+- A `match` is rewritten into an `if` chain of `is` tests, with the last variant in the final `else`, so it is validated like an `if`: an arm that cannot run is vacuous, and the facts of the arms that can are joined. A match with a missing, repeated or foreign variant is a parse error.
+- A struct can be matched as the only variant of its type: `match p { Point { x: a } => a }`.
+- Enums can contain themselves: `enum Tree { Leaf, Branch { left: Tree, value: Int, right: Tree } }`, and a function over a tree recurses on its parts. (A compiled Tersus would have to put such fields behind a pointer; the language does not mention it.)
+- Equality `=` is structural, and `x != y` is proved for values built by different variants or with different fields.
+- Reading a field with `x.f` is only allowed on a struct for now. On an enum it is a type error, because the field may be absent: take the value apart with `match`.
+- A contract can demand a variant: `[{ affirm o is Opt::Some; }]`. The caller has to show it, from where the value was built, an `if o is Opt::Some` or an earlier `affirm`. Two different variants of one value cannot both hold, so a contract that assumes both is contradictory and anything follows from it.
+
+See `examples/enums.tersus`.
 
 ## Expressions
 

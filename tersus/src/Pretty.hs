@@ -20,6 +20,11 @@ renderProof name = go 0
             let text = go (max level 1) l ++ " " ++ op ++ " " ++ go (if level == 0 then 1 else level + 1) r
              in if prec > level then "(" ++ text ++ ")" else text
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [struct]) = go 3 struct ++ "." ++ field
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Project _ field)) _)) [struct]) = go 3 struct ++ "." ++ field
+    go prec (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variant)) _)) [value]) =
+        let text = go 1 value ++ " is " ++ variant
+         in if prec > 0 then "(" ++ text ++ ")" else text
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _)) _)) []) = name
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args)
         | length fields == length args = name ++ " { " ++ intercalate ", " (zipWith (\f a -> f ++ ": " ++ go 0 a) fields args) ++ " }"
     go _ (FApp f args) = renderHead f ++ "(" ++ intercalate ", " (map (go 0) args) ++ ")"
@@ -67,10 +72,13 @@ builtinName Div = "/"
 builtinName (Rel r) = relName r
 builtinName (Ctor name _) = name
 builtinName (Field _ field) = "." ++ field
+builtinName (Project _ field) = "." ++ field
+builtinName (Is variant) = "is " ++ variant
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
 renderValue (VBool b) = if b then "true" else "false"
+renderValue (VData name []) = name
 renderValue (VData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderValue v | (f, v) <- fields] ++ " }"
 renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VFunct args _ _ _ _) = "fn(" ++ intercalate ", " args ++ ")"

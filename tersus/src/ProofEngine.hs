@@ -136,9 +136,15 @@ solve facts goals =
         (table4, classes) = evaluateClosure (0 :: Int) table3 equalities
         sameClass a b = rep classes a == rep classes b
         arithmetic = arithmeticEdges table4 classes trueId zeroId
+        clash = constructorClash table4 classes trueId
         entailed goal goalId =
-            sameClass goalId trueId
+            clash
+                || sameClass goalId trueId
                 || or [sameClass (idOf table4 lhs) (idOf table4 rhs) | FApp funct [lhs, rhs] <- [goal], funct == eqProof]
+                || or
+                    [ provablyDistinct table4 classes (idOf table4 lhs) (idOf table4 rhs)
+                    | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [lhs, rhs] <- [goal]
+                    ]
                 || or
                     [ arithmeticEntails arithmetic rel (rep classes (idOf table4 lhs)) (rep classes (idOf table4 rhs))
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
@@ -168,14 +174,21 @@ maxEvaluationRounds = 8
 -- in one class agree field by field, and it needs no rule for an update, which is a constructor
 -- applied to the old struct's fields. A struct that is a known value is handled by evaluation.
 
+-- The field a builtin reads from a struct, however the program wrote it
+fieldRead :: BuiltinFunct -> Maybe Variable
+fieldRead (Field _ field) = Just field
+fieldRead (Project _ field) = Just field
+fieldRead _ = Nothing
+
 selections :: TermTable -> IntMap.IntMap Int -> [(Int, Int)]
 selections table classes = reads ++ injectivity
   where
     reads =
         [ (termId, arg)
         | (termId, (functId, [structId])) <- tableApps table
-        , Just (Field _ field) <- [Map.lookup (rep classes functId) builtinOfClass]
-        , (fields, args) <- Map.findWithDefault [] (rep classes structId) constructions
+        , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
+        , Just field <- [fieldRead funct]
+        , (_, fields, args) <- Map.findWithDefault [] (rep classes structId) constructions
         , (name, arg) <- zip fields args
         , name == field
         ]
@@ -183,18 +196,18 @@ selections table classes = reads ++ injectivity
     injectivity =
         [ link
         | group <- Map.elems constructions
-        , (fields, args) : others <- [group]
-        , (fields', args') <- others
-        , fields == fields'
+        , (name, fields, args) : others <- [group]
+        , (name', fields', args') <- others
+        , name == name'
         , link <- zip args args'
         ]
     builtinOfClass = builtinsByClass table classes (const True)
     constructions =
         Map.fromListWith
             (++)
-            [ (rep classes termId, [(fields, args)])
+            [ (rep classes termId, [(name, fields, args)])
             | (termId, (functId, args)) <- tableApps table
-            , Just (Ctor _ fields) <- [Map.lookup (rep classes functId) builtinOfClass]
+            , Just (Ctor name fields) <- [Map.lookup (rep classes functId) builtinOfClass]
             , length fields == length args
             ]
 
@@ -205,29 +218,100 @@ selections table classes = reads ++ injectivity
 -- the closure is built.
 
 evaluatedTerms :: TermTable -> IntMap.IntMap Int -> [(Int, Value)]
-evaluatedTerms table classes =
-    [ (termId, value)
-    | (termId, (functId, argIds)) <- tableApps table
-    , Map.notMember (rep classes termId) concreteOfClass
-    , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
-    , Just args <- [mapM ((`Map.lookup` concreteOfClass) . rep classes) argIds]
-    , Ok value <- [evalBuiltinFunct funct args]
-    , concrete value
-    ]
+evaluatedTerms table classes = variantTests ++ evaluated
   where
+    evaluated =
+        [ (termId, value)
+        | (termId, (functId, argIds)) <- tableApps table
+        , Map.notMember (rep classes termId) concreteOfClass
+        , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
+        , Just args <- [mapM ((`Map.lookup` concreteOfClass) . rep classes) argIds]
+        , Ok value <- [evalBuiltinFunct funct args]
+        , concrete value
+        ]
+    -- Which variant a value is, when it is built by a constructor whose fields are not all known
+    variantTests =
+        [ (termId, VBool (variant `elem` built))
+        | (termId, (functId, [argId])) <- tableApps table
+        , Map.notMember (rep classes termId) concreteOfClass
+        , Just (Is variant) <- [Map.lookup (rep classes functId) builtinOfClass]
+        , built@(_ : _) <- [Map.findWithDefault [] (rep classes argId) constructed]
+        ]
+    constructed =
+        Map.fromListWith
+            (++)
+            [ (rep classes termId, [name])
+            | (termId, (functId, _)) <- tableApps table
+            , Just (Ctor name _) <- [Map.lookup (rep classes functId) builtinOfClass]
+            ]
     builtinOfClass = builtinsByClass table classes (const True)
-    concreteOfClass =
-        Map.fromList
-            [ (rep classes termId, value)
+    concreteOfClass = Map.map head (constantsByClass table classes)
+
+concrete :: Value -> Bool
+concrete (VInt _) = True
+concrete (VList _) = True
+concrete (VData _ _) = True
+concrete (VBool _) = True
+concrete _ = False
+
+-- The concrete values equal to each class, once each
+constantsByClass :: TermTable -> IntMap.IntMap Int -> Map.Map Int [Value]
+constantsByClass table classes =
+    Map.map nubOrd $
+        Map.fromListWith
+            (++)
+            [ (rep classes termId, [value])
             | (value, constId) <- tableConsts table
             , concrete value
             , Just termId <- [Map.lookup (KConst constId) (tableKeys table)]
             ]
-    concrete (VInt _) = True
-    concrete (VList _) = True
-    concrete (VData _ _) = True
-    concrete (VBool _) = True
-    concrete _ = False
+
+-- The constructors a class is built by: those applied in it and those of its known values
+constructorNames :: TermTable -> IntMap.IntMap Int -> Map.Map Int [Name]
+constructorNames table classes =
+    Map.map nubOrd $
+        Map.fromListWith
+            (++)
+            ( [ (rep classes termId, [name])
+              | (termId, (functId, _)) <- tableApps table
+              , Just (Ctor name _) <- [Map.lookup (rep classes functId) builtinOfClass]
+              ]
+                ++ [ (cls, [name])
+                   | (cls, values) <- Map.toList (constantsByClass table classes)
+                   , VData name _ <- values
+                   ]
+            )
+  where
+    builtinOfClass = builtinsByClass table classes (const True)
+
+-- Two different values, or two different constructors, in one class cannot both be what it is equal to
+constructorClash :: TermTable -> IntMap.IntMap Int -> Int -> Bool
+constructorClash table classes trueId =
+    any ((> 1) . length) (Map.elems (constantsByClass table classes))
+        || any ((> 1) . length) (Map.elems (constructorNames table classes))
+        || any ((> 1) . length . nubOrd) (Map.elems variantsKnownToHold)
+  where
+    -- the variants a value has been said to be, as in `x is Opt::Some` assumed true
+    variantsKnownToHold =
+        Map.fromListWith
+            (++)
+            [ (rep classes argId, [variant])
+            | (termId, (functId, [argId])) <- tableApps table
+            , rep classes termId == rep classes trueId
+            , Just (Is variant) <- [Map.lookup (rep classes functId) (builtinsByClass table classes (const True))]
+            ]
+
+-- Two classes that are known to differ: they are equal to different values, or built by different constructors
+provablyDistinct :: TermTable -> IntMap.IntMap Int -> Int -> Int -> Bool
+provablyDistinct table classes a b =
+    differ (constantsByClass table classes) || differ' (constructorNames table classes)
+  where
+    differ values = case (Map.lookup (rep classes a) values, Map.lookup (rep classes b) values) of
+        (Just (x : _), Just (y : _)) -> x /= y
+        _ -> False
+    differ' names = case (Map.lookup (rep classes a) names, Map.lookup (rep classes b) names) of
+        (Just xs@(_ : _), Just ys@(_ : _)) -> all (`notElem` ys) xs
+        _ -> False
 
 -- Forall instances
 --
@@ -398,6 +482,7 @@ lightProof other = other
 -- the same function however it was written
 unowned :: BuiltinFunct -> BuiltinFunct
 unowned (Field _ field) = Field Nothing field
+unowned (Project _ field) = Field Nothing field
 unowned funct = funct
 
 canonicalValue :: Value -> Value

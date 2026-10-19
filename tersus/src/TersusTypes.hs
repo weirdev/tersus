@@ -12,6 +12,9 @@ data BuiltinFunct
     | Rel Rel
     | Ctor Name [Variable]
     | Field (Maybe Name) Variable
+    | -- Is Ctor tests which variant an enum value is; Project Ctor reads a field of a value known to be that variant
+      Is Name
+    | Project Name Variable
     deriving (Show, Eq, Ord)
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
@@ -71,6 +74,8 @@ data Statement
     | ValidationStatement ValidationStatement
     | -- struct Name { field: Type, ... }; it only matters to the type checker
       StructDef Name [(Variable, Type)]
+    | -- enum Name { Variant { field: Type, ... }, ... } with the variants' full names (Name::Variant)
+      EnumDef Name [(Name, [(Variable, Type)])]
     | AxiomDef Variable [Variable] [ValidationStatement] [ValidationStatement]
     | ProofDef Variable [Variable] [ValidationStatement] [ValidationStatement] [ValidationStatement]
     | Block [Statement]
