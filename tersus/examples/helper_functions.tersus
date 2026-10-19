@@ -5,12 +5,12 @@ fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] {
     return n;
 };
 
-fn inc(n) [{ }] [{ affirm return = (n + 1); }] {
+fn inc(n) [{ }] [{ affirm return = n + 1; }] {
     return n + 1;
 };
 
 // The caller's own contract is proved from the callees' contracts.
-fn incTwice(n) [{ }] [{ affirm return = (n + 2); }] {
+fn incTwice(n) [{ }] [{ affirm return = n + 2; }] {
     return inc(inc(n));
 };
 
