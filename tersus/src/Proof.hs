@@ -766,7 +766,11 @@ valExpressionFunction (VState scope iotaCtx proofCtx iotaseq ruleCtx) iota fnexp
                         -- The exception is an argument that is a literal, when the callee's output proofs
                         -- mention it: set(a, i, 20) leaves get(return, i) = x, and x is 20.
                         outputIotas = concatMap proofIotas functProofs
-                        argLinks = filter (\p -> isArgLink argIotas p || isLiteralArgLink outputIotas argIotas p) flatInputProofs
+                        -- A call nested in an argument, such as get(a, i) in push(out, get(a, i)), has
+                        -- arguments of its own, and their links keep its result tied to the caller's variables.
+                        nestedCallIotas = concatMap proofIotas (filter (not . isIotaEquality) flatInputProofs)
+                        linkedIotas = argIotas ++ nestedCallIotas
+                        argLinks = filter (\p -> isArgLink linkedIotas p || isLiteralArgLink outputIotas linkedIotas p || isCallDefinition argIotas p) flatInputProofs
                      in -- The links tie each argument's fresh iota to the caller's variable, which output
                         -- contracts that mention the arguments (size(return) = size(list) + 1) need
                         Ok (nextState, nonEvalProof : functProofs ++ argLinks)
@@ -776,6 +780,17 @@ valExpressionFunction (VState scope iotaCtx proofCtx iotaseq ruleCtx) iota fnexp
 isTrivialEq :: IotaProof -> Bool
 isTrivialEq (FApp funct [lhs, rhs]) = funct == eqProof && lhs == rhs
 isTrivialEq _ = False
+
+-- What an argument that is itself a call is equal to: t0 = (get(a, i) + 1) for the argument t0 of
+-- push(out, get(a, i) + 1), which the callee's output proofs about t0 need
+isCallDefinition :: [Iota] -> IotaProof -> Bool
+isCallDefinition argIotas (FApp funct [ATerm lhs, FApp _ _]) = funct == eqProof && lhs `elem` argIotas
+isCallDefinition _ _ = False
+
+-- An equality between two iotas
+isIotaEquality :: IotaProof -> Bool
+isIotaEquality (FApp funct [ATerm _, ATerm _]) = funct == eqProof
+isIotaEquality _ = False
 
 -- An equality between an argument's fresh iota and another iota
 isArgLink :: [Iota] -> IotaProof -> Bool
