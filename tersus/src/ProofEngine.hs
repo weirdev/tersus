@@ -114,7 +114,7 @@ splitIndexes facts fresh goal =
      in take maxSplitIndexes (map (termOf table) firstOfEachClass)
 
 maxSplitIndexes :: Int
-maxSplitIndexes = 6
+maxSplitIndexes = 60
 
 maxInstantiationRounds :: Int
 maxInstantiationRounds = 5
