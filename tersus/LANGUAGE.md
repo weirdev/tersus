@@ -71,7 +71,7 @@ Tersus currently has four runtime value categories:
 
 Boolean values can also be produced by relation expressions such as `x < y`. The condition of an `if` consumes them.
 
-Negative literals are not parsed directly. Use subtraction instead, for example `0 - 1`.
+Integer literals can be negative: `-1`, `[-1, 2]`.
 
 ## Expressions
 
@@ -88,10 +88,10 @@ first(xs) + last(xs)
 
 The current infix operators are:
 
-- Arithmetic: `+`, `-`
+- Arithmetic: `*`, `/`, `+`, `-`
 - Relations: `=`, `!=`, `<`, `>`, `<=`, `>=`
 
-All infix operators currently share one precedence level and associate left. Use parentheses when the intended grouping matters.
+Infix operators bind in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations. Each level associates left, so `return = n + 1` reads as `return = (n + 1)` and `a + 1 < b * 2` as `(a + 1) < (b * 2)`. Use parentheses when the intended grouping is not clear.
 
 ## Builtins
 
@@ -106,7 +106,7 @@ The standard library seeds these builtin functions:
 - `+` and `-`: integer arithmetic.
 - `=`, `!=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
-`first` and `last` have builtin input contracts requiring the list size to be greater than zero. The validator checks that with the arithmetic (see Arithmetic), so a call such as `first(l)` needs `size(l) > 0` to be known (from a literal list, a guard or an earlier `affirm`) and fails with `Could not prove: size(list) > 0` otherwise. Concrete evaluation still rejects empty lists and wrong argument types.
+`first` and `last` have builtin input contracts requiring the list size to be greater than zero. The validator checks that with the arithmetic (see Arithmetic), so a call such as `first(l)` needs `size(l) > 0` to be known (from a literal list, a guard or an earlier `affirm`) and fails with `Could not prove: size(list) > 0` otherwise. They also export `return = get(list, 0)` and `return = get(list, size(list) - 1)`, so facts about the elements of a list (a `forall`, or `get(l, 0) = x`) reach `first(l)` and `last(l)`. Concrete evaluation still rejects empty lists and wrong argument types.
 
 `get` and `set` have a builtin input contract requiring `index >= 0` and `index < size(list)`. It is checked with the primitive `checkRel` rewrite, so a call with a concrete list and index needs no proof, while a symbolic index must already be provable at the call site, usually from the enclosing function's contract or a loop invariant:
 
@@ -400,7 +400,7 @@ A function defined at the top level can be called by the functions defined after
 
 ```tersus
 fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };
-fn inc(n) [{ }] [{ affirm return = (n + 1); }] { return n + 1; };
+fn inc(n) [{ }] [{ affirm return = n + 1; }] { return n + 1; };
 fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };
 ```
 
@@ -614,7 +614,7 @@ y = s + 1;
 affirm y != s;
 ```
 
-`*` and `/` bind tighter than `+`, `-` and the relations, which share one precedence and associate left: `2 + 3 * 4` is `14`. `/` rounds down (`-7 / 2` is `-4`). Integer literals can be negative (`x = -4;`, `[-1, 2]`, `3 - -2`). Dividing needs a divisor the validator can show is non-zero, checked like the index of `get`; evaluating `1 / 0` is an error.
+`*` and `/` bind tighter than `+` and `-`: `2 + 3 * 4` is `14`. `/` rounds down (`-7 / 2` is `-4`). Integer literals can be negative (`x = -4;`, `[-1, 2]`, `3 - -2`). Dividing needs a divisor the validator can show is non-zero, checked like the index of `get`; evaluating `1 / 0` is an error.
 
 ```tersus
 fn average(total, count) [{ affirm count > 0; }] [{ }] {

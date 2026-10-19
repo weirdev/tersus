@@ -274,16 +274,7 @@ nonInfixProof =
         <|> try abstractProof
 
 infixProof :: Parser VariableProof
-infixProof = chainl1 (chainl1 nonInfixProof mulOp) op
-  where
-    mulOp = do
-        funct <- multiplicativeFunct
-        whitespace
-        return (\lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof])
-    op = do
-        funct <- infixFunct
-        whitespace
-        return (\lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof])
+infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof])
 
 parensProof :: Parser VariableProof
 parensProof = parensParse proof
@@ -349,8 +340,7 @@ parseNullaryRule = return
 -- otherwise we will parse the lhs of infix expressions
 -- as one of the other expression types,
 -- not matching the infix operator and rhs
--- `*` and `/` bind tighter than every other infix operator. The rest (`+`, `-` and the relations) share one
--- precedence, and all infix operators associate left.
+-- `*` and `/` bind tighter than `+` and `-`, which bind tighter than the relations (see infixLevels).
 expression :: Parser Expression
 expression = try infixExpression <|> nonInfixExpression
 
@@ -426,20 +416,18 @@ fExpression = do
     return $ F (Var fname) args
 
 infixExpression :: Parser Expression
-infixExpression = chainl1 (chainl1 nonInfixExpression mulOp) op
-  where
-    mulOp = do
-        funct <- multiplicativeFunct
-        whitespace
-        return (\lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr])
-    op = do
-        funct <- infixFunct
-        whitespace
-        -- TODO: Function should be Var expression like fExpression produces not Val
-        return (\lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr])
+-- TODO: Function should be Var expression like fExpression produces not Val
+infixExpression = infixLevels nonInfixExpression (\funct lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr])
 
-infixFunct :: Parser BuiltinFunct
-infixFunct = arithmeticFunct <|> relationFunct
+-- Infix operators in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations.
+-- Each level associates left, so `a + 1 < b * 2` is `(a + 1) < (b * 2)`.
+infixLevels :: Parser a -> (BuiltinFunct -> a -> a -> a) -> Parser a
+infixLevels operand combine = relations
+  where
+    level opParser next = chainl1 next (do funct <- opParser; whitespace; return (combine funct))
+    multiplicative = level multiplicativeFunct operand
+    additive = level arithmeticFunct multiplicative
+    relations = level relationFunct additive
 
 arithmeticFunct :: Parser BuiltinFunct
 arithmeticFunct = do

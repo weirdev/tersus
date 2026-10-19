@@ -1791,6 +1791,45 @@ testFunctionCalls =
               parseValidProgramHelper (inc ++ "fn twice(n) [{ }] [{ }] { return inc(inc(n)); }; inc2 = 1; affirm inc2 = 1;")
             ]
 
+testPrecedence :: Test
+testPrecedence =
+    let plus a b = F (Val (builtinFunct Plus)) [a, b]
+        times a b = F (Val (builtinFunct Times)) [a, b]
+        rel r a b = F (Val (builtinFunct (Rel r))) [a, b]
+        int = Val . VInt
+     in testCaseSeq
+            "testPrecedence"
+            [ -- `*` and `/` bind tighter than `+` and `-`, which bind tighter than the relations
+              case parseStatementBlock "x = a + 1 < b * 2;" of
+                Right parsed -> testAssertEq parsed [Assign "x" (rel Lt (plus (Var "a") (int 1)) (times (Var "b") (int 2)))]
+                Left err -> Just (show err)
+            , case parseStatementBlock "x = a = b - 1 * 2;" of
+                Right parsed -> testAssertEq parsed [Assign "x" (rel Eq (Var "a") (F (Val (builtinFunct Minus)) [Var "b", times (int 1) (int 2)]))]
+                Left err -> Just (show err)
+            , parseEvalProgramHelper "return 1 + 2 = 3;" (Just (VBool True))
+            , parseEvalProgramHelper "return 2 * 3 < 4 + 3;" (Just (VBool True))
+            , -- Relations in proofs follow the same levels, so contracts need no parentheses
+              parseValidProgramHelper "fn inc(n) [{ }] [{ affirm return = n + 1; }] { return n + 1; }; x = inc(2); affirm x = 3; affirm x - 1 = 2 * 1;"
+            , parseValidateFailProgramHelper "x = 2; affirm x + 1 = 4;" "Could not prove: x + 1 = 4"
+            ]
+
+testFirstLast :: Test
+testFirstLast =
+    let guarded body = "fn f(l) [{ affirm size(l) > 1; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm return = 0; }] { return " ++ body ++ "; };"
+     in testCaseSeq
+            "testFirstLast"
+            [ -- first and last are get at the first and the last index
+              parseValidProgramHelper "fn f(l) [{ affirm size(l) > 0; }] [{ affirm return = get(l, 0); }] { return first(l); };"
+            , parseValidProgramHelper "fn f(l) [{ affirm size(l) > 0; }] [{ affirm return = get(l, size(l) - 1); }] { return last(l); };"
+            , parseValidProgramHelper "fn f(l) [{ affirm size(l) = 2; }] [{ affirm return = get(l, 1); }] { return last(l); };"
+            , parseValidProgramHelper "l = [4, 5, 6]; affirm first(l) = 4; affirm last(l) = 6;"
+            , -- A forall about the elements reaches them
+              parseValidProgramHelper (guarded "first(l) + last(l)")
+            , -- Rejected: the other end of the list, or an index that is not the last one
+              parseValidateFailProgramHelper "fn f(l) [{ affirm size(l) > 1; }] [{ affirm return = get(l, 0); }] { return last(l); };" "Could not prove: return = get(l, 0)"
+            , parseValidateFailProgramHelper "fn f(l) [{ affirm size(l) > 2; }] [{ affirm return = get(l, 1); }] { return last(l); };" "Could not prove: return = get(l, 1)"
+            ]
+
 testCrlf :: Test
 testCrlf =
     testCaseSeq
@@ -2122,6 +2161,8 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testPrecedence
+                , testFirstLast
                 , testFunctionCalls
                 , testValidationFuel
                 ]

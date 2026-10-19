@@ -10,6 +10,7 @@ import Utils
 
 builtinFunct :: BuiltinFunct -> Value
 builtinFunct Size = VFunct ["list"] [] [] (BuiltinFunct Size) []
+-- first and last are get at the first and the last index, which is how element facts about the list reach them
 builtinFunct First =
     VFunct
         ["list"]
@@ -21,7 +22,10 @@ builtinFunct First =
         ]
         []
         (BuiltinFunct First)
-        []
+        [ FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ATerm "return", FApp (CTerm getSymbol) [ATerm "list", CTerm (VInt 0)]]
+        ]
 builtinFunct Last =
     VFunct
         ["list"]
@@ -33,7 +37,10 @@ builtinFunct Last =
         ]
         []
         (BuiltinFunct Last)
-        []
+        [ FApp
+            (CTerm (builtinFunct (Rel Eq)))
+            [ATerm "return", FApp (CTerm getSymbol) [ATerm "list", FApp (CTerm (builtinFunct Minus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)]]]
+        ]
 -- get requires a valid index, and its result is equal to the term get(list, index), which is what
 -- forall facts about the list are instantiated at. The contract is checked with checkRel so that a concrete
 -- list and index need no proof from the caller, while symbolic ones must already have
