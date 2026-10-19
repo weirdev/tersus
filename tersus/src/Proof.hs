@@ -8,7 +8,7 @@ import Data.Map (
     toList,
   )
 
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import Data.Maybe (mapMaybe)
 import qualified Data.Map as Map
 
@@ -207,7 +207,7 @@ valReturnStatement state expr =
                                     eqSources = proofs ++ nproofs
                                     reflectedOnce = reflProofsByProofs nproofs eqSources
                                     reflectedTwice = reflProofsByProofs (nproofs ++ reflectedOnce) eqSources
-                                    refledNProofs = filter (not . isTrivialEq) (nub (reflectedOnce ++ reflectedTwice))
+                                    refledNProofs = filter (not . isTrivialEq) (nubOrd (reflectedOnce ++ reflectedTwice))
                                     visibleIotas = niota : map snd (toList (vVisibleVars exprState))
                                     state'' = vTopLevelScope exprState
                                  in Ok $ vSetReturn state'' niota (filter (proofOnlyOfIotasOrConst visibleIotas) (nproofs ++ refledNProofs))
@@ -268,7 +268,7 @@ valPath state assumptions stmts =
     let VState (VScopeState iotas proofs (Continuations rest) parent) iotaCtx proofCtx iotaseq ruleCtx = state
      in valBlock $
             VState
-                (VScopeState iotas (nub (proofs ++ assumptions)) (Continuations (Block stmts : rest)) parent)
+                (VScopeState iotas (nubOrd (proofs ++ assumptions)) (Continuations (Block stmts : rest)) parent)
                 iotaCtx
                 proofCtx
                 iotaseq
@@ -291,7 +291,7 @@ joinReturnPaths s0 pThen pElse =
      in popNIotasFromSeq pElse (length returns) `bindResult` \(mergeIotas, sAfter) ->
             let merges = zip mergeIotas returns
                 baseFacts = vGetProofs base
-                visible = nub (concatMap proofIotas baseFacts ++ Map.elems (vVisibleVars base) ++ mergeIotas)
+                visible = nubOrd (concatMap proofIotas baseFacts ++ Map.elems (vVisibleVars base) ++ mergeIotas)
                 toMerged proof =
                     foldl
                         (\p (m, (thenRet, _)) -> maybe p id (substituteProofTerm (ATerm thenRet) (ATerm m) p))
@@ -300,7 +300,7 @@ joinReturnPaths s0 pThen pElse =
                 candidates =
                     filter
                         (\p -> p `notElem` baseFacts && all (`elem` visible) (proofIotas p))
-                        (nub (map toMerged (vGetProofs pThen)))
+                        (nubOrd (map toMerged (vGetProofs pThen)))
                 elseEqualities = [FApp eqProof [ATerm m, ATerm elseRet] | (m, (_, elseRet)) <- merges]
                 elseContext = Engine.proofContextFromFacts (vGetProofs pElse ++ elseEqualities)
                 kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
@@ -353,7 +353,7 @@ containsReturn = any returns
 
 -- Variables assigned anywhere in the statements, including nested blocks
 assignedVars :: [Statement] -> [Variable]
-assignedVars = nub . concatMap assigned
+assignedVars = nubOrd . concatMap assigned
   where
     assigned (Assign var _) = [var]
     assigned (Block stmts) = assignedVars stmts
@@ -382,7 +382,7 @@ joinBranches s0 vars sThen sElse =
                     let merges = zip3 vars mergeIotas (zip thenIotas elseIotas)
                         s0Facts = vGetProofs s0
                         visible =
-                            nub (concatMap proofIotas s0Facts ++ Map.elems (vVisibleVars s0) ++ mergeIotas)
+                            nubOrd (concatMap proofIotas s0Facts ++ Map.elems (vVisibleVars s0) ++ mergeIotas)
                         toMerged proof =
                             foldl
                                 (\p (_, m, (thenIota, _)) -> maybe p id (substituteProofTerm (ATerm thenIota) (ATerm m) p))
@@ -391,7 +391,7 @@ joinBranches s0 vars sThen sElse =
                         candidates =
                             filter
                                 (\p -> p `notElem` s0Facts && all (`elem` visible) (proofIotas p))
-                                (nub (map toMerged (vGetProofs sThen)))
+                                (nubOrd (map toMerged (vGetProofs sThen)))
                         elseEqualities = [FApp eqProof [ATerm m, ATerm elseIota] | (_, m, (_, elseIota)) <- merges]
                         elseContext = Engine.proofContextFromFacts (vGetProofs sElse ++ elseEqualities)
                         kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
@@ -737,7 +737,6 @@ valExpression :: VState -> Iota -> Expression -> Result (VState, [IotaProof]) St
 valExpression state iota (Val val) = valExpressionValue state iota val
 valExpression state iota (Var var) = valExpressionVar state iota var
 valExpression state iota (F fnexpr argexprs) = valExpressionFunction state iota fnexpr argexprs
-valExpression _ _ e = Error $ "Unsupported expression: " ++ show e
 
 valExpressionValue :: VState -> Iota -> Value -> Result (VState, [IotaProof]) String
 valExpressionValue state iota val =
@@ -857,7 +856,7 @@ exportFunctOutputProofs bodyState args inputValStmts outputValStmts =
      in case bodyStateWithOutput of
             Error e -> Error e
             Ok outputState ->
-                let allowedNames = nub (args ++ ["return"] ++ concatMap valStmtDefinedVars inputValStmts ++ concatMap valStmtDefinedVars outputValStmts)
+                let allowedNames = nubOrd (args ++ ["return"] ++ concatMap valStmtDefinedVars inputValStmts ++ concatMap valStmtDefinedVars outputValStmts)
                  in let allowedBindings =
                             mapMaybe
                                 (\var -> case vLookupVar outputState var of
@@ -866,7 +865,7 @@ exportFunctOutputProofs bodyState args inputValStmts outputValStmts =
                                 allowedNames
                     in let namedIotas = namedIotaMap allowedBindings
                        in let exportedProofs =
-                                  nub $
+                                  nubOrd $
                                       mapMaybe
                                           (iotaProofToVarProof namedIotas)
                                           ( filter
@@ -1019,7 +1018,7 @@ maybeConcreteFunctionResult fnValState fnVal iiotas iproofs retiota instantiated
 instantiateFunctOutputProofs :: VState -> [Variable] -> [Iota] -> Iota -> [VariableProof] -> Result (VState, [IotaProof]) String
 instantiateFunctOutputProofs state _ _ _ [] = Ok (state, [])
 instantiateFunctOutputProofs state varArgs argIotas returnIota exportedProofs =
-    let exportedNames = nub (concatMap proofVars exportedProofs)
+    let exportedNames = nubOrd (concatMap proofVars exportedProofs)
      in let exportedProofVarNames = filter (\var -> var /= "return" && notElem var varArgs) exportedNames
          in case popNIotasFromSeq state (length exportedProofVarNames) of
                 Ok (exportedProofVarIotas, state') ->

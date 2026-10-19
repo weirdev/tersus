@@ -1176,14 +1176,14 @@ testExamples =
         , testExampleFile "examples/rejected/loop_stale_fact.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/loop_return_invariant.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/loop_missing_return.tersus" (ExpectRejected "Return value not found")
-        , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "lacks concrete definition")
+        , testExampleFile "examples/rejected/unguarded_access.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
         , testExampleFile "examples/rejected/branch_fact.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/guard_condition.tersus" (ExpectRejected "lacks concrete definition")
+        , testExampleFile "examples/rejected/guard_condition.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
         , testExampleFile "examples/rejected/missing_return.tersus" (ExpectRejected "Return value not found")
         , testExampleFile "examples/rejected/affirm.tersus" (ExpectRejected "Assertion failed")
-        , testExampleFile "examples/rejected/first_of_empty.tersus" (ExpectRejected "is not greater than 0")
+        , testExampleFile "examples/rejected/first_of_empty.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
         , testExampleFile "examples/rejected/unmet_contract.tersus" (ExpectRejected "is not greater than 0")
-        , testExampleFile "examples/rejected/missing_contract.tersus" (ExpectRejected "lacks concrete definition")
+        , testExampleFile "examples/rejected/missing_contract.tersus" (ExpectRejected "Assertion failed: size(list) > 0")
         , testExampleFile "examples/rejected/output_contract.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/bad_proof_rule.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/axiom_input.tersus" (ExpectRejected "is not greater than 0")
@@ -1332,7 +1332,7 @@ testValidateIf =
             \  return r;\
             \};\
             \return firstOr([4, 8], 0);"
-            "lacks concrete definition"
+            "Assertion failed: size(list) > 0"
         , -- A fact only one branch establishes does not survive the join
           parseValidateFailProgramHelper
             "fn f(n) {\
@@ -1481,10 +1481,10 @@ testEarlyReturn =
         , -- Rejected: the guard only helps on the path where it did not return
           parseValidateFailProgramHelper
             "fn f(lst, d) { if size(lst) > 0 { return d; }; return first(lst); };"
-            "lacks concrete definition"
+            "Assertion failed: size(list) > 0"
         , parseValidateFailProgramHelper
             "fn f(lst, d) { if size(lst) < 5 { } else { return d; }; return first(lst); };"
-            "lacks concrete definition"
+            "Assertion failed: size(list) > 0"
         , -- Soundness: the return branch's condition is not known afterwards
           parseValidateFailProgramHelper
             "fn f(n) { if n < 6 { return 1; }; affirm n < 6; return 2; };"
@@ -1740,6 +1740,14 @@ testForallGrownList =
             ]
 
 -- forall in loop invariants and the contracts of functions that build lists
+testCrlf :: Test
+testCrlf =
+    testCaseSeq
+        "testCrlf"
+        [ -- Programs checked out with Windows line endings parse the same, comments included
+          parseEvalProgramHelper "x = 1; // note\r\n\r\nl = [1,\r\n 2];\r\nif x < 2 {\r\n  x = 3;\r\n};\r\nreturn x;\r\n" (Just (VInt 3))
+        ]
+
 testMulDivNegative :: Test
 testMulDivNegative =
     testCaseSeq
@@ -2062,6 +2070,7 @@ main = do
                 , testForallLoops
                 , testPrettyProofs
                 , testMulDivNegative
+                , testCrlf
                 ]
     putStrLn $
         "Summary: "

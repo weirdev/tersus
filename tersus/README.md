@@ -38,7 +38,6 @@ Next steps, roughly in priority order:
 7. Proof transformation v2
     Validator arithmetic is done for comparisons and for adding or subtracting a known constant (`ProofEngine.arithmeticEdges`); `*` and `/` (item 8) and relations between sums of two unknown terms are not
     Evaluate builtins on concrete terms inside the closure, so `out = []` gives `size(out) = 0` without `define s0 = size(out)`
-    Use the arithmetic to drop the `eqToGtZero` rewrite from `first` and `last`'s contracts
 8. Widen operators and literals (done: `*`, `/`, negative literals; see examples/arithmetic.tersus)
     The validator only understands `x * 0`, `x * 1` and `x / 1`; other products and quotients are opaque terms (folded when both operands are known). Nonlinear facts such as `n > 0` giving `n * 2 > 0` would need a rule or a solver step
 9. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
@@ -49,17 +48,14 @@ Next steps, roughly in priority order:
     Cover ints, bools, int lists, and functions to catch builtin/type misuse earlier
 12. Pretty-print proofs in error messages (done for failed `affirm`s, see `Pretty.hs`)
     Other validation errors that embed iotas, proof contexts or whole states (`Function object not validated`, trace output) still use `show`
-13. Maintenance
-    Remove the redundant-pattern warning in `Proof.hs` (`valExpression _ _ e`)
+13. Maintenance (done: `nub` replaced by sets, reflection indexed by subterm, `Value` comparison cheap for builtins, CRLF line endings, redundant pattern, `eqToGtZero` out of `first`/`last`)
     Entailment no longer needs `rewrite refl`, but `deriveRefl` still copies every fact and is used for exporting contract facts; export from the closure instead, then `refl` and `reflectProofsByProofs` can go
-    Improve the performance of the congruence closure in `ProofEngine.entails`. It is fine at the current sizes (the loop examples validate in about 0.2s) but has not been benchmarked on large contexts. With n terms, F facts and A applications:
+    Benchmarked on programs of N `push` calls followed by an `affirm` (at `-O1`): N=20 takes 0.3s, N=40 0.9s and N=80 4.4s, from 1.1s, 9.5s and over 80s before. Plain arithmetic chains of 80 statements take 0.04s. Growth is still about N^2, from these remaining costs:
     The closure is rebuilt from the facts on every `affirm`, invariant check and `if` join, so cost grows with statements times facts; keep it in the proof context and update it as facts are added
-    `insertProofs` and `proofContextFromFacts` use `nub`, which is O(F^2) with deep comparisons and probably dominates before the closure does; use a set keyed on the interned terms
+    `valFunctExprHelper` reflects the call's input proofs through every equality in the context at each call
     The fixpoint loop regroups every application each round, O(n + A log A) per round and up to O(n) rounds (roughly the nesting depth in practice); use-list propagation (Downey-Sethi-Tarjan) gets O(n log n)
-    The union-find has no rank or path compression, and constants are found by a linear scan with deep `Eq` (the standard library functions make that heavy); intern them by a cheaper key
+    The union-find has no rank or path compression, and constants are found by a linear scan
     The context carries the standard library facts twice
-    Benchmark on a synthetic context of a few thousand facts before choosing which of these to do
-    Check that the parser handles CRLF line endings, since files may be checked out with them on Windows
 
 Running (from this (tersus/) directory):
     0. stack run -- run examples/basics.tersus

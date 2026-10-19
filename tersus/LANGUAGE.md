@@ -84,7 +84,7 @@ The standard library seeds these builtin functions:
 - `+` and `-`: integer arithmetic.
 - `=`, `!=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
-`first` and `last` have builtin input contracts requiring the list size to be greater than zero. Their current validation proof relies on the standard-library `eqToGtZero` axiom, whose input contract is checked by the primitive `checkGtZero` rewrite. Concrete evaluation still rejects empty lists and wrong argument types.
+`first` and `last` have builtin input contracts requiring the list size to be greater than zero. The validator checks that with the arithmetic (see Arithmetic), so a call such as `first(l)` needs `size(l) > 0` to be known (from a literal list, a guard or an earlier `affirm`) and fails with `Assertion failed: size(list) > 0` otherwise. Concrete evaluation still rejects empty lists and wrong argument types.
 
 `get` and `set` have a builtin input contract requiring `index >= 0` and `index < size(list)`. It is checked with the primitive `checkRel` rewrite, so a call with a concrete list and index needs no proof, while a symbolic index must already be provable at the call site, usually from the enclosing function's contract or a loop invariant:
 
