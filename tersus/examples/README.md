@@ -29,6 +29,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 | `arithmetic.tersus` | `*`, `/` (rounding down, with a non-zero divisor contract), operator precedence and negative literals | returns `6` |
 | `helper_functions.tersus` | Functions calling the functions defined before them, with each call checked against the callee's contract | returns `11` |
+| `recursion.tersus` | A function calling itself, validated assuming its own output contract, including recursion over a list | returns `26` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
 | `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes, the result's size and each element (the sum of its pair, a `forall`) stated in the function's contract and the loop invariant | returns `[11, 22, 33]` |
@@ -87,6 +88,8 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/get_unproven_index.tersus` | A function calls `get(lst, i)` without any contract on `i`, so nothing proves it is in range |
 | `rejected/parallel_length.tersus` | A `dot` function indexes `b` with a counter bounded by `size(a)`, and no contract says the sizes match |
 | `rejected/call_violates_contract.tersus` | A function calls another without establishing its input contract |
+| `rejected/recursion_wrong_contract.tersus` | A recursive function whose base case breaks its output contract |
+| `rejected/recursion_input.tersus` | A recursive call that does not meet the function's own input contract |
 | `rejected/call_before_definition.tersus` | A function calls one defined after it |
 | `rejected/division_by_zero.tersus` | A function divides by an argument that nothing shows is non-zero |
 | `rejected/push_size.tersus` | An output contract claims `push` leaves the size unchanged |

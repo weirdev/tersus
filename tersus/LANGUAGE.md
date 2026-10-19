@@ -404,7 +404,16 @@ fn inc(n) [{ }] [{ affirm return = n + 1; }] { return n + 1; };
 fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };
 ```
 
-A function sees only the functions defined before it, so there is no recursion yet and no mutual recursion, and calling a later function is a validation error (`Undefined variable`). A function name can be defined only once. An argument or local variable with the same name hides the function. See `examples/helper_functions.tersus`.
+A function sees only the functions defined before it and itself, so there is no mutual recursion, and calling a later function is a validation error (`Undefined variable`).
+
+A function can call itself. Its body is validated assuming its own output contract, and the contract is then checked against the body, so every recursive call must meet the input contract and the base cases must establish the output contract. As for loops this is partial correctness: termination is not checked, and `fn spin(n) [{ }] [{ affirm return = 0; }] { return spin(n); }` validates.
+
+```tersus
+fn upTo(i, n) [{ affirm i <= n; }] [{ affirm return = n; }] {
+    if i < n { return upTo(i + 1, n); } else { return n; };
+};
+```
+ A function name can be defined only once. An argument or local variable with the same name hides the function. See `examples/helper_functions.tersus` and `examples/recursion.tersus`.
 
 The evaluator runs a function body with its argument bindings and expects the body to set a return value. If a function completes without `return`, evaluation fails.
 
@@ -433,7 +442,7 @@ Validation statements are ordinary statements syntactically, but they are used b
 
 ### `affirm`
 
-`affirm` requires a proof to be entailed by the current proof context. The proof may be present directly or match through known equalities, including equalities between the parts of a term: if `s = k` and `size(k) = l` are known then `size(s) + 1` is known to equal `l + 1`, with no `rewrite` needed to say so.
+`affirm` requires a proof to be entailed by the current proof context, and once proved it is added to the context as a fact. That matters when the proof links terms that the heuristics only know are related by arithmetic: after `affirm i = size(l) - 1;`, `get(l, i)` and `get(l, size(l) - 1)` are the same term. The proof may be present directly or match through known equalities, including equalities between the parts of a term: if `s = k` and `size(k) = l` are known then `size(s) + 1` is known to equal `l + 1`, with no `rewrite` needed to say so.
 
 ```tersus
 x = 5;
@@ -637,5 +646,5 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.
-- Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function cannot call itself, and a function name can be defined only once.
+- Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
 - The CLI runs one file at a time and has no REPL or multi-file programs.

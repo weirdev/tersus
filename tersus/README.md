@@ -23,9 +23,9 @@ Next steps, roughly in priority order:
     Instances come only from `get(L, j)` terms in the body, so a body that does not read elements is never used; `exists` is not implemented; and `forall` does not nest
     Proving a `forall` over a range that grew by one splits the index on the indexes the program reads, up to `maxSplitIndexes`; a program with many reads may need a smarter choice
     Benchmark `entailsAll` on large contexts: `frame_facts.tersus` takes about 0.2s because every `affirm` re-solves the closure and instantiates the frame foralls again
-2. Let user functions call other user functions (done for functions defined before the caller, see examples/helper_functions.tersus)
+2. Let user functions call other user functions (done for earlier functions and self-recursion, see examples/helper_functions.tersus and examples/recursion.tersus)
     A top-level `fn` is also registered in the global evaluation context and, for validation, in the global iota and proof contexts (`registerGlobalFunction`, `registerGlobalFunctionProof`), so the bodies of later functions find it by name like a standard library function. A name can be defined once
-    Still to do: self and mutual recursion (a body is validated before its own name exists, so the validator would assume the function's contract while validating its body), and a termination story for it
+    Self-recursion is done (`bindFunctionToItself`): the body is validated with its name bound to a copy that exports the output contract's assertions, and the contract is then checked, so this is partial correctness like loops. Mutual recursion needs a forward declaration, and there is no termination check (for instance a decreasing measure in the contract)
     Argument passing is by value and bodies capture no variables (see LANGUAGE.md); decide the closure rules before adding mutable data
 3. Let declarations
 4. Property objects
