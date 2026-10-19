@@ -3,6 +3,7 @@ module TestTersus (main) where
 import qualified Control.Exception as Exception
 import Control.Exception (SomeException, displayException, try)
 import Control.Monad (when)
+import Data.List (isInfixOf)
 import qualified Data.Map as Map
 import System.Exit (exitFailure)
 
@@ -1737,6 +1738,23 @@ testForallGrownList =
             ]
 
 -- forall in loop invariants and the contracts of functions that build lists
+testPrettyProofs :: Test
+testPrettyProofs =
+    testCaseSeq
+        "testPrettyProofs"
+        [ -- Failed assertions are reported in source syntax rather than as a raw AST
+          parseValidateFailProgramHelper "x = 1; affirm x < 4; affirm x = 2;" "Assertion failed: x = 2"
+        , parseValidateFailProgramHelper "l = [1, 2]; affirm size(l) + 1 = 4;" "Assertion failed: size(l) + 1 = 4"
+        , parseValidateFailProgramHelper "x = 1; affirm x - (1 - 1) != 1;" "Assertion failed: x - (1 - 1) != 1"
+        , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j in 0..size(l): get(l, j) = 0;" "Assertion failed: forall j in 0..size(l): get(l, j) = 0"
+        , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j where j > 0: get(l, j) = 0;" "Assertion failed: forall j where j > 0: get(l, j) = 0"
+        , case parseStatementBlock "l = [1]; affirm 1 = 2;" of
+            Right stmts -> case validate stmts of
+                Error e | "FApp" `isInfixOf` e || "VFunct" `isInfixOf` e -> Just $ "Raw AST in error: " ++ e
+                _ -> Nothing
+            Left err -> Just (show err)
+        ]
+
 testForallLoops :: Test
 testForallLoops =
     let copyLoop invariant element = loopWith "get(a, j)" invariant element
@@ -2011,6 +2029,7 @@ main = do
                 , testForallProof
                 , testForallGrownList
                 , testForallLoops
+                , testPrettyProofs
                 ]
     putStrLn $
         "Summary: "
