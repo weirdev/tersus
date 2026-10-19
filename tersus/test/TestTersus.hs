@@ -250,9 +250,9 @@ testParseComments =
         , case parseStatementBlock "x = 5; // y = 6;\n" of
             Left err -> Just $ "Parse failed: " ++ show err
             Right parsed -> testAssertEq parsed [Assign "x" (Val (VInt 5))]
-        , case parseStatementBlock "x = 5 / 2" of
+        , case parseStatementBlock "x = 5 /" of
             Left _ -> Nothing
-            Right parsed -> Just $ "Expected parse failure for a single slash, got: " ++ show parsed
+            Right parsed -> Just $ "Expected parse failure for a dangling slash, got: " ++ show parsed
         ]
 
 testParse :: Test
@@ -1149,6 +1149,7 @@ testExamples =
         , testExampleFile "examples/contracts.tersus" (ExpectReturn (VInt 8))
         , testExampleFile "examples/rules.tersus" ExpectValid
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
+        , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
@@ -1165,6 +1166,7 @@ testExamples =
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
+        , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/set_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/set_size.tersus" (ExpectRejected "Assertion failed")
@@ -1738,6 +1740,35 @@ testForallGrownList =
             ]
 
 -- forall in loop invariants and the contracts of functions that build lists
+testMulDivNegative :: Test
+testMulDivNegative =
+    testCaseSeq
+        "testMulDivNegative"
+        [ -- Evaluation: `*` and `/` bind tighter than the other infix operators, and `/` rounds down
+          parseEvalProgramHelper "return 2 + 3 * 4;" (Just (VInt 14))
+        , parseEvalProgramHelper "return 2 * 3 + 4 * 5 - 6 / 4;" (Just (VInt 25))
+        , parseEvalProgramHelper "return 7 / 2 * 2;" (Just (VInt 6))
+        , parseEvalProgramHelper "return (0 - 7) / 2;" (Just (VInt (-4)))
+        , parseEvalProgramHelper "return -7 / 2;" (Just (VInt (-4)))
+        , parseEvalProgramHelper "return 3 - -2;" (Just (VInt 5))
+        , parseEvalProgramHelper "x = 4; return x-1;" (Just (VInt 3))
+        , parseEvalProgramHelper "l = [-1, 2, -3]; return get(l, 2);" (Just (VInt (-3)))
+        , parseEvalProgramFailHelper "return 1 / 0;" "Division by zero"
+        , -- Validation: constants fold, `* 1` and `/ 1` keep their operand, other products are opaque
+          parseValidProgramHelper "x = 3; y = x * 4; affirm y = 12; z = y / 5; affirm z = 2;"
+        , parseValidProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 1; }; x = f(3);"
+        , parseValidProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return = 0; }] { return n * 0; }; x = f(3);"
+        , parseValidateFailProgramHelper "fn f(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);" "Assertion failed: return > 0"
+        , parseValidateFailProgramHelper "x = 3; y = x + -1; affirm y = 3;" "Assertion failed: y = 3"
+        , -- Division needs a divisor known to be non-zero
+          parseValidProgramHelper "fn f(a, b) [{ affirm b != 0; }] [{ }] { return a / b; }; x = f(8, 2);"
+        , parseValidProgramHelper "fn f(a, b) [{ affirm b < 0; }] [{ }] { return a / b; }; x = f(8, -2);"
+        , parseValidateFailProgramHelper "fn f(a, b) [{ }] [{ }] { return a / b; }; x = f(8, 2);" "Relation lacks a proof"
+        , parseValidateFailProgramHelper "x = 3 / 0;" "Relation does not hold"
+        , -- Proofs print with the same precedence
+          parseValidateFailProgramHelper "x = 2; affirm x * (x + 1) = 5;" "Assertion failed: x * (x + 1) = 5"
+        ]
+
 testPrettyProofs :: Test
 testPrettyProofs =
     testCaseSeq
@@ -2030,6 +2061,7 @@ main = do
                 , testForallGrownList
                 , testForallLoops
                 , testPrettyProofs
+                , testMulDivNegative
                 ]
     putStrLn $
         "Summary: "

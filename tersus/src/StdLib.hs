@@ -124,6 +124,17 @@ builtinFunct Set =
         ]
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
+builtinFunct Times = VFunct ["a", "b"] [] [] (BuiltinFunct Times) []
+-- Division by zero is rejected, like an out of range index: the divisor must already be known to be non-zero
+builtinFunct Div =
+    VFunct
+        ["a", "b"]
+        [ Rewrite (CheckRel (relProof NotEq (ATerm "b") (CTerm (VInt 0))))
+        , ProofAssert (relProof NotEq (ATerm "b") (CTerm (VInt 0)))
+        ]
+        []
+        (BuiltinFunct Div)
+        []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
 
 stdLibCtx :: Map Variable Value
@@ -137,6 +148,8 @@ stdLibCtx =
         , ("set", builtinFunct Set)
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
+        , ("*", builtinFunct Times)
+        , ("/", builtinFunct Div)
         , ("=", builtinFunct (Rel Eq))
         , ("!=", builtinFunct (Rel NotEq))
         , ("<", builtinFunct (Rel Lt))
@@ -166,9 +179,14 @@ evalBuiltinFunct Set [VIntList l, VInt i, VInt x]
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VIntList (before ++ x : drop 1 after)
 evalBuiltinFunct Set _ = Error "Set only valid for an IntList and two ints"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
-evalBuiltinFunct Minus _ = Error "Plus only valid for two ints"
+evalBuiltinFunct Minus _ = Error "Minus only valid for two ints"
 evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)
 evalBuiltinFunct Plus _ = Error "Plus only valid for two ints"
+evalBuiltinFunct Times [VInt v1, VInt v2] = Ok $ VInt (v1 * v2)
+evalBuiltinFunct Times _ = Error "Times only valid for two ints"
+evalBuiltinFunct Div [VInt _, VInt 0] = Error "Division by zero"
+evalBuiltinFunct Div [VInt v1, VInt v2] = Ok $ VInt (v1 `div` v2)
+evalBuiltinFunct Div _ = Error "Div only valid for two ints"
 evalBuiltinFunct (Rel Eq) [VInt v1, VInt v2] = Ok $ VBool (v1 == v2)
 evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two ints"
 evalBuiltinFunct (Rel NotEq) [VInt v1, VInt v2] = Ok $ VBool (v1 /= v2)

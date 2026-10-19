@@ -572,7 +572,8 @@ The validator decides integer comparisons itself, so `affirm`, loop invariants, 
 - relations in the context (`i < n`, `a <= b`, and `x != y` only as a goal),
 - `x + c` and `x - c` where `c` has a known integer value,
 - any term with a known integer value, and
-- `size(l) >= 0`.
+- `size(l) >= 0`, and
+- `x * 0`, `x * 1` and `x / 1` (any other product or quotient is an uninterpreted term, folded to a number only when both operands are known).
 
 ```tersus
 s = 3;
@@ -580,6 +581,16 @@ affirm s > 0;           // no rewrite eqToGtZero needed
 y = s + 1;
 affirm y != s;
 ```
+
+`*` and `/` bind tighter than `+`, `-` and the relations, which share one precedence and associate left: `2 + 3 * 4` is `14`. `/` rounds down (`-7 / 2` is `-4`). Integer literals can be negative (`x = -4;`, `[-1, 2]`, `3 - -2`). Dividing needs a divisor the validator can show is non-zero, checked like the index of `get`; evaluating `1 / 0` is an error.
+
+```tersus
+fn average(total, count) [{ affirm count > 0; }] [{ }] {
+    return total / count;
+};
+```
+
+See `examples/arithmetic.tersus`.
 
 A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such as the guard of an unreachable branch, prove every comparison.
 
@@ -589,7 +600,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 - Loops are validated for partial correctness only, and termination is not checked: a program can loop forever, and `run` (and validation of a call with known arguments, which evaluates it) will not return.
 - No declarations separate from assignment.
 - No strings, floats, records, or generic lists. Integer lists can be read with `get`, extended with `push` and updated with `set`, which return new lists.
-- Arithmetic is limited to comparisons and adding or subtracting a known constant (see Arithmetic). There is no `*` or `/`, and a relation between `x + y` terms where neither is known is not understood.
+- Arithmetic is limited to comparisons, adding or subtracting a known constant, and multiplying by 0 or 1 or dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known.
 - The size of a list built by a literal or loop is not computed by the validator on its own: `out = []; define s0 = size(out);` is how `examples/build_list.tersus` gets `size(out) = 0`.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`.

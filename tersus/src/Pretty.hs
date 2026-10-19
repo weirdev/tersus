@@ -11,7 +11,7 @@ renderVarProof = renderProof id
 renderProof :: (i -> String) -> Proof i -> String
 renderProof name = go 0
   where
-    -- A term is parenthesized when its operator binds looser than the context's level: relations 0, +/- 1.
+    -- A term is parenthesized when its operator binds looser than the context's level: relations 0, +/- 1, */ 2.
     go _ (ATerm i) = name i
     go _ (BVar v) = v
     go _ (CTerm v) = renderValue v
@@ -37,6 +37,8 @@ renderProof name = go 0
 infixOp :: BuiltinFunct -> Maybe (String, Int)
 infixOp Plus = Just ("+", 1)
 infixOp Minus = Just ("-", 1)
+infixOp Times = Just ("*", 2)
+infixOp Div = Just ("/", 2)
 infixOp (Rel r) = Just (relName r, 0)
 infixOp _ = Nothing
 
@@ -57,6 +59,8 @@ builtinName Push = "push"
 builtinName Set = "set"
 builtinName Plus = "+"
 builtinName Minus = "-"
+builtinName Times = "*"
+builtinName Div = "/"
 builtinName (Rel r) = relName r
 
 renderValue :: Value -> String

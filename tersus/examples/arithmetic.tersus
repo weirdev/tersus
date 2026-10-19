@@ -1,0 +1,20 @@
+// Multiplication, division and negative literals.
+// `*` and `/` bind tighter than `+`, `-` and the relations; division rounds down.
+// `/` requires a divisor the validator can show is non-zero.
+fn average(total, count) [{ affirm count > 0; }] [{ }] {
+    return total / count;
+};
+
+fn scale(n) [{ affirm n > 0; }] [{ affirm return > 0; }] {
+    return n * 1;
+};
+
+offset = -4;
+sum = 2 + 3 * 4;          // 14
+affirm sum = 14;
+shifted = sum + offset;   // 10
+affirm shifted = 10;
+mean = average(shifted, 4);   // 10 / 4 rounds down to 2
+affirm mean = 2;
+below = average(-7, 2);       // -7 / 2 rounds down to -4
+return scale(mean) + below * -1;   // 2 + 4
