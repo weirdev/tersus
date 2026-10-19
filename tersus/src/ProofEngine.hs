@@ -15,7 +15,9 @@ module ProofEngine
     ) where
 
 import qualified Data.IntMap.Strict as IntMap
-import Data.List (foldl', mapAccumL, nub)
+import Data.Containers.ListUtils (nubOrd)
+import Data.List (foldl', mapAccumL)
+import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 
@@ -39,13 +41,13 @@ emptyProofContext :: ProofContext
 emptyProofContext = ProofContext []
 
 proofContextFromFacts :: [IotaProof] -> ProofContext
-proofContextFromFacts = ProofContext . nub
+proofContextFromFacts = ProofContext . nubOrd
 
 proofContextFacts :: ProofContext -> [IotaProof]
 proofContextFacts (ProofContext facts) = facts
 
 insertProofs :: [IotaProof] -> ProofContext -> ProofContext
-insertProofs newFacts (ProofContext facts) = ProofContext (nub (facts ++ newFacts))
+insertProofs newFacts (ProofContext facts) = ProofContext (nubOrd (facts ++ newFacts))
 
 proofContextDelta :: ProofContext -> ProofContext -> [IotaProof]
 proofContextDelta (ProofContext oldFacts) (ProofContext newFacts) =
@@ -74,8 +76,8 @@ entailsAll originalGoals (ProofContext originalFacts) = zipWith provedAsForall g
         let fresh = ATerm (Iota ("$" ++ index))
             guardFacts = map (substituteIndex index fresh) guards
             bodyGoal = substituteIndex index fresh body
-            known = nub (facts ++ guardFacts)
-            holdsUnder extra = and (entailsAll [bodyGoal] (ProofContext (nub (known ++ extra))))
+            known = nubOrd (facts ++ guardFacts)
+            holdsUnder extra = and (entailsAll [bodyGoal] (ProofContext (nubOrd (known ++ extra))))
             comparisons t =
                 [ [FApp (CTerm (builtinFunct (Rel Lt))) [fresh, t]]
                 , [FApp eqProof [fresh, t]]
@@ -96,7 +98,7 @@ entailsAll originalGoals (ProofContext originalFacts) = zipWith provedAsForall g
                         (_, _, guardFlags) = solve currentFacts (goals ++ guardGoals)
                         guardHolds = zip guardGoals (drop (length goals) guardFlags)
                         accepted = [body | (guards, body) <- instances, all (\g -> lookup g guardHolds == Just True) guards]
-                     in if null accepted then flags else saturate (round + 1) (nub (currentFacts ++ accepted))
+                     in if null accepted then flags else saturate (round + 1) (nubOrd (currentFacts ++ accepted))
 
 -- The indexes of the get(L, t) in the facts and the goal, one for each class of equal indexes, other
 -- than the index itself. Only the first few are tried, to bound the work of a proof.
@@ -198,24 +200,27 @@ evaluatedTerms table classes =
 
 forallInstances :: TermTable -> IntMap.IntMap Int -> [IotaProof] -> [([IotaProof], IotaProof)]
 forallInstances table classes facts =
-    nub
+    nubOrd
         [ (map (substituteIndex index indexTerm) guards, instantiated)
         | Forall index guards body <- facts
         , listTerm <- indexedLists index body
         , indexTerm <- getIndexesOf listTerm
         , let instantiated = substituteIndex index indexTerm body
-        , instantiated `notElem` facts
+        , instantiated `Set.notMember` known
         ]
   where
+    known = Set.fromList facts
     getClasses = Map.keys (builtinsByClass table classes (== Get))
-    -- The index terms t of the get(L', t) in the closure with L' equal to the list
-    getIndexesOf listTerm =
-        let listClass = rep classes (idOf table listTerm)
-         in [ termOf table indexId
+    termFor = termOf table
+    -- The index terms t of the get(L', t) in the closure, by the class of L'
+    getIndexes =
+        Map.fromListWith
+            (flip (++))
+            [ (rep classes listId, [termFor indexId])
             | (_, (functId, [listId, indexId])) <- tableApps table
             , rep classes functId `elem` getClasses
-            , rep classes listId == listClass
             ]
+    getIndexesOf listTerm = Map.findWithDefault [] (rep classes (idOf table listTerm)) getIndexes
 
 -- The lists L of the get(L, index) in a proof, where L does not mention the index
 indexedLists :: Variable -> IotaProof -> [IotaProof]
@@ -621,22 +626,24 @@ equalityFacts facts =
     , funct == eqProof
     ]
 
+-- Each proof is rewritten with the sources whose left side occurs in it, found by looking its
+-- subterms up among the sources instead of trying every source.
 reflectProofsByProofs :: [IotaProof] -> [IotaProof] -> [IotaProof]
-reflectProofsByProofs proofs = nub . concatMap (reflectProofsByProof proofs)
+reflectProofsByProofs proofs sources = nubOrd (concatMap reflected proofs)
+  where
+    rewritesOf = Map.fromListWith (flip (++)) [(lhs, [rhs]) | FApp funct [lhs, rhs] <- sources, funct == eqProof]
+    reflected proof =
+        [ new
+        | lhs <- nubOrd (subterms proof)
+        , rhs <- Map.findWithDefault [] lhs rewritesOf
+        , Just new <- [substituteProofTerm lhs rhs proof]
+        ]
 
-reflectProofsByProof :: [IotaProof] -> IotaProof -> [IotaProof]
-reflectProofsByProof (proof : proofs) eqProofSource@(FApp funct [_lhs, _rhs])
-    | funct == eqProof =
-        case reflectProofByProof proof eqProofSource of
-            Just newProof -> newProof : reflectProofsByProof proofs eqProofSource
-            Nothing -> reflectProofsByProof proofs eqProofSource
-reflectProofsByProof _ _ = []
-
-reflectProofByProof :: IotaProof -> IotaProof -> Maybe IotaProof
-reflectProofByProof proof (FApp funct [lhs, rhs])
-    | funct == eqProof =
-        substituteProofTerm lhs rhs proof
-reflectProofByProof _ _ = error "Only Eq relation supported"
+-- The terms substituteProofTerm can replace in a proof: the proof itself and the parts of its applications and foralls
+subterms :: IotaProof -> [IotaProof]
+subterms proof@(FApp funct args) = proof : concatMap subterms (funct : args)
+subterms proof@(Forall _ guards body) = proof : concatMap subterms (body : guards)
+subterms proof = [proof]
 
 substituteProofTerm :: IotaProof -> IotaProof -> IotaProof -> Maybe IotaProof
 substituteProofTerm source target proof

@@ -3,9 +3,9 @@ module TersusTypes where
 import Data.Map (Map)
 
 type Variable = String
-data BuiltinFunct = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Rel Rel deriving (Show, Eq)
+data BuiltinFunct = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Rel Rel deriving (Show, Eq, Ord)
 
-data FunctBody = NativeFunct [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq)
+data FunctBody = NativeFunct [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord)
 
 -- TODO: Generic list type
 data Value
@@ -16,16 +16,35 @@ data Value
       -- Result assertions may contain variables from inputArgs and "return" variable
       -- TODO: Real return slot rather than var
       VFunct [Variable] [ValidationStatement] [ValidationStatement] FunctBody [VariableProof]
-    deriving (Show, Eq)
+    deriving (Show)
+
+-- A builtin is fully described by which builtin it is: its contracts come from the standard library
+-- and are large, and values are compared constantly by the proof engine.
+instance Eq Value where
+    a == b = compare a b == EQ
+
+instance Ord Value where
+    compare (VInt a) (VInt b) = compare a b
+    compare (VIntList a) (VIntList b) = compare a b
+    compare (VBool a) (VBool b) = compare a b
+    compare (VFunct _ _ _ (BuiltinFunct a) _) (VFunct _ _ _ (BuiltinFunct b) _) = compare a b
+    compare (VFunct a b c d e) (VFunct a' b' c' d' e') = compare (a, b, c, d, e) (a', b', c', d', e')
+    compare a b = compare (rank a) (rank b)
+      where
+        rank :: Value -> Int
+        rank VInt{} = 0
+        rank VIntList{} = 1
+        rank VBool{} = 2
+        rank VFunct{} = 3
 
 -- TODO: Call
 data Expression = Val Value | Var Variable | F Expression [Expression]
-    deriving (Show, Eq)
+    deriving (Show, Eq, Ord)
 data ValidationStatement
     = Rewrite RwRule
     | ProofAssert VariableProof
     | AssignProofVar Variable Expression
-    deriving (Show, Eq)
+    deriving (Show, Eq, Ord)
 data Statement
     = Assign Variable Expression
     | Return Expression
@@ -40,7 +59,7 @@ data Statement
     | -- Never parsed: the validator ends a loop body with this to check the invariant, see valReturningWhile
       LoopEnd [ValidationStatement]
     | EndBlock
-    deriving (Show, Eq) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
+    deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- nextStmt
 -- TODO: Naming is probably wrong here
@@ -55,7 +74,7 @@ data ScopeState = ScopeState (Map Variable Value) Continuations (Maybe ScopeStat
 data State = State ScopeState (Map Variable Value)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
-data Rel = Eq | NotEq | Lt | Gt | LtEq | GtEq deriving (Eq, Show)
+data Rel = Eq | NotEq | Lt | Gt | LtEq | GtEq deriving (Eq, Ord, Show)
 newtype Iota = Iota String deriving (Eq, Ord, Show)
 
 -- Function being applied, arguments
@@ -68,7 +87,7 @@ data Proof i
     | CTerm Value
     | Forall Variable [Proof i] (Proof i)
     | BVar Variable
-    deriving (Show, Eq)
+    deriving (Show, Eq, Ord)
 
 proofHasForall :: Proof i -> Bool
 proofHasForall Forall{} = True
@@ -85,12 +104,12 @@ data RwRule
     | CheckGtZero VariableProof
     | CheckRel VariableProof
     | UserRewrite Variable [VariableProof]
-    deriving (Show, Eq) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
+    deriving (Show, Eq, Ord) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 
 data UserRule
     = AxiomRule [Variable] [ValidationStatement] [ValidationStatement]
     | ProofRule [Variable] [ValidationStatement] [VariableProof]
-    deriving (Show, Eq)
+    deriving (Show, Eq, Ord)
 
 type RuleContext = Map Variable UserRule
 

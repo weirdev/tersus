@@ -11,7 +11,7 @@ import Data.Map (
     union,
  )
 
-import Data.List (nub)
+import Data.Containers.ListUtils (nubOrd)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 
 import StdLib
@@ -263,7 +263,7 @@ vGetProofs (VState scope _ proofCtx _ _) = vScopeGetProofs scope ++ proofCtx
 
 vScopeInsertProofs :: VScopeState -> [IotaProof] -> VScopeState
 vScopeInsertProofs (VScopeState iotas proofs c pScope) newProofs =
-    VScopeState iotas (nub (proofs ++ newProofs)) c pScope
+    VScopeState iotas (nubOrd (proofs ++ newProofs)) c pScope
 
 vInsertProofs :: VState -> [IotaProof] -> VState
 vInsertProofs (VState scope iotaCtx proofCtx iotaseq ruleCtx) newProofs =
@@ -480,8 +480,8 @@ proofVars :: VariableProof -> [Variable]
 proofVars (CTerm _) = []
 proofVars (ATerm var) = [var]
 proofVars BVar{} = []
-proofVars (Forall _ guards body) = nub (concatMap proofVars guards ++ proofVars body)
-proofVars (FApp funct args) = nub (proofVars funct ++ concatMap proofVars args)
+proofVars (Forall _ guards body) = nubOrd (concatMap proofVars guards ++ proofVars body)
+proofVars (FApp funct args) = nubOrd (proofVars funct ++ concatMap proofVars args)
 
 valStmtDefinedVars :: ValidationStatement -> [Variable]
 -- Only proof-variable definitions are exportable names from a validation block.
