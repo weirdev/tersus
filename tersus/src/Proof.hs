@@ -13,6 +13,7 @@ import Data.Maybe (mapMaybe)
 import qualified Data.Map as Map
 
 import qualified ProofEngine as Engine
+import Pretty (renderVarProof)
 import ProofHelpers
 import StdLib
 import TersusTypes
@@ -504,7 +505,7 @@ valValidationStatement state (ProofAssert varproof) =
                         proofContext = Engine.proofContextFromFacts proofs
                      in if Engine.entails iotaProof proofContext
                             then Ok state'
-                            else doTrace4 ("Had vars: " ++ show (vGetVars state')) (doTrace4 ("Had proofs: " ++ show proofs) (Error $ "Assertion failed: " ++ show varproof))
+                            else doTrace4 ("Had vars: " ++ show (vGetVars state')) (doTrace4 ("Had proofs: " ++ show proofs) (Error $ "Assertion failed: " ++ renderVarProof varproof))
                 Error e -> Error e
         Error e -> Error e
 valValidationStatement state (AssignProofVar var expr) =

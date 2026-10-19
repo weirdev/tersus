@@ -415,6 +415,12 @@ affirm size(xs) > 0;
 affirm y = (x + 1);
 ```
 
+When an `affirm` (or a contract check) cannot be proved, the error shows the failed proof in this same syntax:
+
+```
+Validation failed: Assertion failed: forall j in 0..size(l): get(l, j) = 0
+```
+
 ### `forall`
 
 `forall` states a fact about every index in a range, for use in `affirm`, contracts and loop invariants. The validator can both prove and use a `forall`. Evaluation ignores it like any validation statement.
