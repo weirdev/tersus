@@ -131,7 +131,7 @@ testParseComplexAssign =
                 Right parsed ->
                     testAssertEq
                         parsed
-                        [ Assign "x" (F (Var "size") [Val (VIntList [5])])
+                        [ Assign "x" (F (Var "size") [Val (VList [VInt 5])])
                         , Assign "rr" (F (Val (builtinFunct Minus)) [Val (VInt 1), Val (VInt 1)])
                         ]
           in testCase "testParseComplexAssign" result
@@ -282,9 +282,9 @@ testEvaluateFullContext :: Test
 testEvaluateFullContext =
     testCaseSeq
         "testEvaluateFullContext"
-        [ evalFCHelper [Assign "x" (F (Var "size") [Val (VIntList [5])])] [("x", VInt 1)]
+        [ evalFCHelper [Assign "x" (F (Var "size") [Val (VList [VInt 5])])] [("x", VInt 1)]
         , evalFCHelper
-            [ Assign "x" (F (Var "size") [Val (VIntList [5])])
+            [ Assign "x" (F (Var "size") [Val (VList [VInt 5])])
             , Assign "y" (F (Val (builtinFunct Minus)) [Val (VInt 1), Val (VInt 1)])
             ]
             [("x", VInt 1), ("y", VInt 0)]
@@ -460,18 +460,18 @@ testValidateWithExpectedMatch =
     testCaseSeq
         "testValidateWithExpectedMatch"
         [ validateWEMatchHelper
-            [ Assign "x" (F (Val (builtinFunct Size)) [Val (VIntList [5])])
+            [ Assign "x" (F (Val (builtinFunct Size)) [Val (VList [VInt 5])])
             ]
             [FApp eqVarProof [ATerm "x", CTerm (VInt 1)]]
         , validateWEMatchHelper
-            [ Assign "x" (Val (VIntList [5, 4]))
+            [ Assign "x" (Val (VList [VInt 5, VInt 4]))
             , Assign "y" (F (Val (builtinFunct Size)) [Var "x"])
             ]
-            [ FApp eqVarProof [ATerm "x", CTerm (VIntList [5, 4])]
+            [ FApp eqVarProof [ATerm "x", CTerm (VList [VInt 5, VInt 4])]
             , FApp eqVarProof [ATerm "y", CTerm (VInt 2)]
             ]
         , validateWEMatchHelper
-            [ Assign "x" (F (Val (builtinFunct Size)) [Val (VIntList [5])])
+            [ Assign "x" (F (Val (builtinFunct Size)) [Val (VList [VInt 5])])
             , Assign "y" (F (Val (builtinFunct Minus)) [Val (VInt 1), Val (VInt 1)])
             ]
             [ FApp eqVarProof [ATerm "x", CTerm (VInt 1)]
@@ -512,15 +512,15 @@ testValidateWithExpectedMismatch =
                 "x"
                 ( F
                     (Val (builtinFunct Size))
-                    [Val (VIntList [5])]
+                    [Val (VList [VInt 5])]
                 )
             ]
             [FApp eqVarProof [ATerm "y", CTerm (VInt 1)]]
         , validateWEMismatchHelper
-            [ Assign "x" (Val (VIntList [5, 4]))
+            [ Assign "x" (Val (VList [VInt 5, VInt 4]))
             , Assign "y" (F (Val (builtinFunct Size)) [Var "x"])
             ]
-            [ FApp eqVarProof [ATerm "x", CTerm (VIntList [5, 4])]
+            [ FApp eqVarProof [ATerm "x", CTerm (VList [VInt 5, VInt 4])]
             , FApp eqVarProof [ATerm "y", CTerm (VInt 2)]
             , FApp eqVarProof [ATerm "z", CTerm (VInt 2)]
             ]
@@ -641,7 +641,7 @@ testProofEngineEvalDerivesConcreteBuiltinResult =
         iotaSize = Iota "size"
         context =
             Engine.proofContextFromFacts
-                [ FApp eqProof [ATerm iotaList, CTerm (VIntList [1, 2])]
+                [ FApp eqProof [ATerm iotaList, CTerm (VList [VInt 1, VInt 2])]
                 , FApp eqProof [ATerm iotaSize, FApp (CTerm (builtinFunct Size)) [ATerm iotaList]]
                 ]
         result = Engine.applyRewrite evalBuiltinFunct (Engine.EngineEval iotaSize) context
@@ -1001,7 +1001,7 @@ testParseEvalFirstEmptyFail =
         "{\
         \  return first([]);\
         \}"
-        "First requires a non-empty IntList"
+        "First requires a non-empty list"
 
 testParseEvalLastEmptyFail :: TestResult
 testParseEvalLastEmptyFail =
@@ -1009,7 +1009,7 @@ testParseEvalLastEmptyFail =
         "{\
         \  return last([]);\
         \}"
-        "Last requires a non-empty IntList"
+        "Last requires a non-empty list"
 
 testParseEvalFirstWrongTypeFail :: TestResult
 testParseEvalFirstWrongTypeFail =
@@ -1017,7 +1017,7 @@ testParseEvalFirstWrongTypeFail =
         "{\
         \  return first(1);\
         \}"
-        "First only valid for IntList"
+        "First only valid for a list"
 
 -- The LANGUAGE.md "Argument Passing" example: the callee's reassignment of a parameter
 -- must not reach the caller's variable, in evaluation or after validation.
@@ -1152,14 +1152,15 @@ testExamples =
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/types.tersus" (ExpectReturn (VInt 6))
+        , testExampleFile "examples/generic_lists.tersus" (ExpectReturn (VList [VList [VInt 1, VInt 2], VList [VInt 3, VInt 4], VList [VInt 1, VInt 2]]))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
-        , testExampleFile "examples/parallel_sum.tersus" (ExpectReturn (VIntList [11, 22, 33]))
-        , testExampleFile "examples/build_list.tersus" (ExpectReturn (VIntList [2, 4, 6]))
-        , testExampleFile "examples/update_list.tersus" (ExpectReturn (VIntList [101, 102, 103]))
+        , testExampleFile "examples/parallel_sum.tersus" (ExpectReturn (VList [VInt 11, VInt 22, VInt 33]))
+        , testExampleFile "examples/build_list.tersus" (ExpectReturn (VList [VInt 2, VInt 4, VInt 6]))
+        , testExampleFile "examples/update_list.tersus" (ExpectReturn (VList [VInt 101, VInt 102, VInt 103]))
         , testExampleFile "examples/element_facts.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/frame_facts.tersus" (ExpectReturn (VInt 149))
         , testExampleFile "examples/forall_facts.tersus" (ExpectReturn (VInt 5))
@@ -1175,6 +1176,7 @@ testExamples =
         , testExampleFile "examples/rejected/recursion_input.tersus" (ExpectRejected "Could not prove: n > 0")
         , testExampleFile "examples/rejected/type_return_mismatch.tersus" (ExpectRejected "returned value: expected Int, got List<Int>")
         , testExampleFile "examples/rejected/type_argument_mismatch.tersus" (ExpectRejected "argument 1 of size")
+        , testExampleFile "examples/rejected/list_element_mismatch.tersus" (ExpectRejected "argument 2 of push: expected Bool, got Int")
         , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
@@ -1210,7 +1212,7 @@ testCliParseCommandLine =
 testCliRenderValue :: TestResult
 testCliRenderValue =
     testAssertEq
-        (map renderValue [VInt 5, VIntList [], VIntList [1, 2], VBool True, VBool False])
+        (map renderValue [VInt 5, VList [], VList [VInt 1, VInt 2], VBool True, VBool False])
         ["5", "[]", "[1, 2]", "true", "false"]
 
 testCliRun :: TestResult
@@ -1894,7 +1896,8 @@ testTypeCheck =
             , typeError "affirm [1] < [2];" "expected Int, got List<Int>"
             , -- Builtins
               typeError "x = size(5);" "argument 1 of size: expected List<?>, got Int"
-            , typeError "l = [1]; x = push(l, [2]);" "expected Int, got List<Int>"
+            , typeError "l = [1]; x = push(l, [2]);" "argument 2 of push: expected Int, got List<Int>"
+            , typeError "x = set([1], 0, true);" "argument 3 of set: expected Int, got Bool"
             , typeError "x = get([1], [0]);" "argument 2 of get: expected Int, got List<Int>"
             , typeError "x = 1 + [1];" "expected Int, got List<Int>"
             , -- Variables keep their type
@@ -1925,6 +1928,39 @@ testTypeCheck =
             , parseFails "fn f(n: Float) -> Int { return n; };"
             , -- validate runs the check first
               parseValidateFailProgramHelper "fn f(n: Int) -> List<Int> { return n; }; x = 1;" "returned value: expected List<Int>, got Int"
+            ]
+
+testGenericLists :: Test
+testGenericLists =
+    let ints = VList . map VInt
+     in testCaseSeq
+            "testGenericLists"
+            [ -- Lists of any element type, in evaluation
+              parseEvalProgramHelper "return [true, false];" (Just (VList [VBool True, VBool False]))
+            , parseEvalProgramHelper "return [[1, 2], [3]];" (Just (VList [ints [1, 2], ints [3]]))
+            , parseEvalProgramHelper "return get([[1, 2], [3]], 1);" (Just (ints [3]))
+            , parseEvalProgramHelper "return size([[1, 2], [3], []]);" (Just (VInt 3))
+            , parseEvalProgramHelper "return push([[1]], [2, 3]);" (Just (VList [ints [1], ints [2, 3]]))
+            , parseEvalProgramHelper "return first([true]);" (Just (VBool True))
+            , parseEvalProgramHelper "return set([true, true], 1, false);" (Just (VList [VBool True, VBool False]))
+            , parseEvalProgramHelper "return [-1, 2];" (Just (ints [-1, 2]))
+            , -- Types
+              parseValidProgramHelper "fn flags(n: Int) -> List<Bool> { return push([true], n > 0); }; x = flags(1);"
+            , -- A builtin is used at its own element type each time
+              parseValidProgramHelper "x = push([], push([], 1)); y = push([true], false);"
+            , parseValidateFailProgramHelper "e = []; x = push(e, 1); y = push(e, push(e, 1));" "argument 2 of push: expected Int, got List<Int>"
+            , parseValidProgramHelper "fn pair(a: Int, b: Int) -> List<List<Int>> { return push(push([], push([], a)), push([], b)); }; x = pair(1, 2);"
+            , parseValidateFailProgramHelper "x = [1, true];" "list element: expected Int, got Bool"
+            , parseValidateFailProgramHelper "x = [[1], 2];" "list element: expected List<Int>, got Int"
+            , parseValidateFailProgramHelper "fn f(l: List<Bool>) -> Int { return first(l); };" "returned value: expected Int, got Bool"
+            , parseValidateFailProgramHelper "x = push([true], 1);" "argument 2 of push: expected Bool, got Int"
+            , -- Validation: elements of any type are terms, so contracts and foralls work on them
+              parseValidProgramHelper "fn f(l: List<Bool>) -> Bool [{ affirm size(l) > 0; }] [{ affirm return = get(l, 0); }] { return first(l); };"
+            , parseValidProgramHelper "l = [true, false]; affirm get(l, 1) = false; affirm size(l) = 2;"
+            , parseValidProgramHelper "m = [[1, 2], [3]]; affirm size(get(m, 0)) = 2; affirm get(get(m, 0), 1) = 2;"
+            , parseValidateFailProgramHelper "l = [true, false]; affirm get(l, 1) = true;" "Could not prove: get(l, 1) = true"
+            , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; }] [{ affirm size(return) = size(m) + 1; affirm get(return, size(m)) = get(m, 0); }] { return push(m, first(m)); };"
+            , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; affirm forall j in 0..size(m): size(get(m, j)) = 2; }] [{ affirm forall j in 0..size(return): size(get(return, j)) = 2; }] { return push(m, first(m)); };"
             ]
 
 testCrlf :: Test
@@ -2128,24 +2164,23 @@ testLists =
         [ -- Evaluation
           parseEvalProgramHelper "return get([5, 6, 7], 0);" (Just (VInt 5))
         , parseEvalProgramHelper "a = [5, 6, 7]; i = 1 + 1; return get(a, i);" (Just (VInt 7))
-        , parseEvalProgramHelper "return push([1, 2], 3);" (Just (VIntList [1, 2, 3]))
-        , parseEvalProgramHelper "return push([], 4);" (Just (VIntList [4]))
+        , parseEvalProgramHelper "return push([1, 2], 3);" (Just (VList [VInt 1, VInt 2, VInt 3]))
+        , parseEvalProgramHelper "return push([], 4);" (Just (VList [VInt 4]))
         , parseEvalProgramHelper "return get(push(push([], 4), 9), 1);" (Just (VInt 9))
         , parseEvalProgramHelper "a = [1]; b = push(a, 2); return size(a) + size(b);" (Just (VInt 3))
         , parseEvalFailStmtHelper "{ return get([5], 1); }" "Get index out of range"
         , parseEvalFailStmtHelper "{ return get([5], 0 - 1); }" "Get index out of range"
-        , parseEvalFailStmtHelper "{ return push([1], [2]); }" "Push only valid"
+        , parseEvalFailStmtHelper "{ return push(1, 2); }" "Push only valid"
         , parseEvalFailStmtHelper "{ return get(1, 0); }" "Get only valid"
-        , parseEvalProgramHelper "return set([1, 2, 3], 1, 20);" (Just (VIntList [1, 20, 3]))
-        , parseEvalProgramHelper "return set([1, 2, 3], 0, 9);" (Just (VIntList [9, 2, 3]))
-        , parseEvalProgramHelper "return set([1, 2, 3], 2, 9);" (Just (VIntList [1, 2, 9]))
+        , parseEvalProgramHelper "return set([1, 2, 3], 1, 20);" (Just (VList [VInt 1, VInt 20, VInt 3]))
+        , parseEvalProgramHelper "return set([1, 2, 3], 0, 9);" (Just (VList [VInt 9, VInt 2, VInt 3]))
+        , parseEvalProgramHelper "return set([1, 2, 3], 2, 9);" (Just (VList [VInt 1, VInt 2, VInt 9]))
         , parseEvalProgramHelper "a = [1, 2, 3]; b = set(a, 0, 9); return first(a) + first(b);" (Just (VInt 10))
-        , parseEvalProgramHelper "return set(push([1], 2), 1, 5);" (Just (VIntList [1, 5]))
+        , parseEvalProgramHelper "return set(push([1], 2), 1, 5);" (Just (VList [VInt 1, VInt 5]))
         , parseEvalFailStmtHelper "{ return set([5], 1, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set([5], 0 - 1, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set([], 0, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set(1, 0, 0); }" "Set only valid"
-        , parseEvalFailStmtHelper "{ return set([5], 0, [1]); }" "Set only valid"
         , -- Frame facts: push's contract keeps the old elements, and nothing else is known
           parseValidProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);"
         , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 2) = get(a, 1);" "Could not prove"
@@ -2262,6 +2297,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testGenericLists
                 , testTypeCheck
                 , testRecursion
                 , testPrecedence

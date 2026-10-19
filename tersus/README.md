@@ -47,7 +47,7 @@ Next steps, roughly in priority order:
     The doubly linked list needs lists that can be updated (`set`, done, see examples/update_list.tersus) plus element-level facts (item 1) to say what each link points to
 10. Distinguish between proof only vars and regular vars
 11. Introduce a small type layer (done: phase 1 of DATA_MODEL.md, see `TypeCheck.hs`)
-    Cover ints, bools, int lists, and functions to catch builtin/type misuse earlier
+    Covers ints, bools, lists of any element type, and functions to catch builtin/type misuse earlier
 12. Pretty-print proofs in error messages (done for failed `affirm`s, see `Pretty.hs`)
     Other validation errors that embed iotas, proof contexts or whole states (`Function object not validated`, trace output) still use `show`
 13. Maintenance (done: `nub` replaced by sets, reflection indexed by subterm, `Value` comparison cheap for builtins, CRLF line endings, redundant pattern, `eqToGtZero` out of `first`/`last`)

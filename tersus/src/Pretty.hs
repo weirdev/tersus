@@ -66,5 +66,5 @@ builtinName (Rel r) = relName r
 renderValue :: Value -> String
 renderValue (VInt i) = show i
 renderValue (VBool b) = if b then "true" else "false"
-renderValue (VIntList l) = "[" ++ intercalate ", " (map show l) ++ "]"
+renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VFunct args _ _ _ _) = "fn(" ++ intercalate ", " args ++ ")"

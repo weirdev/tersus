@@ -52,7 +52,7 @@ runSource command source =
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
-renderValue (VIntList l) = "[" ++ intercalate ", " (map show l) ++ "]"
+renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VBool True) = "true"
 renderValue (VBool False) = "false"
 renderValue VFunct{} = "<function>"

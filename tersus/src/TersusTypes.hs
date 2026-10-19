@@ -15,10 +15,9 @@ data Signature = Signature [Type] Type deriving (Show, Eq, Ord)
 
 data FunctBody = NativeFunct Signature [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord)
 
--- TODO: Generic list type
 data Value
     = VInt Integer
-    | VIntList [Integer]
+    | VList [Value]
     | VBool Bool
     | -- VFunct inputArgs inputArgAssertions outputAssertions body exportedResultAssertions
       -- Result assertions may contain variables from inputArgs and "return" variable
@@ -33,7 +32,7 @@ instance Eq Value where
 
 instance Ord Value where
     compare (VInt a) (VInt b) = compare a b
-    compare (VIntList a) (VIntList b) = compare a b
+    compare (VList a) (VList b) = compare a b
     compare (VBool a) (VBool b) = compare a b
     compare (VFunct _ _ _ (BuiltinFunct a) _) (VFunct _ _ _ (BuiltinFunct b) _) = compare a b
     compare (VFunct a b c d e) (VFunct a' b' c' d' e') = compare (a, b, c, d, e) (a', b', c', d', e')
@@ -41,7 +40,7 @@ instance Ord Value where
       where
         rank :: Value -> Int
         rank VInt{} = 0
-        rank VIntList{} = 1
+        rank VList{} = 1
         rank VBool{} = 2
         rank VFunct{} = 3
 
