@@ -1157,6 +1157,8 @@ testExamples =
         , testExampleFile "examples/element_facts.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/frame_facts.tersus" (ExpectReturn (VInt 149))
         , testExampleFile "examples/forall_facts.tersus" (ExpectReturn (VInt 5))
+        , testExampleFile "examples/rejected/forall_wrong_element.tersus" (ExpectRejected "Assertion failed")
+        , testExampleFile "examples/rejected/forall_invariant_gap.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/forall_unproven.tersus" (ExpectRejected "input validation failed")
         , testExampleFile "examples/rejected/frame_changed_index.tersus" (ExpectRejected "Assertion failed")
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
@@ -1734,6 +1736,48 @@ testForallGrownList =
               engineNot (filter (/= (grown !! 2)) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
             ]
 
+-- forall in loop invariants and the contracts of functions that build lists
+testForallLoops :: Test
+testForallLoops =
+    let copyLoop invariant element = loopWith "get(a, j)" invariant element
+        -- the output contract says every element of the result is `claim`
+        loopWith claim invariant element =
+            "fn copy(a) [{ }] [{ affirm size(return) = size(a); affirm forall j in 0..size(a): get(return, j) = " ++ claim ++ "; }] {\
+            \  n = size(a); i = 0; out = [];\
+            \  while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; "
+                ++ invariant
+                ++ " }] { out = push(out, "
+                ++ element
+                ++ "); i = i + 1; };\
+                   \  return out; };"
+        copyInvariant = "affirm forall j in 0..i: get(out, j) = get(a, j);"
+     in testCaseSeq
+            "testForallLoops"
+            [ -- A list built element by element: the invariant covers the elements so far
+              parseValidProgramHelper (copyLoop copyInvariant "get(a, i)")
+            , parseValidProgramHelper (loopWith "(get(a, j) + 1)" "affirm forall j in 0..i: get(out, j) = (get(a, j) + 1);" "get(a, i) + 1")
+            , -- Rejected: the element pushed is not the one the invariant claims
+              parseValidateFailProgramHelper (copyLoop copyInvariant "get(a, i) + 1") "Loop invariant is not preserved"
+            , parseValidateFailProgramHelper (loopWith "(get(a, j) + 1)" "affirm forall j in 0..i: get(out, j) = (get(a, j) + 1);" "get(a, i)") "Loop invariant is not preserved"
+            , -- Rejected: the invariant covers one element too many on entry
+              parseValidateFailProgramHelper (copyLoop "affirm forall j in 0..(i + 1): get(out, j) = get(a, j);" "get(a, i)") "Loop invariant does not hold on entry"
+            , -- Without the forall in the invariant the output contract's forall cannot be proved
+              parseValidateFailProgramHelper (copyLoop "" "get(a, i)") "Assertion failed"
+            , -- A call nested in an argument keeps its link to the caller's variables
+              parseValidProgramHelper
+                "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, i); return y; };"
+            , parseValidateFailProgramHelper
+                "fn g(l, i, k) [{ affirm i >= 0; affirm i < size(l); affirm k >= 0; affirm k < size(l); }] [{ }] { y = push(l, get(l, i)); affirm get(y, size(l)) = get(l, k); return y; };"
+                "Assertion failed"
+            , parseValidProgramHelper
+                "fn g(l, i) [{ affirm i >= 0; affirm i < size(l); }] [{ }] { y = push(l, get(l, i) + 1); affirm get(y, size(l)) = (get(l, i) + 1); return y; };"
+            , -- The elementwise contract reaches the caller
+              parseValidProgramHelper
+                ( copyLoop copyInvariant "get(a, i)"
+                    ++ "b = [4, 5, 6]; c = copy(b); affirm get(c, 1) = get(b, 1); affirm forall j in 0..size(b): get(c, j) = get(b, j);"
+                )
+            ]
+
 zeroAxiom :: String
 zeroAxiom = "axiom zeros(l) [{ }] [{ affirm forall j in 0..size(l): get(l, j) = 0; }];"
 
@@ -1966,6 +2010,7 @@ main = do
                 , testForallInstantiation
                 , testForallProof
                 , testForallGrownList
+                , testForallLoops
                 ]
     putStrLn $
         "Summary: "

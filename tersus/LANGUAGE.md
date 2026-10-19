@@ -313,6 +313,26 @@ affirm i >= 3;
 
 `i = 0` gives the invariant on entry, `i < 3` gives `i + 1 <= 3` at the end of the body, and the negated condition gives `i >= 3` afterwards.
 
+An invariant can use `forall` to describe a list that is built or updated element by element. The validator proves it for the new element and, with the frame facts of `push` and `set`, for the old ones:
+
+```tersus
+fn doubled(a) [{ }] [{ affirm forall j in 0..size(a): get(return, j) = (get(a, j) + get(a, j)); }] {
+    n = size(a);
+    i = 0;
+    out = [];
+    while i < n [{
+        affirm i >= 0; affirm i <= n; affirm size(out) = i;
+        affirm forall j in 0..i: get(out, j) = (get(a, j) + get(a, j));
+    }] {
+        out = push(out, get(a, i) + get(a, i));
+        i = i + 1;
+    };
+    return out;
+};
+```
+
+See `examples/parallel_sum.tersus`, `examples/build_list.tersus` and `examples/update_list.tersus`.
+
 `while` is a reserved word; `whiley` is still an ordinary name.
 
 #### Returning from a loop

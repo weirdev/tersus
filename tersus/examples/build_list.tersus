@@ -1,16 +1,24 @@
 // Building a list: doubled returns a new list with every element twice as large. push has an
 // output contract (size(return) = size(list) + 1), which the loop invariant turns into the
-// function's own output contract, size(return) = size(a).
+// function's own output contract, size(return) = size(a). The invariant also has a forall that
+// says the elements built so far are the doubles of the matching elements, which becomes the
+// output contract's elementwise fact.
 // The counter facts (0 <= i <= n, and i = n after the loop) follow from the loop condition
-// and the invariant, so no axioms are needed. define s0 = size(out) makes the validator
-// evaluate the size of the empty list, which the invariant size(out) = i needs on entry.
+// and the invariant, so no axioms are needed.
 
-fn doubled(a) [{ }] [{ affirm size(return) = size(a); }] {
+fn doubled(a) [{ }] [{
+    affirm size(return) = size(a);
+    affirm forall j in 0..size(a): get(return, j) = (get(a, j) + get(a, j));
+}] {
     n = size(a);
     i = 0;
     out = [];
-    define s0 = size(out);
-    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; }] {
+    while i < n [{
+        affirm i >= 0;
+        affirm i <= n;
+        affirm size(out) = i;
+        affirm forall j in 0..i: get(out, j) = (get(a, j) + get(a, j));
+    }] {
         out = push(out, get(a, i) + get(a, i));
         i = i + 1;
     };

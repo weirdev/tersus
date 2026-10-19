@@ -29,9 +29,9 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
-| `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes and the result's size stated in the function's contract | returns `[11, 22, 33]` |
-| `build_list.tersus` | Building a list with `push` in a loop, with the result's size stated in an output contract | returns `[2, 4, 6]` |
-| `update_list.tersus` | Updating a list: `set` replaces an element of a copy in a loop, with the size carried by the invariant and stated in the output contract | returns `[101, 102, 103]` |
+| `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes, the result's size and each element (the sum of its pair, a `forall`) stated in the function's contract and the loop invariant | returns `[11, 22, 33]` |
+| `build_list.tersus` | Building a list with `push` in a loop, with the result's size and each element (twice the input's) stated in an output contract | returns `[2, 4, 6]` |
+| `update_list.tersus` | Updating a list: `set` replaces an element of a copy in a loop, with the size and the bumped and untouched elements carried by the invariant (two `forall`s) and stated in the output contract | returns `[101, 102, 103]` |
 | `frame_facts.tersus` | What `push` and `set` leave alone: every other element is unchanged | returns `149` |
 | `forall_facts.tersus` | `forall` facts: assumed by an axiom, required by an input contract, passed on by an output contract, and proved directly | returns `5` |
 | `element_facts.tersus` | What `set` and `push` say about elements: the element just written, repeated in a function's output contract and used by its caller | returns `106` |
@@ -85,6 +85,8 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/get_unproven_index.tersus` | A function calls `get(lst, i)` without any contract on `i`, so nothing proves it is in range |
 | `rejected/parallel_length.tersus` | A `dot` function indexes `b` with a counter bounded by `size(a)`, and no contract says the sizes match |
 | `rejected/push_size.tersus` | An output contract claims `push` leaves the size unchanged |
+| `rejected/forall_wrong_element.tersus` | An output contract claims each element is one more than the sum the loop builds |
+| `rejected/forall_invariant_gap.tersus` | A loop invariant that does not say the elements from `i` on are untouched, so it is not preserved |
 | `rejected/forall_unproven.tersus` | An input contract needs `forall j in 0..size(l)`, but only `0..2` is known |
 | `rejected/frame_changed_index.tersus` | Claims `set` left the element it wrote unchanged |
 | `rejected/set_out_of_range.tersus` | `set(a, 3, 0)` on a three-element list: `3 < size(a)` does not hold |
