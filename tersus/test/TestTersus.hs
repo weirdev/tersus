@@ -1150,6 +1150,7 @@ testExamples =
         , testExampleFile "examples/rules.tersus" ExpectValid
         , testExampleFile "examples/branching.tersus" (ExpectReturn (VInt 106))
         , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
+        , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
@@ -1166,6 +1167,8 @@ testExamples =
         , testExampleFile "examples/rejected/get_out_of_range.tersus" (ExpectRejected "Relation does not hold")
         , testExampleFile "examples/rejected/get_unproven_index.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/parallel_length.tersus" (ExpectRejected "Relation lacks a proof")
+        , testExampleFile "examples/rejected/call_violates_contract.tersus" (ExpectRejected "Could not prove: n > 0")
+        , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
         , testExampleFile "examples/rejected/set_out_of_range.tersus" (ExpectRejected "Relation does not hold")
@@ -1763,6 +1766,31 @@ testValidationFuel =
               parseValidProgramHelper "fn spin(n) [{ }] [{ }] { i = 0; while i >= 0 [{ affirm i >= 0; }] { i = i + 1; }; return i; }; x = spin(1);"
             ]
 
+testFunctionCalls :: Test
+testFunctionCalls =
+    let inc = "fn inc(n) [{ }] [{ affirm return = (n + 1); }] { return n + 1; };"
+        positive = "fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };"
+     in testCaseSeq
+            "testFunctionCalls"
+            [ -- A function calls the functions defined before it
+              parseEvalProgramHelper (inc ++ "fn twice(n) [{ }] [{ }] { return inc(inc(n)); }; return twice(3);") (Just (VInt 5))
+            , parseValidProgramHelper (inc ++ "fn twice(n) [{ }] [{ affirm return = (n + 2); }] { return inc(inc(n)); }; x = twice(3); affirm x = 5;")
+            , -- Chains of calls and calls with contracts of their own
+              parseEvalProgramHelper (inc ++ positive ++ "fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); }; return bump(5);") (Just (VInt 6))
+            , parseValidProgramHelper (inc ++ positive ++ "fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };")
+            , -- Rejected: the callee's input contract is not met, or the caller's own output contract is not
+              parseValidateFailProgramHelper (positive ++ "fn bump(n) [{ }] [{ }] { return positive(n); };") "Could not prove: n > 0"
+            , parseValidateFailProgramHelper (inc ++ "fn twice(n) [{ }] [{ affirm return = (n + 3); }] { return inc(inc(n)); };") "Could not prove"
+            , -- A function cannot call one defined after it, and a name is defined once
+              parseValidateFailProgramHelper "fn f(n) [{ }] [{ }] { return g(n); }; fn g(n) [{ }] [{ }] { return n; };" "Undefined variable: g"
+            , parseValidateFailProgramHelper "fn f(n) [{ }] [{ }] { return n; }; fn f(n) [{ }] [{ }] { return n + 1; };" "Function already defined: f"
+            , parseEvalProgramFailHelper "fn f(n) [{ }] [{ }] { return n; }; fn f(n) [{ }] [{ }] { return n + 1; };" "Function already defined: f"
+            , -- An argument or local variable with the same name hides the function
+              parseEvalProgramHelper "fn inc(n) [{ }] [{ }] { return n + 1; }; fn f(inc) [{ }] [{ }] { return inc + 1; }; return f(3);" (Just (VInt 4))
+            , -- The calls made by a function are not visible to its caller's other statements
+              parseValidProgramHelper (inc ++ "fn twice(n) [{ }] [{ }] { return inc(inc(n)); }; inc2 = 1; affirm inc2 = 1;")
+            ]
+
 testCrlf :: Test
 testCrlf =
     testCaseSeq
@@ -2094,6 +2122,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testFunctionCalls
                 , testValidationFuel
                 ]
     putStrLn $

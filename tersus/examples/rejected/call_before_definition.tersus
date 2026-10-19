@@ -1,0 +1,8 @@
+// Rejected: a function can only call functions defined before it.
+fn firstUse(n) [{ }] [{ }] {
+    return later(n);
+};
+
+fn later(n) [{ }] [{ }] {
+    return n;
+};

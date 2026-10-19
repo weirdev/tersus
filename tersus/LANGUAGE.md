@@ -396,6 +396,16 @@ x = add1(4);
 
 Function arguments are comma-separated. Function bodies are ordinary statement blocks.
 
+A function defined at the top level can be called by the functions defined after it, by name. A call is checked against the callee's contract, as it is in the main program, so a caller must establish the callee's input contract and can use its output contract.
+
+```tersus
+fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };
+fn inc(n) [{ }] [{ affirm return = (n + 1); }] { return n + 1; };
+fn bump(n) [{ affirm n >= 5; }] [{ affirm return > 5; }] { return positive(inc(n)); };
+```
+
+A function sees only the functions defined before it, so there is no recursion yet and no mutual recursion, and calling a later function is a validation error (`Undefined variable`). A function name can be defined only once. An argument or local variable with the same name hides the function. See `examples/helper_functions.tersus`.
+
 The evaluator runs a function body with its argument bindings and expects the body to set a return value. If a function completes without `return`, evaluation fails.
 
 ### Argument Passing
@@ -627,5 +637,5 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.
-- Function calls do not capture lexical closures; function bodies are evaluated with argument bindings plus the standard library context.
+- Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function cannot call itself, and a function name can be defined only once.
 - The CLI runs one file at a time and has no REPL or multi-file programs.

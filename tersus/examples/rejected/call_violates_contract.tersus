@@ -1,0 +1,8 @@
+// Rejected: bump calls positive, whose input contract needs n > 0, but nothing says n is positive.
+fn positive(n) [{ affirm n > 0; }] [{ affirm return > 0; }] {
+    return n;
+};
+
+fn bump(n) [{ }] [{ }] {
+    return positive(n);
+};
