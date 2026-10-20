@@ -1,11 +1,12 @@
 // A doubly linked list stored in an array: the links are indexes into the list.
 // Index 0 is a sentinel, and a list with one node points to itself both ways.
 //
-// What the validator proves is that the list is memory safe: every link is a valid index, so following
-// a link with `get` can never fail, and the operations keep that true. The invariant is four foralls.
+// What the validator proves is that the list is well formed: every link is a valid index, so following a
+// link with `get` can never fail, and the two directions agree (the node after i has i before it, and the
+// node before i has i after it). The operations keep both true. The invariant is six foralls.
 struct Node { value: Int, prev: Int, next: Int };
 
-// The links of every node are inside the list
+// The links of every node are inside the list and agree with each other
 fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node>
     [{
         affirm size(nodes) > 0;
@@ -14,6 +15,8 @@ fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node>
         affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes);
         affirm forall i in 0..size(nodes): get(nodes, i).prev >= 0;
         affirm forall i in 0..size(nodes): get(nodes, i).prev < size(nodes);
+        affirm forall i in 0..size(nodes): get(nodes, get(nodes, i).next).prev = i;
+        affirm forall i in 0..size(nodes): get(nodes, get(nodes, i).prev).next = i;
     }]
     [{
         affirm size(return) = size(nodes) + 1;
@@ -21,6 +24,8 @@ fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node>
         affirm forall i in 0..size(return): get(return, i).next < size(return);
         affirm forall i in 0..size(return): get(return, i).prev >= 0;
         affirm forall i in 0..size(return): get(return, i).prev < size(return);
+        affirm forall i in 0..size(return): get(return, get(return, i).next).prev = i;
+        affirm forall i in 0..size(return): get(return, get(return, i).prev).next = i;
     }]
 {
     q = get(nodes, p).next;           // the node after p, which is a valid index by the invariant

@@ -711,7 +711,7 @@ See `examples/forall_facts.tersus`.
 
 ### A linked list in an array
 
-Lists of structs hold data structures without references: the links are indexes. A doubly linked list is a `List<Node>` whose nodes name their neighbours by index, and what the validator can establish about it is memory safety. If every link of every node is a valid index, following a link with `get` can never fail, and an operation that keeps that true can be called safely.
+Lists of structs hold data structures without references: the links are indexes. A doubly linked list is a `List<Node>` whose nodes name their neighbours by index, and what the validator can establish about it is that it is well formed. If every link of every node is a valid index, following a link with `get` can never fail, and an operation that keeps that true can be called safely. If the two directions agree, the node after `i` has `i` before it, and the node before `i` has `i` after it.
 
 ```tersus
 struct Node { value: Int, prev: Int, next: Int };
@@ -734,7 +734,16 @@ fn walk(nodes: List<Node>, start: Int, steps: Int) -> Int
 };
 ```
 
-`examples/linked_list.tersus` also inserts a node after another one (a `push` and two `set`s, with the four range foralls as the input and output contract) and rejects an insertion whose new node links one past its own index. The stronger invariant that `prev` and `next` agree (`get(nodes, get(nodes, i).next).prev = i`) is true of the insertion, but proving it takes about six nested case splits (the neighbour's index against `p`, `q` and `n` for every `i`), which is beyond the search above. The program is expected to supply the missing pieces as intermediate `affirm`s, but what the useful pieces are for this invariant has not been worked out.
+`examples/linked_list.tersus` also inserts a node after another one (a `push` and two `set`s). Its input and output contracts are six foralls: the four range foralls above, and the agreement of the links in both directions:
+
+```tersus
+affirm forall i in 0..size(nodes): get(nodes, get(nodes, i).next).prev = i;
+affirm forall i in 0..size(nodes): get(nodes, get(nodes, i).prev).next = i;
+```
+
+The validator proves that the insertion keeps all six, without help from the program, in a few seconds. The proof is a case analysis: for an arbitrary `i`, its neighbour is compared with `p`, `q` and the new index `n` (about six nested splits), and in each case the facts about the updated elements decide the goal. `examples/rejected/linked_list_link_out_of_range.tersus` is an insertion whose new node links one past its own index, and `examples/rejected/linked_list_link_disagrees.tersus` is one that forgets to point the old next node back at the new node, which keeps every link in range but breaks the agreement.
+
+A forall is instantiated at the indexes the program reads, and an instance that mentions a further `get(l, k)` could be instantiated again at `k` without end. The search therefore instantiates foralls only at indexes that appear in the facts and the goal, or in one instance of a forall (the instance an agreement forall makes at `i` contains `get(l, i).next`, which is used, but the instance made at that is not). A proof that needs a deeper chain of instances needs the middle step as an `affirm`.
 
 ## Arithmetic
 

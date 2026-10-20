@@ -1,0 +1,36 @@
+// Inserting a node after p must also point the old next node back at it. This insertion forgets that, so
+// the links are all in range but the node after the new one still has p before it, and the validator rejects
+// the agreement of `prev` and `next`.
+struct Node { value: Int, prev: Int, next: Int };
+
+// The links of every node are inside the list and agree with each other
+fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node>
+    [{
+        affirm size(nodes) > 0;
+        affirm p >= 0; affirm p < size(nodes);
+        affirm forall i in 0..size(nodes): get(nodes, i).next >= 0;
+        affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes);
+        affirm forall i in 0..size(nodes): get(nodes, i).prev >= 0;
+        affirm forall i in 0..size(nodes): get(nodes, i).prev < size(nodes);
+        affirm forall i in 0..size(nodes): get(nodes, get(nodes, i).next).prev = i;
+        affirm forall i in 0..size(nodes): get(nodes, get(nodes, i).prev).next = i;
+    }]
+    [{
+        affirm size(return) = size(nodes) + 1;
+        affirm forall i in 0..size(return): get(return, i).next >= 0;
+        affirm forall i in 0..size(return): get(return, i).next < size(return);
+        affirm forall i in 0..size(return): get(return, i).prev >= 0;
+        affirm forall i in 0..size(return): get(return, i).prev < size(return);
+        affirm forall i in 0..size(return): get(return, get(return, i).next).prev = i;
+        affirm forall i in 0..size(return): get(return, get(return, i).prev).next = i;
+    }]
+{
+    q = get(nodes, p).next;           // the node after p, which is a valid index by the invariant
+    n = size(nodes);                  // the new node goes at the end
+    out = push(nodes, Node { value: v, prev: p, next: q });
+    out = set(out, p, Node { next: n, ..get(out, p) });
+    return out;
+};
+
+
+return 1;
