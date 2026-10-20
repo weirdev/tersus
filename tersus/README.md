@@ -44,7 +44,7 @@ Next steps, roughly in priority order:
     The validator only understands `x * 0`, `x * 1` and `x / 1`; other products and quotients are opaque terms (folded when both operands are known). Nonlinear facts such as `n > 0` giving `n * 2 > 0` would need a rule or a solver step
 9. Test against motivating example cases (safe access to lize of size known at runtime, parallel iteration of lists, provably safe doubly linked list)
     Safe access is covered by examples/safe_access.tersus, and parallel iteration of two lists by examples/parallel_sum.tersus
-    The doubly linked list needs lists that can be updated (`set`, done, see examples/update_list.tersus) plus element-level facts (item 1) to say what each link points to
+    The doubly linked list is done for memory safety (examples/linked_list.tersus: structs in a list, `set` and `push`, and foralls over the links). That `prev` and `next` agree after an insertion is not proved yet, see item 1
 10. Distinguish between proof only vars and regular vars
 11. Introduce a small type layer (done: phase 1 of DATA_MODEL.md, see `TypeCheck.hs`)
     Covers ints, bools, lists of any element type, and functions to catch builtin/type misuse earlier
