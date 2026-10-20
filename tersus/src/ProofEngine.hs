@@ -69,23 +69,28 @@ entailsBlocked goals (ProofContext facts) =
 
 -- The facts a proof has reached by instantiating foralls, and the generation of each term (see saturate). A
 -- case split starts from the saturation of the case before it, since facts only grow.
-data Saturation = Saturation [IotaProof] (Map.Map IotaProof Int)
+data Saturation = Saturation [IotaProof] (Set.Set IotaProof) (Map.Map IotaProof Int) Solver
 
 -- The list builtins carry their contracts, which are large, and every fact and goal is compared with the
 -- others many times. They are replaced by plain symbols up front.
 initialSaturation :: [IotaProof] -> [IotaProof] -> Saturation
 initialSaturation goals facts =
     let lightFacts = map lightProof facts
-     in Saturation lightFacts (Map.fromList [(t, 0) | t <- concatMap subterms (lightFacts ++ map lightProof goals)])
+     in Saturation lightFacts (Set.fromList lightFacts) (Map.fromList [(t, 0) | t <- concatMap subterms (lightFacts ++ map lightProof goals)]) (solverAddFacts newSolver lightFacts)
 
 -- Adds facts that hold in a case, as terms of generation 0
 extendSaturation :: Saturation -> [IotaProof] -> Saturation
-extendSaturation (Saturation facts births) new =
-    Saturation (nubOrd (facts ++ new)) (foldl (\m t -> Map.insertWith (\_ old -> old) t 0 m) births (concatMap subterms new))
+extendSaturation (Saturation facts factSet births solver) new =
+    let fresh = filter (`Set.notMember` factSet) (nubOrd new)
+     in Saturation
+            (facts ++ fresh)
+            (foldr Set.insert factSet fresh)
+            (foldl (\m t -> Map.insertWith (\_ old -> old) t 0 m) births (concatMap subterms new))
+            (if null fresh then solver else solverAddFacts solver fresh)
 
 entailsFrom :: [IotaProof] -> Saturation -> ([Bool], [IotaProof], Saturation)
-entailsFrom originalGoals (Saturation startFacts startBirths) =
-    let (flags, blocked, saturated) = saturateWith (0 :: Int) startBirths startFacts
+entailsFrom originalGoals startSaturation =
+    let (flags, blocked, saturated) = saturateWith (0 :: Int) startSaturation
      in (zipWith provedAsForall goals flags, blocked, saturated)
   where
     goals = map lightProof originalGoals
@@ -105,8 +110,8 @@ entailsFrom originalGoals (Saturation startFacts startBirths) =
         let fresh = ATerm (Iota ("$" ++ index))
             guardFacts = map (substituteIndex index fresh) guards
             bodyGoal = substituteIndex index fresh body
-            sat0 = extendSaturation (Saturation startFacts startBirths) guardFacts
-            Saturation known _ = sat0
+            sat0 = extendSaturation startSaturation guardFacts
+            Saturation known _ _ _ = sat0
             holdsUnder extra = let (flags, _, _) = entailsFrom [bodyGoal] (extendSaturation sat0 extra) in and flags
             -- Each entailment costs one unit of budget
             guided budget depth sat extra
@@ -147,17 +152,24 @@ entailsFrom originalGoals (Saturation startFacts startBirths) =
     -- more than the index it was instantiated at. A forall is only instantiated at indexes of a low generation,
     -- so an agreement invariant such as get(l, get(l, i).next).prev = i, whose instance contains a new index
     -- to instantiate at, does not feed itself without end.
-    saturateWith round births currentFacts =
-        let (table, classes, flags) = solve currentFacts goals
+    saturateWith round saturation@(Saturation currentFacts _ births solver) =
+        let (table, classes, flags, quick) = querySolver solver goals
             generationOf t = Map.findWithDefault 0 t births
             instances = forallInstances ((<= maxIndexGeneration) . generationOf) table classes currentFacts
          in if null instances
-                then (flags, [], Saturation currentFacts births)
+                then (flags, [], saturation)
                 else
                     let guardGoals = concatMap (\(guards, _, _) -> guards) instances
-                        (guardTable, guardClasses, guardFlags) = solve currentFacts (goals ++ guardGoals)
-                        guardHolds = zip guardGoals (drop (length goals) guardFlags)
-                        holds g = lookup g guardHolds == Just True
+                        -- The guards are asked of the same classes when the table has their terms; otherwise the facts are
+                        -- solved again with the guards as goals
+                        quickGuards = map quick guardGoals
+                        (guardTable, guardClasses, guardHolds)
+                            | all (/= Nothing) quickGuards = (table, classes, zip guardGoals (map (== Just True) quickGuards))
+                            | otherwise =
+                                let (guardTable', guardClasses', guardFlags, _) = querySolver solver (goals ++ guardGoals)
+                                 in (guardTable', guardClasses', zip guardGoals (drop (length goals) guardFlags))
+                        holds g = Map.lookup g guardHoldsMap == Just True
+                        guardHoldsMap = Map.fromList guardHolds
                         acceptedInstances = [(body, indexTerm) | (guards, body, indexTerm) <- instances, all holds guards]
                         accepted = map fst acceptedInstances
                         births' =
@@ -184,10 +196,11 @@ entailsFrom originalGoals (Saturation startFacts startBirths) =
                         relevant t = rep guardClasses (idOf guardTable t) `Set.member` goalIndexClasses
                         distinctSides table' classes' (FApp _ [a, b]) = rep classes' (idOf table' a) /= rep classes' (idOf table' b)
                         distinctSides _ _ _ = True
-                        next = nubOrd (currentFacts ++ accepted)
+                        next = (extendSaturation saturation accepted) `withBirths` births'
+                        withBirths (Saturation f fs _ sv) b = Saturation f fs b sv
                      in if null accepted || round >= maxInstantiationRounds
-                            then (flags, missing, Saturation next births')
-                            else saturateWith (round + 1) births' next
+                            then (flags, missing, next)
+                            else saturateWith (round + 1) next
 
 -- The index terms of the get(L, t) a proof contains
 goalIndexes :: IotaProof -> [IotaProof]
@@ -245,18 +258,22 @@ maxInstantiationRounds = 5
 -- Interns the facts and goals, builds the classes, and says which goals hold
 solve :: [IotaProof] -> [IotaProof] -> (TermTable, IntMap.IntMap Int, [Bool])
 solve givenFacts goals =
-    let -- a != b is also b != a
-        facts = givenFacts ++ [FApp funct [b, a] | FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [a, b] <- givenFacts]
-        (table1, factIds) = internAll emptyTable facts
-        (table2, goalIds) = internAll table1 goals
-        (table3a, trueId) = internTerm table2 (CTerm (VBool True))
-        (table3, zeroId) = internTerm table3a (CTerm (VInt 0))
-        equalities =
-            concat
-                [ (factId, trueId) : [(idOf table3 lhs, idOf table3 rhs) | FApp funct [lhs, rhs] <- [fact], funct == eqProof]
-                | (fact, factId) <- zip facts factIds
-                ]
-        (table4, classes) = evaluateClosure (0 :: Int) table3 equalities
+    let (table, classes, flags, _) = solveQuery givenFacts goals
+     in (table, classes, flags)
+
+-- As solve, and a way to ask about more relations without solving again: it answers for a relation whose sides are
+-- terms the table already has, and says Nothing for any other goal
+solveQuery :: [IotaProof] -> [IotaProof] -> (TermTable, IntMap.IntMap Int, [Bool], IotaProof -> Maybe Bool)
+solveQuery givenFacts goals = querySolver (solverAddFacts newSolver givenFacts) goals
+
+-- The classes of a solver's facts and the goals interned with them, which of the goals hold, and a quick query
+querySolver :: Solver -> [IotaProof] -> (TermTable, IntMap.IntMap Int, [Bool], IotaProof -> Maybe Bool)
+querySolver facts goals =
+    let (solver, goalIds) = solverGoals facts goals
+        table4 = solverTable solver
+        classes = closureFlat (solverClosure solver)
+        trueId = solverTrueId solver
+        zeroId = solverZeroId solver
         sameClass a b = rep classes a == rep classes b
         arithmetic = arithmeticEdges table4 classes trueId zeroId
         clash = constructorClash table4 classes trueId
@@ -272,20 +289,104 @@ solve givenFacts goals =
                     [ arithmeticEntails arithmetic rel (rep classes (idOf table4 lhs)) (rep classes (idOf table4 rhs))
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
                     ]
-     in (table4, classes, zipWith entailed goals goalIds)
+        -- The applications by the classes of their function and arguments, to find a relation that is a fact
+        -- under congruence
+        appsBySignature = Map.fromListWith (++) [((rep classes functId, map (rep classes) argIds), [termId]) | (termId, (functId, argIds)) <- tableApps table4]
+        quick (FApp funct [lhs, rhs]) =
+            case (lookupTerm table4 funct, lookupTerm table4 lhs, lookupTerm table4 rhs) of
+                (functId, Just l, Just r) ->
+                    Just
+                        ( clash
+                            || or [sameClass t trueId | Just f <- [functId], t <- Map.findWithDefault [] (rep classes f, [rep classes l, rep classes r]) appsBySignature]
+                            || or [sameClass l r | funct == eqProof]
+                            || or [provablyDistinct table4 classes l r | CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _) <- [funct]]
+                            || or [arithmeticEntails arithmetic rel (rep classes l) (rep classes r) | CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _) <- [funct]]
+                        )
+                _ -> Nothing
+        quick _ = Nothing
+     in (table4, classes, zipWith entailed goals goalIds, quick)
 
--- The classes, once every builtin applied to concrete values is equal to its value. Evaluating
--- gives new constants, which can make more applications concrete, so it repeats.
-evaluateClosure :: Int -> TermTable -> [(Int, Int)] -> (TermTable, IntMap.IntMap Int)
-evaluateClosure round table equalities =
-    let classes = congruenceClosure (tableApps table) (tableForalls table) equalities
+-- A solver holds the terms and the congruence closure of some facts, so that more facts and goals can be added to it
+-- without starting again. Adding gives a new solver; the one it was added to is unchanged.
+data Solver = Solver
+    { solverTable :: TermTable
+    , solverClosure :: Closure
+    , solverTrueId :: Int
+    , solverZeroId :: Int
+    , solverApps :: Int -- how many applications and foralls of the table the closure has
+    , solverForalls :: Int
+    }
+
+newSolver :: Solver
+newSolver =
+    let (table1, trueId) = internTerm emptyTable (CTerm (VBool True))
+        (table2, zeroId) = internTerm table1 (CTerm (VInt 0))
+     in Solver table2 emptyClosure trueId zeroId 0 0
+
+-- Gives the closure the terms interned since it last had them
+syncClosure :: Solver -> Solver
+syncClosure solver =
+    let table = solverTable solver
+        newApps = take (tableAppCount table - solverApps solver) (tableApps table)
+        newForalls = take (tableForallCount table - solverForalls solver) (tableForalls table)
+        shapes =
+            reverse [(termId, AppShape functId argIds) | (termId, (functId, argIds)) <- newApps]
+                ++ reverse [(termId, ForallShape index guardIds bodyId) | (termId, (index, guardIds, bodyId)) <- newForalls]
+     in solver{solverClosure = closureAdd (solverClosure solver) shapes, solverApps = tableAppCount table, solverForalls = tableForallCount table}
+
+solverIntern :: Solver -> [IotaProof] -> (Solver, [Int])
+solverIntern solver terms =
+    let (table, ids) = internAll (solverTable solver) terms
+     in (syncClosure solver{solverTable = table}, ids)
+
+-- Facts are equal to true, and the two sides of an equality are equal. a != b is also b != a.
+solverAddFacts :: Solver -> [IotaProof] -> Solver
+solverAddFacts solver givenFacts =
+    let facts = givenFacts ++ [FApp funct [b, a] | FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [a, b] <- givenFacts]
+        (solver1, factIds) = solverIntern solver facts
+        table = solverTable solver1
+        equalities =
+            concat
+                [ (factId, solverTrueId solver1) : [(idOf table lhs, idOf table rhs) | FApp funct [lhs, rhs] <- [fact], funct == eqProof]
+                | (fact, factId) <- zip facts factIds
+                ]
+     in settleSolver 0 solver1{solverClosure = closureJoin (solverClosure solver1) equalities}
+
+-- Interns goals into a solver, so that they take part in the closure
+solverGoals :: Solver -> [IotaProof] -> (Solver, [Int])
+solverGoals solver goals =
+    let (solver1, goalIds) = solverIntern solver goals
+     in (settleSolver 0 solver1, goalIds)
+
+-- The number of a term, when the table already has it
+lookupTerm :: TermTable -> IotaProof -> Maybe Int
+lookupTerm table (ATerm iota) = Map.lookup (KIota iota) (tableKeys table)
+lookupTerm table (BVar index) = Map.lookup (KBound index) (tableKeys table)
+lookupTerm table (CTerm value) =
+    let found =
+            case constKey value of
+                Just key -> Map.lookup key (tableConstIds table)
+                Nothing -> lookup value (tableOtherConsts table)
+     in found >>= \constId -> Map.lookup (KConst constId) (tableKeys table)
+lookupTerm table (FApp funct args) = do
+    functId <- lookupTerm table funct
+    argIds <- mapM (lookupTerm table) args
+    Map.lookup (KApp functId argIds) (tableKeys table)
+lookupTerm _ (Forall _ _ _) = Nothing
+
+-- Makes every builtin applied to concrete values equal to its value. Evaluating gives new constants, which can make
+-- more applications concrete, so it repeats.
+settleSolver :: Int -> Solver -> Solver
+settleSolver round solver =
+    let table = solverTable solver
+        classes = closureFlat (solverClosure solver)
         values = evaluatedTerms table classes
         links = [link | link@(term, field) <- selections table classes, rep classes term /= rep classes field]
      in if (null values && null links) || round >= maxEvaluationRounds
-            then (table, classes)
+            then solver
             else
-                let (table', valueIds) = internAll table [CTerm value | (_, value) <- values]
-                 in evaluateClosure (round + 1) table' (equalities ++ zip (map fst values) valueIds ++ links)
+                let (solver1, valueIds) = solverIntern solver [CTerm value | (_, value) <- values]
+                 in settleSolver (round + 1) solver1{solverClosure = closureJoin (solverClosure solver1) (zip (map fst values) valueIds ++ links)}
 
 maxEvaluationRounds :: Int
 maxEvaluationRounds = 8
@@ -555,10 +656,12 @@ data TermTable = TermTable
     , tableOtherConsts :: [(Value, Int)] -- constants with no key
     , tableApps :: [(Int, (Int, [Int]))] -- applications: term, function term, argument terms
     , tableForalls :: [(Int, (Variable, [Int], Int))] -- foralls: term, index, guard terms, body term
+    , tableAppCount :: Int
+    , tableForallCount :: Int
     }
 
 emptyTable :: TermTable
-emptyTable = TermTable Map.empty [] Map.empty [] [] []
+emptyTable = TermTable Map.empty [] Map.empty [] [] [] 0 0
 
 internAll :: TermTable -> [IotaProof] -> (TermTable, [Int])
 internAll = mapAccumL internTerm
@@ -573,7 +676,7 @@ internTerm table (Forall index guards body) =
         (table3, termId) = internKey table2 key
      in if Map.member key (tableKeys table2)
             then (table3, termId)
-            else (table3{tableForalls = (termId, (index, guardIds, bodyId)) : tableForalls table3}, termId)
+            else (table3{tableForalls = (termId, (index, guardIds, bodyId)) : tableForalls table3, tableForallCount = tableForallCount table3 + 1}, termId)
 internTerm table (CTerm value) =
     -- A builtin function is the same term however it was written, with or without its contracts
     let found =
@@ -598,7 +701,7 @@ internTerm table (FApp funct args) =
         (table3, termId) = internKey table2 key
      in if Map.member key (tableKeys table2)
             then (table3, termId)
-            else (table3{tableApps = (termId, (functId, argIds)) : tableApps table3}, termId)
+            else (table3{tableApps = (termId, (functId, argIds)) : tableApps table3, tableAppCount = tableAppCount table3 + 1}, termId)
 
 -- A proof with the large builtin function values replaced by plain symbols
 lightProof :: IotaProof -> IotaProof
@@ -632,22 +735,90 @@ internKey table key =
 idOf :: TermTable -> IotaProof -> Int
 idOf table term = snd (internTerm table term)
 
--- Maps term numbers to their class representative (a number missing from the map is its own)
-congruenceClosure :: [(Int, (Int, [Int]))] -> [(Int, (Variable, [Int], Int))] -> [(Int, Int)] -> IntMap.IntMap Int
-congruenceClosure apps foralls equalities = settle (foldl' unionClasses IntMap.empty equalities)
+-- The congruence closure
+--
+-- Two terms built from the same function on equal arguments are joined, and so are foralls with
+-- the same index and equal guards and body. Joining classes changes the signatures of the terms
+-- that use them, so each class keeps a list of its users, and only those are looked at again. Terms
+-- and equalities can be added to a closure that has been built.
+
+data Shape = AppShape Int [Int] | ForallShape Variable [Int] Int
+
+type ShapeKey = Either (Int, [Int]) (Variable, [Int], Int)
+
+data Closure = Closure
+    { closureParents :: IntMap.IntMap Int -- a term number that is not its own class points toward its class
+    , closureSignatures :: Map.Map ShapeKey Int -- a term of each signature
+    , closureUsers :: IntMap.IntMap [Int] -- the nodes that have a term of the class as a part, by class
+    , closureNodes :: IntMap.IntMap (Int, Shape) -- the terms that have parts
+    }
+
+emptyClosure :: Closure
+emptyClosure = Closure IntMap.empty Map.empty IntMap.empty IntMap.empty
+
+-- Maps every term number to its class representative
+closureFlat :: Closure -> IntMap.IntMap Int
+closureFlat closure = IntMap.map (findClass (closureParents closure)) (closureParents closure)
+
+signatureOf :: IntMap.IntMap Int -> Shape -> ShapeKey
+signatureOf classes (AppShape functId argIds) = Left (findClass classes functId, map (findClass classes) argIds)
+signatureOf classes (ForallShape index guardIds bodyId) = Right (index, map (findClass classes) guardIds, findClass classes bodyId)
+
+shapeParts :: Shape -> [Int]
+shapeParts (AppShape functId argIds) = functId : argIds
+shapeParts (ForallShape _ guardIds bodyId) = guardIds ++ [bodyId]
+
+-- Adds terms with parts, joining those that agree with a term already there
+closureAdd :: Closure -> [(Int, Shape)] -> Closure
+closureAdd closure terms =
+    let firstNode = IntMap.size (closureNodes closure)
+        numbered = zip [firstNode ..] terms
+        classes = closureParents closure
+        withNodes =
+            closure
+                { closureNodes = foldl' (\nodes (node, entry) -> IntMap.insert node entry nodes) (closureNodes closure) numbered
+                , closureUsers = foldl' (\users (node, (_, shape)) -> foldl' (\acc part -> IntMap.insertWith (++) (findClass classes part) [node] acc) users (shapeParts shape)) (closureUsers closure) numbered
+                }
+        (resolved, merges) = resolveNodes withNodes (map fst numbered)
+     in closureJoin resolved merges
+
+-- Looks the nodes up by signature, and gives the pairs of terms that agree
+resolveNodes :: Closure -> [Int] -> (Closure, [(Int, Int)])
+resolveNodes closure0 = foldl' step (closure0, [])
   where
-    -- Two terms are congruent when they have the same shape on equal parts. foralls with the same
-    -- index and equal guards and body are equal, as for applications.
-    settle classes =
-        let flat = IntMap.map (findClass classes) classes
-            bySignature =
-                Map.fromListWith
-                    (++)
-                    ( [(Left (rep flat functId, map (rep flat) argIds), [termId]) | (termId, (functId, argIds)) <- apps]
-                        ++ [(Right (index, map (rep flat) guardIds, rep flat bodyId), [termId]) | (termId, (index, guardIds, bodyId)) <- foralls]
-                    )
-            merges = [(a, b) | (a : rest) <- Map.elems bySignature, b <- rest, rep flat a /= rep flat b]
-         in if null merges then flat else settle (foldl' unionClasses flat merges)
+    step (closure, merges) node =
+        case IntMap.lookup node (closureNodes closure) of
+            Nothing -> (closure, merges)
+            Just (termId, shape) ->
+                let classes = closureParents closure
+                    key = signatureOf classes shape
+                 in case Map.lookup key (closureSignatures closure) of
+                        Just other
+                            | findClass classes other /= findClass classes termId -> (closure, (termId, other) : merges)
+                            | otherwise -> (closure, merges)
+                        Nothing -> (closure{closureSignatures = Map.insert key termId (closureSignatures closure)}, merges)
+
+-- Joins the classes of the pairs of terms, and whatever that makes agree
+closureJoin :: Closure -> [(Int, Int)] -> Closure
+closureJoin closure [] = closure
+closureJoin closure ((a, b) : pending) =
+    let classes = closureParents closure
+        ra = findClass classes a
+        rb = findClass classes b
+     in if ra == rb
+            then closureJoin closure pending
+            else
+                let users = closureUsers closure
+                    usersOf r = IntMap.findWithDefault [] r users
+                    -- the class with fewer users is the one whose users are looked at again
+                    (loser, winner) = if length (usersOf ra) <= length (usersOf rb) then (ra, rb) else (rb, ra)
+                    joined =
+                        closure
+                            { closureParents = IntMap.insert loser winner classes
+                            , closureUsers = IntMap.insertWith (++) winner (usersOf loser) (IntMap.delete loser users)
+                            }
+                    (resolved, merges) = resolveNodes joined (usersOf loser)
+                 in closureJoin resolved (merges ++ pending)
 
 rep :: IntMap.IntMap Int -> Int -> Int
 rep classes x = IntMap.findWithDefault x x classes
@@ -680,7 +851,16 @@ unionClasses classes (a, b) =
 type Edge = (Int, Int, Integer)
 
 -- The constraints, and whether they contradict each other anywhere (not only near a goal)
-data Arithmetic = Arithmetic [Edge] Bool
+data Arithmetic = Arithmetic Graph Bool
+
+-- The edges out of each node, and the number of nodes
+data Graph = Graph (IntMap.IntMap [(Int, Integer)]) Int
+
+buildGraph :: [Edge] -> Graph
+buildGraph edges =
+    let outgoing = IntMap.fromListWith (++) [(from, [(to, weight)]) | (from, to, weight) <- edges]
+        nodes = IntMap.fromList ([(from, ()) | (from, _, _) <- edges] ++ [(to, ()) | (_, to, _) <- edges])
+     in Graph outgoing (IntMap.size nodes)
 
 arithmeticEdges :: TermTable -> IntMap.IntMap Int -> Int -> Int -> Arithmetic
 arithmeticEdges table classes trueId zeroId =
@@ -719,11 +899,11 @@ arithmeticEdges table classes trueId zeroId =
                 _ -> []
         constEdges = concat [diff termId zeroId n | (termId, n) <- Map.toList intOfClass]
         edges = constEdges ++ concat [appEdges t functId args | (t, (functId, args)) <- tableApps table]
-     in Arithmetic edges (not (consistent edges))
+     in let graph = buildGraph edges in Arithmetic graph (not (consistent graph))
 
 -- Whether lhs rel rhs follows from the constraints, for the class representatives lhs and rhs
 arithmeticEntails :: Arithmetic -> Rel -> Int -> Int -> Bool
-arithmeticEntails (Arithmetic edges inconsistent) rel lhs rhs =
+arithmeticEntails (Arithmetic graph inconsistent) rel lhs rhs =
     inconsistent || case rel of
         Lt -> bound rhs lhs (-1)
         LtEq -> bound rhs lhs 0
@@ -734,34 +914,37 @@ arithmeticEntails (Arithmetic edges inconsistent) rel lhs rhs =
   where
     -- Whether the shortest path from source to target weighs at most k
     bound source target k =
-        case shortestPaths edges (Map.singleton source 0) of
+        case shortestPaths graph (IntMap.singleton source 0) of
             Nothing -> True
-            Just dist -> maybe (source == target && 0 <= k) (<= k) (Map.lookup target dist)
+            Just dist -> maybe (source == target && 0 <= k) (<= k) (IntMap.lookup target dist)
 
 -- Whether the constraints have a solution, which is when no cycle of edges weighs less than
 -- zero. Starting every node at distance 0 finds a negative cycle anywhere in the graph, whether
 -- or not a goal can reach it.
-consistent :: [Edge] -> Bool
-consistent edges = shortestPaths edges (Map.fromList [(node, 0) | (from, to, _) <- edges, node <- [from, to]]) /= Nothing
+consistent :: Graph -> Bool
+consistent graph@(Graph outgoing _) = shortestPaths graph (IntMap.map (const 0) outgoing) /= Nothing
 
--- Bellman-Ford from the given starting distances; Nothing when it keeps improving, which is a
--- negative cycle reachable from them
-shortestPaths :: [Edge] -> Map.Map Int Integer -> Maybe (Map.Map Int Integer)
-shortestPaths edges start = go (length edges + 1) start
+-- Bellman-Ford from the given starting distances, looking again only at the edges out of the nodes that
+-- got shorter in the last round; Nothing when it keeps improving, which is a negative cycle reachable
+-- from them
+shortestPaths :: Graph -> IntMap.IntMap Integer -> Maybe (IntMap.IntMap Integer)
+shortestPaths (Graph outgoing nodeCount) start = go (nodeCount + 1) start (IntMap.keys start)
   where
-    go :: Int -> Map.Map Int Integer -> Maybe (Map.Map Int Integer)
-    go rounds dist =
-        let dist' = foldl' relax dist edges
-         in if dist' == dist
-                then Just dist
-                else if rounds <= 0 then Nothing else go (rounds - 1) dist'
-    relax dist (from, to, weight) =
-        case Map.lookup from dist of
-            Nothing -> dist
-            Just d ->
-                case Map.lookup to dist of
-                    Just current | current <= d + weight -> dist
-                    _ -> Map.insert to (d + weight) dist
+    go :: Int -> IntMap.IntMap Integer -> [Int] -> Maybe (IntMap.IntMap Integer)
+    go _ dist [] = Just dist
+    go rounds dist frontier
+        | rounds <= 0 = Nothing
+        | otherwise =
+            let (dist', improved) = foldl' relaxFrom (dist, IntMap.empty) frontier
+             in go (rounds - 1) dist' (IntMap.keys improved)
+    relaxFrom (dist, improved) from =
+        case IntMap.lookup from dist of
+            Nothing -> (dist, improved)
+            Just d -> foldl' (relax d) (dist, improved) (IntMap.findWithDefault [] from outgoing)
+    relax d (dist, improved) (to, weight) =
+        case IntMap.lookup to dist of
+            Just current | current <= d + weight -> (dist, improved)
+            _ -> (IntMap.insert to (d + weight) dist, IntMap.insert to () improved)
 
 applyRewrite :: BuiltinEvaluator -> EngineRewriteRule -> ProofContext -> Result ProofContext String
 applyRewrite _ EngineRefl context = Ok (deriveRefl context)
