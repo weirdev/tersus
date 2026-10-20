@@ -58,7 +58,14 @@ entails goal context = and (entailsAll [goal] context)
 
 -- Which of the goals the context entails, sharing one congruence closure between them.
 entailsAll :: [IotaProof] -> ProofContext -> [Bool]
-entailsAll originalGoals (ProofContext originalFacts) = zipWith provedAsForall goals (saturate (0 :: Int) facts)
+entailsAll goals context = fst (entailsBlocked goals context)
+
+-- Also the guards that kept an instance of a forall from being used: each is the one condition missing
+-- for an instance whose other guards hold, so a case split on it is what may let the proof go on.
+entailsBlocked :: [IotaProof] -> ProofContext -> ([Bool], [IotaProof])
+entailsBlocked originalGoals (ProofContext originalFacts) =
+    let (flags, blocked) = saturate (0 :: Int) facts
+     in (zipWith provedAsForall goals flags, blocked)
   where
     -- The list builtins carry their contracts, which are large, and every fact and goal is
     -- compared with the others many times. They are replaced by plain symbols up front.
@@ -68,22 +75,57 @@ entailsAll originalGoals (ProofContext originalFacts) = zipWith provedAsForall g
     provedAsForall goal entailed = entailed || proveForall goal
     -- Takes a fresh index that meets the guards, and asks for the body at that index. The name
     -- cannot be written in a program, so no fact is about it. A range with no index in it has
-    -- guards that contradict each other, which entail everything. If the body does not follow
-    -- directly, the index is compared with an index the program reads, and the body must follow
-    -- in each case: below it, equal to it, and above it. This is how the new element of a list
-    -- that grew by one is told apart from the old ones.
+    -- guards that contradict each other, which entail everything.
+    --
+    -- If the body does not follow directly, the proof splits cases. First on the guards that kept a
+    -- forall from being used, which is where the facts say `j != p` or `j < size(l)` and the new index is
+    -- not yet known to meet them (`set` leaves p out, `push` leaves the new element out). Each guard
+    -- is split into the ways it can go, and the body must follow in each; a split can leave another
+    -- guard blocked, so it repeats within a budget. Failing that, the index is compared with an index
+    -- the program reads: below it, equal to it, and above it.
     proveForall (Forall index guards body) =
         let fresh = ATerm (Iota ("$" ++ index))
             guardFacts = map (substituteIndex index fresh) guards
             bodyGoal = substituteIndex index fresh body
             known = nubOrd (facts ++ guardFacts)
-            holdsUnder extra = and (entailsAll [bodyGoal] (ProofContext (nubOrd (known ++ extra))))
+            context extra = ProofContext (nubOrd (known ++ extra))
+            holdsUnder extra = and (entailsAll [bodyGoal] (context extra))
+            -- Each entailment costs one unit of budget
+            guided budget depth extra
+                | budget <= 0 = (False, 0 :: Int)
+                | and flags = (True, budget - 1)
+                | depth <= 0 = (False, budget - 1)
+                | otherwise = anyGuard (budget - 1) (take maxSplitGuards (aboutIndexFirst (filter notSplit (nubOrd blocked))))
+              where
+                -- Guards not already split on, those about the new index, or a term it has been found equal to, first
+                aboutIndex = fresh : [other | FApp eq [x, y] <- extra, eq == eqProof, other <- if x == fresh then [y] else if y == fresh then [x] else []]
+                aboutIndexFirst gs = [g | g <- gs, mentions g] ++ [g | g <- gs, not (mentions g)]
+                mentions (FApp _ [a, b]) = a `elem` aboutIndex || b `elem` aboutIndex
+                mentions _ = False
+                notSplit (FApp _ [a, b]) = not (or [sameTerms x y a b | FApp _ [x, y] <- extra])
+                notSplit _ = False
+                sameTerms x y p q = (x == p && y == q) || (x == q && y == p)
+                (flags, blocked) = entailsBlocked [bodyGoal] (context extra)
+                anyGuard remaining [] = (False, remaining)
+                anyGuard remaining (guard : rest) =
+                    case guardCases guard of
+                        [] -> anyGuard remaining rest
+                        cases ->
+                            let (ok, remaining') = allBranches remaining cases
+                             in if ok then (True, remaining') else if remaining' <= 0 then (False, 0) else anyGuard remaining' rest
+                allBranches remaining [] = (True, remaining)
+                allBranches remaining (c : cs) =
+                    let (ok, remaining') = guided remaining (depth - 1) (extra ++ c)
+                     in if ok then allBranches remaining' cs else (False, remaining')
             comparisons t =
                 [ [FApp (CTerm (builtinFunct (Rel Lt))) [fresh, t]]
                 , [FApp eqProof [fresh, t]]
                 , [FApp (CTerm (builtinFunct (Rel Gt))) [fresh, t]]
                 ]
-         in holdsUnder [] || any (all holdsUnder . comparisons) (splitIndexes known fresh bodyGoal)
+            reads = take maxSplitIndexes (splitIndexes known fresh bodyGoal)
+         in holdsUnder []
+                || fst (guided maxSplitAttempts maxSplitDepth [])
+                || any (all holdsUnder . comparisons) reads
     proveForall _ = False
     -- Facts that are foralls are instantiated, and the closure is rebuilt with the instances
     -- that hold, until no new instance appears or the rounds run out. Without a forall this is
@@ -91,14 +133,20 @@ entailsAll originalGoals (ProofContext originalFacts) = zipWith provedAsForall g
     saturate round currentFacts =
         let (table, classes, flags) = solve currentFacts goals
             instances = forallInstances table classes currentFacts
-         in if round >= maxInstantiationRounds || null instances
-                then flags
+         in if null instances
+                then (flags, [])
                 else
                     let guardGoals = concatMap fst instances
-                        (_, _, guardFlags) = solve currentFacts (goals ++ guardGoals)
+                        (guardTable, guardClasses, guardFlags) = solve currentFacts (goals ++ guardGoals)
                         guardHolds = zip guardGoals (drop (length goals) guardFlags)
-                        accepted = [body | (guards, body) <- instances, all (\g -> lookup g guardHolds == Just True) guards]
-                     in if null accepted then flags else saturate (round + 1) (nubOrd (currentFacts ++ accepted))
+                        holds g = lookup g guardHolds == Just True
+                        accepted = [body | (guards, body) <- instances, all holds guards]
+                        -- an instance with exactly one guard missing would be used if that guard held, unless the
+                        -- guard compares two terms that are already equal
+                        missing = [g | (guards, _) <- instances, [g] <- [filter (not . holds) guards], distinctSides guardTable guardClasses g]
+                        distinctSides table' classes' (FApp _ [a, b]) = rep classes' (idOf table' a) /= rep classes' (idOf table' b)
+                        distinctSides _ _ _ = True
+                     in if null accepted || round >= maxInstantiationRounds then (flags, missing) else saturate (round + 1) (nubOrd (currentFacts ++ accepted))
 
 -- The indexes of the get(L, t) in the facts and the goal, one for each class of equal indexes, other
 -- than the index itself. Only the first few are tried, to bound the work of a proof.
@@ -118,13 +166,39 @@ splitIndexes facts fresh goal =
 maxSplitIndexes :: Int
 maxSplitIndexes = 60
 
+-- How deep the case splits on blocked guards go, how many guards one level tries, and how many
+-- entailments one forall proof may spend on them
+maxSplitDepth :: Int
+maxSplitDepth = 4
+
+maxSplitGuards :: Int
+maxSplitGuards = 6
+
+maxSplitAttempts :: Int
+maxSplitAttempts = 300
+
+-- The ways a guard can go. A guard that is a left-out index splits into holding or not, a range bound into
+-- the three orders, which lets the case where they are equal join the two terms.
+guardCases :: IotaProof -> [[IotaProof]]
+guardCases (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [a, b]) =
+    case rel of
+        NotEq -> [[FApp eqProof [a, b]], [FApp (CTerm (builtinFunct (Rel NotEq))) [a, b], FApp (CTerm (builtinFunct (Rel NotEq))) [b, a]]]
+        _ ->
+            [ [FApp (CTerm (builtinFunct (Rel Lt))) [a, b]]
+            , [FApp eqProof [a, b]]
+            , [FApp (CTerm (builtinFunct (Rel Gt))) [a, b]]
+            ]
+guardCases _ = []
+
 maxInstantiationRounds :: Int
 maxInstantiationRounds = 5
 
 -- Interns the facts and goals, builds the classes, and says which goals hold
 solve :: [IotaProof] -> [IotaProof] -> (TermTable, IntMap.IntMap Int, [Bool])
-solve facts goals =
-    let (table1, factIds) = internAll emptyTable facts
+solve givenFacts goals =
+    let -- a != b is also b != a
+        facts = givenFacts ++ [FApp funct [b, a] | FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [a, b] <- givenFacts]
+        (table1, factIds) = internAll emptyTable facts
         (table2, goalIds) = internAll table1 goals
         (table3a, trueId) = internTerm table2 (CTerm (VBool True))
         (table3, zeroId) = internTerm table3a (CTerm (VInt 0))

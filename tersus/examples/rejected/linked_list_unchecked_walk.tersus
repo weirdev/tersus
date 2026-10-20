@@ -1,0 +1,15 @@
+// Rejected: nothing says the links of the list are valid indexes, so following one may leave the list.
+struct Node { value: Int, prev: Int, next: Int };
+
+fn walk(nodes: List<Node>, start: Int, steps: Int) -> Int
+    [{ affirm start >= 0; affirm start < size(nodes); }]
+    [{ }]
+{
+    cur = start;
+    taken = 0;
+    while taken < steps [{ affirm taken >= 0; affirm cur >= 0; affirm cur < size(nodes); }] {
+        cur = get(nodes, cur).next;
+        taken = taken + 1;
+    };
+    return cur;
+};

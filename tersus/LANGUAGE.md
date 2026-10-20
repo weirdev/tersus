@@ -42,7 +42,7 @@ stack run -- run program.tersus     # validate, then evaluate and print the retu
 
 Checking every proposition a real program could need is not feasible, so validation is a bounded search that is sound but incomplete:
 
-1. **Heuristics do the common work.** The validator tries, without any help from the program: equalities between terms and their parts, integer comparisons (see Arithmetic), evaluation of builtins on known values, `forall` facts at the elements the program reads, and the facts that function contracts export. Each search is bounded: a fixed number of `forall` instantiation rounds, a fixed number of index case splits, and a fixed budget of statements when a call with known arguments is evaluated.
+1. **Heuristics do the common work.** The validator tries, without any help from the program: equalities between terms and their parts, integer comparisons (see Arithmetic), evaluation of builtins on known values, `forall` facts at the elements the program reads, and the facts that function contracts export. Each search is bounded: a fixed number of `forall` instantiation rounds, a fixed number of case splits, and a fixed budget of statements when a call with known arguments is evaluated.
 2. **Whatever they cannot prove is rejected.** A statement is never accepted on a guess. When the search runs out, the validator reports `Could not prove: P`, which means "not provable by these heuristics", not "false". The one definite failure is a `checkRel` over concrete values, which says `Relation does not hold`.
 3. **The program supplies the rest.** You move the proof context closer to the goal until the heuristics can finish, with:
    - an intermediate `affirm` (proved, then available as a fact),
@@ -575,7 +575,7 @@ affirm forall j where j >= 0, j < n, j != 2: get(l, j) = 0;
 
 - `forall j in lo..hi: P` is shorthand for `forall j where j >= lo, j < hi: P`, so the range is half open.
 - `forall j where g1, g2, ...: P` holds `P` for every `j` for which all the guards hold. A guard is any relation.
-- To prove a `forall` (in `affirm`, an output contract, or a loop invariant) the validator takes an index that meets the guards, and proves the body for it from everything it knows. So `affirm forall j in 0..3: j < 3;` holds, a narrower range of a known `forall` holds when its bound is known to be within the original one, and an empty range holds for any body. If the body does not follow directly, the index is also compared with the indexes the program reads with `get` (below, equal to, and above), and the body must follow in each case. That is how a list that grew by one is shown to keep its old elements and have the new one at the end. The name of the index does not matter. A `forall` cannot be passed to a rewrite rule as an argument.
+- To prove a `forall` (in `affirm`, an output contract, or a loop invariant) the validator takes an index that meets the guards, and proves the body for it from everything it knows. So `affirm forall j in 0..3: j < 3;` holds, a narrower range of a known `forall` holds when its bound is known to be within the original one, and an empty range holds for any body. If the body does not follow directly, the validator splits cases. It looks at the instances of known foralls that are missing one guard (a `set` leaves out its index: `j != p`; a `push` leaves out the new element: `j < size(l)`), splits on that guard, and the body must follow in every case (`i = p` and `i != p`, or below, equal to and above); a case can leave another guard missing, so this repeats up to four levels and 300 entailments. Failing that, the index is compared with the indexes the program reads with `get` (below, equal to, and above). That is how a list that grew by one and had two elements replaced is shown to keep its other elements, with no help from the program. The name of the index does not matter. A `forall` cannot be passed to a rewrite rule as an argument.
 - A `forall` is used at the elements the program reads. For every `get(l, t)` in the proof context whose list is equal to the list of a `get(l, j)` in `P`, the validator instantiates `j := t`. If the guards hold for `t` it adds `P` for `t` as a fact. So with `forall j in 0..size(l): get(l, j) = 0` and `0 <= i < size(l)` known, `get(l, i) = 0` follows. A `forall` whose `P` has no `get(l, j)` is never used. `get(l, i)` is equal to the proof term `get(l, i)`, so `x = get(l, i)` gives `x = get(l, i)` as a fact.
 - `j` is bound in the guards and in `P`. Other names refer to variables as usual, and `forall` does not nest.
 
@@ -707,6 +707,33 @@ fn keep(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) =
 ```
 
 See `examples/forall_facts.tersus`.
+
+### A linked list in an array
+
+Lists of structs hold data structures without references: the links are indexes. A doubly linked list is a `List<Node>` whose nodes name their neighbours by index, and what the validator can establish about it is memory safety. If every link of every node is a valid index, following a link with `get` can never fail, and an operation that keeps that true can be called safely.
+
+```tersus
+struct Node { value: Int, prev: Int, next: Int };
+
+fn walk(nodes: List<Node>, start: Int, steps: Int) -> Int
+    [{
+        affirm start >= 0; affirm start < size(nodes);
+        affirm forall i in 0..size(nodes): get(nodes, i).next >= 0;
+        affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes);
+    }]
+    [{ affirm return >= 0; affirm return < size(nodes); }]
+{
+    cur = start;
+    taken = 0;
+    while taken < steps [{ affirm taken >= 0; affirm cur >= 0; affirm cur < size(nodes); }] {
+        cur = get(nodes, cur).next;
+        taken = taken + 1;
+    };
+    return cur;
+};
+```
+
+`examples/linked_list.tersus` also inserts a node after another one (a `push` and two `set`s, with the four range foralls as the input and output contract) and rejects an insertion whose new node links one past its own index. The stronger invariant that `prev` and `next` agree (`get(nodes, get(nodes, i).next).prev = i`) is true of the insertion, but proving it takes about six nested case splits (the neighbour's index against `p`, `q` and `n` for every `i`), which is beyond the search above. A proof like that is meant to be written in steps, with the intermediate facts as `affirm`s, which does not work yet because a `forall` is only proved over the whole list.
 
 ## Arithmetic
 

@@ -1,0 +1,28 @@
+// Rejected: the new node links to n + 1, one past its own index, so following its link would fail.
+struct Node { value: Int, prev: Int, next: Int };
+
+fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node>
+    [{
+        affirm size(nodes) > 0;
+        affirm p >= 0; affirm p < size(nodes);
+        affirm forall i in 0..size(nodes): get(nodes, i).next >= 0;
+        affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes);
+        affirm forall i in 0..size(nodes): get(nodes, i).prev >= 0;
+        affirm forall i in 0..size(nodes): get(nodes, i).prev < size(nodes);
+    }]
+    [{
+        affirm size(return) = size(nodes) + 1;
+        affirm forall i in 0..size(return): get(return, i).next >= 0;
+        affirm forall i in 0..size(return): get(return, i).next < size(return);
+        affirm forall i in 0..size(return): get(return, i).prev >= 0;
+        affirm forall i in 0..size(return): get(return, i).prev < size(return);
+    }]
+{
+    q = get(nodes, p).next;           // the node after p, which is a valid index by the invariant
+    n = size(nodes);                  // the new node goes at the end
+    out = push(nodes, Node { value: v, prev: p, next: n + 1 });
+    out = set(out, p, Node { next: n, ..get(out, p) });
+    out = set(out, q, Node { prev: n, ..get(out, q) });
+    return out;
+};
+

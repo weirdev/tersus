@@ -1153,6 +1153,7 @@ testExamples =
         , testExampleFile "examples/arithmetic.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/types.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/structs.tersus" (ExpectReturn (VInt 11))
+        , testExampleFile "examples/linked_list.tersus" (ExpectReturn (VInt 9))
         , testExampleFile "examples/enums.tersus" (ExpectReturn (VInt 27))
         , testExampleFile "examples/generic_lists.tersus" (ExpectReturn (VList [VList [VInt 1, VInt 2], VList [VInt 3, VInt 4], VList [VInt 1, VInt 2]]))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
@@ -1183,6 +1184,8 @@ testExamples =
         , testExampleFile "examples/rejected/struct_field_type.tersus" (ExpectRejected "field value of Node: expected Int, got Bool")
         , testExampleFile "examples/rejected/enum_contract_unmet.tersus" (ExpectRejected "Could not prove: s is Shape::Circle")
         , testExampleFile "examples/rejected/enum_wrong_variant.tersus" (ExpectRejected "Could not prove: s is Shape::Rect")
+        , testExampleFile "examples/rejected/linked_list_link_out_of_range.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)")
+        , testExampleFile "examples/rejected/linked_list_unchecked_walk.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
         , testExampleFile "examples/rejected/push_size.tersus" (ExpectRejected "Could not prove")
@@ -2148,6 +2151,25 @@ testEnums =
               parseValidProgramHelper (tree ++ "fn sum(t: Tree) -> Int [{ }] [{ }] { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; x = sum(Tree::Leaf); affirm x = 0;")
             ]
 
+testListProofs :: Test
+testListProofs =
+    let node = "struct Node { value: Int, prev: Int, next: Int };"
+        nonNegative l = "affirm forall i in 0..size(" ++ l ++ "): get(" ++ l ++ ", i) >= 0;"
+     in testCaseSeq
+            "testListProofs"
+            [ -- Case splits on the guards that block a forall: the index set by one update, then another
+              parseValidProgramHelper ("fn f(l: List<Int>, p: Int, q: Int) -> List<Int> [{ affirm p >= 0; affirm p < size(l); affirm q >= 0; affirm q < size(l); " ++ nonNegative "l" ++ " }] [{ " ++ nonNegative "return" ++ " }] { out = set(l, p, 5); out = set(out, q, 6); return out; };")
+            , parseValidateFailProgramHelper ("fn f(l: List<Int>, p: Int, q: Int) -> List<Int> [{ affirm p >= 0; affirm p < size(l); affirm q >= 0; affirm q < size(l); " ++ nonNegative "l" ++ " }] [{ " ++ nonNegative "return" ++ " }] { out = set(l, p, 5); out = set(out, q, 0 - 6); return out; };") "Could not prove: forall i in 0..size(return): get(return, i) >= 0"
+            , -- The two updates may hit the same element, and the new element at the end is told apart too
+              parseValidProgramHelper ("fn f(l: List<Int>, p: Int, q: Int) -> List<Int> [{ affirm p >= 0; affirm p < size(l); affirm q >= 0; affirm q < size(l); " ++ nonNegative "l" ++ " }] [{ " ++ nonNegative "return" ++ " }] { out = push(l, 1); out = set(out, p, 5); out = set(out, q, 6); return out; };")
+            , parseValidateFailProgramHelper ("fn f(l: List<Int>, p: Int, q: Int) -> List<Int> [{ affirm p >= 0; affirm p < size(l); affirm q >= 0; affirm q < size(l); " ++ nonNegative "l" ++ " }] [{ " ++ nonNegative "return" ++ " }] { out = push(l, 0 - 1); out = set(out, p, 5); out = set(out, q, 6); return out; };") "Could not prove: forall i in 0..size(return): get(return, i) >= 0"
+            , -- Struct fields: the links stay in range through a push and two updates
+              parseValidProgramHelper (node ++ "fn f(nodes: List<Node>, p: Int, v: Int) -> List<Node> [{ affirm size(nodes) > 0; affirm p >= 0; affirm p < size(nodes); affirm forall i in 0..size(nodes): get(nodes, i).next >= 0; affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes); }] [{ affirm forall i in 0..size(return): get(return, i).next >= 0; affirm forall i in 0..size(return): get(return, i).next < size(return); }] { q = get(nodes, p).next; n = size(nodes); out = push(nodes, Node { value: v, prev: p, next: q }); out = set(out, p, Node { next: n, ..get(out, p) }); out = set(out, q, Node { prev: n, ..get(out, q) }); return out; };")
+            , parseValidateFailProgramHelper (node ++ "fn f(nodes: List<Node>, p: Int, v: Int) -> List<Node> [{ affirm size(nodes) > 0; affirm p >= 0; affirm p < size(nodes); affirm forall i in 0..size(nodes): get(nodes, i).next >= 0; affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes); }] [{ affirm forall i in 0..size(return): get(return, i).next < size(return); }] { q = get(nodes, p).next; n = size(nodes); out = push(nodes, Node { value: v, prev: p, next: n + 1 }); return out; };") "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)"
+            , -- A disequality is the same in both directions
+              parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ affirm a != b; }] [{ }] { affirm b != a; return 0; };"
+            ]
+
 testCrlf :: Test
 testCrlf =
     testCaseSeq
@@ -2482,6 +2504,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testListProofs
                 , testEnums
                 , testStructs
                 , testGenericLists
