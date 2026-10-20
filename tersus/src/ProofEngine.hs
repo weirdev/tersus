@@ -15,7 +15,7 @@ module ProofEngine
     ) where
 
 import qualified Data.IntMap.Strict as IntMap
-import Data.Containers.ListUtils (nubOrd)
+import Data.Containers.ListUtils (nubOrd, nubOrdOn)
 import Data.List (foldl', mapAccumL)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
@@ -69,24 +69,31 @@ entailsBlocked goals (ProofContext facts) =
 
 -- The facts a proof has reached by instantiating foralls, and the generation of each term (see saturate). A
 -- case split starts from the saturation of the case before it, since facts only grow.
-data Saturation = Saturation [IotaProof] (Set.Set IotaProof) (Map.Map IotaProof Int) Solver
+data Saturation = Saturation
+    { satFacts :: [IotaProof]
+    , satFactSet :: Set.Set IotaProof
+    , satBirths :: Map.Map IotaProof Int
+    , satSolver :: Solver
+    , satDone :: Set.Set (Int, Int) -- the foralls (by place in the facts) already instantiated at an index (by term number)
+    }
 
 -- The list builtins carry their contracts, which are large, and every fact and goal is compared with the
 -- others many times. They are replaced by plain symbols up front.
 initialSaturation :: [IotaProof] -> [IotaProof] -> Saturation
 initialSaturation goals facts =
     let lightFacts = map lightProof facts
-     in Saturation lightFacts (Set.fromList lightFacts) (Map.fromList [(t, 0) | t <- concatMap subterms (lightFacts ++ map lightProof goals)]) (solverAddFacts newSolver lightFacts)
+     in Saturation lightFacts (Set.fromList lightFacts) (Map.fromList [(t, 0) | t <- concatMap subterms (lightFacts ++ map lightProof goals)]) (solverAddFacts newSolver lightFacts) Set.empty
 
 -- Adds facts that hold in a case, as terms of generation 0
 extendSaturation :: Saturation -> [IotaProof] -> Saturation
-extendSaturation (Saturation facts factSet births solver) new =
+extendSaturation (Saturation facts factSet births solver done) new =
     let fresh = filter (`Set.notMember` factSet) (nubOrd new)
      in Saturation
             (facts ++ fresh)
             (foldr Set.insert factSet fresh)
             (foldl (\m t -> Map.insertWith (\_ old -> old) t 0 m) births (concatMap subterms new))
             (if null fresh then solver else solverAddFacts solver fresh)
+            done
 
 entailsFrom :: [IotaProof] -> Saturation -> ([Bool], [IotaProof], Saturation)
 entailsFrom originalGoals startSaturation =
@@ -111,7 +118,7 @@ entailsFrom originalGoals startSaturation =
             guardFacts = map (substituteIndex index fresh) guards
             bodyGoal = substituteIndex index fresh body
             sat0 = extendSaturation startSaturation guardFacts
-            Saturation known _ _ _ = sat0
+            known = satFacts sat0
             holdsUnder extra = let (flags, _, _) = entailsFrom [bodyGoal] (extendSaturation sat0 extra) in and flags
             -- Each entailment costs one unit of budget
             guided budget depth sat extra
@@ -152,14 +159,14 @@ entailsFrom originalGoals startSaturation =
     -- more than the index it was instantiated at. A forall is only instantiated at indexes of a low generation,
     -- so an agreement invariant such as get(l, get(l, i).next).prev = i, whose instance contains a new index
     -- to instantiate at, does not feed itself without end.
-    saturateWith round saturation@(Saturation currentFacts _ births solver) =
+    saturateWith round saturation@(Saturation currentFacts factSet births solver done) =
         let (table, classes, flags, quick) = querySolver solver goals
             generationOf t = Map.findWithDefault 0 t births
-            instances = forallInstances ((<= maxIndexGeneration) . generationOf) table classes currentFacts
+            instances = forallInstances ((<= maxIndexGeneration) . generationOf) table classes currentFacts factSet done
          in if null instances
                 then (flags, [], saturation)
                 else
-                    let guardGoals = concatMap (\(guards, _, _) -> guards) instances
+                    let guardGoals = concatMap (\(guards, _, _, _) -> guards) instances
                         -- The guards are asked of the same classes when the table has their terms; otherwise the facts are
                         -- solved again with the guards as goals
                         quickGuards = map quick guardGoals
@@ -170,17 +177,17 @@ entailsFrom originalGoals startSaturation =
                                  in (guardTable', guardClasses', zip guardGoals (drop (length goals) guardFlags))
                         holds g = Map.lookup g guardHoldsMap == Just True
                         guardHoldsMap = Map.fromList guardHolds
-                        acceptedInstances = [(body, indexTerm) | (guards, body, indexTerm) <- instances, all holds guards]
-                        accepted = map fst acceptedInstances
+                        acceptedInstances = [(body, indexTerm, key) | (guards, body, indexTerm, key) <- instances, all holds guards]
+                        accepted = [body | (body, _, _) <- acceptedInstances]
                         births' =
                             foldl
-                                (\known (body, indexTerm) -> foldl (\m t -> Map.insertWith (\_ old -> old) t (generationOf indexTerm + 1) m) known (subterms body))
+                                (\known (body, indexTerm, _) -> foldl (\m t -> Map.insertWith (\_ old -> old) t (generationOf indexTerm + 1) m) known (subterms body))
                                 births
                                 acceptedInstances
                         -- an instance with exactly one guard missing would be used if that guard held, unless the
                         -- guard compares two terms that are already equal
                         -- those at an index the goal reads with get come first: the splits that bear on the goal
-                        missing = distinctGuards (relevantFirst [(g, indexTerm) | (guards, _, indexTerm) <- instances, [g] <- [filter (not . holds) guards], distinctSides guardTable guardClasses g])
+                        missing = distinctGuards (relevantFirst [(g, indexTerm) | (guards, _, indexTerm, _) <- instances, [g] <- [filter (not . holds) guards], distinctSides guardTable guardClasses g])
                         -- guards about the same two classes of terms are one split, however the terms are written
                         distinctGuards = go Set.empty
                           where
@@ -196,8 +203,7 @@ entailsFrom originalGoals startSaturation =
                         relevant t = rep guardClasses (idOf guardTable t) `Set.member` goalIndexClasses
                         distinctSides table' classes' (FApp _ [a, b]) = rep classes' (idOf table' a) /= rep classes' (idOf table' b)
                         distinctSides _ _ _ = True
-                        next = (extendSaturation saturation accepted) `withBirths` births'
-                        withBirths (Saturation f fs _ sv) b = Saturation f fs b sv
+                        next = (extendSaturation saturation accepted){satBirths = births', satDone = foldr (\(_, _, key) -> Set.insert key) done acceptedInstances}
                      in if null accepted || round >= maxInstantiationRounds
                             then (flags, missing, next)
                             else saturateWith (round + 1) next
@@ -551,28 +557,31 @@ provablyDistinct table classes a b =
 -- entailed, and the instantiated body, which then becomes a fact. A forall whose body has no
 -- get(L, j) is never instantiated.
 
-forallInstances :: (IotaProof -> Bool) -> TermTable -> IntMap.IntMap Int -> [IotaProof] -> [([IotaProof], IotaProof, IotaProof)]
-forallInstances eligible table classes facts =
-    nubOrd
-        [ (map (substituteIndex index indexTerm) guards, instantiated, indexTerm)
-        | Forall index guards body <- facts
+forallInstances :: (IotaProof -> Bool) -> TermTable -> IntMap.IntMap Int -> [IotaProof] -> Set.Set IotaProof -> Set.Set (Int, Int) -> [([IotaProof], IotaProof, IotaProof, (Int, Int))]
+forallInstances eligible table classes facts known done =
+    nubOrdOn
+        (\(guards, instantiated, indexTerm, _) -> (guards, instantiated, indexTerm))
+        [ (map (substituteIndex index indexTerm) guards, instantiated, indexTerm, key)
+        | (place, Forall index guards body) <- zip [0 ..] facts
         , listTerm <- indexedLists index body
-        , indexTerm <- getIndexesOf listTerm
-        , eligible indexTerm
+        , (indexId, indexTerm) <- getIndexesOf listTerm
+        , let key = (place, indexId)
+        , key `Set.notMember` done
         , let instantiated = substituteIndex index indexTerm body
         , instantiated `Set.notMember` known
         ]
   where
-    known = Set.fromList facts
     getClasses = Map.keys (builtinsByClass table classes (== Get))
     termFor = termOf table
     -- The index terms t of the get(L', t) in the closure, by the class of L'
     getIndexes =
         Map.fromListWith
             (flip (++))
-            [ (rep classes listId, [termFor indexId])
+            [ (rep classes listId, [(indexId, indexTerm)])
             | (_, (functId, [listId, indexId])) <- tableApps table
             , rep classes functId `elem` getClasses
+            , let indexTerm = termFor indexId
+            , eligible indexTerm
             ]
     getIndexesOf listTerm = Map.findWithDefault [] (rep classes (idOf table listTerm)) getIndexes
 
