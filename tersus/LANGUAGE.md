@@ -733,7 +733,7 @@ fn walk(nodes: List<Node>, start: Int, steps: Int) -> Int
 };
 ```
 
-`examples/linked_list.tersus` also inserts a node after another one (a `push` and two `set`s, with the four range foralls as the input and output contract) and rejects an insertion whose new node links one past its own index. The stronger invariant that `prev` and `next` agree (`get(nodes, get(nodes, i).next).prev = i`) is true of the insertion, but proving it takes about six nested case splits (the neighbour's index against `p`, `q` and `n` for every `i`), which is beyond the search above. A proof like that is meant to be written in steps, with the intermediate facts as `affirm`s, which does not work yet because a `forall` is only proved over the whole list.
+`examples/linked_list.tersus` also inserts a node after another one (a `push` and two `set`s, with the four range foralls as the input and output contract) and rejects an insertion whose new node links one past its own index. The stronger invariant that `prev` and `next` agree (`get(nodes, get(nodes, i).next).prev = i`) is true of the insertion, but proving it takes about six nested case splits (the neighbour's index against `p`, `q` and `n` for every `i`), which is beyond the search above. The program is expected to supply the missing pieces as intermediate `affirm`s, but what the useful pieces are for this invariant has not been worked out.
 
 ## Arithmetic
 
