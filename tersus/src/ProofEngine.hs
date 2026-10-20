@@ -252,6 +252,7 @@ maxEvaluationRounds = 8
 fieldRead :: BuiltinFunct -> Maybe Variable
 fieldRead (Field _ field) = Just field
 fieldRead (Project _ field) = Just field
+fieldRead (Access _ field) = Just field
 fieldRead _ = Nothing
 
 selections :: TermTable -> IntMap.IntMap Int -> [(Int, Int)]
@@ -557,6 +558,7 @@ lightProof other = other
 unowned :: BuiltinFunct -> BuiltinFunct
 unowned (Field _ field) = Field Nothing field
 unowned (Project _ field) = Field Nothing field
+unowned (Access _ field) = Field Nothing field
 unowned funct = funct
 
 canonicalValue :: Value -> Value

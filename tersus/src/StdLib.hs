@@ -128,6 +128,13 @@ builtinFunct Set =
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []
+builtinFunct (Access variant field) =
+    VFunct
+        ["value"]
+        [ProofAssert (FApp (CTerm (builtinFunct (Is variant))) [ATerm "value"])]
+        []
+        (BuiltinFunct (Access variant field))
+        []
 builtinFunct (Project variant field) = VFunct ["value"] [] [] (BuiltinFunct (Project variant field)) []
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
 builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
@@ -199,6 +206,7 @@ evalBuiltinFunct (Is _) _ = Error "Is only tests the variant of an enum value"
 evalBuiltinFunct (Project variant field) [VData name fields]
     | name /= variant = Error ("Expected a " ++ variant ++ " but got a " ++ name)
     | otherwise = maybe (Error ("Variant " ++ variant ++ " has no field " ++ field)) Ok (lookup field fields)
+evalBuiltinFunct (Access variant field) args = evalBuiltinFunct (Project variant field) args
 evalBuiltinFunct (Project _ _) _ = Error "A field can only be read from an enum value"
 evalBuiltinFunct (Field _ _) _ = Error "A field can only be read from a struct"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)

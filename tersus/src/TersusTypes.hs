@@ -15,6 +15,9 @@ data BuiltinFunct
     | -- Is Ctor tests which variant an enum value is; Project Ctor reads a field of a value known to be that variant
       Is Name
     | Project Name Variable
+    | -- Access Ctor field is the field read of `x.field` where only that variant has the field: unlike Project it
+      -- demands the proof `x is Ctor`
+      Access Name Variable
     deriving (Show, Eq, Ord)
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never

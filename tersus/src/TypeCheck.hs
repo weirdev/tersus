@@ -215,7 +215,7 @@ fieldType field structTy = do
                     case lookup field declared of
                         Just fieldTy -> return fieldTy
                         Nothing -> failTc ("Type error: " ++ name ++ " has no field " ++ field)
-                _ -> failTc ("Type error: " ++ name ++ " has several variants, so its field " ++ field ++ " may be absent: take the value apart with match")
+                _ -> failTc ("Type error: " ++ name ++ " has several variants, so its field " ++ field ++ " may be absent: take the value apart with match, or read a field only one variant has")
         TVar _ -> failTc ("Type error: the type of the value whose field " ++ field ++ " is read is not known yet; annotate it")
         other -> failTc ("Type error: field " ++ field ++ " is read from a " ++ renderType other ++ ", which is not a struct")
 
@@ -267,15 +267,17 @@ builtinType funct =
         Is variant -> do
             (typeName, _) <- ctorInfo variant
             return (TFn [TNamed typeName] TBool)
-        Project variant field -> do
-            (typeName, declared) <- ctorInfo variant
-            case lookup field declared of
-                Just fieldTy -> return (TFn [TNamed typeName] fieldTy)
-                Nothing -> failTc ("Type error: " ++ variant ++ " has no field " ++ field)
+        Access variant field -> projectType variant field
+        Project variant field -> projectType variant field
         Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
   where
     list build = build <$> freshVar
     arith = return (TFn [TInt, TInt] TInt)
+    projectType variant field = do
+        (typeName, declared) <- ctorInfo variant
+        case lookup field declared of
+            Just fieldTy -> return (TFn [TNamed typeName] fieldTy)
+            Nothing -> failTc ("Type error: " ++ variant ++ " has no field " ++ field)
 
 valueType :: Value -> TC Type
 valueType (VInt _) = return TInt
