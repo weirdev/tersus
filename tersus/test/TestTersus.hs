@@ -2097,14 +2097,14 @@ testEnums =
             , parseFailsWith (shape ++ "s = Shape::Empty; match s { Shape::Nope => { } };") "Unknown struct or variant Shape::Nope"
             , parseFailsWith (shape ++ "s = Shape::Circle { radius: 1 }; match s { Shape::Circle { diameter: d } => { }, Shape::Rect { width: w } => { }, Shape::Empty => { } };") "has no field diameter"
             , parseFailsWith (shape ++ "x = Shape::Circle { };") "lacks field radius"
-            , parseFailsWith (shape ++ "x = Shape::Circle { radius: 1, ..y };") "Update syntax is for structs"
+            , parseFailsWith (shape ++ "x = Shape::Circle { radius: 1, ..y };") "copies nothing"
             , parseFailsWith (shape ++ "x = Shape::Empty is Shape::Nope;") "unexpected"
             , parseFailsWith "enum E { };" "has no variants"
             , parseFailsWith "enum E { A, A };" "repeats a variant"
             , parseFailsWith "enum Bool { A };" "builtin type"
             , -- Type checking
               parseValidateFailProgramHelper (shape ++ "x = Shape::Circle { radius: true };") "field radius of Shape::Circle: expected Int, got Bool"
-            , parseValidateFailProgramHelper (shape ++ "fn f(s: Shape) -> Int { return s.radius; };") "has several variants, so its field radius may be absent"
+            , parseValidateFailProgramHelper (shape ++ "fn f(s: Shape) -> Int { return s.radius; };") "Could not prove: value is Shape::Circle"
             , parseValidateFailProgramHelper (shape ++ opt ++ "x = Shape::Empty = Opt::None;") "expected Shape, got Opt"
             , parseValidateFailProgramHelper (shape ++ "x = 1 is Shape::Empty;") "expected Shape, got Int"
             , parseValidateFailProgramHelper (shape ++ shape) "Type already defined: Shape"
@@ -2168,6 +2168,38 @@ testListProofs =
             , parseValidateFailProgramHelper (node ++ "fn f(nodes: List<Node>, p: Int, v: Int) -> List<Node> [{ affirm size(nodes) > 0; affirm p >= 0; affirm p < size(nodes); affirm forall i in 0..size(nodes): get(nodes, i).next >= 0; affirm forall i in 0..size(nodes): get(nodes, i).next < size(nodes); }] [{ affirm forall i in 0..size(return): get(return, i).next < size(return); }] { q = get(nodes, p).next; n = size(nodes); out = push(nodes, Node { value: v, prev: p, next: n + 1 }); return out; };") "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)"
             , -- A disequality is the same in both directions
               parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ affirm a != b; }] [{ }] { affirm b != a; return 0; };"
+            ]
+
+testEnumAccess :: Test
+testEnumAccess =
+    let shape = "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
+     in testCaseSeq
+            "testEnumAccess"
+            [ -- A field only one variant has can be read when the value is shown to be that variant
+              parseEvalProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; return c.radius;") (Just (VInt 5))
+            , parseValidProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; affirm c.radius = 5;")
+            , parseValidProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ affirm s is Shape::Circle; }] [{ affirm return = s.radius; }] { return s.radius; };")
+            , parseValidProgramHelper (shape ++ "fn area(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Rect { return s.width * s.height; } else { return 0; }; };")
+            , parseEvalProgramHelper (shape ++ "fn area(s: Shape) -> Int { if s is Shape::Rect { return s.width * s.height; } else { return 0; }; }; return area(Shape::Rect { width: 3, height: 4 });") (Just (VInt 12))
+            , parseValidProgramHelper (shape ++ "fn f(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Circle { return s.radius; } else { if s is Shape::Rect { return s.width; } else { return 0; }; }; };")
+            , -- Rejected when the variant is not shown
+              parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ }] [{ }] { return s.radius; };") "Could not prove: value is Shape::Circle"
+            , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ affirm s is Shape::Rect; }] [{ }] { return s.radius; };") "Could not prove: value is Shape::Circle"
+            , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Circle { return 0; } else { return s.radius; }; };") "Could not prove: value is Shape::Circle"
+            , parseValidateFailProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; x = r.radius;") "Could not prove: value is Shape::Circle"
+            , parseEvalProgramFailHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; x = r.radius; return x;") "Expected a Shape::Circle but got a Shape::Rect"
+            , -- The type of the field is checked, and a field of another type's variant is not a field of this one
+              parseValidateFailProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; b = c.radius = true;") "expected Int, got Bool"
+            , parseValidateFailProgramHelper (shape ++ "x = 1; y = x.radius;") "expected Shape, got Int"
+            , -- Updating a variant copies the fields it does not name, which needs the base to be that variant
+              parseValidProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ affirm s is Shape::Rect; }] [{ affirm return is Shape::Rect; affirm return.height = s.height; affirm return.width = 10; }] { return Shape::Rect { width: 10, ..s }; };")
+            , parseValidateFailProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ }] [{ }] { return Shape::Rect { width: 10, ..s }; };") "Could not prove: value is Shape::Rect"
+            , parseValidateFailProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ affirm s is Shape::Rect; }] [{ affirm return.height = 5; }] { return Shape::Rect { width: 10, ..s }; };") "Could not prove: return.height = 5"
+            , parseEvalProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; return Shape::Rect { width: 7, ..r };") (Just (VData "Shape::Rect" [("width", VInt 7), ("height", VInt 2)]))
+            , -- A field several variants (or a struct and a variant) have is not read this way
+              parseValidateFailProgramHelper ("enum E { A { size: Int }, B { size: Int } };" ++ "fn f(e: E) -> Int { return e.size; };") "has several variants, so its field size may be absent"
+            , parseEvalProgramHelper ("struct P { radius: Int };" ++ shape ++ "p = P { radius: 4 }; return p.radius;") (Just (VInt 4))
+            , parseValidateFailProgramHelper ("struct P { radius: Int };" ++ shape ++ "fn f(s: Shape) -> Int { return s.radius; };") "has several variants, so its field radius may be absent"
             ]
 
 testCrlf :: Test
@@ -2504,6 +2536,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
+                , testEnumAccess
                 , testListProofs
                 , testEnums
                 , testStructs

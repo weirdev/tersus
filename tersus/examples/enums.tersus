@@ -15,16 +15,13 @@ fn area(s: Shape) -> Int {
     };
 };
 
-// A variant can be demanded in a contract; the caller has to show it.
+// A field that only one variant has can be read with `.`, which asks for the proof that the value is that
+// variant: the contract demands it here, and the caller has to show it.
 fn radiusOf(s: Shape) -> Int
     [{ affirm s is Shape::Circle; }]
     [{ }]
 {
-    return match s {
-        Shape::Circle { radius: r } => r,
-        Shape::Rect { width: w, height: h } => 0,
-        Shape::Empty => 0,
-    };
+    return s.radius;
 };
 
 // A type can contain itself, so a function over it recurses.

@@ -170,8 +170,8 @@ match s {                                   // as a statement, the arms are bloc
 - A struct can be matched as the only variant of its type: `match p { Point { x: a } => a }`.
 - Enums can contain themselves: `enum Tree { Leaf, Branch { left: Tree, value: Int, right: Tree } }`, and a function over a tree recurses on its parts. (A compiled Tersus would have to put such fields behind a pointer; the language does not mention it.)
 - Equality `=` is structural, and `x != y` is proved for values built by different variants or with different fields.
-- Reading a field with `x.f` is only allowed on a struct for now. On an enum it is a type error, because the field may be absent: take the value apart with `match`.
-- A contract can demand a variant: `[{ affirm o is Opt::Some; }]`. The caller has to show it, from where the value was built, an `if o is Opt::Some` or an earlier `affirm`. Two different variants of one value cannot both hold, so a contract that assumes both is contradictory and anything follows from it.
+- `x.f` reads a field. On a struct it always works. On an enum it works for a field that only one variant of one enum has (`radius` of `Shape::Circle`), and then it asks for the proof that `x` is that variant, the way `get` asks for an index in range: an `affirm x is Shape::Circle;` in a contract, an earlier `affirm`, or an `if x is Shape::Circle`. A field that several variants have, or that a struct also has, is a type error on an enum value (`size` of `A` and `B`): take the value apart with `match`.
+- A contract can demand a variant: `[{ affirm o is Opt::Some; }]`. The caller has to show it, from where the value was built, an `if o is Opt::Some` or an earlier `affirm`. Updating a variant, `Shape::Rect { width: 10, ..s }`, copies the other fields with the same reads, so it asks for the proof that `s` is a `Shape::Rect`. Two different variants of one value cannot both hold, so a contract that assumes both is contradictory and anything follows from it.
 
 See `examples/enums.tersus`.
 

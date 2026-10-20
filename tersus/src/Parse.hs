@@ -237,7 +237,6 @@ structFields element apply name declared = do
     void (char '}')
     whitespace
     mapM_ (\(field, _) -> when (field `notElem` declared) (fail ("Struct " ++ name ++ " has no field " ++ field))) inits
-    when (isJust base && "::" `isInfixOf` name) $ fail ("Update syntax is for structs, not the variant " ++ name)
     when (length (map fst inits) /= length (foldr (\f rest -> if f `elem` rest then rest else f : rest) [] (map fst inits))) $
         fail ("Struct " ++ name ++ " literal repeats a field")
     when (isJust base && all (`elem` map fst inits) declared) $
@@ -257,7 +256,7 @@ structFields element apply name declared = do
     argument name base inits field =
         case (lookup field inits, base) of
             (Just given, _) -> return given
-            (Nothing, Just from) -> return (apply (builtinFunct (Field (Just name) field)) [from])
+            (Nothing, Just from) -> return (apply (builtinFunct (if "::" `isInfixOf` name then Access name field else Field (Just name) field)) [from])
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
 
 -- Name or Enum::Variant
@@ -359,12 +358,24 @@ matchReturn = do
     (scrutinee, arms) <- matchArms expression
     desugarMatch scrutinee [(name, binds, [Return body]) | (name, binds, body) <- arms]
 
--- x.field, repeated. A `..` after a term is a range, not a field.
+-- x.field, repeated. A `..` after a term is a range, not a field. A field that only one variant of an enum has is
+-- read with that variant's Access, which asks for the proof that the value is that variant; any other field is
+-- read from a struct.
 withFields :: (Value -> [a] -> a) -> Parser a -> Parser a
 withFields apply term = do
     base <- term
     fields <- many (try (char '.' >> notFollowedBy (char '.') >> variable <* whitespace))
-    return (foldl (\acc field -> apply (builtinFunct (Field Nothing field)) [acc]) base fields)
+    reads <- mapM readerOf fields
+    return (foldl (\acc reader -> apply (builtinFunct reader) [acc]) base reads)
+
+readerOf :: Variable -> Parser BuiltinFunct
+readerOf field = do
+    decls <- getState
+    let owners = [ctor | (ctor, fields) <- Map.toList (declCtors decls), field `elem` fields]
+        variantOf ctor = length [() | (_, ctors) <- Map.toList (declTypes decls), ctor `elem` ctors, length ctors > 1] > 0
+    return $ case owners of
+        [only] | variantOf only -> Access only field
+        _ -> Field Nothing field
 
 expressionApply :: Value -> [Expression] -> Expression
 expressionApply funct = F (Val funct)
