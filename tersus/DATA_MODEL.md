@@ -1,6 +1,6 @@
 # Tersus Data Model (design)
 
-Status: proposal, nothing here is implemented. It replaces README items 4 (property objects) and 11 (type layer), and is the route to item 9 (the doubly linked list). The syntax follows Rust where Rust has an answer.
+Status: phases 1 to 5 are implemented (see Phases below for what each left out). It replaces README items 4 (property objects) and 11 (type layer), and is the route to item 9 (the doubly linked list). The syntax follows Rust where Rust has an answer.
 
 ## Goals
 
