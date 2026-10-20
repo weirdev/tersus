@@ -171,6 +171,14 @@ insertVar (State (ScopeState vals c pState) ctxVals) var val =
         Just s -> s
         Nothing -> State (ScopeState (insert var val vals) c pState) ctxVals
 
+-- Binds a variable in the innermost scope only, hiding a variable of that name in an outer scope
+bindVar :: State -> Variable -> Value -> State
+bindVar (State (ScopeState vals c pState) ctxVals) var val = State (ScopeState (insert var val vals) c pState) ctxVals
+
+vBindVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
+vBindVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
+    VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq ruleCtx
+
 vInsertVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
 vInsertVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
     case vUpdateExistingVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs of

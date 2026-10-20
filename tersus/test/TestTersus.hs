@@ -2129,6 +2129,19 @@ testEnums =
             , parseValidProgramHelper (opt ++ "fn needsSome(o: Opt) -> Int [{ affirm o is Opt::Some; }] [{ }] { return 1; }; fn caller(o: Opt) -> Int [{ }] [{ }] { if o is Opt::Some { return needsSome(o); } else { return 0; }; };")
             , -- Two variants of one value cannot both hold
               parseValidProgramHelper (opt ++ "fn f(o: Opt) -> Int [{ affirm o is Opt::None; affirm o is Opt::Some; }] [{ affirm return = 9; }] { return 1; };")
+            , -- What an arm binds or first assigns is local to the arm, whatever the number of variants
+              parseValidateFailProgramHelper "struct P { x: Int }; p = P { x: 1 }; match p { P { x: a } => { local = a; } }; return local;" "Undefined variable: local"
+            , parseEvalProgramFailHelper "struct P { x: Int }; p = P { x: 1 }; match p { P { x: a } => { local = a; } }; return local;" "Undefined variable: local"
+            , parseValidateFailProgramHelper (opt ++ "o = Opt::None; match o { Opt::None => { local = 1; }, Opt::Some { value: v } => { local = v; } }; return local;") "Undefined variable: local"
+            , parseValidateFailProgramHelper (opt ++ "o = Opt::None; match o { Opt::None => { }, Opt::Some { value: v } => { } }; return v;") "Undefined variable: v"
+            , -- A pattern variable hides a variable of the same name instead of assigning it
+              parseEvalProgramHelper (opt ++ "v = 99; o = Opt::Some { value: 4 }; match o { Opt::None => { }, Opt::Some { value: v } => { w = v; } }; return v;") (Just (VInt 99))
+            , parseValidProgramHelper (opt ++ "v = 99; o = Opt::Some { value: 4 }; match o { Opt::None => { }, Opt::Some { value: v } => { w = v; } }; affirm v = 99;")
+            , parseEvalProgramHelper "struct P { x: Int }; v = 99; p = P { x: 4 }; match p { P { x: v } => { } }; return v;" (Just (VInt 99))
+            , parseValidProgramHelper (opt ++ "v = true; o = Opt::Some { value: 4 }; match o { Opt::None => { }, Opt::Some { value: v } => { w = v + 1; } }; affirm v = true;")
+            , -- The scrutinee is read once, so a pattern variable named like it does not change later fields
+              parseEvalProgramHelper (shape ++ "r = Shape::Rect { width: 3, height: 4 }; t = 0; match r { Shape::Circle { radius: x } => { }, Shape::Rect { width: r, height: h } => { t = r * 10 + h; }, Shape::Empty => { } }; return t;") (Just (VInt 34))
+            , parseValidProgramHelper (shape ++ "r = Shape::Rect { width: 3, height: 4 }; t = 0; match r { Shape::Circle { radius: x } => { }, Shape::Rect { width: r, height: h } => { t = r * 10 + h; }, Shape::Empty => { } }; affirm t = 34;")
             , -- Enums in lists
               parseValidProgramHelper (opt ++ "l = push(push([], Opt::None), Opt::Some { value: 2 }); affirm get(l, 0) is Opt::None; affirm size(l) = 2;")
             , -- Recursive types

@@ -70,6 +70,9 @@ data ValidationStatement
     deriving (Show, Eq, Ord)
 data Statement
     = Assign Variable Expression
+    | -- Binds a variable in the innermost scope, hiding any variable of that name outside it instead of assigning it.
+      -- Never parsed: a match uses it for its scrutinee and the fields its patterns name.
+      Let Variable Expression
     | Return Expression
     | ValidationStatement ValidationStatement
     | -- struct Name { field: Type, ... }; it only matters to the type checker
