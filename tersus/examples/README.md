@@ -33,7 +33,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `generic_lists.tersus` | Lists of `Bool` and of lists, built by a loop with an invariant, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
 | `structs.tersus` | A `struct`, literals, field reads, `..base` updates with a contract proving the other fields are unchanged, and updating one element of a list of structs | returns `11` |
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
-| `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index, and following links is memory safe | returns `9` |
+| `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
@@ -99,6 +99,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/enum_contract_unmet.tersus` | A function that needs a `Circle` is called with a `Rect` |
 | `rejected/enum_wrong_variant.tersus` | `affirm s is Shape::Rect` for a `Circle` |
 | `rejected/linked_list_link_out_of_range.tersus` | An insertion gives the new node a link one past its own index |
+| `rejected/linked_list_link_disagrees.tersus` | An insertion that forgets to point the old next node back at the new node, so `prev` and `next` disagree |
 | `rejected/linked_list_unchecked_walk.tersus` | A walk over a list whose links nothing says are valid |
 | `rejected/struct_update_frame.tersus` | A contract claims a field that an update did not set equals another field |
 | `rejected/struct_field_type.tersus` | A struct literal gives a `Bool` for an `Int` field |
