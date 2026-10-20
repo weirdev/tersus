@@ -159,8 +159,13 @@ entailsFrom originalGoals startSaturation =
     -- more than the index it was instantiated at. A forall is only instantiated at indexes of a low generation,
     -- so an agreement invariant such as get(l, get(l, i).next).prev = i, whose instance contains a new index
     -- to instantiate at, does not feed itself without end.
-    saturateWith round saturation@(Saturation currentFacts factSet births solver done) =
-        let (table, classes, flags, quick) = querySolver solver goals
+    saturateWith round saturation =
+        let currentFacts = satFacts saturation
+            factSet = satFactSet saturation
+            births = satBirths saturation
+            solver = satSolver saturation
+            done = satDone saturation
+            (table, classes, flags, quick) = querySolver solver goals
             generationOf t = Map.findWithDefault 0 t births
             instances = forallInstances ((<= maxIndexGeneration) . generationOf) table classes currentFacts factSet done
          in if null instances
@@ -195,8 +200,8 @@ entailsFrom originalGoals startSaturation =
                             go seen (g : rest) =
                                 let key = guardKey g
                                  in if key `Set.member` seen then go seen rest else g : go (Set.insert key seen) rest
-                        guardKey g@(FApp f [a, b]) = (f, min (classOfTerm a) (classOfTerm b), max (classOfTerm a) (classOfTerm b))
-                        guardKey g = (CTerm (VBool False), -1, -1)
+                        guardKey (FApp f [a, b]) = (f, min (classOfTerm a) (classOfTerm b), max (classOfTerm a) (classOfTerm b))
+                        guardKey _ = (CTerm (VBool False), -1, -1)
                         classOfTerm t = rep guardClasses (idOf guardTable t)
                         goalIndexClasses = Set.fromList [rep guardClasses (idOf guardTable t) | t <- concatMap goalIndexes goals]
                         relevantFirst gs = [g | (g, t) <- gs, relevant t] ++ [g | (g, t) <- gs, not (relevant t)]
@@ -282,13 +287,17 @@ querySolver facts goals =
         zeroId = solverZeroId solver
         sameClass a b = rep classes a == rep classes b
         arithmetic = arithmeticEdges table4 classes trueId zeroId
-        clash = constructorClash table4 classes trueId
+        -- shared by the questions asked
+        valuesByClass = constantsByClass table4 classes
+        namesByClass = constructorNames table4 classes
+        distinct = provablyDistinct classes valuesByClass namesByClass
+        clash = constructorClash table4 classes valuesByClass namesByClass trueId
         entailed goal goalId =
             clash
                 || sameClass goalId trueId
                 || or [sameClass (idOf table4 lhs) (idOf table4 rhs) | FApp funct [lhs, rhs] <- [goal], funct == eqProof]
                 || or
-                    [ provablyDistinct table4 classes (idOf table4 lhs) (idOf table4 rhs)
+                    [ distinct (idOf table4 lhs) (idOf table4 rhs)
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [lhs, rhs] <- [goal]
                     ]
                 || or
@@ -305,7 +314,7 @@ querySolver facts goals =
                         ( clash
                             || or [sameClass t trueId | Just f <- [functId], t <- Map.findWithDefault [] (rep classes f, [rep classes l, rep classes r]) appsBySignature]
                             || or [sameClass l r | funct == eqProof]
-                            || or [provablyDistinct table4 classes l r | CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _) <- [funct]]
+                            || or [distinct l r | CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _) <- [funct]]
                             || or [arithmeticEntails arithmetic rel (rep classes l) (rep classes r) | CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _) <- [funct]]
                         )
                 _ -> Nothing
@@ -521,10 +530,10 @@ constructorNames table classes =
     builtinOfClass = builtinsByClass table classes (const True)
 
 -- Two different values, or two different constructors, in one class cannot both be what it is equal to
-constructorClash :: TermTable -> IntMap.IntMap Int -> Int -> Bool
-constructorClash table classes trueId =
-    any ((> 1) . length) (Map.elems (constantsByClass table classes))
-        || any ((> 1) . length) (Map.elems (constructorNames table classes))
+constructorClash :: TermTable -> IntMap.IntMap Int -> Map.Map Int [Value] -> Map.Map Int [Name] -> Int -> Bool
+constructorClash table classes values names trueId =
+    any ((> 1) . length) (Map.elems values)
+        || any ((> 1) . length) (Map.elems names)
         || any ((> 1) . length . nubOrd) (Map.elems variantsKnownToHold)
   where
     -- the variants a value has been said to be, as in `x is Opt::Some` assumed true
@@ -538,9 +547,9 @@ constructorClash table classes trueId =
             ]
 
 -- Two classes that are known to differ: they are equal to different values, or built by different constructors
-provablyDistinct :: TermTable -> IntMap.IntMap Int -> Int -> Int -> Bool
-provablyDistinct table classes a b =
-    differ (constantsByClass table classes) || differ' (constructorNames table classes)
+provablyDistinct :: IntMap.IntMap Int -> Map.Map Int [Value] -> Map.Map Int [Name] -> Int -> Int -> Bool
+provablyDistinct classes values names a b =
+    differ values || differ' names
   where
     differ values = case (Map.lookup (rep classes a) values, Map.lookup (rep classes b) values) of
         (Just (x : _), Just (y : _)) -> x /= y
@@ -837,12 +846,6 @@ findClass classes x =
     case IntMap.lookup x classes of
         Just parent | parent /= x -> findClass classes parent
         _ -> x
-
-unionClasses :: IntMap.IntMap Int -> (Int, Int) -> IntMap.IntMap Int
-unionClasses classes (a, b) =
-    let ra = findClass classes a
-        rb = findClass classes b
-     in if ra == rb then classes else IntMap.insert ra rb classes
 
 -- Integer arithmetic
 --
