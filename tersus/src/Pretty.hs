@@ -21,7 +21,7 @@ renderProof name = go 0
              in if prec > level then "(" ++ text ++ ")" else text
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [struct]) = go 3 struct ++ "." ++ field
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Project _ field)) _)) [struct]) = go 3 struct ++ "." ++ field
-    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Access _ field)) _)) [struct]) = go 3 struct ++ "." ++ field
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Cast variant)) _)) [value]) = "(" ++ go 1 value ++ " as " ++ variant ++ ")"
     go prec (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variant)) _)) [value]) =
         let text = go 1 value ++ " is " ++ variant
          in if prec > 0 then "(" ++ text ++ ")" else text
@@ -74,7 +74,7 @@ builtinName (Rel r) = relName r
 builtinName (Ctor name _) = name
 builtinName (Field _ field) = "." ++ field
 builtinName (Project _ field) = "." ++ field
-builtinName (Access _ field) = "." ++ field
+builtinName (Cast variant) = "as " ++ variant
 builtinName (Is variant) = "is " ++ variant
 
 renderValue :: Value -> String

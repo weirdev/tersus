@@ -24,6 +24,7 @@ renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
 renderType (TNamed name) = name
+renderType (TVariant name) = name
 renderType (TVar _) = "?"
 
 -- The checking monad: a substitution for the type variables, a counter for new ones, and failure
@@ -105,6 +106,11 @@ unify a b = do
         (TInt, TInt) -> return True
         (TBool, TBool) -> return True
         (TNamed x, TNamed y) -> return (x == y)
+        (TVariant x, TVariant y) -> return (x == y)
+        -- a value read as one variant is still a value of its enum
+        -- (only one way: a Circle is a Shape, but a Shape is not a Circle)
+        (TNamed t, TVariant v) -> variantOf t v
+        (TVariant _, TNamed _) -> return False
         (TList x, TList y) -> unify x y
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
@@ -114,6 +120,11 @@ unify a b = do
     allM f (x : xs) = do
         ok <- f x
         if ok then allM f xs else return False
+
+variantOf :: Name -> Name -> TC Bool
+variantOf typeName variant = do
+    s <- getState
+    return (variant `elem` Map.findWithDefault [] typeName (tcTypes s))
 
 -- Fails with the context if the types cannot be made equal
 expect :: String -> Type -> Type -> TC ()
@@ -215,7 +226,12 @@ fieldType field structTy = do
                     case lookup field declared of
                         Just fieldTy -> return fieldTy
                         Nothing -> failTc ("Type error: " ++ name ++ " has no field " ++ field)
-                _ -> failTc ("Type error: " ++ name ++ " has several variants, so its field " ++ field ++ " may be absent: take the value apart with match, or read a field only one variant has")
+                _ -> failTc ("Type error: " ++ name ++ " has several variants, so its field " ++ field ++ " may be absent: cast the value to a variant first, as in (value as " ++ name ++ "::Variant)." ++ field ++ ", or take it apart with match")
+        TVariant variant -> do
+            (_, declared) <- ctorInfo variant
+            case lookup field declared of
+                Just fieldTy -> return fieldTy
+                Nothing -> failTc ("Type error: " ++ variant ++ " has no field " ++ field)
         TVar _ -> failTc ("Type error: the type of the value whose field " ++ field ++ " is read is not known yet; annotate it")
         other -> failTc ("Type error: field " ++ field ++ " is read from a " ++ renderType other ++ ", which is not a struct")
 
@@ -237,6 +253,7 @@ registerCtors typeName ctors = do
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
+checkType (TVariant name) = () <$ ctorInfo name
 checkType (TList t) = checkType t
 checkType (TFn args ret) = mapM_ checkType (ret : args)
 checkType _ = return ()
@@ -267,7 +284,9 @@ builtinType funct =
         Is variant -> do
             (typeName, _) <- ctorInfo variant
             return (TFn [TNamed typeName] TBool)
-        Access variant field -> projectType variant field
+        Cast variant -> do
+            (typeName, _) <- ctorInfo variant
+            return (TFn [TNamed typeName] (TVariant variant))
         Project variant field -> projectType variant field
         Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
   where

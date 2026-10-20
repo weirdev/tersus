@@ -15,13 +15,14 @@ fn area(s: Shape) -> Int {
     };
 };
 
-// A field that only one variant has can be read with `.`, which asks for the proof that the value is that
-// variant: the contract demands it here, and the caller has to show it.
+// A field of an enum value is read after a cast to the variant that has it. The validator asks for the proof
+// that the value is that variant (the contract demands it here, and the caller has to show it); running a
+// cast does nothing, and a wrong one is undefined behaviour.
 fn radiusOf(s: Shape) -> Int
     [{ affirm s is Shape::Circle; }]
     [{ }]
 {
-    return s.radius;
+    return (s as Shape::Circle).radius;
 };
 
 // A type can contain itself, so a function over it recurses.

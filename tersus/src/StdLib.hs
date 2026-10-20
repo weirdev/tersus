@@ -128,12 +128,13 @@ builtinFunct Set =
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []
-builtinFunct (Access variant field) =
+-- A cast demands the proof that the value is the variant, and does nothing when it runs
+builtinFunct (Cast variant) =
     VFunct
         ["value"]
         [ProofAssert (FApp (CTerm (builtinFunct (Is variant))) [ATerm "value"])]
         []
-        (BuiltinFunct (Access variant field))
+        (BuiltinFunct (Cast variant))
         []
 builtinFunct (Project variant field) = VFunct ["value"] [] [] (BuiltinFunct (Project variant field)) []
 builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
@@ -200,13 +201,14 @@ evalBuiltinFunct (Field owner field) [VData name fields]
     | otherwise =
     case lookup field fields of
         Just value -> Ok value
-        Nothing -> Error ("Struct " ++ name ++ " has no field " ++ field)
+        Nothing -> Error ("Struct " ++ name ++ " has no field " ++ field ++ " (reading it after a cast to the wrong variant is undefined behaviour)")
 evalBuiltinFunct (Is variant) [VData name _] = Ok $ VBool (name == variant)
 evalBuiltinFunct (Is _) _ = Error "Is only tests the variant of an enum value"
 evalBuiltinFunct (Project variant field) [VData name fields]
     | name /= variant = Error ("Expected a " ++ variant ++ " but got a " ++ name)
     | otherwise = maybe (Error ("Variant " ++ variant ++ " has no field " ++ field)) Ok (lookup field fields)
-evalBuiltinFunct (Access variant field) args = evalBuiltinFunct (Project variant field) args
+evalBuiltinFunct (Cast _) [value] = Ok value
+evalBuiltinFunct (Cast _) _ = Error "A cast takes one value"
 evalBuiltinFunct (Project _ _) _ = Error "A field can only be read from an enum value"
 evalBuiltinFunct (Field _ _) _ = Error "A field can only be read from a struct"
 evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
