@@ -95,7 +95,7 @@ entailsBlocked originalGoals (ProofContext originalFacts) =
                 | budget <= 0 = (False, 0 :: Int)
                 | and flags = (True, budget - 1)
                 | depth <= 0 = (False, budget - 1)
-                | otherwise = anyGuard (budget - 1) (take maxSplitGuards (aboutIndexFirst (filter notSplit (nubOrd blocked))))
+                | otherwise = anyGuard (budget - 1) (take maxSplitGuards (filter notSplit (nubOrd blocked)))
               where
                 -- Guards not already split on, those about the new index, or a term it has been found equal to, first
                 aboutIndex = fresh : [other | FApp eq [x, y] <- extra, eq == eqProof, other <- if x == fresh then [y] else if y == fresh then [x] else []]
@@ -123,30 +123,61 @@ entailsBlocked originalGoals (ProofContext originalFacts) =
                 , [FApp (CTerm (builtinFunct (Rel Gt))) [fresh, t]]
                 ]
             reads = take maxSplitIndexes (splitIndexes known fresh bodyGoal)
+            (guidedProved, budgetLeft) = guided maxSplitAttempts maxSplitDepth []
          in holdsUnder []
-                || fst (guided maxSplitAttempts maxSplitDepth [])
-                || any (all holdsUnder . comparisons) reads
+                || guidedProved
+                || any (all holdsUnder . comparisons) (take (budgetLeft `div` 3) reads)
     proveForall _ = False
     -- Facts that are foralls are instantiated, and the closure is rebuilt with the instances
     -- that hold, until no new instance appears or the rounds run out. Without a forall this is
     -- one closure.
-    saturate round currentFacts =
+    -- Each term has a generation: those of the facts and the goals are 0, and the terms an instance adds are one
+    -- more than the index it was instantiated at. A forall is only instantiated at indexes of a low generation,
+    -- so an agreement invariant such as get(l, get(l, i).next).prev = i, whose instance contains a new index
+    -- to instantiate at, does not feed itself without end.
+    saturate round currentFacts = saturateWith round (Map.fromList [(t, 0) | t <- concatMap subterms (currentFacts ++ goals)]) currentFacts
+    saturateWith round births currentFacts =
         let (table, classes, flags) = solve currentFacts goals
-            instances = forallInstances table classes currentFacts
+            generationOf t = Map.findWithDefault 0 t births
+            instances = forallInstances ((<= maxIndexGeneration) . generationOf) table classes currentFacts
          in if null instances
                 then (flags, [])
                 else
-                    let guardGoals = concatMap fst instances
+                    let guardGoals = concatMap (\(guards, _, _) -> guards) instances
                         (guardTable, guardClasses, guardFlags) = solve currentFacts (goals ++ guardGoals)
                         guardHolds = zip guardGoals (drop (length goals) guardFlags)
                         holds g = lookup g guardHolds == Just True
-                        accepted = [body | (guards, body) <- instances, all holds guards]
+                        acceptedInstances = [(body, indexTerm) | (guards, body, indexTerm) <- instances, all holds guards]
+                        accepted = map fst acceptedInstances
+                        births' =
+                            foldl
+                                (\known (body, indexTerm) -> foldl (\m t -> Map.insertWith (\_ old -> old) t (generationOf indexTerm + 1) m) known (subterms body))
+                                births
+                                acceptedInstances
                         -- an instance with exactly one guard missing would be used if that guard held, unless the
                         -- guard compares two terms that are already equal
-                        missing = [g | (guards, _) <- instances, [g] <- [filter (not . holds) guards], distinctSides guardTable guardClasses g]
+                        -- those at an index the goal reads with get come first: the splits that bear on the goal
+                        missing = distinctGuards (relevantFirst [(g, indexTerm) | (guards, _, indexTerm) <- instances, [g] <- [filter (not . holds) guards], distinctSides guardTable guardClasses g])
+                        -- guards about the same two classes of terms are one split, however the terms are written
+                        distinctGuards = go Set.empty
+                          where
+                            go _ [] = []
+                            go seen (g : rest) =
+                                let key = guardKey g
+                                 in if key `Set.member` seen then go seen rest else g : go (Set.insert key seen) rest
+                        guardKey g@(FApp f [a, b]) = (f, min (classOfTerm a) (classOfTerm b), max (classOfTerm a) (classOfTerm b))
+                        guardKey g = (CTerm (VBool False), -1, -1)
+                        classOfTerm t = rep guardClasses (idOf guardTable t)
+                        goalIndexClasses = Set.fromList [rep guardClasses (idOf guardTable t) | t <- concatMap goalIndexes goals]
+                        relevantFirst gs = [g | (g, t) <- gs, relevant t] ++ [g | (g, t) <- gs, not (relevant t)]
+                        relevant t = rep guardClasses (idOf guardTable t) `Set.member` goalIndexClasses
                         distinctSides table' classes' (FApp _ [a, b]) = rep classes' (idOf table' a) /= rep classes' (idOf table' b)
                         distinctSides _ _ _ = True
-                     in if null accepted || round >= maxInstantiationRounds then (flags, missing) else saturate (round + 1) (nubOrd (currentFacts ++ accepted))
+                     in if null accepted || round >= maxInstantiationRounds then (flags, missing) else saturateWith (round + 1) births' (nubOrd (currentFacts ++ accepted))
+
+-- The index terms of the get(L, t) a proof contains
+goalIndexes :: IotaProof -> [IotaProof]
+goalIndexes proof = [index | FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [_, index] <- subterms proof]
 
 -- The indexes of the get(L, t) in the facts and the goal, one for each class of equal indexes, other
 -- than the index itself. Only the first few are tried, to bound the work of a proof.
@@ -189,6 +220,10 @@ guardCases (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [a, b]) =
             , [FApp (CTerm (builtinFunct (Rel Gt))) [a, b]]
             ]
 guardCases _ = []
+
+-- The highest generation of an index a forall is instantiated at (see saturate)
+maxIndexGeneration :: Int
+maxIndexGeneration = 1
 
 maxInstantiationRounds :: Int
 maxInstantiationRounds = 5
@@ -401,13 +436,14 @@ provablyDistinct table classes a b =
 -- entailed, and the instantiated body, which then becomes a fact. A forall whose body has no
 -- get(L, j) is never instantiated.
 
-forallInstances :: TermTable -> IntMap.IntMap Int -> [IotaProof] -> [([IotaProof], IotaProof)]
-forallInstances table classes facts =
+forallInstances :: (IotaProof -> Bool) -> TermTable -> IntMap.IntMap Int -> [IotaProof] -> [([IotaProof], IotaProof, IotaProof)]
+forallInstances eligible table classes facts =
     nubOrd
-        [ (map (substituteIndex index indexTerm) guards, instantiated)
+        [ (map (substituteIndex index indexTerm) guards, instantiated, indexTerm)
         | Forall index guards body <- facts
         , listTerm <- indexedLists index body
         , indexTerm <- getIndexesOf listTerm
+        , eligible indexTerm
         , let instantiated = substituteIndex index indexTerm body
         , instantiated `Set.notMember` known
         ]
