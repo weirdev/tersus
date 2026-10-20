@@ -63,13 +63,31 @@ entailsAll goals context = fst (entailsBlocked goals context)
 -- Also the guards that kept an instance of a forall from being used: each is the one condition missing
 -- for an instance whose other guards hold, so a case split on it is what may let the proof go on.
 entailsBlocked :: [IotaProof] -> ProofContext -> ([Bool], [IotaProof])
-entailsBlocked originalGoals (ProofContext originalFacts) =
-    let (flags, blocked) = saturate (0 :: Int) facts
-     in (zipWith provedAsForall goals flags, blocked)
+entailsBlocked goals (ProofContext facts) =
+    let (flags, blocked, _) = entailsFrom goals (initialSaturation goals facts)
+     in (flags, blocked)
+
+-- The facts a proof has reached by instantiating foralls, and the generation of each term (see saturate). A
+-- case split starts from the saturation of the case before it, since facts only grow.
+data Saturation = Saturation [IotaProof] (Map.Map IotaProof Int)
+
+-- The list builtins carry their contracts, which are large, and every fact and goal is compared with the
+-- others many times. They are replaced by plain symbols up front.
+initialSaturation :: [IotaProof] -> [IotaProof] -> Saturation
+initialSaturation goals facts =
+    let lightFacts = map lightProof facts
+     in Saturation lightFacts (Map.fromList [(t, 0) | t <- concatMap subterms (lightFacts ++ map lightProof goals)])
+
+-- Adds facts that hold in a case, as terms of generation 0
+extendSaturation :: Saturation -> [IotaProof] -> Saturation
+extendSaturation (Saturation facts births) new =
+    Saturation (nubOrd (facts ++ new)) (foldl (\m t -> Map.insertWith (\_ old -> old) t 0 m) births (concatMap subterms new))
+
+entailsFrom :: [IotaProof] -> Saturation -> ([Bool], [IotaProof], Saturation)
+entailsFrom originalGoals (Saturation startFacts startBirths) =
+    let (flags, blocked, saturated) = saturateWith (0 :: Int) startBirths startFacts
+     in (zipWith provedAsForall goals flags, blocked, saturated)
   where
-    -- The list builtins carry their contracts, which are large, and every fact and goal is
-    -- compared with the others many times. They are replaced by plain symbols up front.
-    facts = map lightProof originalFacts
     goals = map lightProof originalGoals
     -- A forall goal that is not already a known fact is proved for an arbitrary index
     provedAsForall goal entailed = entailed || proveForall goal
@@ -87,25 +105,20 @@ entailsBlocked originalGoals (ProofContext originalFacts) =
         let fresh = ATerm (Iota ("$" ++ index))
             guardFacts = map (substituteIndex index fresh) guards
             bodyGoal = substituteIndex index fresh body
-            known = nubOrd (facts ++ guardFacts)
-            context extra = ProofContext (nubOrd (known ++ extra))
-            holdsUnder extra = and (entailsAll [bodyGoal] (context extra))
+            sat0 = extendSaturation (Saturation startFacts startBirths) guardFacts
+            Saturation known _ = sat0
+            holdsUnder extra = let (flags, _, _) = entailsFrom [bodyGoal] (extendSaturation sat0 extra) in and flags
             -- Each entailment costs one unit of budget
-            guided budget depth extra
+            guided budget depth sat extra
                 | budget <= 0 = (False, 0 :: Int)
                 | and flags = (True, budget - 1)
                 | depth <= 0 = (False, budget - 1)
                 | otherwise = anyGuard (budget - 1) (take maxSplitGuards (filter notSplit (nubOrd blocked)))
               where
-                -- Guards not already split on, those about the new index, or a term it has been found equal to, first
-                aboutIndex = fresh : [other | FApp eq [x, y] <- extra, eq == eqProof, other <- if x == fresh then [y] else if y == fresh then [x] else []]
-                aboutIndexFirst gs = [g | g <- gs, mentions g] ++ [g | g <- gs, not (mentions g)]
-                mentions (FApp _ [a, b]) = a `elem` aboutIndex || b `elem` aboutIndex
-                mentions _ = False
                 notSplit (FApp _ [a, b]) = not (or [sameTerms x y a b | FApp _ [x, y] <- extra])
                 notSplit _ = False
                 sameTerms x y p q = (x == p && y == q) || (x == q && y == p)
-                (flags, blocked) = entailsBlocked [bodyGoal] (context extra)
+                (flags, blocked, saturated) = entailsFrom [bodyGoal] sat
                 anyGuard remaining [] = (False, remaining)
                 anyGuard remaining (guard : rest) =
                     case guardCases guard of
@@ -115,7 +128,7 @@ entailsBlocked originalGoals (ProofContext originalFacts) =
                              in if ok then (True, remaining') else if remaining' <= 0 then (False, 0) else anyGuard remaining' rest
                 allBranches remaining [] = (True, remaining)
                 allBranches remaining (c : cs) =
-                    let (ok, remaining') = guided remaining (depth - 1) (extra ++ c)
+                    let (ok, remaining') = guided remaining (depth - 1) (extendSaturation saturated c) (extra ++ c)
                      in if ok then allBranches remaining' cs else (False, remaining')
             comparisons t =
                 [ [FApp (CTerm (builtinFunct (Rel Lt))) [fresh, t]]
@@ -123,9 +136,8 @@ entailsBlocked originalGoals (ProofContext originalFacts) =
                 , [FApp (CTerm (builtinFunct (Rel Gt))) [fresh, t]]
                 ]
             reads = take maxSplitIndexes (splitIndexes known fresh bodyGoal)
-            (guidedProved, budgetLeft) = guided maxSplitAttempts maxSplitDepth []
-         in holdsUnder []
-                || guidedProved
+            (guidedProved, budgetLeft) = guided maxSplitAttempts maxSplitDepth sat0 []
+         in guidedProved
                 || any (all holdsUnder . comparisons) (take (budgetLeft `div` 3) reads)
     proveForall _ = False
     -- Facts that are foralls are instantiated, and the closure is rebuilt with the instances
@@ -135,13 +147,12 @@ entailsBlocked originalGoals (ProofContext originalFacts) =
     -- more than the index it was instantiated at. A forall is only instantiated at indexes of a low generation,
     -- so an agreement invariant such as get(l, get(l, i).next).prev = i, whose instance contains a new index
     -- to instantiate at, does not feed itself without end.
-    saturate round currentFacts = saturateWith round (Map.fromList [(t, 0) | t <- concatMap subterms (currentFacts ++ goals)]) currentFacts
     saturateWith round births currentFacts =
         let (table, classes, flags) = solve currentFacts goals
             generationOf t = Map.findWithDefault 0 t births
             instances = forallInstances ((<= maxIndexGeneration) . generationOf) table classes currentFacts
          in if null instances
-                then (flags, [])
+                then (flags, [], Saturation currentFacts births)
                 else
                     let guardGoals = concatMap (\(guards, _, _) -> guards) instances
                         (guardTable, guardClasses, guardFlags) = solve currentFacts (goals ++ guardGoals)
@@ -173,7 +184,10 @@ entailsBlocked originalGoals (ProofContext originalFacts) =
                         relevant t = rep guardClasses (idOf guardTable t) `Set.member` goalIndexClasses
                         distinctSides table' classes' (FApp _ [a, b]) = rep classes' (idOf table' a) /= rep classes' (idOf table' b)
                         distinctSides _ _ _ = True
-                     in if null accepted || round >= maxInstantiationRounds then (flags, missing) else saturateWith (round + 1) births' (nubOrd (currentFacts ++ accepted))
+                        next = nubOrd (currentFacts ++ accepted)
+                     in if null accepted || round >= maxInstantiationRounds
+                            then (flags, missing, Saturation next births')
+                            else saturateWith (round + 1) births' next
 
 -- The index terms of the get(L, t) a proof contains
 goalIndexes :: IotaProof -> [IotaProof]
@@ -200,13 +214,13 @@ maxSplitIndexes = 60
 -- How deep the case splits on blocked guards go, how many guards one level tries, and how many
 -- entailments one forall proof may spend on them
 maxSplitDepth :: Int
-maxSplitDepth = 4
+maxSplitDepth = 10
 
 maxSplitGuards :: Int
-maxSplitGuards = 6
+maxSplitGuards = 1
 
 maxSplitAttempts :: Int
-maxSplitAttempts = 300
+maxSplitAttempts = 600
 
 -- The ways a guard can go. A guard that is a left-out index splits into holding or not, a range bound into
 -- the three orders, which lets the case where they are equal join the two terms.
