@@ -15,14 +15,14 @@ data BuiltinFunct
     | -- Is Ctor tests which variant an enum value is; Project Ctor reads a field of a value known to be that variant
       Is Name
     | Project Name Variable
-    | -- Access Ctor field is the field read of `x.field` where only that variant has the field: unlike Project it
-      -- demands the proof `x is Ctor`
-      Access Name Variable
+    | -- Cast Ctor reinterprets an enum value as that variant so its fields can be read. The validator demands the proof
+      -- that the value is that variant; evaluation does nothing, and a wrong cast is undefined behaviour.
+      Cast Name
     deriving (Show, Eq, Ord)
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
 -- look at them. TVar is the checker's own unknown and is never written by a program.
-data Type = TInt | TBool | TList Type | TFn [Type] Type | TNamed Name | TVar Int
+data Type = TInt | TBool | TList Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
     deriving (Show, Eq, Ord)
 
 -- The declared parameter types and return type of a user function

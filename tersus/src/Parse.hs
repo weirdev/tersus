@@ -256,7 +256,9 @@ structFields element apply name declared = do
     argument name base inits field =
         case (lookup field inits, base) of
             (Just given, _) -> return given
-            (Nothing, Just from) -> return (apply (builtinFunct (if "::" `isInfixOf` name then Access name field else Field (Just name) field)) [from])
+            (Nothing, Just from)
+                | "::" `isInfixOf` name -> return (apply (builtinFunct (Field Nothing field)) [apply (builtinFunct (Cast name)) [from]])
+                | otherwise -> return (apply (builtinFunct (Field (Just name) field)) [from])
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
 
 -- Name or Enum::Variant
@@ -358,24 +360,21 @@ matchReturn = do
     (scrutinee, arms) <- matchArms expression
     desugarMatch scrutinee [(name, binds, [Return body]) | (name, binds, body) <- arms]
 
--- x.field, repeated. A `..` after a term is a range, not a field. A field that only one variant of an enum has is
--- read with that variant's Access, which asks for the proof that the value is that variant; any other field is
--- read from a struct.
+-- x.field and x as Enum::Variant, repeated. A `..` after a term is a range, not a field. A field of an enum value
+-- is read after a cast to the variant that has it: (s as Shape::Circle).radius
 withFields :: (Value -> [a] -> a) -> Parser a -> Parser a
 withFields apply term = do
     base <- term
-    fields <- many (try (char '.' >> notFollowedBy (char '.') >> variable <* whitespace))
-    reads <- mapM readerOf fields
-    return (foldl (\acc reader -> apply (builtinFunct reader) [acc]) base reads)
-
-readerOf :: Variable -> Parser BuiltinFunct
-readerOf field = do
-    decls <- getState
-    let owners = [ctor | (ctor, fields) <- Map.toList (declCtors decls), field `elem` fields]
-        variantOf ctor = length [() | (_, ctors) <- Map.toList (declTypes decls), ctor `elem` ctors, length ctors > 1] > 0
-    return $ case owners of
-        [only] | variantOf only -> Access only field
-        _ -> Field Nothing field
+    suffixes <- many (try fieldSuffix <|> castSuffix)
+    return (foldl (\acc funct -> apply (builtinFunct funct) [acc]) base suffixes)
+  where
+    fieldSuffix = Field Nothing <$> (char '.' >> notFollowedBy (char '.') >> variable <* whitespace)
+    castSuffix = do
+        keyword "as"
+        whitespace
+        (variant, _) <- declaredCtor
+        whitespace
+        return (Cast variant)
 
 expressionApply :: Value -> [Expression] -> Expression
 expressionApply funct = F (Val funct)
@@ -445,7 +444,9 @@ typeAnnotation = do
                 element <- typeAnnotation
                 void (char '>')
                 return (TList element)
-            _ -> return (TNamed name)
+            _ -> do
+                variant <- optionMaybe (try (string "::" >> variable))
+                return (maybe (TNamed name) (\v -> TVariant (name ++ "::" ++ v)) variant)
 
 functContractReqs :: Parser [ValidationStatement]
 -- Function contracts are written as `[{ ... }]`: square brackets mark the presence

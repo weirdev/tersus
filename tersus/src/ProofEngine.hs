@@ -252,12 +252,17 @@ maxEvaluationRounds = 8
 fieldRead :: BuiltinFunct -> Maybe Variable
 fieldRead (Field _ field) = Just field
 fieldRead (Project _ field) = Just field
-fieldRead (Access _ field) = Just field
 fieldRead _ = Nothing
 
 selections :: TermTable -> IntMap.IntMap Int -> [(Int, Int)]
-selections table classes = reads ++ injectivity
+selections table classes = reads ++ injectivity ++ casts
   where
+    -- a cast changes how a value is read, not the value
+    casts =
+        [ (termId, argId)
+        | (termId, (functId, [argId])) <- tableApps table
+        , Just (Cast _) <- [Map.lookup (rep classes functId) builtinOfClass]
+        ]
     reads =
         [ (termId, arg)
         | (termId, (functId, [structId])) <- tableApps table
@@ -558,7 +563,6 @@ lightProof other = other
 unowned :: BuiltinFunct -> BuiltinFunct
 unowned (Field _ field) = Field Nothing field
 unowned (Project _ field) = Field Nothing field
-unowned (Access _ field) = Field Nothing field
 unowned funct = funct
 
 canonicalValue :: Value -> Value

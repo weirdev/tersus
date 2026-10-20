@@ -2104,7 +2104,7 @@ testEnums =
             , parseFailsWith "enum Bool { A };" "builtin type"
             , -- Type checking
               parseValidateFailProgramHelper (shape ++ "x = Shape::Circle { radius: true };") "field radius of Shape::Circle: expected Int, got Bool"
-            , parseValidateFailProgramHelper (shape ++ "fn f(s: Shape) -> Int { return s.radius; };") "Could not prove: value is Shape::Circle"
+            , parseValidateFailProgramHelper (shape ++ "fn f(s: Shape) -> Int { return s.radius; };") "cast the value to a variant first"
             , parseValidateFailProgramHelper (shape ++ opt ++ "x = Shape::Empty = Opt::None;") "expected Shape, got Opt"
             , parseValidateFailProgramHelper (shape ++ "x = 1 is Shape::Empty;") "expected Shape, got Int"
             , parseValidateFailProgramHelper (shape ++ shape) "Type already defined: Shape"
@@ -2170,36 +2170,44 @@ testListProofs =
               parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ affirm a != b; }] [{ }] { affirm b != a; return 0; };"
             ]
 
-testEnumAccess :: Test
-testEnumAccess =
+testEnumCast :: Test
+testEnumCast =
     let shape = "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
      in testCaseSeq
-            "testEnumAccess"
-            [ -- A field only one variant has can be read when the value is shown to be that variant
-              parseEvalProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; return c.radius;") (Just (VInt 5))
-            , parseValidProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; affirm c.radius = 5;")
-            , parseValidProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ affirm s is Shape::Circle; }] [{ affirm return = s.radius; }] { return s.radius; };")
-            , parseValidProgramHelper (shape ++ "fn area(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Rect { return s.width * s.height; } else { return 0; }; };")
-            , parseEvalProgramHelper (shape ++ "fn area(s: Shape) -> Int { if s is Shape::Rect { return s.width * s.height; } else { return 0; }; }; return area(Shape::Rect { width: 3, height: 4 });") (Just (VInt 12))
-            , parseValidProgramHelper (shape ++ "fn f(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Circle { return s.radius; } else { if s is Shape::Rect { return s.width; } else { return 0; }; }; };")
-            , -- Rejected when the variant is not shown
-              parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ }] [{ }] { return s.radius; };") "Could not prove: value is Shape::Circle"
-            , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ affirm s is Shape::Rect; }] [{ }] { return s.radius; };") "Could not prove: value is Shape::Circle"
-            , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Circle { return 0; } else { return s.radius; }; };") "Could not prove: value is Shape::Circle"
-            , parseValidateFailProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; x = r.radius;") "Could not prove: value is Shape::Circle"
-            , parseEvalProgramFailHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; x = r.radius; return x;") "Expected a Shape::Circle but got a Shape::Rect"
-            , -- The type of the field is checked, and a field of another type's variant is not a field of this one
-              parseValidateFailProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; b = c.radius = true;") "expected Int, got Bool"
-            , parseValidateFailProgramHelper (shape ++ "x = 1; y = x.radius;") "expected Shape, got Int"
-            , -- Updating a variant copies the fields it does not name, which needs the base to be that variant
-              parseValidProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ affirm s is Shape::Rect; }] [{ affirm return is Shape::Rect; affirm return.height = s.height; affirm return.width = 10; }] { return Shape::Rect { width: 10, ..s }; };")
+            "testEnumCast"
+            [ -- Casting to a variant lets its fields be read, and is checked by the validator
+              parseEvalProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; return (c as Shape::Circle).radius;") (Just (VInt 5))
+            , parseEvalProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; return c as Shape::Circle;") (Just (VData "Shape::Circle" [("radius", VInt 5)]))
+            , parseValidProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; affirm (c as Shape::Circle).radius = 5;")
+            , parseValidProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ affirm s is Shape::Circle; }] [{ affirm return = (s as Shape::Circle).radius; }] { return (s as Shape::Circle).radius; };")
+            , parseValidProgramHelper (shape ++ "fn area(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Rect { return (s as Shape::Rect).width * (s as Shape::Rect).height; } else { return 0; }; };")
+            , parseEvalProgramHelper (shape ++ "fn area(s: Shape) -> Int { if s is Shape::Rect { return (s as Shape::Rect).width * (s as Shape::Rect).height; } else { return 0; }; }; return area(Shape::Rect { width: 3, height: 4 });") (Just (VInt 12))
+            , -- The cast without a proof is rejected
+              parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ }] [{ }] { return (s as Shape::Circle).radius; };") "Could not prove: value is Shape::Circle"
+            , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ affirm s is Shape::Rect; }] [{ }] { return (s as Shape::Circle).radius; };") "Could not prove: value is Shape::Circle"
+            , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Circle { return 0; } else { return (s as Shape::Circle).radius; }; };") "Could not prove: value is Shape::Circle"
+            , parseValidateFailProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; k = r as Shape::Circle;") "Could not prove: value is Shape::Circle"
+            , -- Running a wrong cast is undefined behaviour: the interpreter does not check it, and reading what is not there is an error
+              parseEvalProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; k = r as Shape::Circle; return 1;") (Just (VInt 1))
+            , parseEvalProgramFailHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; return (r as Shape::Circle).radius;") "undefined behaviour"
+            , -- A field of an enum is not read without a cast, whichever variants have it
+              parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int { return s.radius; };") "cast the value to a variant first"
+            , parseValidateFailProgramHelper ("enum E { A { size: Int }, B { size: Int } };" ++ "fn f(e: E) -> Int { return e.size; };") "cast the value to a variant first"
+            , parseValidProgramHelper ("enum E { A { size: Int }, B { size: Int } };" ++ "fn f(e: E) -> Int [{ affirm e is E::B; }] [{ }] { return (e as E::B).size; };")
+            , -- The variant's fields are checked, and the cast value is still a value of the enum
+              parseValidateFailProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; k = (c as Shape::Circle).width;") "Shape::Circle has no field width"
+            , parseValidateFailProgramHelper (shape ++ "c = Shape::Circle { radius: 5 }; b = (c as Shape::Circle).radius = true;") "expected Int, got Bool"
+            , parseValidateFailProgramHelper (shape ++ "x = 1; y = x as Shape::Circle;") "expected Shape, got Int"
+            , parseValidProgramHelper (shape ++ "fn id(s: Shape) -> Shape { return s; }; c = Shape::Circle { radius: 5 }; d = id(c as Shape::Circle);")
+            , parseValidProgramHelper (shape ++ "fn r(c: Shape::Circle) -> Int { return c.radius; }; fn use(s: Shape) -> Int [{ affirm s is Shape::Circle; }] [{ }] { return r(s as Shape::Circle); }; x = use(Shape::Circle { radius: 9 });")
+            , parseValidateFailProgramHelper (shape ++ "fn r(c: Shape::Circle) -> Int { return c.radius; }; x = r(Shape::Rect { width: 1, height: 2 });") "expected Shape::Circle, got Shape"
+            , -- Updating a variant copies the fields it does not name from the base cast to that variant
+              parseValidProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ affirm s is Shape::Rect; }] [{ affirm return is Shape::Rect; affirm (return as Shape::Rect).height = (s as Shape::Rect).height; affirm (return as Shape::Rect).width = 10; }] { return Shape::Rect { width: 10, ..s }; };")
             , parseValidateFailProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ }] [{ }] { return Shape::Rect { width: 10, ..s }; };") "Could not prove: value is Shape::Rect"
-            , parseValidateFailProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ affirm s is Shape::Rect; }] [{ affirm return.height = 5; }] { return Shape::Rect { width: 10, ..s }; };") "Could not prove: return.height = 5"
+            , parseValidateFailProgramHelper (shape ++ "fn grow(s: Shape) -> Shape [{ affirm s is Shape::Rect; }] [{ affirm (return as Shape::Rect).height = 5; }] { return Shape::Rect { width: 10, ..s }; };") "Could not prove: (return as Shape::Rect).height = 5"
             , parseEvalProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; return Shape::Rect { width: 7, ..r };") (Just (VData "Shape::Rect" [("width", VInt 7), ("height", VInt 2)]))
-            , -- A field several variants (or a struct and a variant) have is not read this way
-              parseValidateFailProgramHelper ("enum E { A { size: Int }, B { size: Int } };" ++ "fn f(e: E) -> Int { return e.size; };") "has several variants, so its field size may be absent"
-            , parseEvalProgramHelper ("struct P { radius: Int };" ++ shape ++ "p = P { radius: 4 }; return p.radius;") (Just (VInt 4))
-            , parseValidateFailProgramHelper ("struct P { radius: Int };" ++ shape ++ "fn f(s: Shape) -> Int { return s.radius; };") "has several variants, so its field radius may be absent"
+            , -- Structs read their fields directly
+              parseEvalProgramHelper ("struct P { radius: Int };" ++ shape ++ "p = P { radius: 4 }; return p.radius;") (Just (VInt 4))
             ]
 
 testCrlf :: Test
@@ -2536,7 +2544,7 @@ main = do
                 , testPrettyProofs
                 , testMulDivNegative
                 , testCrlf
-                , testEnumAccess
+                , testEnumCast
                 , testListProofs
                 , testEnums
                 , testStructs
