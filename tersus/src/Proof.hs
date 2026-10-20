@@ -95,6 +95,7 @@ evalNextStatement fuelState = spendFuel fuelState `bindResult` evalNextStatement
 evalNextStatementWithFuel :: State -> Result State String
 evalNextStatementWithFuel state = case nextStatement state of
     Ok (Assign var expr) -> evalAssignStatement state var expr
+    Ok (Let var expr) -> evalLetStatement state var expr
     Ok (Return expr) -> evalReturnStatement state expr
     Ok ValidationStatement{} -> advanceStatement state
     Ok AxiomDef{} -> advanceStatement state
@@ -129,6 +130,11 @@ registerGlobalFunction var val@(VFunct _ _ _ NativeFunct{} _) (State scope@(Scop
     | Map.member var ctxVals = Error ("Function already defined: " ++ var)
     | otherwise = Ok (State scope (Map.insert var val ctxVals))
 registerGlobalFunction _ _ state = Ok state
+
+evalLetStatement :: State -> Variable -> Expression -> Result State String
+evalLetStatement state var expr =
+    advanceStatement state `bindResult` \advancedState ->
+        evalExpression advancedState expr `bindResult` \(val, rState) -> Ok (bindVar rState var val)
 
 evalReturnStatement :: State -> Expression -> Result State String
 evalReturnStatement state expr =
@@ -198,6 +204,7 @@ valNextStatement state =
             let tracedStmt = doTraceStatements ("valNextStatement: " ++ show stmt) stmt
              in case tracedStmt of
                     Assign var expr -> valAssignStatement state var expr
+                    Let var expr -> valLetStatement state var expr
                     Return expr -> valReturnStatement state expr
                     ValidationStatement valStmt -> valValidationStatement state valStmt
                     StructDef{} -> vAdvanceStatement state
@@ -222,6 +229,13 @@ valAssignStatement state var expr =
             bindFunctionToItself var expr state' `bindResult` \stateWithSelf ->
                 valExpression stateWithSelf niota expr `bindResult` \(exprState, nproofs) ->
                     registerGlobalFunctionProof var niota expr nproofs (vInsertVar (withGlobalsOf state' exprState) var niota nproofs)
+
+valLetStatement :: VState -> Variable -> Expression -> Result VState String
+valLetStatement state var expr =
+    vAdvanceStatement state `bindResult` \advancedState ->
+        popIotaFromSeq advancedState `bindResult` \(niota, state') ->
+            valExpression state' niota expr `bindResult` \(exprState, nproofs) ->
+                Ok (vBindVar exprState var niota nproofs)
 
 -- A function defined at the top level can call itself. Its body is validated with its own name bound to
 -- a copy of the function that exports what its output contract asserts, without having shown it yet:

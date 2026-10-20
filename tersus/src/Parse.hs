@@ -323,13 +323,20 @@ desugarMatch scrutinee arms@((first, _, _) : _) = do
     when (any (`notElem` variants) names) $ fail ("A match over " ++ typeName ++ " has an arm of another type")
     when (length (nub names) /= length names) $ fail ("A match over " ++ typeName ++ " repeats a variant")
     when (not (null (variants \\ names))) $ fail ("A match over " ++ typeName ++ " does not cover " ++ unwords (variants \\ names))
-    return (chain arms)
+    -- The scrutinee is evaluated once into a name no program can write. Each arm is a branch, whose own scope
+    -- holds what it binds and first assigns; a match with one arm has no branch, so it gets a block to do so.
+    return $ case arms of
+        [(name, binds, body)] -> [Block (Let hidden scrutinee : bindings name binds ++ body)]
+        _ -> Let hidden scrutinee : chain arms
   where
+    hidden = "$match"
+    subject = Var hidden
     chain [] = []
     chain [(name, binds, body)] = bindings name binds ++ body
     chain ((name, binds, body) : rest) =
-        [If (F (Val (builtinFunct (Is name))) [scrutinee]) (bindings name binds ++ body) (chain rest)]
-    bindings name binds = [Assign var (F (Val (builtinFunct (Project name field))) [scrutinee]) | (field, var) <- binds]
+        [If (F (Val (builtinFunct (Is name))) [subject]) (bindings name binds ++ body) (chain rest)]
+    -- Binding hides a variable of the same name outside the match instead of assigning it
+    bindings name binds = [Let var (F (Val (builtinFunct (Project name field))) [subject]) | (field, var) <- binds]
 
 -- match scrutinee { Pattern => { statements }, ... }
 matchStatement :: Parser [Statement]

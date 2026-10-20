@@ -317,6 +317,11 @@ checkStatement top ctx env stmt =
             t <- inferExpr ctx env expr
             env' <- assignVar ctx env var t
             return (ctx, env')
+        Let var expr -> do
+            t <- inferExpr ctx env expr
+            case env of
+                scope : outer -> return (ctx, Map.insert var t scope : outer)
+                [] -> return (ctx, [Map.singleton var t])
         Return expr -> do
             t <- inferExpr ctx env expr
             case ctxReturn ctx of
