@@ -247,12 +247,13 @@ bindFunctionToItself var (Val (VFunct args ins outs body@NativeFunct{} _)) state
     | otherwise =
         popIotaFromSeq state `bindResult` \(selfIota, VState _ _ _ iotaseq _) ->
             let assumed = VFunct args ins outs body [p | ProofAssert p <- outs, all (`elem` ("return" : args)) (proofVars p)]
-             in Ok (VState scope (Map.insert var selfIota iotaCtx) (proofCtx ++ [FApp eqProof [ATerm selfIota, CTerm assumed]]) iotaseq ruleCtx)
+                fact = FApp eqProof [ATerm selfIota, CTerm assumed]
+             in Ok (withFacts state [fact] (VState scope (Map.insert var selfIota iotaCtx) (proofCtx ++ [fact]) iotaseq ruleCtx))
 bindFunctionToItself _ _ state = Ok state
 
 -- The state after an expression, without the global bindings that were added only to validate it
 withGlobalsOf :: VState -> VState -> VState
-withGlobalsOf (VState _ iotaCtx proofCtx _ _) (VState scope _ _ iotaseq ruleCtx) = VState scope iotaCtx proofCtx iotaseq ruleCtx
+withGlobalsOf (VState _ iotaCtx proofCtx _ _) expr@(VState scope _ _ iotaseq ruleCtx) = keepCache expr (VState scope iotaCtx proofCtx iotaseq ruleCtx)
 
 -- The validation counterpart of registerGlobalFunction: the function's iota and the proof of its value
 -- join the global context, which the bodies of later functions are validated in.
@@ -260,7 +261,7 @@ registerGlobalFunctionProof :: Variable -> Iota -> Expression -> [IotaProof] -> 
 registerGlobalFunctionProof var niota (Val (VFunct _ _ _ NativeFunct{} _)) nproofs state@(VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx iotaseq ruleCtx)
     | Map.member functionBodyMarker iotaCtx = Ok state
     | Map.member var iotaCtx = Error ("Function already defined: " ++ var)
-    | otherwise = Ok (VState scope (Map.insert var niota iotaCtx) (proofCtx ++ nproofs) iotaseq ruleCtx)
+    | otherwise = Ok (withFacts state nproofs (VState scope (Map.insert var niota iotaCtx) (proofCtx ++ nproofs) iotaseq ruleCtx))
 registerGlobalFunctionProof _ _ _ _ state = Ok state
 
 -- Return proofs are trimmed to names visible at the call boundary so nested block-local
@@ -290,9 +291,9 @@ valReturnStatement state expr =
             Error e -> Error e
 
 valBlockStatement :: VState -> [Statement] -> Result VState String
-valBlockStatement (VState scope iotaCtx proofCtx iotaseq ruleCtx) bstmts =
+valBlockStatement state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) bstmts =
     case vScopeAdvanceStatement scope of
-        Ok advancedScope -> valBlock $ VState (VScopeState empty [] (Continuations $ bstmts ++ [EndBlock]) (Just advancedScope)) iotaCtx proofCtx iotaseq ruleCtx
+        Ok advancedScope -> valBlock $ keepCache state (VState (VScopeState empty [] (Continuations $ bstmts ++ [EndBlock]) (Just advancedScope)) iotaCtx proofCtx iotaseq ruleCtx)
         Error e -> Error e
 
 -- Validates both branches from the state after the condition, then joins them.
@@ -341,12 +342,16 @@ valPath :: VState -> [IotaProof] -> [Statement] -> Result VState String
 valPath state assumptions stmts =
     let VState (VScopeState iotas proofs (Continuations rest) parent) iotaCtx proofCtx iotaseq ruleCtx = state
      in valBlock $
-            VState
-                (VScopeState iotas (nubOrd (proofs ++ assumptions)) (Continuations (Block stmts : rest)) parent)
-                iotaCtx
-                proofCtx
-                iotaseq
-                ruleCtx
+            withFacts
+                state
+                assumptions
+                ( VState
+                    (VScopeState iotas (nubOrd (proofs ++ assumptions)) (Continuations (Block stmts : rest)) parent)
+                    iotaCtx
+                    proofCtx
+                    iotaseq
+                    ruleCtx
+                )
 
 -- Continues from the top level scope as it was before the `if`, since both paths have ended.
 -- What both paths establish is kept, in the same way as joinBranches. If both paths return,
@@ -381,7 +386,7 @@ joinReturnPathsFrom s0 pThen pElse =
                         (\p -> p `notElem` baseFacts && all (`elem` visible) (proofIotas p))
                         (nubOrd (map toMerged (vGetProofs pThen)))
                 elseEqualities = [FApp eqProof [ATerm m, ATerm elseRet] | (m, (_, elseRet)) <- merges]
-                elseContext = Engine.proofContextFromFacts (vGetProofs pElse ++ elseEqualities)
+                elseContext = vProofContextWith pElse elseEqualities
                 kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
                 based = vSetIotaSeq base (vGetIotaSeq sAfter)
                 withReturn = foldl (\s (m, _) -> vSetReturn s m []) based merges
@@ -392,8 +397,8 @@ joinReturnPathsFrom s0 pThen pElse =
 -- everything the branch proved in it. The result is only used to read what the branch
 -- established; it is never continued from.
 valBranch :: VState -> [IotaProof] -> [Statement] -> Result VState String
-valBranch (VState scope iotaCtx proofCtx iotaseq ruleCtx) assumptions stmts =
-    valBlock (VState (VScopeState empty assumptions (Continuations stmts) (Just scope)) iotaCtx proofCtx iotaseq ruleCtx)
+valBranch state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) assumptions stmts =
+    valBlock (withFacts state assumptions (VState (VScopeState empty assumptions (Continuations stmts) (Just scope)) iotaCtx proofCtx iotaseq ruleCtx))
 
 -- What holds inside a branch: the branch's truth value for the condition iota and, when the
 -- condition is a relation, the relation itself (negated for the else branch).
@@ -454,7 +459,7 @@ assignedOuterVars state stmts =
 -- A branch whose facts contradict each other cannot run, so the join is the other branch: the facts are
 -- taken from the branch that can run. (Otherwise they come from the first branch and must hold in the second.)
 vacuous :: VState -> Bool
-vacuous state = Engine.entails zeroBelowZero (Engine.proofContextFromFacts (vGetProofs state))
+vacuous state = Engine.entails zeroBelowZero (vProofContext state)
   where
     zeroBelowZero = FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]
 
@@ -484,7 +489,7 @@ joinBranchesFrom s0 vars sThen sElse =
                                 (\p -> p `notElem` s0Facts && all (`elem` visible) (proofIotas p))
                                 (nubOrd (map toMerged (vGetProofs sThen)))
                         elseEqualities = [FApp eqProof [ATerm m, ATerm elseIota] | (_, m, (_, elseIota)) <- merges]
-                        elseContext = Engine.proofContextFromFacts (vGetProofs sElse ++ elseEqualities)
+                        elseContext = vProofContextWith sElse elseEqualities
                         kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
                         base = vSetIotaSeq s0 (vGetIotaSeq sAfter)
                         factsFor m = filter (elem m . proofIotas) kept
@@ -593,7 +598,7 @@ valValidationStatement state (ProofAssert varproof) =
             case varProofToIotaProof varproof state' of
                 Ok iotaProof ->
                     let proofs = vGetProofs state'
-                        proofContext = Engine.proofContextFromFacts proofs
+                        proofContext = vProofContext state'
                      in if Engine.entails iotaProof proofContext
                             then Ok (vInsertProofs state' [iotaProof])
                             else doTrace4 ("Had vars: " ++ show (vGetVars state')) (doTrace4 ("Had proofs: " ++ show proofs) (Error $ "Could not prove: " ++ renderVarProof varproof))
@@ -667,7 +672,7 @@ valRewrite state (UserRewrite name args) = rewriteUserRule state name args
 
 applyEngineRewrite :: VState -> Engine.EngineRewriteRule -> Result VState String
 applyEngineRewrite state rule =
-    let oldContext = Engine.proofContextFromFacts (vGetProofs state)
+    let oldContext = vProofContext state
      in case Engine.applyRewrite evalBuiltinFunct rule oldContext of
             Ok newContext ->
                 Ok $ vInsertProofs state (Engine.proofContextDelta oldContext newContext)
@@ -846,8 +851,8 @@ valExpressionVar state iota var =
              in Ok (state, iotaEq : reverseIotaEq : refledEqProofs)
 
 valExpressionFunction :: VState -> Iota -> Expression -> [Expression] -> Result (VState, [IotaProof]) String
-valExpressionFunction (VState scope iotaCtx proofCtx iotaseq ruleCtx) iota fnexpr argexprs =
-    case valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq ruleCtx) fnexpr argexprs iota of
+valExpressionFunction state iota fnexpr argexprs =
+    case valFunctExprHelper state fnexpr argexprs iota of
         Ok (nextState, flatInputProofs, functProofs, argIotas) ->
             case varProofToIotaProof (exprToProof (F fnexpr argexprs)) nextState of
                 Ok fnProof ->
@@ -939,8 +944,8 @@ functionBodyMarker :: Variable
 functionBodyMarker = "$body"
 
 markFunctionBody :: VState -> VState
-markFunctionBody (VState scope iotaCtx proofCtx iotaseq ruleCtx) =
-    VState scope (Map.insert functionBodyMarker (Iota functionBodyMarker) iotaCtx) proofCtx iotaseq ruleCtx
+markFunctionBody state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
+    keepCache state (VState scope (Map.insert functionBodyMarker (Iota functionBodyMarker) iotaCtx) proofCtx iotaseq ruleCtx)
 
 exportFunctOutputProofs :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Result [VariableProof] String
 exportFunctOutputProofs bodyState args inputValStmts outputValStmts =
@@ -996,12 +1001,12 @@ assumeValStmt state (AssignProofVar var expr) = assignProofVarImpl state var exp
 -- 1) proofs of input expressions 2) proofs of the evaluated fn result 3) the new iotas used
 -- state -> fnexpr -> argexprs -> (argProofs, functresultproofs, new iotas)
 valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result (VState, [IotaProof], [IotaProof], [Iota]) String
-valFunctExprHelper (VState scope iotaCtx proofCtx iotaseq ruleCtx) functionExpr argExprs resultIota =
-    let proofs = vGetProofs (VState scope iotaCtx proofCtx iotaseq ruleCtx)
+valFunctExprHelper state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) functionExpr argExprs resultIota =
+    let proofs = vGetProofs state
      in -- Get proofs from the function and arg expressions
          let exprsToVal = functionExpr : argExprs
           in let (freshIotas, iotaseq') = splitAt (length exprsToVal) iotaseq
-               in let exprState = VState scope iotaCtx proofCtx iotaseq' ruleCtx
+               in let exprState = keepCache state (VState scope iotaCtx proofCtx iotaseq' ruleCtx)
                    in case valExpressionSeq exprState exprsToVal freshIotas of
                          Error e -> Error e
                          Ok (exprValidatedState, inputProofGroups) ->
@@ -1147,12 +1152,16 @@ valFunctInput state varArgs argIotas argProofs valStmts =
             Ok (argIotasMap, _) ->
                 let stmts = map ValidationStatement valStmts
                  in valBlock $
-                        VState
-                            (VScopeState (Data.Map.fromList argIotasMap) (argProofs ++ vGetProofs state) (Continuations stmts) Nothing)
-                            iotaCtx
-                            proofCtx
-                            iotaseq
-                            ruleCtx
+                        withFacts
+                            state
+                            argProofs
+                            ( VState
+                                (VScopeState (Data.Map.fromList argIotasMap) (argProofs ++ vGetProofs state) (Continuations stmts) Nothing)
+                                iotaCtx
+                                proofCtx
+                                iotaseq
+                                ruleCtx
+                            )
             Error e -> Error e
 
 -- TODO: Export validation vars from this into the function body
