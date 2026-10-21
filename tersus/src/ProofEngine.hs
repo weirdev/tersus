@@ -1080,18 +1080,22 @@ equalityFacts facts =
     , funct == eqProof
     ]
 
--- Each proof is rewritten with the sources whose left side occurs in it, found by looking its
--- subterms up among the sources instead of trying every source.
+-- Each proof is rewritten with the sources whose left side occurs in it. With few sources every proof is tried
+-- against each; with many, its subterms are looked up among the sources instead of trying every source.
 reflectProofsByProofs :: [IotaProof] -> [IotaProof] -> [IotaProof]
 reflectProofsByProofs proofs sources = nubOrd (concatMap reflected proofs)
   where
-    rewritesOf = Map.fromListWith (flip (++)) [(lhs, [rhs]) | FApp funct [lhs, rhs] <- sources, funct == eqProof]
-    reflected proof =
-        [ new
-        | lhs <- nubOrd (subterms proof)
-        , rhs <- Map.findWithDefault [] lhs rewritesOf
-        , Just new <- [substituteProofTerm lhs rhs proof]
-        ]
+    rewrites = [(lhs, rhs) | FApp funct [lhs, rhs] <- sources, funct == eqProof]
+    rewritesOf = Map.fromListWith (flip (++)) [(lhs, [rhs]) | (lhs, rhs) <- rewrites]
+    reflected proof
+        | length rewrites <= fewSources = [new | (lhs, rhs) <- rewrites, Just new <- [substituteProofTerm lhs rhs proof]]
+        | otherwise =
+            [ new
+            | lhs <- nubOrd (subterms proof)
+            , rhs <- Map.findWithDefault [] lhs rewritesOf
+            , Just new <- [substituteProofTerm lhs rhs proof]
+            ]
+    fewSources = 4
 
 -- The terms substituteProofTerm can replace in a proof: the proof itself and the parts of its applications and foralls
 subterms :: IotaProof -> [IotaProof]
