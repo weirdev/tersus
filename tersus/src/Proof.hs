@@ -1002,24 +1002,22 @@ assumeValStmt state (AssignProofVar var expr) = assignProofVarImpl state var exp
 -- state -> fnexpr -> argexprs -> (argProofs, functresultproofs, new iotas)
 valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result (VState, [IotaProof], [IotaProof], [Iota]) String
 valFunctExprHelper state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) functionExpr argExprs resultIota =
-    let proofs = vGetProofs state
-     in -- Get proofs from the function and arg expressions
-         let exprsToVal = functionExpr : argExprs
-          in let (freshIotas, iotaseq') = splitAt (length exprsToVal) iotaseq
-               in let exprState = keepCache state (VState scope iotaCtx proofCtx iotaseq' ruleCtx)
-                   in case valExpressionSeq exprState exprsToVal freshIotas of
-                         Error e -> Error e
-                         Ok (exprValidatedState, inputProofGroups) ->
-                             let flatInputProofs = concat inputProofGroups
-                              in let reflectedInputProofs =
-                                         reflProofsByProofs flatInputProofs (proofs ++ proofCtx)
-                                   in let availableInputProofs = reflectedInputProofs ++ flatInputProofs
-                                      in case freshIotas of
-                                            functionIota : inputIotas ->
-                                                case valFunctCall exprValidatedState functionIota inputIotas availableInputProofs resultIota of
-                                                    Ok (callState, functionProofs) -> Ok (callState, flatInputProofs, functionProofs, freshIotas)
-                                                    Error e -> Error e
-                                            [] -> Error "Not enough fresh iotas for function expression"
+    -- Get proofs from the function and arg expressions
+    let exprsToVal = functionExpr : argExprs
+     in let (freshIotas, iotaseq') = splitAt (length exprsToVal) iotaseq
+         in let exprState = keepCache state (VState scope iotaCtx proofCtx iotaseq' ruleCtx)
+             in case valExpressionSeq exprState exprsToVal freshIotas of
+                    Error e -> Error e
+                    Ok (exprValidatedState, inputProofGroups) ->
+                        -- (the closure makes an input fact usable under the context's equalities, so the facts
+                        -- are not rewritten through them here)
+                        let flatInputProofs = concat inputProofGroups
+                         in case freshIotas of
+                                functionIota : inputIotas ->
+                                    case valFunctCall exprValidatedState functionIota inputIotas flatInputProofs resultIota of
+                                        Ok (callState, functionProofs) -> Ok (callState, flatInputProofs, functionProofs, freshIotas)
+                                        Error e -> Error e
+                                [] -> Error "Not enough fresh iotas for function expression"
 
 valExpressionSeq :: VState -> [Expression] -> [Iota] -> Result (VState, [[IotaProof]]) String
 valExpressionSeq state [] [] = Ok (state, [])
