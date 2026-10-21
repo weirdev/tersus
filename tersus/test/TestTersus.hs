@@ -1879,6 +1879,24 @@ testRecursion =
             , parseValidateFailProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };" "Could not prove: return = get(l, size(l) - 1)"
             ]
 
+-- The validator keeps a solver of the visible facts between questions, and uses it only while it holds nothing the
+-- state has lost
+testSolverCache :: Test
+testSolverCache =
+    testCaseSeq
+        "testSolverCache"
+        [ -- A fact assumed in a branch is not visible after the if, though the branch has been validated before the question
+          parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { a = 0; affirm n = n; if n > 7 { affirm n > 7; a = 1; } else { a = 2; }; affirm n > 7; return a; };" "Could not prove: n > 7"
+        , parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { a = 0; if n > 7 { affirm n > 7; a = 1; } else { a = 2; }; affirm n = n; return a; };"
+        , -- Facts from before the if are still visible after it
+          parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n > 3; }] [{ }] { a = 0; affirm n >= 3; if n > 7 { a = 1; } else { a = 2; }; affirm n > 2; return a; };"
+        , -- The same for a loop: what the body assumes is gone after it
+          parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] { affirm i < n; i = i + 1; }; affirm i < n; return i; };" "Could not prove: i < n"
+        , -- Facts about a list built by many calls
+          parseValidProgramHelper "l = []; l = push(l, 1); affirm size(l) = 1; l = push(l, 2); affirm size(l) = 2; l = push(l, 3); affirm get(l, 0) = 1; affirm get(l, 2) = 3; affirm size(l) = 3;"
+        , parseValidateFailProgramHelper "l = []; l = push(l, 1); affirm size(l) = 1; l = push(l, 2); affirm size(l) = 3;" "Could not prove: size(l) = 3"
+        ]
+
 testTypeCheck :: Test
 testTypeCheck =
     let typeError source expected =
@@ -2552,6 +2570,7 @@ main = do
                 , testGenericLists
                 , testTypeCheck
                 , testRecursion
+                , testSolverCache
                 , testPrecedence
                 , testFirstLast
                 , testFunctionCalls
