@@ -19,7 +19,7 @@ import Data.Containers.ListUtils (nubOrd, nubOrdOn)
 import Data.List (foldl', mapAccumL)
 import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
-import Data.Maybe (fromMaybe)
+import Data.Maybe (fromMaybe, isJust)
 
 import StdLib
 import TersusTypes
@@ -64,10 +64,10 @@ entailsAll goals context = fst (entailsBlocked goals context)
 -- for an instance whose other guards hold, so a case split on it is what may let the proof go on.
 entailsBlocked :: [IotaProof] -> ProofContext -> ([Bool], [IotaProof])
 entailsBlocked goals (ProofContext facts) =
-    let (flags, blocked, _) = entailsFrom goals (initialSaturation goals facts)
+    let (flags, blocked, _) = entailsFrom goals (initialSaturation facts)
      in (flags, blocked)
 
--- The facts a proof has reached by instantiating foralls, and the generation of each term (see saturate). A
+-- The facts a proof has reached by instantiating foralls, and the generation of each term an instance added (see saturate). A
 -- case split starts from the saturation of the case before it, since facts only grow.
 data Saturation = Saturation
     { satFacts :: [IotaProof]
@@ -79,19 +79,19 @@ data Saturation = Saturation
 
 -- The list builtins carry their contracts, which are large, and every fact and goal is compared with the
 -- others many times. They are replaced by plain symbols up front.
-initialSaturation :: [IotaProof] -> [IotaProof] -> Saturation
-initialSaturation goals facts =
+initialSaturation :: [IotaProof] -> Saturation
+initialSaturation facts =
     let lightFacts = map lightProof facts
-     in Saturation lightFacts (Set.fromList lightFacts) (Map.fromList [(t, 0) | t <- concatMap subterms (lightFacts ++ map lightProof goals)]) (solverAddFacts newSolver lightFacts) Set.empty
+     in Saturation lightFacts (Set.fromList lightFacts) Map.empty (solverAddFacts newSolver lightFacts) Set.empty
 
--- Adds facts that hold in a case, as terms of generation 0
+-- Adds facts that hold in a case
 extendSaturation :: Saturation -> [IotaProof] -> Saturation
 extendSaturation (Saturation facts factSet births solver done) new =
     let fresh = filter (`Set.notMember` factSet) (nubOrd new)
      in Saturation
             (facts ++ fresh)
             (foldr Set.insert factSet fresh)
-            (foldl (\m t -> Map.insertWith (\_ old -> old) t 0 m) births (concatMap subterms new))
+            births
             (if null fresh then solver else solverAddFacts solver fresh)
             done
 
@@ -186,9 +186,10 @@ entailsFrom originalGoals startSaturation =
                         accepted = [body | (body, _, _) <- acceptedInstances]
                         births' =
                             foldl
-                                (\known (body, indexTerm, _) -> foldl (\m t -> Map.insertWith (\_ old -> old) t (generationOf indexTerm + 1) m) known (subterms body))
+                                (\known (body, indexTerm, _) -> foldl (\m t -> if Map.member t m || isJust (lookupTerm table t) then m else Map.insert t (generationOf indexTerm + 1) m) known (subterms body))
                                 births
                                 acceptedInstances
+                        -- (a term the table already has is of generation 0, or has the generation it was given then)
                         -- an instance with exactly one guard missing would be used if that guard held, unless the
                         -- guard compares two terms that are already equal
                         -- those at an index the goal reads with get come first: the splits that bear on the goal
