@@ -14,6 +14,7 @@ import Data.Map (
 import Data.Containers.ListUtils (nubOrd)
 import Data.Maybe (fromMaybe, isJust, mapMaybe)
 
+import qualified ProofEngine as Engine
 import StdLib
 import TersusTypes
 import Utils
@@ -39,7 +40,7 @@ initScopeStateWStatements stmts = ScopeState empty (Continuations stmts) Nothing
 initVStateWStatements :: [Statement] -> VState
 initVStateWStatements stmts =
     let (iotaCtx, proofCtx) = stdLibValCtx
-     in VState (initVScopeStateWStatements stmts) iotaCtx proofCtx iotalist stdLibRuleCtx
+     in VStateC (initVScopeStateWStatements stmts) iotaCtx proofCtx iotalist stdLibRuleCtx (Just (Engine.factCacheAdd Engine.emptyFactCache proofCtx))
 
 initVScopeStateWStatements :: [Statement] -> VScopeState
 initVScopeStateWStatements stmts = VScopeState empty [] (Continuations stmts) Nothing
@@ -54,7 +55,7 @@ setScope :: State -> ScopeState -> State
 setScope (State _ ctxVals) scope = State scope ctxVals
 
 vSetScope :: VState -> VScopeState -> VState
-vSetScope (VState _ iotaCtx proofCtx iotaseq ruleCtx) scope = VState scope iotaCtx proofCtx iotaseq ruleCtx
+vSetScope old@(VState _ iotaCtx proofCtx iotaseq ruleCtx) scope = keepCache old (VState scope iotaCtx proofCtx iotaseq ruleCtx)
 
 setPScope :: State -> Maybe ScopeState -> State
 setPScope (State scope ctxVals) p = State (scopeSetPScope scope p) ctxVals
@@ -75,8 +76,8 @@ pushNewEmptyScope :: State -> State
 pushNewEmptyScope (State scope ctxVals) = State (emptyScopeStateWithParent (Just scope)) ctxVals
 
 vPushNewEmptyScope :: VState -> VState
-vPushNewEmptyScope (VState scope iotaCtx proofCtx iotaseq ruleCtx) =
-    VState (vEmptyScopeStateWithParent (Just scope)) iotaCtx proofCtx iotaseq ruleCtx
+vPushNewEmptyScope old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
+    keepCache old (VState (vEmptyScopeStateWithParent (Just scope)) iotaCtx proofCtx iotaseq ruleCtx)
 
 -- TODO: Get vars from parent scopes and ctx
 vGetVars :: VState -> Map Variable Iota
@@ -95,7 +96,7 @@ vGetIotaSeq :: VState -> [Iota]
 vGetIotaSeq (VState _ _ _ iotaseq _) = iotaseq
 
 vSetIotaSeq :: VState -> [Iota] -> VState
-vSetIotaSeq (VState scope iotaCtx proofCtx _ ruleCtx) iotaseq = VState scope iotaCtx proofCtx iotaseq ruleCtx
+vSetIotaSeq old@(VState scope iotaCtx proofCtx _ ruleCtx) iotaseq = keepCache old (VState scope iotaCtx proofCtx iotaseq ruleCtx)
 
 -- All iotas a proof mentions
 proofIotas :: Proof Iota -> [Iota]
@@ -148,9 +149,9 @@ scopeUpdateExistingVar (ScopeState vals c pState) var val =
             Nothing -> Nothing
 
 vUpdateExistingVar :: VState -> Variable -> Iota -> [IotaProof] -> Maybe VState
-vUpdateExistingVar (VState scope iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
+vUpdateExistingVar old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
     case vScopeUpdateExistingVar scope var niota nproofs of
-        Just ns -> Just $ VState ns iotaCtx proofCtx iotaseq ruleCtx
+        Just ns -> Just $ withFacts old nproofs (VState ns iotaCtx proofCtx iotaseq ruleCtx)
         Nothing -> Nothing
 
 vScopeUpdateExistingVar :: VScopeState -> Variable -> Iota -> [IotaProof] -> Maybe VScopeState
@@ -176,14 +177,14 @@ bindVar :: State -> Variable -> Value -> State
 bindVar (State (ScopeState vals c pState) ctxVals) var val = State (ScopeState (insert var val vals) c pState) ctxVals
 
 vBindVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
-vBindVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
-    VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq ruleCtx
+vBindVar old@(VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
+    withFacts old nproofs (VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq ruleCtx)
 
 vInsertVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
-vInsertVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
-    case vUpdateExistingVar (VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs of
+vInsertVar old@(VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
+    case vUpdateExistingVar old var niota nproofs of
         Just s -> s
-        Nothing -> VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq ruleCtx
+        Nothing -> withFacts old nproofs (VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq ruleCtx)
 
 vInsertVars :: VState -> [(Variable, Iota)] -> [IotaProof] -> VState
 vInsertVars state [] nproofs = vInsertProofs state nproofs
@@ -206,7 +207,7 @@ setContinuations :: State -> Continuations -> State
 setContinuations (State scope ctxVals) c = State (scopeSetContinuations scope c) ctxVals
 
 vSetContinuations :: VState -> Continuations -> VState
-vSetContinuations (VState scope iotaCtx proofCtx iotaseq ruleCtx) c = VState (vScopeSetContinuations scope c) iotaCtx proofCtx iotaseq ruleCtx
+vSetContinuations old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) c = keepCache old (VState (vScopeSetContinuations scope c) iotaCtx proofCtx iotaseq ruleCtx)
 
 scopeSetContinuations :: ScopeState -> Continuations -> ScopeState
 scopeSetContinuations (ScopeState vals _ pScope) c = ScopeState vals c pScope
@@ -240,8 +241,8 @@ scopeSetReturn (ScopeState vals _ Nothing) val = ScopeState (insert "return" val
 scopeSetReturn (ScopeState _ _ (Just pScope)) val = scopeSetReturn pScope val
 
 vSetReturn :: VState -> Iota -> [IotaProof] -> VState
-vSetReturn (VState scope iotaCtx proofCtx iotaseq ruleCtx) niota nproofs =
-    VState (vScopeSetReturn scope niota nproofs) iotaCtx proofCtx iotaseq ruleCtx
+vSetReturn old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) niota nproofs =
+    withFacts old nproofs (VState (vScopeSetReturn scope niota nproofs) iotaCtx proofCtx iotaseq ruleCtx)
 
 vScopeSetReturn :: VScopeState -> Iota -> [IotaProof] -> VScopeState
 vScopeSetReturn (VScopeState iotas proofs _ Nothing) niota nproofs =
@@ -266,6 +267,23 @@ vScopeGetProofs (VScopeState _ proofs _ Nothing) = proofs
 vScopeGetProofs (VScopeState _ proofs _ (Just pScope)) =
     proofs ++ vScopeGetProofs pScope
 
+-- The state `new`, built from `old` by changing something other than the visible facts, with old's solver cache
+keepCache :: VState -> VState -> VState
+keepCache (VStateC _ _ _ _ _ cache) (VStateC scope iotaCtx proofCtx iotaseq ruleCtx _) = VStateC scope iotaCtx proofCtx iotaseq ruleCtx cache
+
+-- The state `new`, built from `old` by making more facts visible: the cache gets them too
+withFacts :: VState -> [IotaProof] -> VState -> VState
+withFacts (VStateC _ _ _ _ _ cache) facts (VStateC scope iotaCtx proofCtx iotaseq ruleCtx _) =
+    VStateC scope iotaCtx proofCtx iotaseq ruleCtx (Just (Engine.factCacheAdd (fromMaybe Engine.emptyFactCache cache) facts))
+
+-- What the proof engine is asked about the facts of a state, using the state's solver cache
+vProofContext :: VState -> Engine.ProofContext
+vProofContext state@(VStateC _ _ _ _ _ cache) = Engine.proofContextFromCache cache (vGetProofs state)
+
+-- As vProofContext, with more facts than the state has
+vProofContextWith :: VState -> [IotaProof] -> Engine.ProofContext
+vProofContextWith state@(VStateC _ _ _ _ _ cache) extra = Engine.proofContextFromCache cache (vGetProofs state ++ extra)
+
 vGetProofs :: VState -> [IotaProof]
 vGetProofs (VState scope _ proofCtx _ _) = vScopeGetProofs scope ++ proofCtx
 
@@ -274,22 +292,22 @@ vScopeInsertProofs (VScopeState iotas proofs c pScope) newProofs =
     VScopeState iotas (nubOrd (proofs ++ newProofs)) c pScope
 
 vInsertProofs :: VState -> [IotaProof] -> VState
-vInsertProofs (VState scope iotaCtx proofCtx iotaseq ruleCtx) newProofs =
-    VState (vScopeInsertProofs scope newProofs) iotaCtx proofCtx iotaseq ruleCtx
+vInsertProofs old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) newProofs =
+    withFacts old newProofs (VState (vScopeInsertProofs scope newProofs) iotaCtx proofCtx iotaseq ruleCtx)
 
 vLookupRule :: VState -> Variable -> Maybe UserRule
 vLookupRule (VState _ _ _ _ ruleCtx) name = Data.Map.lookup name ruleCtx
 
 vInsertRule :: VState -> Variable -> UserRule -> Result VState String
-vInsertRule (VState scope iotaCtx proofCtx iotaseq ruleCtx) name rule =
+vInsertRule old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) name rule =
     case Data.Map.lookup name ruleCtx of
         Just _ -> Error $ "Duplicate rule definition: " ++ name
-        Nothing -> Ok $ VState scope iotaCtx proofCtx iotaseq (insert name rule ruleCtx)
+        Nothing -> Ok $ keepCache old (VState scope iotaCtx proofCtx iotaseq (insert name rule ruleCtx))
 
 popIotaFromSeq :: VState -> Result (Iota, VState) String
-popIotaFromSeq (VState vScopeState iotaCtx proofCtx iotaseq ruleCtx) = case iotaseq of
+popIotaFromSeq old@(VState vScopeState iotaCtx proofCtx iotaseq ruleCtx) = case iotaseq of
     [] -> Error "No more iotas to pop"
-    i : is -> Ok (i, VState vScopeState iotaCtx proofCtx is ruleCtx)
+    i : is -> Ok (i, keepCache old (VState vScopeState iotaCtx proofCtx is ruleCtx))
 
 popNIotasFromSeq :: VState -> Int -> Result ([Iota], VState) String
 popNIotasFromSeq state n
@@ -316,9 +334,9 @@ scopeAdvanceStatement (ScopeState _ (Continuations []) _) = Error "No more state
 scopeAdvanceStatement (ScopeState vals (Continuations (_ : nxt)) pState) = Ok $ ScopeState vals (Continuations nxt) pState
 
 vAdvanceStatement :: VState -> Result VState String
-vAdvanceStatement (VState scope iotaCtx proofCtx iotaseq ruleCtx) =
+vAdvanceStatement old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
     case vScopeAdvanceStatement scope of
-        Ok nscope -> Ok $ VState nscope iotaCtx proofCtx iotaseq ruleCtx
+        Ok nscope -> Ok $ keepCache old (VState nscope iotaCtx proofCtx iotaseq ruleCtx)
         Error e -> Error e
 
 vScopeAdvanceStatement :: VScopeState -> Result VScopeState String

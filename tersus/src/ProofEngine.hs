@@ -4,6 +4,9 @@ module ProofEngine
     , EngineRewriteRule (..)
     , emptyProofContext
     , proofContextFromFacts
+    , proofContextFromCache
+    , emptyFactCache
+    , factCacheAdd
     , proofContextFacts
     , insertProofs
     , proofContextDelta
@@ -27,7 +30,14 @@ import Utils
 
 type BuiltinEvaluator = BuiltinFunct -> [Value] -> Result Value String
 
-newtype ProofContext = ProofContext [IotaProof] deriving (Show, Eq)
+-- The facts, and the solver of them when it is known (see FactCache). Two contexts are equal when their facts are.
+data ProofContext = ProofContext [IotaProof] (Maybe FactCache)
+
+instance Show ProofContext where
+    show (ProofContext facts _) = "ProofContext " ++ show facts
+
+instance Eq ProofContext where
+    ProofContext facts _ == ProofContext facts' _ = facts == facts'
 
 data EngineRewriteRule
     = EngineRefl
@@ -38,19 +48,42 @@ data EngineRewriteRule
     deriving (Show, Eq)
 
 emptyProofContext :: ProofContext
-emptyProofContext = ProofContext []
+emptyProofContext = ProofContext [] Nothing
 
 proofContextFromFacts :: [IotaProof] -> ProofContext
-proofContextFromFacts = ProofContext . nubOrd
+proofContextFromFacts facts = ProofContext (nubOrd facts) Nothing
+
+-- The context of some facts that has a cache's solver when everything the cache has is among the facts, and
+-- the facts it lacks are added to it. A cache that holds a fact the context no longer has is not used.
+proofContextFromCache :: Maybe FactCache -> [IotaProof] -> ProofContext
+proofContextFromCache Nothing facts = proofContextFromFacts facts
+proofContextFromCache (Just cache) facts =
+    let factSet = Set.fromList facts
+     in if cacheOriginals cache `Set.isSubsetOf` factSet
+            then ProofContext (nubOrd facts) (Just (factCacheAdd cache (Set.toList (factSet `Set.difference` cacheOriginals cache))))
+            else proofContextFromFacts facts
+
+emptyFactCache :: FactCache
+emptyFactCache = FactCache Set.empty [] Set.empty newSolver
+
+-- The cache with more facts. The solver is built when something asks for it.
+factCacheAdd :: FactCache -> [IotaProof] -> FactCache
+factCacheAdd cache new =
+    let fresh = filter (`Set.notMember` cacheFactSet cache) (nubOrd (map lightProof new))
+     in FactCache
+            (foldr Set.insert (cacheOriginals cache) new)
+            (cacheFacts cache ++ fresh)
+            (foldr Set.insert (cacheFactSet cache) fresh)
+            (if null fresh then cacheSolver cache else solverAddFacts (cacheSolver cache) fresh)
 
 proofContextFacts :: ProofContext -> [IotaProof]
-proofContextFacts (ProofContext facts) = facts
+proofContextFacts (ProofContext facts _) = facts
 
 insertProofs :: [IotaProof] -> ProofContext -> ProofContext
-insertProofs newFacts (ProofContext facts) = ProofContext (nubOrd (facts ++ newFacts))
+insertProofs newFacts (ProofContext facts _) = ProofContext (nubOrd (facts ++ newFacts)) Nothing
 
 proofContextDelta :: ProofContext -> ProofContext -> [IotaProof]
-proofContextDelta (ProofContext oldFacts) (ProofContext newFacts) =
+proofContextDelta (ProofContext oldFacts _) (ProofContext newFacts _) =
     filter (`notElem` oldFacts) newFacts
 
 entails :: IotaProof -> ProofContext -> Bool
@@ -63,8 +96,11 @@ entailsAll goals context = fst (entailsBlocked goals context)
 -- Also the guards that kept an instance of a forall from being used: each is the one condition missing
 -- for an instance whose other guards hold, so a case split on it is what may let the proof go on.
 entailsBlocked :: [IotaProof] -> ProofContext -> ([Bool], [IotaProof])
-entailsBlocked goals (ProofContext facts) =
-    let (flags, blocked, _) = entailsFrom goals (initialSaturation facts)
+entailsBlocked goals (ProofContext facts cache) =
+    let start = case cache of
+            Just c -> Saturation (cacheFacts c) (cacheFactSet c) Map.empty (cacheSolver c) Set.empty
+            Nothing -> initialSaturation facts
+        (flags, blocked, _) = entailsFrom goals start
      in (flags, blocked)
 
 -- The facts a proof has reached by instantiating foralls, and the generation of each term an instance added (see saturate). A
@@ -321,17 +357,6 @@ querySolver facts goals =
                 _ -> Nothing
         quick _ = Nothing
      in (table4, classes, zipWith entailed goals goalIds, quick)
-
--- A solver holds the terms and the congruence closure of some facts, so that more facts and goals can be added to it
--- without starting again. Adding gives a new solver; the one it was added to is unchanged.
-data Solver = Solver
-    { solverTable :: TermTable
-    , solverClosure :: Closure
-    , solverTrueId :: Int
-    , solverZeroId :: Int
-    , solverApps :: Int -- how many applications and foralls of the table the closure has
-    , solverForalls :: Int
-    }
 
 newSolver :: Solver
 newSolver =
@@ -653,13 +678,6 @@ termOf table = build
 -- equal to true, so a goal is entailed when its term is in the class of true. An equality
 -- goal also holds when both of its sides are in one class.
 
--- A forall is one opaque term built from its guards and body, so the same forall twice is one term
-data TermKey = KIota Iota | KConst Int | KApp Int [Int] | KBound Variable | KForall Variable [Int] Int deriving (Eq, Ord)
-
--- What tells constants apart. Builtin functions are one constant each, however they were written.
--- Any other constant (a user function) has no key and is found by comparing whole values.
-data ConstKey = CInt Integer | CList [ConstKey] | CBool Bool | CData Name [(Variable, ConstKey)] | CBuiltin String deriving (Eq, Ord)
-
 constKey :: Value -> Maybe ConstKey
 constKey (VInt n) = Just (CInt n)
 constKey (VList l) = CList <$> mapM constKey l
@@ -667,17 +685,6 @@ constKey (VData name fields) = CData name <$> mapM (\(field, value) -> (,) field
 constKey (VBool b) = Just (CBool b)
 constKey (VFunct _ _ _ (BuiltinFunct funct) _) = Just (CBuiltin (show (unowned funct)))
 constKey _ = Nothing
-
-data TermTable = TermTable
-    { tableKeys :: Map.Map TermKey Int
-    , tableConsts :: [(Value, Int)]
-    , tableConstIds :: Map.Map ConstKey Int -- the number of each constant, found without comparing whole values
-    , tableOtherConsts :: [(Value, Int)] -- constants with no key
-    , tableApps :: [(Int, (Int, [Int]))] -- applications: term, function term, argument terms
-    , tableForalls :: [(Int, (Variable, [Int], Int))] -- foralls: term, index, guard terms, body term
-    , tableAppCount :: Int
-    , tableForallCount :: Int
-    }
 
 emptyTable :: TermTable
 emptyTable = TermTable Map.empty [] Map.empty [] [] [] 0 0
@@ -760,17 +767,6 @@ idOf table term = snd (internTerm table term)
 -- the same index and equal guards and body. Joining classes changes the signatures of the terms
 -- that use them, so each class keeps a list of its users, and only those are looked at again. Terms
 -- and equalities can be added to a closure that has been built.
-
-data Shape = AppShape Int [Int] | ForallShape Variable [Int] Int
-
-type ShapeKey = Either (Int, [Int]) (Variable, [Int], Int)
-
-data Closure = Closure
-    { closureParents :: IntMap.IntMap Int -- a term number that is not its own class points toward its class
-    , closureSignatures :: Map.Map ShapeKey Int -- a term of each signature
-    , closureUsers :: IntMap.IntMap [Int] -- the nodes that have a term of the class as a part, by class
-    , closureNodes :: IntMap.IntMap (Int, Shape) -- the terms that have parts
-    }
 
 emptyClosure :: Closure
 emptyClosure = Closure IntMap.empty Map.empty IntMap.empty IntMap.empty
@@ -997,18 +993,18 @@ checkGtZero evalBuiltin proof context =
                 Nothing -> Error "Proof term lacks concrete definition and no equivalent proof exists"
 
 deriveRefl :: ProofContext -> ProofContext
-deriveRefl context@(ProofContext facts) =
+deriveRefl context@(ProofContext facts _) =
     let eqFacts = equalityFacts facts
         reversedEqFacts = map reverseEqProof eqFacts
         derivedFacts = reflectProofsByProofs facts (eqFacts ++ reversedEqFacts)
      in insertProofs derivedFacts context
 
 evalAll :: BuiltinEvaluator -> ProofContext -> [IotaProof]
-evalAll evalBuiltin context@(ProofContext facts) =
+evalAll evalBuiltin context@(ProofContext facts _) =
     concatMap (evalProof evalBuiltin context) facts
 
 evalIota :: BuiltinEvaluator -> Iota -> ProofContext -> [IotaProof]
-evalIota evalBuiltin iota context@(ProofContext facts) =
+evalIota evalBuiltin iota context@(ProofContext facts _) =
     concatMap (evalProofIfForIota evalBuiltin iota context) facts
 
 evalProofIfForIota :: BuiltinEvaluator -> Iota -> ProofContext -> IotaProof -> [IotaProof]
@@ -1066,7 +1062,7 @@ evalProofTerm evalBuiltin (FApp (CTerm (VFunct _ _ _ (BuiltinFunct funct) _)) ar
 evalProofTerm _ _ _ = Nothing
 
 concreteValueOfIota :: Iota -> ProofContext -> Maybe Value
-concreteValueOfIota iota (ProofContext facts) =
+concreteValueOfIota iota (ProofContext facts _) =
     concreteValueOfIotaFromFacts iota facts
 
 concreteValueOfIotaFromFacts :: Iota -> [IotaProof] -> Maybe Value
