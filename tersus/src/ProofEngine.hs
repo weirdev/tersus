@@ -168,7 +168,7 @@ entailsFrom originalGoals startSaturation =
             (table, classes, flags, quick) = querySolver solver goals
             generationOf t = Map.findWithDefault 0 t births
             instances = forallInstances ((<= maxIndexGeneration) . generationOf) table classes currentFacts factSet done
-         in if null instances
+         in if null instances || and flags
                 then (flags, [], saturation)
                 else
                     let guardGoals = concatMap (\(guards, _, _, _) -> guards) instances
