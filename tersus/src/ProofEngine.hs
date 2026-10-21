@@ -74,7 +74,7 @@ data Saturation = Saturation
     , satFactSet :: Set.Set IotaProof
     , satBirths :: Map.Map IotaProof Int
     , satSolver :: Solver
-    , satDone :: Set.Set (Int, Int) -- the foralls (by place in the facts) already instantiated at an index (by term number)
+    , satDone :: Set.Set (Int, IotaProof) -- the foralls (by place in the facts) already instantiated at an index term
     }
 
 -- The list builtins carry their contracts, which are large, and every fact and goal is compared with the
@@ -566,15 +566,15 @@ provablyDistinct classes values names a b =
 -- entailed, and the instantiated body, which then becomes a fact. A forall whose body has no
 -- get(L, j) is never instantiated.
 
-forallInstances :: (IotaProof -> Bool) -> TermTable -> IntMap.IntMap Int -> [IotaProof] -> Set.Set IotaProof -> Set.Set (Int, Int) -> [([IotaProof], IotaProof, IotaProof, (Int, Int))]
+forallInstances :: (IotaProof -> Bool) -> TermTable -> IntMap.IntMap Int -> [IotaProof] -> Set.Set IotaProof -> Set.Set (Int, IotaProof) -> [([IotaProof], IotaProof, IotaProof, (Int, IotaProof))]
 forallInstances eligible table classes facts known done =
     nubOrdOn
         (\(guards, instantiated, indexTerm, _) -> (guards, instantiated, indexTerm))
         [ (map (substituteIndex index indexTerm) guards, instantiated, indexTerm, key)
         | (place, Forall index guards body) <- zip [0 ..] facts
         , listTerm <- indexedLists index body
-        , (indexId, indexTerm) <- getIndexesOf listTerm
-        , let key = (place, indexId)
+        , indexTerm <- getIndexesOf listTerm
+        , let key = (place, indexTerm)
         , key `Set.notMember` done
         , let instantiated = substituteIndex index indexTerm body
         , instantiated `Set.notMember` known
@@ -586,7 +586,7 @@ forallInstances eligible table classes facts known done =
     getIndexes =
         Map.fromListWith
             (flip (++))
-            [ (rep classes listId, [(indexId, indexTerm)])
+            [ (rep classes listId, [indexTerm])
             | (_, (functId, [listId, indexId])) <- tableApps table
             , rep classes functId `elem` getClasses
             , let indexTerm = termFor indexId
