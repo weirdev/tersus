@@ -1985,6 +1985,12 @@ testForLoops =
             , parseValidProgramHelper "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = []; for x in a { out = push(out, x + 1); }; return out; };"
             , parseValidProgramHelper "fn f(a: List<List<Int>>) -> Int { s = 0; for row in a { for x in row { s = s + x; }; }; return s; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { for x in a { if x > 2 { return x; }; }; return -1; };"
+            , -- Loops that nest or follow each other with the same names keep their own copies of the list
+              parseEvalProgramHelper "s = 0; for i, x in [1, 2] { for j, x in [10, 20] { y = x; }; s = s + x; }; return s;" (Just (VInt 3))
+            , parseEvalProgramHelper "s = 0; for x in [1, 2] { for x in [10, 20] { s = s + 1; }; s = s + x; }; return s;" (Just (VInt 7))
+            , parseValidProgramHelper "for x in [1, 2] { y = x; }; for x in [true, false] { z = x; };"
+            , parseValidProgramHelper "fn f(a: List<Int>, b: List<Bool>) -> Int { for x in a { for x in b { y = x; }; z = x + 1; }; return 0; };"
+            , parseValidateFailProgramHelper "for x in [1, 2] { for x in [10, 20] { y = 0; }; affirm x = 10; };" "Could not prove: x = 10"
             , -- A body that changes the list it goes through does not change what it goes through
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { for x in a { a = push(a, x); }; return 0; };"
             , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { for x in a { y = x; }; return x; };" "Undefined variable: x"

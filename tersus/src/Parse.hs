@@ -163,10 +163,12 @@ whileStatement = do
 --
 -- for x in list { body } and for i, x in list { body } go through the elements, as that loop over 0..size(list) with
 -- x bound to get(list, i) in each iteration (x is local to the body, i stays in scope as it does for a range). The
--- list is read once, so a body that changes the variable it came from does not change what is looped over. Without
--- an i, the index is a variable no program can write.
+-- list is read once, so a body that changes the variable it came from does not change what is looped over. The
+-- copy of the list, and the index when there is no i, are variables no program can write, named by where the
+-- loop is in the source, so loops that nest or follow each other and use the same names do not share them.
 forStatement :: Parser [Statement]
 forStatement = do
+    position <- getPosition
     keyword "for"
     whitespace
     first <- variable
@@ -180,11 +182,12 @@ forStatement = do
     invariant <- option [] functContractReqs
     whitespace
     body <- curlyBracesParse statementBlock
+    let place = show (sourceLine position) ++ ":" ++ show (sourceColumn position)
     case (second, end) of
         (Nothing, Just hi) -> countingLoop first start hi invariant body
         (Just _, Just _) -> fail "A for loop over a range has one variable, as in for i in 0..n"
-        (Nothing, Nothing) -> elementLoop ("$index " ++ first) first start invariant body
-        (Just element, Nothing) -> elementLoop first element start invariant body
+        (Nothing, Nothing) -> elementLoop place ("$index " ++ place) first start invariant body
+        (Just element, Nothing) -> elementLoop place first element start invariant body
 
 countingLoop :: Variable -> Expression -> Expression -> [ValidationStatement] -> [Statement] -> Parser [Statement]
 countingLoop var lo hi invariant body = do
@@ -201,9 +204,9 @@ countingLoop var lo hi invariant body = do
         , While (builtinApp (Rel Lt) [Var var, Var hiName]) (bound GtEq loName : bound LtEq hiName : invariant) (Just (Shrinks remaining)) (body ++ [step])
         ]
 
-elementLoop :: Variable -> Variable -> Expression -> [ValidationStatement] -> [Statement] -> Parser [Statement]
-elementLoop index element list invariant body = do
-    let listName = "$list " ++ element
+elementLoop :: String -> Variable -> Variable -> Expression -> [ValidationStatement] -> [Statement] -> Parser [Statement]
+elementLoop place index element list invariant body = do
+    let listName = "$list " ++ place
         elementOf = Let element (builtinApp Get [Var listName, Var index])
     loop <- countingLoop index (Val (VInt 0)) (builtinApp Size [Var listName]) invariant (elementOf : body)
     return (Assign listName list : loop)
