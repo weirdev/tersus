@@ -13,6 +13,7 @@ module ProofEngine
     , entails
     , entailsAll
     , constantValues
+    , entailsDirect
     , applyRewrite
     , deriveRefl
     , reflectProofsByProofs
@@ -102,6 +103,16 @@ constantValues terms (ProofContext facts cache) =
         classes = closureFlat (solverClosure solver)
         constants = constantsByClass (solverTable solver) classes
      in [case Map.lookup (rep classes termId) constants of Just (value : _) -> Just value; _ -> Nothing | termId <- ids]
+
+-- Whether each goal follows from the facts by congruence and arithmetic alone: no forall is instantiated and no case is
+-- split, so it is cheap, and a goal that needs them is not entailed
+entailsDirect :: [IotaProof] -> ProofContext -> [Bool]
+entailsDirect goals (ProofContext facts cache) =
+    let start = case cache of
+            Just c -> cacheSolver c
+            Nothing -> satSolver (initialSaturation facts)
+        (_, _, flags, _) = querySolver start (map lightProof goals)
+     in flags
 
 entailsAll :: [IotaProof] -> ProofContext -> [Bool]
 entailsAll goals context = fst (entailsBlocked goals context)

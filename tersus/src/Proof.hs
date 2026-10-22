@@ -528,18 +528,22 @@ valWhileStatement state cond invariant term body =
                 let loopVars = assignedOuterVars advanced body
                  in popNIotasFromSeq advanced (length loopVars) `bindResult` \(freshIotas, popped) ->
                         let havocked = foldl (\s (var, iota) -> vInsertVar s var iota []) popped (zip loopVars freshIotas)
-                            inferred = if containsReturn body then [] else inferInvariants advanced havocked loopVars cond invariant body
+                            inferred = inferInvariants advanced havocked loopVars cond invariant body
                             attempt extra = valLoopFrom havocked cond (invariant ++ extra) term body
-                         in -- The inferred invariants were shown to be preserved, but if the loop is refused anyway the
-                            -- program's own invariant is what the error should be about
+                         in -- The inferred invariants were shown to be preserved. If the loop is refused because one of them is
+                            -- not, which would be a surprise, the error should be about the program's own invariant instead
                             case attempt inferred of
-                                Error _ | not (null inferred) -> attempt []
+                                Error e | namesInferred e inferred -> attempt []
                                 result -> result
 
 -- A for loop whose range is not known to end at or after its start does not hold its bounds on entry
 rangeHint :: Result a String -> Result a String
 rangeHint (Error e) | "(end of for" `isInfixOf` e = Error (e ++ " (the range has to be known to end at or after its start, as 0..n does with n >= 0)")
 rangeHint result = result
+
+-- Whether an error says that one of the invariants was not preserved
+namesInferred :: String -> [ValidationStatement] -> Bool
+namesInferred e inferred = or [e == "Loop invariant is not preserved: Could not prove: " ++ renderVarProof p | ProofAssert p <- inferred]
 
 -- The rest of the validation of a loop, from the state where the variables its body assigns are unknown
 valLoopFrom :: VState -> Expression -> [ValidationStatement] -> Maybe Termination -> [Statement] -> Result VState String
@@ -556,34 +560,49 @@ valLoopFrom havocked cond invariant term body =
                                     variantFailure "Loop variant does not shrink" decrease (validateUserRuleInputs bodyState decrease) `bindResult` \_ ->
                                         valLoopExit (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond
 
--- Invariants that a loop gets without the program writing them. The variables the body assigns that are a
--- number or a list when the loop is entered start with candidates: a number is at least and at most its
--- value on entry, the size of a list likewise, and two of them differ by what they differed by on entry
--- (a list that gets one element per iteration of a counter has size(out) = i, however long it runs). Each
--- candidate is kept only if the body establishes it again, assuming all the candidates that are left, which
--- is repeated until none is dropped, so what is kept is an invariant: it holds on entry, and is preserved.
--- A loop whose body returns, or does not validate, infers nothing.
+-- Invariants that a loop gets without the program writing them. The variables the body assigns start with
+-- candidates, from what the facts say when the loop is entered:
+--   * a variable that is a number there is at least and at most that number, the size of a list likewise, and
+--     two of these differ by what they differed by;
+--   * a variable (or the size of a list) that is not known to be a number is compared with the other variables
+--     the loop does not assign, and the comparison is a candidate if the facts already entail it (i <= n when
+--     i starts at 0 and n is size(a), size(out) = size(a) when out starts as a copy of a).
+-- A candidate is kept only if the body establishes it again, assuming the candidates that are left, which is
+-- repeated until none is dropped, so what is kept is an invariant: it holds on entry, and is preserved. A body
+-- that does not validate infers nothing. For a body that returns, a candidate that is not preserved is found
+-- from the error and dropped, one at a time.
 inferInvariants :: VState -> VState -> [Variable] -> Expression -> [ValidationStatement] -> [Statement] -> [ValidationStatement]
-inferInvariants entry havocked loopVars cond invariant body = houdini maxInferenceRounds (map ProofAssert candidates)
+inferInvariants entry havocked loopVars cond invariant body
+    | null candidates = []
+    | containsReturn body = dropByError maxDropRounds (map ProofAssert candidates)
+    | otherwise = houdini maxInferenceRounds (map ProofAssert candidates)
   where
-    entryValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- loopVars] (vProofContext entry)
-    known =
-        take maxInferenceTerms
-            [ (term, k)
-            | (var, Just value) <- zip loopVars entryValues
-            , (term, k) <- case value of
-                VInt n -> [(ATerm var, n)]
-                VList items -> [(FApp (CTerm (builtinFunct Size)) [ATerm var], fromIntegral (length items))]
-                _ -> []
-            ]
+    context = vProofContext entry
+    sizeOf term = FApp (CTerm (builtinFunct Size)) [term]
     relation rel lhs rhs = FApp (CTerm (builtinFunct (Rel rel))) [lhs, rhs]
-    candidates =
+    -- The terms of a variable that candidates are about, with the number they equal on entry if there is one
+    termsOf var (Just (VInt n)) = [(ATerm var, Just n)]
+    termsOf var (Just (VList items)) = [(sizeOf (ATerm var), Just (fromIntegral (length items)))]
+    termsOf _ (Just _) = []
+    termsOf var Nothing = [(ATerm var, Nothing), (sizeOf (ATerm var), Nothing)]
+    loopValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- loopVars] context
+    loopTerms = take maxInferenceTerms (concat [termsOf var value | (var, value) <- zip loopVars loopValues])
+    -- Variables the loop does not assign, that are not known to be a number or a list, and that the program wrote
+    anchorVars = take maxInferenceAnchors [var | var <- Map.keys (vVisibleVars entry), var `notElem` loopVars, ' ' `notElem` var, take 1 var /= "$"]
+    anchorValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- anchorVars] context
+    anchors = concat [termsOf var Nothing | (var, Nothing) <- zip anchorVars anchorValues]
+    known = [(term, k) | (term, Just k) <- loopTerms]
+    constantCandidates =
         concat [[relation GtEq term (CTerm (VInt k)), relation LtEq term (CTerm (VInt k))] | (term, k) <- known]
             ++ [ relation Eq t1 (if k1 == k2 then t2 else FApp (CTerm (builtinFunct Plus)) [t2, CTerm (VInt (k1 - k2))])
                | (i, (t1, k1)) <- zip [0 :: Int ..] known
                , (j, (t2, k2)) <- zip [0 ..] known
                , i < j
                ]
+    comparisons = [relation rel term anchor | (term, _) <- loopTerms, (anchor, _) <- anchors, rel <- [Eq, LtEq, GtEq]]
+    converted = [(c, goal) | c <- comparisons, Ok goal <- [varProofToIotaProof c entry]]
+    entailed = [c | ((c, _), True) <- zip converted (Engine.entailsDirect (map snd converted) context)]
+    candidates = take maxInferenceCandidates (constantCandidates ++ entailed)
     houdini rounds survivors
         | null survivors || rounds <= 0 = []
         | otherwise = case iterationEnd survivors of
@@ -601,14 +620,38 @@ inferInvariants entry havocked loopVars cond invariant body = houdini maxInferen
                     Error _ -> Nothing
                 Error _ -> Nothing
             Error _ -> Nothing
+    dropByError rounds survivors
+        | null survivors || rounds <= 0 = []
+        | otherwise = case returningBodyPath havocked cond (invariant ++ survivors) body of
+            Ok _ -> survivors
+            Error e -> case [c | c@(ProofAssert p) <- survivors, e == "Loop invariant is not preserved: Could not prove: " ++ renderVarProof p] of
+                c : _ -> dropByError (rounds - 1) (filter (/= c) survivors)
+                [] -> []
     isOk (Ok _) = True
     isOk (Error _) = False
+
+-- The path through the body of a loop that returns, to the end of an iteration, where the invariant is checked
+returningBodyPath :: VState -> Expression -> [ValidationStatement] -> [Statement] -> Result VState String
+returningBodyPath havocked cond invariant body =
+    assumeValStmts havocked invariant `bindResult` \assumed ->
+        valLoopCondition assumed cond `bindResult` \(condState, condIota) ->
+            conditionAssumptions True cond condIota condState `bindResult` \bodyAssumptions ->
+                valPath (vSetContinuations condState emptyContinuations) bodyAssumptions (body ++ [LoopEnd invariant []])
 
 maxInferenceRounds :: Int
 maxInferenceRounds = 4
 
+maxDropRounds :: Int
+maxDropRounds = 12
+
 maxInferenceTerms :: Int
 maxInferenceTerms = 6
+
+maxInferenceAnchors :: Int
+maxInferenceAnchors = 12
+
+maxInferenceCandidates :: Int
+maxInferenceCandidates = 24
 
 -- A loop has to say how it ends. One that may not end is code that may not terminate, which a function
 -- has to be declared ~ to contain.

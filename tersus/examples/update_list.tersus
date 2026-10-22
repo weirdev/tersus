@@ -5,8 +5,8 @@
 // each element in place, so its result is as long as its input, and every element of the result
 // is 100 more than the matching element of the input. The loop invariant carries that fact with
 // a forall: the elements below i are done, and the ones from i on are untouched.
-// The counter facts come with the for loop. out starts as a copy of an argument the validator knows
-// nothing else about, so the invariant says its size is unchanged.
+// The counter facts come with the for loop, and the validator works out that out keeps the size of a:
+// out starts as a copy of a, and set does not change a size.
 
 fn bumpAll(a: List<Int>) -> List<Int> [{ }] [{
     affirm size(return) = size(a);
@@ -14,7 +14,6 @@ fn bumpAll(a: List<Int>) -> List<Int> [{ }] [{
 }] {
     out = a;
     for i in 0..size(a) [{
-        affirm size(out) = size(a);
         // the elements already visited are bumped, and the rest are as they were
         affirm forall j in 0..i: get(out, j) = (get(a, j) + 100);
         affirm forall j in i..size(a): get(out, j) = get(a, j);

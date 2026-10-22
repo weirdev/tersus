@@ -1,6 +1,7 @@
 module Pretty (renderProof, renderVarProof, renderValue) where
 
 import Data.List (intercalate, stripPrefix)
+import Data.Maybe (fromMaybe)
 
 import TersusTypes
 
@@ -8,10 +9,13 @@ import TersusTypes
 renderVarProof :: Proof Variable -> String
 renderVarProof = renderProof sourceName
   where
-    -- the ends of a for loop's range are kept in variables the program cannot write
+    -- the ends of a for loop's range, and what a loop over a list goes through, are kept in variables the program cannot write
+    loopName loop = fromMaybe loop (stripPrefix "$index " loop)
     sourceName name
-        | Just loop <- stripPrefix "$hi " name = "(end of for " ++ loop ++ ")"
-        | Just loop <- stripPrefix "$lo " name = "(start of for " ++ loop ++ ")"
+        | Just loop <- stripPrefix "$hi " name = "(end of for " ++ loopName loop ++ ")"
+        | Just loop <- stripPrefix "$lo " name = "(start of for " ++ loopName loop ++ ")"
+        | Just element <- stripPrefix "$list " name = "(the list of for " ++ element ++ ")"
+        | Just element <- stripPrefix "$index " name = "(the index of for " ++ element ++ ")"
         | otherwise = name
 
 renderProof :: (i -> String) -> Proof i -> String
