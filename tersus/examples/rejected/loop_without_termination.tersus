@@ -1,4 +1,4 @@
-// Rejected: a loop has to say why it ends, with decreases or shrinks, or declare may_diverge.
+// Rejected: a loop has to say why it ends, with shrinks, or declare it ~.
 i = 0;
 while i < 3 [{ affirm i <= 3; }] {
     i = i + 1;

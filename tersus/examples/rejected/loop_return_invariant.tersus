@@ -2,7 +2,7 @@
 // not taken, i goes from 2 to 3, which breaks the invariant i <= 2.
 fn firstOver(n: Int) -> Int {
     i = 0;
-    while i < 3 [{ affirm i <= 2; }] decreases 3 - i {
+    while i < 3 [{ affirm i <= 2; }] shrinks 3 - i {
         if (i + i) > n {
             return i;
         };

@@ -29,8 +29,8 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 | `arithmetic.tersus` | `*`, `/` (rounding down, with a non-zero divisor contract), operator precedence and negative literals | returns `6` |
 | `helper_functions.tersus` | Functions calling the functions defined before them, with each call checked against the callee's contract | returns `11` |
-| `recursion.tersus` | A function calling itself, validated assuming its own output contract, including recursion over a list; each says what decreases | returns `26` |
-| `termination.tersus` | How code says it ends: `decreases` on loops and recursive functions, `shrinks` over a tree, and `may_diverge` for code that is not shown to end, including a call in unreachable code | returns `23` |
+| `recursion.tersus` | A function calling itself, validated assuming its own output contract, including recursion over a list; each says what shrinks | returns `26` |
+| `termination.tersus` | How code says it ends: `shrinks` on loops and recursive functions (an integer counting down, or a tree losing a field), and `~` for code that is not shown to end, including a call in unreachable code | returns `23` |
 | `generic_lists.tersus` | Lists of `Bool` and of lists, built by a loop with an invariant, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
 | `structs.tersus` | A `struct`, literals, field reads, `..base` updates with a contract proving the other fields are unchanged, and updating one element of a list of structs | returns `11` |
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
@@ -118,14 +118,14 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/element_wrong.tersus` | An output contract claims `set` left the old element at the index it overwrote |
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
-| `rejected/loop_without_termination.tersus` | A loop that says neither `decreases`, `shrinks` nor `may_diverge` |
+| `rejected/loop_without_termination.tersus` | A loop that says neither `shrinks` nor `~` |
 | `rejected/loop_variant_not_decreasing.tersus` | A loop whose variant `3 - i` is never made smaller by its body |
 | `rejected/loop_variant_unbounded.tersus` | A countdown on a parameter that nothing shows is at least 0 |
-| `rejected/recursion_without_variant.tersus` | A function that calls itself and does not say what decreases |
-| `rejected/recursion_variant_not_smaller.tersus` | A recursive call that passes the same `n` |
+| `rejected/recursion_without_variant.tersus` | A function that calls itself and does not say what shrinks |
+| `rejected/recursion_variant_not_shrinking.tersus` | A recursive call that passes the same `n` |
 | `rejected/recursion_shrinks_not_a_part.tersus` | A recursive call on a tree, passing the tree itself and not a field of it |
-| `rejected/diverging_call.tersus` | A function calls one declared `may_diverge` and does not say so itself |
-| `rejected/diverging_loop.tersus` | A function contains a `may_diverge` loop and does not say so itself |
+| `rejected/diverging_call.tersus` | A function calls one declared `~` and does not say so itself |
+| `rejected/diverging_loop.tersus` | A function contains a `~` loop and does not say so itself |
 | `rejected/loop_stale_fact.tersus` | `affirm i = 0` after a loop that changes `i`: earlier facts about `i` are not carried out of the loop |
 
 ## Writing your own

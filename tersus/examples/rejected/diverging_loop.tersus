@@ -1,6 +1,6 @@
-// Rejected: a loop declared may_diverge makes the function that contains it not guaranteed to terminate.
+// Rejected: a loop declared ~ makes the function that contains it not guaranteed to terminate.
 fn settle(n: Int) -> Int {
-    while n != 1 may_diverge {
+    while n != 1 ~ {
         n = n - 1;
     };
     return n;

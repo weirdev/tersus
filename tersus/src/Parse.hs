@@ -139,7 +139,7 @@ ifStatement = do
         whitespace
         curlyBracesParse statementBlock <|> ((: []) <$> ifStatement)
 
--- The loop invariant uses the contract syntax and is optional: `while c [{ affirm ...; }] decreases e { ... }`.
+-- The loop invariant uses the contract syntax and is optional: `while c [{ affirm ...; }] shrinks e { ... }`.
 -- What follows is how the loop ends, see terminationClause.
 whileStatement :: Parser Statement
 whileStatement = do
@@ -153,12 +153,12 @@ whileStatement = do
     body <- curlyBracesParse statementBlock
     return (While cond invariant termination body)
 
--- `decreases e`, `shrinks e` or `may_diverge`, before the body of a loop or function. Both are optional here, the validator
+-- `shrinks e` or `~`, before the body of a loop or function. Both are optional here, the validator
 -- decides whether leaving them out is allowed.
 terminationClause :: Parser (Maybe Termination)
 terminationClause = optionMaybe (clause <* whitespace)
   where
-    clause = (keyword "may_diverge" >> return MayDiverge) <|> (keyword "decreases" >> whitespace >> Decreases <$> expression) <|> (keyword "shrinks" >> whitespace >> Shrinks <$> expression)
+    clause = (char '~' >> return MayDiverge) <|> (keyword "shrinks" >> whitespace >> Shrinks <$> expression)
 
 -- enum Name { Variant, Variant { field: Type, ... }, ... }
 enumStatement :: Parser Statement

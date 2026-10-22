@@ -8,7 +8,7 @@ fn dot(a: List<Int>, b: List<Int>) -> Int {
     i = 0;
     total = 0;
     rewrite startsAtZero i;
-    while i < n [{ affirm i >= 0; }] decreases n - i {
+    while i < n [{ affirm i >= 0; }] shrinks n - i {
         total = total + (get(a, i) + get(b, i));
         rewrite staysNonNegative i;
         i = i + 1;
