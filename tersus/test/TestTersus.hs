@@ -1161,7 +1161,7 @@ testExamples =
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
         , testExampleFile "examples/termination.tersus" (ExpectReturn (VInt 23))
-        , testExampleFile "examples/for_loops.tersus" (ExpectReturn (VInt 25))
+        , testExampleFile "examples/for_loops.tersus" (ExpectReturn (VInt 33))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
@@ -1973,6 +1973,23 @@ testForLoops =
             , parseValidProgramHelper "fn f(i: Int) -> Int { i = 5; return i; }; for i in 0..3 { y = f(i); };"
             , parseValidateFailProgramHelper "z = 0; for i in 0..3 [{ affirm z = 0; }] { z = z + 1; };" "Loop invariant is not preserved: Could not prove: z = 0"
             , parseValidateFailProgramHelper "n = 0; for i in 0..3 { n = n + 1; }; affirm i = 4;" "Could not prove: i = 4"
+            , -- Through the elements of a list: x is bound in each iteration and is local to the body, i is the index
+              parseEvalProgramHelper "s = 0; for x in [4, 5, 6] { s = s + x; }; return s;" (Just (VInt 15))
+            , parseEvalProgramHelper "s = 0; for i, x in [4, 5, 6] { s = s + i * x; }; return s;" (Just (VInt 17))
+            , parseEvalProgramHelper "s = 0; for i, x in [4, 5, 6] { s = s + 1; }; return s * 10 + i;" (Just (VInt 33))
+            , parseEvalProgramHelper "l = [1, 2]; n = 0; for x in l { l = push(l, x); n = n + 1; }; return n * 10 + size(l);" (Just (VInt 24))
+            , parseEvalProgramHelper "n = 0; for row in [[1, 2], [3]] { for x in row { n = n + x; }; }; return n;" (Just (VInt 6))
+            , parseEvalProgramHelper "fn f(l: List<Int>) -> Int { for x in l { if x > 2 { return x; }; }; return -1; }; return f([1, 5, 7]);" (Just (VInt 5))
+            , parseValidProgramHelper "fn total(a: List<Int>) -> Int { s = 0; for x in a { s = s + x; }; return s; };"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> Int { for i, x in a { affirm x = get(a, i); }; return 0; };"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = []; for x in a { out = push(out, x + 1); }; return out; };"
+            , parseValidProgramHelper "fn f(a: List<List<Int>>) -> Int { s = 0; for row in a { for x in row { s = s + x; }; }; return s; };"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> Int { for x in a { if x > 2 { return x; }; }; return -1; };"
+            , -- A body that changes the list it goes through does not change what it goes through
+              parseValidProgramHelper "fn f(a: List<Int>) -> Int { for x in a { a = push(a, x); }; return 0; };"
+            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { for x in a { y = x; }; return x; };" "Undefined variable: x"
+            , parseFailsWith "for i, x in [1] { i = 3; };" "cannot assign its loop variable i"
+            , parseFailsWith "for i, x in 0..3 { y = 1; };" "has one variable"
             , -- The range has to be known not to run backwards, which is what gives i = hi afterwards
               parseValidateFailProgramHelper "fn f(n: Int) -> Int { for i in 0..n { x = i; }; return 0; };" "the range has to be known to end at or after its start"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { for i in 0..n { x = i; }; affirm i = n; return 0; };"
@@ -2001,8 +2018,18 @@ testInferredInvariants =
             , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { i = i + 1; }; affirm i = 0;" "Could not prove: i = 0"
             , -- A mistake in the invariant is reported as before
               parseValidateFailProgramHelper "out = []; i = 0; while i < 3 [{ affirm size(out) = 7; }] shrinks 3 - i { out = push(out, i); i = i + 1; };" "Loop invariant does not hold on entry"
-            , -- A loop that returns infers nothing, and still validates with what the program says
+            , -- A loop that returns infers its invariants too, one candidate at a time
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"
+            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = 0; return -1; };" "Could not prove: i = 0"
+            , -- Starting from something that is not a number: a copy of an argument, or a counter bounded by a parameter
+              parseValidProgramHelper "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = a; for i in 0..size(a) { out = set(out, i, 0); }; return out; };"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> Int { c = a; i = 0; while i < size(a) shrinks size(a) - i { c = set(c, i, 1); i = i + 1; }; affirm size(c) = size(a); return 0; };"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; n = size(a); while i < n shrinks n - i { i = i + 1; }; affirm i = n; return i; };"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = 0; while i < n shrinks n - i { i = i + 1; }; affirm i = n; return i; };"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int { i = 0; while i < n shrinks n - i { i = i + 1; }; affirm i = n; return i; };" "Could not prove: i = n"
+            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { c = a; i = 0; while i < size(a) shrinks size(a) - i { c = push(c, 0); i = i + 1; }; affirm size(c) = size(a); return 0; };" "Could not prove: size(c) = size(a)"
+            , parseValidateFailProgramHelper "fn f(a: List<Int>, b: List<Int>) -> Int { c = b; i = 0; while i < size(a) shrinks size(a) - i { c = set(c, 0, 1); i = i + 1; }; return 0; };" "Funct input validation failed"
             ]
 
 -- Loops and recursive functions say why they end, and code that may not end is declared
@@ -2146,6 +2173,7 @@ testTypeCheck =
             , typeError "affirm [1] < [2];" "expected Int, got List<Int>"
             , typeError "for i in 0..true { x = 1; };" "expected Int, got Bool"
             , typeError "for i in [1]..3 { x = 1; };" "expected Int, got List<Int>"
+            , typeError "for x in 3 { y = 1; };" "expected List<?>, got Int"
             , typeError "while 1 < 2 shrinks true { x = 2; };" "shrinks needs an Int, an enum or a struct, got Bool"
             , -- Builtins
               typeError "x = size(5);" "argument 1 of size: expected List<?>, got Int"

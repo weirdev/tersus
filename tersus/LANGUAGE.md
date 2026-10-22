@@ -462,7 +462,12 @@ See `examples/parallel_sum.tersus`, `examples/build_list.tersus` and `examples/u
 
 #### Inferred invariants
 
-The invariants of a loop that does not `return` are completed by the validator. For each variable the body assigns that is a number or a list when the loop is entered, it starts from what is known on entry: a number is at least and at most its value there, the size of a list likewise, and two of these differ by what they differed by on entry. It keeps a candidate only if the body establishes it again, assuming the ones that are left, and repeats until none is dropped (at most four rounds), so what is kept is an invariant like one the program wrote: it holds on entry, is preserved, and holds after the loop together with the negated condition.
+The invariants of a loop are completed by the validator. For each variable the body assigns, it starts from what is known when the loop is entered:
+
+- a variable that is a number there is at least and at most that number, the size of a list likewise, and two of these differ by what they differed by on entry;
+- a variable (or the size of a list) that is not known to be a number is compared with the variables the loop does not assign, and the comparison (`=`, `<=` or `>=`) is a candidate if the facts already imply it: `i <= n` when `i` starts at `0` and `n` is `size(a)`, or `size(out) = size(a)` when `out` starts as a copy of `a`.
+
+It keeps a candidate only if the body establishes it again, assuming the ones that are left. For a body without a `return` this is repeated until none is dropped (at most four rounds); for a body with one, a candidate that is not preserved is found from the error and dropped, one at a time (at most twelve). What is kept is an invariant like one the program wrote: it holds on entry, is preserved, and holds after the loop together with the negated condition. Six variables or sizes, twelve variables to compare with and twenty-four candidates at most are tried.
 
 ```tersus
 out = [];
@@ -474,7 +479,7 @@ while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
 affirm size(out) = 3;       // size(out) = i was inferred: both start at 0 and grow by one
 ```
 
-This is what makes `size(return) = size(a)` follow from a loop that pushes once per element, with no `affirm size(out) = i`. It covers differences of constants only: a list that starts as a copy of an argument, or a counter that starts at a variable, has no value to compare with on entry, so its invariant is written as before (`examples/update_list.tersus` does this for `size(out) = size(a)`). A loop with a `return` in its body infers nothing. If a loop is refused, the error is about the invariant the program wrote, never about an inferred one.
+This is what makes `size(return) = size(a)` follow from a loop that pushes once per element, with no `affirm size(out) = i`, and `size(out) = size(a)` follow from a loop that `set`s the elements of a copy (`examples/update_list.tersus`). A relation that is not a constant distance or a plain comparison still has to be written, such as a list that grows by the size of another list per iteration, or `s + i = n` (a sum of variables). If a loop is refused because one of its inferred invariants is not preserved, the error is about the invariant the program wrote instead.
 
 #### Returning from a loop
 
@@ -527,6 +532,26 @@ while i < hi [{ affirm i >= lo; affirm i <= hi; }] shrinks hi - i {
 ```
 
 An invariant of the program's own goes between the range and the body, `for i in 0..n [{ affirm ... }] { ... }`, and is added to those; the loop also gets the inferred invariants above. A `return` in the body leaves the function. A body that assigns `i`, in a branch or a nested loop too, is refused when the program is read (`The body of a for loop cannot assign its loop variable i`), so `i` is always the counter the loop advances; `lo` and `hi` must be integers. A range with `hi < lo` runs the body no times when the program runs, but the validator wants `lo <= hi` to be known, as the bounds of `i` are an invariant that has to hold on entry and that is what gives `i = hi` afterwards: `for i in 0..n` needs `affirm n >= 0` in the contract (`size(l)` is known to be at least 0), and is refused otherwise with `Loop invariant does not hold on entry`. `for` is a reserved word; `form` is still an ordinary name. See `examples/for_loops.tersus`.
+
+#### Through the elements of a list
+
+`for x in list { ... }` goes through the elements, and `for i, x in list { ... }` also has the index:
+
+```tersus
+fn total(a: List<Int>) -> Int {
+    s = 0;
+    for x in a {
+        s = s + x;
+    };
+    return s;
+};
+
+for i, x in a {
+    affirm x = get(a, i);
+};
+```
+
+It is the range loop `for i in 0..size(list)`, with `x` bound to `get(list, i)` at the start of each iteration. The list is read once, before the loop, so a body that assigns the variable the list came from does not change what is looped over. `x` is local to the body: it is not defined after the loop, and a body may assign it, which changes only that iteration's copy. `i` is the loop variable of the range loop (it stays in scope, is `size(list)` afterwards, and cannot be assigned); without it, the index is a variable the program cannot write. An invariant goes between the list and the body and can mention `i`, but not `x`. Nested loops, a `return` in the body and lists of lists work as they do for a range.
 
 ### Termination
 
@@ -880,12 +905,12 @@ A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is use
 
 ## Current Limitations
 
-- No `break` or `continue`. `for` counts through a range only, not through the elements of a list or by a step other than `1`.
+- No `break` or `continue`. `for` goes through a range or the elements of a list, not by a step other than `1` or backwards.
 - Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field at each step. Nothing else is a variant: not a lexicographic pair of integers, not the length of a list that shrinks, and a variant that changes both sides of a difference (`n - i` where `n` and `i` both move) has to be split. The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
 - No declarations separate from assignment.
 - No strings or floats yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
 - Arithmetic is limited to comparisons, adding or subtracting a known constant, multiplying by a known constant, and dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known, or between differences that have no side in common.
-- The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration, or that starts as an argument, needs its size in the invariant.
+- The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.

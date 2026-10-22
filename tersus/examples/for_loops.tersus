@@ -2,11 +2,21 @@
 // ordinary variable that is hi once the loop is over, and the loop is a while loop for the validator:
 // it knows lo <= i <= hi, that i < hi inside the body (so get(a, i) is in range when hi is size(a)), and
 // that the loop ends. A for loop needs no invariant or termination clause, but can add an invariant.
+// for x in list { ... } goes through the elements, and for i, x in list { ... } also has the index.
 
 fn total(a: List<Int>) -> Int {
     s = 0;
-    for i in 0..size(a) {
-        s = s + get(a, i);
+    for x in a {
+        s = s + x;
+    };
+    return s;
+};
+
+// With the index, a range loop and an element loop are the same loop: x is get(a, i).
+fn weighted(a: List<Int>) -> Int {
+    s = 0;
+    for i, x in a {
+        s = s + i * x;
     };
     return s;
 };
@@ -40,4 +50,4 @@ fn pairs(n: Int) -> Int [{ affirm n >= 0; }] {
     return count;
 };
 
-return total([4, 5, 6]) + firstOver([1, 7, 3], 5) + size(zeros(3)) + pairs(3);
+return total([4, 5, 6]) + firstOver([1, 7, 3], 5) + size(zeros(3)) + pairs(3) + weighted([1, 2, 3]);

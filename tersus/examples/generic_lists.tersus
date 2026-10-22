@@ -2,8 +2,8 @@
 // An element is a term like any other, so contracts and foralls work on them.
 fn flags(values: List<Int>) -> List<Bool> {
     out = [];
-    for i in 0..size(values) {
-        out = push(out, get(values, i) > 0);
+    for value in values {
+        out = push(out, value > 0);
     };
     return out;
 };

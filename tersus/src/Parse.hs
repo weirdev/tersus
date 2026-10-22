@@ -160,27 +160,37 @@ whileStatement = do
 --
 --   lo<i> = lo; hi<i> = hi; i = lo<i>;
 --   while i < hi<i> [{ affirm i >= lo<i>; affirm i <= hi<i>; invariant }] shrinks hi<i> - i { body; i = i + 1; };
+--
+-- for x in list { body } and for i, x in list { body } go through the elements, as that loop over 0..size(list) with
+-- x bound to get(list, i) in each iteration (x is local to the body, i stays in scope as it does for a range). The
+-- list is read once, so a body that changes the variable it came from does not change what is looped over. Without
+-- an i, the index is a variable no program can write.
 forStatement :: Parser [Statement]
 forStatement = do
     keyword "for"
     whitespace
-    var <- variable
+    first <- variable
     whitespace
+    second <- optionMaybe (char ',' >> whitespace >> variable <* whitespace)
     keyword "in"
     whitespace
-    lo <- expression
+    start <- expression
     whitespace
-    void (string "..")
-    whitespace
-    hi <- expression
-    whitespace
+    end <- optionMaybe (string ".." >> whitespace >> expression <* whitespace)
     invariant <- option [] functContractReqs
     whitespace
     body <- curlyBracesParse statementBlock
+    case (second, end) of
+        (Nothing, Just hi) -> countingLoop first start hi invariant body
+        (Just _, Just _) -> fail "A for loop over a range has one variable, as in for i in 0..n"
+        (Nothing, Nothing) -> elementLoop ("$index " ++ first) first start invariant body
+        (Just element, Nothing) -> elementLoop first element start invariant body
+
+countingLoop :: Variable -> Expression -> Expression -> [ValidationStatement] -> [Statement] -> Parser [Statement]
+countingLoop var lo hi invariant body = do
     when (assigns var body) $ fail ("The body of a for loop cannot assign its loop variable " ++ var)
     let loName = "$lo " ++ var
         hiName = "$hi " ++ var
-        builtinApp name = F (Val (builtinFunct name))
         bound rel name = ProofAssert (FApp (CTerm (builtinFunct (Rel rel))) [ATerm var, ATerm name])
         step = Assign var (builtinApp Plus [Var var, Val (VInt 1)])
         remaining = builtinApp Minus [Var hiName, Var var]
@@ -190,6 +200,16 @@ forStatement = do
         , Assign var (Var loName)
         , While (builtinApp (Rel Lt) [Var var, Var hiName]) (bound GtEq loName : bound LtEq hiName : invariant) (Just (Shrinks remaining)) (body ++ [step])
         ]
+
+elementLoop :: Variable -> Variable -> Expression -> [ValidationStatement] -> [Statement] -> Parser [Statement]
+elementLoop index element list invariant body = do
+    let listName = "$list " ++ element
+        elementOf = Let element (builtinApp Get [Var listName, Var index])
+    loop <- countingLoop index (Val (VInt 0)) (builtinApp Size [Var listName]) invariant (elementOf : body)
+    return (Assign listName list : loop)
+
+builtinApp :: BuiltinFunct -> [Expression] -> Expression
+builtinApp name = F (Val (builtinFunct name))
 
 -- Whether statements assign a variable, in a nested block, branch or loop (a function defined inside has a scope of its own)
 assigns :: Variable -> [Statement] -> Bool

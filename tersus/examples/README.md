@@ -31,17 +31,17 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `helper_functions.tersus` | Functions calling the functions defined before them, with each call checked against the callee's contract | returns `11` |
 | `recursion.tersus` | A function calling itself, validated assuming its own output contract, including recursion over a list; each says what shrinks | returns `26` |
 | `termination.tersus` | How code says it ends: `shrinks` on loops and recursive functions (an integer counting down, or a tree losing a field), and `~` for code that is not shown to end, including a call in unreachable code | returns `23` |
-| `generic_lists.tersus` | Lists of `Bool` and of lists, built by a loop with an invariant, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
+| `generic_lists.tersus` | Lists of `Bool` and of lists, built by a `for` loop over the elements, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
 | `structs.tersus` | A `struct`, literals, field reads, `..base` updates with a contract proving the other fields are unchanged, and updating one element of a list of structs | returns `11` |
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
 | `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
-| `for_loops.tersus` | `for i in lo..hi`: a sum over a list, an early `return`, a list built to a given size, and nested ranges, with no invariant or termination clause | returns `25` |
+| `for_loops.tersus` | `for i in lo..hi` and `for x in list` / `for i, x in list`: a sum over a list, an early `return`, a list built to a given size, and nested ranges, with no invariant or termination clause | returns `33` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
 | `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes, the result's size and each element (the sum of its pair, a `forall`) stated in the function's contract and the loop invariant | returns `[11, 22, 33]` |
 | `build_list.tersus` | Building a list with `push` in a `for` loop, with the result's size (worked out for the loop) and each element (twice the input's) stated in an output contract | returns `[2, 4, 6]` |
-| `update_list.tersus` | Updating a list: `set` replaces an element of a copy in a loop, with the size and the bumped and untouched elements carried by the invariant (two `forall`s) and stated in the output contract | returns `[101, 102, 103]` |
+| `update_list.tersus` | Updating a list: `set` replaces an element of a copy in a loop, with the size worked out by the validator, the bumped and untouched elements carried by the invariant (two `forall`s) and stated in the output contract | returns `[101, 102, 103]` |
 | `frame_facts.tersus` | What `push` and `set` leave alone: every other element is unchanged | returns `149` |
 | `forall_facts.tersus` | `forall` facts: assumed by an axiom, required by an input contract, passed on by an output contract, and proved directly | returns `5` |
 | `element_facts.tersus` | What `set` and `push` say about elements: the element just written, repeated in a function's output contract and used by its caller | returns `106` |
