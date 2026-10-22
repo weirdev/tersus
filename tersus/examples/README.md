@@ -119,7 +119,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
 | `rejected/loop_without_termination.tersus` | A loop that says neither `shrinks` nor `~` |
-| `rejected/loop_variant_not_decreasing.tersus` | A loop whose variant `3 - i` is never made smaller by its body |
+| `rejected/loop_variant_not_shrinking.tersus` | A loop whose variant `3 - i` is never made smaller by its body |
 | `rejected/loop_variant_unbounded.tersus` | A countdown on a parameter that nothing shows is at least 0 |
 | `rejected/recursion_without_variant.tersus` | A function that calls itself and does not say what shrinks |
 | `rejected/recursion_variant_not_shrinking.tersus` | A recursive call that passes the same `n` |
