@@ -120,7 +120,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
 | `rejected/for_reads_past_end.tersus` | A `for` range that ends one past the last index, so `get` is out of range |
-| `rejected/for_assigns_counter.tersus` | A `for` body that assigns its loop variable |
+| `rejected/for_assigns_counter.tersus` | A `for` body that assigns its loop variable (refused when the program is read) |
 | `rejected/loop_without_termination.tersus` | A loop that says neither `shrinks` nor `~` |
 | `rejected/loop_variant_not_shrinking.tersus` | A loop whose variant `3 - i` is never made smaller by its body |
 | `rejected/loop_variant_unbounded.tersus` | A countdown on a parameter that nothing shows is at least 0 |
