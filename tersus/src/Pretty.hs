@@ -1,12 +1,18 @@
 module Pretty (renderProof, renderVarProof, renderValue) where
 
-import Data.List (intercalate)
+import Data.List (intercalate, stripPrefix)
 
 import TersusTypes
 
 -- Renders a proof term in Tersus syntax, e.g. "forall j in 0..size(l): get(l, j) = 0".
 renderVarProof :: Proof Variable -> String
-renderVarProof = renderProof id
+renderVarProof = renderProof sourceName
+  where
+    -- the ends of a for loop's range are kept in variables the program cannot write
+    sourceName name
+        | Just loop <- stripPrefix "$hi " name = "(end of for " ++ loop ++ ")"
+        | Just loop <- stripPrefix "$lo " name = "(start of for " ++ loop ++ ")"
+        | otherwise = name
 
 renderProof :: (i -> String) -> Proof i -> String
 renderProof name = go 0

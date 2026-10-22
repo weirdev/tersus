@@ -12,6 +12,7 @@ module ProofEngine
     , proofContextDelta
     , entails
     , entailsAll
+    , constantValues
     , applyRewrite
     , deriveRefl
     , reflectProofsByProofs
@@ -90,6 +91,18 @@ entails :: IotaProof -> ProofContext -> Bool
 entails goal context = and (entailsAll [goal] context)
 
 -- Which of the goals the context entails, sharing one congruence closure between them.
+-- The value each term is known to have: the facts equate it to a constant, or to a builtin applied to
+-- terms that have constants
+constantValues :: [IotaProof] -> ProofContext -> [Maybe Value]
+constantValues terms (ProofContext facts cache) =
+    let start = case cache of
+            Just c -> cacheSolver c
+            Nothing -> satSolver (initialSaturation facts)
+        (solver, ids) = solverGoals start (map lightProof terms)
+        classes = closureFlat (solverClosure solver)
+        constants = constantsByClass (solverTable solver) classes
+     in [case Map.lookup (rep classes termId) constants of Just (value : _) -> Just value; _ -> Nothing | termId <- ids]
+
 entailsAll :: [IotaProof] -> ProofContext -> [Bool]
 entailsAll goals context = fst (entailsBlocked goals context)
 

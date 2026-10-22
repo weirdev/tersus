@@ -1,0 +1,5 @@
+// Rejected: the body assigns the loop variable, so nothing shows that it stays within the range.
+for i in 0..3 {
+    i = i + 5;
+};
+return i;

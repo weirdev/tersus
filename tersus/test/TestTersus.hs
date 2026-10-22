@@ -1159,6 +1159,7 @@ testExamples =
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
         , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
         , testExampleFile "examples/termination.tersus" (ExpectReturn (VInt 23))
+        , testExampleFile "examples/for_loops.tersus" (ExpectReturn (VInt 25))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
@@ -1187,6 +1188,8 @@ testExamples =
         , testExampleFile "examples/rejected/enum_wrong_variant.tersus" (ExpectRejected "Could not prove: s is Shape::Rect")
         , testExampleFile "examples/rejected/linked_list_link_out_of_range.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)")
         , testExampleFile "examples/rejected/linked_list_link_disagrees.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, get(return, i).next).prev = i")
+        , testExampleFile "examples/rejected/for_reads_past_end.tersus" (ExpectRejected "Funct input validation failed")
+        , testExampleFile "examples/rejected/for_assigns_counter.tersus" (ExpectRejected "Loop invariant is not preserved: Could not prove: i <= (end of for i)")
         , testExampleFile "examples/rejected/loop_without_termination.tersus" (ExpectRejected "Loop must say how it ends")
         , testExampleFile "examples/rejected/loop_variant_not_shrinking.tersus" (ExpectRejected "Loop variant does not shrink: 3 - i")
         , testExampleFile "examples/rejected/loop_variant_unbounded.tersus" (ExpectRejected "Loop variant is not bounded below: i")
@@ -1930,6 +1933,62 @@ testRefinedArithmetic =
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks 2 * n { if n < 1 { return 0; } else { return f(n + 1); }; }; x = f(3);" "Recursive call does not shrink the variant"
             ]
 
+-- for i in lo..hi counts a loop variable, and the validator is given its bounds, its termination and (see
+-- testInferredInvariants) what grows in step with it
+testForLoops :: Test
+testForLoops =
+    let sumList = "fn total(a: List<Int>) -> Int { s = 0; for i in 0..size(a) { s = s + get(a, i); }; return s; };"
+     in testCaseSeq
+            "testForLoops"
+            [ -- Evaluation: the range is half open, hi is read once, and the variable is hi afterwards
+              parseEvalProgramHelper "n = 0; for i in 0..4 { n = n + i; }; return n;" (Just (VInt 6))
+            , parseEvalProgramHelper "n = 0; for i in 3..3 { n = n + 1; }; return n * 10 + i;" (Just (VInt 3))
+            , parseEvalProgramHelper "n = 0; for i in 5..2 { n = n + 1; }; return n;" (Just (VInt 0))
+            , parseEvalProgramHelper "l = [1, 2]; n = 0; for i in 0..size(l) { l = push(l, 0); n = n + 1; }; return n;" (Just (VInt 2))
+            , parseEvalProgramHelper "n = 0; for i in 0..3 { for j in 0..i { n = n + 1; }; }; return n;" (Just (VInt 3))
+            , parseEvalProgramHelper "fn f(l: List<Int>) -> Int { for i in 0..size(l) { if get(l, i) > 2 { return i; }; }; return -1; }; return f([1, 5]) + f([1]);" (Just (VInt 0))
+            , parseEvalProgramHelper (sumList ++ "return total([1, 2, 3]);") (Just (VInt 6))
+            , -- Validation: i is at least lo and below hi inside, so get is in range, and i = hi afterwards
+              parseValidProgramHelper sumList
+            , parseValidProgramHelper "n = 0; for i in 2..5 { n = n + i; }; affirm i = 5;"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> Int [{ affirm size(a) > 0; }] [{ }] { for i in 1..size(a) { x = get(a, i - 1); }; return 0; };"
+            , parseValidProgramHelper "fn f(l: List<Int>) -> Int { for i in 0..size(l) { if get(l, i) > 2 { return i; }; }; return -1; };"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { t = 0; for i in 0..n { for j in 0..i { t = t + 1; }; }; return t; };"
+            , -- An invariant can be written as for a while loop, and uses i
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = 0; }] { z = 0; for i in 0..n [{ affirm z = 0; }] { z = z * 1; }; return z; };"
+            , -- Refused: reading past the end, writing the variable, and an invariant the body breaks
+              parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { s = 0; for i in 0..size(a) + 1 { s = s + get(a, i); }; return s; };" "Funct input validation failed"
+            , parseValidateFailProgramHelper "for i in 0..3 { i = i + 1; };" "Loop invariant is not preserved: Could not prove: i <= (end of for i)"
+            , parseValidateFailProgramHelper "z = 0; for i in 0..3 [{ affirm z = 0; }] { z = z + 1; };" "Loop invariant is not preserved: Could not prove: z = 0"
+            , parseValidateFailProgramHelper "n = 0; for i in 0..3 { n = n + 1; }; affirm i = 4;" "Could not prove: i = 4"
+            ]
+
+-- Loops get the invariants a counter and the lists built beside it satisfy, without the program writing them
+testInferredInvariants :: Test
+testInferredInvariants =
+    let building body = "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = []; " ++ body ++ " return out; };"
+     in testCaseSeq
+            "testInferredInvariants"
+            [ -- A list that gets an element per iteration has the size of the counter
+              parseValidProgramHelper (building "for i in 0..size(a) { out = push(out, 0); };")
+            , parseValidProgramHelper (building "i = 0; n = size(a); while i < n [{ affirm i <= n; }] shrinks n - i { out = push(out, get(a, i)); i = i + 1; };")
+            , parseValidProgramHelper "out = []; i = 0; while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { out = push(out, i); i = i + 1; }; affirm size(out) = 3;"
+            , -- Counters keep their distance, and a lower bound they keep
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = 0; j = 5; while i < n [{ affirm i <= n; }] shrinks n - i { i = i + 1; j = j + 1; }; affirm j = i + 5; return 0; };"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 3; }] { i = 3; while i < n [{ affirm i <= n + 1; }] shrinks n - i { i = i + 2; }; affirm i >= 3; return 0; };"
+            , -- set keeps the size
+              parseValidProgramHelper "l = [1, 2, 3]; for i in 0..3 { l = set(l, i, 0); }; affirm size(l) = 3;"
+            , -- Only what the body keeps is inferred
+              parseValidateFailProgramHelper (building "for i in 0..size(a) { out = push(out, 0); out = push(out, 1); };") "Could not prove: size(return) = size(a)"
+            , parseValidateFailProgramHelper "out = []; for i in 0..3 { if i > 1 { out = push(out, i); }; }; affirm size(out) = 3;" "Could not prove: size(out) = 3"
+            , parseValidateFailProgramHelper "out = []; i = 0; while i < 3 shrinks 3 - i { out = push(out, i); i = i + 2; }; affirm size(out) = 2;" "Could not prove: size(out) = 2"
+            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { i = i + 1; }; affirm i = 0;" "Could not prove: i = 0"
+            , -- A mistake in the invariant is reported as before
+              parseValidateFailProgramHelper "out = []; i = 0; while i < 3 [{ affirm size(out) = 7; }] shrinks 3 - i { out = push(out, i); i = i + 1; };" "Loop invariant does not hold on entry"
+            , -- A loop that returns infers nothing, and still validates with what the program says
+              parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
+            ]
+
 -- Loops and recursive functions say why they end, and code that may not end is declared
 testTermination :: Test
 testTermination =
@@ -2069,6 +2128,8 @@ testTypeCheck =
             , -- Equality works on any type, ordering only on Int
               typeOk "affirm [1] = [1]; affirm true = true;"
             , typeError "affirm [1] < [2];" "expected Int, got List<Int>"
+            , typeError "for i in 0..true { x = 1; };" "expected Int, got Bool"
+            , typeError "for i in [1]..3 { x = 1; };" "expected Int, got List<Int>"
             , typeError "while 1 < 2 shrinks true { x = 2; };" "shrinks needs an Int, an enum or a struct, got Bool"
             , -- Builtins
               typeError "x = size(5);" "argument 1 of size: expected List<?>, got Int"
@@ -2719,6 +2780,8 @@ main = do
                 , testSolverCache
                 , testTermination
                 , testRefinedArithmetic
+                , testForLoops
+                , testInferredInvariants
                 , testPrecedence
                 , testFirstLast
                 , testFunctionCalls

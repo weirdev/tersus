@@ -84,7 +84,7 @@ statementBlock = concat <$> genericStatementBlock statements
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
-statements = matchAssign <|> matchReturn <|> matchStatement <|> (pure <$> statement)
+statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> (pure <$> statement)
 
 validationStatementBlock :: Parser [ValidationStatement]
 validationStatementBlock = genericStatementBlock validationStatement
@@ -152,6 +152,43 @@ whileStatement = do
     termination <- terminationClause
     body <- curlyBracesParse statementBlock
     return (While cond invariant termination body)
+
+-- for i in lo..hi [{ invariant }] { body } counts i from lo up to hi, which is read once. It is the statements of the
+-- loop below, so it has no rules of its own: i stays in scope and is hi afterwards, the validator is given
+-- i >= lo and i <= hi as part of the invariant (the invariant written here is added to those), and the loop
+-- ends because hi - i shrinks. lo and hi are kept in variables no program can write, named after i.
+--
+--   lo<i> = lo; hi<i> = hi; i = lo<i>;
+--   while i < hi<i> [{ affirm i >= lo<i>; affirm i <= hi<i>; invariant }] shrinks hi<i> - i { body; i = i + 1; };
+forStatement :: Parser [Statement]
+forStatement = do
+    keyword "for"
+    whitespace
+    var <- variable
+    whitespace
+    keyword "in"
+    whitespace
+    lo <- expression
+    whitespace
+    void (string "..")
+    whitespace
+    hi <- expression
+    whitespace
+    invariant <- option [] functContractReqs
+    whitespace
+    body <- curlyBracesParse statementBlock
+    let loName = "$lo " ++ var
+        hiName = "$hi " ++ var
+        builtinApp name = F (Val (builtinFunct name))
+        bound rel name = ProofAssert (FApp (CTerm (builtinFunct (Rel rel))) [ATerm var, ATerm name])
+        step = Assign var (builtinApp Plus [Var var, Val (VInt 1)])
+        remaining = builtinApp Minus [Var hiName, Var var]
+    return
+        [ Assign loName lo
+        , Assign hiName hi
+        , Assign var (Var loName)
+        , While (builtinApp (Rel Lt) [Var var, Var hiName]) (bound GtEq loName : bound LtEq hiName : invariant) (Just (Shrinks remaining)) (body ++ [step])
+        ]
 
 -- `shrinks e` or `~`, before the body of a loop or function. Both are optional here, the validator
 -- decides whether leaving them out is allowed.
