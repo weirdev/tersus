@@ -1961,6 +1961,10 @@ testForLoops =
             , parseValidateFailProgramHelper "for i in 0..3 { i = i + 1; };" "Loop invariant is not preserved: Could not prove: i <= (end of for i)"
             , parseValidateFailProgramHelper "z = 0; for i in 0..3 [{ affirm z = 0; }] { z = z + 1; };" "Loop invariant is not preserved: Could not prove: z = 0"
             , parseValidateFailProgramHelper "n = 0; for i in 0..3 { n = n + 1; }; affirm i = 4;" "Could not prove: i = 4"
+            , -- The range has to be known not to run backwards, which is what gives i = hi afterwards
+              parseValidateFailProgramHelper "fn f(n: Int) -> Int { for i in 0..n { x = i; }; return 0; };" "the range has to be known to end at or after its start"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { for i in 0..n { x = i; }; affirm i = n; return 0; };"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 3; }] [{ }] { for i in 3..n { x = i; }; affirm i = n; return 0; };"
             ]
 
 -- Loops get the invariants a counter and the lists built beside it satisfy, without the program writing them
