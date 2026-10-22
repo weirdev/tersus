@@ -36,10 +36,11 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
 | `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
+| `for_loops.tersus` | `for i in lo..hi`: a sum over a list, an early `return`, a list built to a given size, and nested ranges, with no invariant or termination clause | returns `25` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
 | `parallel_sum.tersus` | Parallel iteration: `get` on two lists in one index loop that `push`es each pair's sum, with the equal input sizes, the result's size and each element (the sum of its pair, a `forall`) stated in the function's contract and the loop invariant | returns `[11, 22, 33]` |
-| `build_list.tersus` | Building a list with `push` in a loop, with the result's size and each element (twice the input's) stated in an output contract | returns `[2, 4, 6]` |
+| `build_list.tersus` | Building a list with `push` in a `for` loop, with the result's size (worked out for the loop) and each element (twice the input's) stated in an output contract | returns `[2, 4, 6]` |
 | `update_list.tersus` | Updating a list: `set` replaces an element of a copy in a loop, with the size and the bumped and untouched elements carried by the invariant (two `forall`s) and stated in the output contract | returns `[101, 102, 103]` |
 | `frame_facts.tersus` | What `push` and `set` leave alone: every other element is unchanged | returns `149` |
 | `forall_facts.tersus` | `forall` facts: assumed by an axiom, required by an input contract, passed on by an output contract, and proved directly | returns `5` |
@@ -118,6 +119,8 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/element_wrong.tersus` | An output contract claims `set` left the old element at the index it overwrote |
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
+| `rejected/for_reads_past_end.tersus` | A `for` range that ends one past the last index, so `get` is out of range |
+| `rejected/for_assigns_counter.tersus` | A `for` body that assigns its loop variable |
 | `rejected/loop_without_termination.tersus` | A loop that says neither `shrinks` nor `~` |
 | `rejected/loop_variant_not_shrinking.tersus` | A loop whose variant `3 - i` is never made smaller by its body |
 | `rejected/loop_variant_unbounded.tersus` | A countdown on a parameter that nothing shows is at least 0 |

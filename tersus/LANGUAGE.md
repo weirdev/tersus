@@ -42,7 +42,7 @@ stack run -- run program.tersus     # validate, then evaluate and print the retu
 
 Checking every proposition a real program could need is not feasible, so validation is a bounded search that is sound but incomplete:
 
-1. **Heuristics do the common work.** The validator tries, without any help from the program: equalities between terms and their parts, integer comparisons (see Arithmetic), evaluation of builtins on known values, `forall` facts at the elements the program reads, and the facts that function contracts export. Each search is bounded: a fixed number of `forall` instantiation rounds, a fixed number of case splits, and a fixed budget of statements when a call with known arguments is evaluated.
+1. **Heuristics do the common work.** The validator tries, without any help from the program: equalities between terms and their parts, integer comparisons (see Arithmetic), evaluation of builtins on known values, `forall` facts at the elements the program reads, the facts that function contracts export, and the invariants of a loop that follow from how its counters and lists start and change (see Inferred invariants). Each search is bounded: a fixed number of `forall` instantiation rounds, a fixed number of case splits, and a fixed budget of statements when a call with known arguments is evaluated.
 2. **Whatever they cannot prove is rejected.** A statement is never accepted on a guess. When the search runs out, the validator reports `Could not prove: P`, which means "not provable by these heuristics", not "false". The one definite failure is a `checkRel` over concrete values, which says `Relation does not hold`.
 3. **The program supplies the rest.** You move the proof context closer to the goal until the heuristics can finish, with:
    - an intermediate `affirm` (proved, then available as a fact),
@@ -460,6 +460,22 @@ See `examples/parallel_sum.tersus`, `examples/build_list.tersus` and `examples/u
 
 `while` is a reserved word; `whiley` is still an ordinary name.
 
+#### Inferred invariants
+
+The invariants of a loop that does not `return` are completed by the validator. For each variable the body assigns that is a number or a list when the loop is entered, it starts from what is known on entry: a number is at least and at most its value there, the size of a list likewise, and two of these differ by what they differed by on entry. It keeps a candidate only if the body establishes it again, assuming the ones that are left, and repeats until none is dropped (at most four rounds), so what is kept is an invariant like one the program wrote: it holds on entry, is preserved, and holds after the loop together with the negated condition.
+
+```tersus
+out = [];
+i = 0;
+while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
+    out = push(out, i);
+    i = i + 1;
+};
+affirm size(out) = 3;       // size(out) = i was inferred: both start at 0 and grow by one
+```
+
+This is what makes `size(return) = size(a)` follow from a loop that pushes once per element, with no `affirm size(out) = i`. It covers differences of constants only: a list that starts as a copy of an argument, or a counter that starts at a variable, has no value to compare with on entry, so its invariant is written as before (`examples/update_list.tersus` does this for `size(out) = size(a)`). A loop with a `return` in its body infers nothing. If a loop is refused, the error is about the invariant the program wrote, never about an inferred one.
+
 #### Returning from a loop
 
 A body that contains `return` is validated as paths, in the same way as an `if` with a `return`:
@@ -485,6 +501,32 @@ fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
 - The statements after the loop are validated once, from the state where the invariant holds and the condition is false. Facts that only a returning path knew, such as an `if` condition inside the body, are not known there.
 - As for an `if`, a function where some path (including leaving the loop) does not return has no return value and is rejected with `Return value not found in top scope`.
 - The variant of a loop with a `shrinks` clause must also be smaller on every path that keeps looping.
+
+### For
+
+`for i in lo..hi { ... }` counts `i` from `lo` up to, but not including, `hi`:
+
+```tersus
+fn total(a: List<Int>) -> Int {
+    s = 0;
+    for i in 0..size(a) {
+        s = s + get(a, i);
+    };
+    return s;
+};
+```
+
+It is a `while` loop and is validated as one: `lo` and `hi` are evaluated once, before the loop, and kept; `i` is set to `lo`; the loop runs while `i < hi` and adds `1` to `i` after the body; its invariant has `i >= lo` and `i <= hi`; and it shrinks `hi - i`, so no invariant or termination clause is needed. Inside the body `i < hi` holds, so `get(a, i)` above is in range, and after the loop `i = hi` (the variable stays in scope, and has the value `hi`). Written out, with names the program cannot use for `lo` and `hi`:
+
+```tersus
+lo = 0; hi = size(a); i = lo;
+while i < hi [{ affirm i >= lo; affirm i <= hi; }] shrinks hi - i {
+    s = s + get(a, i);
+    i = i + 1;
+};
+```
+
+An invariant of the program's own goes between the range and the body, `for i in 0..n [{ affirm ... }] { ... }`, and is added to those; the loop also gets the inferred invariants above. A `return` in the body leaves the function. A body that assigns `i` is refused, because it does not keep `i` within the range (`Could not prove: i <= (end of for i)`); `lo` and `hi` must be integers. A range with `hi < lo` runs the body no times when the program runs, but the validator wants `lo <= hi` to be known, as the bounds of `i` are an invariant that has to hold on entry and that is what gives `i = hi` afterwards: `for i in 0..n` needs `affirm n >= 0` in the contract (`size(l)` is known to be at least 0), and is refused otherwise with `Loop invariant does not hold on entry`. `for` is a reserved word; `form` is still an ordinary name. See `examples/for_loops.tersus`.
 
 ### Termination
 
@@ -808,11 +850,12 @@ A forall is instantiated at the indexes the program reads, and an instance that 
 
 The validator decides integer comparisons itself, so `affirm`, loop invariants, `checkRel` and `if` guards need no helper rewrites for them. It treats `x - y <= c` facts as a graph and answers a goal by the shortest path between the two sides. The facts come from:
 
-- relations in the context (`i < n`, `a <= b`, and `x != y` only as a goal),
+- relations in the context (`i < n`, `a <= b`, and `x != y`, which with `x <= y` or `x >= y` gives the strict relation),
 - `x + c` and `x - c` where `c` has a known integer value,
 - any term with a known integer value, and
 - `size(l) >= 0`, and
-- `x * 0`, `x * 1` and `x / 1` (any other product or quotient is an uninterpreted term, folded to a number only when both operands are known).
+- `x * 0`, `x * 1` and `x / 1`,
+- `c * x` and `x * c` for any other known constant `c`: it is a node of its own, and whatever the graph says about two nodes `x` and `y` (or `x` and `0`) is said about `c * x` and `c * y` multiplied by `c`, so `n > 0` gives `2 * n > 0` and `n < m` gives `2 * n < 2 * m - 1` (any other product or quotient is an uninterpreted term, folded to a number only when both operands are known). Different constants are different nodes: `2 * n` is not compared with `3 * n`, and `x / 2` is not related to `x`.
 
 A difference `x - y` of two unknown terms is a term of its own, which the graph says nothing about. A comparison of a difference with `0`, or with another difference that has a side in common, is decided by the other sides, which is what a loop variant such as `n - i` needs: `n - i >= 0` follows from `i <= n`, and `n - (i + 1) < n - i` from `i + 1 > i`. Other facts about a difference, such as `x - y = z` giving `x = y + z`, are not known.
 
@@ -833,16 +876,16 @@ fn average(total: Int, count: Int) -> Int [{ affirm count > 0; }] [{ }] {
 
 See `examples/arithmetic.tersus`.
 
-A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such as the guard of an unreachable branch, prove every comparison.
+A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is used the other way: when `x <= y` is known too, `x < y` is, which an `i != n` loop condition needs to keep `i` below `n`. Contradictory facts, such as the guard of an unreachable branch, prove every comparison.
 
 ## Current Limitations
 
-- No `for` loops, `break` or `continue`.
+- No `break` or `continue`. `for` counts through a range only, not through the elements of a list or by a step other than `1`.
 - Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field at each step. Nothing else is a variant: not a lexicographic pair of integers, not the length of a list that shrinks, and a variant that changes both sides of a difference (`n - i` where `n` and `i` both move) has to be split. The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
 - No declarations separate from assignment.
 - No strings or floats yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
-- Arithmetic is limited to comparisons, adding or subtracting a known constant, and multiplying by 0 or 1 or dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known, or between differences that have no side in common.
-- The size of a list built by a literal or loop is not computed by the validator on its own: `out = []; define s0 = size(out);` is how `examples/build_list.tersus` gets `size(out) = 0`.
+- Arithmetic is limited to comparisons, adding or subtracting a known constant, multiplying by a known constant, and dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known, or between differences that have no side in common.
+- The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration, or that starts as an argument, needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.

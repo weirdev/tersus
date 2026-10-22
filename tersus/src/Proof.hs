@@ -9,6 +9,7 @@ import Data.Map (
   )
 
 import Data.Containers.ListUtils (nubOrd)
+import Data.List (isInfixOf)
 import Data.Maybe (mapMaybe, fromMaybe)
 import qualified Data.Map as Map
 
@@ -523,7 +524,7 @@ valWhileStatement :: VState -> Expression -> [ValidationStatement] -> Maybe Term
 valWhileStatement state cond invariant term body =
     vAdvanceStatement state `bindResult` \advanced ->
         loopTermination advanced term `bindResult` \_ ->
-            prefixError "Loop invariant does not hold on entry: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
+            prefixError "Loop invariant does not hold on entry: " (rangeHint (validateUserRuleInputs advanced invariant)) `bindResult` \_ ->
                 let loopVars = assignedOuterVars advanced body
                  in popNIotasFromSeq advanced (length loopVars) `bindResult` \(freshIotas, popped) ->
                         let havocked = foldl (\s (var, iota) -> vInsertVar s var iota []) popped (zip loopVars freshIotas)
@@ -534,6 +535,11 @@ valWhileStatement state cond invariant term body =
                             case attempt inferred of
                                 Error _ | not (null inferred) -> attempt []
                                 result -> result
+
+-- A for loop whose range is not known to end at or after its start does not hold its bounds on entry
+rangeHint :: Result a String -> Result a String
+rangeHint (Error e) | "(end of for" `isInfixOf` e = Error (e ++ " (the range has to be known to end at or after its start, as 0..n does with n >= 0)")
+rangeHint result = result
 
 -- The rest of the validation of a loop, from the state where the variables its body assigns are unknown
 valLoopFrom :: VState -> Expression -> [ValidationStatement] -> Maybe Termination -> [Statement] -> Result VState String
