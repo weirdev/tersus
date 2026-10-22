@@ -17,7 +17,7 @@ import Pretty (renderVarProof)
 import ProofHelpers
 import StdLib
 import TersusTypes
-import TypeCheck (typeCheck)
+import TypeCheck (elaborate)
 import Utils
 
 -- Public fns
@@ -27,7 +27,7 @@ evaluate l = evalBlock $ initStateWStatements l
 
 validate :: [Statement] -> Result VState String
 validate [] = Ok $ VState emptyVScopeState empty [] [] stdLibRuleCtx
-validate l = case typeCheck l of {Error e -> Error e; Ok () -> validateTyped l}
+validate l = case elaborate l of {Error e -> Error e; Ok l' -> validateTyped l'}
 
 validateTyped :: [Statement] -> Result VState String
 validateTyped l = case valBlock $ initVStateWStatements l of
@@ -536,37 +536,37 @@ valWhileStatement state cond invariant term body =
                                                 startIteration condState bodyAssumptions term `bindResult` \(iterState, decrease) ->
                                                     valBranch iterState bodyAssumptions body `bindResult` \bodyState ->
                                                         prefixError "Loop invariant is not preserved: " (validateUserRuleInputs bodyState invariant) `bindResult` \_ ->
-                                                            variantFailure "Loop variant does not decrease" decrease (validateUserRuleInputs bodyState decrease) `bindResult` \_ ->
+                                                            variantFailure "Loop variant does not shrink" decrease (validateUserRuleInputs bodyState decrease) `bindResult` \_ ->
                                                                 valLoopExit (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond
 
 -- A loop has to say how it ends. One that may not end is code that may not terminate, which a function
--- has to be declared may_diverge to contain.
+-- has to be declared ~ to contain.
 loopTermination :: VState -> Maybe Termination -> Result () String
-loopTermination _ Nothing = Error "Loop must say how it ends: add `decreases <expression>` before its body, or `may_diverge`"
-loopTermination state (Just MayDiverge) = noteDivergence state "a loop is declared may_diverge"
+loopTermination _ Nothing = Error "Loop must say how it ends: add `shrinks <expression>` before its body, or `~`"
+loopTermination state (Just MayDiverge) = noteDivergence state "a loop is declared ~"
 loopTermination _ _ = Ok ()
 
 -- The variant of a loop or function is an integer that has to be at least 0 where it starts, and smaller
 -- each time round. Its value at the start is kept in a variable that has a name no program can write, and
 -- the statements below check the value later on against it.
 --
--- With `decreases e` the variant is an integer. With `shrinks e` it is an enum or struct, which needs no bound
--- and is smaller when it is a part of the earlier value.
+-- `shrinks e` is resolved by the type checker. An integer variant (Counting) has to be at least 0 and smaller. An enum or
+-- struct (Parts) needs no bound and is smaller when it is a part of the earlier value.
 variantStatements :: Variable -> Expression -> [ValidationStatement]
 variantStatements name variant = [AssignProofVar name variant]
 
 -- The expression of a clause that has a variant
 variantOf :: Maybe Termination -> Maybe Expression
-variantOf (Just (Decreases variant)) = Just variant
-variantOf (Just (Shrinks variant)) = Just variant
+variantOf (Just (Counting variant)) = Just variant
+variantOf (Just (Parts variant)) = Just variant
 variantOf _ = Nothing
 
 boundedBelow :: Variable -> Termination -> Expression -> [ValidationStatement]
-boundedBelow name (Decreases _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm name, CTerm (VInt 0)])]
+boundedBelow name (Counting _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm name, CTerm (VInt 0)])]
 boundedBelow name _ variant = variantStatements name variant
 
 smallerThan :: Variable -> Variable -> Termination -> Expression -> [ValidationStatement]
-smallerThan name earlier (Decreases _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm name, ATerm earlier])]
+smallerThan name earlier (Counting _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm name, ATerm earlier])]
 smallerThan name earlier _ variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct Within)) [ATerm name, ATerm earlier])]
 
 -- Says which variant it was that could not be shown to be fine
@@ -624,7 +624,7 @@ valLoopEnd :: VState -> [ValidationStatement] -> [ValidationStatement] -> Result
 valLoopEnd state invariant decrease =
     vAdvanceStatement state `bindResult` \advanced ->
         prefixError "Loop invariant is not preserved: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
-            variantFailure "Loop variant does not decrease" decrease (validateUserRuleInputs advanced decrease) `bindResult` \_ ->
+            variantFailure "Loop variant does not shrink" decrease (validateUserRuleInputs advanced decrease) `bindResult` \_ ->
                 Ok (vMarkLoopBack (vSetContinuations (vTopLevelScope advanced) emptyContinuations))
 
 -- Validates the loop condition in the given state, recording what it says about its result
@@ -1022,7 +1022,7 @@ markFunctionBody term state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
 entryVariantName :: Variable
 entryVariantName = "variant at entry"
 
--- A function that says what decreases has it at least 0 for any arguments that meet the input contract, and
+-- A function that says what shrinks has it at least 0 for any arguments that meet the input contract, and
 -- keeps its value at the start
 startFunctionVariant :: Maybe Termination -> VState -> Result VState String
 startFunctionVariant (Just clause) state
@@ -1039,28 +1039,28 @@ unreachable state =
         impossible = FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]
      in Engine.entails (CTerm (VBool False)) context || Engine.entails impossible context
 
--- Code that may not terminate, in a function that was not declared may_diverge, is an error if it can be
+-- Code that may not terminate, in a function that was not declared ~, is an error if it can be
 -- reached. The code is also not guaranteed to terminate in the program or a function that is declared
--- may_diverge, but they do not mind.
+-- ~, but they do not mind.
 noteDivergence :: VState -> String -> Result () String
 noteDivergence state why =
     let VState _ iotaCtx _ _ _ = state
      in if Map.member terminatesMarker iotaCtx && not (unreachable state)
-            then Error ("Not guaranteed to terminate: " ++ why ++ ". Declare the function may_diverge if that is intended")
+            then Error ("Not guaranteed to terminate: " ++ why ++ ". Declare the function ~ if that is intended")
             else Ok ()
 
--- What calling a function says about whether the caller ends. Calling a function declared may_diverge may
+-- What calling a function says about whether the caller ends. Calling a function declared ~ may
 -- not end. A function calling itself needs a variant that is smaller for the call than for the call it is
 -- in; without one it may not end.
 callTermination :: VState -> [Variable] -> [Iota] -> [IotaProof] -> FunctBody -> Result () String
 callTermination state varArgs argIotas argProofs (NativeFunct _ (Just term) _) = case term of
-    MayDiverge -> noteDivergence state "it calls a function that is declared may_diverge"
-    Recursing Nothing -> noteDivergence state "it calls itself and does not say what decreases"
+    MayDiverge -> noteDivergence state "it calls a function that is declared ~"
+    Recursing Nothing -> noteDivergence state "it calls itself and does not say what shrinks"
     Recursing (Just clause) | Just variant <- variantOf (Just clause) ->
         case vLookupVar state entryVariantName of
             Just entry ->
                 let smaller = smallerThan "variant of the call" entryVariantName clause variant
-                 in mapResult (const ()) (variantFailure "Recursive call does not decrease the variant" smaller (valFunctInput state (varArgs ++ [entryVariantName]) (argIotas ++ [entry]) argProofs smaller))
+                 in mapResult (const ()) (variantFailure "Recursive call does not shrink the variant" smaller (valFunctInput state (varArgs ++ [entryVariantName]) (argIotas ++ [entry]) argProofs smaller))
             Nothing -> Error "Recursive call outside of the function that it calls"
     _ -> Ok ()
 callTermination _ _ _ _ _ = Ok ()

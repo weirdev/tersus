@@ -87,7 +87,7 @@ A function writes the type of each parameter and of its return value. A local va
 fn scale(values: List<Int>, factor: Int) -> List<Int> {
     out = [];
     i = 0;
-    while i < size(values) [{ affirm i >= 0; }] decreases size(values) - i {
+    while i < size(values) [{ affirm i >= 0; }] shrinks size(values) - i {
         out = push(out, get(values, i) * factor);
         i = i + 1;
     };
@@ -399,21 +399,21 @@ A `return` inside a `while` body works the same way, see Returning from a loop b
 ```tersus
 i = 0;
 n = 0;
-while i < 3 decreases 3 - i {
+while i < 3 shrinks 3 - i {
     i = i + 1;
     n = n + 2;
 };
 return n;
 ```
 
-The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. A loop has to say why it ends, here with `decreases 3 - i`, see Termination below; evaluation ignores that, and a loop whose condition never becomes false runs forever. A `return` inside the body ends the function or program, and stops the loop.
+The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. A loop has to say why it ends, here with `shrinks 3 - i`, see Termination below; evaluation ignores that, and a loop whose condition never becomes false runs forever. A `return` inside the body ends the function or program, and stops the loop.
 
 #### Loop invariants
 
 The validator does not unroll loops. A loop can carry an invariant, written with the same `[{ ... }]` contract syntax as functions, between the condition and the body:
 
 ```tersus
-while i < 3 [{ affirm i <= 3; }] decreases 3 - i {
+while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
     rewrite stepWithinBound i;
     i = i + 1;
 };
@@ -430,7 +430,7 @@ The invariant is about what is true if the loop ends; that it ends is shown by t
 
 ```tersus
 i = 0;
-while i < 3 [{ affirm i <= 3; }] decreases 3 - i {
+while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
     i = i + 1;
 };
 affirm i >= 3;
@@ -448,7 +448,7 @@ fn doubled(a: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..size(a): ge
     while i < n [{
         affirm i >= 0; affirm i <= n; affirm size(out) = i;
         affirm forall j in 0..i: get(out, j) = (get(a, j) + get(a, j));
-    }] decreases n - i {
+    }] shrinks n - i {
         out = push(out, get(a, i) + get(a, i));
         i = i + 1;
     };
@@ -468,7 +468,7 @@ A body that contains `return` is validated as paths, in the same way as an `if` 
 fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
     i = 0;
     rewrite zeroWithinBound i;
-    while i < 3 [{ affirm i <= 3; }] decreases 3 - i {
+    while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
         if (i + i) > n {
             return i;
         };
@@ -484,37 +484,35 @@ fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
 - A path that returns assumes the invariant, the loop condition and whatever its own `if` conditions say. Its return value is joined with the value returned after the loop, so an output contract holds only if every returning path establishes it. Above, `return <= 3` holds for the `return i` in the body (from the invariant) and for the one after the loop.
 - The statements after the loop are validated once, from the state where the invariant holds and the condition is false. Facts that only a returning path knew, such as an `if` condition inside the body, are not known there.
 - As for an `if`, a function where some path (including leaving the loop) does not return has no return value and is rejected with `Return value not found in top scope`.
-- The variant of a loop with a `decreases` clause must also be smaller on every path that keeps looping.
+- The variant of a loop with a `shrinks` clause must also be smaller on every path that keeps looping.
 
 ### Termination
 
 Statements that are not loops or calls end by themselves. A loop and a function that calls itself have to say why they end, or say that they may not. The validator checks what they say, or reports the code that is not guaranteed to terminate.
 
-**`decreases e`** gives an integer expression, the variant. It is checked like this:
+**`shrinks e`** names what gets smaller, here called the variant. Which kind of shrinking it means depends on the type of `e`, which the type checker resolves before validation:
 
-- For a loop, `e` must be at least `0` where an iteration starts (assuming the invariant and the condition), and smaller where the iteration ends, on every path that reaches the end of the body. A path that returns does not need to.
-- For a function, `e` is evaluated in the parameters. It must be at least `0` for any arguments that meet the input contract, and at every call the function makes to itself the variant of the arguments must be smaller than the variant of the call it is in (the arguments of the function when it started, even if the body has assigned its parameters since).
-- `i` can be counted up or down: `decreases n - i` needs `i <= n` to be known where the iteration starts, and the condition `i < n` supplies it. The validator compares a difference such as `n - i` by its two sides, so `n - i >= 0` is `n >= i`, `n - (i + 1) < n - i` holds because `i + 1 > i`, and it works when one side of the difference is the same in the two. When both sides move, say so with two steps or a different variant.
+- An `Int` counts down to a bound. For a loop, `e` must be at least `0` where an iteration starts (assuming the invariant and the condition), and smaller where the iteration ends, on every path that reaches the end of the body. A path that returns does not need to. For a function, `e` is evaluated in the parameters. It must be at least `0` for any arguments that meet the input contract, and at every call the function makes to itself the variant of the arguments must be smaller than the variant of the call it is in (the arguments of the function when it started, even if the body has assigned its parameters since).
+- A struct or enum value must be a part of the one before it: a field, or a field of a field, which a `match` binding or `(t as Tree::Branch).left` is. Such values are finite, so this ends, and there is no bound to prove.
+- Any other type is an error: `shrinks needs an Int, an enum or a struct`.
+
+`i` can be counted up or down: `shrinks n - i` needs `i <= n` to be known where the iteration starts, and the condition `i < n` supplies it. The validator compares a difference such as `n - i` by its two sides, so `n - i >= 0` is `n >= i`, `n - (i + 1) < n - i` holds because `i + 1 > i`, and it works when one side of the difference is the same in the two. When both sides move, say so with two steps or a different variant.
 
 ```tersus
-fn sumTo(n: Int) -> Int [{ affirm n >= 0; }] decreases n {
+fn sumTo(n: Int) -> Int [{ affirm n >= 0; }] shrinks n {
     if n < 1 { return 0; } else { return n + sumTo(n - 1); };
 };
 
 fn countDown(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] {
     i = n;
     steps = 0;
-    while i > 0 [{ affirm i >= 0; affirm steps >= 0; }] decreases i {
+    while i > 0 [{ affirm i >= 0; affirm steps >= 0; }] shrinks i {
         i = i - 1;
         steps = steps + 1;
     };
     return steps;
 };
-```
 
-**`shrinks e`** is for an enum or struct value, where nothing is counted. The value must be a part of the one before it: a field, or a field of a field, which a `match` binding or `(t as Tree::Branch).left` is. An enum or struct value is finite, so this ends. There is no bound to prove.
-
-```tersus
 fn leaves(t: Tree) -> Int shrinks t {
     return match t {
         Tree::Leaf => 1,
@@ -523,24 +521,28 @@ fn leaves(t: Tree) -> Int shrinks t {
 };
 ```
 
-**`may_diverge`** says that no guarantee is given. A loop or function that has it validates as before, apart from that, so its invariant and contracts are still checked (partial correctness). A function that contains a loop declared `may_diverge`, or that calls a function declared `may_diverge`, is not guaranteed to terminate either, and has to say so with `may_diverge` itself, or it is rejected with `Not guaranteed to terminate`. The program outside of functions may contain such code.
+**`~`** says that no guarantee is given. A loop or function that has it validates as before, apart from that, so its invariant and contracts are still checked (partial correctness). A function that contains a loop declared `~`, or that calls a function declared `~`, is not guaranteed to terminate either, and has to say so with `~` itself, or it is rejected with `Not guaranteed to terminate`. The program outside of functions may contain such code.
 
 ```tersus
-fn settle(n: Int) -> Int may_diverge {
-    while n != 1 may_diverge {
+fn settle(n: Int) -> Int ~ {
+    while n != 1 ~ {
         if n > 1 { n = n - 1; } else { n = n + 1; };
     };
     return n;
 };
 
-fn settleTwice(n: Int) -> Int may_diverge {
+fn settleTwice(n: Int) -> Int ~ {
     return settle(n) + settle(n + 1);
 };
 ```
 
-The clause is written after the invariant of a loop, and after the contracts of a function, before the body. Leaving it out is an error for a loop (`Loop must say how it ends`) and for a function that calls itself (`Not guaranteed to terminate: it calls itself`); a function that has no loop of its own and does not call itself needs nothing, and a call to it ends. Only code that can be reached counts: where the facts are contradictory, as in `if n > 0 { if n < 0 { return settle(n); }; }`, a call to a function that may not end is not an error. The variant (and so `Recursive call does not decrease the variant`) is only checked for a function that calls itself, which can only be a function defined at the top level; there is no mutual recursion, because a function sees only the functions defined before it.
+The clause is written after the invariant of a loop, and after the contracts of a function, before the body. Leaving it out is an error for a loop (`Loop must say how it ends`) and for a function that calls itself (`Not guaranteed to terminate: it calls itself`); a function that has no loop of its own and does not call itself needs nothing, and a call to it ends. Only code that can be reached counts: where the facts are contradictory, as in `if n > 0 { if n < 0 { return settle(n); }; }`, a call to a function that may not end is not an error. The variant (and so `Recursive call does not shrink the variant`) is only checked for a function that calls itself, which can only be a function defined at the top level; there is no mutual recursion, because a function sees only the functions defined before it.
 
-The words `decreases`, `shrinks` and `may_diverge` only mean something in these places and are otherwise ordinary names. See `examples/termination.tersus`, and `examples/rejected/` for `loop_without_termination`, `loop_variant_not_decreasing`, `loop_variant_unbounded`, `recursion_without_variant`, `recursion_variant_not_smaller`, `recursion_shrinks_not_a_part`, `diverging_call` and `diverging_loop`. A syntax for code that is known never to terminate may be added later.
+`shrinks` only means something in these places and is otherwise an ordinary name. See `examples/termination.tersus`, and `examples/rejected/` for `loop_without_termination`, `loop_variant_not_shrinking`, `loop_variant_unbounded`, `recursion_without_variant`, `recursion_variant_not_shrinking`, `recursion_shrinks_not_a_part`, `diverging_call` and `diverging_loop`.
+
+#### Where this is going
+
+`shrinks e` is meant to be sugar. The intended general form is a termination proof that the program writes out in the validation language, in the style of proof rules and loop invariants: a block of `affirm`s about the state at the start of an iteration or call and the state at its end, which together show that the code cannot go on for ever. `shrinks` would then expand to the block for its type (a bound and a strict decrease for an `Int`, a part-of relation for a struct or enum), and programs whose argument is not a single shrinking value (a lexicographic pair, a list that loses an element, mutually recursive functions) could write their own. That needs obligations that relate two states, which nothing in the language does yet, so it is not implemented. A syntax for code that is known never to terminate may be added later.
 
 ### Functions
 
@@ -566,10 +568,10 @@ fn bump(n: Int) -> Int [{ affirm n >= 5; }] [{ affirm return > 5; }] { return po
 
 A function sees only the functions defined before it and itself, so there is no mutual recursion, and calling a later function is a validation error (`Undefined variable`).
 
-A function can call itself. Its body is validated assuming its own output contract, and the contract is then checked against the body, so every recursive call must meet the input contract and the base cases must establish the output contract. It also has to say why it ends: `decreases` or `shrinks` followed by an expression that gets smaller at each call, see Termination. A function declared `may_diverge` is only partially correct: `fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] may_diverge { return spin(n); }` validates.
+A function can call itself. Its body is validated assuming its own output contract, and the contract is then checked against the body, so every recursive call must meet the input contract and the base cases must establish the output contract. It also has to say why it ends: `shrinks` followed by an expression that gets smaller at each call, or `~`, see Termination. A function declared `~` is only partially correct: `fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] ~ { return spin(n); }` validates.
 
 ```tersus
-fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] decreases n - i {
+fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] shrinks n - i {
     if i < n { return upTo(i + 1, n); } else { return n; };
 };
 ```
@@ -718,7 +720,7 @@ Rule names share one validation rule namespace. Defining the same name twice fai
 Function definitions can include validation contract sections between the argument list and body:
 
 ```tersus
-fn name(arg1: Type1, arg2: Type2) -> ReturnType [{ input validation }] [{ output validation }] decreases e {
+fn name(arg1: Type1, arg2: Type2) -> ReturnType [{ input validation }] [{ output validation }] shrinks e {
     body
 };
 ```
@@ -783,7 +785,7 @@ fn walk(nodes: List<Node>, start: Int, steps: Int) -> Int
 {
     cur = start;
     taken = 0;
-    while taken < steps [{ affirm taken >= 0; affirm cur >= 0; affirm cur < size(nodes); }] decreases steps - taken {
+    while taken < steps [{ affirm taken >= 0; affirm cur >= 0; affirm cur < size(nodes); }] shrinks steps - taken {
         cur = get(nodes, cur).next;
         taken = taken + 1;
     };
@@ -836,7 +838,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is. Contradictory facts, such 
 ## Current Limitations
 
 - No `for` loops, `break` or `continue`.
-- Termination is checked for loops and for a function that calls itself, but only for an integer that counts to a bound (`decreases`) or a value that loses a field at each step (`shrinks`). Nothing else is a variant: not a lexicographic pair of integers, not the length of a list that shrinks, and a variant that changes both sides of a difference (`n - i` where `n` and `i` both move) has to be split. A program that cannot show termination is declared `may_diverge`, can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
+- Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field at each step. Nothing else is a variant: not a lexicographic pair of integers, not the length of a list that shrinks, and a variant that changes both sides of a difference (`n - i` where `n` and `i` both move) has to be split. The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
 - No declarations separate from assignment.
 - No strings or floats yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
 - Arithmetic is limited to comparisons, adding or subtracting a known constant, and multiplying by 0 or 1 or dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known, or between differences that have no side in common.

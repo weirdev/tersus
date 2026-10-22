@@ -39,12 +39,15 @@ data Signature = Signature [Type] Type deriving (Show, Eq, Ord)
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.
 data Termination
-    = -- decreases e: an integer that is at least 0 and gets smaller every iteration or recursive call
-      Decreases Expression
-    | -- shrinks e: a value that is, each iteration or recursive call, a part of the one before it (a field,
-      -- or a field of a field). Enums and structs are finite, so this ends.
+    = -- shrinks e: what the program writes. The type checker resolves it by the type of e, into Counting or Parts,
+      -- and the validator only sees those.
       Shrinks Expression
-    | -- may_diverge: no guarantee, and whatever runs it is not guaranteed to terminate either
+    | -- An integer that is at least 0 and gets smaller every iteration or recursive call
+      Counting Expression
+    | -- An enum or struct value that is, each iteration or recursive call, a part of the one before it (a field,
+      -- or a field of a field). Such values are finite, so this ends.
+      Parts Expression
+    | -- ~: no guarantee, and whatever runs it is not guaranteed to terminate either
       MayDiverge
     | -- Never parsed: the copy of a function that its own body calls, with what the function said
       Recursing (Maybe Termination)

@@ -1,5 +1,5 @@
 // Rejected: the call passes the same n, so nothing gets smaller.
-fn down(n: Int) -> Int [{ affirm n >= 0; }] decreases n {
+fn down(n: Int) -> Int [{ affirm n >= 0; }] shrinks n {
     if n < 1 { return 0; } else { return down(n); };
 };
 return down(3);

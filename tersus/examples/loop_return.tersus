@@ -3,7 +3,7 @@
 // The smallest i in 0..3 with i + i > n, or 3 if there is none.
 fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
     i = 0;
-    while i < 3 [{ affirm i <= 3; }] decreases 3 - i {
+    while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
         if (i + i) > n {
             // Leaves the function. i <= 3 holds here, which the output contract needs.
             return i;

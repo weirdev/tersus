@@ -1,6 +1,6 @@
 // Rejected: i is not known to be at least 0, so counting it down need not end.
 fn down(i: Int) -> Int {
-    while i != 0 decreases i {
+    while i != 0 shrinks i {
         i = i - 1;
     };
     return i;

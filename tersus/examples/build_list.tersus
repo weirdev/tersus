@@ -18,7 +18,7 @@ fn doubled(a: List<Int>) -> List<Int> [{ }] [{
         affirm i <= n;
         affirm size(out) = i;
         affirm forall j in 0..i: get(out, j) = (get(a, j) + get(a, j));
-    }] decreases n - i {
+    }] shrinks n - i {
         out = push(out, get(a, i) + get(a, i));
         i = i + 1;
     };

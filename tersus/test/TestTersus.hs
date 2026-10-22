@@ -1188,13 +1188,13 @@ testExamples =
         , testExampleFile "examples/rejected/linked_list_link_out_of_range.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)")
         , testExampleFile "examples/rejected/linked_list_link_disagrees.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, get(return, i).next).prev = i")
         , testExampleFile "examples/rejected/loop_without_termination.tersus" (ExpectRejected "Loop must say how it ends")
-        , testExampleFile "examples/rejected/loop_variant_not_decreasing.tersus" (ExpectRejected "Loop variant does not decrease: 3 - i")
+        , testExampleFile "examples/rejected/loop_variant_not_shrinking.tersus" (ExpectRejected "Loop variant does not shrink: 3 - i")
         , testExampleFile "examples/rejected/loop_variant_unbounded.tersus" (ExpectRejected "Loop variant is not bounded below: i")
         , testExampleFile "examples/rejected/recursion_without_variant.tersus" (ExpectRejected "Not guaranteed to terminate: it calls itself")
-        , testExampleFile "examples/rejected/recursion_variant_not_smaller.tersus" (ExpectRejected "Recursive call does not decrease the variant: n")
-        , testExampleFile "examples/rejected/recursion_shrinks_not_a_part.tersus" (ExpectRejected "Recursive call does not decrease the variant: t")
-        , testExampleFile "examples/rejected/diverging_call.tersus" (ExpectRejected "it calls a function that is declared may_diverge")
-        , testExampleFile "examples/rejected/diverging_loop.tersus" (ExpectRejected "a loop is declared may_diverge")
+        , testExampleFile "examples/rejected/recursion_variant_not_shrinking.tersus" (ExpectRejected "Recursive call does not shrink the variant: n")
+        , testExampleFile "examples/rejected/recursion_shrinks_not_a_part.tersus" (ExpectRejected "Recursive call does not shrink the variant: t")
+        , testExampleFile "examples/rejected/diverging_call.tersus" (ExpectRejected "it calls a function that is declared ~")
+        , testExampleFile "examples/rejected/diverging_loop.tersus" (ExpectRejected "a loop is declared ~")
         , testExampleFile "examples/rejected/linked_list_unchecked_walk.tersus" (ExpectRejected "Loop invariant is not preserved")
         , testExampleFile "examples/rejected/call_before_definition.tersus" (ExpectRejected "Undefined variable: later")
         , testExampleFile "examples/rejected/division_by_zero.tersus" (ExpectRejected "Relation lacks a proof")
@@ -1441,41 +1441,41 @@ testValidateWhile =
           parseValidProgramHelper
             ( loopAxioms
                 ++ "i = 0; rewrite zeroWithinBound i;\
-                   \while i < 3 [{ affirm i <= 3; }] decreases 3 - i { rewrite stepWithinBound i; i = i + 1; };\
+                   \while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { rewrite stepWithinBound i; i = i + 1; };\
                    \affirm i <= 3; affirm i >= 3;"
             )
         , -- Without an invariant the loop still validates, it just proves nothing about i afterwards
-          parseValidProgramHelper "i = 0; n = 0; while i < 3 decreases 3 - i { i = i + 1; n = n + 2; };"
+          parseValidProgramHelper "i = 0; n = 0; while i < 3 shrinks 3 - i { i = i + 1; n = n + 2; };"
         , -- A loop nested in a function body
           parseValidProgramHelper
             ( loopAxioms
                 ++ "fn f(k: Int) -> Int { i = 0; rewrite zeroWithinBound i;\
-                   \  while i < 3 [{ affirm i <= 3; }] decreases 3 - i { rewrite stepWithinBound i; i = i + 1; };\
+                   \  while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { rewrite stepWithinBound i; i = i + 1; };\
                    \  return i; };\
                    \return f(1);"
             )
         , parseValidateFailProgramHelper
             ( loopAxioms
-                ++ "i = 5; while i < 3 [{ affirm i <= 3; }] decreases 3 - i { rewrite stepWithinBound i; i = i + 1; };"
+                ++ "i = 5; while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { rewrite stepWithinBound i; i = i + 1; };"
             )
             "Loop invariant does not hold on entry"
         , parseValidateFailProgramHelper
             ( loopAxioms
-                ++ "i = 0; rewrite zeroWithinBound i; while i < 3 [{ affirm i <= 2; }] decreases 3 - i { i = i + 1; };"
+                ++ "i = 0; rewrite zeroWithinBound i; while i < 3 [{ affirm i <= 2; }] shrinks 3 - i { i = i + 1; };"
             )
             "Loop invariant is not preserved"
         , -- Soundness: what was known about i before the loop says nothing about i after it
-          parseValidateFailProgramHelper "i = 0; while i < 3 decreases 3 - i { i = i + 1; }; affirm i = 0;" "Could not prove"
+          parseValidateFailProgramHelper "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; affirm i = 0;" "Could not prove"
         , -- Soundness: the loop condition does not hold once the loop is done
           parseValidateFailProgramHelper
             ( loopAxioms
                 ++ "i = 0; rewrite zeroWithinBound i;\
-                   \while i < 3 [{ affirm i <= 3; }] decreases 3 - i { rewrite stepWithinBound i; i = i + 1; };\
+                   \while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { rewrite stepWithinBound i; i = i + 1; };\
                    \affirm i < 3;"
             )
             "Could not prove"
         , -- A loop whose body returns is validated too
-          parseValidProgramHelper "i = 0; while i < 3 decreases 3 - i { return i; }; return 9;"
+          parseValidProgramHelper "i = 0; while i < 3 shrinks 3 - i { return i; }; return 9;"
         ]
 
 testEarlyReturn :: Test
@@ -1492,7 +1492,7 @@ testEarlyReturn =
             "fn f(n: Int) -> Int { if n < 1 { return 0; }; return n + 10; }; return f(0) + f(5);"
             (Just (VInt 15))
         , -- Returning from inside a loop stops the loop
-          parseEvalProgramHelper "i = 0; while i < 10 decreases 10 - i { if i > 2 { return i; }; i = i + 1; }; return 99;" (Just (VInt 3))
+          parseEvalProgramHelper "i = 0; while i < 10 shrinks 10 - i { if i > 2 { return i; }; i = i + 1; }; return 99;" (Just (VInt 3))
         , -- Statements after the return never run
           parseEvalProgramHelper "return 1; x = first([]);" (Just (VInt 1))
         , -- Validation: a guard clause makes the rest of the function safe
@@ -1527,42 +1527,42 @@ testEarlyReturn =
         , -- A function where some path does not return has no return value
           parseValidateFailProgramHelper "fn f(n: Int) -> Int { if n < 6 { return 1; }; }; x = f(1);" "Return value not found"
         , -- Returning from inside a loop stops it
-          parseValidProgramHelper "fn f(n: Int) -> Int { i = 0; while i < 3 decreases 3 - i { if i > n { return i; }; i = i + 1; }; return 0; }; x = f(1);"
-        , parseEvalProgramHelper "fn f(n: Int) -> Int { i = 0; while i < 5 decreases 5 - i { if i > n { return i; }; i = i + 1; }; return 0; }; return f(2) + f(9);" (Just (VInt 3))
+          parseValidProgramHelper "fn f(n: Int) -> Int { i = 0; while i < 3 shrinks 3 - i { if i > n { return i; }; i = i + 1; }; return 0; }; x = f(1);"
+        , parseEvalProgramHelper "fn f(n: Int) -> Int { i = 0; while i < 5 shrinks 5 - i { if i > n { return i; }; i = i + 1; }; return 0; }; return f(2) + f(9);" (Just (VInt 3))
         , -- The invariant is checked on the paths that keep looping, and holds for the return too
           parseValidProgramHelper
             ( loopAxioms
                 ++ "fn f(n: Int) -> Int [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
-                   \ while i < 3 [{ affirm i <= 3; }] decreases 3 - i { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
+                   \ while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
                    \ affirm i >= 3; return i; }; x = f(1);"
             )
         , parseValidateFailProgramHelper
             ( loopAxioms
                 ++ "fn f(n: Int) -> Int { i = 0; rewrite zeroWithinBound i;\
-                   \ while i < 3 [{ affirm i <= 2; }] decreases 3 - i { if i > n { return i; }; i = i + 1; };\
+                   \ while i < 3 [{ affirm i <= 2; }] shrinks 3 - i { if i > n { return i; }; i = i + 1; };\
                    \ return i; };"
             )
             "Loop invariant is not preserved"
         , -- Soundness: the returning path's condition is not known after the loop
           parseValidateFailProgramHelper
-            "fn f(n: Int) -> Int { i = 0; while i < 3 decreases 3 - i { if n > 5 { return 1; }; i = i + 1; }; affirm n > 5; return 0; };"
+            "fn f(n: Int) -> Int { i = 0; while i < 3 shrinks 3 - i { if n > 5 { return 1; }; i = i + 1; }; affirm n > 5; return 0; };"
             "Could not prove"
         , -- Soundness: only the path after the loop knows the loop condition is false
           parseValidateFailProgramHelper
-            "fn f(n: Int) -> Int { i = 0; while i < 3 decreases 3 - i { if n > 5 { return 1; }; i = i + 1; }; affirm i < 3; return 0; };"
+            "fn f(n: Int) -> Int { i = 0; while i < 3 shrinks 3 - i { if n > 5 { return 1; }; i = i + 1; }; affirm i < 3; return 0; };"
             "Could not prove"
         , -- Soundness: a fact only the returning path establishes is not an output fact
           parseValidateFailProgramHelper
             ( loopAxioms
                 ++ "fn f(n: Int) -> Int [{ }] [{ affirm return <= 3; }] { i = 0; rewrite zeroWithinBound i;\
-                   \ while i < 3 [{ affirm i <= 3; }] decreases 3 - i { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
+                   \ while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { if i > n { return i; }; rewrite stepWithinBound i; i = i + 1; };\
                    \ return 100; };"
             )
             "Could not prove"
-        , parseValidateFailProgramHelper "fn f(n: Int) -> Int { i = 0; while i < n decreases n - i { return i; }; }; x = f(1);" "Return value not found"
+        , parseValidateFailProgramHelper "fn f(n: Int) -> Int { i = 0; while i < n shrinks n - i { return i; }; }; x = f(1);" "Return value not found"
         , -- A nested loop that returns
           parseValidProgramHelper
-            "fn f(n: Int) -> Int { i = 0; while i < 2 decreases 2 - i { j = 0; while j < 2 decreases 2 - j { if j > n { return j; }; j = j + 1; }; i = i + 1; }; return 0; }; x = f(1);"
+            "fn f(n: Int) -> Int { i = 0; while i < 2 shrinks 2 - i { j = 0; while j < 2 shrinks 2 - j { if j > n { return j; }; j = j + 1; }; i = i + 1; }; return 0; }; x = f(1);"
         ]
 
 testArithmetic :: Test
@@ -1614,12 +1614,12 @@ testArithmetic =
               parseValidProgramHelper "fn f(xs: List<Int>, a: Int, b: Int) -> Int { if size(xs) < 0 { affirm a < b; }; return 0; };"
             , -- A counting loop needs no axioms
               parseValidProgramHelper
-                "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] decreases 3 - i { i = i + 1; }; affirm i = 3;"
+                "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { i = i + 1; }; affirm i = 3;"
             , parseValidateFailProgramHelper
-                "i = 0; while i < 3 [{ affirm i <= 2; }] decreases 3 - i { i = i + 1; };"
+                "i = 0; while i < 3 [{ affirm i <= 2; }] shrinks 3 - i { i = i + 1; };"
                 "Loop invariant is not preserved"
             , parseValidateFailProgramHelper
-                "i = 0; while i < 3 [{ affirm i >= 1; }] decreases 3 - i { i = i + 1; };"
+                "i = 0; while i < 3 [{ affirm i >= 1; }] shrinks 3 - i { i = i + 1; };"
                 "Loop invariant does not hold on entry"
             ]
 
@@ -1774,7 +1774,7 @@ testForallGrownList =
 testValidationFuel :: Test
 testValidationFuel =
     let twice n =
-            "fn twice(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; c = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] decreases n - i { i = i + 1; c = c + 2; }; return c; };"
+            "fn twice(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; c = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; c = c + 2; }; return c; };"
                 ++ "x = twice("
                 ++ show (n :: Int)
                 ++ "); affirm x = "
@@ -1791,7 +1791,7 @@ testValidationFuel =
             , -- Naming an element with define is how a forall fact gets used at it (LANGUAGE.md, How Validation Works)
               parseValidProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { define v = get(l, 1); affirm v = 0; return 1; };"
             , -- A callee that never ends does not stop validation
-              parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ }] may_diverge { i = 0; while i >= 0 [{ affirm i >= 0; }] may_diverge { i = i + 1; }; return i; }; x = spin(1);"
+              parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ }] ~ { i = 0; while i >= 0 [{ affirm i >= 0; }] ~ { i = i + 1; }; return i; }; x = spin(1);"
             ]
 
 testFunctionCalls :: Test
@@ -1863,7 +1863,7 @@ testFirstLast =
 
 testRecursion :: Test
 testRecursion =
-    let upTo = "fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] decreases n - i { if i < n { return upTo(i + 1, n); } else { return n; }; };"
+    let upTo = "fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] shrinks n - i { if i < n { return upTo(i + 1, n); } else { return n; }; };"
      in testCaseSeq
             "testRecursion"
             [ -- A function calls itself, in evaluation and in validation
@@ -1871,16 +1871,16 @@ testRecursion =
             , parseValidProgramHelper (upTo ++ "x = upTo(0, 5); affirm x = 5;")
             , parseValidProgramHelper (upTo ++ "fn useIt(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { return upTo(0, n); };")
             , -- The recursive call must meet the input contract
-              parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return = 0; }] decreases n { if n < 2 { return 0; } else { return down(n - 3); }; };" "Could not prove: n > 0"
+              parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return = 0; }] shrinks n { if n < 2 { return 0; } else { return down(n - 3); }; };" "Could not prove: n > 0"
             , -- The body must establish the output contract, which is assumed only for the recursive calls
-              parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = 0; }] decreases n { if n < 1 { return 1; } else { return down(n - 1); }; };" "Could not prove: return = 0"
+              parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = 0; }] shrinks n { if n < 1 { return 1; } else { return down(n - 1); }; };" "Could not prove: return = 0"
             , -- Recursion over a list, with an affirm that becomes a fact in the last step
-              parseValidProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] decreases size(l) - i { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; };"
-            , parseEvalProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] decreases size(l) - i { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; }; return sumFrom([4, 5, 6], 0);" (Just (VInt 15))
-            , parseValidProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] decreases size(l) - i { if i + 1 < size(l) { return endOf(l, i + 1); } else { affirm i = size(l) - 1; return get(l, i); }; };"
-            , parseValidateFailProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] decreases size(l) - i { if i + 1 < size(l) { return endOf(l, i + 1); } else { return get(l, i); }; };" "Could not prove: return = get(l, size(l) - 1)"
-            , -- Partial correctness: a function declared may_diverge that never returns satisfies any output contract
-              parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] may_diverge { return spin(n); };"
+              parseValidProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] shrinks size(l) - i { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; };"
+            , parseEvalProgramHelper "fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ }] shrinks size(l) - i { if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; }; }; return sumFrom([4, 5, 6], 0);" (Just (VInt 15))
+            , parseValidProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] shrinks size(l) - i { if i + 1 < size(l) { return endOf(l, i + 1); } else { affirm i = size(l) - 1; return get(l, i); }; };"
+            , parseValidateFailProgramHelper "fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] shrinks size(l) - i { if i + 1 < size(l) { return endOf(l, i + 1); } else { return get(l, i); }; };" "Could not prove: return = get(l, size(l) - 1)"
+            , -- Partial correctness: a function declared ~ that never returns satisfies any output contract
+              parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ affirm return = 0; }] ~ { return spin(n); };"
             , -- A name is still defined once
               parseValidateFailProgramHelper (upTo ++ upTo) "Function already defined: upTo"
             , -- An affirm that is proved becomes a fact: it links i to size(l) - 1 so get(l, i) is get(l, size(l) - 1)
@@ -1892,15 +1892,15 @@ testRecursion =
 testTermination :: Test
 testTermination =
     let tree = "enum Tree { Leaf, Branch { left: Tree, right: Tree } };"
-        settle = "fn settle(n: Int) -> Int may_diverge { while n != 1 may_diverge { n = n - 1; }; return n; };"
+        settle = "fn settle(n: Int) -> Int ~ { while n != 1 ~ { n = n - 1; }; return n; };"
      in testCaseSeq
             "testTermination"
             [ -- The clause is parsed before the body, after an invariant, and after the contracts of a function
-              case parseStatementBlock "while i < 3 [{ affirm i <= 3; }] decreases 3 - i { i = i + 1; };" of
+              case parseStatementBlock "while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { i = i + 1; };" of
                 Left err -> Just ("Parse error: " ++ show err)
-                Right [While _ inv (Just (Decreases _)) _] -> testAssertEq (length inv) 1
+                Right [While _ inv (Just (Shrinks _)) _] -> testAssertEq (length inv) 1
                 Right other -> Just ("Unexpected parse: " ++ show other)
-            , case parseStatementBlock "while i < 3 may_diverge { i = i + 1; };" of
+            , case parseStatementBlock "while i < 3 ~ { i = i + 1; };" of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right [While _ _ (Just MayDiverge) _] -> Nothing
                 Right other -> Just ("Unexpected parse: " ++ show other)
@@ -1910,47 +1910,65 @@ testTermination =
                 Right other -> Just ("Unexpected parse: " ++ show other)
             , -- A loop has to say how it ends
               parseValidateFailProgramHelper "i = 0; while i < 3 { i = i + 1; };" "Loop must say how it ends"
-            , parseValidProgramHelper "i = 0; while i < 3 may_diverge { i = i + 1; };"
+            , parseValidProgramHelper "i = 0; while i < 3 ~ { i = i + 1; };"
             , -- The variant is at least 0 when an iteration starts, and smaller when it ends
-              parseValidProgramHelper "i = 0; while i < 3 decreases 3 - i { i = i + 1; };"
-            , parseValidateFailProgramHelper "i = 0; while i < 3 decreases 3 - i { };" "Loop variant does not decrease: 3 - i"
-            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm i >= 0; }] decreases i { i = i + 1; };" "Loop variant does not decrease: i"
-            , parseValidateFailProgramHelper "fn f(i: Int) -> Int { while i != 0 decreases i { i = i - 1; }; return i; };" "Loop variant is not bounded below: i"
+              parseValidProgramHelper "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };"
+            , parseValidateFailProgramHelper "i = 0; while i < 3 shrinks 3 - i { };" "Loop variant does not shrink: 3 - i"
+            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm i >= 0; }] shrinks i { i = i + 1; };" "Loop variant does not shrink: i"
+            , parseValidateFailProgramHelper "fn f(i: Int) -> Int { while i != 0 shrinks i { i = i - 1; }; return i; };" "Loop variant is not bounded below: i"
             , -- Counting down towards a bound that moves, and a body with an early return
-              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 decreases i { if i = 7 { return 7; }; i = i - 1; }; return i; };"
-            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 decreases i { if i = 7 { return 7; }; i = i + 1; }; return i; };" "Loop variant does not decrease: i"
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 shrinks i { if i = 7 { return 7; }; i = i - 1; }; return i; };"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 shrinks i { if i = 7 { return 7; }; i = i + 1; }; return i; };" "Loop variant does not shrink: i"
             , -- Loops inside loops each have their own variant
-              parseValidProgramHelper "i = 0; while i < 3 decreases 3 - i { j = 0; while j < 2 decreases 2 - j { j = j + 1; }; i = i + 1; };"
+              parseValidProgramHelper "i = 0; while i < 3 shrinks 3 - i { j = 0; while j < 2 shrinks 2 - j { j = j + 1; }; i = i + 1; };"
             , -- A difference is compared by its sides
               parseValidProgramHelper "fn f(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ }] { affirm n - i >= 0; return 0; };"
             , parseValidProgramHelper "fn f(i: Int, n: Int) -> Int [{ affirm i < n; }] [{ }] { affirm n - (i + 1) < n - i; return 0; };"
             , parseValidateFailProgramHelper "fn f(i: Int, n: Int) -> Int [{ affirm i < n; }] [{ }] { affirm n - i < 0; return 0; };" "Could not prove: n - i < 0"
-            , -- A function that calls itself says what decreases
+            , -- A function that calls itself says what shrinks
               parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] { if n < 1 { return 0; } else { return down(n - 1); }; };" "Not guaranteed to terminate: it calls itself"
-            , parseValidProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] decreases n { if n < 1 { return 0; } else { return down(n - 1); }; };"
-            , parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] decreases n { if n < 1 { return 0; } else { return down(n); }; };" "Recursive call does not decrease the variant: n"
-            , parseValidateFailProgramHelper "fn down(n: Int) -> Int decreases n { if n < 1 { return 0; } else { return down(n - 1); }; };" "Function variant is not bounded below: n"
-            , parseValidProgramHelper "fn down(n: Int) -> Int may_diverge { return down(n); };"
+            , parseValidProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n < 1 { return 0; } else { return down(n - 1); }; };"
+            , parseValidateFailProgramHelper "fn down(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n < 1 { return 0; } else { return down(n); }; };" "Recursive call does not shrink the variant: n"
+            , parseValidateFailProgramHelper "fn down(n: Int) -> Int shrinks n { if n < 1 { return 0; } else { return down(n - 1); }; };" "Function variant is not bounded below: n"
+            , parseValidProgramHelper "fn down(n: Int) -> Int ~ { return down(n); };"
             , -- Recursion over a structure: the call is given a field of the value
               parseValidProgramHelper (tree ++ "fn count(t: Tree) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(r) }; };")
-            , parseValidateFailProgramHelper (tree ++ "fn count(t: Tree) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(t) }; };") "Recursive call does not decrease the variant: t"
+            , parseValidateFailProgramHelper (tree ++ "fn count(t: Tree) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(t) }; };") "Recursive call does not shrink the variant: t"
             , parseValidProgramHelper (tree ++ "fn depth(t: Tree) -> Int { n = 0; while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; n = n + 1; }; return n; };")
-            , parseValidateFailProgramHelper (tree ++ "fn depth(t: Tree) -> Int { n = 0; while t is Tree::Branch shrinks t { n = n + 1; }; return n; };") "Loop variant does not decrease: t"
+            , parseValidateFailProgramHelper (tree ++ "fn depth(t: Tree) -> Int { n = 0; while t is Tree::Branch shrinks t { n = n + 1; }; return n; };") "Loop variant does not shrink: t"
             , -- Code that may not end makes a function that contains it say so
               parseValidProgramHelper settle
-            , parseValidateFailProgramHelper "fn settle(n: Int) -> Int { while n != 1 may_diverge { n = n - 1; }; return n; };" "Not guaranteed to terminate: a loop is declared may_diverge"
-            , parseValidateFailProgramHelper (settle ++ "fn twice(n: Int) -> Int { return settle(n) + 1; };") "Not guaranteed to terminate: it calls a function that is declared may_diverge"
-            , parseValidProgramHelper (settle ++ "fn twice(n: Int) -> Int may_diverge { return settle(n) + 1; };")
+            , parseValidateFailProgramHelper "fn settle(n: Int) -> Int { while n != 1 ~ { n = n - 1; }; return n; };" "Not guaranteed to terminate: a loop is declared ~"
+            , parseValidateFailProgramHelper (settle ++ "fn twice(n: Int) -> Int { return settle(n) + 1; };") "Not guaranteed to terminate: it calls a function that is declared ~"
+            , parseValidProgramHelper (settle ++ "fn twice(n: Int) -> Int ~ { return settle(n) + 1; };")
             , -- The program itself may call one
               parseValidProgramHelper (settle ++ "x = settle(3);")
             , -- Code that cannot be reached is not counted
               parseValidProgramHelper (settle ++ "fn f(n: Int) -> Int { if n > 0 { if n < 0 { return settle(n); }; }; return n; };")
             , parseValidateFailProgramHelper (settle ++ "fn f(n: Int) -> Int { if n > 0 { if n < 5 { return settle(n); }; }; return n; };") "Not guaranteed to terminate"
             , -- A function defined inside another says for itself
-              parseValidProgramHelper (settle ++ "fn outer(n: Int) -> Int { fn inner(m: Int) -> Int may_diverge { return settle(m); }; return n; };")
-            , parseValidateFailProgramHelper (settle ++ "fn outer(n: Int) -> Int may_diverge { fn inner(m: Int) -> Int { return settle(m); }; return n; };") "Not guaranteed to terminate"
+              parseValidProgramHelper (settle ++ "fn outer(n: Int) -> Int { fn inner(m: Int) -> Int ~ { return settle(m); }; return n; };")
+            , parseValidateFailProgramHelper (settle ++ "fn outer(n: Int) -> Int ~ { fn inner(m: Int) -> Int { return settle(m); }; return n; };") "Not guaranteed to terminate"
+            , -- The type of what shrinks decides what it means: an Int counts down, an enum or struct loses a field
+              case parseStatementBlock "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" of
+                Left err -> Just ("Parse error: " ++ show err)
+                Right stmts -> case elaborate stmts of
+                    Ok [_, While _ _ (Just (Counting _)) _] -> Nothing
+                    other -> Just ("Unexpected: " ++ show other)
+            , case parseStatementBlock (tree ++ "t = Tree::Leaf; while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
+                Left err -> Just ("Parse error: " ++ show err)
+                Right stmts -> case elaborate stmts of
+                    Ok [_, _, While _ _ (Just (Parts _)) _] -> Nothing
+                    other -> Just ("Unexpected: " ++ show other)
+            , case parseStatementBlock "fn f(n: Int) -> Int shrinks n { return 0; };" of
+                Left err -> Just ("Parse error: " ++ show err)
+                Right stmts -> case elaborate stmts of
+                    Ok [Assign _ (Val (VFunct _ _ _ (NativeFunct _ (Just (Counting _)) _) _))] -> Nothing
+                    other -> Just ("Unexpected: " ++ show other)
+            , parseValidateFailProgramHelper "x = [1]; while x = x shrinks x { x = x; };" "shrinks needs an Int, an enum or a struct, got List<Int>"
+            , parseValidateFailProgramHelper "fn f(b: Bool) -> Int shrinks b { return 0; };" "shrinks needs an Int, an enum or a struct, got Bool"
             , -- Evaluation does not use any of it
-              parseEvalProgramHelper "i = 0; while i < 3 decreases 3 - i { i = i + 1; }; return i;" (Just (VInt 3))
+              parseEvalProgramHelper "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" (Just (VInt 3))
             ]
 
 -- The validator keeps a solver of the visible facts between questions, and uses it only while it holds nothing the
@@ -1965,7 +1983,7 @@ testSolverCache =
         , -- Facts from before the if are still visible after it
           parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n > 3; }] [{ }] { a = 0; affirm n >= 3; if n > 7 { a = 1; } else { a = 2; }; affirm n > 2; return a; };"
         , -- The same for a loop: what the body assumes is gone after it
-          parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] decreases n - i { affirm i < n; i = i + 1; }; affirm i < n; return i; };" "Could not prove: i < n"
+          parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { affirm i < n; i = i + 1; }; affirm i < n; return i; };" "Could not prove: i < n"
         , -- Facts about a list built by many calls
           parseValidProgramHelper "l = []; l = push(l, 1); affirm size(l) = 1; l = push(l, 2); affirm size(l) = 2; l = push(l, 3); affirm get(l, 0) = 1; affirm get(l, 2) = 3; affirm size(l) = 3;"
         , parseValidateFailProgramHelper "l = []; l = push(l, 1); affirm size(l) = 1; l = push(l, 2); affirm size(l) = 3;" "Could not prove: size(l) = 3"
@@ -1999,7 +2017,7 @@ testTypeCheck =
             , -- Equality works on any type, ordering only on Int
               typeOk "affirm [1] = [1]; affirm true = true;"
             , typeError "affirm [1] < [2];" "expected Int, got List<Int>"
-            , typeError "while 1 < 2 decreases true { x = 2; };" "variant of decreases: expected Int, got Bool"
+            , typeError "while 1 < 2 shrinks true { x = 2; };" "shrinks needs an Int, an enum or a struct, got Bool"
             , -- Builtins
               typeError "x = size(5);" "argument 1 of size: expected List<?>, got Int"
             , typeError "l = [1]; x = push(l, [2]);" "argument 2 of push: expected Int, got List<Int>"
@@ -2367,7 +2385,7 @@ testForallLoops =
             \  n = size(a); i = 0; out = [];\
             \  while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; "
                 ++ invariant
-                ++ " }] decreases n - i { out = push(out, "
+                ++ " }] shrinks n - i { out = push(out, "
                 ++ element
                 ++ "); i = i + 1; };\
                    \  return out; };"
@@ -2468,8 +2486,8 @@ testForallSyntax =
             , parseValidateFailProgramHelper "affirm forall j in 0..3: j < 2;" "Could not prove"
             , parseValidProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..2: j < 2; }] { return l; };"
             , parseValidateFailProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..3: j < 2; }] { return l; };" "Could not prove"
-            , parseValidProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] decreases 3 - i { i = i + 1; };"
-            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 2; }] decreases 3 - i { i = i + 1; };" "Loop invariant is not preserved"
+            , parseValidProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 3; }] shrinks 3 - i { i = i + 1; };"
+            , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm forall j in 0..i: j < 2; }] shrinks 3 - i { i = i + 1; };" "Loop invariant is not preserved"
             , -- A forall assumed by an axiom is kept as a fact, and is entailed again when it is the same forall
               parseValidProgramHelper (zeroAxiom ++ "a = [0, 0]; rewrite zeros a; affirm forall j in 0..size(a): get(a, j) = 0;")
             , -- The rule's argument is substituted into the forall

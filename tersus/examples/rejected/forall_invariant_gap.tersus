@@ -10,7 +10,7 @@ fn bumpAll(a: List<Int>) -> List<Int> [{ }] [{ affirm forall j in 0..size(a): ge
         affirm i <= n;
         affirm size(out) = size(a);
         affirm forall j in 0..i: get(out, j) = (get(a, j) + 100);
-    }] decreases n - i {
+    }] shrinks n - i {
         out = set(out, i, get(out, i) + 100);
         i = i + 1;
     };

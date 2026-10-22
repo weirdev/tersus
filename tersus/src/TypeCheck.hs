@@ -1,4 +1,4 @@
-module TypeCheck (typeCheck, renderType) where
+module TypeCheck (typeCheck, elaborate, renderType) where
 
 import Data.List (intercalate)
 import qualified Data.Map as Map
@@ -13,10 +13,15 @@ import Utils
 -- Checking is unification inside one function body, with no polymorphism for user functions.
 
 typeCheck :: [Statement] -> Result () String
-typeCheck stmts =
+typeCheck stmts = mapResult (const ()) (elaborate stmts)
+
+-- Checks the program and gives it back with each `shrinks e` resolved by the type of e: an Int counts down to 0 (Counting),
+-- an enum or struct loses a field at a time (Parts). The validator only sees the resolved clauses.
+elaborate :: [Statement] -> Result [Statement] String
+elaborate stmts =
     case runTc (checkProgram stmts) of
         Left err -> Error err
-        Right _ -> Ok ()
+        Right stmts' -> Ok stmts'
 
 renderType :: Type -> String
 renderType TInt = "Int"
@@ -313,80 +318,80 @@ valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty) _ _) _) = return (TFn 
 
 -- Programs
 
-checkProgram :: [Statement] -> TC ()
-checkProgram stmts = do
-    _ <- checkStatements True (Ctx Map.empty Nothing) [Map.empty] stmts
-    return ()
+checkProgram :: [Statement] -> TC [Statement]
+checkProgram stmts = snd <$> checkStatements True (Ctx Map.empty Nothing) [Map.empty] stmts
 
 -- Statements run in order; a top-level function is visible to the functions after it, and the
 -- returned environment holds the variables the statements defined in the innermost scope.
-checkStatements :: Bool -> Ctx -> Env -> [Statement] -> TC Env
-checkStatements _ _ env [] = return env
+checkStatements :: Bool -> Ctx -> Env -> [Statement] -> TC (Env, [Statement])
+checkStatements _ _ env [] = return (env, [])
 checkStatements top ctx env (stmt : rest) = do
-    (ctx', env') <- checkStatement top ctx env stmt
-    checkStatements top ctx' env' rest
+    (ctx', env', stmt') <- checkStatement top ctx env stmt
+    (envAfter, rest') <- checkStatements top ctx' env' rest
+    return (envAfter, stmt' : rest')
 
-checkStatement :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env)
+-- Also gives the statement back with its termination clauses resolved
+checkStatement :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, Statement)
 checkStatement top ctx env stmt =
     case stmt of
-        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty) term body) _)) -> do
+        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty) term body) proofs)) -> do
             let fnTy = TFn ptys rty
                 ctx' = if top then ctx{ctxFns = Map.insert var fnTy (ctxFns ctx)} else ctx
             env' <- assignVar ctx env var fnTy
-            checkFunction ctx' var params ptys rty ins outs term body
-            return (ctx', env')
+            (term', body') <- checkFunction ctx' var params ptys rty ins outs term body
+            return (ctx', env', Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty) term' body') proofs)))
         Assign var expr -> do
             t <- inferExpr ctx env expr
             env' <- assignVar ctx env var t
-            return (ctx, env')
+            return (ctx, env', stmt)
         Let var expr -> do
             t <- inferExpr ctx env expr
             case env of
-                scope : outer -> return (ctx, Map.insert var t scope : outer)
-                [] -> return (ctx, [Map.singleton var t])
+                scope : outer -> return (ctx, Map.insert var t scope : outer, stmt)
+                [] -> return (ctx, [Map.singleton var t], stmt)
         Return expr -> do
             t <- inferExpr ctx env expr
             case ctxReturn ctx of
                 Just rty -> expect "returned value" rty t
                 Nothing -> return ()
-            return (ctx, env)
+            return (ctx, env, stmt)
         ValidationStatement vs -> do
             env' <- checkValidation ctx env vs
-            return (ctx, env')
+            return (ctx, env', stmt)
         StructDef name fields -> do
             declareType name
             mapM_ (checkType . snd) fields
             registerCtors name [(name, fields)]
-            return (ctx, env)
+            return (ctx, env, stmt)
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
             mapM_ (mapM_ (checkType . snd) . snd) variants
             registerCtors name variants
-            return (ctx, env)
-        AxiomDef{} -> return (ctx, env)
-        ProofDef{} -> return (ctx, env)
+            return (ctx, env, stmt)
+        AxiomDef{} -> return (ctx, env, stmt)
+        ProofDef{} -> return (ctx, env, stmt)
         Block stmts -> do
-            _ <- checkStatements False ctx (Map.empty : env) stmts
-            return (ctx, env)
+            (_, stmts') <- checkStatements False ctx (Map.empty : env) stmts
+            return (ctx, env, Block stmts')
         If cond thenStmts elseStmts -> do
             condTy <- inferExpr ctx env cond
             expect "condition of if" TBool condTy
-            _ <- checkStatements False ctx (Map.empty : env) thenStmts
-            _ <- checkStatements False ctx (Map.empty : env) elseStmts
-            return (ctx, env)
+            (_, thenStmts') <- checkStatements False ctx (Map.empty : env) thenStmts
+            (_, elseStmts') <- checkStatements False ctx (Map.empty : env) elseStmts
+            return (ctx, env, If cond thenStmts' elseStmts')
         While cond invariant term body -> do
             condTy <- inferExpr ctx env cond
             expect "condition of while" TBool condTy
             _ <- checkValidations ctx env invariant
-            checkTermination ctx env term
-            _ <- checkStatements False ctx (Map.empty : env) body
-            return (ctx, env)
-        LoopEnd invariant decrease -> checkValidations ctx env invariant >> checkValidations ctx env decrease >> return (ctx, env)
-        EndBlock -> return (ctx, env)
+            term' <- resolveTermination ctx env term
+            (_, body') <- checkStatements False ctx (Map.empty : env) body
+            return (ctx, env, While cond invariant term' body')
+        LoopEnd invariant decrease -> checkValidations ctx env invariant >> checkValidations ctx env decrease >> return (ctx, env, stmt)
+        EndBlock -> return (ctx, env, stmt)
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
-checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC ()
+checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [Statement])
 checkFunction ctx name params ptys rty ins outs term body = do
     mapM_ checkType (rty : ptys)
     if length params /= length ptys
@@ -395,16 +400,21 @@ checkFunction ctx name params ptys rty ins outs term body = do
     let bodyCtx = ctx{ctxReturn = Just rty}
         paramEnv = [Map.fromList (zip params ptys)]
     inEnv <- checkValidations bodyCtx paramEnv ins
-    checkTermination bodyCtx inEnv term
+    term' <- resolveTermination bodyCtx inEnv term
     _ <- checkValidations bodyCtx (Map.insert "return" rty (head inEnv) : tail inEnv) outs
-    _ <- checkStatements False bodyCtx (Map.empty : paramEnv) body
-    return ()
+    (_, body') <- checkStatements False bodyCtx (Map.empty : paramEnv) body
+    return (term', body')
 
--- A variant is an integer
-checkTermination :: Ctx -> Env -> Maybe Termination -> TC ()
-checkTermination ctx env (Just (Decreases variant)) = inferExpr ctx env variant >>= expect "variant of decreases" TInt
-checkTermination ctx env (Just (Shrinks variant)) = () <$ inferExpr ctx env variant
-checkTermination _ _ _ = return ()
+-- What shrinks is an integer, which counts down to 0, or a struct or enum value, which loses a field at a time
+resolveTermination :: Ctx -> Env -> Maybe Termination -> TC (Maybe Termination)
+resolveTermination ctx env (Just (Shrinks variant)) = do
+    ty <- inferExpr ctx env variant >>= zonk
+    case ty of
+        TInt -> return (Just (Counting variant))
+        TNamed _ -> return (Just (Parts variant))
+        TVariant _ -> return (Just (Parts variant))
+        _ -> failTc ("Type error: shrinks needs an Int, an enum or a struct, got " ++ renderType ty)
+resolveTermination _ _ term = return term
 
 checkValidations :: Ctx -> Env -> [ValidationStatement] -> TC Env
 checkValidations _ env [] = return env

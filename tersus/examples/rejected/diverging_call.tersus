@@ -1,6 +1,6 @@
 // Rejected: settle may not end, so a function that calls it is not guaranteed to either and has to say so.
-fn settle(n: Int) -> Int may_diverge {
-    while n != 1 may_diverge {
+fn settle(n: Int) -> Int ~ {
+    while n != 1 ~ {
         n = n - 1;
     };
     return n;

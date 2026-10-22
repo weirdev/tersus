@@ -1,12 +1,12 @@
 // How code says that it ends. Statements end by themselves. A loop has to say why it does, and so does a
 // function that calls itself; the validator checks what they say. Anything that is not guaranteed to
-// terminate has to be declared may_diverge, and so does every function that contains it.
+// terminate has to be declared with ~, and so does every function that contains it.
 
-// `decreases e` names an integer that is at least 0 when an iteration starts and is smaller when it ends.
+// `shrinks e` names what gets smaller. For an integer, it is at least 0 when an iteration starts and smaller when it ends.
 fn countDown(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] {
     i = n;
     steps = 0;
-    while i > 0 [{ affirm i >= 0; affirm steps >= 0; }] decreases i {
+    while i > 0 [{ affirm i >= 0; affirm steps >= 0; }] shrinks i {
         i = i - 1;
         steps = steps + 1;
     };
@@ -14,16 +14,16 @@ fn countDown(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] {
 };
 
 // The same for a function that calls itself: the input contract makes n at least 0, and the call has n - 1.
-fn sumTo(n: Int) -> Int [{ affirm n >= 0; }] decreases n {
+fn sumTo(n: Int) -> Int [{ affirm n >= 0; }] shrinks n {
     if n < 1 { return 0; } else { return n + sumTo(n - 1); };
 };
 
 // A difference such as n - i is compared the way its two sides are: n - i >= 0 is n >= i.
-fn countUp(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] decreases n - i {
+fn countUp(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] shrinks n - i {
     if i < n { return countUp(i + 1, n); } else { return n; };
 };
 
-// `shrinks e` is for an enum or struct, whose value gets smaller when it is replaced by a field of itself.
+// For an enum or struct, whose value gets smaller when it is replaced by a field of itself.
 enum Tree {
     Leaf,
     Branch { left: Tree, value: Int, right: Tree },
@@ -46,17 +46,17 @@ fn leftmostDepth(t: Tree) -> Int {
     return depth;
 };
 
-// A loop or function that is not shown to end is declared may_diverge. It validates as before.
-fn settle(n: Int) -> Int may_diverge {
+// A loop or function that is not shown to end is declared ~. It validates as before.
+fn settle(n: Int) -> Int ~ {
     i = n;
-    while i != 1 may_diverge {
+    while i != 1 ~ {
         if i > 1 { i = i - 1; } else { i = i + 1; };
     };
     return i;
 };
 
 // A function that calls it is not guaranteed to terminate either, so it says so.
-fn settleTwice(n: Int) -> Int may_diverge {
+fn settleTwice(n: Int) -> Int ~ {
     return settle(n) + settle(n + 1);
 };
 
