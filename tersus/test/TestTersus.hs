@@ -1122,7 +1122,9 @@ testExampleFile :: FilePath -> ExampleExpectation -> Test
 testExampleFile path expectation = TestCase path $ do
     source <- readFile path
     pure $ case parseStatementBlock source of
-        Left err -> Just $ "Parse failed: " ++ show err
+        Left err -> case expectation of
+            ExpectRejected expectedError -> testAssertErrorContains expectedError (Error (show err) :: Result () String)
+            _ -> Just $ "Parse failed: " ++ show err
         Right stmts -> checkExample stmts expectation
 
 checkExample :: [Statement] -> ExampleExpectation -> TestResult
@@ -1189,7 +1191,7 @@ testExamples =
         , testExampleFile "examples/rejected/linked_list_link_out_of_range.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)")
         , testExampleFile "examples/rejected/linked_list_link_disagrees.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, get(return, i).next).prev = i")
         , testExampleFile "examples/rejected/for_reads_past_end.tersus" (ExpectRejected "Funct input validation failed")
-        , testExampleFile "examples/rejected/for_assigns_counter.tersus" (ExpectRejected "Loop invariant is not preserved: Could not prove: i <= (end of for i)")
+        , testExampleFile "examples/rejected/for_assigns_counter.tersus" (ExpectRejected "The body of a for loop cannot assign its loop variable i")
         , testExampleFile "examples/rejected/loop_without_termination.tersus" (ExpectRejected "Loop must say how it ends")
         , testExampleFile "examples/rejected/loop_variant_not_shrinking.tersus" (ExpectRejected "Loop variant does not shrink: 3 - i")
         , testExampleFile "examples/rejected/loop_variant_unbounded.tersus" (ExpectRejected "Loop variant is not bounded below: i")
@@ -1938,6 +1940,9 @@ testRefinedArithmetic =
 testForLoops :: Test
 testForLoops =
     let sumList = "fn total(a: List<Int>) -> Int { s = 0; for i in 0..size(a) { s = s + get(a, i); }; return s; };"
+        parseFailsWith source expected = case parseStatementBlock source of
+            Left err -> testAssertErrorContains expected (Error (show err) :: Result () String)
+            Right _ -> Just ("Expected a parse error for: " ++ source)
      in testCaseSeq
             "testForLoops"
             [ -- Evaluation: the range is half open, hi is read once, and the variable is hi afterwards
@@ -1958,7 +1963,14 @@ testForLoops =
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = 0; }] { z = 0; for i in 0..n [{ affirm z = 0; }] { z = z * 1; }; return z; };"
             , -- Refused: reading past the end, writing the variable, and an invariant the body breaks
               parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { s = 0; for i in 0..size(a) + 1 { s = s + get(a, i); }; return s; };" "Funct input validation failed"
-            , parseValidateFailProgramHelper "for i in 0..3 { i = i + 1; };" "Loop invariant is not preserved: Could not prove: i <= (end of for i)"
+            , -- The loop variable is the loop's to change, in any branch or nested loop, but a function of the same name is its own
+              parseFailsWith "for i in 0..3 { i = i + 1; };" "cannot assign its loop variable i"
+            , parseFailsWith "n = 0; for i in 0..3 { n = n + 1; i = 2; };" "cannot assign its loop variable i"
+            , parseFailsWith "for i in 0..3 { if i > 1 { i = 5; }; };" "cannot assign its loop variable i"
+            , parseFailsWith "for i in 0..3 { for i in 0..2 { x = i; }; };" "cannot assign its loop variable i"
+            , parseFailsWith "for i in 0..3 { while true ~ { i = 0; }; };" "cannot assign its loop variable i"
+            , parseValidProgramHelper "for i in 0..3 { for j in 0..2 { x = j; }; };"
+            , parseValidProgramHelper "fn f(i: Int) -> Int { i = 5; return i; }; for i in 0..3 { y = f(i); };"
             , parseValidateFailProgramHelper "z = 0; for i in 0..3 [{ affirm z = 0; }] { z = z + 1; };" "Loop invariant is not preserved: Could not prove: z = 0"
             , parseValidateFailProgramHelper "n = 0; for i in 0..3 { n = n + 1; }; affirm i = 4;" "Could not prove: i = 4"
             , -- The range has to be known not to run backwards, which is what gives i = hi afterwards

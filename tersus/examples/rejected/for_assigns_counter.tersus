@@ -1,4 +1,4 @@
-// Rejected: the body assigns the loop variable, so nothing shows that it stays within the range.
+// Rejected: the loop variable of a for loop is the loop's to advance, so its body cannot assign it.
 for i in 0..3 {
     i = i + 5;
 };

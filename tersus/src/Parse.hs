@@ -177,6 +177,7 @@ forStatement = do
     invariant <- option [] functContractReqs
     whitespace
     body <- curlyBracesParse statementBlock
+    when (assigns var body) $ fail ("The body of a for loop cannot assign its loop variable " ++ var)
     let loName = "$lo " ++ var
         hiName = "$hi " ++ var
         builtinApp name = F (Val (builtinFunct name))
@@ -189,6 +190,16 @@ forStatement = do
         , Assign var (Var loName)
         , While (builtinApp (Rel Lt) [Var var, Var hiName]) (bound GtEq loName : bound LtEq hiName : invariant) (Just (Shrinks remaining)) (body ++ [step])
         ]
+
+-- Whether statements assign a variable, in a nested block, branch or loop (a function defined inside has a scope of its own)
+assigns :: Variable -> [Statement] -> Bool
+assigns var = any assignsIn
+  where
+    assignsIn (Assign name _) = name == var
+    assignsIn (Block stmts) = assigns var stmts
+    assignsIn (If _ thenStmts elseStmts) = assigns var thenStmts || assigns var elseStmts
+    assignsIn (While _ _ _ stmts) = assigns var stmts
+    assignsIn _ = False
 
 -- `shrinks e` or `~`, before the body of a loop or function. Both are optional here, the validator
 -- decides whether leaving them out is allowed.
