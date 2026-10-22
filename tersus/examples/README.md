@@ -36,6 +36,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
 | `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
+| `linear.tersus` | Sums of variables, multiples and division by a constant as linear arithmetic: contracts like `a + b <= 10` and `2 * x <= y`, a loop with an inferred `s + i = n`, `bits` that halves (`shrinks n`, `n / 2`), and a binary search over a range | returns `633` |
 | `for_loops.tersus` | `for i in lo..hi` and `for x in list` / `for i, x in list`: a sum over a list, an early `return`, a list built to a given size, and nested ranges, with no invariant or termination clause | returns `33` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
@@ -120,6 +121,9 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/invariant_entry.tersus` | A loop whose invariant does not hold before the first iteration |
 | `rejected/invariant_preserved.tersus` | A loop body that increments `i` without re-establishing the invariant |
 | `rejected/for_reads_past_end.tersus` | A `for` range that ends one past the last index, so `get` is out of range |
+| `rejected/division_not_below.tersus` | `n / 2 < n` claimed for `n >= 0`, which fails at `0` |
+| `rejected/sum_bound_too_strong.tersus` | `a + b <= 10` does not give a sum below `10` |
+| `rejected/loop_sum_not_kept.tersus` | A loop whose body breaks `s + i = n`, so nothing is inferred and the output contract fails |
 | `rejected/for_assigns_counter.tersus` | A `for` body that assigns its loop variable (refused when the program is read) |
 | `rejected/loop_without_termination.tersus` | A loop that says neither `shrinks` nor `~` |
 | `rejected/loop_variant_not_shrinking.tersus` | A loop whose variant `3 - i` is never made smaller by its body |
@@ -134,7 +138,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 ## Writing your own
 
 - Infix operators bind in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations, so `affirm y = x + 1` means `y = (x + 1)`. Each level associates left.
-- Validation knows what rewrites and contracts have told it, plus integer comparisons and adding or subtracting a known constant, for example `s > 0` from `s = 3`. It also understands `x * 0`, `x * 1` and `x / 1`, and folds `*` and `/` on known values.
+- Validation knows what rewrites and contracts have told it, plus integer comparisons and adding or subtracting a known constant, for example `s > 0` from `s = 3`. It also understands sums of variables, `x * c` and `x / c` for a known `c` (linear arithmetic, see LANGUAGE.md), and folds `*` and `/` on known values.
 - A function body sees its arguments, the standard library, the functions defined before it, and itself, so functions can call earlier functions and recurse (see `helper_functions.tersus` and `recursion.tersus`).
 - A variable first assigned inside an `if` branch is local to that branch, so declare it before the `if` (`r = fallback;`) if you want it afterwards.
 - Lists can be read with `get`, extended with `push` and updated with `set`, which returns a new list (`a = set(a, i, x)`). `push` and `set` say which element they wrote (`element_facts.tersus`) and the frame rules say the others are unchanged (`frame_facts.tersus`), one index at a time. A `forall` states a fact about every index (`forall_facts.tersus`, `parallel_sum.tersus`), and with lists of structs it expresses the linked-list motivating case, whose link invariants are proved by `linked_list.tersus`.

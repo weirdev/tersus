@@ -1,0 +1,11 @@
+// s + i = n is not kept by a body that adds 2 to s and takes 1 from i, so nothing is inferred and the output contract fails.
+fn countOut(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] {
+    s = 0;
+    i = n;
+    while i > 0 [{ affirm i >= 0; }] shrinks i {
+        s = s + 2;
+        i = i - 1;
+    };
+    return s;
+};
+return countOut(4);

@@ -26,6 +26,7 @@ import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 
+import Linear
 import StdLib
 import TersusTypes
 import Utils
@@ -370,10 +371,18 @@ querySolver facts goals =
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
                     ]
                 || or
+                    [ linearGoal rel (idOf table4 lhs) (idOf table4 rhs)
+                    | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
+                    ]
+                || or
                     [ partOf table4 classes (idOf table4 lhs) (idOf table4 rhs)
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct Within) _)) [lhs, rhs] <- [goal]
                     ]
         differences = differencesByClass table4 classes
+        linear = linearSystem table4 classes trueId
+        -- (the system is looked at as a whole once, in case the facts contradict each other somewhere the goal does not reach)
+        linearContradiction = infeasible linear
+        linearGoal rel l r = not (null linear) && (linearEntails linear rel (rep classes l) (rep classes r) || linearContradiction)
         zeroClass = rep classes zeroId
         -- The applications by the classes of their function and arguments, to find a relation that is a fact
         -- under congruence
@@ -388,6 +397,7 @@ querySolver facts goals =
                             || or [distinct l r | CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _) <- [funct]]
                             || or [arithmeticEntails arithmetic rel (rep classes l) (rep classes r) | CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _) <- [funct]]
                             || or [differenceEntails differences arithmetic zeroClass rel (rep classes l) (rep classes r) | CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _) <- [funct]]
+                            || or [linearGoal rel l r | CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _) <- [funct]]
                         )
                 _ -> Nothing
         quick _ = Nothing
@@ -1045,6 +1055,70 @@ differenceEntails differences arithmetic zeroClass rel lhs rhs =
             ]
   where
     of' side = Map.findWithDefault [] side differences
+
+-- Linear arithmetic
+--
+-- The difference constraints stop at x - y <= c. A relation with a sum of two variables or a multiple of one
+-- (s + i = n, 2 * x <= y, x / 2 < x) goes to Linear: the arithmetic of the facts becomes equations and inequalities
+-- between the classes, and a relation is entailed when the facts with its negation have no solution. That is only
+-- done when some fact needs it (otherwise the difference constraints are already complete), and Linear gives up on a
+-- system that grows too large, which proves nothing.
+--   t = a + b          t - a - b = 0
+--   t = a - b          t - a + b = 0
+--   t = c * a          t - c a = 0             (c a known integer)
+--   t = a / c          c t <= a <= c t + c - 1 (c > 0, rounding down; the reverse for c < 0)
+--   size(l)            size(l) >= 0
+--   x < y and so on    x - y <= -1 and so on
+--   a class that is a known integer n    x = n
+linearSystem :: TermTable -> IntMap.IntMap Int -> Int -> [Constraint]
+linearSystem table classes trueId
+    | not (any needsLinear applications) = []
+    | otherwise = [Equal (IntMap.singleton x 1) (fromInteger n) | (x, n) <- Map.toList intOfClass] ++ concatMap constraintsOf applications
+  where
+    node = rep classes
+    builtinOfClass = builtinsByClass table classes (const True)
+    constTerms = [(Map.lookup (KConst constId) (tableKeys table), value) | (value, constId) <- tableConsts table]
+    intOfClass = Map.fromList [(node termId, n) | (Just termId, VInt n) <- constTerms]
+    applications = [(node t, builtinOfClass `lookupBuiltin` functId, map node args) | (t, (functId, args)) <- tableApps table]
+    lookupBuiltin m functId = Map.lookup (node functId) m
+    known x = Map.lookup x intOfClass
+    needsLinear (_, Just Plus, [a, b]) = known a == Nothing && known b == Nothing
+    needsLinear (_, Just Minus, [_, b]) = known b == Nothing
+    needsLinear (_, Just Times, [a, b]) = any (maybe False (\n -> n /= 0 && n /= 1)) [known a, known b]
+    needsLinear (_, Just Div, [_, b]) = maybe False (/= 1) (known b)
+    needsLinear _ = False
+    form terms = IntMap.filter (/= 0) (IntMap.fromListWith (+) terms)
+    constraintsOf (t, Just Plus, [a, b]) = [Equal (form [(t, 1), (a, -1), (b, -1)]) 0]
+    constraintsOf (t, Just Minus, [a, b]) = [Equal (form [(t, 1), (a, -1), (b, 1)]) 0]
+    constraintsOf (t, Just Times, [a, b])
+        | Just n <- known b = [Equal (form [(t, 1), (a, negate (fromInteger n))]) 0]
+        | Just n <- known a = [Equal (form [(t, 1), (b, negate (fromInteger n))]) 0]
+    constraintsOf (t, Just Div, [a, b])
+        | Just n <- known b, n > 0 = [AtMost (form [(t, fromInteger n), (a, -1)]) 0, AtMost (form [(a, 1), (t, negate (fromInteger n))]) (fromInteger (n - 1))]
+        | Just n <- known b, n < 0 = [AtMost (form [(a, 1), (t, negate (fromInteger n))]) 0, AtMost (form [(t, fromInteger n), (a, -1)]) (fromInteger (negate n - 1))]
+    constraintsOf (_, Just Size, [l]) = [AtMost (form [(l, -1)]) 0]
+    constraintsOf (t, Just (Rel rel), [l, r])
+        | t == node trueId = case rel of
+            Lt -> [AtMost (form [(l, 1), (r, -1)]) (-1)]
+            LtEq -> [AtMost (form [(l, 1), (r, -1)]) 0]
+            Gt -> [AtMost (form [(r, 1), (l, -1)]) (-1)]
+            GtEq -> [AtMost (form [(r, 1), (l, -1)]) 0]
+            _ -> []
+    constraintsOf _ = []
+
+-- Whether l rel r follows from the linear system, for class representatives l and r
+linearEntails :: [Constraint] -> Rel -> Int -> Int -> Bool
+linearEntails system rel l r =
+    case rel of
+        Lt -> refuted [AtMost (form [(r, 1), (l, -1)]) 0]
+        LtEq -> refuted [AtMost (form [(r, 1), (l, -1)]) (-1)]
+        Gt -> refuted [AtMost (form [(l, 1), (r, -1)]) 0]
+        GtEq -> refuted [AtMost (form [(l, 1), (r, -1)]) (-1)]
+        Eq -> linearEntails system LtEq l r && linearEntails system GtEq l r
+        NotEq -> refuted [Equal (form [(l, 1), (r, -1)]) 0]
+  where
+    form terms = IntMap.filter (/= 0) (IntMap.fromListWith (+) terms)
+    refuted = infeasibleWith system
 
 -- Whether lhs rel rhs follows from the constraints, for the class representatives lhs and rhs
 arithmeticEntails :: Arithmetic -> Rel -> Int -> Int -> Bool

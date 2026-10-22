@@ -10,7 +10,7 @@ import Data.Map (
 
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (isInfixOf)
-import Data.Maybe (mapMaybe, fromMaybe)
+import Data.Maybe (isNothing, mapMaybe, fromMaybe)
 import qualified Data.Map as Map
 
 import qualified ProofEngine as Engine
@@ -594,13 +594,28 @@ inferInvariants entry havocked loopVars cond invariant body
     known = [(term, k) | (term, Just k) <- loopTerms]
     constantCandidates =
         concat [[relation GtEq term (CTerm (VInt k)), relation LtEq term (CTerm (VInt k))] | (term, k) <- known]
+            ++ [ relation Eq (FApp (CTerm (builtinFunct Plus)) [t1, t2]) (CTerm (VInt (k1 + k2)))
+               | (i, (t1, k1)) <- zip [0 :: Int ..] known
+               , (j, (t2, k2)) <- zip [0 ..] known
+               , i < j
+               ]
             ++ [ relation Eq t1 (if k1 == k2 then t2 else FApp (CTerm (builtinFunct Plus)) [t2, CTerm (VInt (k1 - k2))])
                | (i, (t1, k1)) <- zip [0 :: Int ..] known
                , (j, (t2, k2)) <- zip [0 ..] known
                , i < j
                ]
     comparisons = [relation rel term anchor | (term, _) <- loopTerms, (anchor, _) <- anchors, rel <- [Eq, LtEq, GtEq]]
-    converted = [(c, goal) | c <- comparisons, Ok goal <- [varProofToIotaProof c entry]]
+    -- a sum of two terms that is a variable the loop does not assign, plus the number one of them starts at: s + i = n
+    sums =
+        [ relation Eq (FApp (CTerm (builtinFunct Plus)) [t1, t2]) (if offset == 0 then anchor else FApp (CTerm (builtinFunct Plus)) [anchor, CTerm (VInt offset)])
+        | (i, (t1, k1)) <- zip [0 :: Int ..] loopTerms
+        , (j, (t2, k2)) <- zip [0 ..] loopTerms
+        , i < j
+        , isNothing k1 || isNothing k2
+        , let offset = fromMaybe 0 k1 + fromMaybe 0 k2
+        , (anchor, _) <- anchors
+        ]
+    converted = [(c, goal) | c <- comparisons ++ sums, Ok goal <- [varProofToIotaProof c entry]]
     entailed = [c | ((c, _), True) <- zip converted (Engine.entailsDirect (map snd converted) context)]
     candidates = take maxInferenceCandidates (constantCandidates ++ entailed)
     houdini rounds survivors

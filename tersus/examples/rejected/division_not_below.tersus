@@ -1,0 +1,5 @@
+// n / 2 is below n only for a positive n: 0 / 2 is 0, so with n >= 0 the output contract does not hold.
+fn half(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return < n; }] {
+    return n / 2;
+};
+return half(5);
