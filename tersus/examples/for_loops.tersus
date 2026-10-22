@@ -1,0 +1,43 @@
+// for i in lo..hi { ... } counts i from lo up to hi - 1. The end of the range is read once, i is an
+// ordinary variable that is hi once the loop is over, and the loop is a while loop for the validator:
+// it knows lo <= i <= hi, that i < hi inside the body (so get(a, i) is in range when hi is size(a)), and
+// that the loop ends. A for loop needs no invariant or termination clause, but can add an invariant.
+
+fn total(a: List<Int>) -> Int {
+    s = 0;
+    for i in 0..size(a) {
+        s = s + get(a, i);
+    };
+    return s;
+};
+
+// A return in the body leaves the function, as in a while loop.
+fn firstOver(a: List<Int>, limit: Int) -> Int {
+    for i in 0..size(a) {
+        if get(a, i) > limit { return i; };
+    };
+    return -1;
+};
+
+// The validator works out that out gets one element per iteration, so size(out) = i, and with i = n after
+// the loop the output contract holds without an invariant.
+fn zeros(n: Int) -> List<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] {
+    out = [];
+    for i in 0..n {
+        out = push(out, 0);
+    };
+    return out;
+};
+
+// Loops nest, and a range can start anywhere.
+fn pairs(n: Int) -> Int [{ affirm n >= 0; }] {
+    count = 0;
+    for i in 0..n {
+        for j in i..n {
+            count = count + 1;
+        };
+    };
+    return count;
+};
+
+return total([4, 5, 6]) + firstOver([1, 7, 3], 5) + size(zeros(3)) + pairs(3);

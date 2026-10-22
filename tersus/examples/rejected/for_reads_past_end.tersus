@@ -1,0 +1,9 @@
+// Rejected: the range ends one past the last index, so get(a, i) is out of range in the last iteration.
+fn total(a: List<Int>) -> Int {
+    s = 0;
+    for i in 0..size(a) + 1 {
+        s = s + get(a, i);
+    };
+    return s;
+};
+return total([1, 2]);

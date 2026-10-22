@@ -5,8 +5,8 @@
 // invariant track the size of the result, which becomes the function's output contract.
 // The invariant also says, with a forall, that the elements built so far are the sums of the
 // matching pairs, and the output contract states that for every element of the result.
-// The counter facts (0 <= i <= n, and i = n after the loop) follow from the loop condition
-// and the invariant, so no axioms are needed.
+// The counter facts (0 <= i <= size(a), and i = size(a) after the loop) come with the for loop,
+// and so does size(out) = i, which the validator works out from how out and i start and change.
 
 fn pairSums(a: List<Int>, b: List<Int>) -> List<Int> [{
     affirm size(a) = size(b);
@@ -14,17 +14,11 @@ fn pairSums(a: List<Int>, b: List<Int>) -> List<Int> [{
     affirm size(return) = size(a);
     affirm forall j in 0..size(a): get(return, j) = (get(a, j) + get(b, j));
 }] {
-    n = size(a);
-    i = 0;
     out = [];
-    while i < n [{
-        affirm i >= 0;
-        affirm i <= n;
-        affirm size(out) = i;
+    for i in 0..size(a) [{
         affirm forall j in 0..i: get(out, j) = (get(a, j) + get(b, j));
-    }] shrinks n - i {
+    }] {
         out = push(out, get(a, i) + get(b, i));
-        i = i + 1;
     };
     return out;
 };

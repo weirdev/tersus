@@ -1,26 +1,21 @@
 // Building a list: doubled returns a new list with every element twice as large. push has an
-// output contract (size(return) = size(list) + 1), which the loop invariant turns into the
-// function's own output contract, size(return) = size(a). The invariant also has a forall that
-// says the elements built so far are the doubles of the matching elements, which becomes the
-// output contract's elementwise fact.
-// The counter facts (0 <= i <= n, and i = n after the loop) follow from the loop condition
-// and the invariant, so no axioms are needed.
+// output contract (size(return) = size(list) + 1). The loop gets size(out) = i without it being
+// written, because out starts empty, i starts at 0, and both grow by one each time, and with
+// i = size(a) after the loop that becomes the function's own output contract,
+// size(return) = size(a). The invariant written here has a forall that says the elements built
+// so far are the doubles of the matching elements, which becomes the output contract's
+// elementwise fact. The counter facts (0 <= i <= size(a), and i = size(a) after the loop) come
+// with the for loop.
 
 fn doubled(a: List<Int>) -> List<Int> [{ }] [{
     affirm size(return) = size(a);
     affirm forall j in 0..size(a): get(return, j) = (get(a, j) + get(a, j));
 }] {
-    n = size(a);
-    i = 0;
     out = [];
-    while i < n [{
-        affirm i >= 0;
-        affirm i <= n;
-        affirm size(out) = i;
+    for i in 0..size(a) [{
         affirm forall j in 0..i: get(out, j) = (get(a, j) + get(a, j));
-    }] shrinks n - i {
+    }] {
         out = push(out, get(a, i) + get(a, i));
-        i = i + 1;
     };
     return out;
 };
