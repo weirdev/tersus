@@ -1,0 +1,61 @@
+// Sums of variables, multiples and division by a constant. The validator solves these together as linear
+// arithmetic, so a relation such as a + b <= 10 or 2 * x <= y is used the way x < y is.
+
+// A sum is bounded by a bound on each part and by a bound on the whole.
+fn total(a: Int, b: Int) -> Int [{ affirm a >= 0; affirm b >= 0; affirm a + b <= 10; }] [{ affirm return <= 10; affirm return >= a; }] {
+    return a + b;
+};
+
+// y - x is at least x when y is at least 2 * x.
+fn rest(x: Int, y: Int) -> Int [{ affirm x >= 1; affirm 2 * x <= y; }] [{ affirm return >= x; }] {
+    return y - x;
+};
+
+// s + i = n holds throughout: every step moves one from i to s. It is inferred, so the loop only needs to say that i stays
+// at least 0; after it, i = 0 and s = n.
+fn countOut(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] {
+    s = 0;
+    i = n;
+    while i > 0 [{ affirm i >= 0; }] shrinks i {
+        s = s + 1;
+        i = i - 1;
+    };
+    return s;
+};
+
+// n / 2 rounds down: at least 0, and below n when n is positive. That is why halving shrinks n.
+fn bits(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] shrinks n {
+    r = 0;
+    if n < 1 {
+        r = 0;
+        affirm r >= 0;
+    } else {
+        s = bits(n / 2);
+        r = 1 + s;
+        affirm r >= 0;
+    };
+    return r;
+};
+
+// Binary search for a number from 0 to 1000. The middle is between lo and hi when lo < hi, so every step narrows
+// the range hi - lo; width remembers it from before the if, since the if only keeps what both branches state.
+fn guess(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] [{ affirm return = secret; }] {
+    lo = 0;
+    hi = 1000;
+    while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo {
+        width = hi - lo;
+        mid = (lo + hi) / 2;
+        if mid < secret {
+            lo = mid + 1;
+            affirm lo <= secret;
+            affirm hi - lo < width;
+        } else {
+            hi = mid;
+            affirm secret <= hi;
+            affirm hi - lo < width;
+        };
+    };
+    return lo;
+};
+
+return total(2, 3) + rest(2, 5) + countOut(4) + bits(9) + guess(617);

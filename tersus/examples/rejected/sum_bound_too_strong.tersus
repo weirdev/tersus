@@ -1,0 +1,5 @@
+// a + b <= 10 does not make the sum below 10.
+fn total(a: Int, b: Int) -> Int [{ affirm a + b <= 10; }] [{ affirm return < 10; }] {
+    return a + b;
+};
+return total(4, 5);

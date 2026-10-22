@@ -1162,6 +1162,7 @@ testExamples =
         , testExampleFile "examples/recursion.tersus" (ExpectReturn (VInt 26))
         , testExampleFile "examples/termination.tersus" (ExpectReturn (VInt 23))
         , testExampleFile "examples/for_loops.tersus" (ExpectReturn (VInt 33))
+        , testExampleFile "examples/linear.tersus" (ExpectReturn (VInt 633))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
@@ -1191,6 +1192,9 @@ testExamples =
         , testExampleFile "examples/rejected/linked_list_link_out_of_range.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, i).next < size(return)")
         , testExampleFile "examples/rejected/linked_list_link_disagrees.tersus" (ExpectRejected "Could not prove: forall i in 0..size(return): get(return, get(return, i).next).prev = i")
         , testExampleFile "examples/rejected/for_reads_past_end.tersus" (ExpectRejected "Funct input validation failed")
+        , testExampleFile "examples/rejected/division_not_below.tersus" (ExpectRejected "Could not prove: return < n")
+        , testExampleFile "examples/rejected/sum_bound_too_strong.tersus" (ExpectRejected "Could not prove: return < 10")
+        , testExampleFile "examples/rejected/loop_sum_not_kept.tersus" (ExpectRejected "Could not prove: return = n")
         , testExampleFile "examples/rejected/for_assigns_counter.tersus" (ExpectRejected "The body of a for loop cannot assign its loop variable i")
         , testExampleFile "examples/rejected/loop_without_termination.tersus" (ExpectRejected "Loop must say how it ends")
         , testExampleFile "examples/rejected/loop_variant_not_shrinking.tersus" (ExpectRejected "Loop variant does not shrink: 3 - i")
@@ -1933,6 +1937,82 @@ testRefinedArithmetic =
             , -- A variant that is twice a counter
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks 2 * n { if n < 1 { return 0; } else { return f(n - 1); }; }; x = f(3);"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks 2 * n { if n < 1 { return 0; } else { return f(n + 1); }; }; x = f(3);" "Recursive call does not shrink the variant"
+            ]
+
+-- Sums of variables, multiples and division by a constant are solved together as linear arithmetic
+testLinearArithmetic :: Test
+testLinearArithmetic =
+    let given facts goal = "fn f(i: Int, j: Int, n: Int, m: Int) -> Int [{ " ++ facts ++ " }] [{ }] { affirm " ++ goal ++ "; return 0; };"
+        holds facts goal = parseValidProgramHelper (given facts goal)
+        fails facts goal = parseValidateFailProgramHelper (given facts goal) ("Could not prove: " ++ goal)
+     in testCaseSeq
+            "testLinearArithmetic"
+            [ -- A sum bounded as a whole, or by its parts
+              holds "affirm i + j = n; affirm i >= 0;" "j <= n"
+            , holds "affirm i + j <= n; affirm j >= 0;" "i <= n"
+            , fails "affirm i + j <= n;" "i <= n"
+            , holds "affirm i + j = n; affirm i = m;" "j = n - m"
+            , holds "affirm i < n; affirm j < m;" "i + j < n + m"
+            , holds "affirm i <= n; affirm j < m;" "i + j < n + m"
+            , fails "affirm i <= n; affirm j <= m;" "i + j < n + m"
+            , holds "affirm i >= 1; affirm j >= 1;" "i + j >= 2"
+            , fails "affirm i >= 1; affirm j >= 0;" "i + j >= 2"
+            , holds "affirm i = 2; affirm j = 3;" "i + j = 5"
+            , -- Several relations at once, which no single difference between two terms shows
+              holds "affirm i + j <= 10; affirm i >= 4; affirm j >= 5;" "i <= 5"
+            , fails "affirm i + j <= 10; affirm i >= 4; affirm j >= 4;" "i <= 5"
+            , holds "affirm i + j + n = 0; affirm i >= 0; affirm j >= 0;" "n <= 0"
+            , -- A multiple of a variable, with another variable
+              holds "affirm 2 * i <= j; affirm i >= 1;" "j >= 2"
+            , fails "affirm 2 * i <= j; affirm i >= 0;" "j >= 2"
+            , holds "affirm i = i;" "i + i = 2 * i"
+            , holds "affirm i + i = j;" "j = 2 * i"
+            , holds "affirm 3 * i + 2 * j = 12; affirm i >= 0; affirm j >= 0;" "i <= 4"
+            , -- Whole numbers only: 2 * i = 2 * j + 1 has no solution, and 2 * i <= 1 means i <= 0
+              holds "affirm 2 * i <= 1;" "i <= 0"
+            , holds "affirm 2 * i = 2 * j + 1;" "n = n + 1"
+            , fails "affirm 3 * i <= 4;" "i <= 0"
+            , -- Division by a constant rounds down
+              holds "affirm n >= 0;" "n / 2 >= 0"
+            , holds "affirm n > 0;" "n / 2 < n"
+            , fails "affirm n >= 0;" "n / 2 < n"
+            , holds "affirm n >= 0;" "n / 2 * 2 <= n"
+            , holds "affirm n >= 0;" "n <= n / 2 * 2 + 1"
+            , fails "affirm n >= 0;" "n <= n / 2 * 2"
+            , holds "affirm n >= 4;" "n / 2 >= 2"
+            , fails "affirm n >= 3;" "n / 2 >= 2"
+            , holds "affirm n >= 0;" "n / 4 <= n / 2"
+            , holds "affirm n >= 0; affirm n <= 9;" "n / 4 <= 2"
+            , fails "affirm n >= 0; affirm n <= 12;" "n / 4 <= 2"
+            , holds "affirm i < j;" "(i + j) / 2 < j"
+            , holds "affirm i < j;" "(i + j) / 2 >= i"
+            , fails "affirm i <= j;" "(i + j) / 2 < j"
+            , -- Division by a negative constant rounds down too
+              holds "affirm n > 0;" "n / -2 < 0"
+            , fails "affirm n >= 0;" "n / -2 < 0"
+            , -- Division by 1 is the number, and the result of a division is not assumed to be a multiple
+              holds "affirm i = i;" "n / 1 = n"
+            , fails "affirm n >= 0;" "n / 2 * 2 = n"
+            , -- Evaluation
+              parseEvalProgramHelper "x = 7; y = x / 2 + x / -2; return y;" (Just (VInt (-1)))
+            , -- Programs: a loop that moves from one variable to another keeps their sum
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { s = 0; i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { s = s + 1; i = i - 1; }; return s; };"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { s = 0; i = n; while i > 0 [{ affirm s + i = n; affirm i >= 0; }] shrinks i { s = s + 1; i = i - 1; }; return s; };"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n + 5; }] { s = 5; i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { s = s + 1; i = i - 1; }; return s; };"
+            , parseValidProgramHelper "s = 0; i = 5; while i > 0 [{ affirm i >= 0; }] shrinks i { s = s + 1; i = i - 1; }; affirm s = 5;"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { s = 0; i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { s = s + 2; i = i - 1; }; return s; };" "Could not prove: return = n"
+            , -- Halving shrinks a number that is at least 1, but not one that is at least 0
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n < 1 { return 0; } else { return 1 + f(n / 2); }; }; x = f(9);"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { return f(n / 2); }; x = f(9);" "Recursive call does not shrink the variant"
+            , -- A loop that halves
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; c = 0; while i > 0 [{ affirm i >= 0; }] shrinks i { i = i / 2; c = c + 1; }; return c; };"
+            , -- A variant that is a sum, or a difference whose two sides both move
+              parseValidProgramHelper "fn f(n: Int, m: Int) -> Int [{ affirm n >= 0; affirm m >= 0; }] { i = n; j = m; while i + j > 0 [{ affirm i >= 0; affirm j >= 0; }] shrinks i + j { old = i + j; if i > 0 { i = i - 1; affirm i >= 0; affirm j >= 0; affirm i + j < old; } else { j = j - 1; affirm i >= 0; affirm j >= 0; affirm i + j < old; }; }; return 0; }; x = f(2, 3);"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = 0; k = n; while i + 1 < k [{ affirm i >= 0; affirm i <= k; }] shrinks k - i { i = i + 1; k = k - 1; }; return 0; }; x = f(7);"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = 0; k = n; while i + 1 < k [{ affirm i >= 0; affirm i <= k; }] shrinks k - i { i = i + 1; k = k + 1; }; return 0; };" "Loop variant does not shrink"
+            , -- Binary search: the middle is between the ends, so the range narrows
+              parseValidProgramHelper "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] [{ affirm return = secret; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { width = hi - lo; mid = (lo + hi) / 2; if mid < secret { lo = mid + 1; affirm lo <= secret; affirm hi - lo < width; } else { hi = mid; affirm secret <= hi; affirm hi - lo < width; }; }; return lo; }; x = f(617);"
+            , parseValidateFailProgramHelper "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { width = hi - lo; mid = (lo + hi) / 2; if mid < secret { lo = mid; affirm hi - lo < width; } else { hi = mid; affirm hi - lo < width; }; }; return lo; };" "Could not prove: hi - lo < width"
             ]
 
 -- for i in lo..hi counts a loop variable, and the validator is given its bounds, its termination and (see
@@ -2830,6 +2910,7 @@ main = do
                 , testSolverCache
                 , testTermination
                 , testRefinedArithmetic
+                , testLinearArithmetic
                 , testForLoops
                 , testInferredInvariants
                 , testPrecedence

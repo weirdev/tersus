@@ -479,7 +479,7 @@ while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
 affirm size(out) = 3;       // size(out) = i was inferred: both start at 0 and grow by one
 ```
 
-This is what makes `size(return) = size(a)` follow from a loop that pushes once per element, with no `affirm size(out) = i`, and `size(out) = size(a)` follow from a loop that `set`s the elements of a copy (`examples/update_list.tersus`). A relation that is not a constant distance or a plain comparison still has to be written, such as a list that grows by the size of another list per iteration, or `s + i = n` (a sum of variables). If a loop is refused because one of its inferred invariants is not preserved, the error is about the invariant the program wrote instead.
+This is what makes `size(return) = size(a)` follow from a loop that pushes once per element, with no `affirm size(out) = i`, and `size(out) = size(a)` follow from a loop that `set`s the elements of a copy (`examples/update_list.tersus`). A sum of two variables that stays equal to another variable (`s + i = n`, or `s + i = n + 5` when `s` starts at `5`) is inferred too; a relation that is not a constant distance, a plain comparison or such a sum still has to be written, such as a list that grows by the size of another list per iteration. If a loop is refused because one of its inferred invariants is not preserved, the error is about the invariant the program wrote instead.
 
 #### Returning from a loop
 
@@ -563,7 +563,7 @@ Statements that are not loops or calls end by themselves. A loop and a function 
 - A struct or enum value must be a part of the one before it: a field, or a field of a field, which a `match` binding or `(t as Tree::Branch).left` is. Such values are finite, so this ends, and there is no bound to prove.
 - Any other type is an error: `shrinks needs an Int, an enum or a struct`.
 
-`i` can be counted up or down: `shrinks n - i` needs `i <= n` to be known where the iteration starts, and the condition `i < n` supplies it. The validator compares a difference such as `n - i` by its two sides, so `n - i >= 0` is `n >= i`, `n - (i + 1) < n - i` holds because `i + 1 > i`, and it works when one side of the difference is the same in the two. When both sides move, say so with two steps or a different variant.
+`i` can be counted up or down: `shrinks n - i` needs `i <= n` to be known where the iteration starts, and the condition `i < n` supplies it. The validator compares a difference such as `n - i` by its two sides, so `n - i >= 0` is `n >= i`, `n - (i + 1) < n - i` holds because `i + 1 > i`, and when both sides move (`k - i` with `i = i + 1; k = k - 1`, which shrinks by 2) or the variant is a sum (`shrinks i + j`) linear arithmetic decides it.
 
 ```tersus
 fn sumTo(n: Int) -> Int [{ affirm n >= 0; }] shrinks n {
@@ -880,9 +880,27 @@ The validator decides integer comparisons itself, so `affirm`, loop invariants, 
 - any term with a known integer value, and
 - `size(l) >= 0`, and
 - `x * 0`, `x * 1` and `x / 1`,
-- `c * x` and `x * c` for any other known constant `c`: it is a node of its own, and whatever the graph says about two nodes `x` and `y` (or `x` and `0`) is said about `c * x` and `c * y` multiplied by `c`, so `n > 0` gives `2 * n > 0` and `n < m` gives `2 * n < 2 * m - 1` (any other product or quotient is an uninterpreted term, folded to a number only when both operands are known). Different constants are different nodes: `2 * n` is not compared with `3 * n`, and `x / 2` is not related to `x`.
+- `c * x` and `x * c` for any other known constant `c`: it is a node of its own, and whatever the graph says about two nodes `x` and `y` (or `x` and `0`) is said about `c * x` and `c * y` multiplied by `c`, so `n > 0` gives `2 * n > 0` and `n < m` gives `2 * n < 2 * m - 1` (any other product or quotient is an uninterpreted term, folded to a number only when both operands are known). Different constants are different nodes in the graph, so `2 * n` is not compared with `3 * n` there (linear arithmetic below does compare them).
 
-A difference `x - y` of two unknown terms is a term of its own, which the graph says nothing about. A comparison of a difference with `0`, or with another difference that has a side in common, is decided by the other sides, which is what a loop variant such as `n - i` needs: `n - i >= 0` follows from `i <= n`, and `n - (i + 1) < n - i` from `i + 1 > i`. Other facts about a difference, such as `x - y = z` giving `x = y + z`, are not known.
+A difference `x - y` of two unknown terms is a term of its own, which the graph says nothing about. A comparison of a difference with `0`, or with another difference that has a side in common, is decided by the other sides, which is what a loop variant such as `n - i` needs: `n - i >= 0` follows from `i <= n`, and `n - (i + 1) < n - i` from `i + 1 > i`. Other facts about a difference, such as `x - y = z` giving `x = y + z`, are left to linear arithmetic.
+
+### Linear arithmetic
+
+What the graph cannot say goes to a second step that solves the arithmetic of the facts as a system of linear equations and inequalities (`Linear`, Fourier-Motzkin elimination with rounding for whole numbers): sums of two variables, multiples of a variable next to other variables, and division by a constant. The step is only run for a goal the graph did not decide, and only when some fact has a `+`, `-`, `*` or `/` that the graph could not take (otherwise the graph is already complete). The goal is entailed when the facts together with its negation have no whole-number solution.
+
+```tersus
+fn f(a: Int, b: Int) -> Int [{ affirm a >= 0; affirm b >= 0; affirm a + b <= 10; }] [{ affirm return <= 10; affirm return >= a; }] {
+    return a + b;            // a + b <= 10, and a + b >= a because b >= 0
+};
+fn g(x: Int, y: Int) -> Int [{ affirm x >= 1; affirm 2 * x <= y; }] [{ affirm return >= x; }] {
+    return y - x;            // y - x >= 2 * x - x
+};
+```
+
+- `t = a + b`, `t = a - b` and `t = c * a` (`c` a known integer, `a` anything) are equations between the terms, so `i + j <= n` and `j >= 0` give `i <= n`, and `i + j = n` with `i = m` gives `j = n - m`.
+- `t = a / c` for a known `c` other than `1` rounds down: for `c > 0`, `c * t <= a <= c * t + c - 1`, and for `c < 0`, `a <= c * t <= a - c - 1`. So `n / 2 >= 0` and `n / 2 < n` follow from `n > 0`, `(i + j) / 2` is between `i` and `j` when `i < j`, and `n / 2 * 2 <= n <= n / 2 * 2 + 1` (but not `n / 2 * 2 = n`).
+- Whole numbers: `2 * x <= 1` gives `x <= 0`, and `2 * x = 2 * y + 1` has no solution (the facts contradict each other, so everything after it is vacuously true).
+- A product of two unknowns, `x * y`, and a division by an unknown, stay opaque. The step gives up, proving nothing, on a system of more than 300 constraints after elimination, so a long chain of sums with a goal that does not follow is slower and then refused.
 
 ```tersus
 s = 3;
@@ -906,10 +924,10 @@ A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is use
 ## Current Limitations
 
 - No `break` or `continue`. `for` goes through a range or the elements of a list, not by a step other than `1` or backwards.
-- Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field at each step. Nothing else is a variant: not a lexicographic pair of integers, not the length of a list that shrinks, and a variant that changes both sides of a difference (`n - i` where `n` and `i` both move) has to be split. The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
+- Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field at each step. Nothing else is a variant: not a lexicographic pair of integers, and not the length of a list that shrinks (`size(l)` is an integer that can be used, but one that shrinks only if the program says so). The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: when it evaluates a call with known arguments it gives up after 100000 statements, and the call's result is then simply not known.
 - No declarations separate from assignment.
 - No strings or floats yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
-- Arithmetic is limited to comparisons, adding or subtracting a known constant, multiplying by a known constant, and dividing by 1 (see Arithmetic). Other products and quotients are evaluated when their operands are known, but otherwise opaque, as is a relation between `x + y` terms where neither is known, or between differences that have no side in common.
+- Arithmetic is linear (see Arithmetic): comparisons, sums and differences, multiples by a known constant and division by a known constant. A product of two unknowns, and a division by an unknown, are evaluated when their operands are known, but otherwise opaque. `x / c` is rounded down, so `x / c * c = x` is not known.
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
