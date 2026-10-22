@@ -939,7 +939,59 @@ arithmeticEdges table classes trueId zeroId =
                 _ -> []
         constEdges = concat [diff termId zeroId n | (termId, n) <- Map.toList intOfClass]
         edges = constEdges ++ concat [appEdges t functId args | (t, (functId, args)) <- tableApps table]
-     in let graph = buildGraph edges in Arithmetic graph (not (consistent graph))
+        -- x != y facts, and the terms c * x for a constant c, which the difference constraints cannot express and
+        -- are refined from the graph (below)
+        notEquals =
+            [ (node l, node r)
+            | (t, (functId, [l, r])) <- tableApps table
+            , node t == node trueId
+            , Just (Rel NotEq) <- [Map.lookup (node functId) builtinOfClass]
+            ]
+        scaledBy =
+            Map.fromListWith
+                (++)
+                [ (n, [(node t, node x)])
+                | (t, (functId, [a, b])) <- tableApps table
+                , Just Times <- [Map.lookup (node functId) builtinOfClass]
+                , (x, n) <- take 1 ([(a, n') | Just n' <- [Map.lookup (node b) intOfClass]] ++ [(b, n') | Just n' <- [Map.lookup (node a) intOfClass]])
+                , n /= 0
+                , n /= 1
+                ]
+        zeroNode = node zeroId
+        -- Adds what the graph so far implies about those terms, twice, since the second round can use the first's edges:
+        -- x != y with x <= y is x < y, and c * x - c * y <= c * d when x - y <= d (when c is negative, the other way round)
+        refine :: Int -> [Edge] -> Graph
+        refine rounds es =
+            let graph = buildGraph es
+                sources = nubOrd (concat [[l, r] | (l, r) <- notEquals] ++ concat [[x, t] | group <- Map.elems scaledBy, (t, x) <- (zeroNode, zeroNode) : group])
+                dists = IntMap.fromList [(source, shortestPaths graph (IntMap.singleton source 0)) | source <- sources]
+                dist source target = case IntMap.lookup source dists of
+                    Just (Just reached) -> IntMap.lookup target reached
+                    _ -> Nothing
+                tighter source target bound = maybe True (> bound) (dist source target)
+                strictEdges =
+                    concat
+                        [ [(r, l, -1) | dist r l == Just 0] ++ [(l, r, -1) | dist l r == Just 0]
+                        | (l, r) <- notEquals
+                        ]
+                scaledEdges =
+                    concat
+                        [ [ (t2, t1, bound)
+                          | (p@(t1, x1), pi') <- zip points [0 :: Int ..]
+                          , (q@(t2, x2), qi) <- zip points [0 ..]
+                          , pi' /= qi
+                          , p /= q
+                          , Just d <- [if c > 0 then dist x2 x1 else dist x1 x2]
+                          , let bound = abs c * d
+                          , tighter t2 t1 bound
+                          ]
+                        | (c, group) <- Map.toList scaledBy
+                        , let points = (zeroNode, zeroNode) : take 8 group
+                        ]
+                extra = strictEdges ++ scaledEdges
+             in if rounds <= 0 || null extra then graph else refine (rounds - 1) (es ++ extra)
+        graphOf = if null notEquals && Map.null scaledBy then buildGraph edges else refine 2 edges
+     in let graph = graphOf in Arithmetic graph (not (consistent graph))
 
 -- The differences x - y among the terms, as the classes of x and y, by the class of the difference
 differencesByClass :: TermTable -> IntMap.IntMap Int -> Map.Map Int [(Int, Int)]
