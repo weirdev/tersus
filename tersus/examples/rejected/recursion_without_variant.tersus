@@ -1,0 +1,5 @@
+// Rejected: a function that calls itself has to say what decreases, or be declared may_diverge.
+fn down(n: Int) -> Int [{ affirm n >= 0; }] {
+    if n < 1 { return 0; } else { return down(n - 1); };
+};
+return down(3);

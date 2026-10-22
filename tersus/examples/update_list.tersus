@@ -21,7 +21,7 @@ fn bumpAll(a: List<Int>) -> List<Int> [{ }] [{
         // the elements already visited are bumped, and the rest are as they were
         affirm forall j in 0..i: get(out, j) = (get(a, j) + 100);
         affirm forall j in i..n: get(out, j) = get(a, j);
-    }] {
+    }] decreases n - i {
         out = set(out, i, get(out, i) + 100);
         i = i + 1;
     };

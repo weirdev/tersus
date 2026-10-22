@@ -47,7 +47,7 @@ fn walk(nodes: List<Node>, start: Int, steps: Int) -> Int
 {
     cur = start;
     taken = 0;
-    while taken < steps [{ affirm taken >= 0; affirm cur >= 0; affirm cur < size(nodes); }] {
+    while taken < steps [{ affirm taken >= 0; affirm cur >= 0; affirm cur < size(nodes); }] decreases steps - taken {
         cur = get(nodes, cur).next;
         taken = taken + 1;
     };

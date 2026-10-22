@@ -7,7 +7,7 @@ fn isPositive(n: Int) -> Bool {
 fn scale(values: List<Int>, factor: Int) -> List<Int> {
     out = [];
     i = 0;
-    while i < size(values) [{ affirm i >= 0; }] {
+    while i < size(values) [{ affirm i >= 0; }] decreases size(values) - i {
         out = push(out, get(values, i) * factor);
         i = i + 1;
     };

@@ -276,6 +276,7 @@ builtinType funct =
         Rel Eq -> list (\a -> TFn [a, a] TBool)
         Rel NotEq -> list (\a -> TFn [a, a] TBool)
         Rel _ -> return (TFn [TInt, TInt] TBool)
+        Within -> list (\a -> TFn [a, a] TBool)
         Ctor name fields -> do
             (typeName, declared) <- ctorInfo name
             if map fst declared == fields
@@ -308,7 +309,7 @@ valueType (VList elements) = do
     mapM_ (expect "list element" element) types
     return (TList element)
 valueType (VFunct _ _ _ (BuiltinFunct funct) _) = builtinType funct
-valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty) _) _) = return (TFn ptys rty)
+valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty) _ _) _) = return (TFn ptys rty)
 
 -- Programs
 
@@ -328,11 +329,11 @@ checkStatements top ctx env (stmt : rest) = do
 checkStatement :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env)
 checkStatement top ctx env stmt =
     case stmt of
-        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty) body) _)) -> do
+        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty) term body) _)) -> do
             let fnTy = TFn ptys rty
                 ctx' = if top then ctx{ctxFns = Map.insert var fnTy (ctxFns ctx)} else ctx
             env' <- assignVar ctx env var fnTy
-            checkFunction ctx' var params ptys rty ins outs body
+            checkFunction ctx' var params ptys rty ins outs term body
             return (ctx', env')
         Assign var expr -> do
             t <- inferExpr ctx env expr
@@ -374,18 +375,19 @@ checkStatement top ctx env stmt =
             _ <- checkStatements False ctx (Map.empty : env) thenStmts
             _ <- checkStatements False ctx (Map.empty : env) elseStmts
             return (ctx, env)
-        While cond invariant body -> do
+        While cond invariant term body -> do
             condTy <- inferExpr ctx env cond
             expect "condition of while" TBool condTy
             _ <- checkValidations ctx env invariant
+            checkTermination ctx env term
             _ <- checkStatements False ctx (Map.empty : env) body
             return (ctx, env)
-        LoopEnd invariant -> checkValidations ctx env invariant >> return (ctx, env)
+        LoopEnd invariant decrease -> checkValidations ctx env invariant >> checkValidations ctx env decrease >> return (ctx, env)
         EndBlock -> return (ctx, env)
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
-checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [ValidationStatement] -> [ValidationStatement] -> [Statement] -> TC ()
-checkFunction ctx name params ptys rty ins outs body = do
+checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC ()
+checkFunction ctx name params ptys rty ins outs term body = do
     mapM_ checkType (rty : ptys)
     if length params /= length ptys
         then failTc ("Type error: function " ++ name ++ " has " ++ show (length params) ++ " parameters but " ++ show (length ptys) ++ " types")
@@ -393,9 +395,16 @@ checkFunction ctx name params ptys rty ins outs body = do
     let bodyCtx = ctx{ctxReturn = Just rty}
         paramEnv = [Map.fromList (zip params ptys)]
     inEnv <- checkValidations bodyCtx paramEnv ins
+    checkTermination bodyCtx inEnv term
     _ <- checkValidations bodyCtx (Map.insert "return" rty (head inEnv) : tail inEnv) outs
     _ <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     return ()
+
+-- A variant is an integer
+checkTermination :: Ctx -> Env -> Maybe Termination -> TC ()
+checkTermination ctx env (Just (Decreases variant)) = inferExpr ctx env variant >>= expect "variant of decreases" TInt
+checkTermination ctx env (Just (Shrinks variant)) = () <$ inferExpr ctx env variant
+checkTermination _ _ _ = return ()
 
 checkValidations :: Ctx -> Env -> [ValidationStatement] -> TC Env
 checkValidations _ env [] = return env

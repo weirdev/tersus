@@ -1,0 +1,12 @@
+// Rejected: settle may not end, so a function that calls it is not guaranteed to either and has to say so.
+fn settle(n: Int) -> Int may_diverge {
+    while n != 1 may_diverge {
+        n = n - 1;
+    };
+    return n;
+};
+
+fn twice(n: Int) -> Int {
+    return settle(n) + settle(n + 1);
+};
+return twice(1);

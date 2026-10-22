@@ -1,0 +1,8 @@
+// Rejected: a loop declared may_diverge makes the function that contains it not guaranteed to terminate.
+fn settle(n: Int) -> Int {
+    while n != 1 may_diverge {
+        n = n - 1;
+    };
+    return n;
+};
+return settle(1);

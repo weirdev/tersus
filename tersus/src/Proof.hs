@@ -104,7 +104,7 @@ evalNextStatementWithFuel state = case nextStatement state of
     Ok ProofDef{} -> advanceStatement state
     Ok (Block statements) -> evalBlockStatement state statements
     Ok (If cond thenStmts elseStmts) -> evalIfStatement state cond thenStmts elseStmts
-    Ok loop@(While cond _ body) -> evalWhileStatement state loop cond body
+    Ok loop@(While cond _ _ body) -> evalWhileStatement state loop cond body
     Ok LoopEnd{} -> Error "LoopEnd is only used during validation"
     Ok EndBlock -> evalEndBlockStatement state
     Error e -> Error e
@@ -213,8 +213,8 @@ valNextStatement state =
                     ProofDef name args inputs outputs body -> valProofDef state name args inputs outputs body
                     Block bstmts -> valBlockStatement state bstmts
                     If cond thenStmts elseStmts -> valIfStatement state cond thenStmts elseStmts
-                    While cond invariant body -> valWhileStatement state cond invariant body
-                    LoopEnd invariant -> valLoopEnd state invariant
+                    While cond invariant term body -> valWhileStatement state cond invariant term body
+                    LoopEnd invariant decrease -> valLoopEnd state invariant decrease
                     EndBlock -> valEndBlockStatement state
         Error e -> Error e
 
@@ -240,13 +240,14 @@ valLetStatement state var expr =
 -- A function defined at the top level can call itself. Its body is validated with its own name bound to
 -- a copy of the function that exports what its output contract asserts, without having shown it yet:
 -- the body is validated assuming the contract, and the contract is then checked against the body.
--- This is partial correctness, as for a loop: nothing shows the recursion ends.
+-- A call to the copy has to show that the function ends, see callTermination.
 bindFunctionToItself :: Variable -> Expression -> VState -> Result VState String
-bindFunctionToItself var (Val (VFunct args ins outs body@NativeFunct{} _)) state@(VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx _ ruleCtx)
+bindFunctionToItself var (Val (VFunct args ins outs (NativeFunct sig term stmts) _)) state@(VState scope@(VScopeState _ _ _ Nothing) iotaCtx proofCtx _ ruleCtx)
     | Map.member var iotaCtx || Map.member functionBodyMarker iotaCtx = Ok state
     | otherwise =
         popIotaFromSeq state `bindResult` \(selfIota, VState _ _ _ iotaseq _) ->
-            let assumed = VFunct args ins outs body [p | ProofAssert p <- outs, all (`elem` ("return" : args)) (proofVars p)]
+            let body = NativeFunct sig (Just (Recursing term)) stmts
+                assumed = VFunct args ins outs body [p | ProofAssert p <- outs, all (`elem` ("return" : args)) (proofVars p)]
                 fact = FApp eqProof [ATerm selfIota, CTerm assumed]
              in Ok (withFacts state [fact] (VState scope (Map.insert var selfIota iotaCtx) (proofCtx ++ [fact]) iotaseq ruleCtx))
 bindFunctionToItself _ _ state = Ok state
@@ -432,7 +433,7 @@ containsReturn = any returns
     returns (Return _) = True
     returns (Block stmts) = containsReturn stmts
     returns (If _ thenStmts elseStmts) = containsReturn thenStmts || containsReturn elseStmts
-    returns (While _ _ body) = containsReturn body
+    returns (While _ _ _ body) = containsReturn body
     returns _ = False
 
 -- Variables assigned anywhere in the statements, including nested blocks
@@ -442,7 +443,7 @@ assignedVars = nubOrd . concatMap assigned
     assigned (Assign var _) = [var]
     assigned (Block stmts) = assignedVars stmts
     assigned (If _ thenStmts elseStmts) = assignedVars thenStmts ++ assignedVars elseStmts
-    assigned (While _ _ body) = assignedVars body
+    assigned (While _ _ _ body) = assignedVars body
     assigned _ = []
 
 -- Assigned variables that already exist outside the statements. Assigning any other variable
@@ -506,33 +507,92 @@ joinBranchesFrom s0 vars sThen sElse =
 traverseResult :: (a -> Result b String) -> [a] -> Result [b] String
 traverseResult = flatResultMap
 
--- Validates a loop by its invariant, without unrolling it. This proves partial correctness
--- only: nothing shows the loop terminates, and that is deliberately not checked.
+-- Validates a loop by its invariant, without unrolling it.
 --
--- 1. The invariant must hold before the first iteration.
--- 2. Every outer variable the body assigns is rebound to a fresh value with no facts, so
+-- 1. The loop has to say how it ends, see loopTermination.
+-- 2. The invariant must hold before the first iteration.
+-- 3. Every outer variable the body assigns is rebound to a fresh value with no facts, so
 --    nothing about its earlier values is assumed. Facts about other values stay true because
 --    values are immutable.
--- 3. Assuming the invariant and the condition, the body must re-establish the invariant.
--- 4. After the loop, the invariant holds and the condition does not.
+-- 4. Assuming the invariant and the condition, the body must re-establish the invariant, and the
+--    variant (if the loop has one) must be at least 0 at the start and smaller at the end.
+-- 5. After the loop, the invariant holds and the condition does not.
 --
 -- A body that contains `return` is validated as paths, see valReturningWhile.
-valWhileStatement :: VState -> Expression -> [ValidationStatement] -> [Statement] -> Result VState String
-valWhileStatement state cond invariant body =
+valWhileStatement :: VState -> Expression -> [ValidationStatement] -> Maybe Termination -> [Statement] -> Result VState String
+valWhileStatement state cond invariant term body =
     vAdvanceStatement state `bindResult` \advanced ->
-        prefixError "Loop invariant does not hold on entry: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
-            let loopVars = assignedOuterVars advanced body
-             in popNIotasFromSeq advanced (length loopVars) `bindResult` \(freshIotas, popped) ->
-                    let havocked = foldl (\s (var, iota) -> vInsertVar s var iota []) popped (zip loopVars freshIotas)
-                     in assumeValStmts havocked invariant `bindResult` \assumed ->
-                            valLoopCondition assumed cond `bindResult` \(condState, condIota) ->
-                                conditionAssumptions True cond condIota condState `bindResult` \bodyAssumptions ->
-                                    if containsReturn body
-                                        then valReturningWhile assumed cond invariant body bodyAssumptions
-                                        else
-                                            valBranch condState bodyAssumptions body `bindResult` \bodyState ->
-                                                prefixError "Loop invariant is not preserved: " (validateUserRuleInputs bodyState invariant) `bindResult` \_ ->
-                                                    valLoopExit (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond
+        loopTermination advanced term `bindResult` \_ ->
+            prefixError "Loop invariant does not hold on entry: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
+                let loopVars = assignedOuterVars advanced body
+                 in popNIotasFromSeq advanced (length loopVars) `bindResult` \(freshIotas, popped) ->
+                        let havocked = foldl (\s (var, iota) -> vInsertVar s var iota []) popped (zip loopVars freshIotas)
+                         in assumeValStmts havocked invariant `bindResult` \assumed ->
+                                valLoopCondition assumed cond `bindResult` \(condState, condIota) ->
+                                    conditionAssumptions True cond condIota condState `bindResult` \bodyAssumptions ->
+                                        if containsReturn body
+                                            then valReturningWhile assumed cond invariant term body bodyAssumptions
+                                            else
+                                                startIteration condState bodyAssumptions term `bindResult` \(iterState, decrease) ->
+                                                    valBranch iterState bodyAssumptions body `bindResult` \bodyState ->
+                                                        prefixError "Loop invariant is not preserved: " (validateUserRuleInputs bodyState invariant) `bindResult` \_ ->
+                                                            variantFailure "Loop variant does not decrease" decrease (validateUserRuleInputs bodyState decrease) `bindResult` \_ ->
+                                                                valLoopExit (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond
+
+-- A loop has to say how it ends. One that may not end is code that may not terminate, which a function
+-- has to be declared may_diverge to contain.
+loopTermination :: VState -> Maybe Termination -> Result () String
+loopTermination _ Nothing = Error "Loop must say how it ends: add `decreases <expression>` before its body, or `may_diverge`"
+loopTermination state (Just MayDiverge) = noteDivergence state "a loop is declared may_diverge"
+loopTermination _ _ = Ok ()
+
+-- The variant of a loop or function is an integer that has to be at least 0 where it starts, and smaller
+-- each time round. Its value at the start is kept in a variable that has a name no program can write, and
+-- the statements below check the value later on against it.
+--
+-- With `decreases e` the variant is an integer. With `shrinks e` it is an enum or struct, which needs no bound
+-- and is smaller when it is a part of the earlier value.
+variantStatements :: Variable -> Expression -> [ValidationStatement]
+variantStatements name variant = [AssignProofVar name variant]
+
+-- The expression of a clause that has a variant
+variantOf :: Maybe Termination -> Maybe Expression
+variantOf (Just (Decreases variant)) = Just variant
+variantOf (Just (Shrinks variant)) = Just variant
+variantOf _ = Nothing
+
+boundedBelow :: Variable -> Termination -> Expression -> [ValidationStatement]
+boundedBelow name (Decreases _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm name, CTerm (VInt 0)])]
+boundedBelow name _ variant = variantStatements name variant
+
+smallerThan :: Variable -> Variable -> Termination -> Expression -> [ValidationStatement]
+smallerThan name earlier (Decreases _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm name, ATerm earlier])]
+smallerThan name earlier _ variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct Within)) [ATerm name, ATerm earlier])]
+
+-- Says which variant it was that could not be shown to be fine
+variantFailure :: String -> [ValidationStatement] -> Result a String -> Result a String
+variantFailure _ _ (Ok a) = Ok a
+variantFailure what (AssignProofVar _ variant : _) (Error e) = Error (what ++ ": " ++ renderVarProof (exprToProof variant))
+variantFailure what _ (Error e) = Error (what ++ ": " ++ e)
+
+-- The names are made from the next iota, which no other loop in the program has
+variantName :: VState -> Variable
+variantName state = "variant " ++ case vGetIotaSeq state of
+    Iota name : _ -> name
+    [] -> ""
+
+-- The state at the start of an iteration, where the invariant and the condition hold. For a loop with a
+-- variant, that must be at least 0, and the state keeps its value. Also the statements that check at the
+-- end of the iteration that it is smaller.
+startIteration :: VState -> [IotaProof] -> Maybe Termination -> Result (VState, [ValidationStatement]) String
+startIteration condState bodyAssumptions (Just clause)
+    | Just variant <- variantOf (Just clause) =
+    let name = variantName condState
+        bounded = boundedBelow name clause variant
+     in variantFailure "Loop variant is not bounded below" bounded (validateUserRuleInputs (vInsertProofs condState bodyAssumptions) bounded) `bindResult` \_ ->
+            assumeValStmts condState (variantStatements name variant) `bindResult` \iterState ->
+                Ok (iterState, smallerThan (name ++ " after") name clause variant)
+startIteration condState _ _ = Ok (condState, [])
 
 -- The state after a loop: the invariant holds (already assumed in the given state) and the
 -- condition is false
@@ -549,21 +609,23 @@ valLoopExit state cond =
 -- The body path ends with LoopEnd, which checks that the invariant is preserved on every way
 -- of reaching the end of the body and then discards that path, since control only goes back
 -- to the condition. Only the paths that return are joined with the path after the loop.
-valReturningWhile :: VState -> Expression -> [ValidationStatement] -> [Statement] -> [IotaProof] -> Result VState String
-valReturningWhile assumed cond invariant body bodyAssumptions =
+valReturningWhile :: VState -> Expression -> [ValidationStatement] -> Maybe Termination -> [Statement] -> [IotaProof] -> Result VState String
+valReturningWhile assumed cond invariant term body bodyAssumptions =
     valLoopCondition assumed cond `bindResult` \(condState, _) ->
-        valPath (vSetContinuations condState emptyContinuations) bodyAssumptions (body ++ [LoopEnd invariant]) `bindResult` \pBody ->
-            valLoopExit (vSetIotaSeq assumed (vGetIotaSeq pBody)) cond `bindResult` \exitState ->
-                valBlock exitState `bindResult` \pExit ->
-                    joinReturnPaths assumed pBody pExit
+        startIteration condState bodyAssumptions term `bindResult` \(iterState, decrease) ->
+            valPath (vSetContinuations iterState emptyContinuations) bodyAssumptions (body ++ [LoopEnd invariant decrease]) `bindResult` \pBody ->
+                valLoopExit (vSetIotaSeq assumed (vGetIotaSeq pBody)) cond `bindResult` \exitState ->
+                    valBlock exitState `bindResult` \pExit ->
+                        joinReturnPaths assumed pBody pExit
 
--- The end of a loop body: the invariant must hold again. The path then stops, as control
--- goes back to the loop condition.
-valLoopEnd :: VState -> [ValidationStatement] -> Result VState String
-valLoopEnd state invariant =
+-- The end of a loop body: the invariant must hold again, and the variant must be smaller. The path then
+-- stops, as control goes back to the loop condition.
+valLoopEnd :: VState -> [ValidationStatement] -> [ValidationStatement] -> Result VState String
+valLoopEnd state invariant decrease =
     vAdvanceStatement state `bindResult` \advanced ->
         prefixError "Loop invariant is not preserved: " (validateUserRuleInputs advanced invariant) `bindResult` \_ ->
-            Ok (vMarkLoopBack (vSetContinuations (vTopLevelScope advanced) emptyContinuations))
+            variantFailure "Loop variant does not decrease" decrease (validateUserRuleInputs advanced decrease) `bindResult` \_ ->
+                Ok (vMarkLoopBack (vSetContinuations (vTopLevelScope advanced) emptyContinuations))
 
 -- Validates the loop condition in the given state, recording what it says about its result
 valLoopCondition :: VState -> Expression -> Result (VState, Iota) String
@@ -638,7 +700,7 @@ validateProofRuleDefinition state args inputValStmts outputValStmts bodyValStmts
 
 prepareProofRuleValidationState :: VState -> [Variable] -> [ValidationStatement] -> [Statement] -> Result VState String
 prepareProofRuleValidationState state args inputValStmts stmts =
-    prepareFunctionValidationState state args inputValStmts stmts
+    prepareFunctionValidationState state args inputValStmts (Just MayDiverge) stmts
 
 assignProofVarImpl :: VState -> Variable -> Expression -> Result VState String
 assignProofVarImpl state var expr =
@@ -909,8 +971,8 @@ validateValue state val = case val of
     _ -> Ok val
 
 valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> FunctBody -> Result [VariableProof] String
-valFunctDef state args inputValStmts outputValStmts (NativeFunct _ stmts) =
-    case prepareFunctionValidationState state args inputValStmts stmts of
+valFunctDef state args inputValStmts outputValStmts (NativeFunct _ term stmts) =
+    case prepareFunctionValidationState state args inputValStmts term stmts of
             Ok fnValState ->
                 let valResult =
                         doTrace4
@@ -922,9 +984,9 @@ valFunctDef state args inputValStmts outputValStmts (NativeFunct _ stmts) =
             Error e -> Error e
 valFunctDef _ _ _ _ BuiltinFunct{} = Ok [] -- Builtin functions assumed to be validly defined
 
-prepareFunctionValidationState :: VState -> [Variable] -> [ValidationStatement] -> [Statement] -> Result VState String
-prepareFunctionValidationState state args inputValStmts stmts =
-    let newState = markFunctionBody (vSetScope state emptyVScopeState)
+prepareFunctionValidationState :: VState -> [Variable] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> Result VState String
+prepareFunctionValidationState state args inputValStmts term stmts =
+    let newState = markFunctionBody term (vSetScope state emptyVScopeState)
         wContinuations =
             doTrace4
                 ("valFunctDef: Setting conts: " ++ show stmts)
@@ -934,7 +996,7 @@ prepareFunctionValidationState state args inputValStmts stmts =
                 case zipMap args niotas (,) of
                     Ok (argIotas, _) ->
                         let preInputValState = vInsertVars newState' argIotas []
-                         in assumeValStmts preInputValState inputValStmts
+                         in assumeValStmts preInputValState inputValStmts `bindResult` startFunctionVariant term
                     Error e -> Error e
             Error e -> Error e
 
@@ -943,9 +1005,65 @@ prepareFunctionValidationState state args inputValStmts stmts =
 functionBodyMarker :: Variable
 functionBodyMarker = "$body"
 
-markFunctionBody :: VState -> VState
-markFunctionBody state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
-    keepCache state (VState scope (Map.insert functionBodyMarker (Iota functionBodyMarker) iotaCtx) proofCtx iotaseq ruleCtx)
+-- Present in the state of the body of a function that is guaranteed to terminate, so that the body may not
+-- have code that is not, see noteDivergence
+terminatesMarker :: Variable
+terminatesMarker = "$terminates"
+
+markFunctionBody :: Maybe Termination -> VState -> VState
+markFunctionBody term state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
+    let marked = Map.insert functionBodyMarker (Iota functionBodyMarker) iotaCtx
+        terminating = case term of
+            Just MayDiverge -> Map.delete terminatesMarker marked
+            _ -> Map.insert terminatesMarker (Iota terminatesMarker) marked
+     in keepCache state (VState scope terminating proofCtx iotaseq ruleCtx)
+
+-- What a recursive call compares its variant with: the variant's value when the function was called
+entryVariantName :: Variable
+entryVariantName = "variant at entry"
+
+-- A function that says what decreases has it at least 0 for any arguments that meet the input contract, and
+-- keeps its value at the start
+startFunctionVariant :: Maybe Termination -> VState -> Result VState String
+startFunctionVariant (Just clause) state
+    | Just variant <- variantOf (Just clause) =
+    let bounded = boundedBelow entryVariantName clause variant
+     in variantFailure "Function variant is not bounded below" bounded (validateUserRuleInputs state bounded) `bindResult` \_ ->
+            assumeValStmts state (variantStatements entryVariantName variant)
+startFunctionVariant _ state = Ok state
+
+-- Whether the facts known at this point contradict each other, so that nothing here can run
+unreachable :: VState -> Bool
+unreachable state =
+    let context = vProofContext state
+        impossible = FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]
+     in Engine.entails (CTerm (VBool False)) context || Engine.entails impossible context
+
+-- Code that may not terminate, in a function that was not declared may_diverge, is an error if it can be
+-- reached. The code is also not guaranteed to terminate in the program or a function that is declared
+-- may_diverge, but they do not mind.
+noteDivergence :: VState -> String -> Result () String
+noteDivergence state why =
+    let VState _ iotaCtx _ _ _ = state
+     in if Map.member terminatesMarker iotaCtx && not (unreachable state)
+            then Error ("Not guaranteed to terminate: " ++ why ++ ". Declare the function may_diverge if that is intended")
+            else Ok ()
+
+-- What calling a function says about whether the caller ends. Calling a function declared may_diverge may
+-- not end. A function calling itself needs a variant that is smaller for the call than for the call it is
+-- in; without one it may not end.
+callTermination :: VState -> [Variable] -> [Iota] -> [IotaProof] -> FunctBody -> Result () String
+callTermination state varArgs argIotas argProofs (NativeFunct _ (Just term) _) = case term of
+    MayDiverge -> noteDivergence state "it calls a function that is declared may_diverge"
+    Recursing Nothing -> noteDivergence state "it calls itself and does not say what decreases"
+    Recursing (Just clause) | Just variant <- variantOf (Just clause) ->
+        case vLookupVar state entryVariantName of
+            Just entry ->
+                let smaller = smallerThan "variant of the call" entryVariantName clause variant
+                 in mapResult (const ()) (variantFailure "Recursive call does not decrease the variant" smaller (valFunctInput state (varArgs ++ [entryVariantName]) (argIotas ++ [entry]) argProofs smaller))
+            Nothing -> Error "Recursive call outside of the function that it calls"
+    _ -> Ok ()
+callTermination _ _ _ _ _ = Ok ()
 
 exportFunctOutputProofs :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Result [VariableProof] String
 exportFunctOutputProofs bodyState args inputValStmts outputValStmts =
@@ -1040,7 +1158,7 @@ evalFunctCallWithContext (VFunct vars _ _ _ _) _ args
     | length vars /= length args = Error (arityMismatchMessage vars args)
 evalFunctCallWithContext (VFunct _ _ _ (BuiltinFunct builtin) _) valCtx args =
     mapResult (\val -> (val, valCtx)) (evalBuiltinFunct builtin args)
-evalFunctCallWithContext (VFunct vars _ _ (NativeFunct _ block) _) valCtx args =
+evalFunctCallWithContext (VFunct vars _ _ (NativeFunct _ _ block) _) valCtx args =
     case zipMap vars args (,) of
         Ok (argVals, _) ->
             let varMap = foldl (\vm (var, val) -> insert var val vm) empty argVals
@@ -1090,14 +1208,15 @@ valFunctCall state fniota iiotas iproofs retiota =
         Error e -> Error e
         Ok (VFunct varArgs _ _ _ _)
             | length varArgs /= length iiotas -> Error (arityMismatchMessage varArgs iiotas)
-        Ok fnVal@(VFunct varArgs inputValStmts _ _ exportedProofs) ->
+        Ok fnVal@(VFunct varArgs inputValStmts _ body exportedProofs) ->
             case valFunctInput state varArgs iiotas iproofs inputValStmts of
                 Error e -> Error $ "Funct input validation failed: " ++ e
                 Ok fnValState ->
-                    case instantiateFunctOutputProofs state varArgs iiotas retiota exportedProofs of
-                        Error e -> Error e
-                        Ok (stateWithExports, instantiatedProofs) ->
-                            Ok (stateWithExports, maybeConcreteFunctionResult fnValState fnVal iiotas iproofs retiota instantiatedProofs)
+                    callTermination (vInsertProofs state iproofs) varArgs iiotas iproofs body `bindResult` \_ ->
+                        case instantiateFunctOutputProofs state varArgs iiotas retiota exportedProofs of
+                            Error e -> Error e
+                            Ok (stateWithExports, instantiatedProofs) ->
+                                Ok (stateWithExports, maybeConcreteFunctionResult fnValState fnVal iiotas iproofs retiota instantiatedProofs)
 
 resolveValidatedFunction :: Iota -> [IotaProof] -> Result Value String
 resolveValidatedFunction fniota iproofs =

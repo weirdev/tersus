@@ -5,7 +5,7 @@ i = 0;
 total = 0;
 // The invariant must hold before the first iteration, is assumed at the start of the body,
 // and must hold again at the end of the body.
-while i < 3 [{ affirm i <= 3; }] {
+while i < 3 [{ affirm i <= 3; }] decreases 3 - i {
     i = i + 1;
     total = total + 10;
 };

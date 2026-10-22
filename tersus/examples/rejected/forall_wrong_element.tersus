@@ -13,7 +13,7 @@ fn pairSums(a: List<Int>, b: List<Int>) -> List<Int> [{
         affirm i <= n;
         affirm size(out) = i;
         affirm forall j in 0..i: get(out, j) = (get(a, j) + get(b, j));
-    }] {
+    }] decreases n - i {
         out = push(out, get(a, i) + get(b, i));
         i = i + 1;
     };

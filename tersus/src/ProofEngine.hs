@@ -341,6 +341,16 @@ querySolver facts goals =
                     [ arithmeticEntails arithmetic rel (rep classes (idOf table4 lhs)) (rep classes (idOf table4 rhs))
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
                     ]
+                || or
+                    [ differenceEntails differences arithmetic zeroClass rel (rep classes (idOf table4 lhs)) (rep classes (idOf table4 rhs))
+                    | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [lhs, rhs] <- [goal]
+                    ]
+                || or
+                    [ partOf table4 classes (idOf table4 lhs) (idOf table4 rhs)
+                    | FApp (CTerm (VFunct _ _ _ (BuiltinFunct Within) _)) [lhs, rhs] <- [goal]
+                    ]
+        differences = differencesByClass table4 classes
+        zeroClass = rep classes zeroId
         -- The applications by the classes of their function and arguments, to find a relation that is a fact
         -- under congruence
         appsBySignature = Map.fromListWith (++) [((rep classes functId, map (rep classes) argIds), [termId]) | (termId, (functId, argIds)) <- tableApps table4]
@@ -353,6 +363,7 @@ querySolver facts goals =
                             || or [sameClass l r | funct == eqProof]
                             || or [distinct l r | CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _) <- [funct]]
                             || or [arithmeticEntails arithmetic rel (rep classes l) (rep classes r) | CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _) <- [funct]]
+                            || or [differenceEntails differences arithmetic zeroClass rel (rep classes l) (rep classes r) | CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _) <- [funct]]
                         )
                 _ -> Nothing
         quick _ = Nothing
@@ -481,6 +492,26 @@ selections table classes = reads ++ injectivity ++ casts
             , Just (Ctor name fields) <- [Map.lookup (rep classes functId) builtinOfClass]
             , length fields == length args
             ]
+
+-- Whether the first term is a part of the second: a field of it, or a field of a field. It goes by the field reads
+-- among the terms, so a value read from the second term and then bound to a name is found.
+partOf :: TermTable -> IntMap.IntMap Int -> Int -> Int -> Bool
+partOf table classes inner outer =
+    rep classes inner /= rep classes outer && Set.member (rep classes inner) (reached Set.empty [rep classes outer])
+  where
+    builtinOfClass = builtinsByClass table classes (const True)
+    children =
+        Map.fromListWith
+            (++)
+            [ (rep classes structId, [rep classes termId])
+            | (termId, (functId, [structId])) <- tableApps table
+            , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
+            , Just _ <- [fieldRead funct]
+            ]
+    reached seen [] = seen
+    reached seen (next : rest) =
+        let new = [child | child <- Map.findWithDefault [] next children, Set.notMember child seen]
+         in reached (foldr Set.insert seen new) (new ++ rest)
 
 -- Evaluation
 --
@@ -909,6 +940,35 @@ arithmeticEdges table classes trueId zeroId =
         constEdges = concat [diff termId zeroId n | (termId, n) <- Map.toList intOfClass]
         edges = constEdges ++ concat [appEdges t functId args | (t, (functId, args)) <- tableApps table]
      in let graph = buildGraph edges in Arithmetic graph (not (consistent graph))
+
+-- The differences x - y among the terms, as the classes of x and y, by the class of the difference
+differencesByClass :: TermTable -> IntMap.IntMap Int -> Map.Map Int [(Int, Int)]
+differencesByClass table classes =
+    Map.fromListWith
+        (++)
+        [ (rep classes termId, [(rep classes x, rep classes y)])
+        | (termId, (functId, [x, y])) <- tableApps table
+        , Just Minus <- [Map.lookup (rep classes functId) builtinOfClass]
+        ]
+  where
+    builtinOfClass = builtinsByClass table classes (== Minus)
+
+-- The constraints are on the differences between terms, so a term x - y is a node of its own that they say
+-- nothing about. A difference compared with zero, or with another that has a side in common, is a comparison
+-- of the other sides: x - y >= 0 is x >= y, and x - y < x - z is z < y. That is what a loop variant such as
+-- n - i needs.
+differenceEntails :: Map.Map Int [(Int, Int)] -> Arithmetic -> Int -> Rel -> Int -> Int -> Bool
+differenceEntails differences arithmetic zeroClass rel lhs rhs =
+    or [arithmeticEntails arithmetic rel x y | rhs == zeroClass, (x, y) <- of' lhs]
+        || or [arithmeticEntails arithmetic rel y x | lhs == zeroClass, (x, y) <- of' rhs]
+        || or
+            [ if x1 == x2 then arithmeticEntails arithmetic rel y2 y1 else arithmeticEntails arithmetic rel x1 x2
+            | (x1, y1) <- of' lhs
+            , (x2, y2) <- of' rhs
+            , x1 == x2 || y1 == y2
+            ]
+  where
+    of' side = Map.findWithDefault [] side differences
 
 -- Whether lhs rel rhs follows from the constraints, for the class representatives lhs and rhs
 arithmeticEntails :: Arithmetic -> Rel -> Int -> Int -> Bool

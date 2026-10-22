@@ -151,6 +151,7 @@ builtinFunct Div =
         (BuiltinFunct Div)
         []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
+builtinFunct Within = VFunct ["a", "b"] [] [] (BuiltinFunct Within) []
 
 stdLibCtx :: Map Variable Value
 stdLibCtx =
@@ -207,6 +208,11 @@ evalBuiltinFunct (Is _) _ = Error "Is only tests the variant of an enum value"
 evalBuiltinFunct (Project variant field) [VData name fields]
     | name /= variant = Error ("Expected a " ++ variant ++ " but got a " ++ name)
     | otherwise = maybe (Error ("Variant " ++ variant ++ " has no field " ++ field)) Ok (lookup field fields)
+evalBuiltinFunct Within [inner, outer] = Ok $ VBool (partOf inner outer)
+  where
+    partOf part (VData _ fields) = any (\(_, field) -> field == part || partOf part field) fields
+    partOf _ _ = False
+evalBuiltinFunct Within _ = Error "Within takes two values"
 evalBuiltinFunct (Cast _) [value] = Ok value
 evalBuiltinFunct (Cast _) _ = Error "A cast takes one value"
 evalBuiltinFunct (Project _ _) _ = Error "A field can only be read from an enum value"
