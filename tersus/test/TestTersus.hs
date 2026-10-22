@@ -1888,6 +1888,48 @@ testRecursion =
             , parseValidateFailProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };" "Could not prove: return = get(l, size(l) - 1)"
             ]
 
+-- x != y is a fact, and c * x for a constant c is related to the terms it is made from by the difference constraints
+testRefinedArithmetic :: Test
+testRefinedArithmetic =
+    let given facts goal = "fn f(i: Int, j: Int, n: Int, m: Int) -> Int [{ " ++ facts ++ " }] [{ }] { affirm " ++ goal ++ "; return 0; };"
+        holds facts goal = parseValidProgramHelper (given facts goal)
+        fails facts goal = parseValidateFailProgramHelper (given facts goal) ("Could not prove: " ++ goal)
+     in testCaseSeq
+            "testRefinedArithmetic"
+            [ -- x != y with x <= y is x < y, also next to a constant
+              holds "affirm i >= -3; affirm i != -3;" "i > -3"
+            , holds "affirm i <= n; affirm i != n;" "i < n"
+            , holds "affirm i <= n; affirm i != n;" "i + 1 <= n"
+            , holds "affirm n >= i; affirm n != i;" "i < n"
+            , holds "affirm i < n; affirm i != n;" "i < n"
+            , fails "affirm i <= 5; affirm i != 3;" "i < 3"
+            , fails "affirm i != n;" "i < n"
+            , holds "affirm i != n; affirm i <= n; affirm n <= i;" "j = j + 1"
+            , -- A loop that stops at a value other than its bound
+              parseValidProgramHelper "i = 5; while i != 0 [{ affirm i >= 0; }] shrinks i { i = i - 1; }; affirm i = 0;"
+            , parseValidProgramHelper "i = 5; while i != -3 [{ affirm i >= -3; }] shrinks i + 3 { i = i - 1; };"
+            , -- c * x for a positive or negative constant
+              holds "affirm n > 0;" "2 * n > 0"
+            , holds "affirm n > 0;" "n * 2 > 0"
+            , holds "affirm n >= 1;" "3 * n >= 3"
+            , holds "affirm n > 2;" "n * 3 > 6"
+            , fails "affirm n >= 0;" "2 * n > 0"
+            , fails "affirm n >= 1;" "3 * n > 3"
+            , holds "affirm n < 0;" "-2 * n > 0"
+            , fails "affirm n <= 0;" "-2 * n > 0"
+            , holds "affirm n < m;" "2 * n < 2 * m"
+            , holds "affirm n < m;" "2 * n < 2 * m - 1"
+            , fails "affirm n < m;" "2 * n < 2 * m - 2"
+            , holds "affirm n <= m;" "3 * n <= 3 * m"
+            , fails "affirm n <= m;" "2 * n < 2 * m"
+            , holds "affirm n < m;" "-2 * m < -2 * n"
+            , -- Different constants are different terms
+              fails "affirm n < m;" "2 * n < 3 * m"
+            , -- A variant that is twice a counter
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks 2 * n { if n < 1 { return 0; } else { return f(n - 1); }; }; x = f(3);"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks 2 * n { if n < 1 { return 0; } else { return f(n + 1); }; }; x = f(3);" "Recursive call does not shrink the variant"
+            ]
+
 -- Loops and recursive functions say why they end, and code that may not end is declared
 testTermination :: Test
 testTermination =
@@ -2358,7 +2400,8 @@ testMulDivNegative =
           parseValidProgramHelper "x = 3; y = x * 4; affirm y = 12; z = y / 5; affirm z = 2;"
         , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 1; }; x = f(3);"
         , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return = 0; }] { return n * 0; }; x = f(3);"
-        , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);" "Could not prove: return > 0"
+        , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);"
+        , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return > 0; }] { return n * 2; }; x = f(3);" "Could not prove: return > 0"
         , parseValidateFailProgramHelper "x = 3; y = x + -1; affirm y = 3;" "Could not prove: y = 3"
         , -- Division needs a divisor known to be non-zero
           parseValidProgramHelper "fn f(a: Int, b: Int) -> Int [{ affirm b != 0; }] [{ }] { return a / b; }; x = f(8, 2);"
@@ -2675,6 +2718,7 @@ main = do
                 , testRecursion
                 , testSolverCache
                 , testTermination
+                , testRefinedArithmetic
                 , testPrecedence
                 , testFirstLast
                 , testFunctionCalls
