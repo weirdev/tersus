@@ -76,6 +76,7 @@ builtinName (Field _ field) = "." ++ field
 builtinName (Project _ field) = "." ++ field
 builtinName (Cast variant) = "as " ++ variant
 builtinName (Is variant) = "is " ++ variant
+builtinName Within = "within"
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i

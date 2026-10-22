@@ -15,6 +15,9 @@ type Name = String
 data BuiltinFunct
     = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div
     | Rel Rel
+    | -- Within a b: a is a field of b, or a field of a field, and so on. Never parsed: it is how the validator checks
+      -- that what a loop or function says shrinks has done so.
+      Within
     | Ctor Name [Variable]
     | Field (Maybe Name) Variable
     | -- Is Ctor tests which variant an enum value is; Project Ctor reads a field of a value known to be that variant
@@ -33,7 +36,22 @@ data Type = TInt | TBool | TList Type | TFn [Type] Type | TNamed Name | TVariant
 -- The declared parameter types and return type of a user function
 data Signature = Signature [Type] Type deriving (Show, Eq, Ord)
 
-data FunctBody = NativeFunct Signature [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord)
+-- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
+-- terminate, and so may not call itself.
+data Termination
+    = -- decreases e: an integer that is at least 0 and gets smaller every iteration or recursive call
+      Decreases Expression
+    | -- shrinks e: a value that is, each iteration or recursive call, a part of the one before it (a field,
+      -- or a field of a field). Enums and structs are finite, so this ends.
+      Shrinks Expression
+    | -- may_diverge: no guarantee, and whatever runs it is not guaranteed to terminate either
+      MayDiverge
+    | -- Never parsed: the copy of a function that its own body calls, with what the function said
+      Recursing (Maybe Termination)
+    deriving (Show, Eq, Ord)
+
+-- NativeFunct signature termination body
+data FunctBody = NativeFunct Signature (Maybe Termination) [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord)
 
 data Value
     = VInt Integer
@@ -92,10 +110,11 @@ data Statement
     | Block [Statement]
     | -- If condition thenBranch elseBranch; a missing else is an empty branch
       If Expression [Statement] [Statement]
-    | -- While condition invariant body; the invariant is only used by the validator
-      While Expression [ValidationStatement] [Statement]
-    | -- Never parsed: the validator ends a loop body with this to check the invariant, see valReturningWhile
-      LoopEnd [ValidationStatement]
+    | -- While condition invariant termination body; the invariant and termination are only used by the validator
+      While Expression [ValidationStatement] (Maybe Termination) [Statement]
+    | -- Never parsed: the validator ends a loop body with this to check the invariant and that the variant has
+      -- decreased (the second list, empty without a variant), see valReturningWhile
+      LoopEnd [ValidationStatement] [ValidationStatement]
     | EndBlock
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 

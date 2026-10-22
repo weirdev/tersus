@@ -3,7 +3,7 @@
 fn flags(values: List<Int>) -> List<Bool> {
     out = [];
     i = 0;
-    while i < size(values) [{ affirm i >= 0; affirm size(out) = i; }] {
+    while i < size(values) [{ affirm i >= 0; affirm size(out) = i; }] decreases size(values) - i {
         out = push(out, get(values, i) > 0);
         i = i + 1;
     };

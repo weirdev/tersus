@@ -139,7 +139,8 @@ ifStatement = do
         whitespace
         curlyBracesParse statementBlock <|> ((: []) <$> ifStatement)
 
--- The loop invariant uses the contract syntax and is optional: `while c [{ affirm ...; }] { ... }`.
+-- The loop invariant uses the contract syntax and is optional: `while c [{ affirm ...; }] decreases e { ... }`.
+-- What follows is how the loop ends, see terminationClause.
 whileStatement :: Parser Statement
 whileStatement = do
     keyword "while"
@@ -148,8 +149,16 @@ whileStatement = do
     whitespace
     invariant <- option [] functContractReqs
     whitespace
+    termination <- terminationClause
     body <- curlyBracesParse statementBlock
-    return (While cond invariant body)
+    return (While cond invariant termination body)
+
+-- `decreases e`, `shrinks e` or `may_diverge`, before the body of a loop or function. Both are optional here, the validator
+-- decides whether leaving them out is allowed.
+terminationClause :: Parser (Maybe Termination)
+terminationClause = optionMaybe (clause <* whitespace)
+  where
+    clause = (keyword "may_diverge" >> return MayDiverge) <|> (keyword "decreases" >> whitespace >> Decreases <$> expression) <|> (keyword "shrinks" >> whitespace >> Shrinks <$> expression)
 
 -- enum Name { Variant, Variant { field: Type, ... }, ... }
 enumStatement :: Parser Statement
@@ -400,9 +409,10 @@ functStatement = do
     whitespace
     outputReqs <- option [] functContractReqs
     whitespace
+    termination <- terminationClause
     fnBody <- curlyBracesParse statementBlock
     whitespace
-    return (Assign var (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType) fnBody) [])))
+    return (Assign var (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType) termination fnBody) [])))
 
 -- A parameter is a name and its type: `n: Int`
 parameter :: Parser (Variable, Type)

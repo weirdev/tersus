@@ -1,5 +1,5 @@
 // Rejected: the invariant i <= 2 holds on entry, but the body can take i from 2 to 3.
 i = 0;
-while i < 3 [{ affirm i <= 2; }] {
+while i < 3 [{ affirm i <= 2; }] decreases 3 - i {
     i = i + 1;
 };

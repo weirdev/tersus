@@ -1,0 +1,71 @@
+// How code says that it ends. Statements end by themselves. A loop has to say why it does, and so does a
+// function that calls itself; the validator checks what they say. Anything that is not guaranteed to
+// terminate has to be declared may_diverge, and so does every function that contains it.
+
+// `decreases e` names an integer that is at least 0 when an iteration starts and is smaller when it ends.
+fn countDown(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] {
+    i = n;
+    steps = 0;
+    while i > 0 [{ affirm i >= 0; affirm steps >= 0; }] decreases i {
+        i = i - 1;
+        steps = steps + 1;
+    };
+    return steps;
+};
+
+// The same for a function that calls itself: the input contract makes n at least 0, and the call has n - 1.
+fn sumTo(n: Int) -> Int [{ affirm n >= 0; }] decreases n {
+    if n < 1 { return 0; } else { return n + sumTo(n - 1); };
+};
+
+// A difference such as n - i is compared the way its two sides are: n - i >= 0 is n >= i.
+fn countUp(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] decreases n - i {
+    if i < n { return countUp(i + 1, n); } else { return n; };
+};
+
+// `shrinks e` is for an enum or struct, whose value gets smaller when it is replaced by a field of itself.
+enum Tree {
+    Leaf,
+    Branch { left: Tree, value: Int, right: Tree },
+};
+
+fn leaves(t: Tree) -> Int shrinks t {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Branch { left: l, value: v, right: r } => leaves(l) + leaves(r),
+    };
+};
+
+// A loop can walk down a value the same way.
+fn leftmostDepth(t: Tree) -> Int {
+    depth = 0;
+    while t is Tree::Branch shrinks t {
+        t = (t as Tree::Branch).left;
+        depth = depth + 1;
+    };
+    return depth;
+};
+
+// A loop or function that is not shown to end is declared may_diverge. It validates as before.
+fn settle(n: Int) -> Int may_diverge {
+    i = n;
+    while i != 1 may_diverge {
+        if i > 1 { i = i - 1; } else { i = i + 1; };
+    };
+    return i;
+};
+
+// A function that calls it is not guaranteed to terminate either, so it says so.
+fn settleTwice(n: Int) -> Int may_diverge {
+    return settle(n) + settle(n + 1);
+};
+
+// Code that cannot be reached does not count: no n is both above 0 and below 0.
+fn unreachableSpin(n: Int) -> Int {
+    if n > 0 {
+        if n < 0 { return settle(n); };
+    };
+    return n;
+};
+
+return countDown(5) + sumTo(4) + countUp(2, 6) + leaves(Tree::Branch { left: Tree::Leaf, value: 1, right: Tree::Leaf });

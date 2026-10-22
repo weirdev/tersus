@@ -31,7 +31,7 @@ enum Tree {
     Branch { left: Tree, value: Int, right: Tree },
 };
 
-fn sum(t: Tree) -> Int {
+fn sum(t: Tree) -> Int shrinks t {
     return match t {
         Tree::Leaf => 0,
         Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r),

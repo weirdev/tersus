@@ -1,7 +1,7 @@
 // Rejected: the loop can end without reaching its return, and nothing returns after it.
 fn f(n: Int) -> Int {
     i = 0;
-    while i < n {
+    while i < n decreases n - i {
         return i;
     };
 };
