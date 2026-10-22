@@ -1056,12 +1056,14 @@ callTermination :: VState -> [Variable] -> [Iota] -> [IotaProof] -> FunctBody ->
 callTermination state varArgs argIotas argProofs (NativeFunct _ (Just term) _) = case term of
     MayDiverge -> noteDivergence state "it calls a function that is declared ~"
     Recursing Nothing -> noteDivergence state "it calls itself and does not say what shrinks"
+    -- Inside the function itself this is not an error, as the function is declared ~ too. From a function defined inside it, it is.
+    Recursing (Just MayDiverge) -> noteDivergence state "it calls a function that is declared ~"
     Recursing (Just clause) | Just variant <- variantOf (Just clause) ->
         case vLookupVar state entryVariantName of
             Just entry ->
                 let smaller = smallerThan "variant of the call" entryVariantName clause variant
                  in mapResult (const ()) (variantFailure "Recursive call does not shrink the variant" smaller (valFunctInput state (varArgs ++ [entryVariantName]) (argIotas ++ [entry]) argProofs smaller))
-            Nothing -> Error "Recursive call outside of the function that it calls"
+            Nothing -> Error "A function can only call itself from its own body, not from a function defined inside it, unless both are declared ~"
     _ -> Ok ()
 callTermination _ _ _ _ _ = Ok ()
 

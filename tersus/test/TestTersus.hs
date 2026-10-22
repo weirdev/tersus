@@ -1941,6 +1941,16 @@ testTermination =
             , parseValidateFailProgramHelper "fn settle(n: Int) -> Int { while n != 1 ~ { n = n - 1; }; return n; };" "Not guaranteed to terminate: a loop is declared ~"
             , parseValidateFailProgramHelper (settle ++ "fn twice(n: Int) -> Int { return settle(n) + 1; };") "Not guaranteed to terminate: it calls a function that is declared ~"
             , parseValidProgramHelper (settle ++ "fn twice(n: Int) -> Int ~ { return settle(n) + 1; };")
+            , -- A cycle has to be a function calling itself: a function inside another cannot call the one around it unless both say ~
+              parseValidProgramHelper "fn f(n: Int) -> Int ~ { fn g(m: Int) -> Int ~ { return f(m); }; return g(n); };"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int ~ { fn g(m: Int) -> Int { return f(m); }; return g(n); };" "Not guaranteed to terminate: it calls a function that is declared ~"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int { fn g(m: Int) -> Int { return f(m); }; return g(n); };" "Not guaranteed to terminate: it calls itself"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { fn g(m: Int) -> Int [{ affirm m >= 0; }] { return f(m); }; if n < 1 { return 0; } else { return g(n - 1); }; };" "not from a function defined inside it"
+            , -- Calling itself through another name is still a call to itself
+              parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { h = f; return h(n); };" "Not guaranteed to terminate: it calls itself"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { h = f; if n < 1 { return 0; } else { return h(n - 1); }; };"
+            , -- A function sees only the functions before it, so two cannot call each other
+              parseValidateFailProgramHelper "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return a(n); };" "Undefined variable: b"
             , -- The program itself may call one
               parseValidProgramHelper (settle ++ "x = settle(3);")
             , -- Code that cannot be reached is not counted
