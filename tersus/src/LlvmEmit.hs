@@ -20,13 +20,16 @@ import Utils
 -- operations assume them, as `unreachable` would. What the language itself defines does stop the program: an Int that
 -- leaves its 64 bits, with the same message as the executor of the MIR.
 --
+-- A program that ends without a `return` on some path (`if c { return 1; };`) returns nothing on that path, so the function
+-- of `main` returns the value with a flag that says whether `_0` was assigned, and only then is the value printed.
+--
 -- Int is i64 and Bool is i1. A program that uses anything else is refused for now.
 
 emitProgram :: Program -> Result String String
 emitProgram program =
-    flatResultMap (\(name, fn) -> emitFunction program (functionSymbol name) fn) (Map.toList (progFunctions program))
+    flatResultMap (\(name, fn) -> emitFunction program False (functionSymbol name) fn) (Map.toList (progFunctions program))
         `bindResult` \functions ->
-            emitFunction program "@tersus_main" (progMain program) `bindResult` \mainFunction ->
+            emitFunction program True "@tersus_main" (progMain program) `bindResult` \mainFunction ->
                 entryPoint (progMain program) `bindResult` \entry ->
                     Ok (unlines (concat (declarations : intersperseBlank (functions ++ [mainFunction, entry]))))
   where
@@ -43,16 +46,30 @@ declarations =
     , ""
     ]
 
--- The C-level main: runs the program and prints its return value, if it has one
+-- The C-level main: runs the program and prints its return value, if it returned one
 entryPoint :: Function -> Result [String] String
 entryPoint fn =
     case fnReturns fn of
-        Nothing -> Ok (wrap ["call void @tersus_main()"])
-        Just TInt -> Ok (wrap ["%r = call i64 @tersus_main()", "call void @tersus_print_int(i64 %r)"])
-        Just TBool -> Ok (wrap ["%r = call i1 @tersus_main()", "%z = zext i1 %r to i32", "call void @tersus_print_bool(i32 %z)"])
+        Nothing -> Ok (wrap ["call void @tersus_main()", "ret i32 0"])
+        Just TInt -> Ok (wrap (withValue "i64" ["call void @tersus_print_int(i64 %v)"]))
+        Just TBool -> Ok (wrap (withValue "i1" ["%z = zext i1 %v to i32", "call void @tersus_print_bool(i32 %z)"]))
         Just t -> Error (unsupportedType t)
   where
-    wrap body = ["define i32 @main() {"] ++ map ("    " ++) (body ++ ["ret i32 0"]) ++ ["}"]
+    wrap body = ["define i32 @main() {"] ++ map indent body ++ ["}"]
+    indent l = if last l == ':' then l else "    " ++ l
+    withValue t printIt =
+        [ "%r = call " ++ resultStruct t ++ " @tersus_main()"
+        , "%ok = extractvalue " ++ resultStruct t ++ " %r, 1"
+        , "br i1 %ok, label %print, label %done"
+        , "print:"
+        , "%v = extractvalue " ++ resultStruct t ++ " %r, 0"
+        ]
+            ++ printIt
+            ++ ["br label %done", "done:", "ret i32 0"]
+
+-- What the function of `main` returns when the program can return a value: the value, and whether it was assigned
+resultStruct :: String -> String
+resultStruct t = "{ " ++ t ++ ", i1 }"
 
 -- Generating the code of one function: a counter for the names of temporaries and labels, and the lines so far (last first)
 newtype G a = G {runG :: Int -> [String] -> Result (a, Int, [String]) String}
@@ -86,10 +103,13 @@ freshLabel base = G (\n ls -> Ok (base ++ show n, n + 1, ls))
 ins :: String -> String -> G String
 ins base text = G (\n ls -> let name = "%" ++ base ++ show n in Ok (name, n + 1, ("    " ++ name ++ " = " ++ text) : ls))
 
-emitFunction :: Program -> String -> Function -> Result [String] String
-emitFunction program symbol fn =
+-- The function of `main` (the entry) also keeps whether the return slot was assigned
+emitFunction :: Program -> Bool -> String -> Function -> Result [String] String
+emitFunction program entry symbol fn =
     inFunction (flatResultMap (localLlvmType fn) (fnParams fn)) `bindResult` \paramTypes ->
-        inFunction (maybe (Ok "void") llvmType (fnReturns fn)) `bindResult` \returnType ->
+        inFunction (maybe (Ok "void") llvmType (fnReturns fn)) `bindResult` \valueType ->
+        let returnType = if entry && fnReturns fn /= Nothing then resultStruct valueType else valueType
+         in
             inFunction (flatResultMap (\(l, d) -> mapResult ((,) l) (llvmType (localType d))) (Map.toList (fnLocals fn))) `bindResult` \localTypes ->
                 let params = intercalate ", " [t ++ " %p" ++ localNumber p | (p, t) <- zip (fnParams fn) paramTypes]
                     header = "define internal " ++ returnType ++ " " ++ symbol ++ "(" ++ params ++ ") {"
@@ -97,8 +117,13 @@ emitFunction program symbol fn =
                         ["entry:"]
                             ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes]
                             ++ ["    store " ++ t ++ " %p" ++ localNumber p ++ ", ptr " ++ slot p | (p, t) <- zip (fnParams fn) paramTypes]
+                            ++ entryPrologue
                             ++ ["    br label %bb" ++ blockNumber (BlockId 0)]
-                 in case runG (mapM_ (emitBlock program fn) (Map.toList (fnBlocks fn))) 0 [] of
+                    entryPrologue =
+                        if entry && fnReturns fn /= Nothing
+                            then ["    %returned = alloca i1", "    store i1 false, ptr %returned", "    store " ++ valueType ++ " " ++ (if valueType == "i1" then "false" else "0") ++ ", ptr " ++ slot (Local 0)]
+                            else []
+                 in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) 0 [] of
                         Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
                         Ok (_, _, body) ->
                             Ok ([header] ++ prologue ++ reverse body ++ overflowBlock ++ ["}"])
@@ -108,17 +133,17 @@ emitFunction program symbol fn =
         Ok a -> Ok a
     overflowBlock = ["overflow:", "    call void @tersus_overflow()", "    unreachable"]
 
-emitBlock :: Program -> Function -> (BlockId, BasicBlock) -> G ()
-emitBlock program fn (b, BasicBlock stmts term) = do
+emitBlock :: Program -> Bool -> Function -> (BlockId, BasicBlock) -> G ()
+emitBlock program entry fn (b, BasicBlock stmts term) = do
     label ("bb" ++ blockNumber b)
-    mapM_ (emitStatement fn) stmts
-    emitTerminator program fn term
+    mapM_ (emitStatement entry fn) stmts
+    emitTerminator program entry fn term
 
-emitStatement :: Function -> Statement -> G ()
-emitStatement _ (Ghost _ _) = pure ()
-emitStatement fn (Assign dest rv) = do
+emitStatement :: Bool -> Function -> Statement -> G ()
+emitStatement _ _ (Ghost _ _) = pure ()
+emitStatement entry fn (Assign dest rv) = do
     result <- rvalue fn rv
-    store fn dest result
+    storeResult entry fn dest result
 
 rvalue :: Function -> Rvalue -> G String
 rvalue fn rv =
@@ -193,12 +218,12 @@ roundsTheOtherWay r divisor = do
     differ <- ins "c" ("icmp slt i64 " ++ signs ++ ", 0")
     ins "c" ("and i1 " ++ nonZero ++ ", " ++ differ)
 
-emitTerminator :: Program -> Function -> Terminator -> G ()
-emitTerminator _ _ (Goto b) = emit ("br label %bb" ++ blockNumber b)
-emitTerminator _ fn (SwitchBool o yes no) = do
+emitTerminator :: Program -> Bool -> Function -> Terminator -> G ()
+emitTerminator _ _ _ (Goto b) = emit ("br label %bb" ++ blockNumber b)
+emitTerminator _ _ fn (SwitchBool o yes no) = do
     v <- operandValue fn o
     emit ("br i1 " ++ v ++ ", label %bb" ++ blockNumber yes ++ ", label %bb" ++ blockNumber no)
-emitTerminator program fn (Call (Const (CFn name)) args dest next) =
+emitTerminator program entry fn (Call (Const (CFn name)) args dest next) =
     case Map.lookup name (progFunctions program) of
         Nothing -> failG ("Call of a function that does not exist: " ++ name)
         Just callee -> do
@@ -206,17 +231,23 @@ emitTerminator program fn (Call (Const (CFn name)) args dest next) =
             paramTypes <- mapM (\p -> localTypeG callee p >>= typeG) (fnParams callee)
             returnType <- maybe (failG ("Function without a result: " ++ name)) typeG (fnReturns callee)
             result <- ins "c" ("call " ++ returnType ++ " " ++ functionSymbol name ++ "(" ++ intercalate ", " (zipWith (\t v -> t ++ " " ++ v) paramTypes values) ++ ")")
-            store fn dest result
+            storeResult entry fn dest result
             emit ("br label %bb" ++ blockNumber next)
-emitTerminator _ _ (Call callee _ _ _) = failG ("Native code does not support a call of " ++ renderOperand' callee ++ " yet")
-emitTerminator _ fn Return =
+emitTerminator _ _ _ (Call callee _ _ _) = failG ("Native code does not support a call of " ++ renderOperand' callee ++ " yet")
+emitTerminator _ entry fn Return =
     case fnReturns fn of
         Nothing -> emit "ret void"
         Just ty -> do
             t <- typeG ty
             v <- ins "v" ("load " ++ t ++ ", ptr " ++ slot (Local 0))
-            emit ("ret " ++ t ++ " " ++ v)
-emitTerminator _ _ Unreachable = emit "unreachable"
+            if entry
+                then do
+                    returned <- ins "f" "load i1, ptr %returned"
+                    withValue <- ins "w" ("insertvalue " ++ resultStruct t ++ " undef, " ++ t ++ " " ++ v ++ ", 0")
+                    both <- ins "w" ("insertvalue " ++ resultStruct t ++ " " ++ withValue ++ ", i1 " ++ returned ++ ", 1")
+                    emit ("ret " ++ resultStruct t ++ " " ++ both)
+                else emit ("ret " ++ t ++ " " ++ v)
+emitTerminator _ _ _ Unreachable = emit "unreachable"
 
 renderOperand' :: Operand -> String
 renderOperand' o = renderRvalue (Use o)
@@ -235,6 +266,12 @@ operandType _ (Const (CInt _)) = pure TInt
 operandType _ (Const (CBool _)) = pure TBool
 operandType _ (Const c) = failG ("Native code does not support the constant " ++ renderRvalue (Use (Const c)) ++ " yet")
 operandType fn (Copy l) = localTypeG fn l
+
+-- Stores the result of a statement; in the entry, the return slot being assigned is what makes the program return a value
+storeResult :: Bool -> Function -> Local -> String -> G ()
+storeResult entry fn dest value = do
+    store fn dest value
+    if entry && dest == Local 0 then emit "store i1 true, ptr %returned" else pure ()
 
 store :: Function -> Local -> String -> G ()
 store fn dest value = do
