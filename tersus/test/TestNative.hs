@@ -4,7 +4,7 @@ module TestNative
 
 import Control.Exception (IOException, try)
 import Data.List (isInfixOf)
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
@@ -27,6 +27,7 @@ testNative =
         , TestList "examples" [testNativeProgram path | path <- nativeExamples]
         , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
+        , TestList "build" [testBuildKeepsFiles]
         , TestList "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
         ]
 
@@ -92,6 +93,11 @@ controlPrograms =
     , ("branch", "a = 3; if a > 2 { a = a * 10; } else { a = 0; }; return a;")
     , ("while loop", "i = 0; s = 0; while i < 10 shrinks 10 - i { s = s + i; i = i + 1; }; return s;")
     , ("no return", "x = 1 + 2;")
+    , ("a return that is not reached", "if false { return 1; };")
+    , ("a return in a branch that is not taken", "x = 3; if x > 5 { return 1; };")
+    , ("a return in a branch that is taken", "x = 3; if x < 5 { return 1; };")
+    , ("a return in a loop that is not reached", "x = 3; while x < 3 shrinks 3 - x { return 1; };")
+    , ("a boolean return in a branch that is not taken", "x = 3; if x > 5 { return true; };")
     , ("recursion", "fn fact(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n = 0 { return 1; }; return n * fact(n - 1); }; return fact(10);")
     , ("boolean result", "fn even(n: Int) -> Bool { return n % 2 = 0; }; return even(10);")
     , ("boolean parameter", "fn pick(c: Bool, a: Int, b: Int) -> Int { if c { return a; }; return b; }; return pick(1 < 2, 10, 20);")
@@ -107,6 +113,27 @@ stopPrograms =
     , ("smallest mod -1", "x = -9223372036854775807 - 1; y = -1; return x % y;")
     , ("largest still fits", "return 9223372036854775806 + 1;")
     ]
+
+-- Building to `<output>` must not touch an `<output>.build` that is already there
+testBuildKeepsFiles :: Test
+testBuildKeepsFiles = TestCase "an existing output.build directory is kept" $ do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else do
+            tmp <- getTemporaryDirectory
+            let dir = tmp </> "tersus-native-keep"
+                exe = dir </> "app"
+                precious = exe ++ ".build" </> "precious.txt"
+            createDirectoryIfMissing True (exe ++ ".build")
+            writeFile precious "keep me"
+            built <- case llvmSource "return 1;" of
+                Error e -> pure (Error e)
+                Ok ir -> buildExecutable exe ir
+            kept <- doesFileExist precious
+            pure $ case built of
+                Error e -> Just e
+                Ok () -> testAssertTrue kept
 
 -- Builds the program and runs it, and runs it on the MIR: both have to print the same, and fail the same
 sameAsMir :: String -> String -> IO TestResult
