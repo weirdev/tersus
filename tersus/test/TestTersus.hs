@@ -2012,6 +2012,9 @@ testModulo =
             , holds "affirm n % 2 = 1; affirm m % 2 = 1;" "(n + m) % 2 = 0"
             , fails "affirm n % 2 = 1; affirm m % 2 = 0;" "(n + m) % 2 = 0"
             , holds "affirm n = n;" "n = n / 3 * 3 + n % 3"
+            , -- Two remainders that are equal have a quotient each: x % 2 = 0 and y % 3 = 0 do not relate x and y
+              fails "affirm n % 2 = 0; affirm m % 3 = 0;" "3 * n = 2 * m"
+            , parseValidateFailProgramHelper "fn f(n: Int, m: Int) -> Int [{ affirm n % 2 = 0; affirm m % 3 = 0; affirm n = 4; affirm m = 3; }] [{ }] { affirm 0 = 1; return 0; };" "Could not prove: 0 = 1"
             , -- With the division of the same number
               holds "affirm n >= 0;" "n / 4 * 4 <= n"
             , holds "affirm n >= 0; affirm n % 4 = 0;" "n / 4 * 4 = n"
@@ -2243,6 +2246,9 @@ testInferredInvariants =
               parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 1) = size(p); }] { out = push(push([], v), size(p)); for x in p { out = push(out, x); }; return out; };"
             , parseValidProgramHelper "fn f(p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 0) = 5; affirm get(return, 1) = 6; }] { out = [5, 6]; for x in p { out = push(out, x); }; return out; };"
             , parseValidateFailProgramHelper "fn f(p: List<Int>) -> List<Int> [{ affirm size(p) > 0; }] [{ affirm get(return, 1) = 6; }] { out = [5, 6]; for i in 0..size(p) { out = set(out, 1, get(p, i)); }; return out; };" "Could not prove: get(return, 1) = 6"
+            , -- The elements of literal lists do not push a counter or a comparison out of the candidates
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm i = n; return 0; }; x = f(3);"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { a = [1, 2, 3]; b = [4, 5, 6]; i = 0; while i < n shrinks n - i { a = set(a, 0, 1); b = set(b, 0, 4); i = i + 1; }; affirm get(a, 1) = 2; return 0; }; x = f(3);"
             , -- A loop that returns infers its invariants too, one candidate at a time
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"
