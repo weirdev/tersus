@@ -18,7 +18,6 @@ main = do
             <$> mapM
                 (runTest [])
                 [ testParse
-                , testEvaluateFullContext
                 , testParseEval
                 , testValidateWithExpectedMatch
                 , testValidateWithExpectedMismatch
@@ -60,6 +59,7 @@ main = do
                 , testCallsAndReturnJoin
                 , testForLoops
                 , testInferredInvariants
+                , testCfgValidation
                 , testPrecedence
                 , testFirstLast
                 , testFunctionCalls

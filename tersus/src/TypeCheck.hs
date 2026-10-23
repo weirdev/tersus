@@ -338,6 +338,7 @@ valueType (VList elements) = do
     return (TList element)
 valueType (VFunct _ _ _ (BuiltinFunct funct) _) = builtinType funct
 valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty) _ _) _) = return (TFn ptys rty)
+valueType (VFnRef name) = failTc ("Type error: " ++ name ++ " is a function of the MIR, which a program cannot write")
 
 -- Programs
 
@@ -415,8 +416,6 @@ checkStatement top ctx env stmt =
             term' <- resolveTermination ctx env term
             (_, body') <- checkStatements False ctx (Map.empty : env) body
             return (ctx, env, While cond invariant term' body')
-        LoopEnd invariant decrease -> checkValidations ctx env invariant >> checkValidations ctx env decrease >> return (ctx, env, stmt)
-        EndBlock -> return (ctx, env, stmt)
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
 checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [Statement])

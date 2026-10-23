@@ -119,23 +119,7 @@ data Statement
       If Expression [Statement] [Statement]
     | -- While condition invariant termination body; the invariant and termination are only used by the validator
       While Expression [ValidationStatement] (Maybe Termination) [Statement]
-    | -- Never parsed: the validator ends a loop body with this to check the invariant and that the variant has
-      -- decreased (the second list, empty without a variant), see valReturningWhile
-      LoopEnd [ValidationStatement] [ValidationStatement]
-    | EndBlock
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
-
--- nextStmt
--- TODO: Naming is probably wrong here
--- Pending statements for the current scope; entering a block swaps in a new queue.
-newtype Continuations = Continuations [Statement] deriving (Show)
-
--- Runtime state is split between the current lexical scope, the remaining statements
--- for that scope, and an optional parent scope to return to on EndBlock.
-data ScopeState = ScopeState (Map Variable Value) Continuations (Maybe ScopeState)
-
--- (scope info, file context [aka standard lib + imports])
-data State = State ScopeState (Map Variable Value)
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | NotEq | Lt | Gt | LtEq | GtEq deriving (Eq, Ord, Show)
@@ -182,28 +166,6 @@ data UserRule
     deriving (Show, Eq, Ord)
 
 type RuleContext = Map Variable UserRule
-
-data VScopeState
-    = VScopeState
-        (Map Variable Iota)
-        [IotaProof]
-        Continuations
-        (Maybe VScopeState)
-    deriving (Show)
--- The last field is a guess at what the solver of the visible facts is, kept up to date where facts are added and
--- dropped by anything that builds a state with the VState pattern. It is checked against the facts before it is used.
-data VState = VStateC VScopeState (Map Variable Iota) [IotaProof] [Iota] RuleContext (Maybe FactCache)
-
-pattern VState :: VScopeState -> Map Variable Iota -> [IotaProof] -> [Iota] -> RuleContext -> VState
-pattern VState scope iotaCtx proofCtx iotaseq ruleCtx <- VStateC scope iotaCtx proofCtx iotaseq ruleCtx _
-    where
-        VState scope iotaCtx proofCtx iotaseq ruleCtx = VStateC scope iotaCtx proofCtx iotaseq ruleCtx Nothing
-
-{-# COMPLETE VState #-}
-
-instance Show VState where
-    show (VState scope iotaCtx proofCtx _ ruleCtx) =
-        "VState (" ++ show (scope, iotaCtx, proofCtx, ruleCtx) ++ ")"
 
 -- The proof engine's terms and closure
 --

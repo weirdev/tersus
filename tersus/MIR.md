@@ -1,10 +1,10 @@
 # Tersus MIR (design)
 
-Status: step 1 is implemented (`Mir.hs`, `MirLower.hs`, `MirEval.hs`; `tersus run` runs the MIR and `tersus mir` prints it). The later steps are listed under Phases so the data model is shaped for them.
+Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, `MirVerify.hs`, `MirValidate.hs`, `MirEval.hs`; `tersus run` validates and runs the MIR and `tersus mir` prints it). The later steps are listed under Phases so the data model is shaped for them.
 
 ```
-today:    source -> AST -> validation -> concrete evaluation of the AST
 step 1:   source -> AST -> validation -> MIR -> execution of the MIR
+today:    source -> AST (checked) -> MIR -> validation -> execution of the MIR
 eventual: source -> AST -> MIR -> validation -> lowering to LLVM IR -> compilation -> execution
 ```
 
@@ -12,14 +12,14 @@ The MIR is to Tersus what Rust's MIR is to Rust: a typed control-flow graph that
 
 ## What the MIR has to represent
 
-Facts about Tersus that decide the shape (all from the current `Proof.evaluate` and `Parse`):
+Facts about Tersus that decide the shape (from `Parse` and the semantics of the language):
 
 - **Values are immutable and unaliased.** `push`/`set` return new lists; there is no heap to model, so a place is just a local. No projections, no borrows, no storage markers.
 - **`match` and `for` are already desugared by the parser** into `if` chains over `Is` tests and `while` loops, so the MIR needs neither.
 - **Functions are first-class but do not capture.** A body sees its parameters, the standard library and the top-level functions defined before it, so a nested `fn` lifts to a top-level MIR function with no environment.
 - **Scopes decide which variable an assignment means** (`x = ...` updates the nearest enclosing `x`, else defines a new one in the current scope). Lowering resolves that once; the MIR has numbered locals and no scopes.
 - **Partial operations have contracts the validator discharged** (`get` in range, `/` and `%` by non-zero, `first`/`last` of a non-empty list, `Cast`). The MIR keeps them as ordinary operations with documented preconditions, as `unreachable` would be in LLVM; the interpreter still checks them and reports an error, which turns any validator bug into a test failure instead of a wrong answer.
-- **Proof-only constructs** (`affirm`, `define`, `rewrite`, `axiom`, `proof`, invariants, `shrinks`, contracts) have no run-time meaning. The eventual flow validates the MIR, so the model has somewhere to keep them (see Specifications); the executor ignores them.
+- **Proof-only constructs** (`affirm`, `define`, `rewrite`, `axiom`, `proof`, invariants, `shrinks`, contracts) have no run-time meaning. The validator reads them from the MIR (see Specifications and Validation); the executor ignores them.
 
 ## Data model
 
@@ -104,12 +104,15 @@ data FunctionSpec = FunctionSpec
     , specEnsures     :: [ValidationStatement]   -- the output contract
     , specTermination :: Maybe Termination       -- after `elaborate`: Counting, Parts or MayDiverge
     , specLoops       :: Map BlockId LoopSpec    -- by loop header
+    , specEnv         :: Env                     -- the parameters, and the functions at the top defined before this one
     }
-data LoopSpec = LoopSpec { loopInvariant :: [ValidationStatement], loopTermination :: Maybe Termination }
-data GhostStatement = GhostValidation ValidationStatement | GhostAxiom ... | GhostProof ...
+data LoopSpec = LoopSpec { loopInvariant :: [ValidationStatement], loopTermination :: Maybe Termination, loopEnv :: Env }
+data Statement = Assign Local Rvalue | Ghost Env GhostStatement
+data GhostStatement = GhostValidation ValidationStatement | GhostAxiom ... | GhostProof ... | GhostFunction Name Variable Bool
+type Env = Map Variable Operand               -- a local (Copy), or a function (Const (CFn name))
 ```
 
-They still mention source variable names (`ATerm "n"`), which `localName` resolves at a program point. Nothing reads them in step 1 except the pretty-printer and a test that lowering keeps them. The point of keeping them is that the model need not change when validation moves onto the MIR.
+They are written with the names of the source (`ATerm "n"`), so each carries an `Env`: what the names stand for at that point of the program. A `localName` could not say it, since two scopes can use one name for two locals. The validator reads a name through the `Env` of the statement, the loop or the function. `GhostFunction name source topLevel` marks where a function is defined, which is where the validator checks its body and learns what it promises.
 
 ## A lowering, by example
 
@@ -148,27 +151,27 @@ fn main() -> Int {
 
 ## Executing it
 
-`MirEval.runProgram :: Program -> Result (Maybe MirValue) String`. A frame is the function's locals (a `Map`) and a current block; the loop is: run the statements, then follow the terminator; `Call` evaluates the callee operand (a `CFn name` is looked up in `progFunctions`) and recurses in Haskell. `MirValue` is `MInt | MBool | MList | MData | MFn Name`, so no value carries an AST. Run-time errors are the ones the AST evaluator has (`Division by zero`, `Get index out of range`, ...), which the validator is meant to make unreachable.
+`MirEval.runProgram :: Program -> Result (Maybe MirValue) String`. A frame is the function's locals (a `Map`) and a current block; the loop is: run the statements, then follow the terminator; `Call` evaluates the callee operand (a `CFn name` is looked up in `progFunctions`) and recurses in Haskell. `MirValue` is `MInt | MBool | MList | MData | MFn Name`, so no value carries an AST. Run-time errors are `Division by zero`, `Get index out of range` and the like, which the validator is meant to make unreachable.
 
-The AST evaluator (`Proof.evaluate`) stays: the validator uses it to learn the result of a call with known arguments (with its fuel budget), and it is the oracle the MIR executor is tested against.
+`MirEval.callWithFuel` runs one function on a budget of steps (a statement or a jump each): the validator uses it to learn the result of a call with known arguments. There is no other evaluator: the AST is not executed.
 
 ## Changes to the flow
 
-- `Cli.runSource`: parse, `validate`, **lower, run the MIR** (was: evaluate the AST). A lowering error is an internal error (a validated program always lowers) and is reported as `Lowering failed: ...`.
+- `Cli.runSource`: parse, type check, **lower, validate the MIR, run the MIR** (step 1 validated the AST and then lowered it). A lowering error is an internal error (a program that type checks always lowers) and is reported as `Lowering failed: ...`.
 - A new command `tersus mir <file>` prints the MIR of a validated program (like `rustc --emit=mir`). It is how a lowering is read and tested.
-- `tersus check` is unchanged.
+- `tersus check` parses, lowers and validates, as `run` does before it runs.
 
 ## Tests
 
-- **Differential**: every program in `examples/` and every test program that runs is executed by the AST evaluator and by lower-then-run, and the two return values must be equal (rendered the same).
+- **Examples and programs**: every program in `examples/` is validated and run on the MIR and must give the value documented in the tests, and the small programs of `testMirRun` give the values written next to them (including the errors, `Division by zero` and `Integer overflow`).
 - **Structure**: lowering a loop makes a back edge to its header, an `if` meets at one join, an early `return` in a branch leaves no edge to the join, a nested `fn` becomes a top-level function, shadowing and block-local variables get separate locals, a function passed as a value is a `CFn`.
 - **Rendering**: `renderProgram` output for small programs (the one above, an `if`, a list/struct program), so a change to lowering shows as a diff.
-- **Well-formedness** (`Mir.checkProgram`, which every lowering goes through and which fails the lowering): every `BlockId` a terminator names exists, every `Local` used is declared, only `Return`/`Unreachable` end a path, every local's type is known (no `TVar`).
+- **Well-formedness** (`MirVerify.verifyProgram`, which every lowering goes through and which fails the lowering): every `BlockId` a terminator names exists, every `Local` used is declared, only `Return`/`Unreachable` end a path, every local's type is known (no `TVar`).
 
 ## Phases
 
 1. **This step**: the model, the renderer, lowering, the executor, the flow change, the tests and docs above.
-2. Validation moves onto the MIR: the validator walks blocks instead of statement lists (the `if` join becomes a real join in the graph, the loop `LoopEnd` marker becomes the back edge to the header, nested-call contracts become the `Call` terminators). This is the large step and changes `Proof.hs`.
+2. **Done**: validation moved onto the MIR (`MirValidate.hs`, `Ghost.hs`, `ProofState.hs`; see Validation), and the AST evaluator and the AST validator (`Proof.hs`) are gone.
 3. LLVM lowering: layouts for lists, structs and enums from `progTypes` and the local types; a bounded integer policy; memory management for values that are copied by `push`/`set`.
 
 ## Arithmetic and traps
@@ -180,21 +183,32 @@ So an operation of the MIR either gives a value or traps. Two kinds of trap:
 - **Overflow** is always checked, in the executor and in native code, because nothing proves it cannot happen.
 - **A broken contract** (a divisor of 0, an index out of range, `first` of an empty list) cannot happen in a validated program. The executor still checks and reports it, so that a validator bug is a failure and not a wrong answer. Native code may omit these checks (they would be `unreachable` to LLVM), or keep them in a checked build.
 
-`Unreachable` is the end of a function whose every path returned and is never executed. The AST evaluator (`Proof.evaluate`, used by the validator) has the same overflow rule, so the two executors agree.
+`Unreachable` is the end of a function whose every path returned and is never executed. The validator rejects a function with a path that reaches it.
 
 ## Verification
 
 `MirVerify.verifyProgram` checks a MIR for its shape (every block a jump names exists, every local and function used is declared, every local has a known type) and its types: each operation is applied to operands of the types it takes and gives the type of the local it is assigned to (`Add` takes two `Int`, `Get` takes a list of the result's type and an `Int`, `ReadField` reads a field that the constructor has, from a value of that constructor's type or one of its variants, a call has the callee's arity and parameter types, `SwitchBool` tests a `Bool`). Lowering gives the locals their types by replaying the checker, which is a second copy of its rules, and native code built on a wrong type is a wrong program, so every lowering goes through the verifier, and so should every pass over the MIR.
 
+## Validation
+
+`MirValidate.validateProgram` walks the control-flow graph of each function with one state per path (`ProofState.PState`: which iota each local holds, the facts, the rules, and the solver of the facts). Values never change, so an assignment gives the local a new iota and a fact stays true for the rest of the path.
+
+- **Statements.** `Assign` of an operation is a call of the builtin it stands for (`rvalueCall`): the arguments are the iotas of the operand locals, so the builtin's input contract is checked against what the path knows and its output facts are about the locals themselves. `Use` of a local gives the destination the same iota. A `Call` terminator does the same with the callee's contract (`Ghost.applyCall`), and when the arguments are known the callee is run on a budget (`MirEval.callWithFuel`) for its result. `Ghost` statements read their names through their `Env`.
+- **Edges.** A `SwitchBool` adds the truth of its condition to each edge's state, and the relation the condition compares (`a < b`; negated on the false edge). A constant condition has one edge.
+- **Joins.** The blocks are walked in reverse postorder, so every forward edge into a block has been walked when it is reached. The states that meet are joined by `mergeStates` (a fresh iota for a local that differs, each fact kept if every path establishes it, a path with contradictory facts ignored); the facts the next statements ask for (`affirm`s, invariants, the output contract about the value being returned) are tried as well.
+- **Loops.** A header with a `LoopSpec` is entered once (`enterLoop`): its termination clause and the invariant on entry are checked, the locals the loop assigns get fresh iotas, and the loop's blocks (the natural loop: the header and every block that reaches a back edge) are walked as a region with the invariant assumed. An edge back to the header must establish the invariant and the variant; an edge out of the region is an edge of the walk that contained the loop. Nested loops are regions of regions. Invariants are inferred by walking the region with candidates assumed and dropping those not preserved.
+- **Returns and functions.** `Return` checks the output contract on its path. A function is validated where `GhostFunction` defines it, from the facts that hold everywhere (the standard library and the functions at the top), with its input contract assumed; what it promises is what the join of its returns says of the parameters (as they were on entry) and the result. A function at the top can call itself with its output contract assumed. A function can be called only after its definition, because it is known only after the marker.
+- **Not in the MIR.** A statement after a `return` is not lowered, and a function that is never defined by a reachable statement is not checked.
+
 ## Notes on the implementation
 
 - Lowering takes the types by replaying the checker over the program (`TypeCheck.TC`, exported for the purpose), so `x = []; x = push(x, 1)` gives `x` the type `List<Int>`. A type no use decided (a list that is only created) is `Int`.
-- A function defined at the top of the program is found by name from the functions after it and from itself (as the evaluator does through its global context). In the scope that defines it, a function is a name that stands for the lifted function and is called by name, unless the program assigns that name elsewhere (`f = size;`): then it is a local that holds the function, assigned like any variable (so the nearest binding changes), and a call of it is a call of a local. The bodies of the functions at the top still find the original by name, as in the evaluator.
+- A function defined at the top of the program is found by name from the functions after it and from itself. In the scope that defines it, a function is a name that stands for the lifted function and is called by name, unless the program assigns that name elsewhere (`f = size;`): then it is a local that holds the function, assigned like any variable (so the nearest binding changes), and a call of it is a call of a local. The bodies of the functions at the top still find the original by name.
 - A program has one return type, that of its first `return` (the checker rejects a later one of another type), so `_0` has one type.
-- Falling off the end of `main` is a `Return` (a program may end without a value); falling off the end of any other function is `Unreachable`, which fails with `Function did not return a value` as the evaluator does.
+- Falling off the end of `main` is a `Return` (a program may end without a value); falling off the end of any other function is `Unreachable`, which fails with `Function did not return a value`.
 - Blocks nothing jumps to are dropped and the rest are numbered in the order a walk from the entry reaches them, so the printed MIR reads from the top.
-- `Pipeline` runs the stages (parse, `elaborate`, validate, lower) and checks the program's types once: the validator and the lowering both take the result of `elaborate` (`validateElaborated`, `lowerElaborated`).
-- `Proof.evaluate` stays for the validator; `checkExample` in the tests runs every example on both and compares the results, and `testMirRun` does so for a set of small programs including the ones that fail.
+- `Pipeline` runs the stages (parse, `elaborate`, lower, validate) and checks the program's types once: the lowering takes the result of `elaborate` (`lowerElaborated`) and the validator the MIR (`validateProgram`).
+- A statement after a `return` is not lowered, so it is not validated either: nothing can run it, and a proof about it would be about no run.
 
 ## Open issues
 

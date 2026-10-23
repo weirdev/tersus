@@ -313,9 +313,9 @@ testEnumCast =
             , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ affirm s is Shape::Rect; }] [{ }] { return (s as Shape::Circle).radius; };") "Could not prove: value is Shape::Circle"
             , parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int [{ }] [{ }] { if s is Shape::Circle { return 0; } else { return (s as Shape::Circle).radius; }; };") "Could not prove: value is Shape::Circle"
             , parseValidateFailProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; k = r as Shape::Circle;") "Could not prove: value is Shape::Circle"
-            , -- Running a wrong cast is undefined behaviour: the interpreter does not check it, and reading what is not there is an error
+            , -- Running a wrong cast is undefined behaviour: the executor does not check it, and reading what is not there is an error
               parseEvalProgramHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; k = r as Shape::Circle; return 1;") (Just (VInt 1))
-            , parseEvalProgramFailHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; return (r as Shape::Circle).radius;") "undefined behaviour"
+            , parseEvalProgramFailHelper (shape ++ "r = Shape::Rect { width: 1, height: 2 }; return (r as Shape::Circle).radius;") "Expected a Shape::Circle but got a Shape::Rect"
             , -- A field of an enum is not read without a cast, whichever variants have it
               parseValidateFailProgramHelper (shape ++ "fn r(s: Shape) -> Int { return s.radius; };") "cast the value to a variant first"
             , parseValidateFailProgramHelper ("enum E { A { size: Int }, B { size: Int } };" ++ "fn f(e: E) -> Int { return e.size; };") "cast the value to a variant first"

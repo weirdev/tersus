@@ -295,7 +295,7 @@ n = size(xs);
 
 ### Return
 
-`return` evaluates an expression, stores it as the return value of the program or function call, and ends it. Statements after a `return` do not run, including when the `return` is inside a nested block, `if` or `while`.
+`return` evaluates an expression, stores it as the return value of the program or function call, and ends it. Statements after a `return` do not run, including when the `return` is inside a nested block, `if` or `while`; since nothing can run them, the validator does not check them either (an `affirm` there is not proved).
 
 ```tersus
 return size(xs);
@@ -414,11 +414,9 @@ fn firstOr(lst: List<Int>, fallback: Int) -> Int {
 };
 ```
 
-The validator cannot join a branch that returned with one that did not, because the statements after the `if` do not run on the path that returned. Instead it validates each path to the end of the function separately: the then-branch followed by the rest of the function, and the else-branch followed by the rest of the function, each assuming its own condition. A path that returns ends there, so the rest of the function is only validated under the paths that reach it. In the example above, `first(lst)` is checked assuming `size(lst) > 0`, and the guard `if size(lst) > 0 { return fallback; };` would be rejected because the code after it only knows `size(lst) <= 0`.
+A branch that returned does not reach the statements after the `if`, so they are validated only under the paths that fall through. In the example above, `first(lst)` is checked assuming `size(lst) > 0`, since the else-branch returned, and the guard `if size(lst) > 0 { return fallback; };` would be rejected because the code after it only knows `size(lst) <= 0`.
 
-The paths are then joined. If they all return, the return value becomes one new value, and a fact about it is known only if every returning path entails it. The join tries the function's output contract (for example `affirm return > 0;`, and what a `rewrite` in it needs, such as the input contract of a rule) about the new value besides the facts the paths state, so a contract that every path entails holds without being restated. Each path is checked in full, as the contract is after the body. If some path reaches the end without returning, there is no return value: a program may do that, and a function that does so is rejected with `Return value not found in top scope`.
-
-Because each path validates the rest of the function again, an `if` whose branches both fall through and contain a `return` somewhere inside doubles the work for the statements after it. Ordinary guard clauses do not, since the path that returns has nothing left to validate.
+Each `return` checks the function's output contract on its own path (for example `affirm return > 0;`, and what a `rewrite` in it needs, such as the input contract of a rule), so every path that returns has to entail it. What the function promises its callers is what the paths that return all establish about the returned value and the parameters. If some path reaches the end without returning, there is no return value: a program may do that, and a function that does so is rejected with `Return value not found`.
 
 A `return` inside a `while` body works the same way, see Returning from a loop below.
 
@@ -534,9 +532,9 @@ fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
 
 - The invariant must hold on entry, as before.
 - Every way of reaching the end of the body without returning must re-establish the invariant. A `return` does not excuse the paths that keep looping, so removing the `rewrite stepWithinBound i;` above is rejected with `Loop invariant is not preserved`.
-- A path that returns assumes the invariant, the loop condition and whatever its own `if` conditions say. Its return value is joined with the value returned after the loop, so an output contract holds only if every returning path entails it. Above, `return <= 3` holds for the `return i` in the body (from the invariant) and for the one after the loop.
+- A path that returns assumes the invariant, the loop condition and whatever its own `if` conditions say. It checks the output contract on its own path, so the contract holds only if every returning path entails it. Above, `return <= 3` holds for the `return i` in the body (from the invariant) and for the one after the loop.
 - The statements after the loop are validated once, from the state where the invariant holds and the condition is false. Facts that only a returning path knew, such as an `if` condition inside the body, are not known there.
-- As for an `if`, a function where some path (including leaving the loop) does not return has no return value and is rejected with `Return value not found in top scope`.
+- As for an `if`, a function where some path (including leaving the loop) does not return has no return value and is rejected with `Return value not found`.
 - The variant of a loop with a `shrinks` clause must also be smaller on every path that keeps looping.
 
 ### For
@@ -674,9 +672,9 @@ fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] shr
     if i < n { return upTo(i + 1, n); } else { return n; };
 };
 ```
- A function name can be defined only once. A function defined inside another function's body is local to that body: functions defined after it there cannot call it. The definition order is enforced by validation (the type checker and the validator), while `evaluate` alone looks a function up when it is called, so run `check` (or `run`, which validates first) rather than relying on evaluation to reject a program. An argument or local variable with the same name hides the function. See `examples/helper_functions.tersus` and `examples/recursion.tersus`.
+ A function name can be defined only once. A function defined inside another function's body is local to that body: functions defined after it there cannot call it. The definition order is enforced by the type checker and the validator. An argument or local variable with the same name hides the function. See `examples/helper_functions.tersus` and `examples/recursion.tersus`.
 
-The evaluator runs a function body with its argument bindings and expects the body to set a return value. If a function completes without `return`, evaluation fails.
+A function body runs with its argument bindings and is expected to set a return value. If a function completes without `return`, the run fails (`Function did not return a value`), and the validator rejects a function that can do so.
 
 ### Argument Passing
 

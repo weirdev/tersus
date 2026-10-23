@@ -15,9 +15,8 @@ import MirLower
 import MirVerify
 import Pipeline
 import Parse
-import Proof
-import ProofHelpers
 import StdLib
+import TypeCheck (elaborate)
 import TersusTypes
 import Utils
 import TestHarness
@@ -44,34 +43,20 @@ testExampleFile path expectation = TestCase path $ do
 
 checkExample :: [Statement] -> ExampleExpectation -> TestResult
 checkExample stmts (ExpectRejected expectedError) =
-    testAssertErrorContains expectedError (validate stmts)
+    testAssertErrorContains expectedError (validateStatements stmts)
 checkExample stmts expectation =
-    case validate stmts of
+    case validateStatements stmts of
         Error e -> Just $ "Validation failed with error: " ++ e
-        Ok _ -> case evaluate stmts of
+        Ok _ -> case runStatements stmts of
             Error e -> Just $ "Evaluation failed with error: " ++ e
-            Ok state ->
-                -- (the program must also lower to the MIR and give the same answer there)
-                case (expectation, mirReturn stmts) of
-                    (_, Left e) -> Just $ "MIR failed: " ++ e
-                    (ExpectReturn expected, Right mirResult) ->
-                        testAssertEq (getReturn state) (Just expected)
-                            `orElse` testAssertEq mirResult (Just (renderValue expected))
-                    (_, Right mirResult) ->
-                        testAssertEq (getReturn state) Nothing `orElse` testAssertEq mirResult Nothing
+            Ok result -> case expectation of
+                ExpectReturn expected -> testAssertEq (fmap fromMirValue result) (Just expected)
+                _ -> testAssertEq (fmap fromMirValue result) Nothing
 
 -- The first failure of two checks
 orElse :: TestResult -> TestResult -> TestResult
 orElse Nothing other = other
 orElse failure _ = failure
-
--- What a program returns when it is lowered to the MIR and run, rendered
-mirReturn :: [Statement] -> Either String (Maybe String)
-mirReturn stmts = case lowerProgram stmts of
-    Error e -> Left ("lowering: " ++ e)
-    Ok program -> case runProgram program of
-        Error e -> Left ("running: " ++ e)
-        Ok result -> Right (fmap renderMirValue result)
 
 testExamples :: Test
 testExamples =
@@ -219,21 +204,15 @@ lowerSource source = case parseStatementBlock source of
 withMir :: String -> (M.Program -> TestResult) -> TestResult
 withMir source check = either Just check (lowerSource source)
 
--- What the program returns, run on the MIR, and the same on the AST evaluator
+-- What the program returns, run on the MIR
 runMir :: String -> Result (Maybe String) String
 runMir source = case lowerSource source of
     Left e -> Error e
     Right program -> mapResult (fmap renderMirValue) (runProgram program)
 
-sameOnBoth :: String -> TestResult
-sameOnBoth source =
-    case parseStatementBlock source of
-        Left err -> Just ("Parse failed: " ++ show err)
-        Right stmts -> case (evaluate stmts, mirReturn stmts) of
-            (Ok state, Right mirResult) -> testAssertEq mirResult (fmap renderValue (getReturn state))
-            (Error _, Left _) -> Nothing
-            (Error e, Right _) -> Just ("only the MIR ran it; the evaluator said: " ++ e)
-            (Ok _, Left e) -> Just ("only the evaluator ran it; the MIR said: " ++ e)
+safeHead :: [a] -> Maybe a
+safeHead (x : _) = Just x
+safeHead [] = Nothing
 
 blocksOf :: M.Function -> [(M.BlockId, M.BasicBlock)]
 blocksOf = Map.toList . M.fnBlocks
@@ -297,6 +276,18 @@ testMirStructure =
                     testAssertEq
                         (length (M.specRequires (M.fnSpec fn)), length (M.specEnsures (M.fnSpec fn)), length [() | (_, M.BasicBlock stmts _) <- blocksOf fn, M.Ghost{} <- stmts], Map.keys (M.progTypes p))
                         (1, 1, 1, ["P"])
+        , -- A ghost statement carries what its names stand for where it is: the local, or the function
+          withMir "fn f(n: Int) -> Int { return n; }; x = 1; { x = 2; y = 3; affirm y = 3; }; return f(x);" $ \p ->
+            let envs = [env | (_, M.BasicBlock stmts _) <- blocksOf (mainFunction p), M.Ghost env (M.GhostValidation _) <- stmts]
+                fn = mainFunction p
+             in testAssertEq
+                    (map (Map.lookup "f") envs, [Map.lookup "x" env == fmap M.Copy (safeHead (localsNamed "x" fn)) | env <- envs], [Map.member "y" env | env <- envs])
+                    ([Just (M.Const (M.CFn "f"))], [True], [True])
+        , -- Where a function is defined is marked, and the specification of the function names its parameters
+          withMir "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ }] { return n; }; return f(1);" $ \p ->
+            testAssertEq
+                ([g | (_, M.BasicBlock stmts _) <- blocksOf (mainFunction p), M.Ghost _ g@M.GhostFunction{} <- stmts], fmap (M.specEnv . M.fnSpec) (Map.lookup "f" (M.progFunctions p)))
+                ([M.GhostFunction "f" "f" True], Just (Map.fromList [("f", M.Const (M.CFn "f")), ("n", M.Copy (M.Local 1))]))
         , -- A builtin used as a value is a function of the program
           case lowerProgram [Assign "f" (Val (builtinFunct Plus)), Assign "r" (F (Var "f") [Val (VInt 1), Val (VInt 2)]), Return (Var "r")] of
             Error e -> Just e
@@ -377,48 +368,47 @@ testMirTypes =
     mapTerminators f = mapBlocks (\b -> b{M.blockTerminator = f (M.blockTerminator b)})
     mapStatements f = mapBlocks (\b -> b{M.blockStatements = map f (M.blockStatements b)})
 
--- Running the MIR gives what the evaluator of the AST gives
+-- Programs run on the MIR, with what they give
 testMirRun :: Test
 testMirRun =
     testCaseSeq
         "testMirRun"
-        ( map
-            sameOnBoth
-            [ "return 1 + 2 * 3;"
-            , "x = 7; y = x % 3; z = x / 2; return y * 10 + z;"
-            , "return -7 / 2 + -7 % 3;"
-            , "l = [1, 2, 3]; l = push(l, 4); l = set(l, 0, 9); return l;"
-            , "l = [1, 2, 3]; return get(l, 1) + first(l) + last(l) + size(l);"
-            , "x = 0; i = 0; while i < 10 [{ affirm i <= 10; }] shrinks 10 - i { if i % 2 = 0 { x = x + i; }; i = i + 1; }; return x;"
-            , "fn fact(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return 1; } else { return n * fact(n - 1); }; }; return fact(10);"
-            , "fn first2(l: List<Int>) -> Int [{ affirm size(l) > 1; }] [{ }] { return get(l, 1); }; return first2([4, 5, 6]);"
-            , "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; return apply(inc, 1);"
-            , "fn outer(n: Int) -> Int { fn inner(m: Int) -> Int { return m * 2; }; return inner(n) + inner(1); }; return outer(5);"
-            , "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; q = P { y: 5, ..p }; return q.x + q.y;"
-            , "enum S { A { r: Int }, B, C { w: Int, h: Int } }; fn area(s: S) -> Int { return match s { S::A { r: r } => r * 3, S::B => 0, S::C { w: w, h: h } => w * h }; }; return area(S::A { r: 2 }) + area(S::B) + area(S::C { w: 3, h: 4 });"
-            , "s = 0; for i in 0..5 { s = s + i; }; for x in [10, 20] { s = s + x; }; return s;"
-            , "x = 1; if x = 1 { y = 2; x = x + y; }; return x;"
-            , "x = 5; { x = 6; y = 1; }; return x;"
-            , "a = true; b = false; return a = b;"
-            , "x = 1; affirm x = 1; return x;"
-            , "x = 1;"
-            , -- A cast keeps the value and gives it the variant's type
-              "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; return a.r;"
-            , "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; s = a; return (s as S::A).r;"
-            , "enum S { A { r: Int }, B }; s = S::A { r: 1 }; return s as S::A;"
-            , "enum S { A { r: Int }, B }; fn r(c: S::A) -> Int { return c.r; }; s = S::A { r: 4 }; return r(s as S::A);"
-            , "enum S { A { r: Int }, B }; s = S::B; a = s as S::A; return 1;"
-            , -- A function name is a variable that can be assigned: the nearest binding is the one that changes
-              "fn f(l: List<Int>) -> Int { return 0; }; { f = size; }; return f([1, 2]);"
-            , "fn outer(n: Int) -> Int { fn g(m: Int) -> Int { return m; }; fn h(m: Int) -> Int { return m * 10; }; { g = h; }; return g(n); }; return outer(2);"
-            , "fn a(n: Int) -> Int { return n + 1; }; fn b(n: Int) -> Int { return n + 2; }; f = a; { f = b; }; return f(1) + a(1);"
-            , "fn a(n: Int) -> Int { return n + 1; }; fn use(n: Int) -> Int { return a(n); }; { a = use; }; return use(1) + a(1);"
-            , "return [];"
-            , "return 1 / 0;"
-            , "return get([1], 3);"
-            , "fn f(n: Int) -> Int { if n > 0 { return 1; }; }; return f(0);"
-            ]
-        )
+        [ testAssertEq (runMir source) expected
+        | (source, expected) <-
+                [ ("return 1 + 2 * 3;", Ok (Just "7"))
+                , ("x = 7; y = x % 3; z = x / 2; return y * 10 + z;", Ok (Just "13"))
+                , ("return -7 / 2 + -7 % 3;", Ok (Just "-2"))
+                , ("l = [1, 2, 3]; l = push(l, 4); l = set(l, 0, 9); return l;", Ok (Just "[9, 2, 3, 4]"))
+                , ("l = [1, 2, 3]; return get(l, 1) + first(l) + last(l) + size(l);", Ok (Just "9"))
+                , ("x = 0; i = 0; while i < 10 [{ affirm i <= 10; }] shrinks 10 - i { if i % 2 = 0 { x = x + i; }; i = i + 1; }; return x;", Ok (Just "20"))
+                , ("fn fact(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return 1; } else { return n * fact(n - 1); }; }; return fact(10);", Ok (Just "3628800"))
+                , ("fn first2(l: List<Int>) -> Int [{ affirm size(l) > 1; }] [{ }] { return get(l, 1); }; return first2([4, 5, 6]);", Ok (Just "5"))
+                , ("fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; return apply(inc, 1);", Ok (Just "3"))
+                , ("fn outer(n: Int) -> Int { fn inner(m: Int) -> Int { return m * 2; }; return inner(n) + inner(1); }; return outer(5);", Ok (Just "12"))
+                , ("struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; q = P { y: 5, ..p }; return q.x + q.y;", Ok (Just "6"))
+                , ("enum S { A { r: Int }, B, C { w: Int, h: Int } }; fn area(s: S) -> Int { return match s { S::A { r: r } => r * 3, S::B => 0, S::C { w: w, h: h } => w * h }; }; return area(S::A { r: 2 }) + area(S::B) + area(S::C { w: 3, h: 4 });", Ok (Just "18"))
+                , ("s = 0; for i in 0..5 { s = s + i; }; for x in [10, 20] { s = s + x; }; return s;", Ok (Just "40"))
+                , ("x = 1; if x = 1 { y = 2; x = x + y; }; return x;", Ok (Just "3"))
+                , ("x = 5; { x = 6; y = 1; }; return x;", Ok (Just "6"))
+                , ("a = true; b = false; return a = b;", Ok (Just "false"))
+                , ("x = 1; affirm x = 1; return x;", Ok (Just "1"))
+                , ("x = 1;", Ok (Nothing))
+                , ("enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; return a.r;", Ok (Just "1"))
+                , ("enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; s = a; return (s as S::A).r;", Ok (Just "1"))
+                , ("enum S { A { r: Int }, B }; s = S::A { r: 1 }; return s as S::A;", Ok (Just "S::A { r: 1 }"))
+                , ("enum S { A { r: Int }, B }; fn r(c: S::A) -> Int { return c.r; }; s = S::A { r: 4 }; return r(s as S::A);", Ok (Just "4"))
+                , ("enum S { A { r: Int }, B }; s = S::B; a = s as S::A; return 1;", Ok (Just "1"))
+                , ("fn f(l: List<Int>) -> Int { return 0; }; { f = size; }; return f([1, 2]);", Ok (Just "2"))
+                , ("fn outer(n: Int) -> Int { fn g(m: Int) -> Int { return m; }; fn h(m: Int) -> Int { return m * 10; }; { g = h; }; return g(n); }; return outer(2);", Ok (Just "20"))
+                , ("fn a(n: Int) -> Int { return n + 1; }; fn b(n: Int) -> Int { return n + 2; }; f = a; { f = b; }; return f(1) + a(1);", Ok (Just "5"))
+                , ("fn a(n: Int) -> Int { return n + 1; }; fn use(n: Int) -> Int { return a(n); }; { a = use; }; return use(1) + a(1);", Ok (Just "4"))
+                , ("return [];", Ok (Just "[]"))
+                , ("return 1 / 0;", Error "Division by zero")
+                , ("return get([1], 3);", Error "Get index out of range")
+                , ("fn f(n: Int) -> Int { if n > 0 { return 1; }; }; return f(0);", Error "Function did not return a value")
+                , ("return 5 + 6;", Ok (Just "11"))
+                ]
+        ]
 
 testMir :: Test
 testMir =
@@ -438,7 +428,7 @@ testMir =
             ]
         ]
 
--- Int is 64 bits: literals must fit, and arithmetic that leaves the range stops the program, on both executors
+-- Int is 64 bits: literals must fit, and arithmetic that leaves the range stops the program
 testIntRange :: Test
 testIntRange =
     testCaseSeq
@@ -468,7 +458,7 @@ testIntRange =
                     , ("return 0 - 9223372036854775807;", "-9223372036854775807")
                     ]
                ]
-            ++ map sameOnBoth ["return 9223372036854775807 + 1;", "x = 2; return x * 4611686018427387904;", "return 5 + 6;", "return -9223372036854775808 / -1;"]
+            ++ [testAssertEq (runMir "x = 2; return x * 4611686018427387904;") (Error "Integer overflow")]
             ++ [ testAssertErrorContains "Integer overflow" (runSource Run "return 9223372036854775807 + 1;")
                , -- (validation reasons about unbounded integers, so a property it proves holds for the runs that do not stop)
                  testAssertEq (runSource Check "x = 9223372036854775807; y = x + 1; affirm y = x + 1;") (Ok "OK")
@@ -482,12 +472,12 @@ testPipeline =
         "testPipeline"
         [ -- Each stage names itself in its error
           testAssertErrorContains "Parse error" (parseSource "x = ;")
-        , testAssertErrorContains "Validation failed: Could not prove" (checkSource "x = 1; affirm x = 2;")
-        , testAssertErrorContains "Validation failed: Type error" (checkSource "x = 1; y = x(2);")
+        , testAssertErrorContains "Validation failed: Could not prove" (compileSource "x = 1; affirm x = 2;")
+        , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")
         , -- A program that does not validate is not lowered
           testAssertErrorContains "Validation failed" (compileSource "x = 1; affirm x = 2;")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
-          case checkSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" of
+          case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborate of
             Ok stmts -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))
             Error e -> Just e
         , case compileSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" of

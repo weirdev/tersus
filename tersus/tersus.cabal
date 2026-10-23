@@ -32,7 +32,6 @@ library
       Parse
       Pipeline
       Pretty
-      Proof
       ProofEngine
       ProofHelpers
       ProofState

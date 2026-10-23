@@ -1,6 +1,5 @@
 module TestBasics
     ( testParse
-    , testEvaluateFullContext
     , testParseEval
     , testCrashRegression
     , testFunctionCalls
@@ -13,8 +12,8 @@ module TestBasics
 
 import qualified Data.Map as Map
 import Parse
-import Proof
-import ProofHelpers
+import MirEval (fromMirValue)
+import Pipeline (runStatements, validateStatements)
 import StdLib
 import TersusTypes
 import Utils
@@ -180,48 +179,11 @@ testParse =
         ]
 
 -- Evaluate tests
-evalFCHelper :: [Statement] -> [(Variable, Value)] -> TestResult
-evalFCHelper stmts expected =
-    case evaluate stmts of
-        Ok (State (ScopeState vals _ _) _) -> testAssertEq vals (Map.fromList expected)
-        Error e -> Just $ "Evaluation failed with error: " ++ e
-
-testEvaluateFullContext :: Test
-testEvaluateFullContext =
-    testCaseSeq
-        "testEvaluateFullContext"
-        [ evalFCHelper [Assign "x" (F (Var "size") [Val (VList [VInt 5])])] [("x", VInt 1)]
-        , evalFCHelper
-            [ Assign "x" (F (Var "size") [Val (VList [VInt 5])])
-            , Assign "y" (F (Val (builtinFunct Minus)) [Val (VInt 1), Val (VInt 1)])
-            ]
-            [("x", VInt 1), ("y", VInt 0)]
-        , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] [] (nativeInts 1 [Return (Val (VInt 3))]) []))
-            , Assign "result" (F (Var "f") [])
-            ]
-            [("result", VInt 3), ("f", VFunct [] [] [] (nativeInts 1 [Return (Val (VInt 3))]) [])]
-        , evalFCHelper
-            [ Assign "f" (Val (VFunct [] [] [] (nativeInts 1 [Assign "y" (Val (VInt 2)), Return (Var "y")]) []))
-            , Assign "result" (F (Var "f") [])
-            ]
-            [("result", VInt 2), ("f", VFunct [] [] [] (nativeInts 1 [Assign "y" (Val (VInt 2)), Return (Var "y")]) [])]
-        , evalFCHelper
-            [ Assign "id" (Val (VFunct ["v"] [] [] (nativeInts 1 [Return (Var "v")]) []))
-            , Assign "result" (F (Var "id") [Val (VInt 7)])
-            ]
-            [("result", VInt 7), ("id", VFunct ["v"] [] [] (nativeInts 1 [Return (Var "v")]) [])]
-        , evalFCHelper
-            [ Assign "add" (Val (VFunct ["l", "r"] [] [] (nativeInts 2 [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) []))
-            , Assign "result" (F (Var "add") [Val (VInt 7), Val (VInt 13)])
-            ]
-            [("result", VInt 20), ("add", VFunct ["l", "r"] [] [] (nativeInts 2 [Return (F (Val (builtinFunct Plus)) [Var "l", Var "r"])]) [])]
-        ]
-
 evalExprHelper :: Expression -> Value -> TestResult
 evalExprHelper expr expected =
-    case evalExpression initState expr of
-        Ok (val, _) -> testAssertEq val expected
+    case runStatements [Return expr] of
+        Ok (Just val) -> testAssertEq (fromMirValue val) expected
+        Ok Nothing -> Just "No value returned"
         Error e -> Just $ "Expression failed with error: " ++ e
 
 parseEvalExprHelper :: String -> Value -> TestResult
@@ -236,10 +198,10 @@ parseEvalReturningStmtHelper stmtStr expected =
     let parseOutput = parseStatement stmtStr
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
-            Right (Block stmts) -> doTrace (show stmts) $
-                case evalReturningBlock (setPScope (initStateWStatements stmts) (Just emptyScopeState)) of
-                    Ok (_, Just val) -> testAssertEq val expected
-                    Ok (_, Nothing) -> Just "No value returned"
+            Right (Block stmts) ->
+                case runStatements stmts of
+                    Ok (Just val) -> testAssertEq (fromMirValue val) expected
+                    Ok Nothing -> Just "No value returned"
                     Error e -> Just $ "Evaluation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
 
@@ -271,7 +233,7 @@ testParseEvalWFunctDef =
         \  };\
         \  return add1;\
         \}"
-        (VFunct ["i"] [] [] (nativeInts 1 [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])]) [])
+        (VFnRef "add1")
 
 testParseEvalWUdfCall :: TestResult
 testParseEvalWUdfCall =
@@ -302,7 +264,7 @@ testParseFunctReturnNestedBlocks =
     parseEvalReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
-        \  fn getFirst(y: Int) -> Int {\
+        \  fn getFirst(y: List<Int>) -> Int {\
         \    x = [1];\
         \    {\
         \      return first(y);\
@@ -333,7 +295,7 @@ parseEvalFailStmtHelper stmtStr expectedError =
         Right (Block stmts) ->
             testAssertErrorContains
                 expectedError
-                (evalReturningBlock (setPScope (initStateWStatements stmts) (Just emptyScopeState)))
+                (runStatements stmts)
         Right _ -> Just "Not a block statement"
 
 testParseEvalFirstEmptyFail :: TestResult
@@ -358,7 +320,7 @@ testParseEvalFirstWrongTypeFail =
         "{\
         \  return first(1);\
         \}"
-        "First only valid for a list"
+        "argument 1 of first: expected List<?>, got Int"
 
 -- The LANGUAGE.md "Argument Passing" example: the callee's reassignment of a parameter
 -- must not reach the caller's variable, in evaluation or after validation.
@@ -374,10 +336,10 @@ testArgPassingByValue =
     case parseStatementBlock argPassingSource of
         Left err -> Just $ "Parse failed: " ++ show err
         Right stmts ->
-            case (valReturningBlock (initVStateWStatements stmts), evalReturningBlock (initStateWStatements stmts)) of
+            case (validateStatements stmts, runStatements stmts) of
                 (Error e, _) -> Just $ "Validation failed with error: " ++ e
                 (_, Error e) -> Just $ "Evaluation failed with error: " ++ e
-                (Ok _, Ok (_, ret)) -> testAssertEq ret (Just (VInt 3))
+                (Ok _, Ok ret) -> testAssertEq (fmap fromMirValue ret) (Just (VInt 3))
 
 testParseEvalUdfExtraArgsFail :: TestResult
 testParseEvalUdfExtraArgsFail =
@@ -386,7 +348,7 @@ testParseEvalUdfExtraArgsFail =
         \  fn f(a: List<Int>) -> List<Int> { return a; };\
         \  return f(1, 2);\
         \}"
-        "expected 1 arguments, got 2"
+        "f takes 1 arguments, got 2"
 
 testParseEvalUdfMissingArgsFail :: TestResult
 testParseEvalUdfMissingArgsFail =
@@ -395,7 +357,7 @@ testParseEvalUdfMissingArgsFail =
         \  fn f(a: Int, b: Int) -> Int { return a; };\
         \  return f(1);\
         \}"
-        "expected 2 arguments, got 1"
+        "f takes 2 arguments, got 1"
 
 testParseValUdfExtraArgsFail :: TestResult
 testParseValUdfExtraArgsFail =
@@ -472,7 +434,7 @@ testEvalIf =
         , parseEvalProgramHelper "x = 5; y = 0; if x < 4 { y = 1; } else if x < 9 { y = 2; } else { y = 3; }; return y;" (Just (VInt 2))
         , parseEvalProgramHelper "x = 5; y = 0; if x < 9 { if x < 3 { y = 1; } else { y = 2; }; }; return y;" (Just (VInt 2))
         , parseEvalProgramHelper "b = 1 < 2; y = 0; if b { y = 4; }; return y;" (Just (VInt 4))
-        , parseEvalProgramFailHelper "if 5 { x = 1; };" "Condition must be a boolean"
+        , parseEvalProgramFailHelper "if 5 { x = 1; };" "condition of if: expected Bool, got Int"
         , -- A variable first assigned in a branch is local to it
           parseEvalProgramFailHelper "if true { t = 1; }; return t;" "Undefined variable: t"
         ]
@@ -572,7 +534,7 @@ testEvalWhile =
         , parseEvalProgramHelper "i = 0; while i < 2 { j = 0; while j < 2 { i = i + 1; j = j + 1; }; }; return i;" (Just (VInt 2))
         , -- The invariant is only used by validation
           parseEvalProgramHelper "i = 0; while i < 3 [{ affirm i <= 3; }] { i = i + 1; }; return i;" (Just (VInt 3))
-        , parseEvalProgramFailHelper "while 5 { x = 1; };" "Condition must be a boolean"
+        , parseEvalProgramFailHelper "while 5 { x = 1; };" "condition of while: expected Bool, got Int"
         ]
 
 -- The validator does no arithmetic, so these two trusted axioms supply the arithmetic facts
@@ -731,7 +693,6 @@ testFunctionCalls =
             , -- A function cannot call one defined after it, and a name is defined once
               parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return g(n); }; fn g(n: Int) -> Int [{ }] [{ }] { return n; };" "Undefined variable: g"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
-            , parseEvalProgramFailHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
             , -- A function defined inside a body is local to it: a later local function cannot call it
               parseValidProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; return helper(n); }; x = outer(1);"
             , parseValidateFailProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; fn user(m: Int) -> Int { return helper(m); }; return user(n); };" "Undefined variable: helper"
@@ -801,8 +762,8 @@ testLists =
         , parseEvalProgramHelper "a = [1]; b = push(a, 2); return size(a) + size(b);" (Just (VInt 3))
         , parseEvalFailStmtHelper "{ return get([5], 1); }" "Get index out of range"
         , parseEvalFailStmtHelper "{ return get([5], 0 - 1); }" "Get index out of range"
-        , parseEvalFailStmtHelper "{ return push(1, 2); }" "Push only valid"
-        , parseEvalFailStmtHelper "{ return get(1, 0); }" "Get only valid"
+        , parseEvalFailStmtHelper "{ return push(1, 2); }" "argument 1 of push: expected List<?>, got Int"
+        , parseEvalFailStmtHelper "{ return get(1, 0); }" "argument 1 of get: expected List<?>, got Int"
         , parseEvalProgramHelper "return set([1, 2, 3], 1, 20);" (Just (VList [VInt 1, VInt 20, VInt 3]))
         , parseEvalProgramHelper "return set([1, 2, 3], 0, 9);" (Just (VList [VInt 9, VInt 2, VInt 3]))
         , parseEvalProgramHelper "return set([1, 2, 3], 2, 9);" (Just (VList [VInt 1, VInt 2, VInt 9]))
@@ -811,7 +772,7 @@ testLists =
         , parseEvalFailStmtHelper "{ return set([5], 1, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set([5], 0 - 1, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set([], 0, 0); }" "Set index out of range"
-        , parseEvalFailStmtHelper "{ return set(1, 0, 0); }" "Set only valid"
+        , parseEvalFailStmtHelper "{ return set(1, 0, 0); }" "argument 1 of set: expected List<?>, got Int"
         , -- Frame facts: push's contract keeps the old elements, and nothing else is known
           parseValidProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 1) = get(a, 1);"
         , parseValidateFailProgramHelper "a = [1, 2]; b = push(a, 3); affirm get(b, 2) = get(a, 1);" "Could not prove"

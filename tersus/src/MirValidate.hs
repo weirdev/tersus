@@ -3,12 +3,12 @@ module MirValidate
     , validateProgram
     ) where
 
-import Control.Monad (filterM, foldM, forM_, unless, when)
+import Control.Monad (filterM, foldM, forM_, when)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (isInfixOf, sort)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe, isNothing, mapMaybe)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -45,7 +45,7 @@ validateProgram program = runV $ do
         _ -> do
             st <- joinAll returned
             let names = Map.fromList [(n, iota) | (l, iota) <- Map.toList (psLocals st), Just d <- [Map.lookup l (M.fnLocals main')], Just n <- [M.localName d]]
-            return (Validated names (allFacts st) (Map.lookup (M.Local 0) (psLocals st)))
+            return (Validated (Map.union names (psVars st)) (allFacts st) (Map.lookup (M.Local 0) (psLocals st)))
 
 -- A function's graph and what is known of its loops
 data Ctx = Ctx
@@ -223,34 +223,6 @@ assign st dest rv =
   where
     bind s iota = s{psLocals = Map.insert dest iota (psLocals s)}
 
--- The builtin function that an operation is
-rvalueCall :: M.Rvalue -> Maybe (BuiltinFunct, [M.Operand])
-rvalueCall rv =
-    case rv of
-        M.BinaryOp op a b -> Just (binary op, [a, b])
-        M.ListOp op os -> Just (list op, os)
-        M.MakeData name fields -> Just (Ctor name (map fst fields), map snd fields)
-        M.ReadField o _ field -> Just (Field Nothing field, [o])
-        M.IsVariant o name -> Just (Is name, [o])
-        M.AsVariant o name -> Just (Cast name, [o])
-        M.Use _ -> Nothing
-        M.MakeList _ -> Nothing
-  where
-    binary op = case op of
-        M.Add -> Plus
-        M.Sub -> Minus
-        M.Mul -> Times
-        M.Div -> Div
-        M.Mod -> Mod
-        M.Compare rel -> Rel rel
-    list op = case op of
-        M.Length -> Size
-        M.First -> First
-        M.Last -> Last
-        M.Get -> Get
-        M.Push -> Push
-        M.Set -> Set
-
 -- The term for the value of an operand
 operandTerm :: PState -> M.Operand -> V IotaProof
 operandTerm st (M.Copy l) =
@@ -263,15 +235,6 @@ operandTerm st (M.Const (M.CFn name))
         Just _ -> return (ATerm (fnIota name))
         Nothing -> throwV ("Undefined variable: " ++ name ++ " (a function must be defined before the functions that call it)")
 operandTerm _ (M.Const c) = return (constantValue c)
-
--- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
-wrapperInfo :: PState -> Name -> Maybe FnInfo
-wrapperInfo st name = do
-    fn <- Map.lookup name (M.progFunctions (psProgram st))
-    [M.BasicBlock [M.Assign (M.Local 0) rv] M.Return] <- Just (Map.elems (M.fnBlocks fn))
-    (builtin, _) <- rvalueCall rv
-    let info = builtinInfo builtin
-    return info{fnTerm = ATerm (fnIota name), fnKind = KUser name}
 
 -- Ghost statements
 
@@ -395,11 +358,11 @@ upcoming cx b rules = concatMap fromBlock reachable
                      in [(M.loopEnv spec, assertedProofs rules (M.loopInvariant spec ++ decrease))]
                 Nothing -> []
             returning = case maybe M.Unreachable M.blockTerminator (Map.lookup x blocks) of
-                M.Return -> outputsAbout x stmts
+                M.Return -> outputsAbout stmts
                 _ -> []
          in ghosts ++ loop ++ returning
     -- what the function promises about the value that a return gives, written for the expression that computes it
-    outputsAbout x stmts =
+    outputsAbout stmts =
         case [rv | M.Assign (M.Local 0) rv <- reverse stmts] of
             rv : _ | Just term <- rvalueTerm rv ->
                 let env = Map.union (M.specEnv (M.fnSpec fn)) (Map.fromList [(pseudo l, M.Copy l) | l <- locals rv])
@@ -504,8 +467,11 @@ mergeStates wantedOf states@(s1 : others) = do
         candidates = nubOrd [c | p <- own s1, let c = toMerged s1 p, isVisible c, c `notElem` s0Facts]
         entailedByOthers cs = foldl (\flags (_, ctx) -> zipWith (&&) flags (Engine.entailsAll cs ctx)) (map (const True) cs) (drop 1 contexts)
         keptFromFirst = [c | (c, True) <- zip candidates (entailedByOthers candidates)]
-        carried = [p' | s <- states, p <- s0Facts, let p' = toMerged s p, p' /= p]
-        fromOthers = [toMerged s p | s <- others, p <- own s]
+        -- (a fact about the value that a local had, for the new value of the local: also one local at a time, since locals can
+        -- hold the same value, and then the value is replaced by the new value of only one of them)
+        toMergedOne s (l, m) = substituteProofTerm (ATerm (iotaOf s l)) (ATerm m)
+        carried = [p' | s <- states, p <- s0Facts, let p' = toMerged s p, p' /= p] ++ [p' | s <- states, lm <- mergeOf, p <- s0Facts, Just p' <- [toMergedOne s lm p]]
+        fromOthers = [toMerged s p | s <- others, p <- own s] ++ [p' | s <- others, lm <- mergeOf, p <- own s, Just p' <- [toMergedOne s lm p]]
         extras =
             take maxJoinCandidates . nubOrd $
                 [ c

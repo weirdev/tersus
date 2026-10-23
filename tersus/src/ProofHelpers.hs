@@ -1,133 +1,23 @@
 module ProofHelpers
-    ( advanceStatement
-    , bindVar
-    , buildVarToIotaState
-    , emptyContinuations
-    , emptyScopeState
-    , emptyVScopeState
-    , getContinuations
-    , getReturn
-    , initState
-    , initStateWStatements
-    , initVStateWStatements
-    , insertVar
-    , iotaProofToVarProof
-    , iotaToValueWProofList
-    , keepCache
-    , lookupVar
+    ( iotaProofToVarProof
     , namedIotaMap
-    , popIotaFromSeq
-    , popNIotasFromSeq
     , proofIotas
-    , proofOnlyOfIotasOrConst
     , proofOnlyOfNamedIotasOrConst
     , proofVars
-    , reverseEqProof
-    , scopeAdvanceStatement
-    , setContinuations
-    , setPScope
-    , setReturn
     , substituteProofTerm
-    , topLevelScope
-    , vAdvanceStatement
-    , vBindVar
-    , vGetContinuations
-    , vGetIotaSeq
-    , vGetProofs
-    , vGetReturn
-    , vGetVars
-    , vInsertProofs
-    , vInsertRule
-    , vInsertVar
-    , vInsertVars
-    , vIsLoopBack
-    , vLookupRule
-    , vLookupVar
-    , vMarkLoopBack
-    , vProofContext
-    , vProofContextWith
-    , vScopeAdvanceStatement
-    , vScopeGetProofs
-    , vSetContinuations
-    , vSetIotaSeq
-    , vSetReturn
-    , vSetScope
-    , vTopLevelScope
-    , vVisibleVars
     , valStmtDefinedVars
-    , varProofToIotaProof
-    , withFacts
     ) where
 
-import Data.Map (
-    Map,
-    empty,
-    insert,
-    lookup,
-    member,
-    fromList,
-    union,
- )
-
 import Data.Containers.ListUtils (nubOrd)
+import Data.Map (Map, fromList)
+import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, isJust)
 
-import qualified ProofEngine as Engine
-import StdLib
 import TersusTypes
 import Utils
 
-initState :: State
-initState = State emptyScopeState stdLibCtx
-
-initStateWStatements :: [Statement] -> State
-initStateWStatements stmts = case initState of
-    State _ ctxVals -> State (initScopeStateWStatements stmts) ctxVals
-
-initScopeStateWStatements :: [Statement] -> ScopeState
-initScopeStateWStatements stmts = ScopeState empty (Continuations stmts) Nothing
-
-initVStateWStatements :: [Statement] -> VState
-initVStateWStatements stmts =
-    let (iotaCtx, proofCtx) = stdLibValCtx
-     in VStateC (initVScopeStateWStatements stmts) iotaCtx proofCtx iotalist stdLibRuleCtx (Just (Engine.factCacheAdd Engine.emptyFactCache proofCtx))
-
-initVScopeStateWStatements :: [Statement] -> VScopeState
-initVScopeStateWStatements stmts = VScopeState empty [] (Continuations stmts) Nothing
-
-emptyScopeState :: ScopeState
-emptyScopeState = ScopeState empty emptyContinuations Nothing
-
-emptyVScopeState :: VScopeState
-emptyVScopeState = VScopeState empty [] emptyContinuations Nothing
-
-vSetScope :: VState -> VScopeState -> VState
-vSetScope old@(VState _ iotaCtx proofCtx iotaseq ruleCtx) scope = keepCache old (VState scope iotaCtx proofCtx iotaseq ruleCtx)
-
-setPScope :: State -> Maybe ScopeState -> State
-setPScope (State scope ctxVals) p = State (scopeSetPScope scope p) ctxVals
-
-scopeSetPScope :: ScopeState -> Maybe ScopeState -> ScopeState
-scopeSetPScope (ScopeState vals c _) = ScopeState vals c
-
--- TODO: Get vars from parent scopes and ctx
-vGetVars :: VState -> Map Variable Iota
-vGetVars (VState (VScopeState iotas _ _ _) _ _ _ _) = iotas
-
--- Every variable visible from the current scope, with inner bindings shadowing outer ones.
-vVisibleVars :: VState -> Map Variable Iota
-vVisibleVars (VState scope _ _ _ _) = vScopeVisibleVars scope
-
-vScopeVisibleVars :: VScopeState -> Map Variable Iota
-vScopeVisibleVars (VScopeState iotas _ _ Nothing) = iotas
-vScopeVisibleVars (VScopeState iotas _ _ (Just pScope)) =
-    Data.Map.union iotas (vScopeVisibleVars pScope)
-
-vGetIotaSeq :: VState -> [Iota]
-vGetIotaSeq (VState _ _ _ iotaseq _) = iotaseq
-
-vSetIotaSeq :: VState -> [Iota] -> VState
-vSetIotaSeq old@(VState scope iotaCtx proofCtx _ ruleCtx) iotaseq = keepCache old (VState scope iotaCtx proofCtx iotaseq ruleCtx)
+-- Helpers for the terms of proofs: which iotas and variables a proof mentions, replacing a term by another, and moving a
+-- proof between the iotas of the validator's values and the names a function gives them.
 
 -- All iotas a proof mentions
 proofIotas :: Proof Iota -> [Iota]
@@ -137,280 +27,7 @@ proofIotas (BVar _) = []
 proofIotas (Forall _ guards body) = concatMap proofIotas (body : guards)
 proofIotas (FApp funct args) = proofIotas funct ++ concatMap proofIotas args
 
--- Lookup the value of a var in State, including parent scopes
-lookupVar :: State -> Variable -> Maybe Value
-lookupVar (State scope ctxVals) var = case scopeLookupVar scope var of
-    Just val -> Just val
-    Nothing -> Data.Map.lookup var ctxVals
-
-scopeLookupVar :: ScopeState -> Variable -> Maybe Value
-scopeLookupVar (ScopeState vals _ pScope) var = case Data.Map.lookup var vals of
-    Just val -> Just val
-    Nothing -> case pScope of
-        Just p -> scopeLookupVar p var
-        Nothing -> Nothing
-
-vLookupVar :: VState -> Variable -> Maybe Iota
-vLookupVar (VState scope iotaCtx _ _ _) var = case vScopeLookupVar scope var of
-    Just iota -> Just iota
-    Nothing -> Data.Map.lookup var iotaCtx
-
-vScopeLookupVar :: VScopeState -> Variable -> Maybe Iota
-vScopeLookupVar (VScopeState iotas _ _ pScope) var =
-    case Data.Map.lookup var iotas of
-        Just iota -> Just iota
-        Nothing -> case pScope of
-            Just p -> vScopeLookupVar p var
-            Nothing -> Nothing
-
-updateExistingVar :: State -> Variable -> Value -> Maybe State
-updateExistingVar (State scope ctxVals) var val =
-    case scopeUpdateExistingVar scope var val of
-        Just ns -> Just $ State ns ctxVals
-        Nothing -> Nothing
-
-scopeUpdateExistingVar :: ScopeState -> Variable -> Value -> Maybe ScopeState
-scopeUpdateExistingVar (ScopeState vals c pState) var val =
-    case Data.Map.lookup var vals of
-        Just _ -> Just (ScopeState (insert var val vals) c pState)
-        Nothing -> case pState of
-            Just p -> case scopeUpdateExistingVar p var val of
-                Just np -> Just $ ScopeState vals c (Just np)
-                Nothing -> Nothing
-            Nothing -> Nothing
-
-vUpdateExistingVar :: VState -> Variable -> Iota -> [IotaProof] -> Maybe VState
-vUpdateExistingVar old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
-    case vScopeUpdateExistingVar scope var niota nproofs of
-        Just ns -> Just $ withFacts old nproofs (VState ns iotaCtx proofCtx iotaseq ruleCtx)
-        Nothing -> Nothing
-
-vScopeUpdateExistingVar :: VScopeState -> Variable -> Iota -> [IotaProof] -> Maybe VScopeState
-vScopeUpdateExistingVar (VScopeState iotas proofs c pScope) var niota nproofs =
-    case Data.Map.lookup var iotas of
-        Just _ -> Just $ VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope
-        Nothing -> case pScope of
-            Just p -> case vScopeUpdateExistingVar p var niota nproofs of
-                Just np -> Just $ VScopeState iotas proofs c (Just np)
-                Nothing -> Nothing
-            Nothing -> Nothing
-
-insertVar :: State -> Variable -> Value -> State
-insertVar (State (ScopeState vals c pState) ctxVals) var val =
-    -- Prefentially update existing var in this or parent scope if the variable is already bound.
-    -- Otherwise, just insert the new variable in the current scope.
-    case updateExistingVar (State (ScopeState vals c pState) ctxVals) var val of
-        Just s -> s
-        Nothing -> State (ScopeState (insert var val vals) c pState) ctxVals
-
--- Binds a variable in the innermost scope only, hiding a variable of that name in an outer scope
-bindVar :: State -> Variable -> Value -> State
-bindVar (State (ScopeState vals c pState) ctxVals) var val = State (ScopeState (insert var val vals) c pState) ctxVals
-
-vBindVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
-vBindVar old@(VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
-    withFacts old nproofs (VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq ruleCtx)
-
-vInsertVar :: VState -> Variable -> Iota -> [IotaProof] -> VState
-vInsertVar old@(VState (VScopeState iotas proofs c pScope) iotaCtx proofCtx iotaseq ruleCtx) var niota nproofs =
-    case vUpdateExistingVar old var niota nproofs of
-        Just s -> s
-        Nothing -> withFacts old nproofs (VState (VScopeState (insert var niota iotas) (proofs ++ nproofs) c pScope) iotaCtx proofCtx iotaseq ruleCtx)
-
-vInsertVars :: VState -> [(Variable, Iota)] -> [IotaProof] -> VState
-vInsertVars state [] nproofs = vInsertProofs state nproofs
-vInsertVars state ((var, iota) : varIotas) nproofs =
-    vInsertVars (vInsertVar state var iota nproofs) varIotas []
-
-getContinuations :: State -> Continuations
-getContinuations (State scope _) = scopeGetContinuations scope
-
-scopeGetContinuations :: ScopeState -> Continuations
-scopeGetContinuations (ScopeState _ c _) = c
-
-vGetContinuations :: VState -> Continuations
-vGetContinuations (VState scope _ _ _ _) = vScopeGetContinuations scope
-
-vScopeGetContinuations :: VScopeState -> Continuations
-vScopeGetContinuations (VScopeState _ _ c _) = c
-
-setContinuations :: State -> Continuations -> State
-setContinuations (State scope ctxVals) c = State (scopeSetContinuations scope c) ctxVals
-
-vSetContinuations :: VState -> Continuations -> VState
-vSetContinuations old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) c = keepCache old (VState (vScopeSetContinuations scope c) iotaCtx proofCtx iotaseq ruleCtx)
-
-scopeSetContinuations :: ScopeState -> Continuations -> ScopeState
-scopeSetContinuations (ScopeState vals _ pScope) c = ScopeState vals c pScope
-
-vScopeSetContinuations :: VScopeState -> Continuations -> VScopeState
-vScopeSetContinuations (VScopeState iotas proofs _ pScope) c = VScopeState iotas proofs c pScope
-
--- Return is always set in the top level scope
--- TODO: We should have a real return slot rather than using a var
-getReturn :: State -> Maybe Value
-getReturn (State (ScopeState vals _ _) _) = Data.Map.lookup "return" vals
-
--- Return is always set in the top level scope
--- TODO: We should have a real return slot rather than using a var
-vGetReturn :: VState -> Result Iota String
-vGetReturn (VState (VScopeState iotas _ _ Nothing) _ _ _ _) =
-    case Data.Map.lookup "return" iotas of
-        Just iota -> Ok iota
-        Nothing -> Error "Return value not found in top scope"
-vGetReturn _ = Error "Not top scope"
-
--- Return is always set in the top level scope, and it ends the program (or function body):
--- the top level scope's remaining statements are dropped.
--- NOTE: If we ever have nested functions that implicitly get their parent's scope,
--- this will need to be updated to indicate on which scope to set the return value
-setReturn :: State -> Value -> State
-setReturn (State scope ctxVals) val = State (scopeSetReturn scope val) ctxVals
-
-scopeSetReturn :: ScopeState -> Value -> ScopeState
-scopeSetReturn (ScopeState vals _ Nothing) val = ScopeState (insert "return" val vals) emptyContinuations Nothing
-scopeSetReturn (ScopeState _ _ (Just pScope)) val = scopeSetReturn pScope val
-
-vSetReturn :: VState -> Iota -> [IotaProof] -> VState
-vSetReturn old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) niota nproofs =
-    withFacts old nproofs (VState (vScopeSetReturn scope niota nproofs) iotaCtx proofCtx iotaseq ruleCtx)
-
-vScopeSetReturn :: VScopeState -> Iota -> [IotaProof] -> VScopeState
-vScopeSetReturn (VScopeState iotas proofs _ Nothing) niota nproofs =
-    VScopeState (insert "return" niota iotas) (proofs ++ nproofs) emptyContinuations Nothing
-vScopeSetReturn (VScopeState iotas proofs c (Just pScope)) niota nproofs =
-    VScopeState iotas proofs c (Just $ vScopeSetReturn pScope niota nproofs)
-
--- A validation path that reaches the end of a loop body has not ended the program: control
--- goes back to the loop condition, which is validated separately. Such a path is marked so
--- that joining paths ignores it. The name cannot be written as a Tersus variable.
-loopBackVar :: Variable
-loopBackVar = "%loopback"
-
-vMarkLoopBack :: VState -> VState
-vMarkLoopBack state = vInsertVar state loopBackVar (Iota loopBackVar) []
-
-vIsLoopBack :: VState -> Bool
-vIsLoopBack state = Data.Map.member loopBackVar (vVisibleVars state)
-
-vScopeGetProofs :: VScopeState -> [IotaProof]
-vScopeGetProofs (VScopeState _ proofs _ Nothing) = proofs
-vScopeGetProofs (VScopeState _ proofs _ (Just pScope)) =
-    proofs ++ vScopeGetProofs pScope
-
--- The state `new`, built from `old` by changing something other than the visible facts, with old's solver cache
-keepCache :: VState -> VState -> VState
-keepCache (VStateC _ _ _ _ _ cache) (VStateC scope iotaCtx proofCtx iotaseq ruleCtx _) = VStateC scope iotaCtx proofCtx iotaseq ruleCtx cache
-
--- The state `new`, built from `old` by making more facts visible: the cache gets them too
-withFacts :: VState -> [IotaProof] -> VState -> VState
-withFacts (VStateC _ _ _ _ _ cache) facts (VStateC scope iotaCtx proofCtx iotaseq ruleCtx _) =
-    VStateC scope iotaCtx proofCtx iotaseq ruleCtx (Just (Engine.factCacheAdd (fromMaybe Engine.emptyFactCache cache) facts))
-
--- What the proof engine is asked about the facts of a state, using the state's solver cache
-vProofContext :: VState -> Engine.ProofContext
-vProofContext state@(VStateC _ _ _ _ _ cache) = Engine.proofContextFromCache cache (vGetProofs state)
-
--- As vProofContext, with more facts than the state has
-vProofContextWith :: VState -> [IotaProof] -> Engine.ProofContext
-vProofContextWith state@(VStateC _ _ _ _ _ cache) extra = Engine.proofContextFromCache cache (vGetProofs state ++ extra)
-
-vGetProofs :: VState -> [IotaProof]
-vGetProofs (VState scope _ proofCtx _ _) = vScopeGetProofs scope ++ proofCtx
-
-vScopeInsertProofs :: VScopeState -> [IotaProof] -> VScopeState
-vScopeInsertProofs (VScopeState iotas proofs c pScope) newProofs =
-    VScopeState iotas (nubOrd (proofs ++ newProofs)) c pScope
-
-vInsertProofs :: VState -> [IotaProof] -> VState
-vInsertProofs old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) newProofs =
-    withFacts old newProofs (VState (vScopeInsertProofs scope newProofs) iotaCtx proofCtx iotaseq ruleCtx)
-
-vLookupRule :: VState -> Variable -> Maybe UserRule
-vLookupRule (VState _ _ _ _ ruleCtx) name = Data.Map.lookup name ruleCtx
-
-vInsertRule :: VState -> Variable -> UserRule -> Result VState String
-vInsertRule old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) name rule =
-    case Data.Map.lookup name ruleCtx of
-        Just _ -> Error $ "Duplicate rule definition: " ++ name
-        Nothing -> Ok $ keepCache old (VState scope iotaCtx proofCtx iotaseq (insert name rule ruleCtx))
-
-popIotaFromSeq :: VState -> Result (Iota, VState) String
-popIotaFromSeq old@(VState vScopeState iotaCtx proofCtx iotaseq ruleCtx) = case iotaseq of
-    [] -> Error "No more iotas to pop"
-    i : is -> Ok (i, keepCache old (VState vScopeState iotaCtx proofCtx is ruleCtx))
-
-popNIotasFromSeq :: VState -> Int -> Result ([Iota], VState) String
-popNIotasFromSeq state n
-    | n > 0 =
-        case popIotaFromSeq state of
-            Ok (iota, state') ->
-                case popNIotasFromSeq state' (n - 1) of
-                    Ok (remainingIotas, state'') -> Ok (iota : remainingIotas, state'')
-                    Error e -> Error e
-            Error e -> Error e
-popNIotasFromSeq state _ = Ok ([], state)
-
-emptyContinuations :: Continuations
-emptyContinuations = Continuations []
-
-advanceStatement :: State -> Result State String
-advanceStatement (State scope ctxVals) =
-    case scopeAdvanceStatement scope of
-        Ok nscope -> Ok $ State nscope ctxVals
-        Error e -> Error e
-
-scopeAdvanceStatement :: ScopeState -> Result ScopeState String
-scopeAdvanceStatement (ScopeState _ (Continuations []) _) = Error "No more statements to advance"
-scopeAdvanceStatement (ScopeState vals (Continuations (_ : nxt)) pState) = Ok $ ScopeState vals (Continuations nxt) pState
-
-vAdvanceStatement :: VState -> Result VState String
-vAdvanceStatement old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
-    case vScopeAdvanceStatement scope of
-        Ok nscope -> Ok $ keepCache old (VState nscope iotaCtx proofCtx iotaseq ruleCtx)
-        Error e -> Error e
-
-vScopeAdvanceStatement :: VScopeState -> Result VScopeState String
-vScopeAdvanceStatement (VScopeState _ _ (Continuations []) _) =
-    Error "No more statements to advance"
-vScopeAdvanceStatement (VScopeState iotas proofs (Continuations (_ : nxt)) pScope) =
-    Ok $ VScopeState iotas proofs (Continuations nxt) pScope
-
-topLevelScope :: State -> State
-topLevelScope (State scope ctxVals) = State (scopeTopLevelScope scope) ctxVals
-
-scopeTopLevelScope :: ScopeState -> ScopeState
-scopeTopLevelScope (ScopeState vals c Nothing) = ScopeState vals c Nothing
-scopeTopLevelScope (ScopeState _ _ (Just pScope)) = scopeTopLevelScope pScope
-
-vTopLevelScope :: VState -> VState
-vTopLevelScope (VState scope iotaCtx proofCtx iotaseq ruleCtx) =
-    VState (vScopeTopLevelScope scope) iotaCtx proofCtx iotaseq ruleCtx
-
-vScopeTopLevelScope :: VScopeState -> VScopeState
-vScopeTopLevelScope (VScopeState iotas proofs c Nothing) = VScopeState iotas proofs c Nothing
-vScopeTopLevelScope (VScopeState _ _ _ (Just pScope)) = vScopeTopLevelScope pScope
-
--- Infinite sequence of iota names (a0, b0, ..., z0, a1, b1, ...)
-iotalist :: [Iota]
-iotalist = [Iota $ l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z']]
-
-proofOnlyOfIotasOrConst :: [Iota] -> IotaProof -> Bool
-proofOnlyOfIotasOrConst iotas (ATerm i) = i `elem` iotas
-proofOnlyOfIotasOrConst _ CTerm{} = True
-proofOnlyOfIotasOrConst _ BVar{} = True
-proofOnlyOfIotasOrConst iotas (Forall _ guards body) = all (proofOnlyOfIotasOrConst iotas) (body : guards)
-proofOnlyOfIotasOrConst iotas (FApp _ proofs) = all (proofOnlyOfIotasOrConst iotas) proofs
-
--- replaceLIotas :: [Proof] -> Iota -> [Proof]
--- replaceLIotas [] _ = []
--- replaceLIotas (A _ rel ptiota : tail) iota =
---     A iota rel ptiota : replaceLIotas tail iota
--- replaceLIotas (C _ rel val : tail) iota =
---     C iota rel val : replaceLIotas tail iota
--- replaceLIotas (FApp _ funct ptiota : tail) iota =
---     FApp iota funct ptiota : replaceLIotas tail iota
-
+-- The proof with each occurrence of the source replaced by the target, if there is one
 substituteProofTerm :: IotaProof -> IotaProof -> IotaProof -> Maybe IotaProof
 substituteProofTerm source target proof
     | proof == source = Just target
@@ -433,39 +50,6 @@ substituteProofTerm source target (Forall index guards body) =
             else Nothing
 substituteProofTerm _ _ _ = Nothing
 
-reverseEqProof :: IotaProof -> IotaProof
-reverseEqProof (FApp funct [lhs, rhs]) | funct == eqProof = FApp eqProof [rhs, lhs]
-reverseEqProof _ = error "Only Eq relation supported"
-
--- Given an iota and a list of proofs,
--- return the concrete value of the iota or nothing if not found
-iotaToValueWProofList :: Iota -> [IotaProof] -> Maybe Value
-iotaToValueWProofList _ [] = Nothing
-iotaToValueWProofList iota (proof : ptail) = case proof of
-    FApp eqProof [ATerm piota, CTerm val] | piota == iota -> Just val
-    _ -> iotaToValueWProofList iota ptail
-
-varProofToIotaProof :: VariableProof -> VState -> Result IotaProof String
-varProofToIotaProof (CTerm val) _ = Ok (CTerm val)
-varProofToIotaProof (BVar index) _ = Ok (BVar index)
-varProofToIotaProof (Forall index guards body) state =
-    case (flatResultMap (`varProofToIotaProof` state) guards, varProofToIotaProof body state) of
-        (Ok iotaGuards, Ok iotaBody) -> Ok (Forall index iotaGuards iotaBody)
-        (Error e, _) -> Error e
-        (_, Error e) -> Error e
-varProofToIotaProof (ATerm var) state =
-    case vLookupVar state var of
-        Just iotaval -> Ok (ATerm iotaval)
-        Nothing -> Error $ "Variable not found in proof map: " ++ var
-varProofToIotaProof (FApp funct args) state =
-    case varProofToIotaProof funct state of
-        Error e -> Error e
-        Ok functProof ->
-            case flatResultMap (`varProofToIotaProof` state) args of
-                Error e -> Error e
-                Ok iotaproofs -> Ok (FApp functProof iotaproofs)
-
-
 proofVars :: VariableProof -> [Variable]
 proofVars (CTerm _) = []
 proofVars (ATerm var) = [var]
@@ -479,9 +63,7 @@ valStmtDefinedVars (AssignProofVar var _) = [var]
 valStmtDefinedVars _ = []
 
 proofOnlyOfNamedIotasOrConst :: Map Iota Variable -> IotaProof -> Bool
-proofOnlyOfNamedIotasOrConst namedIotas (ATerm iota) = case Data.Map.lookup iota namedIotas of
-    Just _ -> True
-    Nothing -> False
+proofOnlyOfNamedIotasOrConst namedIotas (ATerm iota) = Map.member iota namedIotas
 proofOnlyOfNamedIotasOrConst _ CTerm{} = True
 proofOnlyOfNamedIotasOrConst _ BVar{} = True
 proofOnlyOfNamedIotasOrConst namedIotas (Forall _ guards body) =
@@ -495,21 +77,11 @@ iotaProofToVarProof _ (CTerm val) = Just (CTerm val)
 iotaProofToVarProof _ (BVar index) = Just (BVar index)
 iotaProofToVarProof namedIotas (Forall index guards body) =
     Forall index <$> collectMaybes (iotaProofToVarProof namedIotas) guards <*> iotaProofToVarProof namedIotas body
-iotaProofToVarProof namedIotas (ATerm iota) = ATerm <$> Data.Map.lookup iota namedIotas
+iotaProofToVarProof namedIotas (ATerm iota) = ATerm <$> Map.lookup iota namedIotas
 iotaProofToVarProof namedIotas (FApp funct args) = do
     vfunct <- iotaProofToVarProof namedIotas funct
     vargs <- collectMaybes (iotaProofToVarProof namedIotas) args
     Just (FApp vfunct vargs)
-
-buildVarToIotaState :: VState -> [(Variable, Iota)] -> [IotaProof] -> [Iota] -> VState
-buildVarToIotaState (VState _ iotaCtx proofCtx _ ruleCtx) vars proofs iotaseq = VState
-        -- This builds a temporary name->iota environment used while instantiating
-        -- exported function proofs back into the caller's scope.
-        (VScopeState (fromList vars) proofs emptyContinuations Nothing)
-        iotaCtx
-        proofCtx
-        iotaseq
-        ruleCtx
 
 namedIotaMap :: [(Variable, Iota)] -> Map Iota Variable
 namedIotaMap = fromList . map (\(var, iota) -> (iota, var))
