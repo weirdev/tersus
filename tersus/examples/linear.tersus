@@ -38,21 +38,17 @@ fn bits(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] shrinks n 
 };
 
 // Binary search for a number from 0 to 1000. The middle is between lo and hi when lo < hi, so every step narrows
-// the range hi - lo; width remembers it from before the if, since the if only keeps what both branches state.
+// the range hi - lo. Neither branch of the if restates the invariant or the variant: the join keeps what the end of
+// the loop body needs if both branches establish it.
 fn guess(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] [{ affirm return = secret; }] {
     lo = 0;
     hi = 1000;
     while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo {
-        width = hi - lo;
         mid = (lo + hi) / 2;
         if mid < secret {
             lo = mid + 1;
-            affirm lo <= secret;
-            affirm hi - lo < width;
         } else {
             hi = mid;
-            affirm secret <= hi;
-            affirm hi - lo < width;
         };
     };
     return lo;

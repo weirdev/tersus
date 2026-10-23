@@ -36,7 +36,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
 | `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
-| `linear.tersus` | Sums of variables, multiples and division by a constant as linear arithmetic: contracts like `a + b <= 10` and `2 * x <= y`, a loop with an inferred `s + i = n`, `bits` that halves (`shrinks n`, `n / 2`), and a binary search over a range | returns `633` |
+| `linear.tersus` | Sums of variables, multiples and division by a constant as linear arithmetic: contracts like `a + b <= 10` and `2 * x <= y`, a loop with an inferred `s + i = n`, `bits` that halves (`shrinks n`, `n / 2`), and a binary search over a range whose `if` states neither the invariant nor the variant | returns `633` |
 | `for_loops.tersus` | `for i in lo..hi` and `for x in list` / `for i, x in list`: a sum over a list, an early `return`, a list built to a given size, and nested ranges, with no invariant or termination clause | returns `33` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |

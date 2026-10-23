@@ -492,8 +492,36 @@ joinBranchesFrom s0 vars sThen sElse =
                                 (nubOrd (map toMerged (vGetProofs sThen)))
                         elseEqualities = [FApp eqProof [ATerm m, ATerm elseIota] | (_, m, (_, elseIota)) <- merges]
                         elseContext = vProofContextWith sElse elseEqualities
-                        kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
+                        keptFromThen = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
                         base = vSetIotaSeq s0 (vGetIotaSeq sAfter)
+                        -- Facts the join was not handed by the then-branch, that both branches may still establish; each is kept
+                        -- only if both branches entail it, so they only have to be worth trying
+                        joined = foldl (\s (var, m, _) -> vInsertVar s var m []) base merges
+                        oldIotas = [(oldIota, m) | (var, m, _) <- merges, Just oldIota <- [vLookupVar s0 var]]
+                        toMergedElse proof =
+                            foldl
+                                (\p (_, m, (_, elseIota)) -> maybe p id (substituteProofTerm (ATerm elseIota) (ATerm m) p))
+                                proof
+                                merges
+                        wanted = [proof | variableProof <- loopEndProofs s0 ++ upcomingProofs s0, Ok proof <- [varProofToIotaProof variableProof joined]]
+                        carried =
+                            [ proof'
+                            | proof <- s0Facts
+                            , let proof' = foldl (\p (oldIota, m) -> maybe p id (substituteProofTerm (ATerm oldIota) (ATerm m) p)) proof oldIotas
+                            , proof' /= proof
+                            ]
+                        extras =
+                            take maxJoinCandidates $
+                                nubOrd
+                                    [ candidate
+                                    | candidate <- wanted ++ carried ++ map toMergedElse (vGetProofs sElse)
+                                    , candidate `notElem` s0Facts
+                                    , candidate `notElem` candidates
+                                    , all (`elem` visible) (proofIotas candidate)
+                                    ]
+                        thenContext = vProofContextWith sThen [FApp eqProof [ATerm m, ATerm thenIota] | (_, m, (thenIota, _)) <- merges]
+                        keptExtras = [candidate | (candidate, True, True) <- zip3 extras (Engine.entailsDirect extras thenContext) (Engine.entailsDirect extras elseContext)]
+                        kept = keptFromThen ++ keptExtras
                         factsFor m = filter (elem m . proofIotas) kept
                         rebound = foldl (\s (var, m, _) -> vInsertVar s var m (factsFor m)) base merges
                         boundFacts = concatMap (\(_, m, _) -> factsFor m) merges
@@ -504,6 +532,46 @@ joinBranchesFrom s0 vars sThen sElse =
     finalIota state var = case vLookupVar state var of
         Just iota -> Ok iota
         Nothing -> Error ("Variable not found while joining branches: " ++ var)
+
+-- What the join of an `if` tries to keep, besides what the branches state: the proofs the program is about to need.
+-- The statements still to run in the block and in the blocks around it assert some (`affirm`, the invariant of a
+-- loop that follows), and the end of a loop body asserts the invariant and that the variant got smaller. A join that
+-- keeps a fact like that spares the program from stating it again in each branch.
+upcomingProofs :: VState -> [VariableProof]
+upcomingProofs (VState scope _ _ _ _) = go scope
+  where
+    go (VScopeState _ _ (Continuations rest) parent) = concatMap proofsOf rest ++ maybe [] go parent
+    proofsOf (ValidationStatement (ProofAssert proof)) = [proof]
+    proofsOf (While _ invariant _ _) = assertedProofs invariant
+    proofsOf _ = []
+
+-- The proofs that stating the statements asserts, with a variable they define replaced by its definition
+assertedProofs :: [ValidationStatement] -> [VariableProof]
+assertedProofs stmts = [replace proof | ProofAssert proof <- stmts]
+  where
+    definitions = Map.fromList [(var, exprToProof expr) | AssignProofVar var expr <- stmts]
+    replace (ATerm var) = fromMaybe (ATerm var) (Map.lookup var definitions)
+    replace (FApp funct args) = FApp (replace funct) (map replace args)
+    replace (Forall index guards body) = Forall index (map replace guards) (replace body)
+    replace proof = proof
+
+-- The end of the body of the loop being validated, as a rule under a name no program can write, since the state of
+-- a block has nowhere else to carry it. The statements are the invariant and the variant check.
+loopEndMarker :: Variable
+loopEndMarker = "$loop end"
+
+withLoopEnd :: [ValidationStatement] -> VState -> VState
+withLoopEnd stmts state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
+    keepCache state (VState scope iotaCtx proofCtx iotaseq (Map.insert loopEndMarker (AxiomRule [] stmts []) ruleCtx))
+
+loopEndProofs :: VState -> [VariableProof]
+loopEndProofs (VState _ _ _ _ ruleCtx) =
+    case Map.lookup loopEndMarker ruleCtx of
+        Just (AxiomRule _ stmts _) -> assertedProofs stmts
+        _ -> []
+
+maxJoinCandidates :: Int
+maxJoinCandidates = 40
 
 traverseResult :: (a -> Result b String) -> [a] -> Result [b] String
 traverseResult = flatResultMap
@@ -555,7 +623,7 @@ valLoopFrom havocked cond invariant term body =
                     then valReturningWhile assumed cond invariant term body bodyAssumptions
                     else
                         startIteration condState bodyAssumptions term `bindResult` \(iterState, decrease) ->
-                            valBranch iterState bodyAssumptions body `bindResult` \bodyState ->
+                            valBranch (withLoopEnd (invariant ++ decrease) iterState) bodyAssumptions body `bindResult` \bodyState ->
                                 prefixError "Loop invariant is not preserved: " (validateUserRuleInputs bodyState invariant) `bindResult` \_ ->
                                     variantFailure "Loop variant does not shrink" decrease (validateUserRuleInputs bodyState decrease) `bindResult` \_ ->
                                         valLoopExit (vSetIotaSeq assumed (vGetIotaSeq bodyState)) cond
@@ -631,7 +699,7 @@ inferInvariants entry havocked loopVars cond invariant body
         case assumeValStmts havocked (invariant ++ survivors) of
             Ok assumed -> case valLoopCondition assumed cond of
                 Ok (condState, condIota) -> case conditionAssumptions True cond condIota condState of
-                    Ok bodyAssumptions -> case valBranch condState bodyAssumptions body of
+                    Ok bodyAssumptions -> case valBranch (withLoopEnd (invariant ++ survivors) condState) bodyAssumptions body of
                         Ok bodyState -> Just bodyState
                         Error _ -> Nothing
                     Error _ -> Nothing

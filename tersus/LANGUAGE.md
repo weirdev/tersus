@@ -365,7 +365,25 @@ fn f(n: Int) -> Int {
 };
 ```
 
-This is sound but incomplete. Facts a branch derives about values that existed before the `if`, and that the other branch does not also derive, are dropped, so re-derive them after the `if` when you need them.
+The facts the join tries are not only the ones a branch stated. It also tries what the program is about to need, and keeps each if both branches entail it:
+
+- the `affirm`s that follow in the same block or in the blocks around it, and the invariant of a loop that follows,
+- the invariant and the variant check at the end of the loop body that the `if` is in (the variant must be smaller than at the start of the iteration),
+- the facts that held before the `if`, about a variable the branches assign, now about its new value, and
+- the facts the else branch stated, which the then branch may entail.
+
+```tersus
+fn f(c: Int) -> Int {
+    x = 0;
+    if c > 0 { x = 1; } else { x = 2; };
+    affirm x > 0;           // neither branch says so; both entail it, and the affirm that follows asked
+    return x;
+};
+```
+
+In a loop, an `if` in the body does not have to restate the invariant or the variant in each branch (`examples/linear.tersus` searches by halving a range with an `if` that moves one end, and writes neither). A fact is only tried if the program asks for it as above, and it is checked with congruence and arithmetic only, with no `forall` instantiated and no case split, so a fact that needs those still has to be stated in each branch.
+
+This is sound but incomplete. A fact about values that existed before the `if` that nothing later asks for, and that the branches do not both state, is dropped, so state it in both branches or after the `if` when you need it. The output contract of a function is not asked for: the facts it needs about the variable returned must come from the branches or from before the `if`.
 
 #### Early return
 

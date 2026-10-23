@@ -1939,6 +1939,36 @@ testRefinedArithmetic =
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks 2 * n { if n < 1 { return 0; } else { return f(n + 1); }; }; x = f(3);" "Recursive call does not shrink the variant"
             ]
 
+-- The join of an `if` also tries what the program is about to need (see joinBranches in Proof.hs)
+testIfJoin :: Test
+testIfJoin =
+    let fn' body = "fn f(c: Int, y: Int) -> Int [{ affirm y > 0; }] [{ }] { " ++ body ++ " return 0; };"
+     in testCaseSeq
+            "testIfJoin"
+            [ -- An affirm after the if asks for a fact that both branches entail
+              parseValidProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x > 0;")
+            , parseValidProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x < 3; affirm x != 0;")
+            , parseValidateFailProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = -1; }; affirm x > 0;") "Could not prove: x > 0"
+            , parseValidateFailProgramHelper (fn' "x = 0; if c > 0 { x = 1; } else { x = 2; }; affirm x = 1;") "Could not prove: x = 1"
+            , -- Facts from before the if about a variable it assigns, in terms of its new value
+              parseValidProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { x = x + 2; }; affirm x > 1;")
+            , parseValidProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { }; affirm x > 0;")
+            , parseValidateFailProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { x = 0; }; affirm x > 0;") "Could not prove: x > 0"
+            , -- The branches' own facts still count, and so do the else branch's
+              parseValidProgramHelper (fn' "x = 0; if c > 0 { x = 5; } else { x = 5; affirm x = 5; }; affirm x = 5;")
+            , parseValidProgramHelper (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;")
+            , -- Nested ifs
+              parseValidProgramHelper (fn' "x = 0; if c > 0 { if c > 5 { x = 2; } else { x = 1; }; } else { x = 3; }; affirm x > 0;")
+            , -- A loop body does not have to restate the invariant or the variant in each branch
+              parseValidProgramHelper "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] [{ affirm return = secret; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid < secret { lo = mid + 1; } else { hi = mid; }; }; return lo; }; x = f(617);"
+            , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; c = 0; while i > 0 [{ affirm i >= 0; affirm c >= 0; }] shrinks i { if i > 5 { i = i - 2; c = c + 1; } else { i = i - 1; }; }; return c; };"
+            , parseValidateFailProgramHelper "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid < secret { lo = mid; } else { hi = mid; }; }; return lo; };" "Loop variant does not shrink"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 2; } else { i = i + 1; }; }; return 0; };" "Loop variant does not shrink"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 7; } else { i = i - 1; }; }; return 0; };" "Loop invariant is not preserved: Could not prove: i >= 0"
+            , -- A fact that needs a forall is not looked for, and is not wrongly kept
+              parseValidateFailProgramHelper "fn f(a: List<Int>, c: Int) -> Int [{ affirm size(a) > 1; }] { l = a; if c > 0 { l = set(l, 0, 1); } else { l = set(l, 0, 2); }; affirm get(l, 0) = 1; return 0; };" "Could not prove: get(l, 0) = 1"
+            ]
+
 -- Sums of variables, multiples and division by a constant are solved together as linear arithmetic
 testLinearArithmetic :: Test
 testLinearArithmetic =
@@ -2916,6 +2946,7 @@ main = do
                 , testTermination
                 , testRefinedArithmetic
                 , testLinearArithmetic
+                , testIfJoin
                 , testForLoops
                 , testInferredInvariants
                 , testPrecedence
