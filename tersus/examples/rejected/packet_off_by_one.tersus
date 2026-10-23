@@ -1,0 +1,46 @@
+// The check leaves out the checksum: with end = size(buf) the payload fits, but get(buf, end) reads one past the end.
+enum Parsed {
+    Message { version: Int, payload: List<Int> },
+    TooShort,
+    BadLength,
+    BadChecksum,
+};
+
+// The sum of buf[lo..hi) modulo 256. Division by a constant rounds down, so total - 256 * (total / 256) is from 0
+// to 255, which the validator works out (see Linear arithmetic); the input contract is what makes every get safe.
+fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
+    [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
+    [{ affirm 0 <= return; affirm return < 256; }]
+{
+    total = 0;
+    for i in lo..hi {
+        total = total + get(buf, i);
+    };
+    return total - 256 * (total / 256);
+};
+
+fn slice(buf: List<Int>, lo: Int, hi: Int) -> List<Int>
+    [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
+    [{ affirm size(return) = hi - lo; }]
+{
+    out = [];
+    for i in lo..hi [{ affirm size(out) = i - lo; }] {
+        out = push(out, get(buf, i));
+    };
+    return out;
+};
+
+// Every way out is a Parsed. Each check is what makes the reads after it safe: the buffer has the two header
+// numbers, the length is not negative, the payload and the checksum fit, and the checksum is right.
+fn parse(buf: List<Int>) -> Parsed {
+    if size(buf) < 3 { return Parsed::TooShort; };
+    version = get(buf, 0);
+    len = get(buf, 1);
+    if len < 0 { return Parsed::BadLength; };
+    end = 2 + len;
+    if end > size(buf) { return Parsed::BadLength; };
+    if checksum(buf, 0, end) != get(buf, end) { return Parsed::BadChecksum; };
+    return Parsed::Message { version: version, payload: slice(buf, 2, end) };
+};
+
+return 0;

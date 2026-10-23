@@ -1,0 +1,22 @@
+// A checksum that claims to stay below 255: it can be 255 (a sum of 255 is its own remainder), so the output contract does not hold.
+enum Parsed {
+    Message { version: Int, payload: List<Int> },
+    TooShort,
+    BadLength,
+    BadChecksum,
+};
+
+// The sum of buf[lo..hi) modulo 256. Division by a constant rounds down, so total - 256 * (total / 256) is from 0
+// to 255, which the validator works out (see Linear arithmetic); the input contract is what makes every get safe.
+fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
+    [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
+    [{ affirm 0 <= return; affirm return < 255; }]
+{
+    total = 0;
+    for i in lo..hi {
+        total = total + get(buf, i);
+    };
+    return total - 256 * (total / 256);
+};
+
+return 0;
