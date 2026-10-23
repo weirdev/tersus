@@ -1939,6 +1939,36 @@ testRefinedArithmetic =
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks 2 * n { if n < 1 { return 0; } else { return f(n + 1); }; }; x = f(3);" "Recursive call does not shrink the variant"
             ]
 
+-- A call nested in an expression keeps its callee's output contract, and the join of an `if` tries the function's own
+testCallsAndReturnJoin :: Test
+testCallsAndReturnJoin =
+    let one = "fn one(x: Int) -> Int [{ }] [{ affirm return > x; }] { return x + 1; }; "
+     in testCaseSeq
+            "testCallsAndReturnJoin"
+            [ -- Nested calls
+              parseValidProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(y) + 1; }; z = f(1);")
+            , parseValidProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(one(y)); }; z = f(1);")
+            , parseValidProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y; }] { x = 2 * one(y); affirm x > 2 * y; return y + 1; }; z = f(1);")
+            , parseValidProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l) + 2; }] { return push(push(l, 1), 2); }; z = f([1]);"
+            , parseValidateFailProgramHelper (one ++ "fn f(y: Int) -> Int [{ }] [{ affirm return > y + 1; }] { return one(y); }; z = f(1);") "Could not prove: return > y + 1"
+            , parseValidateFailProgramHelper "fn f(l: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(l) + 3; }] { return push(push(l, 1), 2); }; z = f([1]);" "Could not prove: size(return) = size(l) + 3"
+            , parseValidProgramHelper "fn s(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] shrinks n { r = 0; if n < 1 { r = 0; } else { r = n + s(n - 1); }; return r; }; x = s(4);"
+            , -- Returning paths: the output contract holds if every path entails it
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 1; } else { return n + 1; }; }; x = f(3);"
+            , parseValidProgramHelper "fn s(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] shrinks n { if n < 1 { return 0; } else { return n + s(n - 1); }; }; x = s(4);"
+            , parseValidProgramHelper "fn b(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] shrinks n { if n < 1 { return 0; } else { return 1 + b(n / 2); }; }; x = b(9);"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 0; } else { return n - 1; }; }; x = f(3);" "Could not prove: return >= n"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return -1; } else { return n + 1; }; }; x = f(3);" "Could not prove: return >= n"
+            , -- A path that is not the end of the function
+              parseValidProgramHelper "fn f(n: Int, c: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= n; }] { if n < 1 { return 1; }; if c > 0 { return n + 1; } else { return n + 2; }; }; x = f(3, 1);"
+            , -- An if that falls through, then a return
+              parseValidProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r; }; x = g(1, 2);"
+            , parseValidateFailProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r - 2; }; return r; }; x = g(1, 2);" "Could not prove: return > 0"
+            , parseValidProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > n; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; if c > 5 { r = r + 1; }; return r; }; x = g(1, 2);"
+            , -- A loop that returns from inside, with the contract on both its returns
+              parseValidProgramHelper "fn f(a: List<Int>) -> Int [{ }] [{ affirm return >= -1; affirm return < size(a); }] { for i in 0..size(a) { if get(a, i) > 2 { return i; }; }; return -1; }; x = f([1, 3]);"
+            ]
+
 -- The join of an `if` also tries what the program is about to need (see joinBranches in Proof.hs)
 testIfJoin :: Test
 testIfJoin =
@@ -2950,6 +2980,7 @@ main = do
                 , testRefinedArithmetic
                 , testLinearArithmetic
                 , testIfJoin
+                , testCallsAndReturnJoin
                 , testForLoops
                 , testInferredInvariants
                 , testPrecedence
