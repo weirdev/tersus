@@ -338,6 +338,8 @@ checkedInt n
 comparable :: Value -> Value -> Bool
 comparable VFunct{} _ = False
 comparable _ VFunct{} = False
+comparable VFnRef{} _ = False
+comparable _ VFnRef{} = False
 comparable (VInt _) (VInt _) = True
 comparable (VBool _) (VBool _) = True
 comparable (VList _) (VList _) = True

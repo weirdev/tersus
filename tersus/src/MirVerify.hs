@@ -4,7 +4,8 @@ import Data.Maybe (fromMaybe)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
-import Mir
+import Mir hiding (Env)
+import qualified Mir
 import Pretty (renderType)
 import TersusTypes (Name, Rel (..), Type (..), Variable)
 import Utils (Result (..))
@@ -50,11 +51,16 @@ problems program fn =
                 | (b, BasicBlock stmts term) <- Map.toList (fnBlocks fn)
                 ]
             ++ ["a loop is at " ++ show b ++ ", which is not there" | b <- Map.keys (specLoops (fnSpec fn)), not (block b)]
+            ++ ["a name of the specification stands for the undeclared " ++ show l | l <- specLocals, not (declared l)]
+            ++ ["a name of the specification stands for the function " ++ n ++ ", which is not there" | n <- specFunctions, n `notElem` functionNames]
   where
     env = environment program
     declared l = Map.member l (fnLocals fn)
     block b = Map.member b (fnBlocks fn)
     functionNames = Map.keys (progFunctions program)
+    specEnvs = specEnv (fnSpec fn) : map loopEnv (Map.elems (specLoops (fnSpec fn)))
+    specLocals = concatMap envLocals specEnvs
+    specFunctions = concatMap envFunctions specEnvs
 
     shape b stmts term =
         [show b ++ " uses the undeclared " ++ show l | l <- concatMap statementLocals stmts ++ terminatorLocals term, not (declared l)]
@@ -199,7 +205,7 @@ sub env wanted actual = case (wanted, actual) of
 
 statementLocals :: Statement -> [Local]
 statementLocals (Assign dest rv) = dest : concatMap operandLocals (rvalueOperands rv)
-statementLocals Ghost{} = []
+statementLocals (Ghost env _) = envLocals env
 
 rvalueOperands :: Rvalue -> [Operand]
 rvalueOperands (Use o) = [o]
@@ -222,7 +228,13 @@ terminatorLocals _ = []
 
 statementFunctions :: Statement -> [Name]
 statementFunctions (Assign _ rv) = concatMap operandFunctions (rvalueOperands rv)
-statementFunctions Ghost{} = []
+statementFunctions (Ghost env g) = envFunctions env ++ [n | GhostFunction n _ _ <- [g]]
+
+envLocals :: Mir.Env -> [Local]
+envLocals env = [l | Copy l <- Map.elems env]
+
+envFunctions :: Mir.Env -> [Name]
+envFunctions env = concat [constantFunctions c | Const c <- Map.elems env]
 
 terminatorFunctions :: Terminator -> [Name]
 terminatorFunctions (SwitchBool o _ _) = operandFunctions o

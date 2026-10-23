@@ -198,7 +198,7 @@ program stmts = do
     open <- isOpen
     when open (terminate M.Return)
     b <- builder
-    let main' = buildFunction [] [] Nothing b
+    let main' = buildFunction [] [] Nothing Map.empty b
     s <- getS
     let functions = Map.elems (lsFunctions s)
     resolved <- mapM resolveFunction (main' : functions)
@@ -227,15 +227,15 @@ resolveType ty = defaultType <$> tc (zonk ty)
     defaultType t = t
 
 -- Finished blocks, numbered in the order a walk from the entry reaches them; blocks nothing jumps to are dropped
-buildFunction :: [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> Builder -> M.Function
-buildFunction requires ensures term b =
+buildFunction :: [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> M.Env -> Builder -> M.Function
+buildFunction requires ensures term env b =
     M.Function
         { M.fnName = bName b
         , M.fnParams = bParams b
         , M.fnReturns = bReturns b
         , M.fnLocals = bLocals b
         , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
-        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping])
+        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env
         }
   where
     order = reverse (walk [] (M.BlockId 0))
@@ -277,20 +277,35 @@ lowerStatement stmt =
             bindName var (BLocal dest ty)
             finishInto dest pending
         Return expr -> lowerReturn expr
-        ValidationStatement vs -> emit (M.Ghost (M.GhostValidation vs))
+        ValidationStatement vs -> ghost (M.GhostValidation vs)
         StructDef name fields -> do
             tc (declareType name >> mapM_ (checkType . snd) fields >> registerCtors name [(name, fields)])
             addType name (M.StructDecl fields)
         EnumDef name variants -> do
             tc (declareTypeWith name (map fst variants) >> mapM_ (mapM_ (checkType . snd) . snd) variants >> registerCtors name variants)
             addType name (M.EnumDecl variants)
-        AxiomDef name args ins outs -> emit (M.Ghost (M.GhostAxiom name args ins outs))
-        ProofDef name args ins outs body -> emit (M.Ghost (M.GhostProof name args ins outs body))
+        AxiomDef name args ins outs -> ghost (M.GhostAxiom name args ins outs)
+        ProofDef name args ins outs body -> ghost (M.GhostProof name args ins outs body)
         Block stmts -> scoped (lowerStatements stmts)
         If cond thenStmts elseStmts -> lowerIf cond thenStmts elseStmts
         While cond invariant term body -> lowerWhile cond invariant term body
         LoopEnd{} -> failL "LoopEnd is only used during validation"
         EndBlock -> return ()
+
+-- A statement for the validator, with the names the program can use where it stands
+ghost :: M.GhostStatement -> L ()
+ghost g = visibleEnv >>= \env -> emit (M.Ghost env g)
+
+-- What the names visible here stand for: the locals of the scopes (the innermost first), and the functions defined at the top
+visibleEnv :: L M.Env
+visibleEnv = do
+    b <- builder
+    s <- getS
+    let globals = Map.fromList [(var, M.Const (M.CFn name)) | (var, (name, _)) <- Map.toList (lsGlobals s)]
+        scoped' = Map.unions [Map.map operandOf scope | scope <- bScopes b]
+        operandOf (BLocal l _) = M.Copy l
+        operandOf (BFn name _) = M.Const (M.CFn name)
+    return (Map.union scoped' globals)
 
 addType :: Name -> M.TypeDecl -> L ()
 addType name decl = modifyS (\s -> s{lsTypes = Map.insert name decl (lsTypes s)})
@@ -345,7 +360,8 @@ lowerWhile cond invariant term body = do
     exit <- newBlock
     terminate (M.Goto header)
     openBlock header
-    modifyB (\b -> b{bLoops = Map.insert header (M.LoopSpec invariant term) (bLoops b)})
+    env <- visibleEnv
+    modifyB (\b -> b{bLoops = Map.insert header (M.LoopSpec invariant term env) (bLoops b)})
     (test, ty) <- lowerOperand cond
     tc (expect "condition of while" TBool ty)
     terminate (M.SwitchBool test bodyB exit)
@@ -367,6 +383,7 @@ defineFunction var params ins outs (Signature ptys rty) term body = do
     assigned <- (Set.member var . lsAssigned) <$> getS
     -- (the bodies of the functions after it find a function at the top by name, whatever the program does to the variable)
     when atTop (modifyS (\s -> s{lsGlobals = Map.insert var (name, fnTy) (lsGlobals s)}))
+    ghost (M.GhostFunction name var atTop)
     if assigned
         then do
             l <- newLocal (Just var) fnTy
@@ -379,12 +396,13 @@ defineFunction var params ins outs (Signature ptys rty) term body = do
     modifyB (const (newBuilder name False (Just rty)))
     paramLocals <- mapM (\(p, ty) -> (\l -> (p, l, ty)) <$> newLocal (Just p) ty) (zip params ptys)
     modifyB (\b -> b{bParams = [l | (_, l, _) <- paramLocals], bScopes = [Map.fromList [(p, BLocal l ty) | (p, l, ty) <- paramLocals]]})
+    env <- visibleEnv
     lowerStatements body
     open <- isOpen
     when open (terminate M.Unreachable)
     inner <- builder
     modifyB (const outer)
-    let fn = buildFunction ins outs term inner
+    let fn = buildFunction ins outs term env inner
     modifyS (\s -> s{lsFunctions = Map.insert name fn (lsFunctions s)})
 
 -- Expressions
@@ -540,7 +558,7 @@ builtinFunction b = do
             terminate M.Return
             inner <- builder
             modifyB (const outer)
-            modifyS (\s -> s{lsFunctions = Map.insert name (buildFunction [] [] Nothing inner) (lsFunctions s)})
+            modifyS (\s -> s{lsFunctions = Map.insert name (buildFunction [] [] Nothing Map.empty inner) (lsFunctions s)})
             return (M.Const (M.CFn name), ft')
         _ -> failL "A builtin is not a function"
 

@@ -22,10 +22,12 @@ source-repository head
 library
   exposed-modules:
       Cli
+      Ghost
       Linear
       Mir
       MirEval
       MirLower
+      MirValidate
       MirVerify
       Parse
       Pipeline
@@ -33,6 +35,7 @@ library
       Proof
       ProofEngine
       ProofHelpers
+      ProofState
       StdLib
       TersusTypes
       TypeCheck

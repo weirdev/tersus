@@ -62,6 +62,8 @@ data Value
     | VBool Bool
     | -- A struct value: the struct's name and its fields, in declaration order
       VData Name [(Variable, Value)]
+    | -- A function of the MIR program, by name: how the validator writes the function as a constant of a proof
+      VFnRef Name
     | -- VFunct inputArgs inputArgAssertions outputAssertions body exportedResultAssertions
       -- Result assertions may contain variables from inputArgs and "return" variable
       -- TODO: Real return slot rather than var
@@ -80,6 +82,7 @@ instance Ord Value where
     compare (VData n a) (VData m b) = compare (n, a) (m, b)
     compare (VFunct _ _ _ (BuiltinFunct a) _) (VFunct _ _ _ (BuiltinFunct b) _) = compare a b
     compare (VFunct a b c d e) (VFunct a' b' c' d' e') = compare (a, b, c, d, e) (a', b', c', d', e')
+    compare (VFnRef a) (VFnRef b) = compare a b
     compare a b = compare (rank a) (rank b)
       where
         rank :: Value -> Int
@@ -88,6 +91,7 @@ instance Ord Value where
         rank VBool{} = 2
         rank VData{} = 3
         rank VFunct{} = 4
+        rank VFnRef{} = 5
 
 -- TODO: Call
 data Expression = Val Value | Var Variable | F Expression [Expression]

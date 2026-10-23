@@ -8,6 +8,7 @@ module Mir
     , BasicBlock (..)
     , Statement (..)
     , GhostStatement (..)
+    , Env
     , Rvalue (..)
     , BinOp (..)
     , ListOp (..)
@@ -84,14 +85,21 @@ data BasicBlock = BasicBlock
 
 data Statement
     = Assign Local Rvalue
-    | -- Does nothing when the program runs; the validator's
-      Ghost GhostStatement
+    | -- Does nothing when the program runs; the validator's. The names are those the program can use at this point.
+      Ghost Env GhostStatement
     deriving (Show, Eq)
+
+-- What the names of the source mean at a point: the local of a variable, or the function (a constant) of a name that
+-- stands for one. Ghost statements, contracts and invariants are written with these names.
+type Env = Map Variable Operand
 
 data GhostStatement
     = GhostValidation ValidationStatement -- affirm, define, rewrite
     | GhostAxiom Variable [Variable] [ValidationStatement] [ValidationStatement]
     | GhostProof Variable [Variable] [ValidationStatement] [ValidationStatement] [ValidationStatement]
+    | -- Where a function is defined (the validator checks its body here and from then on knows what it promises): its name in
+      -- the program, the name it has in the source, and whether it is one of the functions defined at the top of the program
+      GhostFunction Name Variable Bool
     deriving (Show, Eq)
 
 data Rvalue
@@ -147,17 +155,19 @@ data FunctionSpec = FunctionSpec
     , specEnsures :: [ValidationStatement]
     , specTermination :: Maybe Termination
     , specLoops :: Map BlockId LoopSpec -- by the header block of the loop
+    , specEnv :: Env -- the parameters, and the functions defined at the top of the program before this one
     }
     deriving (Show, Eq)
 
 data LoopSpec = LoopSpec
     { loopInvariant :: [ValidationStatement]
     , loopTermination :: Maybe Termination
+    , loopEnv :: Env
     }
     deriving (Show, Eq)
 
 emptySpec :: FunctionSpec
-emptySpec = FunctionSpec [] [] Nothing Map.empty
+emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty
 
 successors :: Terminator -> [BlockId]
 successors (Goto b) = [b]
@@ -211,7 +221,7 @@ renderFunction fn =
             ++ ["        // loop: " ++ loopText ls | Just ls <- [Map.lookup b (specLoops spec)]]
             ++ map (("        " ++) . renderStatement) stmts
             ++ ["        " ++ renderTerminator term, "    }"]
-    loopText (LoopSpec inv term) =
+    loopText (LoopSpec inv term _) =
         intercalate "; " (["invariant " ++ renderGhostList inv | not (null inv)] ++ ["terminates " ++ renderTermination t | Just t <- [term]])
 
 renderTermination :: Termination -> String
@@ -242,9 +252,10 @@ renderRule (UserRewrite name ps) = unwords (name : map renderVarProof ps)
 
 renderStatement :: Statement -> String
 renderStatement (Assign dest rv) = show dest ++ " = " ++ renderRvalue rv ++ ";"
-renderStatement (Ghost (GhostValidation v)) = "ghost " ++ renderValidation v ++ ";"
-renderStatement (Ghost (GhostAxiom name args _ _)) = "ghost axiom " ++ name ++ "(" ++ intercalate ", " args ++ ");"
-renderStatement (Ghost (GhostProof name args _ _ _)) = "ghost proof " ++ name ++ "(" ++ intercalate ", " args ++ ");"
+renderStatement (Ghost _ (GhostValidation v)) = "ghost " ++ renderValidation v ++ ";"
+renderStatement (Ghost _ (GhostAxiom name args _ _)) = "ghost axiom " ++ name ++ "(" ++ intercalate ", " args ++ ");"
+renderStatement (Ghost _ (GhostProof name args _ _ _)) = "ghost proof " ++ name ++ "(" ++ intercalate ", " args ++ ");"
+renderStatement (Ghost _ (GhostFunction name _ _)) = "ghost fn " ++ name ++ ";"
 
 renderRvalue :: Rvalue -> String
 renderRvalue (Use o) = renderOperand o

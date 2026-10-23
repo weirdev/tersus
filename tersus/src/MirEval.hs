@@ -1,6 +1,7 @@
 module MirEval
     ( MirValue (..)
     , runProgram
+    , callWithFuel
     , renderMirValue
     ) where
 
@@ -26,52 +27,89 @@ data MirValue
 
 -- The value of _0 when the program returns, and Nothing when it ends without
 runProgram :: Program -> Result (Maybe MirValue) String
-runProgram program = runFunction program (progMain program) []
+runProgram program = mapResult fst (runE (runFunction program (progMain program) []) Nothing)
 
-runFunction :: Program -> Function -> [MirValue] -> Result (Maybe MirValue) String
+-- Calls a function of the program with a budget of steps (a statement or a jump each), and fails once it is spent. This is
+-- how the validator learns the result of a call whose arguments it knows without depending on a long or endless computation.
+callWithFuel :: Int -> Program -> Name -> [MirValue] -> Result MirValue String
+callWithFuel fuel program name args =
+    mapResult fst (runE (callFunction program (MFn name) args) (Just fuel))
+
+-- The evaluator keeps the steps that are left, when there is a limit
+newtype E a = E {runE :: Maybe Int -> Result (a, Maybe Int) String}
+
+instance Functor E where
+    fmap f (E g) = E (\fuel -> mapResult (\(a, fuel') -> (f a, fuel')) (g fuel))
+
+instance Applicative E where
+    pure a = E (\fuel -> Ok (a, fuel))
+    E f <*> E g = E (\fuel -> f fuel `bindResult` \(h, fuel') -> mapResult (\(a, fuel'') -> (h a, fuel'')) (g fuel'))
+
+instance Monad E where
+    E g >>= f = E (\fuel -> g fuel `bindResult` \(a, fuel') -> runE (f a) fuel')
+
+failE :: String -> E a
+failE e = E (\_ -> Error e)
+
+liftE :: Result a String -> E a
+liftE r = E (\fuel -> mapResult (\a -> (a, fuel)) r)
+
+-- One step of the budget
+tick :: E ()
+tick = E (\fuel -> case fuel of
+    Nothing -> Ok ((), Nothing)
+    Just n
+        | n <= 0 -> Error "Evaluation ran out of fuel"
+        | otherwise -> Ok ((), Just (n - 1)))
+
+runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue)
 runFunction program fn args
     | length args /= length (fnParams fn) =
-        Error ("Function expected " ++ show (length (fnParams fn)) ++ " arguments, got " ++ show (length args))
+        failE ("Function expected " ++ show (length (fnParams fn)) ++ " arguments, got " ++ show (length args))
     | otherwise = runBlock program fn (BlockId 0) (Map.fromList (zip (fnParams fn) args))
 
 type Frame = Map Local MirValue
 
-runBlock :: Program -> Function -> BlockId -> Frame -> Result (Maybe MirValue) String
+runBlock :: Program -> Function -> BlockId -> Frame -> E (Maybe MirValue)
 runBlock program fn block frame =
     case Map.lookup block (fnBlocks fn) of
-        Nothing -> Error ("Jump to a block that does not exist: " ++ show block)
-        Just (BasicBlock stmts term) ->
-            runStatements frame stmts `bindResult` \frame' ->
-                case term of
-                    Goto next -> runBlock program fn next frame'
-                    SwitchBool test yes no ->
-                        operandValue frame' test `bindResult` \v -> case v of
-                            MBool True -> runBlock program fn yes frame'
-                            MBool False -> runBlock program fn no frame'
-                            _ -> Error "Condition must be a boolean"
-                    Call callee args dest next ->
-                        operandValue frame' callee `bindResult` \f ->
-                            mapResults (operandValue frame') args `bindResult` \argValues ->
-                                callFunction program f argValues `bindResult` \result ->
-                                    runBlock program fn next (Map.insert dest result frame')
-                    Return -> Ok (Map.lookup (Local 0) frame')
-                    Unreachable -> Error "Function did not return a value"
+        Nothing -> failE ("Jump to a block that does not exist: " ++ show block)
+        Just (BasicBlock stmts term) -> do
+            frame' <- runStatements frame stmts
+            tick
+            case term of
+                Goto next -> runBlock program fn next frame'
+                SwitchBool test yes no -> do
+                    v <- liftE (operandValue frame' test)
+                    case v of
+                        MBool True -> runBlock program fn yes frame'
+                        MBool False -> runBlock program fn no frame'
+                        _ -> failE "Condition must be a boolean"
+                Call callee args dest next -> do
+                    f <- liftE (operandValue frame' callee)
+                    argValues <- liftE (mapResults (operandValue frame') args)
+                    result <- callFunction program f argValues
+                    runBlock program fn next (Map.insert dest result frame')
+                Return -> return (Map.lookup (Local 0) frame')
+                Unreachable -> failE "Function did not return a value"
 
-callFunction :: Program -> MirValue -> [MirValue] -> Result MirValue String
+callFunction :: Program -> MirValue -> [MirValue] -> E MirValue
 callFunction program (MFn name) args =
     case Map.lookup name (progFunctions program) of
-        Nothing -> Error ("Call of a function that does not exist: " ++ name)
-        Just fn -> runFunction program fn args `bindResult` maybe (Error "Function did not return a value") Ok
-callFunction _ _ _ = Error "Object being called must be a function"
+        Nothing -> failE ("Call of a function that does not exist: " ++ name)
+        Just fn -> runFunction program fn args >>= maybe (failE "Function did not return a value") return
+callFunction _ _ _ = failE "Object being called must be a function"
 
 mapResults :: (a -> Result b String) -> [a] -> Result [b] String
 mapResults = flatResultMap
 
-runStatements :: Frame -> [Statement] -> Result Frame String
-runStatements frame [] = Ok frame
+runStatements :: Frame -> [Statement] -> E Frame
+runStatements frame [] = return frame
 runStatements frame (Ghost{} : rest) = runStatements frame rest
-runStatements frame (Assign dest rv : rest) =
-    evalRvalue frame rv `bindResult` \v -> runStatements (Map.insert dest v frame) rest
+runStatements frame (Assign dest rv : rest) = do
+    tick
+    v <- liftE (evalRvalue frame rv)
+    runStatements (Map.insert dest v frame) rest
 
 operandValue :: Frame -> Operand -> Result MirValue String
 operandValue frame (Copy l) = maybe (Error ("Undefined variable: " ++ show l)) Ok (Map.lookup l frame)

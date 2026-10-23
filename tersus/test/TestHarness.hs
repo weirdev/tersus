@@ -21,7 +21,9 @@ module TestHarness
 
 import qualified Control.Exception as Exception
 import Control.Exception (SomeException, displayException, try)
-import MirLower (lowerProgram)
+import MirLower (lowerElaborated, lowerProgram)
+import MirValidate (validateProgram)
+import TypeCheck (elaborate)
 import Parse
 import Proof
 import ProofHelpers
@@ -124,7 +126,9 @@ parseValFailStmtHelper stmtStr =
             Left err -> Just $ "Parse failed: " ++ show err
             Right (Block stmts) -> case valReturningBlock (initVStateWStatements stmts) of
                 Ok _ -> Just "Validation succeeded expected failure"
-                Error _ -> Nothing
+                Error _ -> case newValidate stmts of
+                    Ok () -> Just "NEW validator accepted a program that should fail"
+                    Error _ -> Nothing
             Right _ -> Just "Not a block statement"
 
 -- Control flow tests
@@ -149,7 +153,9 @@ parseValidProgramHelper source =
         Right stmts -> case validate stmts of
             -- (a program that validates must also lower to a MIR that passes the verifier)
             Ok _ -> case lowerProgram stmts of
-                Ok _ -> Nothing
+                Ok _ -> case newValidate stmts of
+                    Ok () -> Nothing
+                    Error e -> Just $ "NEW validator failed with error: " ++ e
                 Error e -> Just $ "Lowering failed with error: " ++ e
             Error e -> Just $ "Validation failed with error: " ++ e
 
@@ -157,7 +163,18 @@ parseValidateFailProgramHelper :: String -> String -> TestResult
 parseValidateFailProgramHelper source expectedError =
     case parseStatementBlock source of
         Left err -> Just $ "Parse failed: " ++ show err
-        Right stmts -> testAssertErrorContains expectedError (validate stmts)
+        Right stmts -> case testAssertErrorContains expectedError (validate stmts) of
+            Just e -> Just e
+            Nothing -> case newValidate stmts of
+                Ok () -> Just "NEW validator accepted a program that should fail"
+                Error e -> fmap ("NEW validator: " ++) (testAssertErrorContains expectedError (Error e :: Result () String))
+
+-- Validation on the MIR
+newValidate :: [Statement] -> Result () String
+newValidate stmts =
+    elaborate stmts `bindResult` \elaborated ->
+        lowerElaborated elaborated `bindResult` \program ->
+            mapResult (const ()) (validateProgram program)
 
 -- Run tests
 -- A function over integers only
