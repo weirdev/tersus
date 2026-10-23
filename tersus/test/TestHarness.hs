@@ -21,6 +21,7 @@ module TestHarness
 
 import qualified Control.Exception as Exception
 import Control.Exception (SomeException, displayException, try)
+import MirLower (lowerProgram)
 import Parse
 import Proof
 import ProofHelpers
@@ -146,7 +147,10 @@ parseValidProgramHelper source =
     case parseStatementBlock source of
         Left err -> Just $ "Parse failed: " ++ show err
         Right stmts -> case validate stmts of
-            Ok _ -> Nothing
+            -- (a program that validates must also lower to a MIR that passes the verifier)
+            Ok _ -> case lowerProgram stmts of
+                Ok _ -> Nothing
+                Error e -> Just $ "Lowering failed with error: " ++ e
             Error e -> Just $ "Validation failed with error: " ++ e
 
 parseValidateFailProgramHelper :: String -> String -> TestResult

@@ -104,6 +104,9 @@ data Rvalue
     | -- The field of a value that is that constructor (a struct, or a variant the program has shown the value to be)
       ReadField Operand Name Variable
     | IsVariant Operand Name
+    | -- The same value, known to be that variant because the validator proved it (`value as Enum::Variant`). The value is
+      -- not changed or checked, and the local that gets it has the variant's type, so its fields can be read.
+      AsVariant Operand Name
     deriving (Show, Eq)
 
 -- Div and Mod need a divisor that is not 0. Compare Eq and NotEq are structural, and the other comparisons are of Ints.
@@ -252,6 +255,7 @@ renderRvalue (MakeData name []) = name
 renderRvalue (MakeData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderOperand o | (f, o) <- fields] ++ " }"
 renderRvalue (ReadField o name field) = "(" ++ renderOperand o ++ " as " ++ name ++ ")." ++ field
 renderRvalue (IsVariant o name) = renderOperand o ++ " is " ++ name
+renderRvalue (AsVariant o name) = renderOperand o ++ " as " ++ name
 
 renderBinOp :: BinOp -> String
 renderBinOp (Compare rel) = case rel of

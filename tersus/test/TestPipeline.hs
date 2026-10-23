@@ -304,6 +304,9 @@ testMirStructure =
         , -- A call ends the block it is in
           withMir "fn f(n: Int) -> Int { return n; }; a = f(1); b = f(a); return b;" $ \p ->
             testAssertEq (length [() | (_, M.BasicBlock _ M.Call{}) <- blocksOf (mainFunction p)]) 2
+        , -- A cast is an operation of the MIR that gives the value the variant's type
+          withMir "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; return a.r;" $ \p ->
+            testAssertEq ([M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "a"], "_1 as S::A" `isInfixOf` M.renderProgram p) ([TVariant "S::A"], True)
         , -- A function whose name is assigned is a local that holds it; one that is not is called by name
           withMir "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; h = f; h = g; return f(1) + h(2);" $ \p ->
             let fn = mainFunction p
@@ -358,6 +361,9 @@ testMirTypes =
         , broken "fn f(n: Int) -> Int { return n; }; return f(1);" (setLocalType (M.Local 0) TBool) "the function returns"
         , -- a comparison of two types
           broken "return 1 = 2;" (mapStatements (\st -> case st of M.Assign d (M.BinaryOp op a _) -> M.Assign d (M.BinaryOp op a (M.Const (M.CBool True))); _ -> st)) "the operands are"
+        , -- a cast: of a value of the enum, giving the variant
+          broken "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; return a.r;" (setLocalType (M.Local 2) TInt) "the result is Int, not S::A"
+        , broken "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; return a.r;" (mapStatements (\st -> case st of M.Assign d (M.AsVariant _ n) -> M.Assign d (M.AsVariant (M.Const (M.CInt 1)) n); _ -> st)) "is not a S"
         , -- a variant is a value of its enum, and not the other way
           withMir "enum S { A { r: Int }, B }; fn f(s: S) -> Int [{ affirm s is S::A; }] [{ }] { return (s as S::A).r; }; return f(S::A { r: 1 });" $ \p ->
             testAssertEq (verifyProgram p) (Ok ())
@@ -396,6 +402,12 @@ testMirRun =
             , "a = true; b = false; return a = b;"
             , "x = 1; affirm x = 1; return x;"
             , "x = 1;"
+            , -- A cast keeps the value and gives it the variant's type
+              "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; return a.r;"
+            , "enum S { A { r: Int }, B }; s = S::A { r: 1 }; a = s as S::A; s = a; return (s as S::A).r;"
+            , "enum S { A { r: Int }, B }; s = S::A { r: 1 }; return s as S::A;"
+            , "enum S { A { r: Int }, B }; fn r(c: S::A) -> Int { return c.r; }; s = S::A { r: 4 }; return r(s as S::A);"
+            , "enum S { A { r: Int }, B }; s = S::B; a = s as S::A; return 1;"
             , -- A function name is a variable that can be assigned: the nearest binding is the one that changes
               "fn f(l: List<Int>) -> Int { return 0; }; { f = size; }; return f([1, 2]);"
             , "fn outer(n: Int) -> Int { fn g(m: Int) -> Int { return m; }; fn h(m: Int) -> Int { return m * 10; }; { g = h; }; return g(n); }; return outer(2);"

@@ -120,6 +120,11 @@ rvalueProblems env localTy d rv =
         IsVariant o name -> case Map.lookup name (envCtors env) of
             Nothing -> ["there is no constructor " ++ name]
             Just (typeName, _) -> [expected' ("a " ++ typeName) o | not (isValueOf typeName o)] ++ result TBool
+        AsVariant o name -> case Map.lookup name (envCtors env) of
+            Nothing -> ["there is no constructor " ++ name]
+            Just (typeName, _) ->
+                [expected' ("a " ++ typeName) o | not (isValueOf typeName o)]
+                    ++ ["the result is " ++ renderType d ++ ", not " ++ name | not (sub env d (TVariant name))]
   where
     fits' = fits env localTy
     expected t o = renderOperand' o ++ " is not " ++ renderType t
@@ -204,6 +209,7 @@ rvalueOperands (MakeList os) = os
 rvalueOperands (MakeData _ fields) = map snd fields
 rvalueOperands (ReadField o _ _) = [o]
 rvalueOperands (IsVariant o _) = [o]
+rvalueOperands (AsVariant o _) = [o]
 
 operandLocals :: Operand -> [Local]
 operandLocals (Copy l) = [l]

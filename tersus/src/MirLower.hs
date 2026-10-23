@@ -456,7 +456,7 @@ lowerBuiltin b args = do
     rv <- builtinRvalue b tys (map fst operands)
     return (PRvalue rv, result)
 
--- The operation that a builtin applied to operands stands for. `as` does nothing when the program runs.
+-- The operation that a builtin applied to operands stands for. `as` keeps the value and gives it the variant's type.
 builtinRvalue :: BuiltinFunct -> [Type] -> [M.Operand] -> L M.Rvalue
 builtinRvalue b tys ops =
     case (b, ops) of
@@ -478,7 +478,7 @@ builtinRvalue b tys ops =
             return (M.ReadField o ctor field)
         (Project variant field, [o]) -> return (M.ReadField o variant field)
         (Is variant, [o]) -> return (M.IsVariant o variant)
-        (Cast _, [o]) -> return (M.Use o)
+        (Cast variant, [o]) -> return (M.AsVariant o variant)
         (Within, _) -> failL "within only exists in proofs"
         _ -> failL ("A builtin was applied to the wrong number of arguments: " ++ show b)
 

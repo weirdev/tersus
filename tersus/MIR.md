@@ -68,6 +68,7 @@ data Rvalue
     | MakeData Name [(Variable, Operand)]   -- a struct or an enum variant (named Enum::Variant), fields in declaration order
     | ReadField Operand Name Variable       -- field of a value known to be that constructor (Field, Project and Cast fused)
     | IsVariant Operand Name
+    | AsVariant Operand Name                -- the same value, known to be that variant (`value as Enum::Variant`); gives the local the variant's type
 
 data BinOp  = Add | Sub | Mul | Div | Mod | Compare Rel      -- Div and Mod need a divisor /= 0; Compare Eq is structural
 data ListOp = Length | First | Last | Get | Push | Set       -- First and Last need a non-empty list, Get and Set an index in range
@@ -91,7 +92,7 @@ Choices and why:
 - **A builtin used as a value** (`+` passed where a `fn(Int, Int) -> Int` is wanted) is lifted to a small function of the program (`builtin::add`) whose body applies it, so a function value is always a `CFn` of a function in `progFunctions` and the executor has one kind of callee.
 - **Call is a terminator**, like Rust's `Call`: it ends a block, so a validator over the graph has a place to put the callee's contract. A builtin application is an `Rvalue`, which cannot fail except by a broken contract.
 - **Operands are locals or constants.** `a * b + get(l, i)` lowers to temporaries, so every statement does one thing and the later passes see no trees.
-- **Its own operator set**, not `BuiltinFunct`: `Within` is proof-only and `Cast` is the identity, and neither belongs in something that runs. `Ctor`, `Field`, `Project` and `Is` become `MakeData`, `ReadField` and `IsVariant`, which name the constructor (this is why locals are typed: a `Field Nothing f` in the AST says nothing about which struct, and a layout needs it).
+- **Its own operator set**, not `BuiltinFunct`: `Within` is proof-only and does not belong in something that runs. `Ctor`, `Field`, `Project`, `Is` and `Cast` become `MakeData`, `ReadField`, `IsVariant` and `AsVariant` (a cast keeps the value, which the executor does not check, but the local that gets it has the variant's type, so the types stay honest and the verifier can tell a refinement the validator proved from a mistake), which name the constructor (this is why locals are typed: a `Field Nothing f` in the AST says nothing about which struct, and a layout needs it).
 - **Types on every local.** The AST erases types after checking, so lowering recomputes the type of each temporary bottom-up from the declared types of locals and parameters, the signatures of functions, the field types of structs and the builtins' result types (about 40 lines, and total on a program that checked). It does not change `TypeCheck`.
 - **No panic or assert terminator for now.** Rust's MIR has `Assert` for overflow and bounds; here the validator proves those, so the MIR would either have to repeat them or drop them. Dropping them (as above) is the current semantics of an unchecked cast. Revisit when integers become bounded (see Open issues).
 
