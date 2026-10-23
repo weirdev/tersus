@@ -1965,6 +1965,9 @@ testIfJoin =
             , parseValidateFailProgramHelper "fn f(secret: Int) -> Int [{ affirm secret >= 0; affirm secret <= 1000; }] { lo = 0; hi = 1000; while lo < hi [{ affirm lo <= secret; affirm secret <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid < secret { lo = mid; } else { hi = mid; }; }; return lo; };" "Loop variant does not shrink"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 2; } else { i = i + 1; }; }; return 0; };" "Loop variant does not shrink"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; while i > 0 [{ affirm i >= 0; }] shrinks i { if i > 5 { i = i - 7; } else { i = i - 1; }; }; return 0; };" "Loop invariant is not preserved: Could not prove: i >= 0"
+            , -- The same when the loop body returns, which ends its path with the loop end check
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { lo = 0; hi = n; while lo < hi [{ affirm lo <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid > 100 { return mid; }; if mid < 7 { lo = mid + 1; } else { hi = mid; }; }; return lo; }; x = f(30);"
+            , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { lo = 0; hi = n; while lo < hi [{ affirm lo <= hi; }] shrinks hi - lo { mid = (lo + hi) / 2; if mid > 100 { return mid; }; if mid < 7 { lo = mid; } else { hi = mid; }; }; return lo; };" "Loop variant does not shrink"
             , -- A fact that needs a forall is not looked for, and is not wrongly kept
               parseValidateFailProgramHelper "fn f(a: List<Int>, c: Int) -> Int [{ affirm size(a) > 1; }] { l = a; if c > 0 { l = set(l, 0, 1); } else { l = set(l, 0, 2); }; affirm get(l, 0) = 1; return 0; };" "Could not prove: get(l, 0) = 1"
             ]
