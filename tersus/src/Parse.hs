@@ -816,7 +816,7 @@ arithmeticFunct = do
         else return Minus
 
 multiplicativeFunct :: Parser BuiltinFunct
-multiplicativeFunct = (char '*' >> whitespace >> return Times) <|> (char '/' >> whitespace >> return Div)
+multiplicativeFunct = (char '*' >> whitespace >> return Times) <|> (char '/' >> whitespace >> return Div) <|> (char '%' >> whitespace >> return Mod)
 
 relationFunct :: Parser BuiltinFunct
 relationFunct = do

@@ -379,7 +379,7 @@ querySolver facts goals =
                     | FApp (CTerm (VFunct _ _ _ (BuiltinFunct Within) _)) [lhs, rhs] <- [goal]
                     ]
         differences = differencesByClass table4 classes
-        linear = linearSystem table4 classes trueId
+        linear = linearSystem table4 classes trueId (\x -> arithmeticEntails arithmetic Gt (rep classes x) zeroClass) (\x -> arithmeticEntails arithmetic Lt (rep classes x) zeroClass)
         -- (the system is looked at as a whole once, in case the facts contradict each other somewhere the goal does not reach)
         linearContradiction = infeasible linear
         linearGoal rel l r = not (null linear) && (linearEntails linear rel (rep classes l) (rep classes r) || linearContradiction)
@@ -1070,8 +1070,8 @@ differenceEntails differences arithmetic zeroClass rel lhs rhs =
 --   size(l)            size(l) >= 0
 --   x < y and so on    x - y <= -1 and so on
 --   a class that is a known integer n    x = n
-linearSystem :: TermTable -> IntMap.IntMap Int -> Int -> [Constraint]
-linearSystem table classes trueId
+linearSystem :: TermTable -> IntMap.IntMap Int -> Int -> (Int -> Bool) -> (Int -> Bool) -> [Constraint]
+linearSystem table classes trueId positive negative
     | not (any needsLinear applications) = []
     | otherwise = [Equal (IntMap.singleton x 1) (fromInteger n) | (x, n) <- Map.toList intOfClass] ++ concatMap constraintsOf applications
   where
@@ -1086,6 +1086,7 @@ linearSystem table classes trueId
     needsLinear (_, Just Minus, [_, b]) = known b == Nothing
     needsLinear (_, Just Times, [a, b]) = any (maybe False (\n -> n /= 0 && n /= 1)) [known a, known b]
     needsLinear (_, Just Div, [_, b]) = maybe False (/= 1) (known b)
+    needsLinear (_, Just Mod, [_, b]) = maybe True (/= 0) (known b)
     needsLinear _ = False
     form terms = IntMap.filter (/= 0) (IntMap.fromListWith (+) terms)
     constraintsOf (t, Just Plus, [a, b]) = [Equal (form [(t, 1), (a, -1), (b, -1)]) 0]
@@ -1096,6 +1097,19 @@ linearSystem table classes trueId
     constraintsOf (t, Just Div, [a, b])
         | Just n <- known b, n > 0 = [AtMost (form [(t, fromInteger n), (a, -1)]) 0, AtMost (form [(a, 1), (t, negate (fromInteger n))]) (fromInteger (n - 1))]
         | Just n <- known b, n < 0 = [AtMost (form [(a, 1), (t, negate (fromInteger n))]) 0, AtMost (form [(t, fromInteger n), (a, -1)]) (fromInteger (negate n - 1))]
+    -- a = c * q + t with the remainder t from 0 to c - 1 (from c + 1 to 0 for a negative c): q is a variable of its own,
+    -- numbered below zero from the term, and it is a / c when that is a term too
+    constraintsOf (t, Just Mod, [a, b])
+        | Just n <- known b, n /= 0 =
+            let q = negate t - 1
+                bounds
+                    | n > 0 = [AtMost (form [(t, -1)]) 0, AtMost (form [(t, 1)]) (fromInteger (n - 1))]
+                    | otherwise = [AtMost (form [(t, 1)]) 0, AtMost (form [(t, -1)]) (fromInteger (negate n - 1))]
+             in Equal (form [(a, 1), (q, negate (fromInteger n)), (t, -1)]) 0 : bounds
+    -- a divisor that is not a known number but is known to be positive (or negative) still bounds the remainder
+    constraintsOf (t, Just Mod, [_, b])
+        | known b == Nothing && positive b = [AtMost (form [(t, -1)]) 0, AtMost (form [(t, 1), (b, -1)]) (-1)]
+        | known b == Nothing && negative b = [AtMost (form [(t, 1)]) 0, AtMost (form [(b, 1), (t, -1)]) (-1)]
     constraintsOf (t, Just Size, [_]) = [AtMost (form [(t, -1)]) 0]
     constraintsOf (t, Just (Rel rel), [l, r])
         | t == node trueId = case rel of
