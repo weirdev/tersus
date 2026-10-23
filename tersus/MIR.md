@@ -173,7 +173,8 @@ The AST evaluator (`Proof.evaluate`) stays: the validator uses it to learn the r
 ## Notes on the implementation
 
 - Lowering takes the types by replaying the checker over the program (`TypeCheck.TC`, exported for the purpose), so `x = []; x = push(x, 1)` gives `x` the type `List<Int>`. A type no use decided (a list that is only created) is `Int`.
-- A function defined at the top of the program is found by name from the functions after it and from itself (as the evaluator does through its global context); any other function is a name in its scope that stands for the lifted function.
+- A function defined at the top of the program is found by name from the functions after it and from itself (as the evaluator does through its global context). In the scope that defines it, a function is a name that stands for the lifted function and is called by name, unless the program assigns that name elsewhere (`f = size;`): then it is a local that holds the function, assigned like any variable (so the nearest binding changes), and a call of it is a call of a local. The bodies of the functions at the top still find the original by name, as in the evaluator.
+- A program has one return type, that of its first `return` (the checker rejects a later one of another type), so `_0` has one type.
 - Falling off the end of `main` is a `Return` (a program may end without a value); falling off the end of any other function is `Unreachable`, which fails with `Function did not return a value` as the evaluator does.
 - Blocks nothing jumps to are dropped and the rest are numbered in the order a walk from the entry reaches them, so the printed MIR reads from the top.
 - `Proof.evaluate` stays for the validator; `checkExample` in the tests runs every example on both and compares the results, and `testMirRun` does so for a set of small programs including the ones that fail.

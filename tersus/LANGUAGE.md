@@ -82,7 +82,7 @@ Every value has a type, and programs are type checked before they are validated:
 - `Int`, `Bool`, and `List<T>` for any element type `T`, such as `List<Int>`, `List<Bool>` or `List<List<Int>>`. All the elements of a list have the same type, and `[]` takes its element type from how it is used. A variable holding `[]` has one type for its whole life, so `e = []` cannot be pushed an `Int` once and a list later,
 - `fn(Int, Int) -> Int` for a function value.
 
-A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Types exist only for checking: validation and evaluation never look at them.
+A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Types exist only for checking: validation and evaluation never look at them. Every `return` of the program itself (outside any function) must have the type of the first, as `if c { return 1; } else { return false; };` has none.
 
 ```tersus
 fn scale(values: List<Int>, factor: Int) -> List<Int> {

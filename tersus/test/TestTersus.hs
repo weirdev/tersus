@@ -1392,6 +1392,12 @@ testMirStructure =
         , -- A call ends the block it is in
           withMir "fn f(n: Int) -> Int { return n; }; a = f(1); b = f(a); return b;" $ \p ->
             testAssertEq (length [() | (_, M.BasicBlock _ M.Call{}) <- blocksOf (mainFunction p)]) 2
+        , -- A function whose name is assigned is a local that holds it; one that is not is called by name
+          withMir "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; h = f; h = g; return f(1) + h(2);" $ \p ->
+            let fn = mainFunction p
+             in testAssertEq (length (localsNamed "h" fn), length (localsNamed "f" fn), length (localsNamed "g" fn)) (1, 0, 0)
+        , withMir "fn f(l: List<Int>) -> Int { return 0; }; { f = size; }; return f([1, 2]);" $ \p ->
+            testAssertEq (length (localsNamed "f" (mainFunction p)), runProgram p) (1, Ok (Just (MInt 2)))
         , -- Every program lowers to a well formed MIR
           withMir "fn f(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; s = 0; for x in [1, 2, 3] { s = s + x; }; l = push([], s); return f(l, 0);" $ \p ->
             testAssertEq (M.checkProgram p) (Ok ())
@@ -1444,6 +1450,11 @@ testMirRun =
             , "a = true; b = false; return a = b;"
             , "x = 1; affirm x = 1; return x;"
             , "x = 1;"
+            , -- A function name is a variable that can be assigned: the nearest binding is the one that changes
+              "fn f(l: List<Int>) -> Int { return 0; }; { f = size; }; return f([1, 2]);"
+            , "fn outer(n: Int) -> Int { fn g(m: Int) -> Int { return m; }; fn h(m: Int) -> Int { return m * 10; }; { g = h; }; return g(n); }; return outer(2);"
+            , "fn a(n: Int) -> Int { return n + 1; }; fn b(n: Int) -> Int { return n + 2; }; f = a; { f = b; }; return f(1) + a(1);"
+            , "fn a(n: Int) -> Int { return n + 1; }; fn use(n: Int) -> Int { return a(n); }; { a = use; }; return use(1) + a(1);"
             , "return [];"
             , "return 1 / 0;"
             , "return get([1], 3);"
@@ -2622,6 +2633,11 @@ testTypeCheck =
             , typeError "fn f(n: Int) -> Int { return n; }; x = f(1, 2);" "f takes 1 arguments, got 2"
             , typeError "fn f(n: Int) -> Bool { return n; };" "returned value: expected Bool, got Int"
             , typeError "x = 1; y = x(2);" "x is not a function"
+            , -- The program has one return type, the first return's, as a function has its declared one
+              typeError "if true { return 1; } else { return false; };" "returned value of the program: expected Int, got Bool"
+            , typeError "x = 1; if x = 1 { return [1]; }; return 2;" "returned value of the program: expected List<Int>, got Int"
+            , -- (a function has its own, and a return in it does not count for the program)
+              typeOk "fn f(n: Int) -> Bool { return n = 1; }; if true { return 1; } else { return 2; };"
             , -- Equality is structural, which functions do not have
               typeError "fn f(n: Int) -> Int { return n; }; b = f = f;" "functions cannot be compared"
             , typeError "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; affirm f != g;" "functions cannot be compared"
