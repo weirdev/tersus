@@ -27,6 +27,17 @@ jobs:
           key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock', 'tersus/package.yaml') }}
           restore-keys: stack-${{ runner.os }}-
 
+      - name: Diagnose linker
+        shell: bash
+        continue-on-error: true
+        run: |
+          echo "PATH=$PATH"
+          command -v ld || true
+          command -v gcc || true
+          ls -l /usr/bin/ld* || true
+          stack exec -- sh -c 'command -v ld; command -v gcc'
+          stack exec -- ghc --info
+
       - name: Build
         run: stack build --test --no-run-tests
 
