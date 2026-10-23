@@ -546,20 +546,43 @@ joinBranchesFrom s0 vars sThen sElse =
 -- loop that follows), and the end of a loop body asserts the invariant and that the variant got smaller. A join that
 -- keeps a fact like that spares the program from stating it again in each branch.
 upcomingProofs :: VState -> [VariableProof]
-upcomingProofs (VState scope _ _ _ _) = go scope
+upcomingProofs (VState scope _ _ _ ruleCtx) = go scope
   where
     go (VScopeState _ _ (Continuations rest) parent) = concatMap proofsOf rest ++ maybe [] go parent
-    proofsOf (ValidationStatement (ProofAssert proof)) = [proof]
-    proofsOf (While _ invariant _ _) = assertedProofs invariant
-    proofsOf (LoopEnd invariant decrease) = assertedProofs (invariant ++ decrease)
+    proofsOf (ValidationStatement stmt) = assertedProofs ruleCtx [stmt]
+    proofsOf (While _ invariant _ _) = assertedProofs ruleCtx invariant
+    proofsOf (LoopEnd invariant decrease) = assertedProofs ruleCtx (invariant ++ decrease)
     proofsOf _ = []
 
--- The proofs that stating the statements asserts, with a variable they define replaced by its definition
-assertedProofs :: [ValidationStatement] -> [VariableProof]
-assertedProofs stmts = [replace proof | ProofAssert proof <- stmts]
+-- The proofs that stating the statements asserts, with a variable they define replaced by its definition. A rewrite
+-- asserts what it needs to hold where it is used.
+assertedProofs :: RuleContext -> [ValidationStatement] -> [VariableProof]
+assertedProofs rules stmts = [substituteVars definitions proof | proof <- concatMap asserted stmts]
   where
     definitions = Map.fromList [(var, exprToProof expr) | AssignProofVar var expr <- stmts]
-    replace (ATerm var) = fromMaybe (ATerm var) (Map.lookup var definitions)
+    asserted (ProofAssert proof) = [proof]
+    asserted (Rewrite rule) = rewriteNeeds rules rule
+    asserted _ = []
+
+-- What a rewrite needs to hold where it is applied: the relation a check asks about, and the input contract of a rule
+rewriteNeeds :: RuleContext -> RwRule -> [VariableProof]
+rewriteNeeds _ (CheckRel proof) = [proof]
+rewriteNeeds _ (CheckGtZero proof) = [FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]]
+rewriteNeeds rules (UserRewrite name args) =
+    case Map.lookup name rules of
+        Just (AxiomRule vars inputs _) -> instantiate vars inputs
+        Just (ProofRule vars inputs _) -> instantiate vars inputs
+        Nothing -> []
+  where
+    instantiate vars inputs
+        | length vars == length args = [substituteVars (Map.fromList (zip vars args)) proof | ProofAssert proof <- inputs]
+        | otherwise = []
+rewriteNeeds _ _ = []
+
+substituteVars :: Map.Map Variable VariableProof -> VariableProof -> VariableProof
+substituteVars replacements = replace
+  where
+    replace (ATerm var) = fromMaybe (ATerm var) (Map.lookup var replacements)
     replace (FApp funct args) = FApp (replace funct) (map replace args)
     replace (Forall index guards body) = Forall index (map replace guards) (replace body)
     replace proof = proof
@@ -581,7 +604,7 @@ withMarked marker stmts state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
 markedProofs :: Variable -> VState -> [VariableProof]
 markedProofs marker (VState _ _ _ _ ruleCtx) =
     case Map.lookup marker ruleCtx of
-        Just (AxiomRule _ stmts _) -> assertedProofs stmts
+        Just (AxiomRule _ stmts _) -> assertedProofs ruleCtx stmts
         _ -> []
 
 withLoopEnd :: [ValidationStatement] -> VState -> VState
