@@ -2006,6 +2006,11 @@ testLinearArithmetic =
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { return f(n / 2); }; x = f(9);" "Recursive call does not shrink the variant"
             , -- A loop that halves
               parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = n; c = 0; while i > 0 [{ affirm i >= 0; }] shrinks i { i = i / 2; c = c + 1; }; return c; };"
+            , -- size(l) >= 0 is part of the linear system
+              parseValidProgramHelper "fn f(i: Int, l: List<Int>) -> Int [{ }] [{ affirm return >= i; }] { return i + size(l); };"
+            , parseValidateFailProgramHelper "fn f(i: Int, l: List<Int>) -> Int [{ }] [{ affirm return > i; }] { return i + size(l); };" "Could not prove: return > i"
+            , -- Sums of terms never push the distances out of the candidates: the last pair keeps its distance with six terms
+              parseValidProgramHelper "p = 0; q = 0; r = 0; s = 0; x = 0; y = 5; while p < 3 [{ affirm p <= 3; }] shrinks 3 - p { p = p + 1; q = q + 2; r = r + 3; s = s + 4; x = x + 1; y = y + 1; }; affirm y = x + 5;"
             , -- A variant that is a sum, or a difference whose two sides both move
               parseValidProgramHelper "fn f(n: Int, m: Int) -> Int [{ affirm n >= 0; affirm m >= 0; }] { i = n; j = m; while i + j > 0 [{ affirm i >= 0; affirm j >= 0; }] shrinks i + j { old = i + j; if i > 0 { i = i - 1; affirm i >= 0; affirm j >= 0; affirm i + j < old; } else { j = j - 1; affirm i >= 0; affirm j >= 0; affirm i + j < old; }; }; return 0; }; x = f(2, 3);"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = 0; k = n; while i + 1 < k [{ affirm i >= 0; affirm i <= k; }] shrinks k - i { i = i + 1; k = k - 1; }; return 0; }; x = f(7);"
