@@ -1,4 +1,14 @@
-module StdLib where
+module StdLib
+    ( builtinFunct
+    , comparable
+    , eqProof
+    , eqVarProof
+    , evalBuiltinFunct
+    , relProof
+    , stdLibCtx
+    , stdLibRuleCtx
+    , stdLibValCtx
+    ) where
 
 import Data.Map (Map, fromList, toList)
 
@@ -228,14 +238,14 @@ evalBuiltinFunct (Cast _) [value] = Ok value
 evalBuiltinFunct (Cast _) _ = Error "A cast takes one value"
 evalBuiltinFunct (Project _ _) _ = Error "A field can only be read from an enum value"
 evalBuiltinFunct (Field _ _) _ = Error "A field can only be read from a struct"
-evalBuiltinFunct Minus [VInt v1, VInt v2] = Ok $ VInt (v1 - v2)
+evalBuiltinFunct Minus [VInt v1, VInt v2] = checkedInt (v1 - v2)
 evalBuiltinFunct Minus _ = Error "Minus only valid for two ints"
-evalBuiltinFunct Plus [VInt v1, VInt v2] = Ok $ VInt (v1 + v2)
+evalBuiltinFunct Plus [VInt v1, VInt v2] = checkedInt (v1 + v2)
 evalBuiltinFunct Plus _ = Error "Plus only valid for two ints"
-evalBuiltinFunct Times [VInt v1, VInt v2] = Ok $ VInt (v1 * v2)
+evalBuiltinFunct Times [VInt v1, VInt v2] = checkedInt (v1 * v2)
 evalBuiltinFunct Times _ = Error "Times only valid for two ints"
 evalBuiltinFunct Div [VInt _, VInt 0] = Error "Division by zero"
-evalBuiltinFunct Div [VInt v1, VInt v2] = Ok $ VInt (v1 `div` v2)
+evalBuiltinFunct Div [VInt v1, VInt v2] = checkedInt (v1 `div` v2)
 evalBuiltinFunct Div _ = Error "Div only valid for two ints"
 evalBuiltinFunct Mod [VInt _, VInt 0] = Error "Modulo by zero"
 evalBuiltinFunct Mod [VInt v1, VInt v2] = Ok $ VInt (v1 `mod` v2)
@@ -316,6 +326,13 @@ stdLibCtxToValCtxHelper ((var, functDef) : rest) =
      in let newProof = FApp eqProof [ATerm (Iota var), CTerm functDef]
          in let (restVarIota, restProof) = stdLibCtxToValCtxHelper rest
              in (newVarIota : restVarIota, newProof : restProof)
+
+-- An Int result that does not fit in 64 bits is an error, as in compiled code (addition, subtraction and
+-- multiplication overflow, and so does minInt / -1)
+checkedInt :: Integer -> Result Value String
+checkedInt n
+    | inIntRange n = Ok (VInt n)
+    | otherwise = Error "Integer overflow"
 
 -- Equality is structural, for any two values that are not functions
 comparable :: Value -> Value -> Bool

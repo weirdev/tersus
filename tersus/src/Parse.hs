@@ -1,4 +1,17 @@
-module Parse where
+module Parse
+    ( assigns
+    , expression
+    , parameter
+    , parseExpression
+    , parseStatement
+    , parseStatementBlock
+    , proof
+    , semicolon
+    , statement
+    , statements
+    , value
+    , variable
+    ) where
 
 import Text.Parsec
 import qualified Data.Map as Map
@@ -9,6 +22,7 @@ import Data.List (isInfixOf, nub, (\\))
 import Data.Maybe (isJust)
 
 import StdLib
+import Utils (inIntRange)
 import TersusTypes
 
 -- The parser remembers the structs and enums declared so far. A literal needs the fields of a constructor
@@ -762,7 +776,9 @@ vint = do
     sign <- option id (char '-' >> whitespace >> return negate)
     val <- many1 digit
     whitespace
-    return (VInt (sign (read val)))
+    let n = sign (read val)
+    when (not (inIntRange n)) $ fail "Integer literal out of range (Int is 64 bits)"
+    return (VInt n)
 
 vlist :: Parser Value
 vlist = do

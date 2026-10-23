@@ -2,6 +2,14 @@ module Utils where
 
 import Data.Maybe (mapMaybe)
 
+-- Int is a 64-bit signed integer. Arithmetic that leaves this range stops the program (see LANGUAGE.md, Integers).
+intMin, intMax :: Integer
+intMin = negate (2 ^ (63 :: Int))
+intMax = 2 ^ (63 :: Int) - 1
+
+inIntRange :: Integer -> Bool
+inIntRange n = intMin <= n && n <= intMax
+
 data Result a e = Ok a | Error e deriving (Eq, Show)
 
 bindResult :: Result a e -> (a -> Result b e) -> Result b e

@@ -18,20 +18,19 @@ module Mir
     , LoopSpec (..)
     , emptySpec
     , successors
-    , checkProgram
     , renderProgram
     , renderFunction
+    , renderStatement
+    , renderTerminator
+    , renderRvalue
     ) where
 
 import Data.List (intercalate)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 
-import Pretty (renderVarProof)
-import ProofHelpers (exprToProof)
-import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression)
-import TypeCheck (renderType)
-import Utils (Result (..))
+import Pretty (renderType, renderVarProof)
+import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -55,11 +54,11 @@ data Program = Program
     , progFunctions :: Map Name Function -- every function but main, a nested one lifted to the top (outer::inner)
     , progMain :: Function -- the statements of the program; no parameters
     }
-    deriving (Show)
+    deriving (Show, Eq)
 
 -- A struct is its fields; an enum its variants (named Enum::Variant) with theirs
 data TypeDecl = StructDecl [(Variable, Type)] | EnumDecl [(Name, [(Variable, Type)])]
-    deriving (Show)
+    deriving (Show, Eq)
 
 data Function = Function
     { fnName :: Name
@@ -69,31 +68,31 @@ data Function = Function
     , fnBlocks :: Map BlockId BasicBlock
     , fnSpec :: FunctionSpec
     }
-    deriving (Show)
+    deriving (Show, Eq)
 
 data LocalDecl = LocalDecl
     { localType :: Type
     , localName :: Maybe Variable -- the source name; Nothing for a temporary
     }
-    deriving (Show)
+    deriving (Show, Eq)
 
 data BasicBlock = BasicBlock
     { blockStatements :: [Statement]
     , blockTerminator :: Terminator
     }
-    deriving (Show)
+    deriving (Show, Eq)
 
 data Statement
     = Assign Local Rvalue
     | -- Does nothing when the program runs; the validator's
       Ghost GhostStatement
-    deriving (Show)
+    deriving (Show, Eq)
 
 data GhostStatement
     = GhostValidation ValidationStatement -- affirm, define, rewrite
     | GhostAxiom Variable [Variable] [ValidationStatement] [ValidationStatement]
     | GhostProof Variable [Variable] [ValidationStatement] [ValidationStatement] [ValidationStatement]
-    deriving (Show)
+    deriving (Show, Eq)
 
 data Rvalue
     = Use Operand
@@ -105,7 +104,7 @@ data Rvalue
     | -- The field of a value that is that constructor (a struct, or a variant the program has shown the value to be)
       ReadField Operand Name Variable
     | IsVariant Operand Name
-    deriving (Show)
+    deriving (Show, Eq)
 
 -- Div and Mod need a divisor that is not 0. Compare Eq and NotEq are structural, and the other comparisons are of Ints.
 data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
@@ -116,7 +115,7 @@ data ListOp = Length | First | Last | Get | Push | Set
     deriving (Show, Eq)
 
 data Operand = Copy Local | Const Constant
-    deriving (Show)
+    deriving (Show, Eq)
 
 data Constant
     = CInt Integer
@@ -124,7 +123,7 @@ data Constant
     | CList [Constant]
     | CData Name [(Variable, Constant)]
     | CFn Name -- a function of the program, as a value
-    deriving (Show)
+    deriving (Show, Eq)
 
 data Terminator
     = Goto BlockId
@@ -137,7 +136,7 @@ data Terminator
       Return
     | -- The end of a function whose every path returned
       Unreachable
-    deriving (Show)
+    deriving (Show, Eq)
 
 -- What the program says about a function that the validator uses and the executor does not
 data FunctionSpec = FunctionSpec
@@ -146,13 +145,13 @@ data FunctionSpec = FunctionSpec
     , specTermination :: Maybe Termination
     , specLoops :: Map BlockId LoopSpec -- by the header block of the loop
     }
-    deriving (Show)
+    deriving (Show, Eq)
 
 data LoopSpec = LoopSpec
     { loopInvariant :: [ValidationStatement]
     , loopTermination :: Maybe Termination
     }
-    deriving (Show)
+    deriving (Show, Eq)
 
 emptySpec :: FunctionSpec
 emptySpec = FunctionSpec [] [] Nothing Map.empty
@@ -163,80 +162,6 @@ successors (SwitchBool _ t f) = [t, f]
 successors (Call _ _ _ next) = [next]
 successors Return = []
 successors Unreachable = []
-
--- Whether the program is well formed: every block a jump names is there, every local used is declared, and every local
--- has a type that is known. What lowering must always produce; the tests run it on every lowering.
-checkProgram :: Program -> Result () String
-checkProgram program =
-    case concatMap problems (progMain program : Map.elems (progFunctions program)) of
-        [] -> Ok ()
-        problem : _ -> Error problem
-  where
-    functionNames = Map.keys (progFunctions program)
-    problems fn =
-        map (("In " ++ fnName fn ++ ": ") ++) $
-            [ "no entry block bb0" | not (block (BlockId 0)) ]
-                ++ [show l ++ " has no known type" | (l, d) <- Map.toList (fnLocals fn), hasUnknown (localType d)]
-                ++ ["parameter " ++ show l ++ " is not declared" | l <- fnParams fn, not (declared l)]
-                ++ ["_0 is not declared" | Just _ <- [fnReturns fn], not (declared (Local 0))]
-                ++ concat
-                    [ [show b ++ " uses the undeclared " ++ show l | l <- concatMap statementLocals stmts ++ terminatorLocals term, not (declared l)]
-                        ++ [show b ++ " jumps to " ++ show t ++ ", which is not there" | t <- successors term, not (block t)]
-                        ++ [show b ++ " names the function " ++ n ++ ", which is not there" | n <- concatMap statementFunctions stmts ++ terminatorFunctions term, n `notElem` functionNames]
-                    | (b, BasicBlock stmts term) <- Map.toList (fnBlocks fn)
-                    ]
-                ++ ["a loop is at " ++ show b ++ ", which is not there" | b <- Map.keys (specLoops (fnSpec fn)), not (block b)]
-      where
-        declared l = Map.member l (fnLocals fn)
-        block b = Map.member b (fnBlocks fn)
-    hasUnknown (TVar _) = True
-    hasUnknown (TList t) = hasUnknown t
-    hasUnknown (TFn args ret) = any hasUnknown (ret : args)
-    hasUnknown _ = False
-
-statementLocals :: Statement -> [Local]
-statementLocals (Assign dest rv) = dest : rvalueLocals rv
-statementLocals Ghost{} = []
-
-rvalueLocals :: Rvalue -> [Local]
-rvalueLocals rv = concatMap operandLocals (rvalueOperands rv)
-
-rvalueOperands :: Rvalue -> [Operand]
-rvalueOperands (Use o) = [o]
-rvalueOperands (BinaryOp _ a b) = [a, b]
-rvalueOperands (ListOp _ os) = os
-rvalueOperands (MakeList os) = os
-rvalueOperands (MakeData _ fields) = map snd fields
-rvalueOperands (ReadField o _ _) = [o]
-rvalueOperands (IsVariant o _) = [o]
-
-operandLocals :: Operand -> [Local]
-operandLocals (Copy l) = [l]
-operandLocals (Const _) = []
-
-terminatorLocals :: Terminator -> [Local]
-terminatorLocals (SwitchBool o _ _) = operandLocals o
-terminatorLocals (Call f args dest _) = dest : concatMap operandLocals (f : args)
-terminatorLocals _ = []
-
-statementFunctions :: Statement -> [Name]
-statementFunctions (Assign _ rv) = concatMap operandFunctions (rvalueOperands rv)
-statementFunctions Ghost{} = []
-
-terminatorFunctions :: Terminator -> [Name]
-terminatorFunctions (SwitchBool o _ _) = operandFunctions o
-terminatorFunctions (Call f args _ _) = concatMap operandFunctions (f : args)
-terminatorFunctions _ = []
-
-operandFunctions :: Operand -> [Name]
-operandFunctions (Const c) = constantFunctions c
-operandFunctions _ = []
-
-constantFunctions :: Constant -> [Name]
-constantFunctions (CFn n) = [n]
-constantFunctions (CList cs) = concatMap constantFunctions cs
-constantFunctions (CData _ fs) = concatMap (constantFunctions . snd) fs
-constantFunctions _ = []
 
 -- Rendering: the text of `tersus mir`
 

@@ -170,6 +170,21 @@ The AST evaluator (`Proof.evaluate`) stays: the validator uses it to learn the r
 2. Validation moves onto the MIR: the validator walks blocks instead of statement lists (the `if` join becomes a real join in the graph, the loop `LoopEnd` marker becomes the back edge to the header, nested-call contracts become the `Call` terminators). This is the large step and changes `Proof.hs`.
 3. LLVM lowering: layouts for lists, structs and enums from `progTypes` and the local types; a bounded integer policy; memory management for values that are copied by `push`/`set`.
 
+## Arithmetic and traps
+
+`Int` is a 64-bit signed integer (see LANGUAGE.md, Integers), and **`Add`, `Sub`, `Mul` and `Div` trap when the result does not fit**: the program stops with `Integer overflow`, as in native code built from LLVM's `llvm.sadd.with.overflow` and the like followed by a branch to a trap. The validator reasons about unbounded integers, so what it proves holds for the runs that do not trap. The MIR has no operation that wraps.
+
+So an operation of the MIR either gives a value or traps. Two kinds of trap:
+
+- **Overflow** is always checked, in the executor and in native code, because nothing proves it cannot happen.
+- **A broken contract** (a divisor of 0, an index out of range, `first` of an empty list) cannot happen in a validated program. The executor still checks and reports it, so that a validator bug is a failure and not a wrong answer. Native code may omit these checks (they would be `unreachable` to LLVM), or keep them in a checked build.
+
+`Unreachable` is the end of a function whose every path returned and is never executed. The AST evaluator (`Proof.evaluate`, used by the validator) has the same overflow rule, so the two executors agree.
+
+## Verification
+
+`MirVerify.verifyProgram` checks a MIR for its shape (every block a jump names exists, every local and function used is declared, every local has a known type) and its types: each operation is applied to operands of the types it takes and gives the type of the local it is assigned to (`Add` takes two `Int`, `Get` takes a list of the result's type and an `Int`, `ReadField` reads a field that the constructor has, from a value of that constructor's type or one of its variants, a call has the callee's arity and parameter types, `SwitchBool` tests a `Bool`). Lowering gives the locals their types by replaying the checker, which is a second copy of its rules, and native code built on a wrong type is a wrong program, so every lowering goes through the verifier, and so should every pass over the MIR.
+
 ## Notes on the implementation
 
 - Lowering takes the types by replaying the checker over the program (`TypeCheck.TC`, exported for the purpose), so `x = []; x = push(x, 1)` gives `x` the type `List<Int>`. A type no use decided (a list that is only created) is `Int`.
@@ -177,11 +192,11 @@ The AST evaluator (`Proof.evaluate`) stays: the validator uses it to learn the r
 - A program has one return type, that of its first `return` (the checker rejects a later one of another type), so `_0` has one type.
 - Falling off the end of `main` is a `Return` (a program may end without a value); falling off the end of any other function is `Unreachable`, which fails with `Function did not return a value` as the evaluator does.
 - Blocks nothing jumps to are dropped and the rest are numbered in the order a walk from the entry reaches them, so the printed MIR reads from the top.
+- `Pipeline` runs the stages (parse, `elaborate`, validate, lower) and checks the program's types once: the validator and the lowering both take the result of `elaborate` (`validateElaborated`, `lowerElaborated`).
 - `Proof.evaluate` stays for the validator; `checkExample` in the tests runs every example on both and compares the results, and `testMirRun` does so for a set of small programs including the ones that fail.
 
 ## Open issues
 
-- **Integers are unbounded** (`Integer`) in both evaluators. Native code needs a width and an overflow story (proved away by the validator, or checked, or wrapping). The MIR does not decide this; `Add` and the others stay abstract until it is decided.
 - **Top-level `return` with no value** (`main` without one) leaves `_0` unassigned and `fnReturns = Nothing`.
 - **Recursive types** (`Tree`) need a pointer in a native layout; the MIR only names them.
 - **Mutual recursion** does not exist in the language yet, so `progFunctions` needs no forward references.

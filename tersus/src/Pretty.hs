@@ -1,4 +1,4 @@
-module Pretty (renderProof, renderVarProof, renderValue) where
+module Pretty (renderProof, renderVarProof, renderValue, renderType) where
 
 import Data.List (intercalate, stripPrefix)
 
@@ -96,3 +96,13 @@ renderValue (VData name []) = name
 renderValue (VData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderValue v | (f, v) <- fields] ++ " }"
 renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VFunct args _ _ _ _) = "fn(" ++ intercalate ", " args ++ ")"
+
+-- Renders a type in Tersus syntax
+renderType :: Type -> String
+renderType TInt = "Int"
+renderType TBool = "Bool"
+renderType (TList t) = "List<" ++ renderType t ++ ">"
+renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
+renderType (TNamed name) = name
+renderType (TVariant name) = name
+renderType (TVar _) = "?"

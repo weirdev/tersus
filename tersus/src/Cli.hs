@@ -10,9 +10,7 @@ import Data.List (intercalate)
 
 import Mir (renderProgram)
 import MirEval (renderMirValue, runProgram)
-import MirLower (lowerProgram)
-import Parse
-import Proof
+import Pipeline
 import TersusTypes
 import Utils
 
@@ -43,23 +41,13 @@ parseCommandLine _ = Nothing
 -- Runs a command over program source. Ok holds the text to print on success, which is
 -- empty when there is nothing to report; Error holds the message for a failure.
 runSource :: Command -> String -> Result String String
-runSource command source =
-    case parseStatementBlock source of
-        Left err -> Error ("Parse error: " ++ show err)
-        Right stmts ->
-            case validate stmts of
-                Error e -> Error ("Validation failed: " ++ e)
-                Ok _ -> case command of
-                    Check -> Ok "OK"
-                    Run -> lowered stmts `bindResult` \program ->
-                        case runProgram program of
-                            Error e -> Error ("Evaluation failed: " ++ e)
-                            Ok result -> Ok (maybe "" renderMirValue result)
-                    Mir -> mapResult renderProgram (lowered stmts)
-  where
-    lowered stmts = case lowerProgram stmts of
-        Error e -> Error ("Lowering failed: " ++ e)
-        Ok program -> Ok program
+runSource Check source = mapResult (const "OK") (checkSource source)
+runSource Run source =
+    compileSource source `bindResult` \program ->
+        case runProgram program of
+            Error e -> Error ("Evaluation failed: " ++ e)
+            Ok result -> Ok (maybe "" renderMirValue result)
+runSource Mir source = mapResult renderProgram (compileSource source)
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i

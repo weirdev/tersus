@@ -1,4 +1,63 @@
-module ProofHelpers where
+module ProofHelpers
+    ( advanceStatement
+    , bindVar
+    , buildVarToIotaState
+    , emptyContinuations
+    , emptyScopeState
+    , emptyVScopeState
+    , getContinuations
+    , getReturn
+    , initState
+    , initStateWStatements
+    , initVStateWStatements
+    , insertVar
+    , iotaProofToVarProof
+    , iotaToValueWProofList
+    , keepCache
+    , lookupVar
+    , namedIotaMap
+    , popIotaFromSeq
+    , popNIotasFromSeq
+    , proofIotas
+    , proofOnlyOfIotasOrConst
+    , proofOnlyOfNamedIotasOrConst
+    , proofVars
+    , reverseEqProof
+    , scopeAdvanceStatement
+    , setContinuations
+    , setPScope
+    , setReturn
+    , substituteProofTerm
+    , topLevelScope
+    , vAdvanceStatement
+    , vBindVar
+    , vGetContinuations
+    , vGetIotaSeq
+    , vGetProofs
+    , vGetReturn
+    , vGetVars
+    , vInsertProofs
+    , vInsertRule
+    , vInsertVar
+    , vInsertVars
+    , vIsLoopBack
+    , vLookupRule
+    , vLookupVar
+    , vMarkLoopBack
+    , vProofContext
+    , vProofContextWith
+    , vScopeAdvanceStatement
+    , vScopeGetProofs
+    , vSetContinuations
+    , vSetIotaSeq
+    , vSetReturn
+    , vSetScope
+    , vTopLevelScope
+    , vVisibleVars
+    , valStmtDefinedVars
+    , varProofToIotaProof
+    , withFacts
+    ) where
 
 import Data.Map (
     Map,
@@ -7,25 +66,16 @@ import Data.Map (
     lookup,
     member,
     fromList,
-    toList,
     union,
  )
 
 import Data.Containers.ListUtils (nubOrd)
-import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Data.Maybe (fromMaybe, isJust)
 
 import qualified ProofEngine as Engine
 import StdLib
 import TersusTypes
 import Utils
-
-newtype ProofMatchTerm i = MatchEquivalents [Proof i] deriving (Show, Eq)
-data ProofMatcher i
-    = FAppMatch (ProofMatcher i) [ProofMatcher i]
-    | ProofMatchTerm (ProofMatchTerm i)
-    deriving (Show, Eq)
-type IotaProofMatcher = ProofMatcher Iota
-type VariableProofMatcher = ProofMatcher Variable
 
 initState :: State
 initState = State emptyScopeState stdLibCtx
@@ -51,9 +101,6 @@ emptyScopeState = ScopeState empty emptyContinuations Nothing
 emptyVScopeState :: VScopeState
 emptyVScopeState = VScopeState empty [] emptyContinuations Nothing
 
-setScope :: State -> ScopeState -> State
-setScope (State _ ctxVals) scope = State scope ctxVals
-
 vSetScope :: VState -> VScopeState -> VState
 vSetScope old@(VState _ iotaCtx proofCtx iotaseq ruleCtx) scope = keepCache old (VState scope iotaCtx proofCtx iotaseq ruleCtx)
 
@@ -62,22 +109,6 @@ setPScope (State scope ctxVals) p = State (scopeSetPScope scope p) ctxVals
 
 scopeSetPScope :: ScopeState -> Maybe ScopeState -> ScopeState
 scopeSetPScope (ScopeState vals c _) = ScopeState vals c
-
-vScopeSetPScope :: VScopeState -> Maybe VScopeState -> VScopeState
-vScopeSetPScope (VScopeState iotas proofs c _) = VScopeState iotas proofs c
-
-emptyScopeStateWithParent :: Maybe ScopeState -> ScopeState
-emptyScopeStateWithParent = scopeSetPScope emptyScopeState
-
-vEmptyScopeStateWithParent :: Maybe VScopeState -> VScopeState
-vEmptyScopeStateWithParent = vScopeSetPScope emptyVScopeState
-
-pushNewEmptyScope :: State -> State
-pushNewEmptyScope (State scope ctxVals) = State (emptyScopeStateWithParent (Just scope)) ctxVals
-
-vPushNewEmptyScope :: VState -> VState
-vPushNewEmptyScope old@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
-    keepCache old (VState (vEmptyScopeStateWithParent (Just scope)) iotaCtx proofCtx iotaseq ruleCtx)
 
 -- TODO: Get vars from parent scopes and ctx
 vGetVars :: VState -> Map Variable Iota
@@ -364,43 +395,12 @@ vScopeTopLevelScope (VScopeState _ _ _ (Just pScope)) = vScopeTopLevelScope pSco
 iotalist :: [Iota]
 iotalist = [Iota $ l : show x | x <- [0 :: Integer ..], l <- ['a' .. 'z']]
 
-maybeATermProofToIota :: IotaProof -> Maybe Iota
-maybeATermProofToIota (ATerm i) = Just i
-maybeATermProofToIota _ = Nothing
-
--- Find all proofs with the given iota on the LHS
-proofLIotaLookup :: [IotaProof] -> Iota -> [IotaProof]
-proofLIotaLookup proofs iota = filter (proofLIota iota) proofs
-
--- Proofs where the LHS is the given iota
--- For FApp, check if the first arg is the given iota
-proofLIota :: Iota -> IotaProof -> Bool
-proofLIota iota (FApp _ args) = case args of
-    -- TODO: checking first arg only is arbitrary
-    ATerm piota : _ -> piota == iota
-    _ -> False
-proofLIota _ _ = False
-
 proofOnlyOfIotasOrConst :: [Iota] -> IotaProof -> Bool
 proofOnlyOfIotasOrConst iotas (ATerm i) = i `elem` iotas
 proofOnlyOfIotasOrConst _ CTerm{} = True
 proofOnlyOfIotasOrConst _ BVar{} = True
 proofOnlyOfIotasOrConst iotas (Forall _ guards body) = all (proofOnlyOfIotasOrConst iotas) (body : guards)
 proofOnlyOfIotasOrConst iotas (FApp _ proofs) = all (proofOnlyOfIotasOrConst iotas) proofs
-
--- Does the proof use the given relation
-proofRel :: Rel -> IotaProof -> Bool
-proofRel rel (FApp funct _) = funct == CTerm (builtinFunct (Rel rel))
-proofRel _ _ = False
-
--- Is the proof concrete
-abstractLhsEqConcreteRhs :: IotaProof -> Bool
-abstractLhsEqConcreteRhs (FApp funct [ATerm _, CTerm _]) = funct == CTerm (builtinFunct (Rel Eq))
-abstractLhsEqConcreteRhs _ = False
-
-abstractLhsEqAbstractRhs :: IotaProof -> Bool
-abstractLhsEqAbstractRhs (FApp funct [ATerm _, ATerm _]) = funct == CTerm (builtinFunct (Rel Eq))
-abstractLhsEqAbstractRhs _ = False
 
 -- replaceLIotas :: [Proof] -> Iota -> [Proof]
 -- replaceLIotas [] _ = []
@@ -437,35 +437,6 @@ reverseEqProof :: IotaProof -> IotaProof
 reverseEqProof (FApp funct [lhs, rhs]) | funct == eqProof = FApp eqProof [rhs, lhs]
 reverseEqProof _ = error "Only Eq relation supported"
 
--- Given an equality relation, construct a new proof by replacing
--- instances of the LHS proof term with the RHS proof term.
-reflProofByProof :: IotaProof -> IotaProof -> Maybe IotaProof
-reflProofByProof proof (FApp funct [lhs, rhs]) | funct == eqProof =
-    substituteProofTerm lhs rhs proof
-reflProofByProof _ _ = error "Only Eq relation supported"
-
--- Given an eqality relation, construct new proofs by replacing the
--- LHS iota with the RHS iota or value
--- proofs to change -> eq relation -> new proofs
-reflProofsByProof :: [IotaProof] -> IotaProof -> [IotaProof]
-reflProofsByProof (proof : ptail) eqProofSource@(FApp funct [_lhs, _rhs]) | funct == eqProof =
-    case reflProofByProof proof eqProofSource of
-        Just newProof -> newProof : reflProofsByProof ptail eqProofSource
-        _ -> reflProofsByProof ptail eqProofSource
-reflProofsByProof _ _ = []
-
--- Given a list of iotas and a list of proofs,
--- return a list of values or nothing if not all iotas have concrete definitions
-iotasToValues :: [Iota] -> [IotaProof] -> Maybe [Value]
-iotasToValues [] _ = Just []
-iotasToValues (iota : itail) proofs =
-    let maybeValue = iotaToValueWProofList iota proofs
-     in case maybeValue of
-            Just value -> case iotasToValues itail proofs of
-                Just values -> Just $ value : values
-                _ -> Nothing
-            _ -> Nothing
-
 -- Given an iota and a list of proofs,
 -- return the concrete value of the iota or nothing if not found
 iotaToValueWProofList :: Iota -> [IotaProof] -> Maybe Value
@@ -473,9 +444,6 @@ iotaToValueWProofList _ [] = Nothing
 iotaToValueWProofList iota (proof : ptail) = case proof of
     FApp eqProof [ATerm piota, CTerm val] | piota == iota -> Just val
     _ -> iotaToValueWProofList iota ptail
-
-iotaToValue :: Iota -> VState -> Maybe Value
-iotaToValue iota state = iotaToValueWProofList iota (vGetProofs state)
 
 varProofToIotaProof :: VariableProof -> VState -> Result IotaProof String
 varProofToIotaProof (CTerm val) _ = Ok (CTerm val)
@@ -497,10 +465,6 @@ varProofToIotaProof (FApp funct args) state =
                 Error e -> Error e
                 Ok iotaproofs -> Ok (FApp functProof iotaproofs)
 
-exprToProof :: Expression -> VariableProof
-exprToProof (Val val) = CTerm val
-exprToProof (Var var) = ATerm var
-exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof argExprs)
 
 proofVars :: VariableProof -> [Variable]
 proofVars (CTerm _) = []
@@ -549,33 +513,3 @@ buildVarToIotaState (VState _ iotaCtx proofCtx _ ruleCtx) vars proofs iotaseq = 
 
 namedIotaMap :: [(Variable, Iota)] -> Map Iota Variable
 namedIotaMap = fromList . map (\(var, iota) -> (iota, var))
-
--- proof `p` being searched for -> source equality proof -> other side of equality if p found
-extractFirstDegreeEquivalent :: IotaProof -> IotaProof -> Maybe IotaProof
-extractFirstDegreeEquivalent proof (FApp eqProof [lhs, rhs]) | lhs == proof = Just rhs
-extractFirstDegreeEquivalent proof (FApp eqProof [lhs, rhs]) | rhs == proof = Just lhs
-extractFirstDegreeEquivalent _ _ = Nothing
-
--- proof `p` being searched for -> source equality proofs -> other side of equalities where p found
-extractFirstDegreeEquivalents :: IotaProof -> [IotaProof] -> [IotaProof]
-extractFirstDegreeEquivalents proof = mapMaybe (extractFirstDegreeEquivalent proof)
-
-extractFirstDegreeEquivalentsInclusive :: IotaProof -> [IotaProof] -> [IotaProof]
-extractFirstDegreeEquivalentsInclusive proof proofs =
-    proof : extractFirstDegreeEquivalents proof proofs
-
-extractNDegreeEquivalents :: Int -> IotaProof -> [IotaProof] -> [IotaProof]
-extractNDegreeEquivalents 0 _ _ = []
-extractNDegreeEquivalents n proof proofs =
-    let nextProofs = extractFirstDegreeEquivalents proof proofs
-     in nextProofs ++ concatMap (\p -> extractNDegreeEquivalents (n - 1) p proofs) nextProofs
-
-extractNDegreeEquivalentsInclusive :: Int -> IotaProof -> [IotaProof] -> [IotaProof]
-extractNDegreeEquivalentsInclusive n proof proofs =
-    proof : extractNDegreeEquivalents n proof proofs
-
-matchIotaProof :: IotaProofMatcher -> IotaProof -> Bool
-matchIotaProof (ProofMatchTerm (MatchEquivalents matchers)) proof = proof `elem` matchers
-matchIotaProof (FAppMatch matcherFunct matchers) (FApp proofFunct proofArgs) =
-    matchIotaProof matcherFunct proofFunct && all (uncurry matchIotaProof) (zip matchers proofArgs)
-matchIotaProof _ _ = False

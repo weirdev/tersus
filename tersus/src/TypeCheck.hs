@@ -23,10 +23,10 @@ module TypeCheck
     , zonk
     ) where
 
-import Data.List (intercalate)
 import qualified Data.Map as Map
 import Data.Map (Map)
 
+import Pretty (renderType)
 import StdLib
 import TersusTypes
 import Utils
@@ -46,14 +46,6 @@ elaborate stmts =
         Left err -> Error err
         Right stmts' -> Ok stmts'
 
-renderType :: Type -> String
-renderType TInt = "Int"
-renderType TBool = "Bool"
-renderType (TList t) = "List<" ++ renderType t ++ ">"
-renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
-renderType (TNamed name) = name
-renderType (TVariant name) = name
-renderType (TVar _) = "?"
 
 -- The checking monad: a substitution for the type variables, a counter for new ones, and failure
 

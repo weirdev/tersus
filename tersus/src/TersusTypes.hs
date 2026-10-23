@@ -153,6 +153,12 @@ proofHasForall :: Proof i -> Bool
 proofHasForall Forall{} = True
 proofHasForall (FApp funct args) = proofHasForall funct || any proofHasForall args
 proofHasForall _ = False
+-- The proof term for an expression: variables are abstract terms, values and builtins constant ones
+exprToProof :: Expression -> VariableProof
+exprToProof (Val val) = CTerm val
+exprToProof (Var var) = ATerm var
+exprToProof (F fnExpr argExprs) = FApp (exprToProof fnExpr) (map exprToProof argExprs)
+
 type IotaProof = Proof Iota
 type VariableProof = Proof Variable
 

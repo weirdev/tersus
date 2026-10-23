@@ -1,4 +1,4 @@
-module MirLower (lowerProgram) where
+module MirLower (lowerProgram, lowerElaborated) where
 
 import Control.Monad (unless, when)
 import Data.Map.Strict (Map)
@@ -6,6 +6,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import qualified Mir as M
+import MirVerify (verifyProgram)
 import StdLib (stdLibCtx)
 import TersusTypes
 import TypeCheck
@@ -19,11 +20,14 @@ import Utils
 -- inference over the same program with the same unifier (TypeCheck's TC), taking the type of each piece from
 -- the steps of inferExpr: that is how `x = []` gets the element type that a later `push(x, 1)` decides.
 lowerProgram :: [Statement] -> Result M.Program String
-lowerProgram stmts =
-    elaborate stmts `bindResult` \elaborated ->
-        case runL (program elaborated) (initialState elaborated) of
-            Left e -> Error e
-            Right (p, _) -> Ok p
+lowerProgram stmts = elaborate stmts `bindResult` lowerElaborated
+
+-- For a program that `elaborate` has checked and handed back (the pipeline checks a program once)
+lowerElaborated :: [Statement] -> Result M.Program String
+lowerElaborated elaborated =
+    case runL (program elaborated) (initialState elaborated) of
+        Left e -> Error e
+        Right (p, _) -> Ok p
 
 -- The lowering monad: state, and failure for what should not happen to a program that has been checked
 newtype L a = L {runL :: LS -> Either String (a, LS)}
@@ -202,7 +206,7 @@ program stmts = do
             m : rest -> (m, rest)
             [] -> (main', [])
         result = M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain
-    case M.checkProgram result of
+    case verifyProgram result of
         Error e -> failL ("Lowering produced a malformed program: " ++ e)
         Ok () -> return result
 

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; and regression tests are in `tersus/test/TestTersus.hs`. The `python/` directory contains older parser and proof prototypes plus `python/tests.py`. The `stack/tersus/` tree is a starter snapshot, not the main development target.
+The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; and regression tests are in `tersus/test/` (`TestTersus.hs` runs the groups, which live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`, `TestData` and `TestPipeline`, with the shared harness in `TestHarness`). The `python/` directory contains older parser and proof prototypes plus `python/tests.py`. The `stack/tersus/` tree is a starter snapshot, not the main development target.
 
 ## Build, Test, and Development Commands
 Work from `tersus/` unless you are touching the Python prototype.
@@ -16,9 +16,9 @@ Work from `tersus/` unless you are touching the Python prototype.
 Follow the existing style in `tersus/src`: 4-space indentation, explicit type signatures for top-level helpers when useful, and `CamelCase` for data constructors and module names. Use `camelCase` for functions such as `parseStatementBlock` and `evalReturningBlock`. Keep parser and proof code split by concern instead of growing monolithic files. For Python prototypes, keep PEP 8 spacing and `snake_case` only when extending those files; preserve existing naming if you are making a minimal fix.
 
 ## Testing Guidelines
-Add or update Haskell tests in `tersus/test/TestTersus.hs` alongside the affected parser, evaluator, or validator behavior. Existing tests group cases with names like `testParseEval` and `testValidationFail`; follow that pattern and make failures readable. Run `stack test` before opening a PR. If you change prototype-only Python code, run `python python/tests.py` as a secondary check.
+Add or update Haskell tests in the matching module under `tersus/test/` (and list a new group in `TestTersus.hs`) alongside the affected parser, evaluator, or validator behavior. Existing tests group cases with names like `testParseEval` and `testValidationFail`; follow that pattern and make failures readable. Run `stack test` before opening a PR. If you change prototype-only Python code, run `python python/tests.py` as a secondary check.
 
-Note: the Haskell test harness is custom. It prints `[PASS]`/`[FAIL]` per case and a final `Summary: N passed, M failed` line, and exits non-zero if any case fails, so the process exit code is reliable. Example programs in `tersus/examples/` are loaded and checked by `testExamples`, so a new or edited example needs a matching expectation in `tersus/test/TestTersus.hs`.
+Note: the Haskell test harness is custom. It prints `[PASS]`/`[FAIL]` per case and a final `Summary: N passed, M failed` line, and exits non-zero if any case fails, so the process exit code is reliable. Example programs in `tersus/examples/` are loaded and checked by `testExamples`, so a new or edited example needs a matching expectation in `tersus/test/TestPipeline.hs`.
 
 ## Documentation Guidelines
 Keep `tersus/LANGUAGE.md` in sync with user-visible syntax (including comments), builtins, validation statements, rewrite rules, contracts, and known language limitations. Keep `tersus/examples/README.md` in sync with the programs in `tersus/examples/`. Update the interpreter-flow section in `tersus/README.md` when parser, concrete evaluation, validation, scope, function-call, or CLI behavior changes. Include small Tersus snippets when documenting grammar or proof behavior.
