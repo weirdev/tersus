@@ -1096,7 +1096,7 @@ linearSystem table classes trueId
     constraintsOf (t, Just Div, [a, b])
         | Just n <- known b, n > 0 = [AtMost (form [(t, fromInteger n), (a, -1)]) 0, AtMost (form [(a, 1), (t, negate (fromInteger n))]) (fromInteger (n - 1))]
         | Just n <- known b, n < 0 = [AtMost (form [(a, 1), (t, negate (fromInteger n))]) 0, AtMost (form [(t, fromInteger n), (a, -1)]) (fromInteger (negate n - 1))]
-    constraintsOf (_, Just Size, [l]) = [AtMost (form [(l, -1)]) 0]
+    constraintsOf (t, Just Size, [_]) = [AtMost (form [(t, -1)]) 0]
     constraintsOf (t, Just (Rel rel), [l, r])
         | t == node trueId = case rel of
             Lt -> [AtMost (form [(l, 1), (r, -1)]) (-1)]

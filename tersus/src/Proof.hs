@@ -594,11 +594,6 @@ inferInvariants entry havocked loopVars cond invariant body
     known = [(term, k) | (term, Just k) <- loopTerms]
     constantCandidates =
         concat [[relation GtEq term (CTerm (VInt k)), relation LtEq term (CTerm (VInt k))] | (term, k) <- known]
-            ++ [ relation Eq (FApp (CTerm (builtinFunct Plus)) [t1, t2]) (CTerm (VInt (k1 + k2)))
-               | (i, (t1, k1)) <- zip [0 :: Int ..] known
-               , (j, (t2, k2)) <- zip [0 ..] known
-               , i < j
-               ]
             ++ [ relation Eq t1 (if k1 == k2 then t2 else FApp (CTerm (builtinFunct Plus)) [t2, CTerm (VInt (k1 - k2))])
                | (i, (t1, k1)) <- zip [0 :: Int ..] known
                , (j, (t2, k2)) <- zip [0 ..] known
@@ -617,7 +612,14 @@ inferInvariants entry havocked loopVars cond invariant body
         ]
     converted = [(c, goal) | c <- comparisons ++ sums, Ok goal <- [varProofToIotaProof c entry]]
     entailed = [c | ((c, _), True) <- zip converted (Engine.entailsDirect (map snd converted) context)]
-    candidates = take maxInferenceCandidates (constantCandidates ++ entailed)
+    -- sums of terms that start at numbers, last so that they never push out the distances and comparisons
+    knownSums =
+        [ relation Eq (FApp (CTerm (builtinFunct Plus)) [t1, t2]) (CTerm (VInt (k1 + k2)))
+        | (i, (t1, k1)) <- zip [0 :: Int ..] known
+        , (j, (t2, k2)) <- zip [0 ..] known
+        , i < j
+        ]
+    candidates = take maxInferenceCandidates (constantCandidates ++ entailed ++ knownSums)
     houdini rounds survivors
         | null survivors || rounds <= 0 = []
         | otherwise = case iterationEnd survivors of
