@@ -389,7 +389,15 @@ joinReturnPathsFrom s0 pThen pElse =
                         (nubOrd (map toMerged (vGetProofs pThen)))
                 elseEqualities = [FApp eqProof [ATerm m, ATerm elseRet] | (m, (_, elseRet)) <- merges]
                 elseContext = vProofContextWith pElse elseEqualities
-                kept = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
+                keptFromThen = [candidate | (candidate, True) <- zip candidates (Engine.entailsAll candidates elseContext)]
+                -- The output contract of the function, about the merged return value: it is checked once the paths are joined,
+                -- so a path does not have to state it for the join to keep it when both entail it
+                returned = foldl (\s (m, _) -> vInsertVar s "return" m []) base merges
+                wanted = [proof | not (null merges), variableProof <- markedProofs outputsMarker s0, Ok proof <- [varProofToIotaProof variableProof returned]]
+                extras = take maxJoinCandidates (nubOrd [c | c <- wanted, c `notElem` baseFacts, c `notElem` candidates, all (`elem` visible) (proofIotas c)])
+                thenContext = vProofContextWith pThen [FApp eqProof [ATerm m, ATerm thenRet] | (m, (thenRet, _)) <- merges]
+                keptExtras = [c | (c, True, True) <- zip3 extras (Engine.entailsAll extras thenContext) (Engine.entailsAll extras elseContext)]
+                kept = keptFromThen ++ keptExtras
                 based = vSetIotaSeq base (vGetIotaSeq sAfter)
                 withReturn = foldl (\s (m, _) -> vSetReturn s m []) based merges
              in Ok (vInsertProofs withReturn kept)
@@ -503,7 +511,7 @@ joinBranchesFrom s0 vars sThen sElse =
                                 (\p (_, m, (_, elseIota)) -> maybe p id (substituteProofTerm (ATerm elseIota) (ATerm m) p))
                                 proof
                                 merges
-                        wanted = [proof | variableProof <- loopEndProofs s0 ++ upcomingProofs s0, Ok proof <- [varProofToIotaProof variableProof joined]]
+                        wanted = [proof | variableProof <- loopEndProofs s0 ++ upcomingProofs s0 ++ upcomingOutputs s0, Ok proof <- [varProofToIotaProof variableProof joined]]
                         carried =
                             [ proof'
                             | proof <- s0Facts
@@ -556,20 +564,50 @@ assertedProofs stmts = [replace proof | ProofAssert proof <- stmts]
     replace (Forall index guards body) = Forall index (map replace guards) (replace body)
     replace proof = proof
 
--- The end of the body of the loop being validated, as a rule under a name no program can write, since the state of
--- a block has nowhere else to carry it. The statements are the invariant and the variant check.
+-- Statements the join of an `if` may try to keep, carried in the rule context under a name no program can write, since
+-- the state of a block has nowhere else to carry them:
+--   * the end of the body of the loop being validated: the invariant and the variant check;
+--   * the output contract of the function being validated, which is checked after the body and so after any join.
 loopEndMarker :: Variable
 loopEndMarker = "$loop end"
 
-withLoopEnd :: [ValidationStatement] -> VState -> VState
-withLoopEnd stmts state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
-    keepCache state (VState scope iotaCtx proofCtx iotaseq (Map.insert loopEndMarker (AxiomRule [] stmts []) ruleCtx))
+outputsMarker :: Variable
+outputsMarker = "$outputs"
 
-loopEndProofs :: VState -> [VariableProof]
-loopEndProofs (VState _ _ _ _ ruleCtx) =
-    case Map.lookup loopEndMarker ruleCtx of
+withMarked :: Variable -> [ValidationStatement] -> VState -> VState
+withMarked marker stmts state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) =
+    keepCache state (VState scope iotaCtx proofCtx iotaseq (Map.insert marker (AxiomRule [] stmts []) ruleCtx))
+
+markedProofs :: Variable -> VState -> [VariableProof]
+markedProofs marker (VState _ _ _ _ ruleCtx) =
+    case Map.lookup marker ruleCtx of
         Just (AxiomRule _ stmts _) -> assertedProofs stmts
         _ -> []
+
+withLoopEnd :: [ValidationStatement] -> VState -> VState
+withLoopEnd = withMarked loopEndMarker
+
+loopEndProofs :: VState -> [VariableProof]
+loopEndProofs = markedProofs loopEndMarker
+
+withOutputs :: [ValidationStatement] -> VState -> VState
+withOutputs = withMarked outputsMarker
+
+-- The output contract, about the value of the `return` that follows, if the statements still to run have one
+upcomingOutputs :: VState -> [VariableProof]
+upcomingOutputs state@(VState scope _ _ _ _) =
+    case returned scope of
+        Just expr -> map (replaceReturn (exprToProof expr)) (markedProofs outputsMarker state)
+        Nothing -> []
+  where
+    returned (VScopeState _ _ (Continuations rest) parent) =
+        case [expr | Return expr <- rest] of
+            expr : _ -> Just expr
+            [] -> parent >>= returned
+    replaceReturn value (ATerm "return") = value
+    replaceReturn value (FApp funct args) = FApp (replaceReturn value funct) (map (replaceReturn value) args)
+    replaceReturn value (Forall index guards body) = Forall index (map (replaceReturn value) guards) (replaceReturn value body)
+    replaceReturn _ proof = proof
 
 maxJoinCandidates :: Int
 maxJoinCandidates = 40
@@ -1115,7 +1153,7 @@ valExpressionVar state iota var =
 valExpressionFunction :: VState -> Iota -> Expression -> [Expression] -> Result (VState, [IotaProof]) String
 valExpressionFunction state iota fnexpr argexprs =
     case valFunctExprHelper state fnexpr argexprs iota of
-        Ok (nextState, flatInputProofs, functProofs, argIotas) ->
+        Ok (nextState, flatInputProofs, functProofs, argIotas, nestedCallProofs) ->
             case varProofToIotaProof (exprToProof (F fnexpr argexprs)) nextState of
                 Ok fnProof ->
                     let nonEvalProof = FApp eqProof [ATerm iota, fnProof]
@@ -1131,7 +1169,7 @@ valExpressionFunction state iota fnexpr argexprs =
                         argLinks = filter (\p -> isArgLink linkedIotas p || isLiteralArgLink outputIotas linkedIotas p || isCallDefinition argIotas p) flatInputProofs
                      in -- The links tie each argument's fresh iota to the caller's variable, which output
                         -- contracts that mention the arguments (size(return) = size(list) + 1) need
-                        Ok (nextState, nonEvalProof : functProofs ++ argLinks)
+                        Ok (nextState, nonEvalProof : functProofs ++ nubOrd (argLinks ++ nestedCallProofs))
                 Error e -> Error e
         Error e -> Error e
 
@@ -1173,8 +1211,9 @@ validateValue state val = case val of
 valFunctDef :: VState -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> FunctBody -> Result [VariableProof] String
 valFunctDef state args inputValStmts outputValStmts (NativeFunct _ term stmts) =
     case prepareFunctionValidationState state args inputValStmts term stmts of
-            Ok fnValState ->
-                let valResult =
+            Ok preparedState ->
+                let fnValState = withOutputs outputValStmts preparedState
+                    valResult =
                         doTrace4
                             ("valFunctDef: Validating body: " ++ show (vGetContinuations fnValState))
                             (doTrace4 ("Preval fn body: Vars: " ++ show (vGetVars fnValState) ++ " Proofs: " ++ show (vGetProofs fnValState)) (valReturningBlock fnValState))
@@ -1320,7 +1359,7 @@ assumeValStmt state (AssignProofVar var expr) = assignProofVarImpl state var exp
 -- validate and return:
 -- 1) proofs of input expressions 2) proofs of the evaluated fn result 3) the new iotas used
 -- state -> fnexpr -> argexprs -> (argProofs, functresultproofs, new iotas)
-valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result (VState, [IotaProof], [IotaProof], [Iota]) String
+valFunctExprHelper :: VState -> Expression -> [Expression] -> Iota -> Result (VState, [IotaProof], [IotaProof], [Iota], [IotaProof]) String
 valFunctExprHelper state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) functionExpr argExprs resultIota =
     -- Get proofs from the function and arg expressions
     let exprsToVal = functionExpr : argExprs
@@ -1332,10 +1371,12 @@ valFunctExprHelper state@(VState scope iotaCtx proofCtx iotaseq ruleCtx) functio
                         -- (the closure makes an input fact usable under the context's equalities, so the facts
                         -- are not rewritten through them here)
                         let flatInputProofs = concat inputProofGroups
+                            -- (an argument that is a call has proved what its callee's output contract says about it)
+                            nestedCallProofs = concat [group | (F _ _, group) <- zip argExprs (drop 1 inputProofGroups)]
                          in case freshIotas of
                                 functionIota : inputIotas ->
                                     case valFunctCall exprValidatedState functionIota inputIotas flatInputProofs resultIota of
-                                        Ok (callState, functionProofs) -> Ok (callState, flatInputProofs, functionProofs, freshIotas)
+                                        Ok (callState, functionProofs) -> Ok (callState, flatInputProofs, functionProofs, freshIotas, nestedCallProofs)
                                         Error e -> Error e
                                 [] -> Error "Not enough fresh iotas for function expression"
 

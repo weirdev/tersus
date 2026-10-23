@@ -231,6 +231,8 @@ fn at(lst: List<Int>, i: Int) -> Int [{
 
 `push` has a builtin output contract, `size(return) = size(list) + 1` and `get(return, size(list)) = x` (the new element sits at the old size), which is instantiated at every call. That is what lets a function that builds a list state its size in its own output contract (see `examples/build_list.tersus`). An empty list is the literal `[]`.
 
+A call can be nested in the arguments of another (`push(push(l, 1), 2)`, `n + f(n - 1)`), and the output contract of the inner call is known for its result, so `size(return) = size(l) + 2` holds for the first and `r >= n` follows from `f`'s contract in the second.
+
 `set` has the same input contract as `get`, and a builtin output contract, `size(return) = size(list)` and `get(return, index) = x`. Since lists are values, `set` does not change its argument: update a variable by assigning the result back to it.
 
 ```tersus
@@ -383,7 +385,7 @@ fn f(c: Int) -> Int {
 
 In a loop, an `if` in the body does not have to restate the invariant or the variant in each branch (`examples/linear.tersus` searches by halving a range with an `if` that moves one end, and writes neither). A fact is only tried if the program asks for it as above, and it is checked with congruence and arithmetic only, with no `forall` instantiated and no case split, so a fact that needs those still has to be stated in each branch.
 
-This is sound but incomplete. A fact about values that existed before the `if` that nothing later asks for, and that the branches do not both state, is dropped, so state it in both branches or after the `if` when you need it. The output contract of a function is not asked for: the facts it needs about the variable returned must come from the branches or from before the `if`.
+This is sound but incomplete. A fact about values that existed before the `if` that nothing later asks for, and that the branches do not both state, is dropped, so state it in both branches or after the `if` when you need it. The output contract of the function is asked for too, about the value of the `return` that follows the `if` in the same block or in the blocks around it, so `r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r;` meets `affirm return > 0;` when `n > 0`.
 
 #### Early return
 
@@ -404,7 +406,7 @@ fn firstOr(lst: List<Int>, fallback: Int) -> Int {
 
 The validator cannot join a branch that returned with one that did not, because the statements after the `if` do not run on the path that returned. Instead it validates each path to the end of the function separately: the then-branch followed by the rest of the function, and the else-branch followed by the rest of the function, each assuming its own condition. A path that returns ends there, so the rest of the function is only validated under the paths that reach it. In the example above, `first(lst)` is checked assuming `size(lst) > 0`, and the guard `if size(lst) > 0 { return fallback; };` would be rejected because the code after it only knows `size(lst) <= 0`.
 
-The paths are then joined. If they all return, the return value becomes one new value, and a fact about it (for example an output contract `affirm return > 0;`) is known only if every returning path established it. If some path reaches the end without returning, there is no return value: a program may do that, and a function that does so is rejected with `Return value not found in top scope`.
+The paths are then joined. If they all return, the return value becomes one new value, and a fact about it is known only if every returning path entails it. The join tries the function's output contract (for example `affirm return > 0;`) about the new value besides the facts the paths state, so a contract that every path entails holds without being restated. Each path is checked in full, as the contract is after the body. If some path reaches the end without returning, there is no return value: a program may do that, and a function that does so is rejected with `Return value not found in top scope`.
 
 Because each path validates the rest of the function again, an `if` whose branches both fall through and contain a `return` somewhere inside doubles the work for the statements after it. Ordinary guard clauses do not, since the path that returns has nothing left to validate.
 
@@ -520,7 +522,7 @@ fn firstOver(n: Int) -> Int [{ }] [{ affirm return <= 3; }] {
 
 - The invariant must hold on entry, as before.
 - Every way of reaching the end of the body without returning must re-establish the invariant. A `return` does not excuse the paths that keep looping, so removing the `rewrite stepWithinBound i;` above is rejected with `Loop invariant is not preserved`.
-- A path that returns assumes the invariant, the loop condition and whatever its own `if` conditions say. Its return value is joined with the value returned after the loop, so an output contract holds only if every returning path establishes it. Above, `return <= 3` holds for the `return i` in the body (from the invariant) and for the one after the loop.
+- A path that returns assumes the invariant, the loop condition and whatever its own `if` conditions say. Its return value is joined with the value returned after the loop, so an output contract holds only if every returning path entails it. Above, `return <= 3` holds for the `return i` in the body (from the invariant) and for the one after the loop.
 - The statements after the loop are validated once, from the state where the invariant holds and the condition is false. Facts that only a returning path knew, such as an `if` condition inside the body, are not known there.
 - As for an `if`, a function where some path (including leaving the loop) does not return has no return value and is rejected with `Return value not found in top scope`.
 - The variant of a loop with a `shrinks` clause must also be smaller on every path that keeps looping.
