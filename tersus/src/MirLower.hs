@@ -1,6 +1,6 @@
 module MirLower (lowerProgram) where
 
-import Control.Monad (when)
+import Control.Monad (unless, when)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -21,7 +21,7 @@ import Utils
 lowerProgram :: [Statement] -> Result M.Program String
 lowerProgram stmts =
     elaborate stmts `bindResult` \elaborated ->
-        case runL (program elaborated) initialState of
+        case runL (program elaborated) (initialState elaborated) of
             Left e -> Error e
             Right (p, _) -> Ok p
 
@@ -81,11 +81,27 @@ data LS = LS
     , lsFunctions :: Map Name M.Function
     , lsNames :: Set.Set Name
     , lsGlobals :: Map Variable (Name, Type) -- the functions defined at the top of the program
+    , lsAssigned :: Set.Set Variable -- the names the program assigns other than by defining a function
     , lsBuilder :: Builder
     }
 
-initialState :: LS
-initialState = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (newBuilder "main" True Nothing)
+initialState :: [Statement] -> LS
+initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing)
+
+-- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
+-- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
+-- others are known functions, and a call of one is a call by name.
+assignedNames :: [Statement] -> Set.Set Variable
+assignedNames = foldMap names
+  where
+    names stmt = case stmt of
+        Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> assignedNames body
+        Assign var _ -> Set.singleton var
+        Let var _ -> Set.singleton var
+        Block body -> assignedNames body
+        If _ thenStmts elseStmts -> assignedNames thenStmts <> assignedNames elseStmts
+        While _ _ _ body -> assignedNames body
+        _ -> Set.empty
 
 newBuilder :: Name -> Bool -> Maybe Type -> Builder
 newBuilder name isMain returns =
@@ -344,9 +360,15 @@ defineFunction var params ins outs (Signature ptys rty) term body = do
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
         fnTy = TFn ptys rty
     name <- uniqueName (if atTop then var else bName enclosing ++ "::" ++ var)
-    if atTop
-        then modifyS (\s -> s{lsGlobals = Map.insert var (name, fnTy) (lsGlobals s)})
-        else bindName var (BFn name fnTy)
+    assigned <- (Set.member var . lsAssigned) <$> getS
+    -- (the bodies of the functions after it find a function at the top by name, whatever the program does to the variable)
+    when atTop (modifyS (\s -> s{lsGlobals = Map.insert var (name, fnTy) (lsGlobals s)}))
+    if assigned
+        then do
+            l <- newLocal (Just var) fnTy
+            bindName var (BLocal l fnTy)
+            emit (M.Assign l (M.Use (M.Const (M.CFn name))))
+        else unless atTop (bindName var (BFn name fnTy))
     tc (mapM_ checkType (rty : ptys))
     outer <- builder
     -- the body is lowered as a function of its own, then the outer one goes on

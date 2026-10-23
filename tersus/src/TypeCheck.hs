@@ -64,6 +64,7 @@ data TcState = TcState
     , tcNext :: Int
     , tcTypes :: Map Name [Name]
     , tcCtors :: Map Name (Name, [(Variable, Type)])
+    , tcProgramReturn :: Maybe Type -- what the first return of the program itself (not of a function) returned
     }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
@@ -72,7 +73,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -383,7 +384,12 @@ checkStatement top ctx env stmt =
             t <- inferExpr ctx env expr
             case ctxReturn ctx of
                 Just rty -> expect "returned value" rty t
-                Nothing -> return ()
+                -- the program has no declared type: every return in it has the type of the first
+                Nothing -> do
+                    s <- getState
+                    case tcProgramReturn s of
+                        Nothing -> putState s{tcProgramReturn = Just t}
+                        Just first -> expect "returned value of the program" first t
             return (ctx, env, stmt)
         ValidationStatement vs -> do
             env' <- checkValidation ctx env vs
