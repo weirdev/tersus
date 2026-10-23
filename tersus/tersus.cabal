@@ -24,11 +24,14 @@ library
       Cli
       Ghost
       Linear
+      LlvmEmit
+      LlvmRuntime
       Mir
       MirEval
       MirLower
       MirValidate
       MirVerify
+      Native
       Parse
       Pipeline
       Pretty
@@ -49,7 +52,10 @@ library
   build-depends:
       base >=4.7 && <5
     , containers
+    , directory
+    , filepath
     , parsec
+    , process
   default-language: Haskell2010
 
 executable tersus-exe
@@ -64,7 +70,10 @@ executable tersus-exe
   build-depends:
       base >=4.7 && <5
     , containers
+    , directory
+    , filepath
     , parsec
+    , process
     , tersus
   default-language: Haskell2010
 
@@ -76,6 +85,7 @@ test-suite tersus-test
       TestControl
       TestData
       TestHarness
+      TestNative
       TestPipeline
       TestProofs
       TestValidation
@@ -88,6 +98,9 @@ test-suite tersus-test
   build-depends:
       base >=4.7 && <5
     , containers
+    , directory
+    , filepath
     , parsec
+    , process
     , tersus
   default-language: Haskell2010

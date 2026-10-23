@@ -35,9 +35,13 @@ From the `tersus/` directory:
 stack run -- check program.tersus   # parse and validate; prints OK
 stack run -- run program.tersus     # validate, then lower to the MIR, run that and print the return value
 stack run -- mir program.tersus     # validate, then print the MIR
+stack run -- llvm program.tersus    # validate, then print the LLVM IR
+stack run -- build program.tersus -o program   # validate, then compile to an executable with clang
 ```
 
 `run` never runs a program that fails validation. `mir` prints the program as the blocks the machine runs (see `MIR.md`). A program that does not `return` prints nothing. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
+
+`build` writes the IR and the C runtime beside the output, runs `clang -O2` on them, and removes them; it needs `clang` on the path. The executable prints the return value as `run` does and stops on an `Integer overflow` with the same message and exit status. Native code handles `Int` and `Bool` and the functions over them so far: a program that uses a list, a struct, an enum or a function value is refused with `Native code failed: Native code does not support <type> yet`. It does not check what validation proved (a divisor that is not 0, an index in range), so a program that validates cannot trip them, and a bug in the validator would be undefined behaviour here and an error in `run`.
 
 ## How Validation Works
 
