@@ -57,6 +57,7 @@ infixOp Plus = Just ("+", 1)
 infixOp Minus = Just ("-", 1)
 infixOp Times = Just ("*", 2)
 infixOp Div = Just ("/", 2)
+infixOp Mod = Just ("%", 2)
 infixOp (Rel r) = Just (relName r, 0)
 infixOp _ = Nothing
 
@@ -79,6 +80,7 @@ builtinName Plus = "+"
 builtinName Minus = "-"
 builtinName Times = "*"
 builtinName Div = "/"
+builtinName Mod = "%"
 builtinName (Rel r) = relName r
 builtinName (Ctor name _) = name
 builtinName (Field _ field) = "." ++ field

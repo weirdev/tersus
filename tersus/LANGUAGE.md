@@ -191,10 +191,10 @@ first(xs) + last(xs)
 
 The current infix operators are:
 
-- Arithmetic: `*`, `/`, `+`, `-`
+- Arithmetic: `*`, `/`, `%`, `+`, `-`
 - Relations: `=`, `!=`, `<`, `>`, `<=`, `>=`
 
-Infix operators bind in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations. Each level associates left, so `return = n + 1` reads as `return = (n + 1)` and `a + 1 < b * 2` as `(a + 1) < (b * 2)`. Use parentheses when the intended grouping is not clear.
+Infix operators bind in three levels, tightest first: `*`, `/` and `%`, then `+` and `-`, then the relations. Each level associates left, so `return = n + 1` reads as `return = (n + 1)` and `a + 1 < b * 2` as `(a + 1) < (b * 2)`. Use parentheses when the intended grouping is not clear.
 
 ## Builtins
 
@@ -207,6 +207,7 @@ The standard library seeds these builtin functions:
 - `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
 - `set(list, index, x)`: returns a new list with the element at `index` replaced by `x`. The index must satisfy `0 <= index < size(list)`, and the argument list is unchanged.
 - `+` and `-`: integer arithmetic.
+- `*`, `/` and `%`: integer arithmetic. `/` rounds down and `x % y` is what is left, `x = (x / y) * y + x % y`, so it has the sign of `y` (`-7 % 3` is `2`, `7 % -3` is `-2`). Like `/`, a divisor must be shown to be non-zero.
 - `=`, `!=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
 
 `first` and `last` have builtin input contracts requiring the list size to be greater than zero. The validator checks that with the arithmetic (see Arithmetic), so a call such as `first(l)` needs `size(l) > 0` to be known (from a literal list, a guard or an earlier `affirm`) and fails with `Could not prove: size(list) > 0` otherwise. They also export `return = get(list, 0)` and `return = get(list, size(list) - 1)`, so facts about the elements of a list (a `forall`, or `get(l, 0) = x`) reach `first(l)` and `last(l)`. Concrete evaluation still rejects empty lists and wrong argument types.
@@ -920,6 +921,7 @@ fn g(x: Int, y: Int) -> Int [{ affirm x >= 1; affirm 2 * x <= y; }] [{ affirm re
 ```
 
 - `t = a + b`, `t = a - b` and `t = c * a` (`c` a known integer, `a` anything) are equations between the terms, so `i + j <= n` and `j >= 0` give `i <= n`, and `i + j = n` with `i = m` gives `j = n - m`.
+- `t = a % c` for a known `c` is `a - c * (a / c)`: from `0` to `c - 1` for a positive `c`, from `c + 1` to `0` for a negative one. So `n % 4 < 4`, `(n + m) % 2 = 0` when both are odd, and `n % 8 = n` when `n` is from `0` to `7` follow. A divisor that is not a known number but is known to be positive (or negative), such as `size(l)` under `size(l) > 0`, still bounds the remainder, which makes `get(l, i % size(l))` safe for any `i`.
 - `t = a / c` for a known `c` other than `1` rounds down: for `c > 0`, `c * t <= a <= c * t + c - 1`, and for `c < 0`, `a <= c * t <= a - c - 1`. So `n / 2 >= 0` and `n / 2 < n` follow from `n > 0`, `(i + j) / 2` is between `i` and `j` when `i < j`, and `n / 2 * 2 <= n <= n / 2 * 2 + 1` (but not `n / 2 * 2 = n`).
 - Whole numbers: `2 * x <= 1` gives `x <= 0`, and `2 * x = 2 * y + 1` has no solution (the facts contradict each other, so everything after it is vacuously true).
 - A product of two unknowns, `x * y`, and a division by an unknown, stay opaque. The step gives up, proving nothing, on a system of more than 300 constraints after elimination, so a long chain of sums with a goal that does not follow is slower and then refused.

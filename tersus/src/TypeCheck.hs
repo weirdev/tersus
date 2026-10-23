@@ -278,6 +278,7 @@ builtinType funct =
         Minus -> arith
         Times -> arith
         Div -> arith
+        Mod -> arith
         Rel Eq -> list (\a -> TFn [a, a] TBool)
         Rel NotEq -> list (\a -> TFn [a, a] TBool)
         Rel _ -> return (TFn [TInt, TInt] TBool)

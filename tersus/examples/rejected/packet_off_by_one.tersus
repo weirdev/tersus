@@ -6,8 +6,8 @@ enum Parsed {
     BadChecksum,
 };
 
-// The sum of buf[lo..hi) modulo 256. Division by a constant rounds down, so total - 256 * (total / 256) is from 0
-// to 255, which the validator works out (see Linear arithmetic); the input contract is what makes every get safe.
+// The sum of buf[lo..hi) modulo 256. The remainder of a division by 256 is from 0 to 255 (see Linear arithmetic), and
+// the input contract is what makes every get safe.
 fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
     [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
     [{ affirm 0 <= return; affirm return < 256; }]
@@ -16,7 +16,7 @@ fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
     for i in lo..hi {
         total = total + get(buf, i);
     };
-    return total - 256 * (total / 256);
+    return total % 256;
 };
 
 fn slice(buf: List<Int>, lo: Int, hi: Int) -> List<Int>

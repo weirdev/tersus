@@ -150,6 +150,16 @@ builtinFunct Div =
         []
         (BuiltinFunct Div)
         []
+-- Modulo by zero is rejected the same way
+builtinFunct Mod =
+    VFunct
+        ["a", "b"]
+        [ Rewrite (CheckRel (relProof NotEq (ATerm "b") (CTerm (VInt 0))))
+        , ProofAssert (relProof NotEq (ATerm "b") (CTerm (VInt 0)))
+        ]
+        []
+        (BuiltinFunct Mod)
+        []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
 builtinFunct Within = VFunct ["a", "b"] [] [] (BuiltinFunct Within) []
 
@@ -166,6 +176,7 @@ stdLibCtx =
         , ("-", builtinFunct Minus)
         , ("*", builtinFunct Times)
         , ("/", builtinFunct Div)
+        , ("%", builtinFunct Mod)
         , ("=", builtinFunct (Rel Eq))
         , ("!=", builtinFunct (Rel NotEq))
         , ("<", builtinFunct (Rel Lt))
@@ -226,6 +237,9 @@ evalBuiltinFunct Times _ = Error "Times only valid for two ints"
 evalBuiltinFunct Div [VInt _, VInt 0] = Error "Division by zero"
 evalBuiltinFunct Div [VInt v1, VInt v2] = Ok $ VInt (v1 `div` v2)
 evalBuiltinFunct Div _ = Error "Div only valid for two ints"
+evalBuiltinFunct Mod [VInt _, VInt 0] = Error "Modulo by zero"
+evalBuiltinFunct Mod [VInt v1, VInt v2] = Ok $ VInt (v1 `mod` v2)
+evalBuiltinFunct Mod _ = Error "Mod only valid for two ints"
 evalBuiltinFunct (Rel Eq) [v1, v2] | comparable v1 v2 = Ok $ VBool (v1 == v2)
 evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two values of the same kind that are not functions"
 evalBuiltinFunct (Rel NotEq) [v1, v2] | comparable v1 v2 = Ok $ VBool (v1 /= v2)

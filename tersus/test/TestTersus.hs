@@ -1979,6 +1979,56 @@ testCallsAndReturnJoin =
               parseValidProgramHelper "fn f(a: List<Int>) -> Int [{ }] [{ affirm return >= -1; affirm return < size(a); }] { for i in 0..size(a) { if get(a, i) > 2 { return i; }; }; return -1; }; x = f([1, 3]);"
             ]
 
+-- x % c is the remainder of x / c, which rounds down: it has the sign of the divisor
+testModulo :: Test
+testModulo =
+    let given facts goal = "fn f(i: Int, j: Int, n: Int, m: Int) -> Int [{ " ++ facts ++ " }] [{ }] { affirm " ++ goal ++ "; return 0; };"
+        holds facts goal = parseValidProgramHelper (given facts goal)
+        fails facts goal = parseValidateFailProgramHelper (given facts goal) ("Could not prove: " ++ goal)
+     in testCaseSeq
+            "testModulo"
+            [ -- Evaluation: the remainder has the sign of the divisor, and x = (x / c) * c + x % c
+              parseEvalProgramHelper "return 7 % 3;" (Just (VInt 1))
+            , parseEvalProgramHelper "return -7 % 3;" (Just (VInt 2))
+            , parseEvalProgramHelper "return 7 % -3;" (Just (VInt (-2)))
+            , parseEvalProgramHelper "return -7 % -3;" (Just (VInt (-1)))
+            , parseEvalProgramHelper "return 2 + 7 % 4 * 3;" (Just (VInt 11))
+            , parseEvalProgramHelper "x = 17; return (x / 5) * 5 + x % 5;" (Just (VInt 17))
+            , parseEvalProgramFailHelper "x = 0; return 5 % x;" "Modulo by zero"
+            , -- By a known constant
+              holds "affirm n = n;" "n % 4 >= 0"
+            , holds "affirm n = n;" "n % 4 < 4"
+            , holds "affirm n = n;" "n % -4 <= 0"
+            , holds "affirm n = n;" "n % -4 > -4"
+            , fails "affirm n = n;" "n % 4 < 3"
+            , fails "affirm n = n;" "n % 4 > 0"
+            , holds "affirm n % 2 = 1;" "n != 0"
+            , holds "affirm n >= 0; affirm n < 4;" "n % 4 = n"
+            , holds "affirm n >= 0; affirm n < 4;" "n % 8 = n"
+            , fails "affirm n >= 0; affirm n < 9;" "n % 8 = n"
+            , holds "affirm n = m + 4;" "n % 4 = m % 4"
+            , fails "affirm n = m + 3;" "n % 4 = m % 4"
+            , holds "affirm n % 2 = 0; affirm m % 2 = 0;" "(n + m) % 2 = 0"
+            , holds "affirm n % 2 = 1; affirm m % 2 = 1;" "(n + m) % 2 = 0"
+            , fails "affirm n % 2 = 1; affirm m % 2 = 0;" "(n + m) % 2 = 0"
+            , holds "affirm n = n;" "n = n / 3 * 3 + n % 3"
+            , -- With the division of the same number
+              holds "affirm n >= 0;" "n / 4 * 4 <= n"
+            , holds "affirm n >= 0; affirm n % 4 = 0;" "n / 4 * 4 = n"
+            , -- By a variable that is known to be positive (or negative)
+              holds "affirm m > 0;" "n % m >= 0"
+            , holds "affirm m > 0;" "n % m < m"
+            , holds "affirm m < 0;" "n % m <= 0"
+            , holds "affirm m < 0;" "n % m > m"
+            , fails "affirm m >= 0;" "n % m < m"
+            , -- The divisor must be known to be non-zero, as for /
+              parseValidateFailProgramHelper "fn f(x: Int, y: Int) -> Int { return x % y; };" "Funct input validation failed"
+            , -- A ring index wraps around
+              parseValidProgramHelper "fn next(i: Int, n: Int) -> Int [{ affirm n > 0; affirm i >= 0; }] [{ affirm return >= 0; affirm return < n; }] { return (i + 1) % n; }; fn at(l: List<Int>, i: Int) -> Int [{ affirm size(l) > 0; affirm i >= 0; }] { return get(l, i % size(l)); }; x = at([5, 6, 7], next(2, 3));"
+            , parseValidProgramHelper "fn at(l: List<Int>, i: Int) -> Int [{ affirm size(l) > 0; }] { return get(l, i % size(l)); }; x = at([5, 6], -3);"
+            , parseValidateFailProgramHelper "fn at(l: List<Int>, i: Int) -> Int { return get(l, i % size(l)); }; x = 0;" "Funct input validation failed"
+            ]
+
 -- The join of an `if` also tries what the program is about to need (see joinBranches in Proof.hs)
 testIfJoin :: Test
 testIfJoin =
@@ -3001,6 +3051,7 @@ main = do
                 , testRefinedArithmetic
                 , testLinearArithmetic
                 , testIfJoin
+                , testModulo
                 , testCallsAndReturnJoin
                 , testForLoops
                 , testInferredInvariants
