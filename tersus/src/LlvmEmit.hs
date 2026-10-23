@@ -114,7 +114,7 @@ typeDescriptors program types =
     ["%tersus.type = type { i64, ptr }"]
         ++ [typeSymbol program ty ++ " = private constant %tersus.type " ++ body ty | ty <- types]
         ++ concat [dataDescriptor n | TNamed n <- types]
-        ++ [ "@\"str." ++ name ++ "\" = private constant [" ++ show (length name + 1) ++ " x i8] c\"" ++ name ++ "\\00\""
+        ++ [ global "str." name ++ " = private constant [" ++ show (byteLength name + 1) ++ " x i8] c\"" ++ escaped name ++ "\\00\""
            | name <- nub (concat [v : map fst fields | TNamed n <- types, (v, fields) <- variantsOf program n])
            ]
         ++ [""]
@@ -122,25 +122,53 @@ typeDescriptors program types =
     body TInt = "{ i64 0, ptr null }"
     body TBool = "{ i64 1, ptr null }"
     body (TList t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
-    body (TNamed n) = "{ i64 3, ptr @\"data." ++ n ++ "\" }"
+    body (TNamed n) = "{ i64 3, ptr " ++ global "data." n ++ " }"
     body (TFn _ _) = "{ i64 4, ptr null }"
     body _ = "{ i64 -1, ptr null }"
     dataDescriptor n =
         let variants = variantsOf program n
-         in [ "@\"data." ++ n ++ "\" = private constant { i64, ptr } { i64 " ++ show (length variants) ++ ", ptr @\"variants." ++ n ++ "\" }"
-            , "@\"variants." ++ n ++ "\" = private constant [" ++ show (length variants) ++ " x { ptr, i64, ptr }] ["
-                ++ intercalate ", " ["{ ptr, i64, ptr } { ptr @\"str." ++ v ++ "\", i64 " ++ show (length fields) ++ ", ptr " ++ (if null fields then "null" else "@\"fields." ++ v ++ "\"") ++ " }" | (v, fields) <- variants]
+         in [ global "data." n ++ " = private constant { i64, ptr } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ " }"
+            , global "variants." n ++ " = private constant [" ++ show (length variants) ++ " x { ptr, i64, ptr }] ["
+                ++ intercalate ", " ["{ ptr, i64, ptr } { ptr " ++ global "str." v ++ ", i64 " ++ show (length fields) ++ ", ptr " ++ (if null fields then "null" else global "fields." v) ++ " }" | (v, fields) <- variants]
                 ++ "]"
             ]
-                ++ [ "@\"fields." ++ v ++ "\" = private constant [" ++ show (length fields) ++ " x { ptr, ptr }] ["
-                        ++ intercalate ", " ["{ ptr, ptr } { ptr @\"str." ++ f ++ "\", ptr " ++ typeSymbol program t ++ " }" | (f, t) <- fields]
+                ++ [ global "fields." v ++ " = private constant [" ++ show (length fields) ++ " x { ptr, ptr }] ["
+                        ++ intercalate ", " ["{ ptr, ptr } { ptr " ++ global "str." f ++ ", ptr " ++ typeSymbol program t ++ " }" | (f, t) <- fields]
                         ++ "]"
                    | (v, fields) <- variants
                    , not (null fields)
                    ]
 
 typeSymbol :: Program -> Type -> String
-typeSymbol program ty = "@\"type." ++ renderType (canonical program ty) ++ "\""
+typeSymbol program ty = global "type." (renderType (canonical program ty))
+
+-- The name of a global: quoted, so that any name will do
+global :: String -> String -> String
+global prefix name = "@\"" ++ prefix ++ escaped name ++ "\""
+
+-- A name as LLVM writes it in quotes and in a string: its UTF-8 bytes, those that are printable ASCII as they are and the
+-- others (and `"` and `\`) as `\hh`. The program may name things with any letter, and the file is ASCII whatever the encoding.
+escaped :: String -> String
+escaped = concatMap byteText . concatMap utf8
+  where
+    byteText b
+        | b >= 32 && b < 127 && b /= 34 && b /= 92 = [toEnum b]
+        | otherwise = ['\\', hexDigit (b `div` 16), hexDigit (b `mod` 16)]
+    hexDigit d = "0123456789ABCDEF" !! d
+
+-- The number of bytes of a name
+byteLength :: String -> Int
+byteLength = length . concatMap utf8
+
+utf8 :: Char -> [Int]
+utf8 c
+    | n < 0x80 = [n]
+    | n < 0x800 = [0xC0 + n `div` 64, continuation n]
+    | n < 0x10000 = [0xE0 + n `div` 4096, continuation (n `div` 64), continuation n]
+    | otherwise = [0xF0 + n `div` 262144, continuation (n `div` 4096), continuation (n `div` 64), continuation n]
+  where
+    n = fromEnum c
+    continuation x = 0x80 + x `mod` 64
 
 -- The variants of a struct or an enum: a struct is one variant, named as it is
 variantsOf :: Program -> Name -> [(Name, [(Variable, Type)])]
@@ -643,8 +671,4 @@ blockNumber (BlockId n) = show n
 
 -- The symbol of a function of the program. Quoted, since a lifted function is named outer::inner.
 functionSymbol :: Name -> String
-functionSymbol name = "@\"fn." ++ concatMap escape name ++ "\""
-  where
-    escape '"' = "\\22"
-    escape '\\' = "\\5C"
-    escape c = [c]
+functionSymbol name = global "fn." name

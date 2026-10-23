@@ -3,6 +3,7 @@ module TestNative
     ) where
 
 import Control.Exception (IOException, try)
+import Data.Char (isAscii)
 import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..))
@@ -74,6 +75,13 @@ testNativeIr =
             withIr "struct P { x: Int }; p = P { x: 1 }; return p;" (\ir -> testAssertTrue ("call ptr @tersus_data_new(i64 0, i64 1)" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir))
         , TestCase "an enum value has the tag of its variant" . pure $
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("call ptr @tersus_data_new(i64 1, i64 1)" `isInfixOf` ir && "icmp eq i64" `isInfixOf` ir))
+        , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" . pure $
+            withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[3 x i8] c\"\\C3\\A9\\00\"" `isInfixOf` ir))
+        , TestCase "a letter of four bytes" . pure $
+            withIr "struct \x1D538 { \x1D539: Int }; return \x1D538 { \x1D539: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[5 x i8] c\"\\F0\\9D\\94\\B8\\00\"" `isInfixOf` ir))
+        , TestCase "a function with a non-ASCII name" . pure $
+            withIr "fn d\x00e9(n: Int) -> Int { return n + 1; }; return d\x00e9(1);" (\ir -> testAssertTrue (all isAscii ir && "@\"fn.d\\C3\\A9\"" `isInfixOf` ir))
+        , TestCase "a program with non-ASCII names builds" $ buildsOnly "struct P { \x00e9: Int }; enum \x00d1 { \x00c4 { \x00f6: Int }, \x00dc }; fn d\x00e9(n: Int) -> Int { return n + 1; }; return \x00d1::\x00c4 { \x00f6: d\x00e9(1) };"
         , TestCase "a function value is the address of the function" . pure $
             case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
                 Left e -> Just e
@@ -262,6 +270,23 @@ sameAsMir name source = do
   where
     expected (Ok output) = (ExitSuccess, if null output then "" else output ++ "\n", "")
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
+
+-- Builds the program, which tests the IR without running it
+buildsOnly :: String -> IO TestResult
+buildsOnly source = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else case llvmSource source of
+            Error e -> pure (Just e)
+            Ok ir -> do
+                tmp <- getTemporaryDirectory
+                let dir = tmp </> "tersus-native-test"
+                createDirectoryIfMissing True dir
+                built <- buildExecutable (dir </> "builds_only") ir
+                pure $ case built of
+                    Error e -> Just e
+                    Ok () -> Nothing
 
 -- The same for a program that is lowered without being validated
 sameAsUnvalidated :: String -> String -> IO TestResult
