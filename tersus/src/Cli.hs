@@ -15,18 +15,22 @@ import TersusTypes
 import Utils
 
 -- `Check` parses a program, lowers it to the MIR and validates that. `Run` also runs it, but only after it validates, and
--- `Mir` prints the MIR instead.
-data Command = Check | Run | Mir deriving (Show, Eq)
+-- `Mir` prints the MIR instead. `Llvm` prints the LLVM IR of the validated program, and `Build` compiles that to the
+-- executable at the path.
+data Command = Check | Run | Mir | Llvm | Build FilePath deriving (Show, Eq)
 
 usage :: String
 usage =
     unlines
-        [ "Usage: tersus <command> <file>"
+        [ "Usage: tersus <command> <file> [-o <output>]"
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
         , "  run <file>    Validate a program, then run it and print its return value"
         , "  mir <file>    Validate a program, then print its MIR"
+        , "  llvm <file>   Validate a program, then print its LLVM IR"
+        , "  build <file> -o <output>"
+        , "                Validate a program, then compile it to an executable with clang"
         , ""
         , "Use - as the file to read the program from standard input."
         ]
@@ -36,6 +40,8 @@ parseCommandLine :: [String] -> Maybe (Command, FilePath)
 parseCommandLine ["check", file] = Just (Check, file)
 parseCommandLine ["run", file] = Just (Run, file)
 parseCommandLine ["mir", file] = Just (Mir, file)
+parseCommandLine ["llvm", file] = Just (Llvm, file)
+parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
 parseCommandLine _ = Nothing
 
 -- Runs a command over program source. Ok holds the text to print on success, which is
@@ -48,6 +54,9 @@ runSource Run source =
             Error e -> Error ("Evaluation failed: " ++ e)
             Ok result -> Ok (maybe "" renderMirValue result)
 runSource Mir source = mapResult renderProgram (compileSource source)
+runSource Llvm source = llvmSource source
+-- (compiling the IR is left to the caller, since it runs clang)
+runSource (Build _) source = llvmSource source
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i

@@ -18,6 +18,7 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 - `stack run -- check <file>` parses the program, lowers it to the MIR and validates that, printing `OK` on success.
 - `stack run -- run <file>` validates the program, and only if that succeeds runs its MIR and prints its return value (nothing is printed when the program does not `return`).
 - `stack run -- mir <file>` validates the program, and only if that succeeds prints its MIR.
+- `stack run -- llvm <file>` validates the program, and only if that succeeds prints its LLVM IR (`LlvmEmit`); `stack run -- build <file> -o <output>` compiles that and the C runtime (`LlvmRuntime`) with clang (`Native`). Native code handles `Int` and `Bool` so far.
 - Use `-` as the file to read the program from standard input.
 - Errors go to standard error, prefixed with `Parse error:`, `Validation failed:`, `Lowering failed:` (a bug: a program that type checks always lowers) or `Evaluation failed:`. The exit code is 1 for a failed program and 2 for bad command-line usage.
 
@@ -71,12 +72,18 @@ Next steps, roughly in priority order:
     An output contract cannot say something that depends on which variant is returned, such as "if `parse` returns `Parsed::Message`, its payload fits in the buffer"; the property is true by construction today and cannot be stated to a caller
     The intended form is an implication in contracts, `affirm return is Parsed::Message => size((return as Parsed::Message).payload) <= size(buf);`, proved for each way out of the function and assumed by a caller once it knows the variant. A single implication to start with, not general `||` inside proofs
 17. LLVM
-    Validation walks the MIR (`MirValidate`), and the AST has no evaluator any more: the MIR executor runs programs, and the validator runs it for the result of a call with known arguments. Next the MIR is lowered to LLVM IR, which needs a memory model for lists (a copy on `push`, and what frees them), a layout for recursive enums, and a printer for the returned value. `Int` is 64 bits and arithmetic traps on overflow (see LANGUAGE.md, Integers)
+    Validation walks the MIR (`MirValidate`), and the AST has no evaluator any more: the MIR executor runs programs, and the validator runs it for the result of a call with known arguments. The MIR is lowered to LLVM IR (`LlvmEmit`, MIR.md, Native code) in steps, each checked against the executor by building and running programs:
+    1. Done: `Int` and `Bool`, control flow, calls and recursion, the overflow traps, and the printing of the result
+    2. Lists: a runtime of C (`LlvmRuntime`), list literals and operations (a copy on `push` and `set`, nothing freed yet), and printing
+    3. Structs, enums, constants as static data, structural equality, and function values
+    4. Memory: the last use of a local moves it, reference counts free values, and `push`/`set` update in place when a list is not shared
+    5. A flag for the stack depth of deep recursion, and the docs
 
 Running (from this (tersus/) directory):
     0. stack run -- run examples/basics.tersus
     1. stack run -- check <file>
     2. stack run -- mir <file>
+    3. stack run -- llvm <file>
 Tests:
     0. stack test (test/TestTersus.hs runs the groups of TestBasics, TestValidation, TestProofs, TestControl, TestData and TestPipeline, which share TestHarness)
 Examples:

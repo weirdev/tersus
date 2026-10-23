@@ -1,6 +1,6 @@
 # Tersus MIR (design)
 
-Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, `MirVerify.hs`, `MirValidate.hs`, `MirEval.hs`; `tersus run` validates and runs the MIR and `tersus mir` prints it). The later steps are listed under Phases so the data model is shaped for them.
+Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, `MirVerify.hs`, `MirValidate.hs`, `MirEval.hs`; `tersus run` validates and runs the MIR and `tersus mir` prints it) and the lowering to LLVM IR has begun (`LlvmEmit.hs`, `tersus llvm` and `tersus build`; see Native code). The later steps are listed under Phases so the data model is shaped for them.
 
 ```
 step 1:   source -> AST -> validation -> MIR -> execution of the MIR
@@ -172,7 +172,7 @@ fn main() -> Int {
 
 1. **This step**: the model, the renderer, lowering, the executor, the flow change, the tests and docs above.
 2. **Done**: validation moved onto the MIR (`MirValidate.hs`, `Ghost.hs`, `ProofState.hs`; see Validation), and the AST evaluator and the AST validator (`Proof.hs`) are gone.
-3. LLVM lowering: layouts for lists, structs and enums from `progTypes` and the local types; a bounded integer policy; memory management for values that are copied by `push`/`set`.
+3. **In progress**: LLVM lowering (`LlvmEmit.hs`, see Native code): step 1 (`Int`, `Bool`, control flow, calls) is done; lists, structs and enums, and memory management follow.
 
 ## Arithmetic and traps
 
@@ -181,9 +181,20 @@ fn main() -> Int {
 So an operation of the MIR either gives a value or traps. Two kinds of trap:
 
 - **Overflow** is always checked, in the executor and in native code, because nothing proves it cannot happen.
-- **A broken contract** (a divisor of 0, an index out of range, `first` of an empty list) cannot happen in a validated program. The executor still checks and reports it, so that a validator bug is a failure and not a wrong answer. Native code may omit these checks (they would be `unreachable` to LLVM), or keep them in a checked build.
+- **A broken contract** (a divisor of 0, an index out of range, `first` of an empty list) cannot happen in a validated program. The executor still checks and reports it, so that a validator bug is a failure and not a wrong answer. Native code omits these checks (they are `unreachable` to LLVM).
 
 `Unreachable` is the end of a function whose every path returned and is never executed. The validator rejects a function with a path that reaches it.
+
+## Native code
+
+`LlvmEmit.emitProgram` lowers a validated `Program` to LLVM IR as text; `tersus build` compiles it, with the C runtime of `LlvmRuntime` (embedded in the compiler and written beside the IR), with clang.
+
+- **Locals are stack slots.** Each local is an `alloca` in the entry block, and a statement loads its operands and stores its result, so the blocks need no phis; `-O2` runs `mem2reg`, which builds them. A block is a label `bbN`, `Goto` and `SwitchBool` are `br`, `Return` loads `_0` and returns it, and `Unreachable` is `unreachable`. `Ghost` statements and the `FunctionSpec` are dropped.
+- **Names.** A function of the program is `@"fn.<name>"` (internal, quoted, since a lifted function is named `outer::inner`), the statements of `main` are `@tersus_main`, and the C-level `main` calls that and prints the result by its type (`tersus_print_int`, `tersus_print_bool`; nothing for a program that does not return).
+- **Types.** `Int` is `i64` and `Bool` is `i1`. Lists, structs, enums and function values are refused for now (`Native code does not support List<Int> yet`). The plan for them: every list, struct and enum is a pointer to a heap object with a reference count in its header, `{ rc, len, cap, elems }` for a list and `{ rc, tag, fields }` for data, each element and field an 8-byte slot, so that one runtime function serves every element type; a variant's tag is its position in the declaration; constants are static objects that are never freed; a function value is a bare function pointer (functions capture nothing). Equality, printing and freeing are done by the runtime from a constant descriptor of the type. Memory is leaked at first and then managed by reference counting, with the last use of a local moving it and `push`/`set` updating in place when the count is 1.
+- **Arithmetic.** `Add`, `Sub` and `Mul` are `llvm.s{add,sub,mul}.with.overflow.i64` followed by a branch to the function's `overflow` block, which calls `tersus_overflow` (the message `Evaluation failed: Integer overflow` and exit status 1 of `tersus run`). `Div` rounds down, where `sdiv` truncates, so it subtracts 1 from the quotient when the remainder is not 0 and has the other sign than the divisor, and the one quotient that does not fit (the smallest `Int` divided by -1) goes to the overflow block. `Mod` takes the sign of the divisor, with `srem` by 1 in place of -1, which `srem` leaves undefined for the smallest `Int`, and the result 0 that follows.
+- **Contracts are not checked.** A divisor that is not 0, an index in range, a list that is not empty are what validation proved, and the operations assume them as `unreachable` would (`sdiv` by 0 is undefined in LLVM). A bug in the validator is undefined behaviour in native code, where `tersus run` reports it. Overflow is the one trap, since nothing proves it cannot happen.
+- **Tests.** `TestNative` builds programs and compares what the executable prints, and its exit status, with `tersus run` (the examples that use only supported types, divisions of every sign, loops, recursion, and each overflow); the builds pass without clang.
 
 ## Verification
 

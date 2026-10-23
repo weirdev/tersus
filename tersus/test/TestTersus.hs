@@ -10,6 +10,7 @@ import TestProofs
 import TestControl
 import TestData
 import TestPipeline
+import TestNative
 
 main :: IO ()
 main = do
@@ -64,6 +65,7 @@ main = do
                 , testFirstLast
                 , testFunctionCalls
                 , testValidationFuel
+                , testNative
                 ]
     putStrLn $
         "Summary: "

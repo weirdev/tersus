@@ -1,10 +1,12 @@
 module Pipeline
     ( parseSource
     , compileSource
+    , llvmSource
     , validateStatements
     , runStatements
     ) where
 
+import LlvmEmit (emitProgram)
 import qualified Mir as M
 import MirEval (MirValue, runProgram)
 import MirLower (lowerElaborated)
@@ -18,6 +20,7 @@ import Utils
 --
 --   source -> AST (parseSource) -> checked AST (elaborate: types checked, each `shrinks` resolved)
 --          -> MIR (lowerElaborated) -> validated MIR (validateProgram) -> executed (runProgram)
+--                                                                    or -> LLVM IR (emitProgram)
 --
 -- The program is type checked once, by `elaborate`; the lowering takes its result and the validator the MIR. Errors name
 -- the stage that refused the program, as the command line prints them.
@@ -35,6 +38,10 @@ compileSource source =
             stage "Lowering failed: " (lowerElaborated elaborated) `bindResult` \program ->
                 stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
                     Ok program
+
+-- The LLVM IR of a program that passes every check
+llvmSource :: String -> Result String String
+llvmSource source = compileSource source `bindResult` \program -> stage "Native code failed: " (emitProgram program)
 
 -- Checks and validates a program given as statements
 validateStatements :: [Statement] -> Result Validated String
