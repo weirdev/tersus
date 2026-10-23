@@ -33,10 +33,11 @@ From the `tersus/` directory:
 
 ```
 stack run -- check program.tersus   # parse and validate; prints OK
-stack run -- run program.tersus     # validate, then evaluate and print the return value
+stack run -- run program.tersus     # validate, then lower to the MIR, run that and print the return value
+stack run -- mir program.tersus     # validate, then print the MIR
 ```
 
-`run` never evaluates a program that fails validation. A program that does not `return` prints nothing. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
+`run` never runs a program that fails validation. `mir` prints the program as the blocks the machine runs (see `MIR.md`). A program that does not `return` prints nothing. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
 
 ## How Validation Works
 

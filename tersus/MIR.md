@@ -1,6 +1,6 @@
 # Tersus MIR (design)
 
-Status: proposed, nothing implemented. This is step 1 of the pipeline below; the later steps are listed under Phases so the data model is shaped for them.
+Status: step 1 is implemented (`Mir.hs`, `MirLower.hs`, `MirEval.hs`; `tersus run` runs the MIR and `tersus mir` prints it). The later steps are listed under Phases so the data model is shaped for them.
 
 ```
 today:    source -> AST -> validation -> concrete evaluation of the AST
@@ -65,7 +65,7 @@ data Rvalue
     | BinaryOp BinOp Operand Operand
     | ListOp ListOp [Operand]
     | MakeList [Operand]                    -- a list built from elements
-    | MakeData Name [Operand]               -- a struct or an enum variant (named Enum::Variant), fields in declaration order
+    | MakeData Name [(Variable, Operand)]   -- a struct or an enum variant (named Enum::Variant), fields in declaration order
     | ReadField Operand Name Variable       -- field of a value known to be that constructor (Field, Project and Cast fused)
     | IsVariant Operand Name
 
@@ -75,13 +75,12 @@ data ListOp = Length | First | Last | Get | Push | Set       -- First and Last n
 data Operand = Copy Local | Const Constant
 data Constant
     = CInt Integer | CBool Bool | CList [Constant] | CData Name [(Variable, Constant)]
-    | CFn Callee                            -- a function as a value
-data Callee = UserFn Name | BuiltinFn Builtin -- a builtin used as a value, such as `+` passed to a function
+    | CFn Name                              -- a function of the program as a value
 
 data Terminator
     = Goto BlockId
     | SwitchBool Operand BlockId BlockId    -- if true then else; the test of every `if` and `while`
-    | Call { callee :: Operand, args :: [Operand], dest :: Local, next :: BlockId }
+    | Call Operand [Operand] Local BlockId  -- callee, arguments, the local that gets the result, the block that follows
     | Return                                -- the value is in _0
     | Unreachable                           -- falling off the end of a function whose paths all returned
 ```
@@ -89,6 +88,7 @@ data Terminator
 Choices and why:
 
 - **Mutable locals, not SSA**, like Rust's MIR. A loop variable is one local assigned in the body; SSA and phi nodes can be built later for LLVM (`mem2reg` does it anyway).
+- **A builtin used as a value** (`+` passed where a `fn(Int, Int) -> Int` is wanted) is lifted to a small function of the program (`builtin::add`) whose body applies it, so a function value is always a `CFn` of a function in `progFunctions` and the executor has one kind of callee.
 - **Call is a terminator**, like Rust's `Call`: it ends a block, so a validator over the graph has a place to put the callee's contract. A builtin application is an `Rvalue`, which cannot fail except by a broken contract.
 - **Operands are locals or constants.** `a * b + get(l, i)` lowers to temporaries, so every statement does one thing and the later passes see no trees.
 - **Its own operator set**, not `BuiltinFunct`: `Within` is proof-only and `Cast` is the identity, and neither belongs in something that runs. `Ctor`, `Field`, `Project` and `Is` become `MakeData`, `ReadField` and `IsVariant`, which name the constructor (this is why locals are typed: a `Field Nothing f` in the AST says nothing about which struct, and a layout needs it).
@@ -147,13 +147,13 @@ fn main() -> Int {
 
 ## Executing it
 
-`MirEval.run :: Program -> Result (Maybe MirValue) String`. A frame is the function's locals (an `IntMap`) and a current block; the loop is: run the statements, then follow the terminator; `Call` evaluates the callee operand (`CFn (UserFn name)` looks the function up in `progFunctions`, `CFn (BuiltinFn b)` applies the builtin) and recurses in Haskell. `MirValue` is `VInt | VBool | VList | VData | VFn Callee`, so no value carries an AST. Run-time errors are the ones the AST evaluator has (`Division by zero`, `Get index out of range`, ...), which the validator is meant to make unreachable.
+`MirEval.runProgram :: Program -> Result (Maybe MirValue) String`. A frame is the function's locals (a `Map`) and a current block; the loop is: run the statements, then follow the terminator; `Call` evaluates the callee operand (a `CFn name` is looked up in `progFunctions`) and recurses in Haskell. `MirValue` is `MInt | MBool | MList | MData | MFn Name`, so no value carries an AST. Run-time errors are the ones the AST evaluator has (`Division by zero`, `Get index out of range`, ...), which the validator is meant to make unreachable.
 
 The AST evaluator (`Proof.evaluate`) stays: the validator uses it to learn the result of a call with known arguments (with its fuel budget), and it is the oracle the MIR executor is tested against.
 
 ## Changes to the flow
 
-- `Cli.runSource`: parse, `validate`, **lower, run the MIR** (was: evaluate the AST). A lowering error is an internal error and is reported as `Lowering failed: ...`.
+- `Cli.runSource`: parse, `validate`, **lower, run the MIR** (was: evaluate the AST). A lowering error is an internal error (a validated program always lowers) and is reported as `Lowering failed: ...`.
 - A new command `tersus mir <file>` prints the MIR of a validated program (like `rustc --emit=mir`). It is how a lowering is read and tested.
 - `tersus check` is unchanged.
 
@@ -162,13 +162,21 @@ The AST evaluator (`Proof.evaluate`) stays: the validator uses it to learn the r
 - **Differential**: every program in `examples/` and every test program that runs is executed by the AST evaluator and by lower-then-run, and the two return values must be equal (rendered the same).
 - **Structure**: lowering a loop makes a back edge to its header, an `if` meets at one join, an early `return` in a branch leaves no edge to the join, a nested `fn` becomes a top-level function, shadowing and block-local variables get separate locals, a function passed as a value is a `CFn`.
 - **Rendering**: `renderProgram` output for small programs (the one above, an `if`, a list/struct program), so a change to lowering shows as a diff.
-- **Well-formedness** (`Mir.check`, run on every lowering in the tests): every `BlockId` a terminator names exists, every `Local` used is declared, only `Return`/`Unreachable` end a path, every local's type is known (no `TVar`).
+- **Well-formedness** (`Mir.checkProgram`, which every lowering goes through and which fails the lowering): every `BlockId` a terminator names exists, every `Local` used is declared, only `Return`/`Unreachable` end a path, every local's type is known (no `TVar`).
 
 ## Phases
 
 1. **This step**: the model, the renderer, lowering, the executor, the flow change, the tests and docs above.
 2. Validation moves onto the MIR: the validator walks blocks instead of statement lists (the `if` join becomes a real join in the graph, the loop `LoopEnd` marker becomes the back edge to the header, nested-call contracts become the `Call` terminators). This is the large step and changes `Proof.hs`.
 3. LLVM lowering: layouts for lists, structs and enums from `progTypes` and the local types; a bounded integer policy; memory management for values that are copied by `push`/`set`.
+
+## Notes on the implementation
+
+- Lowering takes the types by replaying the checker over the program (`TypeCheck.TC`, exported for the purpose), so `x = []; x = push(x, 1)` gives `x` the type `List<Int>`. A type no use decided (a list that is only created) is `Int`.
+- A function defined at the top of the program is found by name from the functions after it and from itself (as the evaluator does through its global context); any other function is a name in its scope that stands for the lifted function.
+- Falling off the end of `main` is a `Return` (a program may end without a value); falling off the end of any other function is `Unreachable`, which fails with `Function did not return a value` as the evaluator does.
+- Blocks nothing jumps to are dropped and the rest are numbered in the order a walk from the entry reaches them, so the printed MIR reads from the top.
+- `Proof.evaluate` stays for the validator; `checkExample` in the tests runs every example on both and compares the results, and `testMirRun` does so for a set of small programs including the ones that fail.
 
 ## Open issues
 
