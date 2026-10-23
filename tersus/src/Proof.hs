@@ -713,9 +713,11 @@ inferInvariants entry havocked loopVars cond invariant body
     -- The terms of a variable that candidates are about, with the number they equal on entry if there is one
     -- (a variable that is not a known number or list can still have a size that is known: push(push([], a), b) has size 2)
     termsOf var (Just (VInt n)) _ = [(ATerm var, Just n)]
-    termsOf var (Just (VList items)) _ = [(sizeOf (ATerm var), Just (fromIntegral (length items)))]
+    termsOf var (Just (VList items)) _ = (sizeOf (ATerm var), Just (fromIntegral (length items))) : [(element var k, Just n) | (k, VInt n) <- take maxInferenceElements (zip [0 ..] items)]
     termsOf _ (Just _) _ = []
-    termsOf var Nothing size = [(ATerm var, Nothing), (sizeOf (ATerm var), size)]
+    termsOf var Nothing size = [(ATerm var, Nothing), (sizeOf (ATerm var), size)] ++ [(element var k, Nothing) | Just n <- [size], k <- [0 .. min n (fromIntegral maxInferenceElements) - 1]]
+    -- the first elements of a list, which a loop that only pushes (or sets elsewhere) leaves as they were
+    element var k = FApp (CTerm (builtinFunct Get)) [ATerm var, CTerm (VInt k)]
     loopValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- loopVars] context
     loopSizes = [case value of Just (VInt n) -> Just n; _ -> Nothing | value <- Engine.constantValues [sizeOf (ATerm (fromMaybe (Iota var) (vLookupVar entry var))) | var <- loopVars] context]
     loopTerms = take maxInferenceTerms (concat [termsOf var value size | (var, value, size) <- zip3 loopVars loopValues loopSizes])
@@ -743,7 +745,21 @@ inferInvariants entry havocked loopVars cond invariant body
         , (anchor, _) <- anchors
         ]
     converted = [(c, goal) | c <- comparisons ++ sums, Ok goal <- [varProofToIotaProof c entry]]
-    entailed = [c | ((c, _), True) <- zip converted (Engine.entailsDirect (map snd converted) context)]
+    entailedAt goals = [c | ((c, _), True) <- zip goals (Engine.entailsDirect (map snd goals) context)]
+    entailedBasic = entailedAt converted
+    -- a term that starts at a variable the loop does not assign, next to a term that starts at a number: i = lo, size(out) = 0
+    -- gives i = size(out) + lo, which holds as long as both grow by the same amount (slice of a buffer from lo)
+    differences =
+        [ relation Eq t (FApp (CTerm (builtinFunct Plus)) [t2, if k == 0 then anchor else FApp (CTerm (builtinFunct Plus)) [anchor, CTerm (VInt (negate k))]])
+        | FApp rel [t, anchor] <- entailedBasic
+        , rel == CTerm (builtinFunct (Rel Eq))
+        , t `elem` unknownTerms
+        , (t2, k) <- known
+        , t2 /= t
+        ]
+    unknownTerms = [term | (term, Nothing) <- loopTerms]
+    convertedDifferences = [(c, goal) | c <- differences, Ok goal <- [varProofToIotaProof c entry]]
+    entailed = entailedBasic ++ entailedAt convertedDifferences
     -- sums of terms that start at numbers, last so that they never push out the distances and comparisons
     knownSums =
         [ relation Eq (FApp (CTerm (builtinFunct Plus)) [t1, t2]) (CTerm (VInt (k1 + k2)))
@@ -794,13 +810,17 @@ maxDropRounds :: Int
 maxDropRounds = 12
 
 maxInferenceTerms :: Int
-maxInferenceTerms = 6
+maxInferenceTerms = 8
+
+-- The first elements of a list that are looked at
+maxInferenceElements :: Int
+maxInferenceElements = 3
 
 maxInferenceAnchors :: Int
 maxInferenceAnchors = 12
 
 maxInferenceCandidates :: Int
-maxInferenceCandidates = 24
+maxInferenceCandidates = 32
 
 -- A loop has to say how it ends. One that may not end is code that may not terminate, which a function
 -- has to be declared ~ to contain.

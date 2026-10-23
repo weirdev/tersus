@@ -24,7 +24,7 @@ fn slice(buf: List<Int>, lo: Int, hi: Int) -> List<Int>
     [{ affirm size(return) = hi - lo; }]
 {
     out = [];
-    for i in lo..hi [{ affirm size(out) = i - lo; }] {
+    for i in lo..hi {
         out = push(out, get(buf, i));
     };
     return out;
