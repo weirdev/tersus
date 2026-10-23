@@ -543,6 +543,7 @@ upcomingProofs (VState scope _ _ _ _) = go scope
     go (VScopeState _ _ (Continuations rest) parent) = concatMap proofsOf rest ++ maybe [] go parent
     proofsOf (ValidationStatement (ProofAssert proof)) = [proof]
     proofsOf (While _ invariant _ _) = assertedProofs invariant
+    proofsOf (LoopEnd invariant decrease) = assertedProofs (invariant ++ decrease)
     proofsOf _ = []
 
 -- The proofs that stating the statements asserts, with a variable they define replaced by its definition
