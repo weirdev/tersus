@@ -322,6 +322,13 @@ testCfgValidation =
           parseValidProgramHelper "i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; }] shrinks 2 - i { fn inc(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; i = inc(i); }; affirm i >= 2;"
         , -- A path that ends without a return, however it got there
           parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { if n > 0 { return 1; } else { if n < 0 { return 2; }; }; }; x = f(1);" "Return value not found"
+        , -- The variant starts at the test of the condition, which a call in the condition moves to a block of its own, or a constant
+          parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; i = 3; while id(i) > 0 [{ affirm i >= 0; }] shrinks i { i = i - 1; };"
+        , parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; i = 3; while id(i) > 0 [{ affirm i >= 0; }] shrinks i { i = i + 1; };" "Loop variant does not shrink"
+        , parseValidProgramHelper "i = 0; while true [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { if i = 3 { return i; }; i = i + 1; };"
+        , -- A variable of a proof that has the name of a program variable stands for it until the program assigns it again
+          parseValidProgramHelper "x = 0; define x = x; x = 1; affirm x = 1;"
+        , parseValidateFailProgramHelper "x = 0; define x = x; x = 1; affirm x = 0;" "Could not prove: x = 0"
         , -- A builtin used as a value keeps its contract
           parseValidProgramHelper "h = size; x = h([1, 2]); affirm x = 2;"
         , parseValidateFailProgramHelper "h = first; x = h([]);" "Funct input validation failed"
