@@ -2,8 +2,9 @@ module LlvmEmit
     ( emitProgram
     ) where
 
-import Data.List (intercalate)
+import Data.List (intercalate, nub)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (mapMaybe)
 
 import Mir
 import Pretty (renderType)
@@ -23,17 +24,20 @@ import Utils
 -- A program that ends without a `return` on some path (`if c { return 1; };`) returns nothing on that path, so the function
 -- of `main` returns the value with a flag that says whether `_0` was assigned, and only then is the value printed.
 --
--- Int is i64 and Bool is i1. A program that uses anything else is refused for now.
+-- Int is i64 and Bool is i1. A list is a pointer to `{ rc, len, cap, elements }` (24 bytes of header, then one 8-byte slot per
+-- element: an Int, a Bool as 0 or 1, or the pointer to a list), made by the runtime, which `push` and `set` copy. Nothing is
+-- freed yet. The runtime prints and compares values by a descriptor of their type, a constant global `@"type.<type>"`.
+-- A program that uses anything else is refused for now.
 
 emitProgram :: Program -> Result String String
 emitProgram program =
     flatResultMap (\(name, fn) -> emitFunction program False (functionSymbol name) fn) (Map.toList (progFunctions program))
         `bindResult` \functions ->
             emitFunction program True "@tersus_main" (progMain program) `bindResult` \mainFunction ->
-                entryPoint (progMain program) `bindResult` \entry ->
-                    Ok (unlines (concat (declarations : intersperseBlank (functions ++ [mainFunction, entry]))))
-  where
-    intersperseBlank = map (++ [""])
+                entryPoint (progMain program) `bindResult` \(entry, entryTypes) ->
+                    let bodies = map fst functions ++ [fst mainFunction, entry]
+                        types = closeTypes (concatMap snd functions ++ snd mainFunction ++ entryTypes)
+                     in Ok (unlines (concat (declarations : typeDescriptors types : map (++ [""]) bodies)))
 
 declarations :: [String]
 declarations =
@@ -41,97 +45,142 @@ declarations =
     , "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)"
     , "declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)"
     , "declare void @tersus_overflow() noreturn"
-    , "declare void @tersus_print_int(i64)"
-    , "declare void @tersus_print_bool(i32)"
+    , "declare void @tersus_print(ptr, i64)"
+    , "declare i32 @tersus_equal(ptr, i64, i64)"
+    , "declare ptr @tersus_list_new(i64)"
+    , "declare ptr @tersus_list_push(ptr, i64)"
+    , "declare ptr @tersus_list_set(ptr, i64, i64)"
     , ""
     ]
 
 -- The C-level main: runs the program and prints its return value, if it returned one
-entryPoint :: Function -> Result [String] String
+entryPoint :: Function -> Result ([String], [Type]) String
 entryPoint fn =
     case fnReturns fn of
-        Nothing -> Ok (wrap ["call void @tersus_main()", "ret i32 0"])
-        Just TInt -> Ok (wrap (withValue "i64" ["call void @tersus_print_int(i64 %v)"]))
-        Just TBool -> Ok (wrap (withValue "i1" ["%z = zext i1 %v to i32", "call void @tersus_print_bool(i32 %z)"]))
-        Just t -> Error (unsupportedType t)
+        Nothing -> Ok (wrap ["call void @tersus_main()", "ret i32 0"], [])
+        Just ty ->
+            llvmType ty `bindResult` \t ->
+                let result = resultStruct t
+                    (convert, word) = case ty of
+                        TInt -> ([], "%v")
+                        TBool -> (["%w = zext i1 %v to i64"], "%w")
+                        _ -> (["%w = ptrtoint ptr %v to i64"], "%w")
+                 in Ok
+                        ( wrap
+                            ( [ "%r = call " ++ result ++ " @tersus_main()"
+                              , "%ok = extractvalue " ++ result ++ " %r, 1"
+                              , "br i1 %ok, label %print, label %done"
+                              , "print:"
+                              , "%v = extractvalue " ++ result ++ " %r, 0"
+                              ]
+                                ++ convert
+                                ++ ["call void @tersus_print(ptr " ++ typeSymbol ty ++ ", i64 " ++ word ++ ")", "br label %done", "done:", "ret i32 0"]
+                            )
+                        , [ty]
+                        )
   where
     wrap body = ["define i32 @main() {"] ++ map indent body ++ ["}"]
     indent l = if last l == ':' then l else "    " ++ l
-    withValue t printIt =
-        [ "%r = call " ++ resultStruct t ++ " @tersus_main()"
-        , "%ok = extractvalue " ++ resultStruct t ++ " %r, 1"
-        , "br i1 %ok, label %print, label %done"
-        , "print:"
-        , "%v = extractvalue " ++ resultStruct t ++ " %r, 0"
-        ]
-            ++ printIt
-            ++ ["br label %done", "done:", "ret i32 0"]
 
 -- What the function of `main` returns when the program can return a value: the value, and whether it was assigned
 resultStruct :: String -> String
 resultStruct t = "{ " ++ t ++ ", i1 }"
 
--- Generating the code of one function: a counter for the names of temporaries and labels, and the lines so far (last first)
-newtype G a = G {runG :: Int -> [String] -> Result (a, Int, [String]) String}
+-- The types the runtime needs a descriptor of, and the types inside them
+closeTypes :: [Type] -> [Type]
+closeTypes = nub . concatMap parts
+  where
+    parts ty@(TList t) = ty : parts t
+    parts ty = [ty]
+
+-- A constant global for each type: its kind (0 Int, 1 Bool, 2 List) and the descriptor of the elements of a list
+typeDescriptors :: [Type] -> [String]
+typeDescriptors types =
+    ["%tersus.type = type { i64, ptr }"]
+        ++ [typeSymbol ty ++ " = private constant %tersus.type " ++ body ty | ty <- types]
+        ++ [""]
+  where
+    body TInt = "{ i64 0, ptr null }"
+    body TBool = "{ i64 1, ptr null }"
+    body (TList t) = "{ i64 2, ptr " ++ typeSymbol t ++ " }"
+    body _ = "{ i64 -1, ptr null }"
+
+typeSymbol :: Type -> String
+typeSymbol ty = "@\"type." ++ renderType ty ++ "\""
+
+-- Generating the code of one function: a counter for the names of temporaries and labels, the lines so far (last first),
+-- and the types whose descriptors the code refers to
+data S = S {sCount :: Int, sLines :: [String], sTypes :: [Type]}
+
+newtype G a = G {runG :: S -> Result (a, S) String}
 
 instance Functor G where
-    fmap f (G g) = G (\n ls -> mapResult (\(a, n', ls') -> (f a, n', ls')) (g n ls))
+    fmap f (G g) = G (\s -> mapResult (\(a, s') -> (f a, s')) (g s))
 
 instance Applicative G where
-    pure a = G (\n ls -> Ok (a, n, ls))
-    G f <*> G g = G (\n ls -> f n ls `bindResult` \(h, n', ls') -> mapResult (\(a, n'', ls'') -> (h a, n'', ls'')) (g n' ls'))
+    pure a = G (\s -> Ok (a, s))
+    G f <*> G g = G (\s -> f s `bindResult` \(h, s') -> mapResult (\(a, s'') -> (h a, s'')) (g s'))
 
 instance Monad G where
-    G g >>= f = G (\n ls -> g n ls `bindResult` \(a, n', ls') -> runG (f a) n' ls')
+    G g >>= f = G (\s -> g s `bindResult` \(a, s') -> runG (f a) s')
 
 failG :: String -> G a
-failG e = G (\_ _ -> Error e)
+failG e = G (\_ -> Error e)
 
 -- An instruction
 emit :: String -> G ()
-emit line = G (\n ls -> Ok ((), n, ("    " ++ line) : ls))
+emit line = G (\s -> Ok ((), s{sLines = ("    " ++ line) : sLines s}))
 
 -- The start of a block
 label :: String -> G ()
-label name = G (\n ls -> Ok ((), n, (name ++ ":") : ls))
+label name = G (\s -> Ok ((), s{sLines = (name ++ ":") : sLines s}))
 
 -- A name for a label that no other has
 freshLabel :: String -> G String
-freshLabel base = G (\n ls -> Ok (base ++ show n, n + 1, ls))
+freshLabel base = G (\s -> Ok (base ++ show (sCount s), s{sCount = sCount s + 1}))
 
 -- An instruction that gives a value, and the name of that value
 ins :: String -> String -> G String
-ins base text = G (\n ls -> let name = "%" ++ base ++ show n in Ok (name, n + 1, ("    " ++ name ++ " = " ++ text) : ls))
+ins base text = G (\s -> let name = "%" ++ base ++ show (sCount s) in Ok (name, s{sCount = sCount s + 1, sLines = ("    " ++ name ++ " = " ++ text) : sLines s}))
+
+-- The descriptor of a type, which the program will have
+descriptor :: Type -> G String
+descriptor ty = G (\s -> Ok (typeSymbol ty, s{sTypes = ty : sTypes s}))
 
 -- The function of `main` (the entry) also keeps whether the return slot was assigned
-emitFunction :: Program -> Bool -> String -> Function -> Result [String] String
+emitFunction :: Program -> Bool -> String -> Function -> Result ([String], [Type]) String
 emitFunction program entry symbol fn =
     inFunction (flatResultMap (localLlvmType fn) (fnParams fn)) `bindResult` \paramTypes ->
         inFunction (maybe (Ok "void") llvmType (fnReturns fn)) `bindResult` \valueType ->
-        let returnType = if entry && fnReturns fn /= Nothing then resultStruct valueType else valueType
-         in
-            inFunction (flatResultMap (\(l, d) -> mapResult ((,) l) (llvmType (localType d))) (Map.toList (fnLocals fn))) `bindResult` \localTypes ->
-                let params = intercalate ", " [t ++ " %p" ++ localNumber p | (p, t) <- zip (fnParams fn) paramTypes]
-                    header = "define internal " ++ returnType ++ " " ++ symbol ++ "(" ++ params ++ ") {"
-                    prologue =
-                        ["entry:"]
-                            ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes]
-                            ++ ["    store " ++ t ++ " %p" ++ localNumber p ++ ", ptr " ++ slot p | (p, t) <- zip (fnParams fn) paramTypes]
-                            ++ entryPrologue
-                            ++ ["    br label %bb" ++ blockNumber (BlockId 0)]
-                    entryPrologue =
-                        if entry && fnReturns fn /= Nothing
-                            then ["    %returned = alloca i1", "    store i1 false, ptr %returned", "    store " ++ valueType ++ " " ++ (if valueType == "i1" then "false" else "0") ++ ", ptr " ++ slot (Local 0)]
-                            else []
-                 in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) 0 [] of
-                        Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
-                        Ok (_, _, body) ->
-                            Ok ([header] ++ prologue ++ reverse body ++ overflowBlock ++ ["}"])
+            let returnType = if entry && fnReturns fn /= Nothing then resultStruct valueType else valueType
+             in inFunction (flatResultMap (\(l, d) -> mapResult ((,) l) (llvmType (localType d))) (Map.toList (fnLocals fn))) `bindResult` \localTypes ->
+                    let params = intercalate ", " [t ++ " %p." ++ localNumber p | (p, t) <- zip (fnParams fn) paramTypes]
+                        header = "define internal " ++ returnType ++ " " ++ symbol ++ "(" ++ params ++ ") {"
+                        prologue =
+                            ["entry:"]
+                                ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes]
+                                ++ ["    store " ++ t ++ " %p." ++ localNumber p ++ ", ptr " ++ slot p | (p, t) <- zip (fnParams fn) paramTypes]
+                                ++ entryPrologue
+                                ++ ["    br label %bb" ++ blockNumber (BlockId 0)]
+                        entryPrologue =
+                            if entry && fnReturns fn /= Nothing
+                                then ["    %returned = alloca i1", "    store i1 false, ptr %returned", "    store " ++ valueType ++ " " ++ zeroOf valueType ++ ", ptr " ++ slot (Local 0)]
+                                else []
+                     in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) (S 0 [] []) of
+                            Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
+                            Ok (_, s) ->
+                                Ok ([header] ++ prologue ++ reverse (sLines s) ++ overflowBlock ++ ["}"], sTypes s)
   where
     inFunction r = case r of
         Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
         Ok a -> Ok a
     overflowBlock = ["overflow:", "    call void @tersus_overflow()", "    unreachable"]
+
+-- The value a slot holds before anything is assigned to it
+zeroOf :: String -> String
+zeroOf "i1" = "false"
+zeroOf "ptr" = "null"
+zeroOf _ = "0"
 
 emitBlock :: Program -> Bool -> Function -> (BlockId, BasicBlock) -> G ()
 emitBlock program entry fn (b, BasicBlock stmts term) = do
@@ -142,19 +191,102 @@ emitBlock program entry fn (b, BasicBlock stmts term) = do
 emitStatement :: Bool -> Function -> Statement -> G ()
 emitStatement _ _ (Ghost _ _) = pure ()
 emitStatement entry fn (Assign dest rv) = do
-    result <- rvalue fn rv
+    destType <- localTypeG fn dest
+    result <- rvalue fn destType rv
     storeResult entry fn dest result
 
-rvalue :: Function -> Rvalue -> G String
-rvalue fn rv =
+-- The value of an rvalue, given the type of the local it is for (which says what a constant list holds)
+rvalue :: Function -> Type -> Rvalue -> G String
+rvalue fn destType rv =
     case rv of
-        Use o -> operandValue fn o
+        Use o -> operandAt fn destType o
         BinaryOp op a b -> do
-            ty <- operandType fn a
-            x <- operandValue fn a
-            y <- operandValue fn b
+            ty <- sharedType fn [a, b]
+            x <- operandAt fn ty a
+            y <- operandAt fn ty b
             binary op ty x y
+        MakeList os -> case destType of
+            TList t -> do
+                list <- newList (length os)
+                mapM_ (\(i, o) -> operandAt fn t o >>= storeElement t list (show i)) (zip [0 :: Int ..] os)
+                pure list
+            _ -> failG "A list literal must make a list"
+        ListOp op os -> listOperation fn destType op os
         _ -> failG ("Native code does not support " ++ renderRvalue rv ++ " yet")
+
+newList :: Int -> G String
+newList n = ins "l" ("call ptr @tersus_list_new(i64 " ++ show n ++ ")")
+
+-- A list operation, given the type of its result, which says what the list holds even when the operand is an empty constant.
+-- The contracts (an index in range, a list that is not empty) are assumed.
+listOperation :: Function -> Type -> ListOp -> [Operand] -> G String
+listOperation fn destType op os =
+    case (op, os) of
+        (Length, [l]) -> listArg l >>= \(_, list) -> lengthOf list
+        (First, [l]) -> listArg l >>= \(t, list) -> elementPtr list "0" >>= loadElement t
+        (Last, [l]) -> do
+            (t, list) <- listArg l
+            n <- lengthOf list
+            i <- ins "i" ("sub i64 " ++ n ++ ", 1")
+            elementPtr list i >>= loadElement t
+        (Get, [l, i]) -> do
+            (t, list) <- listArg l
+            index <- operandAt fn TInt i
+            elementPtr list index >>= loadElement t
+        (Push, [l, x]) -> do
+            (t, list) <- listArg l
+            word <- operandAt fn t x >>= toWord t
+            ins "l" ("call ptr @tersus_list_push(ptr " ++ list ++ ", i64 " ++ word ++ ")")
+        (Set, [l, i, x]) -> do
+            (t, list) <- listArg l
+            index <- operandAt fn TInt i
+            word <- operandAt fn t x >>= toWord t
+            ins "l" ("call ptr @tersus_list_set(ptr " ++ list ++ ", i64 " ++ index ++ ", i64 " ++ word ++ ")")
+        _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " yet")
+  where
+    listArg o = do
+        ty <- case op of
+            Push -> pure destType
+            Set -> pure destType
+            Length -> sharedType fn [o]
+            _ -> pure (TList destType)
+        case ty of
+            TList t -> operandAt fn ty o >>= \list -> pure (t, list)
+            _ -> failG "A list operation needs a list"
+    lengthOf list = do
+        p <- ins "p" ("getelementptr i8, ptr " ++ list ++ ", i64 8")
+        ins "n" ("load i64, ptr " ++ p)
+
+-- The address of an element: a list is 24 bytes of header (count, length, capacity) and then a slot of 8 bytes per element
+elementPtr :: String -> String -> G String
+elementPtr list index = do
+    elements <- ins "e" ("getelementptr i8, ptr " ++ list ++ ", i64 24")
+    ins "p" ("getelementptr i64, ptr " ++ elements ++ ", i64 " ++ index)
+
+storeElement :: Type -> String -> String -> String -> G ()
+storeElement t list index value = do
+    p <- elementPtr list index
+    case t of
+        TInt -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
+        TBool -> do
+            w <- ins "w" ("zext i1 " ++ value ++ " to i64")
+            emit ("store i64 " ++ w ++ ", ptr " ++ p)
+        _ -> emit ("store ptr " ++ value ++ ", ptr " ++ p)
+
+loadElement :: Type -> String -> G String
+loadElement t p =
+    case t of
+        TInt -> ins "v" ("load i64, ptr " ++ p)
+        TBool -> do
+            w <- ins "w" ("load i64, ptr " ++ p)
+            ins "b" ("icmp ne i64 " ++ w ++ ", 0")
+        _ -> ins "v" ("load ptr, ptr " ++ p)
+
+-- A value as the word the runtime takes: an Int as it is, a Bool as 0 or 1, a list as its address
+toWord :: Type -> String -> G String
+toWord TInt value = pure value
+toWord TBool value = ins "w" ("zext i1 " ++ value ++ " to i64")
+toWord _ value = ins "w" ("ptrtoint ptr " ++ value ++ " to i64")
 
 binary :: BinOp -> Type -> String -> String -> G String
 binary Add _ x y = checked "sadd" x y
@@ -181,6 +313,13 @@ binary Mod _ x y = do
     adjust <- roundsTheOtherWay r y
     shifted <- ins "r" ("add i64 " ++ r ++ ", " ++ y)
     ins "r" ("select i1 " ++ adjust ++ ", i64 " ++ shifted ++ ", i64 " ++ r)
+binary (Compare rel) ty@(TList _) x y = do
+    -- structural equality, which the runtime does by the descriptor of the type
+    d <- descriptor ty
+    a <- toWord ty x
+    b <- toWord ty y
+    r <- ins "e" ("call i32 @tersus_equal(ptr " ++ d ++ ", i64 " ++ a ++ ", i64 " ++ b ++ ")")
+    ins "c" ("icmp " ++ (if predicate rel == "ne" then "eq" else "ne") ++ " i32 " ++ r ++ ", 0")
 binary (Compare rel) ty x y = do
     t <- typeG ty
     ins "c" ("icmp " ++ predicate rel ++ " " ++ t ++ " " ++ x ++ ", " ++ y)
@@ -221,14 +360,15 @@ roundsTheOtherWay r divisor = do
 emitTerminator :: Program -> Bool -> Function -> Terminator -> G ()
 emitTerminator _ _ _ (Goto b) = emit ("br label %bb" ++ blockNumber b)
 emitTerminator _ _ fn (SwitchBool o yes no) = do
-    v <- operandValue fn o
+    v <- operandAt fn TBool o
     emit ("br i1 " ++ v ++ ", label %bb" ++ blockNumber yes ++ ", label %bb" ++ blockNumber no)
 emitTerminator program entry fn (Call (Const (CFn name)) args dest next) =
     case Map.lookup name (progFunctions program) of
         Nothing -> failG ("Call of a function that does not exist: " ++ name)
         Just callee -> do
-            values <- mapM (operandValue fn) args
-            paramTypes <- mapM (\p -> localTypeG callee p >>= typeG) (fnParams callee)
+            argTypes <- mapM (localTypeG callee) (fnParams callee)
+            values <- sequence (zipWith (operandAt fn) argTypes args)
+            paramTypes <- mapM typeG argTypes
             returnType <- maybe (failG ("Function without a result: " ++ name)) typeG (fnReturns callee)
             result <- ins "c" ("call " ++ returnType ++ " " ++ functionSymbol name ++ "(" ++ intercalate ", " (zipWith (\t v -> t ++ " " ++ v) paramTypes values) ++ ")")
             storeResult entry fn dest result
@@ -252,20 +392,43 @@ emitTerminator _ _ _ Unreachable = emit "unreachable"
 renderOperand' :: Operand -> String
 renderOperand' o = renderRvalue (Use o)
 
--- The text that stands for an operand: a constant, or the value loaded from the slot of the local
-operandValue :: Function -> Operand -> G String
-operandValue _ (Const (CInt i)) = pure (show i)
-operandValue _ (Const (CBool b)) = pure (if b then "true" else "false")
-operandValue _ (Const c) = failG ("Native code does not support the constant " ++ renderRvalue (Use (Const c)) ++ " yet")
-operandValue fn (Copy l) = do
+-- The text that stands for an operand where a value of the type is wanted: the value loaded from the slot of a local, a
+-- number or a Bool, or a list made from a constant (the type says what an empty one holds)
+operandAt :: Function -> Type -> Operand -> G String
+operandAt fn _ (Copy l) = do
     t <- localTypeG fn l >>= typeG
     ins "v" ("load " ++ t ++ ", ptr " ++ slot l)
+operandAt _ ty (Const c) = constantValue ty c
 
-operandType :: Function -> Operand -> G Type
-operandType _ (Const (CInt _)) = pure TInt
-operandType _ (Const (CBool _)) = pure TBool
-operandType _ (Const c) = failG ("Native code does not support the constant " ++ renderRvalue (Use (Const c)) ++ " yet")
-operandType fn (Copy l) = localTypeG fn l
+constantValue :: Type -> Constant -> G String
+constantValue _ (CInt i) = pure (show i)
+constantValue _ (CBool b) = pure (if b then "true" else "false")
+constantValue (TList t) (CList cs) = do
+    list <- newList (length cs)
+    mapM_ (\(i, c) -> constantValue t c >>= storeElement t list (show i)) (zip [0 :: Int ..] cs)
+    pure list
+constantValue _ c = failG ("Native code does not support the constant " ++ renderRvalue (Use (Const c)) ++ " yet")
+
+-- The type that the operands of an operation share, from whichever of them has one that shows: a list of a constant that
+-- is empty could hold anything, and Int will do when no operand says
+sharedType :: Function -> [Operand] -> G Type
+sharedType fn os =
+    case mapMaybe known os of
+        ty : _ -> pure ty
+        [] -> pure (TList TInt)
+  where
+    known (Copy l) = localType <$> Map.lookup l (fnLocals fn)
+    known (Const c) = constantType c
+
+constantType :: Constant -> Maybe Type
+constantType (CInt _) = Just TInt
+constantType (CBool _) = Just TBool
+constantType (CList cs) = TList <$> firstJust (map constantType cs)
+  where
+    firstJust xs = case mapMaybe id xs of
+        x : _ -> Just x
+        [] -> Nothing
+constantType _ = Nothing
 
 -- Stores the result of a statement; in the entry, the return slot being assigned is what makes the program return a value
 storeResult :: Bool -> Function -> Local -> String -> G ()
@@ -293,14 +456,15 @@ typeG ty = either failG pure (toEither (llvmType ty))
 llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TBool = Ok "i1"
+llvmType (TList t) = llvmType t `bindResult` \_ -> Ok "ptr"
 llvmType ty = Error (unsupportedType ty)
 
 unsupportedType :: Type -> String
 unsupportedType ty = "Native code does not support " ++ renderType ty ++ " yet"
 
--- The stack slot of a local
+-- The stack slot of a local, and the parameter that starts in it (a dot, which no temporary has)
 slot :: Local -> String
-slot l = "%l" ++ localNumber l
+slot l = "%l." ++ localNumber l
 
 localNumber :: Local -> String
 localNumber (Local n) = show n
