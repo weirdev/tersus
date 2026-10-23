@@ -11,8 +11,8 @@ module TestValidation
 
 import qualified Data.Map as Map
 import Parse
-import Proof
-import ProofHelpers
+import MirValidate (Validated (..))
+import Pipeline (validateStatements)
 import StdLib
 import TersusTypes
 import Utils
@@ -43,22 +43,22 @@ expectedProofCompare _ _ _ = False
 -- Validate with expected proofs
 validateWEMatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMatchHelper stmts expected =
-    case validate stmts of
-        Ok (VState (VScopeState varMap iproofs _ _) _ _ _ _) ->
-            testAllTrue (\vp -> expectedProofMatch vp iproofs varMap) expected
+    case validateStatements stmts of
+        Ok validated ->
+            testAllTrue (\vp -> expectedProofMatch vp (vdFacts validated) (vdVars validated)) expected
         -- Just $ show (varMap, iproofs)
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validateWEMismatchHelper :: [Statement] -> [VariableProof] -> TestResult
 validateWEMismatchHelper stmts expected =
-    case validate stmts of
-        Ok (VState (VScopeState varMap iproofs _ _) _ _ _ _) ->
-            testAssertTrue (not (all (\vp -> expectedProofMatch vp iproofs varMap) expected))
+    case validateStatements stmts of
+        Ok validated ->
+            testAssertTrue (not (all (\vp -> expectedProofMatch vp (vdFacts validated) (vdVars validated)) expected))
         Error e -> Just $ "Validation failed with error: " ++ e
 
 validationFailHelper :: [Statement] -> TestResult
 validationFailHelper stmts =
-    case validate stmts of
+    case validateStatements stmts of
         Ok _ -> Just "Validation passed when it should have failed"
         Error _ -> Nothing
 
@@ -223,10 +223,11 @@ parseValReturningStmtHelper stmtStr expVar expected =
      in case parseOutput of
             Left err -> Just $ "Parse failed: " ++ show err
             -- Just $ VScopeState (Data.Map.empty, [], emptyContinuations, Nothing)
-            Right (Block stmts) -> doTrace3 (show stmts) $
-                case valReturningBlock (initVStateWStatements stmts) of
-                    Ok (VState (VScopeState _ proofs _ _) _ _ _ _, Just iota) -> testIotaProofVarProofMatch iota proofs expVar expected
-                    Ok (_, Nothing) -> Just "No value returned"
+            Right (Block stmts) ->
+                case validateStatements stmts of
+                    Ok validated -> case vdReturn validated of
+                        Just iota -> testIotaProofVarProofMatch iota (vdFacts validated) expVar expected
+                        Nothing -> Just "No value returned"
                     Error e -> Just $ "Validation failed with error: " ++ e
             Right _ -> Just "Not a block statement"
 
@@ -259,19 +260,7 @@ testParseValWFunctDef =
         \  return add1;\
         \}"
         "ret"
-        [ FApp
-            eqVarProof
-            [ ATerm "ret"
-            , CTerm
-                ( VFunct
-                    ["i"]
-                    []
-                    []
-                    (nativeInts 1 [Return (F (Val (builtinFunct Plus)) [Var "i", Val (VInt 1)])])
-                    [FApp eqVarProof [ATerm "return", FApp (CTerm (builtinFunct Plus)) [ATerm "i", CTerm (VInt 1)]]]
-                )
-            ]
-        ]
+        [FApp eqVarProof [ATerm "ret", CTerm (VFnRef "add1")]]
 
 testParseValFunctWInputStatements :: TestResult
 testParseValFunctWInputStatements =
@@ -328,7 +317,7 @@ testParseValFunctReturnNestedBlocks =
     parseValReturningStmtHelper
         "{\
         \  x = [3, 6, 9, 12];\
-        \  fn getFirst(y: Int) -> Int [{\
+        \  fn getFirst(y: List<Int>) -> Int [{\
         \    define s = size(y);\
         \    rewrite eqToGtZero s;\
         \    affirm s > 0;\

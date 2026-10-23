@@ -289,8 +289,6 @@ lowerStatement stmt =
         Block stmts -> scoped (lowerStatements stmts)
         If cond thenStmts elseStmts -> lowerIf cond thenStmts elseStmts
         While cond invariant term body -> lowerWhile cond invariant term body
-        LoopEnd{} -> failL "LoopEnd is only used during validation"
-        EndBlock -> return ()
 
 -- A statement for the validator, with the names the program can use where it stands
 ghost :: M.GhostStatement -> L ()
@@ -540,6 +538,7 @@ constantOf (VBool b) = return (M.CBool b)
 constantOf (VList vs) = M.CList <$> mapM constantOf vs
 constantOf (VData name fields) = M.CData name <$> mapM (\(f, v) -> (,) f <$> constantOf v) fields
 constantOf VFunct{} = failL "A function is not a constant"
+constantOf (VFnRef name) = return (M.CFn name)
 
 -- A builtin used as a value, such as `+` passed to a function, is a function of the program that applies it
 builtinFunction :: BuiltinFunct -> L (M.Operand, Type)

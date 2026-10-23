@@ -14,8 +14,8 @@ import Pipeline
 import TersusTypes
 import Utils
 
--- `Check` parses and validates a program. `Run` also lowers it to the MIR and runs that, but only after it validates,
--- and `Mir` prints the MIR instead.
+-- `Check` parses a program, lowers it to the MIR and validates that. `Run` also runs it, but only after it validates, and
+-- `Mir` prints the MIR instead.
 data Command = Check | Run | Mir deriving (Show, Eq)
 
 usage :: String
@@ -25,7 +25,7 @@ usage =
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
-        , "  run <file>    Validate a program, then lower it to the MIR, run that and print its return value"
+        , "  run <file>    Validate a program, then run it and print its return value"
         , "  mir <file>    Validate a program, then print its MIR"
         , ""
         , "Use - as the file to read the program from standard input."
@@ -41,7 +41,7 @@ parseCommandLine _ = Nothing
 -- Runs a command over program source. Ok holds the text to print on success, which is
 -- empty when there is nothing to report; Error holds the message for a failure.
 runSource :: Command -> String -> Result String String
-runSource Check source = mapResult (const "OK") (checkSource source)
+runSource Check source = mapResult (const "OK") (compileSource source)
 runSource Run source =
     compileSource source `bindResult` \program ->
         case runProgram program of

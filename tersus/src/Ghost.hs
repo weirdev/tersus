@@ -5,11 +5,11 @@ module Ghost
     , defineAxiom
     , defineProofRule
     , exportOutputs
-    , exprTerm
     , applyCall
     , builtinInfo
+    , rvalueCall
+    , wrapperInfo
     , resolveFunction
-    , termValue
     , unreachable
     , noteDivergence
     , variantOf
@@ -20,16 +20,15 @@ module Ghost
     , variantFailure
     , prefixError
     , maxJoinCandidates
-    , reflect
     ) where
 
-import Control.Monad (foldM, unless, when)
+import Control.Monad (foldM, when)
 import Data.Containers.ListUtils (nubOrd)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (mapMaybe)
 
-import MirEval (MirValue (..), callWithFuel)
+import MirEval (callWithFuel, fromMirValue, toMirValue)
 import qualified ProofEngine as Engine
 import Pretty (renderVarProof)
 import ProofHelpers
@@ -39,6 +38,7 @@ import ProofHelpers
     , proofVars
     , valStmtDefinedVars
     )
+import qualified Mir as M
 import ProofState
 import StdLib
 import TersusTypes
@@ -121,13 +121,50 @@ resolveFunction st term =
     isFunction VFunct{} = True
     isFunction VFnRef{} = True
     isFunction _ = False
-    byName name = maybe (Error ("Undefined variable: " ++ name ++ " (a function must be defined before the functions that call it)")) Ok (Map.lookup name (psFns st))
+    byName name = maybe (Error ("Undefined variable: " ++ name ++ " (a function must be defined before the functions that call it)")) Ok (maybe (wrapperInfo st name) Just (Map.lookup name (psFns st)))
 
 builtinInfo :: BuiltinFunct -> FnInfo
 builtinInfo b =
     case builtinFunct b of
         VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b)
         _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b)
+
+-- The builtin function that an operation is
+rvalueCall :: M.Rvalue -> Maybe (BuiltinFunct, [M.Operand])
+rvalueCall rv =
+    case rv of
+        M.BinaryOp op a b -> Just (binary op, [a, b])
+        M.ListOp op os -> Just (list op, os)
+        M.MakeData name fields -> Just (Ctor name (map fst fields), map snd fields)
+        M.ReadField o _ field -> Just (Field Nothing field, [o])
+        M.IsVariant o name -> Just (Is name, [o])
+        M.AsVariant o name -> Just (Cast name, [o])
+        M.Use _ -> Nothing
+        M.MakeList _ -> Nothing
+  where
+    binary op = case op of
+        M.Add -> Plus
+        M.Sub -> Minus
+        M.Mul -> Times
+        M.Div -> Div
+        M.Mod -> Mod
+        M.Compare rel -> Rel rel
+    list op = case op of
+        M.Length -> Size
+        M.First -> First
+        M.Last -> Last
+        M.Get -> Get
+        M.Push -> Push
+        M.Set -> Set
+
+-- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
+wrapperInfo :: PState -> Name -> Maybe FnInfo
+wrapperInfo st name = do
+    fn <- Map.lookup name (M.progFunctions (psProgram st))
+    [M.BasicBlock [M.Assign (M.Local 0) rv] M.Return] <- Just (Map.elems (M.fnBlocks fn))
+    (builtin, _) <- rvalueCall rv
+    let info = builtinInfo builtin
+    return info{fnTerm = ATerm (fnIota name), fnKind = KUser name}
 
 -- Calling a function: the arguments have to meet its input contract and the call has to end, and the call then gives
 -- the facts the function promises about its result, and the result itself when everything is known.
@@ -218,28 +255,13 @@ concreteResult st info args = do
             Ok value -> Just value
             Error _ -> Nothing
         KUser name -> do
-            mirArgs <- mapM toMir values
+            mirArgs <- mapM toMirValue values
             case callWithFuel validationFuel (psProgram st) name mirArgs of
-                Ok value -> fromMir value
+                Ok value -> Just (fromMirValue value)
                 Error _ -> Nothing
 
 validationFuel :: Int
 validationFuel = 100000
-
-toMir :: Value -> Maybe MirValue
-toMir (VInt i) = Just (MInt i)
-toMir (VBool b) = Just (MBool b)
-toMir (VList vs) = MList <$> mapM toMir vs
-toMir (VData name fields) = MData name <$> mapM (\(f, v) -> (,) f <$> toMir v) fields
-toMir (VFnRef name) = Just (MFn name)
-toMir VFunct{} = Nothing
-
-fromMir :: MirValue -> Maybe Value
-fromMir (MInt i) = Just (VInt i)
-fromMir (MBool b) = Just (VBool b)
-fromMir (MList vs) = VList <$> mapM fromMir vs
-fromMir (MData name fields) = VData name <$> mapM (\(f, v) -> (,) f <$> fromMir v) fields
-fromMir (MFn name) = Just (VFnRef name)
 
 -- The variant of a loop or function is an integer that has to be at least 0 where it starts, and smaller
 -- each time round. Its value at the start is kept in a variable that has a name no program can write, and
@@ -287,10 +309,6 @@ prefixError prefix action = do
 
 maxJoinCandidates :: Int
 maxJoinCandidates = 40
-
--- Rewrite proofs using eq relation: proofs to change -> eq relations -> updated proofs
-reflect :: [IotaProof] -> [IotaProof] -> [IotaProof]
-reflect = Engine.reflectProofsByProofs
 
 -- Rewrites
 

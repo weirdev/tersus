@@ -3,6 +3,8 @@ module MirEval
     , runProgram
     , callWithFuel
     , renderMirValue
+    , toMirValue
+    , fromMirValue
     ) where
 
 import Data.List (intercalate)
@@ -10,7 +12,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
 import Mir
-import TersusTypes (Name, Rel (..), Variable)
+import TersusTypes (Name, Rel (..), Value (..), Variable)
 import Utils
 
 -- Runs the MIR: a function is its locals and the block it is in. The statements of the block run, then the
@@ -198,3 +200,20 @@ renderMirValue (MList l) = "[" ++ intercalate ", " (map renderMirValue l) ++ "]"
 renderMirValue (MData name []) = name
 renderMirValue (MData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderMirValue v | (f, v) <- fields] ++ " }"
 renderMirValue MFn{} = "<function>"
+
+-- The value of the AST that a value of the MIR is, and the other way: a function of the program is VFnRef, and no function
+-- written in the AST is a value of the MIR
+fromMirValue :: MirValue -> Value
+fromMirValue (MInt i) = VInt i
+fromMirValue (MBool b) = VBool b
+fromMirValue (MList vs) = VList (map fromMirValue vs)
+fromMirValue (MData name fields) = VData name [(f, fromMirValue v) | (f, v) <- fields]
+fromMirValue (MFn name) = VFnRef name
+
+toMirValue :: Value -> Maybe MirValue
+toMirValue (VInt i) = Just (MInt i)
+toMirValue (VBool b) = Just (MBool b)
+toMirValue (VList vs) = MList <$> mapM toMirValue vs
+toMirValue (VData name fields) = MData name <$> mapM (\(f, v) -> (,) f <$> toMirValue v) fields
+toMirValue (VFnRef name) = Just (MFn name)
+toMirValue VFunct{} = Nothing

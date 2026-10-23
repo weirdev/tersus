@@ -17,7 +17,7 @@ module TestProofs
 
 import Data.List (isInfixOf)
 import Parse
-import Proof
+import Pipeline (validateStatements)
 import qualified ProofEngine as Engine
 import StdLib
 import TersusTypes
@@ -599,7 +599,7 @@ testPrettyProofs =
         , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j in 0..size(l): get(l, j) = 0;" "Could not prove: forall j in 0..size(l): get(l, j) = 0"
         , parseValidateFailProgramHelper "l = [1, 2]; affirm forall j where j > 0: get(l, j) = 0;" "Could not prove: forall j where j > 0: get(l, j) = 0"
         , case parseStatementBlock "l = [1]; affirm 1 = 2;" of
-            Right stmts -> case validate stmts of
+            Right stmts -> case validateStatements stmts of
                 Error e | "FApp" `isInfixOf` e || "VFunct" `isInfixOf` e -> Just $ "Raw AST in error: " ++ e
                 _ -> Nothing
             Left err -> Just (show err)

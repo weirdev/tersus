@@ -4,6 +4,7 @@ module TestControl
     , testForLoops
     , testInferredInvariants
     , testTermination
+    , testCfgValidation
     ) where
 
 import Parse
@@ -48,7 +49,7 @@ testCallsAndReturnJoin =
               parseValidProgramHelper "fn f(a: List<Int>) -> Int [{ }] [{ affirm return >= -1; affirm return < size(a); }] { for i in 0..size(a) { if get(a, i) > 2 { return i; }; }; return -1; }; x = f([1, 3]);"
             ]
 
--- The join of an `if` also tries what the program is about to need (see joinBranches in Proof.hs)
+-- The join of an `if` also tries what the program is about to need (see mergeStates in MirValidate.hs)
 testIfJoin :: Test
 testIfJoin =
     let fn' body = "fn f(c: Int, y: Int) -> Int [{ affirm y > 0; }] [{ }] { " ++ body ++ " return 0; };"
@@ -290,3 +291,40 @@ testTermination =
             , -- Evaluation does not use any of it
               parseEvalProgramHelper "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" (Just (VInt 3))
             ]
+
+-- Validation walks the control-flow graph of the MIR: the paths that meet are joined, loops are regions, a return ends a path
+testCfgValidation :: Test
+testCfgValidation =
+    testCaseSeq
+        "testCfgValidation"
+        [ -- Three paths meet at one block
+          parseValidProgramHelper "fn f(c: Int) -> Int [{ }] [{ }] { x = 0; if c < 0 { x = 1; } else { if c = 0 { x = 2; } else { x = 3; }; }; affirm x > 0; affirm x < 4; return x; }; y = f(1);"
+        , parseValidateFailProgramHelper "fn f(c: Int) -> Int [{ }] [{ }] { x = 0; if c < 0 { x = 1; } else { if c = 0 { x = 2; } else { x = -3; }; }; affirm x > 0; return x; }; y = f(1);" "Could not prove: x > 0"
+        , -- A guard that returns leaves the rest of the function to the path that falls through
+          parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ affirm return > 0; }] { if n < 1 { return 1; }; affirm n >= 1; return n; }; y = f(1);"
+        , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ affirm return > 0; }] { if n < 1 { return n; }; return n; }; y = f(1);" "Could not prove: return > 0"
+        , -- A constant condition has one way on
+          parseValidProgramHelper "x = 0; if true { x = 1; } else { x = 2; }; affirm x = 1;"
+        , -- Code after a return cannot run, so it is not validated
+          parseValidProgramHelper "return 1; affirm 1 = 2;"
+        , parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; affirm n = n + 1; }; x = f(1);"
+        , -- A loop in a loop: what the outer invariant says survives the inner loop
+          parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { c = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { j = 0; while j < 2 [{ affirm j >= 0; affirm j <= 2; }] shrinks 2 - j { c = c + 1; j = j + 1; }; affirm i >= 0; i = i + 1; }; return c; }; x = f(3);"
+        , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { j = 0; while j < 2 [{ affirm j >= 0; affirm j <= 2; }] shrinks 2 - j { j = j + 1; i = i + 1; }; i = i + 1; }; return i; }; x = f(3);" "Loop invariant is not preserved"
+        , -- A return inside a nested loop leaves the function from there
+          parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] { for i in 0..n { for j in 0..n { if i + j > 3 { return i + j; }; }; }; return 0; }; x = f(3);"
+        , -- The result of a function that returns what it was given is that argument
+          parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; x = 3; y = id(x); affirm y = x; affirm y = 3;"
+        , parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ }] { return n; }; fn twice(n: Int) -> Int [{ }] [{ affirm return = n; }] { return id(id(n)); }; x = twice(2); affirm x = 2;"
+        , -- A function defined in a branch is local to it
+          parseValidProgramHelper "x = 0; if true { fn inc(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; x = inc(1); } else { x = 2; }; affirm x = 2;"
+        , -- A function defined in a loop is checked, and used there
+          parseValidProgramHelper "i = 0; while i < 2 [{ affirm i >= 0; affirm i <= 2; }] shrinks 2 - i { fn inc(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; i = inc(i); }; affirm i >= 2;"
+        , -- A path that ends without a return, however it got there
+          parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { if n > 0 { return 1; } else { if n < 0 { return 2; }; }; }; x = f(1);" "Return value not found"
+        , -- A builtin used as a value keeps its contract
+          parseValidProgramHelper "h = size; x = h([1, 2]); affirm x = 2;"
+        , parseValidateFailProgramHelper "h = first; x = h([]);" "Funct input validation failed"
+        , -- A function that is called is the one that was defined, even when a local has its name later
+          parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; fn g(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; h = f; { h = g; }; x = f(1); affirm x = 1;"
+        ]
