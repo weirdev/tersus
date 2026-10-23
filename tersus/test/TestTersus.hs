@@ -1965,6 +1965,12 @@ testCallsAndReturnJoin =
               parseValidProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; return r; }; x = g(1, 2);"
             , parseValidateFailProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { r = n; if c > 0 { r = r + 1; } else { r = r - 2; }; return r; }; x = g(1, 2);" "Could not prove: return > 0"
             , parseValidProgramHelper "fn g(n: Int, c: Int) -> Int [{ affirm n > 0; }] [{ affirm return > n; }] { r = n; if c > 0 { r = r + 1; } else { r = r + 2; }; if c > 5 { r = r + 1; }; return r; }; x = g(1, 2);"
+            , -- What a rewrite in the contract needs is tried too: the check of a relation, a rule's input contract
+              parseValidProgramHelper "fn f(c: Int) -> Int [{ }] [{ rewrite checkRel return > 0; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);"
+            , parseValidProgramHelper "fn f(c: Int) -> Int [{ }] [{ rewrite checkGtZero return; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);"
+            , parseValidProgramHelper "axiom posIsSmall(i) [{ affirm i > 0; }] [{ affirm i > -1; }]; fn f(c: Int) -> Int [{ }] [{ rewrite posIsSmall return; affirm return > -5; }] { if c > 0 { return 1; } else { return 2; }; }; x = f(1);"
+            , parseValidateFailProgramHelper "axiom posIsSmall(i) [{ affirm i > 0; }] [{ affirm i > -1; }]; fn f(c: Int) -> Int [{ }] [{ rewrite posIsSmall return; affirm return > -5; }] { if c > 0 { return 1; } else { return 0; }; }; x = f(1);" "Rewrite rule posIsSmall input validation failed: Could not prove: return > 0"
+            , parseValidProgramHelper "fn f(c: Int) -> Int [{ }] { x = 0; if c > 0 { x = 1; } else { x = 2; }; rewrite checkRel x > 0; return x; }; y = f(1);"
             , -- A loop that returns from inside, with the contract on both its returns
               parseValidProgramHelper "fn f(a: List<Int>) -> Int [{ }] [{ affirm return >= -1; affirm return < size(a); }] { for i in 0..size(a) { if get(a, i) > 2 { return i; }; }; return -1; }; x = f([1, 3]);"
             ]
