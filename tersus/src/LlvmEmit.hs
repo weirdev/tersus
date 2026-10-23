@@ -2,12 +2,13 @@ module LlvmEmit
     ( emitProgram
     ) where
 
-import Data.List (intercalate, nub)
+import Data.List (elemIndex, intercalate, nub)
 import qualified Data.Map.Strict as Map
+import Data.Maybe (listToMaybe)
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Name, Rel (..), Type (..))
+import TersusTypes (Name, Rel (..), Type (..), Variable)
 import Utils
 
 -- Lowers the MIR to LLVM IR as text (a .ll file), which clang compiles together with the runtime of LlvmRuntime.
@@ -24,19 +25,21 @@ import Utils
 -- of `main` returns the value with a flag that says whether `_0` was assigned, and only then is the value printed.
 --
 -- Int is i64 and Bool is i1. A list is a pointer to `{ rc, len, cap, elements }` (24 bytes of header, then one 8-byte slot per
--- element: an Int, a Bool as 0 or 1, or the pointer to a list), made by the runtime, which `push` and `set` copy. Nothing is
--- freed yet. The runtime prints and compares values by a descriptor of their type, a constant global `@"type.<type>"`.
--- A program that uses anything else is refused for now.
+-- element: an Int, a Bool as 0 or 1, or a pointer), made by the runtime, which `push` and `set` copy. A struct or an enum value
+-- is a pointer to `{ rc, tag, fields }` (16 bytes of header, then a slot per field of its variant; the tag is the position of
+-- the variant in the enum, and 0 for a struct), so that a type that contains itself needs no layout of its own. A function
+-- value is the address of the function. Nothing is freed yet. The runtime prints and compares values by a descriptor of
+-- their type, a constant global `@"type.<type>"`.
 
 emitProgram :: Program -> Result String String
 emitProgram program =
     flatResultMap (\(name, fn) -> emitFunction program False (functionSymbol name) fn) (Map.toList (progFunctions program))
         `bindResult` \functions ->
             emitFunction program True "@tersus_main" (progMain program) `bindResult` \mainFunction ->
-                entryPoint (progMain program) `bindResult` \(entry, entryTypes) ->
+                entryPoint program (progMain program) `bindResult` \(entry, entryTypes) ->
                     let bodies = map fst functions ++ [fst mainFunction, entry]
-                        types = closeTypes (concatMap snd functions ++ snd mainFunction ++ entryTypes)
-                     in Ok (unlines (concat (declarations : typeDescriptors types : map (++ [""]) bodies)))
+                        types = closeTypes program (concatMap snd functions ++ snd mainFunction ++ entryTypes)
+                     in Ok (unlines (concat (declarations : typeDescriptors program types : map (++ [""]) bodies)))
 
 declarations :: [String]
 declarations =
@@ -49,12 +52,13 @@ declarations =
     , "declare ptr @tersus_list_new(i64)"
     , "declare ptr @tersus_list_push(ptr, i64)"
     , "declare ptr @tersus_list_set(ptr, i64, i64)"
+    , "declare ptr @tersus_data_new(i64, i64)"
     , ""
     ]
 
 -- The C-level main: runs the program and prints its return value, if it returned one
-entryPoint :: Function -> Result ([String], [Type]) String
-entryPoint fn =
+entryPoint :: Program -> Function -> Result ([String], [Type]) String
+entryPoint program fn =
     case fnReturns fn of
         Nothing -> Ok (wrap ["call void @tersus_main()", "ret i32 0"], [])
         Just ty ->
@@ -73,7 +77,7 @@ entryPoint fn =
                               , "%v = extractvalue " ++ result ++ " %r, 0"
                               ]
                                 ++ convert
-                                ++ ["call void @tersus_print(ptr " ++ typeSymbol ty ++ ", i64 " ++ word ++ ")", "br label %done", "done:", "ret i32 0"]
+                                ++ ["call void @tersus_print(ptr " ++ typeSymbol program ty ++ ", i64 " ++ word ++ ")", "br label %done", "done:", "ret i32 0"]
                             )
                         , [ty]
                         )
@@ -85,31 +89,88 @@ entryPoint fn =
 resultStruct :: String -> String
 resultStruct t = "{ " ++ t ++ ", i1 }"
 
--- The types the runtime needs a descriptor of, and the types inside them
-closeTypes :: [Type] -> [Type]
-closeTypes = nub . concatMap parts
+-- The types the runtime needs a descriptor of, and the types inside them (a type that contains itself is there once)
+closeTypes :: Program -> [Type] -> [Type]
+closeTypes program = go [] . map (canonical program)
   where
-    parts ty@(TList t) = ty : parts t
-    parts ty = [ty]
+    go seen [] = reverse seen
+    go seen (ty : rest)
+        | ty `elem` seen = go seen rest
+        | otherwise = go (ty : seen) (parts ty ++ rest)
+    parts (TList t) = [canonical program t]
+    parts (TNamed n) = [canonical program t | (_, fields) <- variantsOf program n, (_, t) <- fields]
+    parts _ = []
 
--- A constant global for each type: its kind (0 Int, 1 Bool, 2 List) and the descriptor of the elements of a list
-typeDescriptors :: [Type] -> [String]
-typeDescriptors types =
+-- A value of a variant has the representation of its enum, so one descriptor serves both
+canonical :: Program -> Type -> Type
+canonical program (TVariant v) = maybe (TVariant v) TNamed (enumOf program v)
+canonical _ ty = ty
+
+-- A constant global for each type: its kind (0 Int, 1 Bool, 2 List, 3 struct or enum, 4 function) and what the runtime
+-- needs to walk a value: the descriptor of the elements of a list, or the variants of a struct or enum with the names and
+-- the descriptors of their fields
+typeDescriptors :: Program -> [Type] -> [String]
+typeDescriptors program types =
     ["%tersus.type = type { i64, ptr }"]
-        ++ [typeSymbol ty ++ " = private constant %tersus.type " ++ body ty | ty <- types]
+        ++ [typeSymbol program ty ++ " = private constant %tersus.type " ++ body ty | ty <- types]
+        ++ concat [dataDescriptor n | TNamed n <- types]
+        ++ [ "@\"str." ++ name ++ "\" = private constant [" ++ show (length name + 1) ++ " x i8] c\"" ++ name ++ "\\00\""
+           | name <- nub (concat [v : map fst fields | TNamed n <- types, (v, fields) <- variantsOf program n])
+           ]
         ++ [""]
   where
     body TInt = "{ i64 0, ptr null }"
     body TBool = "{ i64 1, ptr null }"
-    body (TList t) = "{ i64 2, ptr " ++ typeSymbol t ++ " }"
+    body (TList t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
+    body (TNamed n) = "{ i64 3, ptr @\"data." ++ n ++ "\" }"
+    body (TFn _ _) = "{ i64 4, ptr null }"
     body _ = "{ i64 -1, ptr null }"
+    dataDescriptor n =
+        let variants = variantsOf program n
+         in [ "@\"data." ++ n ++ "\" = private constant { i64, ptr } { i64 " ++ show (length variants) ++ ", ptr @\"variants." ++ n ++ "\" }"
+            , "@\"variants." ++ n ++ "\" = private constant [" ++ show (length variants) ++ " x { ptr, i64, ptr }] ["
+                ++ intercalate ", " ["{ ptr, i64, ptr } { ptr @\"str." ++ v ++ "\", i64 " ++ show (length fields) ++ ", ptr " ++ (if null fields then "null" else "@\"fields." ++ v ++ "\"") ++ " }" | (v, fields) <- variants]
+                ++ "]"
+            ]
+                ++ [ "@\"fields." ++ v ++ "\" = private constant [" ++ show (length fields) ++ " x { ptr, ptr }] ["
+                        ++ intercalate ", " ["{ ptr, ptr } { ptr @\"str." ++ f ++ "\", ptr " ++ typeSymbol program t ++ " }" | (f, t) <- fields]
+                        ++ "]"
+                   | (v, fields) <- variants
+                   , not (null fields)
+                   ]
 
-typeSymbol :: Type -> String
-typeSymbol ty = "@\"type." ++ renderType ty ++ "\""
+typeSymbol :: Program -> Type -> String
+typeSymbol program ty = "@\"type." ++ renderType (canonical program ty) ++ "\""
+
+-- The variants of a struct or an enum: a struct is one variant, named as it is
+variantsOf :: Program -> Name -> [(Name, [(Variable, Type)])]
+variantsOf program n =
+    case Map.lookup n (progTypes program) of
+        Just (StructDecl fields) -> [(n, fields)]
+        Just (EnumDecl variants) -> variants
+        Nothing -> []
+
+-- The tag and the fields of what builds a value: a struct, or a variant (Enum::Variant)
+constructor :: Program -> Name -> Maybe (Int, [(Variable, Type)])
+constructor program name =
+    case Map.lookup name (progTypes program) of
+        Just (StructDecl fields) -> Just (0, fields)
+        _ -> listToMaybe [(i, fields) | EnumDecl variants <- Map.elems (progTypes program), (i, (v, fields)) <- zip [0 ..] variants, v == name]
+
+-- The enum that has the variant
+enumOf :: Program -> Name -> Maybe Name
+enumOf program v = listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
+
+-- The type of a value that a struct or a variant builds
+constructedType :: Program -> Name -> Type
+constructedType program name =
+    case Map.lookup name (progTypes program) of
+        Just StructDecl{} -> TNamed name
+        _ -> TVariant name
 
 -- Generating the code of one function: a counter for the names of temporaries and labels, the lines so far (last first),
 -- and the types whose descriptors the code refers to
-data S = S {sCount :: Int, sLines :: [String], sTypes :: [Type]}
+data S = S {sCount :: Int, sLines :: [String], sTypes :: [Type], sProgram :: Program}
 
 newtype G a = G {runG :: S -> Result (a, S) String}
 
@@ -144,7 +205,10 @@ ins base text = G (\s -> let name = "%" ++ base ++ show (sCount s) in Ok (name, 
 
 -- The descriptor of a type, which the program will have
 descriptor :: Type -> G String
-descriptor ty = G (\s -> Ok (typeSymbol ty, s{sTypes = ty : sTypes s}))
+descriptor ty = G (\s -> Ok (typeSymbol (sProgram s) ty, s{sTypes = ty : sTypes s}))
+
+programG :: G Program
+programG = G (\s -> Ok (sProgram s, s))
 
 -- The function of `main` (the entry) also keeps whether the return slot was assigned
 emitFunction :: Program -> Bool -> String -> Function -> Result ([String], [Type]) String
@@ -165,7 +229,7 @@ emitFunction program entry symbol fn =
                             if entry && fnReturns fn /= Nothing
                                 then ["    %returned = alloca i1", "    store i1 false, ptr %returned", "    store " ++ valueType ++ " " ++ zeroOf valueType ++ ", ptr " ++ slot (Local 0)]
                                 else []
-                     in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) (S 0 [] []) of
+                     in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) (S 0 [] [] program) of
                             Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
                             Ok (_, s) ->
                                 Ok ([header] ++ prologue ++ reverse (sLines s) ++ overflowBlock ++ ["}"], sTypes s)
@@ -211,10 +275,50 @@ rvalue fn destType rv =
                 pure list
             _ -> failG "A list literal must make a list"
         ListOp op os -> listOperation fn destType op os
-        _ -> failG ("Native code does not support " ++ renderRvalue rv ++ " yet")
+        MakeData name fields -> do
+            program <- programG
+            (tag, declared) <- constructorG program name
+            object <- newData tag (length declared)
+            mapM_
+                ( \(i, (f, t)) -> case lookup f fields of
+                    Just o -> operandAt fn t o >>= storeSlot t object (dataHeader + 8 * i)
+                    Nothing -> failG ("A field is missing: " ++ name ++ "." ++ f)
+                )
+                (zip [0 ..] declared)
+            pure object
+        ReadField o name field -> do
+            program <- programG
+            (_, declared) <- constructorG program name
+            case elemIndex field (map fst declared) of
+                Nothing -> failG ("Variant " ++ name ++ " has no field " ++ field)
+                Just i -> do
+                    object <- operandAt fn (constructedType program name) o
+                    loadSlot (snd (declared !! i)) object (dataHeader + 8 * i)
+        IsVariant o name -> do
+            program <- programG
+            (tag, _) <- constructorG program name
+            object <- operandAt fn (constructedType program name) o
+            p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 8")
+            found <- ins "t" ("load i64, ptr " ++ p)
+            ins "c" ("icmp eq i64 " ++ found ++ ", " ++ show tag)
+        -- the same value; the validator proved the variant
+        AsVariant o name -> do
+            program <- programG
+            operandAt fn (constructedType program name) o
 
 newList :: Int -> G String
 newList n = ins "l" ("call ptr @tersus_list_new(i64 " ++ show n ++ ")")
+
+-- A struct or an enum value with room for its fields, which the caller fills in
+newData :: Int -> Int -> G String
+newData tag fields = ins "d" ("call ptr @tersus_data_new(i64 " ++ show tag ++ ", i64 " ++ show fields ++ ")")
+
+-- The bytes before the first field of a struct or an enum value: the count and the tag
+dataHeader :: Int
+dataHeader = 16
+
+constructorG :: Program -> Name -> G (Int, [(Variable, Type)])
+constructorG program name = maybe (failG ("Unknown struct or variant: " ++ name)) pure (constructor program name)
 
 -- A list operation, given the type of its result, which says what the list holds even when the operand is an empty constant.
 -- The contracts (an index in range, a list that is not empty) are assumed.
@@ -265,6 +369,25 @@ elementPtr list index = do
 storeElement :: Type -> String -> String -> String -> G ()
 storeElement t list index value = do
     p <- elementPtr list index
+    storeAt t p value
+
+loadElement :: Type -> String -> G String
+loadElement = loadAt
+
+-- A slot of a struct or an enum value, at a byte offset
+storeSlot :: Type -> String -> Int -> String -> G ()
+storeSlot t object offset value = do
+    p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show offset)
+    storeAt t p value
+
+loadSlot :: Type -> String -> Int -> G String
+loadSlot t object offset = do
+    p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show offset)
+    loadAt t p
+
+-- Every slot is 8 bytes: an Int, a Bool as 0 or 1, or a pointer
+storeAt :: Type -> String -> String -> G ()
+storeAt t p value =
     case t of
         TInt -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
         TBool -> do
@@ -272,14 +395,21 @@ storeElement t list index value = do
             emit ("store i64 " ++ w ++ ", ptr " ++ p)
         _ -> emit ("store ptr " ++ value ++ ", ptr " ++ p)
 
-loadElement :: Type -> String -> G String
-loadElement t p =
+loadAt :: Type -> String -> G String
+loadAt t p =
     case t of
         TInt -> ins "v" ("load i64, ptr " ++ p)
         TBool -> do
             w <- ins "w" ("load i64, ptr " ++ p)
             ins "b" ("icmp ne i64 " ++ w ++ ", 0")
         _ -> ins "v" ("load ptr, ptr " ++ p)
+
+-- Whether a value is the address of an object (what the runtime compares by the descriptor of its type)
+isPointer :: Type -> Bool
+isPointer TList{} = True
+isPointer TNamed{} = True
+isPointer TVariant{} = True
+isPointer _ = False
 
 -- A value as the word the runtime takes: an Int as it is, a Bool as 0 or 1, a list as its address
 toWord :: Type -> String -> G String
@@ -312,7 +442,7 @@ binary Mod _ x y = do
     adjust <- roundsTheOtherWay r y
     shifted <- ins "r" ("add i64 " ++ r ++ ", " ++ y)
     ins "r" ("select i1 " ++ adjust ++ ", i64 " ++ shifted ++ ", i64 " ++ r)
-binary (Compare rel) ty@(TList _) x y = do
+binary (Compare rel) ty x y | isPointer ty = do
     -- structural equality, which the runtime does by the descriptor of the type
     d <- descriptor ty
     a <- toWord ty x
@@ -366,13 +496,16 @@ emitTerminator program entry fn (Call (Const (CFn name)) args dest next) =
         Nothing -> failG ("Call of a function that does not exist: " ++ name)
         Just callee -> do
             argTypes <- mapM (localTypeG callee) (fnParams callee)
-            values <- sequence (zipWith (operandAt fn) argTypes args)
-            paramTypes <- mapM typeG argTypes
-            returnType <- maybe (failG ("Function without a result: " ++ name)) typeG (fnReturns callee)
-            result <- ins "c" ("call " ++ returnType ++ " " ++ functionSymbol name ++ "(" ++ intercalate ", " (zipWith (\t v -> t ++ " " ++ v) paramTypes values) ++ ")")
-            storeResult entry fn dest result
-            emit ("br label %bb" ++ blockNumber next)
-emitTerminator _ _ _ (Call callee _ _ _) = failG ("Native code does not support a call of " ++ renderOperand' callee ++ " yet")
+            returnType <- maybe (failG ("Function without a result: " ++ name)) pure (fnReturns callee)
+            call entry fn (functionSymbol name) argTypes returnType args dest next
+emitTerminator _ entry fn (Call callee args dest next) = do
+    -- a function value: the address of a function, with the types its type says
+    ty <- sharedType fn [callee]
+    case ty of
+        TFn argTypes returnType -> do
+            target <- operandAt fn ty callee
+            call entry fn target argTypes returnType args dest next
+        _ -> failG ("Call of something that is not a function: " ++ renderOperand' callee)
 emitTerminator _ entry fn Return =
     case fnReturns fn of
         Nothing -> emit "ret void"
@@ -387,6 +520,16 @@ emitTerminator _ entry fn Return =
                     emit ("ret " ++ resultStruct t ++ " " ++ both)
                 else emit ("ret " ++ t ++ " " ++ v)
 emitTerminator _ _ _ Unreachable = emit "unreachable"
+
+-- A call of a function, given its symbol or the address of it, the types of its parameters and of its result
+call :: Bool -> Function -> String -> [Type] -> Type -> [Operand] -> Local -> BlockId -> G ()
+call entry fn target argTypes returnType args dest next = do
+    values <- sequence (zipWith (operandAt fn) argTypes args)
+    paramTypes <- mapM typeG argTypes
+    result <- typeG returnType
+    r <- ins "c" ("call " ++ result ++ " " ++ target ++ "(" ++ intercalate ", " (zipWith (\t v -> t ++ " " ++ v) paramTypes values) ++ ")")
+    storeResult entry fn dest r
+    emit ("br label %bb" ++ blockNumber next)
 
 renderOperand' :: Operand -> String
 renderOperand' o = renderRvalue (Use o)
@@ -406,14 +549,28 @@ constantValue (TList t) (CList cs) = do
     list <- newList (length cs)
     mapM_ (\(i, c) -> constantValue t c >>= storeElement t list (show i)) (zip [0 :: Int ..] cs)
     pure list
-constantValue _ c = failG ("Native code does not support the constant " ++ renderRvalue (Use (Const c)) ++ " yet")
+constantValue _ (CData name fields) = do
+    program <- programG
+    (tag, declared) <- constructorG program name
+    object <- newData tag (length declared)
+    mapM_
+        ( \(i, (f, t)) -> case lookup f fields of
+            Just c -> constantValue t c >>= storeSlot t object (dataHeader + 8 * i)
+            Nothing -> failG ("A field is missing: " ++ name ++ "." ++ f)
+        )
+        (zip [0 ..] declared)
+    pure object
+-- a function is its address
+constantValue _ (CFn name) = pure (functionSymbol name)
+constantValue ty c = failG ("A constant of the wrong type: " ++ renderRvalue (Use (Const c)) ++ " is not a " ++ renderType ty)
 
 -- The type that the operands of an operation share. A local has a type; a constant has one only where it holds a number or a
 -- Bool, and the nesting of an empty list is all it says of its elements (`[[]]` is a list of lists), so the type of a local
 -- comes first, then that of a constant that shows its leaves, then the shape of one that does not, with Int for the leaf.
 sharedType :: Function -> [Operand] -> G Type
-sharedType fn os =
-    pure $ case [ty | Just ty <- map local os] ++ [constantShape c | Const c <- os, constantKnown c] ++ [constantShape c | Const c <- os] of
+sharedType fn os = do
+    program <- programG
+    pure $ case [ty | Just ty <- map local os] ++ [constantShape program c | Const c <- os, constantKnown c] ++ [constantShape program c | Const c <- os] of
         ty : _ -> ty
         [] -> TList TInt
   where
@@ -421,13 +578,18 @@ sharedType fn os =
     local (Const _) = Nothing
 
 -- The type of a constant, as far as its contents say: an empty list of lists is a List<List<Int>>
-constantShape :: Constant -> Type
-constantShape (CBool _) = TBool
-constantShape (CList cs) =
+constantShape :: Program -> Constant -> Type
+constantShape _ (CBool _) = TBool
+constantShape program (CList cs) =
     case [c | c <- cs, constantKnown c] ++ cs of
-        c : _ -> TList (constantShape c)
+        c : _ -> TList (constantShape program c)
         [] -> TList TInt
-constantShape _ = TInt
+constantShape program (CData name _) = constructedType program name
+constantShape program (CFn name) =
+    case Map.lookup name (progFunctions program) of
+        Just f -> TFn [maybe TInt localType (Map.lookup p (fnLocals f)) | p <- fnParams f] (maybe TInt id (fnReturns f))
+        Nothing -> TInt
+constantShape _ _ = TInt
 
 -- Whether the contents of a constant say what it is made of: a number or a Bool is, and a list is when one element is
 constantKnown :: Constant -> Bool
@@ -461,6 +623,9 @@ llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TBool = Ok "i1"
 llvmType (TList t) = llvmType t `bindResult` \_ -> Ok "ptr"
+llvmType TNamed{} = Ok "ptr"
+llvmType TVariant{} = Ok "ptr"
+llvmType TFn{} = Ok "ptr"
 llvmType ty = Error (unsupportedType ty)
 
 unsupportedType :: Type -> String

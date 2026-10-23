@@ -10,7 +10,12 @@ import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
 
 import Cli
+import qualified Mir as M
+import MirEval (renderMirValue, runProgram)
+import MirLower (lowerProgram)
+import LlvmEmit (emitProgram)
 import Native (buildExecutable)
+import Parse (parseStatementBlock)
 import Pipeline
 import TestHarness
 import Utils
@@ -27,20 +32,22 @@ testNative =
         , TestList "examples" [testNativeProgram path | path <- nativeExamples]
         , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
+        , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
+        , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestList "build" [testBuildKeepsFiles]
         , TestList "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
         ]
 
--- The examples whose every type native code supports so far (all but those with a struct or an enum)
+-- Every example that validates
 nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
         [ "arithmetic", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
-        , "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
-        , "loop_return", "loops", "parallel_sum", "proofs", "recursion", "rewrites", "rules", "safe_access", "types"
-        , "update_list"
+        , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
+        , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
+        , "safe_access", "structs", "termination", "types", "update_list"
         ]
     ]
 
@@ -63,8 +70,16 @@ testNativeIr =
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
         , TestCase "a list is a runtime list with a descriptor" . pure $
             withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("call ptr @tersus_list_push" `isInfixOf` ir && "@\"type.List<Int>\" = private constant" `isInfixOf` ir))
-        , TestCase "structs are not supported yet" . pure $
-            testAssertErrorContains "Native code does not support P yet" (llvmSource "struct P { x: Int }; p = P { x: 1 }; return p.x;")
+        , TestCase "a struct is a runtime object with a descriptor" . pure $
+            withIr "struct P { x: Int }; p = P { x: 1 }; return p;" (\ir -> testAssertTrue ("call ptr @tersus_data_new(i64 0, i64 1)" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir))
+        , TestCase "an enum value has the tag of its variant" . pure $
+            withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("call ptr @tersus_data_new(i64 1, i64 1)" `isInfixOf` ir && "icmp eq i64" `isInfixOf` ir))
+        , TestCase "a function value is the address of the function" . pure $
+            case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
+                Left e -> Just e
+                Right program -> case emitProgram program of
+                    Error e -> Just e
+                    Ok ir -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` ir && "call i64 %" `isInfixOf` ir)
         , TestCase "a program that does not validate is not lowered" . pure $
             testAssertErrorContains "Validation failed" (llvmSource "x = 5; affirm x < 4;")
         , TestCase "command line" . pure $
@@ -86,6 +101,55 @@ arithmeticPrograms =
   where
     divisionProgram :: Int -> Int -> String
     divisionProgram a b = "a = " ++ show a ++ "; b = " ++ show b ++ "; q = a / b; r = a % b; return q * 100 + r;"
+
+dataPrograms :: [(String, String)]
+dataPrograms =
+    [ ("struct", "struct P { x: Int, y: Bool }; return P { x: 1, y: true };")
+    , ("struct field", "struct P { x: Int, y: Bool }; p = P { x: 7, y: false }; return p.x;")
+    , ("struct with a list", "struct P { x: Int, y: List<Int> }; p = P { x: 1, y: [2, 3] }; return p;")
+    , ("struct update", "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; q = P { y: 5, ..p }; return q;")
+    , ("enum variants", "enum S { A { r: Int }, B { w: Int, h: List<Int> }, C }; return S::B { w: 2, h: [3] };")
+    , ("fieldless variant", "enum S { A { r: Int }, C }; return S::C;")
+    , ("variant tests", "enum S { A { r: Int }, C }; x = S::C; return x is S::C;")
+    , ("variant test that fails", "enum S { A { r: Int }, C }; x = S::C; return x is S::A;")
+    , ("field of a variant", "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;")
+    , ("match", "enum S { A { r: Int }, B { w: Int, h: Int }, C }; fn f(s: S) -> Int { return match s { S::A { r: r } => r, S::B { w: w, h: h } => w * h, S::C => 0 }; }; return f(S::B { w: 3, h: 4 }) + f(S::A { r: 5 }) + f(S::C);")
+    , ("data in a list", "enum S { A { r: Int }, C }; l = push([], S::A { r: 1 }); l = push(l, S::C); return l;")
+    , ("list in data in a list", "struct P { x: List<Int> }; l = push([], P { x: [1] }); l = push(l, P { x: [] }); return l;")
+    , ("recursive enum", "enum T { Leaf, Node { l: T, v: Int, r: T } }; return T::Node { l: T::Leaf, v: 1, r: T::Node { l: T::Leaf, v: 2, r: T::Leaf } };")
+    , ("recursive function", "enum T { Leaf, Node { l: T, v: Int, r: T } }; fn sum(t: T) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(T::Node { l: T::Node { l: T::Leaf, v: 3, r: T::Leaf }, v: 1, r: T::Node { l: T::Leaf, v: 2, r: T::Leaf } });")
+    , ("equal structs", "struct P { x: Int, y: List<Int> }; p = P { x: 1, y: [2, 3] }; q = P { y: [2, 3], x: 1 }; return p = q;")
+    , ("different structs", "struct P { x: Int, y: List<Int> }; p = P { x: 1, y: [2, 3] }; q = P { x: 1, y: [2] }; return p = q;")
+    , ("unequal structs", "struct P { x: Int }; return P { x: 1 } != P { x: 2 };")
+    , ("equal variants", "enum S { A { r: Int }, C }; a = S::A { r: 1 }; return a = S::A { r: 1 };")
+    , ("variants with other fields", "enum S { A { r: Int }, C }; a = S::A { r: 1 }; return a = S::A { r: 2 };")
+    , ("different variants", "enum S { A { r: Int }, C }; a = S::A { r: 1 }; return a = S::C;")
+    , ("fieldless variants", "enum S { A { r: Int }, C }; return S::C = S::C;")
+    , ("equal trees", "enum T { Leaf, Node { l: T, v: Int, r: T } }; a = T::Node { l: T::Leaf, v: 1, r: T::Leaf }; return a = T::Node { l: T::Leaf, v: 1, r: T::Leaf };")
+    , ("lists of structs equal", "struct P { x: Int }; l = push([], P { x: 1 }); return l = push([], P { x: 1 });")
+    , ("data parameter and result", "struct P { x: Int, y: Int }; fn swap(p: P) -> P { return P { x: p.y, y: p.x }; }; return swap(P { x: 1, y: 2 });")
+    , ("data built in a loop", "struct P { x: Int }; l = []; i = 0; while i < 50 [{ affirm i >= 0; }] shrinks 50 - i { l = push(l, P { x: i }); i = i + 1; }; return size(l);")
+    , ("a variant returned in a branch only", "enum S { A { r: Int }, C }; x = S::C; if x is S::A { return x; };")
+    ]
+
+-- Function values. The validator cannot yet follow a call of a function that is a value, so these are lowered without
+-- validation (as the MIR tests are) and compared with the executor of the MIR.
+functionPrograms :: [(String, String)]
+functionPrograms =
+    [ ("a function as a result", "fn inc(n: Int) -> Int { return n + 1; }; return inc;")
+    , ("call of a local", "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(5);")
+    , ("a parameter", "fn inc(n: Int) -> Int { return n + 1; }; fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; return apply(inc, 1);")
+    , ("a function that takes two", "fn add(a: Int, b: Int) -> Int { return a + b; }; fn fold(g: fn(Int, Int) -> Int) -> Int { return g(g(1, 2), 3); }; return fold(add);")
+    , ("a boolean result", "fn big(n: Int) -> Bool { return n > 10; }; f = big; return f(11);")
+    , ("a function that takes a list", "fn total(l: List<Int>) -> Int { return size(l); }; f = total; return f([1, 2, 3]);")
+    , ("in a list", "fn inc(n: Int) -> Int { return n + 1; }; fs = push([], inc); fs = push(fs, inc); f = get(fs, 1); return f(2);")
+    , ("a list of functions printed", "fn inc(n: Int) -> Int { return n + 1; }; return push([], inc);")
+    , ("in a struct", "struct B { f: fn(Int) -> Int }; fn inc(n: Int) -> Int { return n + 1; }; b = B { f: inc }; g = b.f; return g(41);")
+    , ("a builtin", "f = size; return f([1, 2, 3]);")
+    , ("a builtin on lists", "f = first; return f([7, 2, 3]);")
+    , ("chosen by a branch", "fn inc(n: Int) -> Int { return n + 1; }; fn dec(n: Int) -> Int { return n - 1; }; f = inc; if 2 > 1 { f = dec; }; return f(10);")
+    , ("a recursive function through a value", "fn count(n: Int) -> Int shrinks n { if n <= 0 { return 0; }; return 1 + count(n - 1); }; f = count; return f(5);")
+    ]
 
 listPrograms :: [(String, String)]
 listPrograms =
@@ -187,7 +251,7 @@ sameAsMir name source = do
                 Ok ir -> do
                     tmp <- getTemporaryDirectory
                     let dir = tmp </> "tersus-native-test"
-                        exe = dir </> map safe name
+                        exe = dir </> map safeChar name
                     createDirectoryIfMissing True dir
                     built <- buildExecutable exe ir
                     case built of
@@ -196,9 +260,43 @@ sameAsMir name source = do
                             (code, out, err) <- readProcessWithExitCode exe [] ""
                             pure (testAssertEq (code, out, err) (expected (runSource Run source)))
   where
-    safe c = if c `elem` ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] then c else '_'
     expected (Ok output) = (ExitSuccess, if null output then "" else output ++ "\n", "")
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
+
+-- The same for a program that is lowered without being validated
+sameAsUnvalidated :: String -> String -> IO TestResult
+sameAsUnvalidated name source = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else case lowerSource source of
+            Left e -> pure (Just e)
+            Right program -> case emitProgram program of
+                Error e -> pure (Just e)
+                Ok ir -> do
+                    tmp <- getTemporaryDirectory
+                    let dir = tmp </> "tersus-native-test"
+                        exe = dir </> ("unvalidated_" ++ map safeChar name)
+                    createDirectoryIfMissing True dir
+                    built <- buildExecutable exe ir
+                    case built of
+                        Error e -> pure (Just e)
+                        Ok () -> do
+                            (code, out, err) <- readProcessWithExitCode exe [] ""
+                            pure (testAssertEq (code, out, err) (expected (runProgram program)))
+  where
+    expected (Ok result) = (ExitSuccess, maybe "" ((++ "\n") . renderMirValue) result, "")
+    expected (Error e) = (ExitFailure 1, "", "Evaluation failed: " ++ e ++ "\n")
+
+lowerSource :: String -> Either String M.Program
+lowerSource source = case parseStatementBlock source of
+    Left err -> Left ("Parse failed: " ++ show err)
+    Right stmts -> case lowerProgram stmts of
+        Error e -> Left e
+        Ok program -> Right program
+
+safeChar :: Char -> Char
+safeChar c = if c `elem` ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] then c else '_'
 
 clangAvailable :: IO Bool
 clangAvailable = do
