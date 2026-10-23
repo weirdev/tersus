@@ -4,7 +4,6 @@ module LlvmEmit
 
 import Data.List (intercalate, nub)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (mapMaybe)
 
 import Mir
 import Pretty (renderType)
@@ -409,26 +408,31 @@ constantValue (TList t) (CList cs) = do
     pure list
 constantValue _ c = failG ("Native code does not support the constant " ++ renderRvalue (Use (Const c)) ++ " yet")
 
--- The type that the operands of an operation share, from whichever of them has one that shows: a list of a constant that
--- is empty could hold anything, and Int will do when no operand says
+-- The type that the operands of an operation share. A local has a type; a constant has one only where it holds a number or a
+-- Bool, and the nesting of an empty list is all it says of its elements (`[[]]` is a list of lists), so the type of a local
+-- comes first, then that of a constant that shows its leaves, then the shape of one that does not, with Int for the leaf.
 sharedType :: Function -> [Operand] -> G Type
 sharedType fn os =
-    case mapMaybe known os of
-        ty : _ -> pure ty
-        [] -> pure (TList TInt)
+    pure $ case [ty | Just ty <- map local os] ++ [constantShape c | Const c <- os, constantKnown c] ++ [constantShape c | Const c <- os] of
+        ty : _ -> ty
+        [] -> TList TInt
   where
-    known (Copy l) = localType <$> Map.lookup l (fnLocals fn)
-    known (Const c) = constantType c
+    local (Copy l) = localType <$> Map.lookup l (fnLocals fn)
+    local (Const _) = Nothing
 
-constantType :: Constant -> Maybe Type
-constantType (CInt _) = Just TInt
-constantType (CBool _) = Just TBool
-constantType (CList cs) = TList <$> firstJust (map constantType cs)
-  where
-    firstJust xs = case mapMaybe id xs of
-        x : _ -> Just x
-        [] -> Nothing
-constantType _ = Nothing
+-- The type of a constant, as far as its contents say: an empty list of lists is a List<List<Int>>
+constantShape :: Constant -> Type
+constantShape (CBool _) = TBool
+constantShape (CList cs) =
+    case [c | c <- cs, constantKnown c] ++ cs of
+        c : _ -> TList (constantShape c)
+        [] -> TList TInt
+constantShape _ = TInt
+
+-- Whether the contents of a constant say what it is made of: a number or a Bool is, and a list is when one element is
+constantKnown :: Constant -> Bool
+constantKnown (CList cs) = any constantKnown cs
+constantKnown _ = True
 
 -- Stores the result of a statement; in the entry, the return slot being assigned is what makes the program return a value
 storeResult :: Bool -> Function -> Local -> String -> G ()

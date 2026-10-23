@@ -114,6 +114,12 @@ listPrograms =
     , ("list function", "fn grow(l: List<Int>) -> List<Int> { return push(l, size(l)); }; return grow(grow([]));")
     , ("list parameter", "fn total(l: List<Int>) -> Int { s = 0; i = 0; while i < size(l) [{ affirm i >= 0; affirm i <= size(l); }] shrinks size(l) - i { s = s + get(l, i); i = i + 1; }; return s; }; return total([1, 2, 3, 4]);")
     , ("build in a loop", "l = []; i = 0; while i < 300 [{ affirm i >= 0; }] shrinks 300 - i { l = push(l, i * i); i = i + 1; }; return l;")
+    , ("nested empty lists are equal", "return [[]] = [[]];")
+    , ("size of a nested empty list", "return size([[]]);")
+    , ("a nested empty list against a local", "x = [[true]]; return [[]] = x;")
+    , ("a local against a nested empty list", "x = [[true]]; return x != [[]];")
+    , ("deeper empty lists", "return [[[]]] = [[[]]];")
+    , ("an empty list among others", "return [[], [1], []];")
     , ("a list that is not returned", "x = [1, 2];")
     , ("returned in a branch only", "x = [1]; if size(x) > 5 { return x; };")
     ]
