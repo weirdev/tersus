@@ -63,6 +63,13 @@ Next steps, roughly in priority order:
     Needs obligations that relate two states, which the contracts do not have yet: the start state of an iteration or call has to be nameable at its end. The saved variant (`variant at entry`, and the hidden variable of a loop) is the special case of that
     Then a lexicographic pair, a list that loses an element, and mutual recursion can be written by the program, instead of being refused or declared `~`
 
+15. `&&` and `||` in conditions
+    Today a condition is a single relation or boolean, so a guard with several parts is nested `if`s or sequential early returns (see `parse` in examples/packet_parser.tersus). The intended form is short-circuit sugar for nested `if`s, so the validator needs no new reasoning: the then-branch of `a && b` assumes both, the else-branch is the else of either, and `||` is the other way round
+    A boolean value that a proof can mention (a disjunction as a fact, split into cases) is a much larger change, and is not part of this
+16. Conditional contracts
+    An output contract cannot say something that depends on which variant is returned, such as "if `parse` returns `Parsed::Message`, its payload fits in the buffer"; the property is true by construction today and cannot be stated to a caller
+    The intended form is an implication in contracts, `affirm return is Parsed::Message => size((return as Parsed::Message).payload) <= size(buf);`, proved for each way out of the function and assumed by a caller once it knows the variant. A single implication to start with, not general `||` inside proofs
+
 Running (from this (tersus/) directory):
     0. stack run -- run examples/basics.tersus
     1. stack run -- check <file>
