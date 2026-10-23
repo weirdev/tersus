@@ -26,14 +26,14 @@ fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
     return total - 256 * (total / 256);
 };
 
-// buf[lo..hi) as a list of its own. The invariant is the size of the list so far: the loop starts at lo, so the
-// counter and the size differ by lo, which is not a constant, and so it is written.
+// buf[lo..hi) as a list of its own. The loop starts at lo, so the counter and the size of the list so far differ by lo,
+// and the validator infers that (size(out) = i - lo), which is what gives the size after the loop.
 fn slice(buf: List<Int>, lo: Int, hi: Int) -> List<Int>
     [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
     [{ affirm size(return) = hi - lo; }]
 {
     out = [];
-    for i in lo..hi [{ affirm size(out) = i - lo; }] {
+    for i in lo..hi {
         out = push(out, get(buf, i));
     };
     return out;
@@ -52,14 +52,15 @@ fn parse(buf: List<Int>) -> Parsed {
     return Parsed::Message { version: version, payload: slice(buf, 2, end) };
 };
 
-// The other direction: the buffer for a version and a payload, whose size and length field are proved. The loop's size
-// is inferred (out starts with two numbers); the first two numbers staying as they were has to be said.
+// The other direction: the buffer for a version and a payload, whose size and length field are proved. The loop's
+// invariants are inferred: out starts with two numbers and grows by one per element, and its first two numbers
+// stay as they were, so the length field is still there after the loop.
 fn encode(version: Int, payload: List<Int>) -> List<Int>
     [{ }]
     [{ affirm size(return) = size(payload) + 3; affirm get(return, 1) = size(payload); }]
 {
     out = push(push([], version), size(payload));
-    for x in payload [{ affirm get(out, 1) = size(payload); }] {
+    for x in payload {
         out = push(out, x);
     };
     sum = checksum(out, 0, size(out));

@@ -2186,6 +2186,13 @@ testInferredInvariants =
               parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(p) + 2; }] { out = push(push([], v), v); for x in p { out = push(out, x); }; return out; };"
             , parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(p) + 3; }] { out = push(push([], v), v); for x in p { out = push(out, x); }; return push(out, 0); };"
             , parseValidateFailProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(p) + 2; }] { out = push(push([], v), v); for x in p { out = push(push(out, x), x); }; return out; };" "Could not prove: size(return) = size(p) + 2"
+            , -- A loop that starts at a variable: the counter and the size differ by it
+              parseValidProgramHelper "fn f(buf: List<Int>, lo: Int, hi: Int) -> List<Int> [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }] [{ affirm size(return) = hi - lo; }] { out = []; for i in lo..hi { out = push(out, get(buf, i)); }; return out; };"
+            , parseValidateFailProgramHelper "fn f(buf: List<Int>, lo: Int, hi: Int) -> List<Int> [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }] [{ affirm size(return) = hi - lo; }] { out = []; for i in lo..hi { out = push(push(out, get(buf, i)), 0); }; return out; };" "Could not prove: size(return) = hi - lo"
+            , -- The first elements of a list stay as they were when the loop only pushes
+              parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 1) = size(p); }] { out = push(push([], v), size(p)); for x in p { out = push(out, x); }; return out; };"
+            , parseValidProgramHelper "fn f(p: List<Int>) -> List<Int> [{ }] [{ affirm get(return, 0) = 5; affirm get(return, 1) = 6; }] { out = [5, 6]; for x in p { out = push(out, x); }; return out; };"
+            , parseValidateFailProgramHelper "fn f(p: List<Int>) -> List<Int> [{ affirm size(p) > 0; }] [{ affirm get(return, 1) = 6; }] { out = [5, 6]; for i in 0..size(p) { out = set(out, 1, get(p, i)); }; return out; };" "Could not prove: get(return, 1) = 6"
             , -- A loop that returns infers its invariants too, one candidate at a time
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"
