@@ -1079,39 +1079,39 @@ linearSystem table classes trueId positive negative
     builtinOfClass = builtinsByClass table classes (const True)
     constTerms = [(Map.lookup (KConst constId) (tableKeys table), value) | (value, constId) <- tableConsts table]
     intOfClass = Map.fromList [(node termId, n) | (Just termId, VInt n) <- constTerms]
-    applications = [(node t, builtinOfClass `lookupBuiltin` functId, map node args) | (t, (functId, args)) <- tableApps table]
+    applications = [(t, node t, builtinOfClass `lookupBuiltin` functId, map node args) | (t, (functId, args)) <- tableApps table]
     lookupBuiltin m functId = Map.lookup (node functId) m
     known x = Map.lookup x intOfClass
-    needsLinear (_, Just Plus, [a, b]) = known a == Nothing && known b == Nothing
-    needsLinear (_, Just Minus, [_, b]) = known b == Nothing
-    needsLinear (_, Just Times, [a, b]) = any (maybe False (\n -> n /= 0 && n /= 1)) [known a, known b]
-    needsLinear (_, Just Div, [_, b]) = maybe False (/= 1) (known b)
-    needsLinear (_, Just Mod, [_, b]) = maybe True (/= 0) (known b)
+    needsLinear (_, _, Just Plus, [a, b]) = known a == Nothing && known b == Nothing
+    needsLinear (_, _, Just Minus, [_, b]) = known b == Nothing
+    needsLinear (_, _, Just Times, [a, b]) = any (maybe False (\n -> n /= 0 && n /= 1)) [known a, known b]
+    needsLinear (_, _, Just Div, [_, b]) = maybe False (/= 1) (known b)
+    needsLinear (_, _, Just Mod, [_, b]) = maybe True (/= 0) (known b)
     needsLinear _ = False
     form terms = IntMap.filter (/= 0) (IntMap.fromListWith (+) terms)
-    constraintsOf (t, Just Plus, [a, b]) = [Equal (form [(t, 1), (a, -1), (b, -1)]) 0]
-    constraintsOf (t, Just Minus, [a, b]) = [Equal (form [(t, 1), (a, -1), (b, 1)]) 0]
-    constraintsOf (t, Just Times, [a, b])
+    constraintsOf (_, t, Just Plus, [a, b]) = [Equal (form [(t, 1), (a, -1), (b, -1)]) 0]
+    constraintsOf (_, t, Just Minus, [a, b]) = [Equal (form [(t, 1), (a, -1), (b, 1)]) 0]
+    constraintsOf (_, t, Just Times, [a, b])
         | Just n <- known b = [Equal (form [(t, 1), (a, negate (fromInteger n))]) 0]
         | Just n <- known a = [Equal (form [(t, 1), (b, negate (fromInteger n))]) 0]
-    constraintsOf (t, Just Div, [a, b])
+    constraintsOf (_, t, Just Div, [a, b])
         | Just n <- known b, n > 0 = [AtMost (form [(t, fromInteger n), (a, -1)]) 0, AtMost (form [(a, 1), (t, negate (fromInteger n))]) (fromInteger (n - 1))]
         | Just n <- known b, n < 0 = [AtMost (form [(a, 1), (t, negate (fromInteger n))]) 0, AtMost (form [(t, fromInteger n), (a, -1)]) (fromInteger (negate n - 1))]
     -- a = c * q + t with the remainder t from 0 to c - 1 (from c + 1 to 0 for a negative c): q is a variable of its own,
-    -- numbered below zero from the term, and it is a / c when that is a term too
-    constraintsOf (t, Just Mod, [a, b])
+    -- numbered below zero from the application (not its class: two remainders that are equal still have quotients of their own), and it is a / c when that is a term too
+    constraintsOf (raw, t, Just Mod, [a, b])
         | Just n <- known b, n /= 0 =
-            let q = negate t - 1
+            let q = negate raw - 1
                 bounds
                     | n > 0 = [AtMost (form [(t, -1)]) 0, AtMost (form [(t, 1)]) (fromInteger (n - 1))]
                     | otherwise = [AtMost (form [(t, 1)]) 0, AtMost (form [(t, -1)]) (fromInteger (negate n - 1))]
              in Equal (form [(a, 1), (q, negate (fromInteger n)), (t, -1)]) 0 : bounds
     -- a divisor that is not a known number but is known to be positive (or negative) still bounds the remainder
-    constraintsOf (t, Just Mod, [_, b])
+    constraintsOf (_, t, Just Mod, [_, b])
         | known b == Nothing && positive b = [AtMost (form [(t, -1)]) 0, AtMost (form [(t, 1), (b, -1)]) (-1)]
         | known b == Nothing && negative b = [AtMost (form [(t, 1)]) 0, AtMost (form [(b, 1), (t, -1)]) (-1)]
-    constraintsOf (t, Just Size, [_]) = [AtMost (form [(t, -1)]) 0]
-    constraintsOf (t, Just (Rel rel), [l, r])
+    constraintsOf (_, t, Just Size, [_]) = [AtMost (form [(t, -1)]) 0]
+    constraintsOf (_, t, Just (Rel rel), [l, r])
         | t == node trueId = case rel of
             Lt -> [AtMost (form [(l, 1), (r, -1)]) (-1)]
             LtEq -> [AtMost (form [(l, 1), (r, -1)]) 0]

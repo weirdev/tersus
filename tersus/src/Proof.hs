@@ -713,19 +713,28 @@ inferInvariants entry havocked loopVars cond invariant body
     -- The terms of a variable that candidates are about, with the number they equal on entry if there is one
     -- (a variable that is not a known number or list can still have a size that is known: push(push([], a), b) has size 2)
     termsOf var (Just (VInt n)) _ = [(ATerm var, Just n)]
-    termsOf var (Just (VList items)) _ = (sizeOf (ATerm var), Just (fromIntegral (length items))) : [(element var k, Just n) | (k, VInt n) <- take maxInferenceElements (zip [0 ..] items)]
+    termsOf var (Just (VList items)) _ = [(sizeOf (ATerm var), Just (fromIntegral (length items)))]
     termsOf _ (Just _) _ = []
-    termsOf var Nothing size = [(ATerm var, Nothing), (sizeOf (ATerm var), size)] ++ [(element var k, Nothing) | Just n <- [size], k <- [0 .. min n (fromIntegral maxInferenceElements) - 1]]
+    termsOf var Nothing size = [(ATerm var, Nothing), (sizeOf (ATerm var), size)]
     -- the first elements of a list, which a loop that only pushes (or sets elsewhere) leaves as they were
+    elementsOf var (Just (VList items)) _ = [(element var k, Just n) | (k, VInt n) <- take maxInferenceElements (zip [0 ..] items)]
+    elementsOf var Nothing size = [(element var k, Nothing) | Just n <- [size], k <- [0 .. min n (fromIntegral maxInferenceElements) - 1]]
+    elementsOf _ _ _ = []
     element var k = FApp (CTerm (builtinFunct Get)) [ATerm var, CTerm (VInt k)]
     loopValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- loopVars] context
     loopSizes = [case value of Just (VInt n) -> Just n; _ -> Nothing | value <- Engine.constantValues [sizeOf (ATerm (fromMaybe (Iota var) (vLookupVar entry var))) | var <- loopVars] context]
-    loopTerms = take maxInferenceTerms (concat [termsOf var value size | (var, value, size) <- zip3 loopVars loopValues loopSizes])
+    loopEntries = zip3 loopVars loopValues loopSizes
+    -- (the numbers and sizes come first, so that the elements of the lists never push a counter out)
+    loopTerms = take maxInferenceTerms (concat [termsOf var value size | (var, value, size) <- loopEntries] ++ concat [elementsOf var value size | (var, value, size) <- loopEntries])
     -- Variables the loop does not assign, that are not known to be a number or a list, and that the program wrote
     anchorVars = take maxInferenceAnchors [var | var <- Map.keys (vVisibleVars entry), var `notElem` loopVars, ' ' `notElem` var, take 1 var /= "$"]
     anchorValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- anchorVars] context
     anchors = concat [termsOf var Nothing Nothing | (var, Nothing) <- zip anchorVars anchorValues]
-    known = [(term, k) | (term, Just k) <- loopTerms]
+    isElement (FApp (CTerm funct) [ATerm _, CTerm (VInt _)]) = funct == builtinFunct Get
+    isElement _ = False
+    known = [(term, k) | (term, Just k) <- loopTerms, not (isElement term)]
+    -- (an element that starts as a number is only bounded, and after the rest, since there can be many)
+    elementBounds = concat [[relation GtEq term (CTerm (VInt k)), relation LtEq term (CTerm (VInt k))] | (term, Just k) <- loopTerms, isElement term]
     constantCandidates =
         concat [[relation GtEq term (CTerm (VInt k)), relation LtEq term (CTerm (VInt k))] | (term, k) <- known]
             ++ [ relation Eq t1 (if k1 == k2 then t2 else FApp (CTerm (builtinFunct Plus)) [t2, CTerm (VInt (k1 - k2))])
@@ -767,7 +776,7 @@ inferInvariants entry havocked loopVars cond invariant body
         , (j, (t2, k2)) <- zip [0 ..] known
         , i < j
         ]
-    candidates = take maxInferenceCandidates (constantCandidates ++ entailed ++ knownSums)
+    candidates = take maxInferenceCandidates (constantCandidates ++ entailed ++ knownSums ++ elementBounds)
     houdini rounds survivors
         | null survivors || rounds <= 0 = []
         | otherwise = case iterationEnd survivors of
