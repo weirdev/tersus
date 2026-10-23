@@ -96,6 +96,7 @@ renderValue (VData name []) = name
 renderValue (VData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderValue v | (f, v) <- fields] ++ " }"
 renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VFunct args _ _ _ _) = "fn(" ++ intercalate ", " args ++ ")"
+renderValue (VFnRef name) = name
 
 -- Renders a type in Tersus syntax
 renderType :: Type -> String

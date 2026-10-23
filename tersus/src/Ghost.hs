@@ -1,0 +1,431 @@
+module Ghost
+    ( checkStatements
+    , runStatements
+    , assumeStatements
+    , defineAxiom
+    , defineProofRule
+    , exportOutputs
+    , exprTerm
+    , applyCall
+    , builtinInfo
+    , resolveFunction
+    , termValue
+    , unreachable
+    , noteDivergence
+    , variantOf
+    , entryVariantName
+    , boundedBelow
+    , variantStatements
+    , smallerThan
+    , variantFailure
+    , prefixError
+    , maxJoinCandidates
+    , reflect
+    ) where
+
+import Control.Monad (foldM, unless, when)
+import Data.Containers.ListUtils (nubOrd)
+import Data.Map (Map)
+import qualified Data.Map as Map
+import Data.Maybe (mapMaybe)
+
+import MirEval (MirValue (..), callWithFuel)
+import qualified ProofEngine as Engine
+import Pretty (renderVarProof)
+import ProofHelpers
+    ( iotaProofToVarProof
+    , namedIotaMap
+    , proofOnlyOfNamedIotasOrConst
+    , proofVars
+    , valStmtDefinedVars
+    )
+import ProofState
+import StdLib
+import TersusTypes
+import Utils
+
+-- Statements for the validator: affirm, define and rewrite, which the program writes, and the rules it defines
+
+-- Checks each statement in turn, in the state: an affirm has to be proved
+runStatements :: PState -> [ValidationStatement] -> V PState
+runStatements = foldM runStatement
+
+-- As runStatements, for a check whose result is only whether it passed
+checkStatements :: PState -> [ValidationStatement] -> V ()
+checkStatements st stmts = () <$ runStatements st stmts
+
+runStatement :: PState -> ValidationStatement -> V PState
+runStatement st (Rewrite rule) = rewrite st rule
+runStatement st (ProofAssert varProof) = do
+    proof <- liftR (toIotaProof st varProof)
+    if Engine.entails proof (proofContext st)
+        then return (addFacts st [proof])
+        else throwV ("Could not prove: " ++ renderVarProof varProof)
+runStatement st (AssignProofVar var expr) = assignProofVar st var expr
+
+-- Takes each statement as true: what a function or loop starts out with
+assumeStatements :: PState -> [ValidationStatement] -> V PState
+assumeStatements = foldM assumeStatement
+
+assumeStatement :: PState -> ValidationStatement -> V PState
+-- (a rewrite is only a way to prove something)
+assumeStatement st (Rewrite _) = return st
+assumeStatement st (ProofAssert varProof) = (\proof -> addFacts st [proof]) <$> liftR (toIotaProof st varProof)
+assumeStatement st (AssignProofVar var expr) = assignProofVar st var expr
+
+-- A variable of a proof stands for the value of an expression
+assignProofVar :: PState -> Variable -> Expression -> V PState
+assignProofVar st var expr = do
+    (st', term) <- exprTerm st expr
+    case term of
+        ATerm iota -> return st'{psVars = Map.insert var iota (psVars st')}
+        _ -> do
+            iota <- fresh
+            let defined = addFacts st' [FApp eqProof [ATerm iota, term], FApp eqProof [term, ATerm iota]]
+            return defined{psVars = Map.insert var iota (psVars defined)}
+
+-- The term for the value of an expression, with the facts its calls give. A call has its own result iota and has to meet
+-- the contract of the function it calls.
+exprTerm :: PState -> Expression -> V (PState, IotaProof)
+exprTerm st (Val val@(VFunct _ _ _ BuiltinFunct{} _)) = return (st, CTerm val)
+exprTerm _ (Val VFunct{}) = throwV "A function is defined by a statement, not written in an expression"
+exprTerm st (Val val) = return (st, CTerm val)
+exprTerm st (Var var) =
+    case lookupName st var of
+        Just term -> return (st, term)
+        Nothing -> throwV ("Undefined variable: " ++ var ++ " (a function must be defined before the functions that call it)")
+exprTerm st (F funct args) = do
+    (st1, functTerm) <- exprTerm st funct
+    (st2, argTerms) <- foldM (\(s, ts) a -> (\(s', t) -> (s', ts ++ [t])) <$> exprTerm s a) (st1, []) args
+    info <- liftR (resolveFunction st2 functTerm)
+    result <- fresh
+    st3 <- applyCall st2 info argTerms result
+    return (st3, ATerm result)
+
+-- The function that a term stands for
+resolveFunction :: PState -> IotaProof -> Result FnInfo String
+resolveFunction st term =
+    case term of
+        CTerm (VFunct _ _ _ (BuiltinFunct b) _) -> Ok (builtinInfo b)
+        CTerm (VFnRef name) -> byName name
+        CTerm _ -> Error "Non-function value called"
+        ATerm iota -> case functionFact iota of
+            Just value -> resolveFunction st (CTerm value)
+            Nothing -> Error ("Function object not validated. Function iota: " ++ show term)
+        _ -> Error "Object being called must be a function"
+  where
+    functionFact iota =
+        case [value | FApp eq [ATerm lhs, CTerm value] <- allFacts st, eq == eqProof, lhs == iota, isFunction value] of
+            value : _ -> Just value
+            [] -> Nothing
+    isFunction VFunct{} = True
+    isFunction VFnRef{} = True
+    isFunction _ = False
+    byName name = maybe (Error ("Undefined variable: " ++ name ++ " (a function must be defined before the functions that call it)")) Ok (Map.lookup name (psFns st))
+
+builtinInfo :: BuiltinFunct -> FnInfo
+builtinInfo b =
+    case builtinFunct b of
+        VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b)
+        _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b)
+
+-- Calling a function: the arguments have to meet its input contract and the call has to end, and the call then gives
+-- the facts the function promises about its result, and the result itself when everything is known.
+applyCall :: PState -> FnInfo -> [IotaProof] -> Iota -> V PState
+applyCall st info args result = do
+    let params = fnParamNames info
+    when (length params /= length args) (throwV ("Function expected " ++ show (length params) ++ " arguments, got " ++ show (length args)))
+    checkInputs st params args (fnRequires info)
+    callTermination st info args
+    (st', instantiated) <- instantiateOutputs st params args result (fnExported info)
+    let call = FApp eqProof [ATerm result, FApp (fnTerm info) args]
+        known = case concreteResult st info args of
+            Just value -> [FApp eqProof [ATerm result, CTerm value]]
+            Nothing -> []
+    return (addFacts st' (call : known ++ instantiated))
+
+-- The contract is checked in a state of its own: the names it uses are the parameters
+checkInputs :: PState -> [Variable] -> [IotaProof] -> [ValidationStatement] -> V ()
+checkInputs _ _ _ [] = return ()
+checkInputs st params args stmts = do
+    result <- tryV (checkStatements (calleeView st (zip params args)) stmts)
+    case result of
+        Error e -> throwV ("Funct input validation failed: " ++ e)
+        Ok () -> return ()
+
+calleeView :: PState -> [(Variable, IotaProof)] -> PState
+calleeView st bindings = st{psVars = Map.empty, psView = Map.fromList bindings}
+
+-- Whether the function is known to end, if it was called here
+callTermination :: PState -> FnInfo -> [IotaProof] -> V ()
+callTermination st info args =
+    case fnTermination info of
+        Just term -> case term of
+            MayDiverge -> liftR (noteDivergence st "it calls a function that is declared ~")
+            Recursing Nothing -> liftR (noteDivergence st "it calls itself and does not say what shrinks")
+            -- Inside the function itself this is not an error, as the function is declared ~ too. From a function defined inside it, it is.
+            Recursing (Just MayDiverge) -> liftR (noteDivergence st "it calls a function that is declared ~")
+            Recursing (Just clause)
+                | Just variant <- variantOf (Just clause) ->
+                    case Map.lookup entryVariantName (psVars st) of
+                        Just entry ->
+                            let smaller = smallerThan "variant of the call" entryVariantName clause variant
+                             in variantFailure "Recursive call does not shrink the variant" smaller (checkStatements (calleeView st (zip (fnParamNames info ++ [entryVariantName]) (args ++ [ATerm entry]))) smaller)
+                        Nothing -> throwV "A function can only call itself from its own body, not from a function defined inside it, unless both are declared ~"
+            _ -> return ()
+        Nothing -> return ()
+
+-- Code that may not terminate, in a function that was not declared ~, is an error if it can be reached. The code is also
+-- not guaranteed to terminate in the program or a function that is declared ~, but they do not mind.
+noteDivergence :: PState -> String -> Result () String
+noteDivergence st why
+    | psTerminates st && not (unreachable st) = Error ("Not guaranteed to terminate: " ++ why ++ ". Declare the function ~ if that is intended")
+    | otherwise = Ok ()
+
+-- Whether the facts known at this point contradict each other, so that nothing here can run
+unreachable :: PState -> Bool
+unreachable st =
+    let context = proofContext st
+        impossible = FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]
+     in Engine.entails (CTerm (VBool False)) context || Engine.entails impossible context
+
+-- What the function promises, for these arguments and this result. A name the promise defines gets a value of its own.
+instantiateOutputs :: PState -> [Variable] -> [IotaProof] -> Iota -> [VariableProof] -> V (PState, [IotaProof])
+instantiateOutputs st _ _ _ [] = return (st, [])
+instantiateOutputs st params args result exported = do
+    let defined = filter (\var -> var /= "return" && var `notElem` params) (nubOrd (concatMap proofVars exported))
+    iotas <- freshN (length defined)
+    let bound = zip defined iotas
+        view = (calleeView st (zip params args ++ [("return", ATerm result)])){psVars = Map.fromList bound}
+    proofs <- liftR (flatResultMap (toIotaProof view) exported)
+    return (st{psVars = Map.union (Map.fromList bound) (psVars st)}, proofs)
+
+-- The value of a term when the facts say what it is
+termValue :: PState -> IotaProof -> Maybe Value
+termValue _ (CTerm value) = Just value
+termValue st term@(ATerm _) = case Engine.constantValues [term] (proofContext st) of
+    [Just value] -> Just value
+    _ -> Nothing
+termValue _ _ = Nothing
+
+-- The result of the call when its arguments are known. A function of the program runs on a budget, so that validating a
+-- program does not depend on a long or endless computation; one that is not finished gives no result.
+concreteResult :: PState -> FnInfo -> [IotaProof] -> Maybe Value
+concreteResult st info args = do
+    values <- mapM (termValue st) args
+    case fnKind info of
+        KBuiltin b -> case evalBuiltinFunct b values of
+            Ok value -> Just value
+            Error _ -> Nothing
+        KUser name -> do
+            mirArgs <- mapM toMir values
+            case callWithFuel validationFuel (psProgram st) name mirArgs of
+                Ok value -> fromMir value
+                Error _ -> Nothing
+
+validationFuel :: Int
+validationFuel = 100000
+
+toMir :: Value -> Maybe MirValue
+toMir (VInt i) = Just (MInt i)
+toMir (VBool b) = Just (MBool b)
+toMir (VList vs) = MList <$> mapM toMir vs
+toMir (VData name fields) = MData name <$> mapM (\(f, v) -> (,) f <$> toMir v) fields
+toMir (VFnRef name) = Just (MFn name)
+toMir VFunct{} = Nothing
+
+fromMir :: MirValue -> Maybe Value
+fromMir (MInt i) = Just (VInt i)
+fromMir (MBool b) = Just (VBool b)
+fromMir (MList vs) = VList <$> mapM fromMir vs
+fromMir (MData name fields) = VData name <$> mapM (\(f, v) -> (,) f <$> fromMir v) fields
+fromMir (MFn name) = Just (VFnRef name)
+
+-- The variant of a loop or function is an integer that has to be at least 0 where it starts, and smaller
+-- each time round. Its value at the start is kept in a variable that has a name no program can write, and
+-- the statements below check the value later on against it.
+--
+-- `shrinks e` is resolved by the type checker. An integer variant (Counting) has to be at least 0 and smaller. An enum or
+-- struct (Parts) needs no bound and is smaller when it is a part of the earlier value.
+variantStatements :: Variable -> Expression -> [ValidationStatement]
+variantStatements name variant = [AssignProofVar name variant]
+
+-- The expression of a clause that has a variant
+variantOf :: Maybe Termination -> Maybe Expression
+variantOf (Just (Counting variant)) = Just variant
+variantOf (Just (Parts variant)) = Just variant
+variantOf _ = Nothing
+
+-- What a recursive call compares its variant with: the variant's value when the function was called
+entryVariantName :: Variable
+entryVariantName = "variant at entry"
+
+boundedBelow :: Variable -> Termination -> Expression -> [ValidationStatement]
+boundedBelow name (Counting _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm name, CTerm (VInt 0)])]
+boundedBelow name _ variant = variantStatements name variant
+
+smallerThan :: Variable -> Variable -> Termination -> Expression -> [ValidationStatement]
+smallerThan name earlier (Counting _) variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm name, ATerm earlier])]
+smallerThan name earlier _ variant = variantStatements name variant ++ [ProofAssert (FApp (CTerm (builtinFunct Within)) [ATerm name, ATerm earlier])]
+
+-- Says which variant it was that could not be shown to be fine
+variantFailure :: String -> [ValidationStatement] -> V a -> V a
+variantFailure what stmts action = do
+    result <- tryV action
+    case result of
+        Ok a -> return a
+        Error e -> case stmts of
+            AssignProofVar _ variant : _ -> throwV (what ++ ": " ++ renderVarProof (exprToProof variant))
+            _ -> throwV (what ++ ": " ++ e)
+
+prefixError :: String -> V a -> V a
+prefixError prefix action = do
+    result <- tryV action
+    case result of
+        Ok a -> return a
+        Error e -> throwV (prefix ++ e)
+
+maxJoinCandidates :: Int
+maxJoinCandidates = 40
+
+-- Rewrite proofs using eq relation: proofs to change -> eq relations -> updated proofs
+reflect :: [IotaProof] -> [IotaProof] -> [IotaProof]
+reflect = Engine.reflectProofsByProofs
+
+-- Rewrites
+
+rewrite :: PState -> RwRule -> V PState
+rewrite st (Refl varProof) = do
+    _ <- liftR (toIotaProof st varProof)
+    engineRewrite st Engine.EngineRefl
+rewrite st (Eval var) =
+    case lookupName st var of
+        Just (ATerm iota) -> engineRewrite st (Engine.EngineEval iota)
+        _ -> throwV ("(Eval) Undefined variable: " ++ var)
+rewrite st EvalAll = engineRewrite st Engine.EngineEvalAll
+rewrite st (CheckGtZero varProof) = do
+    proof <- liftR (toIotaProof st varProof)
+    engineRewrite st (Engine.EngineCheckGtZero proof)
+rewrite st (CheckRel varProof) = do
+    proof <- liftR (toIotaProof st varProof)
+    engineRewrite st (Engine.EngineCheckRel proof)
+rewrite st (UserRewrite name args) = rewriteUserRule st name args
+
+engineRewrite :: PState -> Engine.EngineRewriteRule -> V PState
+engineRewrite st rule =
+    let oldContext = proofContext st
+     in case Engine.applyRewrite evalBuiltinFunct rule oldContext of
+            Ok newContext -> return (addFacts st (Engine.proofContextDelta oldContext newContext))
+            Error e -> throwV e
+
+rewriteUserRule :: PState -> Variable -> [VariableProof] -> V PState
+rewriteUserRule st name actualArgs =
+    case Map.lookup name (psRules st) of
+        Nothing -> throwV ("Unknown rewrite rule: " ++ name)
+        Just (AxiomRule formals inputs outputs) -> applyAxiom st name formals inputs outputs actualArgs
+        Just (ProofRule formals inputs exported) -> applyProofRule st name formals inputs exported actualArgs
+
+applyAxiom :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> [VariableProof] -> V PState
+applyAxiom st name formals inputs outputs actualArgs
+    | length formals /= length actualArgs =
+        throwV ("Rewrite rule " ++ name ++ " expected " ++ show (length formals) ++ " arguments, got " ++ show (length actualArgs))
+    | any proofHasForall actualArgs = throwV ("Rewrite rule " ++ name ++ " cannot take a forall as an argument")
+    | otherwise = do
+        let bindings = Map.fromList (zip formals actualArgs)
+        checked <- tryV (checkStatements st (map (substituteValidationStatement bindings) inputs))
+        case checked of
+            Error e -> throwV ("Rewrite rule " ++ name ++ " input validation failed: " ++ e)
+            Ok () -> do
+                assumed <- tryV (assumeStatements st (map (substituteValidationStatement bindings) outputs))
+                case assumed of
+                    Error e -> throwV ("Rewrite rule " ++ name ++ " output instantiation failed: " ++ e)
+                    Ok st' -> return st'
+
+applyProofRule :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [VariableProof] -> [VariableProof] -> V PState
+applyProofRule st name formals inputs exported actualArgs
+    | length formals /= length actualArgs =
+        throwV ("Rewrite rule " ++ name ++ " expected " ++ show (length formals) ++ " arguments, got " ++ show (length actualArgs))
+    | any proofHasForall actualArgs = throwV ("Rewrite rule " ++ name ++ " cannot take a forall as an argument")
+    | otherwise = do
+        let bindings = Map.fromList (zip formals actualArgs)
+        checked <- tryV (checkStatements st (map (substituteValidationStatement bindings) inputs))
+        case checked of
+            Error e -> throwV ("Rewrite rule " ++ name ++ " input validation failed: " ++ e)
+            Ok () -> case flatResultMap (toIotaProof st . substituteVariableProof bindings) exported of
+                Error e -> throwV ("Rewrite rule " ++ name ++ " output instantiation failed: " ++ e)
+                Ok proofs -> return (addFacts st proofs)
+
+substituteValidationStatement :: Map Variable VariableProof -> ValidationStatement -> ValidationStatement
+substituteValidationStatement bindings (Rewrite rule) = Rewrite (substituteRwRule bindings rule)
+substituteValidationStatement bindings (ProofAssert varProof) = ProofAssert (substituteVariableProof bindings varProof)
+substituteValidationStatement bindings (AssignProofVar var expr) = AssignProofVar var (substituteExpression bindings expr)
+
+substituteRwRule :: Map Variable VariableProof -> RwRule -> RwRule
+substituteRwRule bindings (Refl varProof) = Refl (substituteVariableProof bindings varProof)
+substituteRwRule _ (Eval var) = Eval var
+substituteRwRule _ EvalAll = EvalAll
+substituteRwRule bindings (CheckGtZero varProof) = CheckGtZero (substituteVariableProof bindings varProof)
+substituteRwRule bindings (CheckRel varProof) = CheckRel (substituteVariableProof bindings varProof)
+substituteRwRule bindings (UserRewrite name args) = UserRewrite name (map (substituteVariableProof bindings) args)
+
+substituteVariableProof :: Map Variable VariableProof -> VariableProof -> VariableProof
+substituteVariableProof bindings (ATerm var) = Map.findWithDefault (ATerm var) var bindings
+substituteVariableProof _ cterm@CTerm{} = cterm
+substituteVariableProof _ bvar@BVar{} = bvar
+substituteVariableProof bindings (Forall index guards body) =
+    Forall index (map (substituteVariableProof bindings) guards) (substituteVariableProof bindings body)
+substituteVariableProof bindings (FApp funct args) =
+    FApp (substituteVariableProof bindings funct) (map (substituteVariableProof bindings) args)
+
+substituteExpression :: Map Variable VariableProof -> Expression -> Expression
+substituteExpression bindings (Var var) =
+    case Map.lookup var bindings of
+        Just replacement -> proofToExpression replacement
+        _ -> Var var
+substituteExpression _ val@Val{} = val
+substituteExpression bindings (F funct args) =
+    F (substituteExpression bindings funct) (map (substituteExpression bindings) args)
+
+proofToExpression :: VariableProof -> Expression
+proofToExpression (ATerm var) = Var var
+-- A forall cannot be an expression: applyAxiom and applyProofRule reject forall arguments
+proofToExpression (BVar index) = Var index
+proofToExpression Forall{} = error "proofToExpression: forall is not an expression"
+proofToExpression (CTerm val) = Val val
+proofToExpression (FApp funct args) = F (proofToExpression funct) (map proofToExpression args)
+
+-- Rules
+
+defineAxiom :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> V PState
+defineAxiom st name args inputs outputs = insertRule st name (AxiomRule args inputs outputs)
+
+insertRule :: PState -> Variable -> UserRule -> V PState
+insertRule st name rule
+    | Map.member name (psRules st) = throwV ("Duplicate rule definition: " ++ name)
+    | otherwise = return st{psRules = Map.insert name rule (psRules st)}
+
+-- A proof is checked once, for any arguments that meet its input contract, and then gives what it exports
+defineProofRule :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> [ValidationStatement] -> V PState
+defineProofRule st name args inputs outputs body = do
+    let inner = bodyState st
+    iotas <- freshN (length args)
+    let bindings = zip args iotas
+        start = (calleeView inner [(a, ATerm i) | (a, i) <- bindings]){psInBody = True}
+    assumed <- assumeStatements start inputs
+    done <- runStatements assumed body
+    exported <- exportOutputs done bindings inputs outputs
+    insertRule st name (ProofRule args inputs exported)
+
+-- What a function or rule promises, as facts over the names it gives its parameters and result: the outputs are checked
+-- once more, and then the facts about those values are what is left.
+exportOutputs :: PState -> [(Variable, Iota)] -> [ValidationStatement] -> [ValidationStatement] -> V [VariableProof]
+exportOutputs st bindings inputs outputs = do
+    let named = st{psView = Map.fromList [(name, ATerm iota) | (name, iota) <- bindings]}
+    checked <- if null outputs then return named else runStatements named outputs
+    let allowed = nubOrd (map fst bindings ++ concatMap valStmtDefinedVars inputs ++ concatMap valStmtDefinedVars outputs)
+        nameIotas = [(name, iota) | name <- allowed, Just (ATerm iota) <- [lookupName checked name]]
+        byIota = namedIotaMap (reverse nameIotas)
+        -- (names that are the same value are said to be equal, since a fact is said once about one of them)
+        aliases = [FApp eqVarProof [ATerm canonical, ATerm name] | (name, iota) <- nameIotas, Just canonical <- [lookup iota [(i, n) | (n, i) <- nameIotas]], canonical /= name]
+        facts = filter (proofOnlyOfNamedIotasOrConst byIota) (allFacts checked)
+    return (nubOrd (mapMaybe (iotaProofToVarProof byIota) facts ++ aliases))
