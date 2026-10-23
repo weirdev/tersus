@@ -106,11 +106,11 @@ evalRvalue frame rv =
     f <$$> r = mapResult f r
 
 binary :: BinOp -> MirValue -> MirValue -> Result MirValue String
-binary Add (MInt a) (MInt b) = Ok (MInt (a + b))
-binary Sub (MInt a) (MInt b) = Ok (MInt (a - b))
-binary Mul (MInt a) (MInt b) = Ok (MInt (a * b))
+binary Add (MInt a) (MInt b) = checked (a + b)
+binary Sub (MInt a) (MInt b) = checked (a - b)
+binary Mul (MInt a) (MInt b) = checked (a * b)
 binary Div (MInt _) (MInt 0) = Error "Division by zero"
-binary Div (MInt a) (MInt b) = Ok (MInt (a `div` b))
+binary Div (MInt a) (MInt b) = checked (a `div` b)
 binary Mod (MInt _) (MInt 0) = Error "Modulo by zero"
 binary Mod (MInt a) (MInt b) = Ok (MInt (a `mod` b))
 binary (Compare Eq) a b | comparable a b = Ok (MBool (a == b))
@@ -120,6 +120,12 @@ binary (Compare Gt) (MInt a) (MInt b) = Ok (MBool (a > b))
 binary (Compare LtEq) (MInt a) (MInt b) = Ok (MBool (a <= b))
 binary (Compare GtEq) (MInt a) (MInt b) = Ok (MBool (a >= b))
 binary op _ _ = Error (show op ++ " is not defined for these values")
+
+-- Int is 64 bits: addition, subtraction, multiplication and division that leave the range stop the program
+checked :: Integer -> Result MirValue String
+checked n
+    | inIntRange n = Ok (MInt n)
+    | otherwise = Error "Integer overflow"
 
 -- Equality is structural, for any two values that are not functions
 comparable :: MirValue -> MirValue -> Bool

@@ -26,7 +26,9 @@ library
       Mir
       MirEval
       MirLower
+      MirVerify
       Parse
+      Pipeline
       Pretty
       Proof
       ProofEngine
@@ -68,6 +70,13 @@ test-suite tersus-test
   type: exitcode-stdio-1.0
   main-is: TestTersus.hs
   other-modules:
+      TestBasics
+      TestControl
+      TestData
+      TestHarness
+      TestPipeline
+      TestProofs
+      TestValidation
       Paths_tersus
   autogen-modules:
       Paths_tersus

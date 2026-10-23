@@ -74,6 +74,14 @@ Boolean values can also be produced by relation expressions such as `x < y`. The
 
 Integer literals can be negative: `-1`, `[-1, 2]`.
 
+### Integers
+
+`Int` is a 64-bit signed integer, from `-9223372036854775808` to `9223372036854775807`.
+
+- A literal outside that range is a parse error (`Integer literal out of range`).
+- `+`, `-`, `*` and `/` whose result is outside the range stop the program with `Integer overflow` (`9223372036854775807 + 1`, and `-9223372036854775808 / -1`, whose result is one too large). The program does not wrap, and compiled code traps in the same way. `%` cannot overflow.
+- The validator reasons about unbounded integers, so a property it proves holds for every run that does not stop on an overflow. It does not prove that no overflow happens (`x + 1 > x` is provable, and `9223372036854775807 + 1` still stops the program); a program that has to be sure adds the bound it needs as a contract (`affirm n < 9223372036854775807;`).
+
 ## Types
 
 Every value has a type, and programs are type checked before they are validated:
@@ -934,7 +942,7 @@ y = s + 1;
 affirm y != s;
 ```
 
-`*` and `/` bind tighter than `+` and `-`: `2 + 3 * 4` is `14`. `/` rounds down (`-7 / 2` is `-4`). Integer literals can be negative (`x = -4;`, `[-1, 2]`, `3 - -2`). Dividing needs a divisor the validator can show is non-zero, checked like the index of `get`; evaluating `1 / 0` is an error.
+`*` and `/` bind tighter than `+` and `-`: `2 + 3 * 4` is `14`. `/` rounds down (`-7 / 2` is `-4`). Integer literals can be negative (`x = -4;`, `[-1, 2]`, `3 - -2`). Dividing needs a divisor the validator can show is non-zero, checked like the index of `get`; evaluating `1 / 0` is an error, and so is a result that does not fit in `Int` (see Integers).
 
 ```tersus
 fn average(total: Int, count: Int) -> Int [{ affirm count > 0; }] [{ }] {

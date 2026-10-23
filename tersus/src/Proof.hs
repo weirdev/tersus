@@ -1,4 +1,16 @@
-module Proof where
+module Proof
+    ( evalExpression
+    , evalReturningBlock
+    , evaluate
+    , joinBranches
+    , loopTermination
+    , unreachable
+    , valReturningBlock
+    , valReturningWhile
+    , validate
+    , validateElaborated
+    , variantOf
+    ) where
 
 import Data.Map (
     Map,
@@ -27,8 +39,12 @@ evaluate [] = Ok initState
 evaluate l = evalBlock $ initStateWStatements l
 
 validate :: [Statement] -> Result VState String
-validate [] = Ok $ VState emptyVScopeState empty [] [] stdLibRuleCtx
-validate l = case elaborate l of {Error e -> Error e; Ok l' -> validateTyped l'}
+validate l = case elaborate l of {Error e -> Error e; Ok l' -> validateElaborated l'}
+
+-- Validates a program that `elaborate` has checked (and handed back), so that the program is checked once
+validateElaborated :: [Statement] -> Result VState String
+validateElaborated [] = Ok $ VState emptyVScopeState empty [] [] stdLibRuleCtx
+validateElaborated l = validateTyped l
 
 validateTyped :: [Statement] -> Result VState String
 validateTyped l = case valBlock $ initVStateWStatements l of
@@ -1580,21 +1596,3 @@ valFunctInput state varArgs argIotas argProofs valStmts =
 
 -- TODO: Export validation vars from this into the function body
 -- WIP: ^^ + use refling rather than evaling the function call in the input validation
-
-iotaLhsEq :: Iota -> [IotaProof] -> [IotaProof]
-iotaLhsEq _ [] = []
-iotaLhsEq iota (proof : tail) =
-    case proof of
-        FApp funct [ATerm liota, rhsProof]
-            | funct == eqProof && liota == iota ->
-                rhsProof : iotaLhsEq iota tail
-        _ -> iotaLhsEq iota tail
-
-findIotaEqToFn :: [Variable] -> [IotaProof] -> Maybe Iota
-findIotaEqToFn _ [] = Nothing
-findIotaEqToFn varList (proof : tail) =
-    case proof of
-        FApp funct [ATerm iota, CTerm (VFunct argList _ _ _ _)]
-            | funct == eqProof && argList == varList ->
-                Just iota
-        _ -> findIotaEqToFn varList tail
