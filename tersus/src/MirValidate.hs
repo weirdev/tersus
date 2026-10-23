@@ -104,6 +104,7 @@ noWalk = Walked [] [] []
 -- What a loop being walked needs besides its blocks: its header, its invariant, its environment, and what shrinks
 data LoopRun = LoopRun
     { lrHeader :: M.BlockId
+    , lrTest :: M.BlockId -- the block that ends in the test of the loop condition: the header, or a block after the calls it makes
     , lrEnv :: M.Env
     , lrVariant :: Maybe (Variable, Termination, Expression)
     }
@@ -113,7 +114,8 @@ walkFunction :: PState -> M.Function -> V [PState]
 walkFunction st fn = do
     let cx = mkCtx fn
         region = Set.fromList (cxOrder cx)
-    walked <- walk cx Nothing region (M.BlockId 0) st
+        named = st{psLocalNames = Map.fromList [(l, n) | (l, d) <- Map.toList (M.fnLocals fn), Just n <- [M.localName d]]}
+    walked <- walk cx Nothing region (M.BlockId 0) named
     return (wdReturns walked)
 
 -- Walks the blocks of a region from the entry, each when the paths that jump to it have been walked
@@ -134,7 +136,7 @@ walk cx run region entry start = go order (Map.singleton entry [start]) noWalk
                         then processBlock cx run b (head incoming)
                         else case Map.lookup b (cxLoops cx) of
                             Just info -> enterLoop cx b info (reverse incoming)
-                            Nothing -> joinStates cx b (reverse incoming) >>= processBlock cx Nothing b
+                            Nothing -> joinStates cx b (reverse incoming) >>= processBlock cx run b
                 let (pending', acc') = foldl route (Map.delete b pending, acc{wdReturns = reverse (wdReturns walked) ++ wdReturns acc}) (wdExits walked)
                     acc'' = acc'{wdBacks = reverse (wdBacks walked) ++ wdBacks acc'}
                 go rest pending' acc''
@@ -152,15 +154,17 @@ processBlock cx run b st0 = do
         M.Goto target -> return noWalk{wdExits = [(target, st)]}
         M.SwitchBool test yes no -> do
             cond <- operandTerm st test
+            -- (an iteration of a loop starts on the true edge of its test)
+            let starting stYes = case run of
+                    Just r | lrTest r == b -> startIteration r stYes
+                    _ -> return stYes
             case cond of
-                CTerm (VBool True) -> return noWalk{wdExits = [(yes, st)]}
+                CTerm (VBool True) -> starting st >>= \stYes -> return noWalk{wdExits = [(yes, stYes)]}
                 CTerm (VBool False) -> return noWalk{wdExits = [(no, st)]}
                 _ -> do
                     let stYes = addFacts st (branchFacts st cond True)
                         stNo = addFacts st (branchFacts st cond False)
-                    stYes' <- case run of
-                        Just r | lrHeader r == b -> startIteration r stYes
-                        _ -> return stYes
+                    stYes' <- starting stYes
                     return noWalk{wdExits = [(yes, stYes'), (no, stNo)]}
         M.Call callee args dest next -> do
             calleeTerm <- operandTerm st callee
@@ -168,7 +172,7 @@ processBlock cx run b st0 = do
             info <- liftR (resolveFunction st calleeTerm)
             result <- fresh
             st' <- applyCall st info argTerms result
-            return noWalk{wdExits = [(next, st'{psLocals = Map.insert dest result (psLocals st')})]}
+            return noWalk{wdExits = [(next, forgetProofVar dest st'{psLocals = Map.insert dest result (psLocals st')})]}
         M.Return -> return noWalk{wdReturns = [st]}
         M.Unreachable
             | unreachable st -> return noWalk
@@ -198,8 +202,15 @@ negateRel NotEq = Just Eq
 
 -- Statements
 
+-- A variable of a proof that has the name of a program variable (`define x = ...` where the program has an `x`) stands for the
+-- variable's value from then on, so assigning the program variable is assigning it again
+forgetProofVar :: M.Local -> PState -> PState
+forgetProofVar dest st = case Map.lookup dest (psLocalNames st) of
+    Just name -> st{psVars = Map.delete name (psVars st)}
+    Nothing -> st
+
 execStatement :: Ctx -> PState -> M.Statement -> V PState
-execStatement _ st (M.Assign dest rv) = assign st dest rv
+execStatement _ st (M.Assign dest rv) = forgetProofVar dest <$> assign st dest rv
 execStatement cx st (M.Ghost env g) = ghostStatement cx st env g
 
 assign :: PState -> M.Local -> M.Rvalue -> V PState
@@ -509,7 +520,7 @@ enterLoop cx header info incoming = do
     let variantName = loopVariantName header
         -- (the candidates are written for the locals the loop assigns, by names that no program can write)
         env' = Map.union env (Map.fromList [(pseudo l, M.Copy l) | l <- loopLocals])
-        run = LoopRun header env' (do clause <- M.loopTermination spec; variant <- variantOf (Just clause); Just (variantName, clause, variant))
+        run = LoopRun header (loopTest cx header) env' (do clause <- M.loopTermination spec; variant <- variantOf (Just clause); Just (variantName, clause, variant))
         attempt extra = loopFrom cx info run havocked (invariant ++ extra)
     inferred <- inferInvariants cx info run entry havocked loopLocals
     result <- tryV (attempt inferred)
@@ -518,6 +529,18 @@ enterLoop cx header info incoming = do
         Error e
             | namesInferred e inferred -> (\walked -> walked{wdBacks = []}) <$> attempt []
             | otherwise -> throwV e
+
+-- The block that ends in the test of a loop's condition: a condition that calls a function ends the header in a call, and the
+-- test is in the block the call goes on to
+loopTest :: Ctx -> M.BlockId -> M.BlockId
+loopTest cx = go (Set.empty :: Set M.BlockId)
+  where
+    go seen b
+        | Set.member b seen = b
+        | otherwise = case fmap M.blockTerminator (Map.lookup b (M.fnBlocks (cxFn cx))) of
+            Just (M.Call _ _ _ next) -> go (Set.insert b seen) next
+            Just (M.Goto next) -> go (Set.insert b seen) next
+            _ -> b
 
 -- The name of the proof variable that holds the value of the variant of a loop at the start of an iteration
 loopVariantName :: M.BlockId -> Variable

@@ -92,6 +92,7 @@ data FnKind = KBuiltin BuiltinFunct | KUser Name
 -- has. Values never change, an assignment gives the local a new one, so a fact stays true for the rest of the path.
 data PState = PState
     { psLocals :: Map M.Local Iota
+    , psLocalNames :: Map M.Local Variable -- the names of the program for the locals of the function being walked
     , psVars :: Map Variable Iota -- the variables of proofs (define)
     , psView :: Map Variable IotaProof -- what the names of the source mean in the statement being validated
     , psFacts :: [IotaProof] -- the facts of this path
@@ -118,6 +119,7 @@ initialPState program =
         globalFacts = stdFacts ++ fnFacts
      in PState
             { psLocals = Map.empty
+            , psLocalNames = Map.empty
             , psVars = Map.empty
             , psView = Map.empty
             , psFacts = []
