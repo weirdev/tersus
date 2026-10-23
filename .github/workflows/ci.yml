@@ -27,16 +27,10 @@ jobs:
           key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock', 'tersus/package.yaml') }}
           restore-keys: stack-${{ runner.os }}-
 
-      - name: Diagnose linker
-        shell: bash
-        continue-on-error: true
-        run: |
-          echo "PATH=$PATH"
-          command -v ld || true
-          command -v gcc || true
-          ls -l /usr/bin/ld* || true
-          stack exec -- sh -c 'command -v ld; command -v gcc'
-          stack exec -- ghc --info
+      # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
+      # reports "cannot find 'ld'". ld.bfd takes the same options, so let it answer to that name.
+      - name: Provide ld.gold
+        run: command -v ld.gold || sudo ln -s "$(command -v ld.bfd)" /usr/local/bin/ld.gold
 
       - name: Build
         run: stack build --test --no-run-tests
