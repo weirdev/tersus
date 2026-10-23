@@ -98,6 +98,8 @@ evalRvalue frame rv =
                     | actual /= name -> Error ("Expected a " ++ name ++ " but got a " ++ actual)
                     | otherwise -> maybe (Error ("Variant " ++ name ++ " has no field " ++ field)) Ok (lookup field fields)
                 _ -> Error "A field can only be read from a struct"
+        -- (a wrong cast is undefined behaviour, as in the evaluator of the AST: reading a field that is not there is the error)
+        AsVariant o _ -> operandValue frame o
         IsVariant o name ->
             operandValue frame o `bindResult` \v -> case v of
                 MData actual _ -> Ok (MBool (actual == name))
