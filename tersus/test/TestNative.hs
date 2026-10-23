@@ -26,22 +26,22 @@ testNative =
         [ testNativeIr
         , TestList "examples" [testNativeProgram path | path <- nativeExamples]
         , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
+        , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestList "build" [testBuildKeepsFiles]
         , TestList "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
         ]
 
--- The examples whose every type native code supports so far
+-- The examples whose every type native code supports so far (all but those with a struct or an enum)
 nativeExamples :: [FilePath]
 nativeExamples =
-    [ "examples/arithmetic.tersus"
-    , "examples/booleans.tersus"
-    , "examples/helper_functions.tersus"
-    , "examples/linear.tersus"
-    , "examples/loop_return.tersus"
-    , "examples/loops.tersus"
-    , "examples/proofs.tersus"
-    , "examples/rules.tersus"
+    [ "examples/" ++ name ++ ".tersus"
+    | name <-
+        [ "arithmetic", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
+        , "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
+        , "loop_return", "loops", "parallel_sum", "proofs", "recursion", "rewrites", "rules", "safe_access", "types"
+        , "update_list"
+        ]
     ]
 
 testNativeProgram :: FilePath -> Test
@@ -54,15 +54,17 @@ testNativeIr =
         [ TestCase "overflow-checked add" . pure $
             withIr "return 1 + 2;" (\ir -> testAssertTrue ("@llvm.sadd.with.overflow.i64" `isInfixOf` ir && "@tersus_overflow" `isInfixOf` ir))
         , TestCase "comparison" . pure $
-            withIr "x = 3; return x < 4;" (\ir -> testAssertTrue ("icmp slt i64" `isInfixOf` ir && "call void @tersus_print_bool" `isInfixOf` ir))
+            withIr "x = 3; return x < 4;" (\ir -> testAssertTrue ("icmp slt i64" `isInfixOf` ir && "@\"type.Bool\"" `isInfixOf` ir))
         , TestCase "function" . pure $
-            withIr "fn f(a: Int) -> Int { return a; }; return f(1);" (\ir -> testAssertTrue ("define internal i64 @\"fn.f\"(i64 %p1)" `isInfixOf` ir && "call i64 @\"fn.f\"" `isInfixOf` ir))
+            withIr "fn f(a: Int) -> Int { return a; }; return f(1);" (\ir -> testAssertTrue ("define internal i64 @\"fn.f\"(i64 %p.1)" `isInfixOf` ir && "call i64 @\"fn.f\"" `isInfixOf` ir))
         , TestCase "no return" . pure $
             withIr "x = 1;" (\ir -> testAssertTrue ("define internal void @tersus_main()" `isInfixOf` ir))
         , TestCase "ghost statements are dropped" . pure $
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
-        , TestCase "lists are not supported yet" . pure $
-            testAssertErrorContains "Native code does not support List<Int> yet" (llvmSource "return [1];")
+        , TestCase "a list is a runtime list with a descriptor" . pure $
+            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("call ptr @tersus_list_push" `isInfixOf` ir && "@\"type.List<Int>\" = private constant" `isInfixOf` ir))
+        , TestCase "structs are not supported yet" . pure $
+            testAssertErrorContains "Native code does not support P yet" (llvmSource "struct P { x: Int }; p = P { x: 1 }; return p.x;")
         , TestCase "a program that does not validate is not lowered" . pure $
             testAssertErrorContains "Validation failed" (llvmSource "x = 5; affirm x < 4;")
         , TestCase "command line" . pure $
@@ -84,6 +86,37 @@ arithmeticPrograms =
   where
     divisionProgram :: Int -> Int -> String
     divisionProgram a b = "a = " ++ show a ++ "; b = " ++ show b ++ "; q = a / b; r = a % b; return q * 100 + r;"
+
+listPrograms :: [(String, String)]
+listPrograms =
+    [ ("literal", "return [1, 2, 3];")
+    , ("empty", "return [];")
+    , ("booleans", "return [true, false];")
+    , ("nested", "return [[1, 2], [], [3]];")
+    , ("negative", "return [-1, 2];")
+    , ("size", "x = [4, 5, 6]; return size(x);")
+    , ("get, first and last", "x = [4, 5, 6]; return get(x, 1) * 100 + first(x) * 10 + last(x);")
+    , ("push", "x = push(push([1], 2), 3); return x;")
+    , ("push does not change its argument", "x = [1]; y = push(x, 2); return x;")
+    , ("set", "x = [1, 2, 3]; y = set(x, 1, 9); return y;")
+    , ("set does not change its argument", "x = [1, 2, 3]; y = set(x, 1, 9); return x;")
+    , ("push to an empty list of lists", "x = [1, 2]; rows = push([], x); rows = push(rows, [3]); return rows;")
+    , ("set a list in a list", "rows = [[1], [2]]; rows = set(rows, 0, [7, 8]); return rows;")
+    , ("get a list from a list", "rows = [[1], [2, 3]]; return get(rows, 1);")
+    , ("booleans in a list", "x = push([true], false); return get(x, 1) = false;")
+    , ("last of booleans", "x = [false, true]; return last(x);")
+    , ("equality", "x = [1, 2]; return x = [1, 2];")
+    , ("inequality", "x = [1, 2]; return x != [1, 3];")
+    , ("equality of different lengths", "x = [1, 2]; return x = [1, 2, 3];")
+    , ("equality of empty lists", "x = push([1], 2); y = [3]; return [] = [];")
+    , ("equality of nested lists", "x = [[1], [2]]; return x = [[1], [2]];")
+    , ("inequality of nested lists", "x = [[1], [2]]; return x = [[1], [3]];")
+    , ("list function", "fn grow(l: List<Int>) -> List<Int> { return push(l, size(l)); }; return grow(grow([]));")
+    , ("list parameter", "fn total(l: List<Int>) -> Int { s = 0; i = 0; while i < size(l) [{ affirm i >= 0; affirm i <= size(l); }] shrinks size(l) - i { s = s + get(l, i); i = i + 1; }; return s; }; return total([1, 2, 3, 4]);")
+    , ("build in a loop", "l = []; i = 0; while i < 300 [{ affirm i >= 0; }] shrinks 300 - i { l = push(l, i * i); i = i + 1; }; return l;")
+    , ("a list that is not returned", "x = [1, 2];")
+    , ("returned in a branch only", "x = [1]; if size(x) > 5 { return x; };")
+    ]
 
 controlPrograms :: [(String, String)]
 controlPrograms =

@@ -18,7 +18,7 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 - `stack run -- check <file>` parses the program, lowers it to the MIR and validates that, printing `OK` on success.
 - `stack run -- run <file>` validates the program, and only if that succeeds runs its MIR and prints its return value (nothing is printed when the program does not `return`).
 - `stack run -- mir <file>` validates the program, and only if that succeeds prints its MIR.
-- `stack run -- llvm <file>` validates the program, and only if that succeeds prints its LLVM IR (`LlvmEmit`); `stack run -- build <file> -o <output>` compiles that and the C runtime (`LlvmRuntime`) with clang (`Native`). Native code handles `Int` and `Bool` so far.
+- `stack run -- llvm <file>` validates the program, and only if that succeeds prints its LLVM IR (`LlvmEmit`); `stack run -- build <file> -o <output>` compiles that and the C runtime (`LlvmRuntime`) with clang (`Native`). Native code handles `Int`, `Bool` and lists so far.
 - Use `-` as the file to read the program from standard input.
 - Errors go to standard error, prefixed with `Parse error:`, `Validation failed:`, `Lowering failed:` (a bug: a program that type checks always lowers) or `Evaluation failed:`. The exit code is 1 for a failed program and 2 for bad command-line usage.
 
@@ -74,8 +74,8 @@ Next steps, roughly in priority order:
 17. LLVM
     Validation walks the MIR (`MirValidate`), and the AST has no evaluator any more: the MIR executor runs programs, and the validator runs it for the result of a call with known arguments. The MIR is lowered to LLVM IR (`LlvmEmit`, MIR.md, Native code) in steps, each checked against the executor by building and running programs:
     1. Done: `Int` and `Bool`, control flow, calls and recursion, the overflow traps, and the printing of the result
-    2. Lists: a runtime of C (`LlvmRuntime`), list literals and operations (a copy on `push` and `set`, nothing freed yet), and printing
-    3. Structs, enums, constants as static data, structural equality, and function values
+    2. Done: lists, with a runtime of C (`LlvmRuntime`): literals and operations (a copy on `push` and `set`, nothing freed yet), structural equality and printing by a descriptor of the type
+    3. Structs and enums (the examples that still fail to build natively), and function values
     4. Memory: the last use of a local moves it, reference counts free values, and `push`/`set` update in place when a list is not shared
     5. A flag for the stack depth of deep recursion, and the docs
 
