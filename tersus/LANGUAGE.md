@@ -484,7 +484,7 @@ See `examples/parallel_sum.tersus`, `examples/build_list.tersus` and `examples/u
 
 The invariants of a loop are completed by the validator. For each variable the body assigns, it starts from what is known when the loop is entered:
 
-- a variable that is a number there is at least and at most that number, the size of a list likewise, and two of these differ by what they differed by on entry;
+- a variable that is a number there is at least and at most that number, the size of a list likewise (a list that is not a literal can still have a size the facts know, such as `push(push([], a), b)`, which has size 2), and two of these differ by what they differed by on entry;
 - a variable (or the size of a list) that is not known to be a number is compared with the variables the loop does not assign, and the comparison (`=`, `<=` or `>=`) is a candidate if the facts already imply it: `i <= n` when `i` starts at `0` and `n` is `size(a)`, or `size(out) = size(a)` when `out` starts as a copy of `a`.
 
 It keeps a candidate only if the body establishes it again, assuming the ones that are left. For a body without a `return` this is repeated until none is dropped (at most four rounds); for a body with one, a candidate that is not preserved is found from the error and dropped, one at a time (at most twelve). What is kept is an invariant like one the program wrote: it holds on entry, is preserved, and holds after the loop together with the negated condition. Six variables or sizes, twelve variables to compare with and twenty-four candidates at most are tried.
@@ -499,7 +499,7 @@ while i < 3 [{ affirm i <= 3; }] shrinks 3 - i {
 affirm size(out) = 3;       // size(out) = i was inferred: both start at 0 and grow by one
 ```
 
-This is what makes `size(return) = size(a)` follow from a loop that pushes once per element, with no `affirm size(out) = i`, and `size(out) = size(a)` follow from a loop that `set`s the elements of a copy (`examples/update_list.tersus`). A sum of two variables that stays equal to another variable (`s + i = n`, or `s + i = n + 5` when `s` starts at `5`) is inferred too; a relation that is not a constant distance, a plain comparison or such a sum still has to be written, such as a list that grows by the size of another list per iteration. If a loop is refused because one of its inferred invariants is not preserved, the error is about the invariant the program wrote instead.
+This is what makes `size(return) = size(a)` follow from a loop that pushes once per element, with no `affirm size(out) = i`, and `size(out) = size(a)` follow from a loop that `set`s the elements of a copy (`examples/update_list.tersus`). A sum of two variables that stays equal to another variable (`s + i = n`, or `s + i = n + 5` when `s` starts at `5`) is inferred too; a relation that is not a constant distance, a plain comparison or such a sum still has to be written, such as a list that grows by the size of another list per iteration, or `size(out) = i - lo` for a loop that starts at a variable `lo` (`slice` in `examples/packet_parser.tersus`). If a loop is refused because one of its inferred invariants is not preserved, the error is about the invariant the program wrote instead.
 
 #### Returning from a loop
 

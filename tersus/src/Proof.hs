@@ -711,16 +711,18 @@ inferInvariants entry havocked loopVars cond invariant body
     sizeOf term = FApp (CTerm (builtinFunct Size)) [term]
     relation rel lhs rhs = FApp (CTerm (builtinFunct (Rel rel))) [lhs, rhs]
     -- The terms of a variable that candidates are about, with the number they equal on entry if there is one
-    termsOf var (Just (VInt n)) = [(ATerm var, Just n)]
-    termsOf var (Just (VList items)) = [(sizeOf (ATerm var), Just (fromIntegral (length items)))]
-    termsOf _ (Just _) = []
-    termsOf var Nothing = [(ATerm var, Nothing), (sizeOf (ATerm var), Nothing)]
+    -- (a variable that is not a known number or list can still have a size that is known: push(push([], a), b) has size 2)
+    termsOf var (Just (VInt n)) _ = [(ATerm var, Just n)]
+    termsOf var (Just (VList items)) _ = [(sizeOf (ATerm var), Just (fromIntegral (length items)))]
+    termsOf _ (Just _) _ = []
+    termsOf var Nothing size = [(ATerm var, Nothing), (sizeOf (ATerm var), size)]
     loopValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- loopVars] context
-    loopTerms = take maxInferenceTerms (concat [termsOf var value | (var, value) <- zip loopVars loopValues])
+    loopSizes = [case value of Just (VInt n) -> Just n; _ -> Nothing | value <- Engine.constantValues [sizeOf (ATerm (fromMaybe (Iota var) (vLookupVar entry var))) | var <- loopVars] context]
+    loopTerms = take maxInferenceTerms (concat [termsOf var value size | (var, value, size) <- zip3 loopVars loopValues loopSizes])
     -- Variables the loop does not assign, that are not known to be a number or a list, and that the program wrote
     anchorVars = take maxInferenceAnchors [var | var <- Map.keys (vVisibleVars entry), var `notElem` loopVars, ' ' `notElem` var, take 1 var /= "$"]
     anchorValues = Engine.constantValues [ATerm (fromMaybe (Iota var) (vLookupVar entry var)) | var <- anchorVars] context
-    anchors = concat [termsOf var Nothing | (var, Nothing) <- zip anchorVars anchorValues]
+    anchors = concat [termsOf var Nothing Nothing | (var, Nothing) <- zip anchorVars anchorValues]
     known = [(term, k) | (term, Just k) <- loopTerms]
     constantCandidates =
         concat [[relation GtEq term (CTerm (VInt k)), relation LtEq term (CTerm (VInt k))] | (term, k) <- known]

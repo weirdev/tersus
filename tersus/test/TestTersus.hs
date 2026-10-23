@@ -1163,6 +1163,7 @@ testExamples =
         , testExampleFile "examples/termination.tersus" (ExpectReturn (VInt 23))
         , testExampleFile "examples/for_loops.tersus" (ExpectReturn (VInt 33))
         , testExampleFile "examples/linear.tersus" (ExpectReturn (VInt 633))
+        , testExampleFile "examples/packet_parser.tersus" (ExpectReturn (VInt 711))
         , testExampleFile "examples/loops.tersus" (ExpectReturn (VInt 30))
         , testExampleFile "examples/early_return.tersus" (ExpectReturn (VInt 104))
         , testExampleFile "examples/loop_return.tersus" (ExpectReturn (VInt 7))
@@ -1195,6 +1196,9 @@ testExamples =
         , testExampleFile "examples/rejected/division_not_below.tersus" (ExpectRejected "Could not prove: return < n")
         , testExampleFile "examples/rejected/sum_bound_too_strong.tersus" (ExpectRejected "Could not prove: return < 10")
         , testExampleFile "examples/rejected/loop_sum_not_kept.tersus" (ExpectRejected "Could not prove: return = n")
+        , testExampleFile "examples/rejected/packet_off_by_one.tersus" (ExpectRejected "Funct input validation failed")
+        , testExampleFile "examples/rejected/packet_negative_length.tersus" (ExpectRejected "Funct input validation failed: Could not prove: lo <= hi")
+        , testExampleFile "examples/rejected/packet_checksum_range.tersus" (ExpectRejected "Could not prove: return < 255")
         , testExampleFile "examples/rejected/for_assigns_counter.tersus" (ExpectRejected "The body of a for loop cannot assign its loop variable i")
         , testExampleFile "examples/rejected/loop_without_termination.tersus" (ExpectRejected "Loop must say how it ends")
         , testExampleFile "examples/rejected/loop_variant_not_shrinking.tersus" (ExpectRejected "Loop variant does not shrink: 3 - i")
@@ -2178,6 +2182,10 @@ testInferredInvariants =
             , parseValidateFailProgramHelper "i = 0; while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { i = i + 1; }; affirm i = 0;" "Could not prove: i = 0"
             , -- A mistake in the invariant is reported as before
               parseValidateFailProgramHelper "out = []; i = 0; while i < 3 [{ affirm size(out) = 7; }] shrinks 3 - i { out = push(out, i); i = i + 1; };" "Loop invariant does not hold on entry"
+            , -- A list whose size is known without being a literal: the size term has a value on entry
+              parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(p) + 2; }] { out = push(push([], v), v); for x in p { out = push(out, x); }; return out; };"
+            , parseValidProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(p) + 3; }] { out = push(push([], v), v); for x in p { out = push(out, x); }; return push(out, 0); };"
+            , parseValidateFailProgramHelper "fn f(v: Int, p: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(p) + 2; }] { out = push(push([], v), v); for x in p { out = push(push(out, x), x); }; return out; };" "Could not prove: size(return) = size(p) + 2"
             , -- A loop that returns infers its invariants too, one candidate at a time
               parseValidProgramHelper "fn f(a: List<Int>) -> Int { out = []; for i in 0..size(a) { if get(a, i) > 2 { return i; }; out = push(out, 0); }; return -1; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"

@@ -1,0 +1,86 @@
+// A parser for binary messages, written the way untrusted input has to be handled. A buffer is
+//
+//     [ version, length, payload (length numbers), checksum ]
+//
+// where the checksum is the sum of everything before it, modulo 256. The parser gets any buffer at all, so it
+// has to check before it reads, and the validator proves that it does: every `get` below is in range, whatever
+// the buffer is, and all the loops end. Nothing here is tested; the proofs hold for every input.
+
+enum Parsed {
+    Message { version: Int, payload: List<Int> },
+    TooShort,
+    BadLength,
+    BadChecksum,
+};
+
+// The sum of buf[lo..hi) modulo 256. Division by a constant rounds down, so total - 256 * (total / 256) is from 0
+// to 255, which the validator works out (see Linear arithmetic); the input contract is what makes every get safe.
+fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
+    [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
+    [{ affirm 0 <= return; affirm return < 256; }]
+{
+    total = 0;
+    for i in lo..hi {
+        total = total + get(buf, i);
+    };
+    return total - 256 * (total / 256);
+};
+
+// buf[lo..hi) as a list of its own. The invariant is the size of the list so far: the loop starts at lo, so the
+// counter and the size differ by lo, which is not a constant, and so it is written.
+fn slice(buf: List<Int>, lo: Int, hi: Int) -> List<Int>
+    [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
+    [{ affirm size(return) = hi - lo; }]
+{
+    out = [];
+    for i in lo..hi [{ affirm size(out) = i - lo; }] {
+        out = push(out, get(buf, i));
+    };
+    return out;
+};
+
+// Every way out is a Parsed. Each check is what makes the reads after it safe: the buffer has the two header
+// numbers, the length is not negative, the payload and the checksum fit, and the checksum is right.
+fn parse(buf: List<Int>) -> Parsed {
+    if size(buf) < 3 { return Parsed::TooShort; };
+    version = get(buf, 0);
+    len = get(buf, 1);
+    if len < 0 { return Parsed::BadLength; };
+    end = 2 + len;
+    if end + 1 > size(buf) { return Parsed::BadLength; };
+    if checksum(buf, 0, end) != get(buf, end) { return Parsed::BadChecksum; };
+    return Parsed::Message { version: version, payload: slice(buf, 2, end) };
+};
+
+// The other direction: the buffer for a version and a payload, whose size and length field are proved. The loop's size
+// is inferred (out starts with two numbers); the first two numbers staying as they were has to be said.
+fn encode(version: Int, payload: List<Int>) -> List<Int>
+    [{ }]
+    [{ affirm size(return) = size(payload) + 3; affirm get(return, 1) = size(payload); }]
+{
+    out = push(push([], version), size(payload));
+    for x in payload [{ affirm get(out, 1) = size(payload); }] {
+        out = push(out, x);
+    };
+    sum = checksum(out, 0, size(out));
+    return push(out, sum);
+};
+
+// What parse says about a few buffers, one of each outcome (the program is evaluated as it is validated)
+fn describe(buf: List<Int>) -> Int {
+    return match parse(buf) {
+        Parsed::Message { version: v, payload: p } => v * 100 + size(p),
+        Parsed::TooShort => 1,
+        Parsed::BadLength => 2,
+        Parsed::BadChecksum => 3,
+    };
+};
+
+sent = encode(7, [10, 20, 30]);
+affirm size(sent) = 6;
+a = describe(sent);                // 703: version 7, three numbers
+b = describe([1, 3]);              // 1: too short
+c = describe([1, 5, 0, 0, 5]);     // 2: the length says five numbers, there are two
+d = describe([1, -1, 0]);       // 2: a negative length
+e = describe([1, 1, 9, 0]);        // 3: the checksum is not 11
+return a + b + c + d + e;

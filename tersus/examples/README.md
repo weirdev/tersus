@@ -37,6 +37,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
 | `linear.tersus` | Sums of variables, multiples and division by a constant as linear arithmetic: contracts like `a + b <= 10` and `2 * x <= y`, a loop with an inferred `s + i = n`, `bits` that halves (`shrinks n`, `n / 2`), and a binary search over a range whose `if` states neither the invariant nor the variant | returns `633` |
+| `packet_parser.tersus` | A showcase: a parser for `[version, length, payload, checksum]` buffers that takes any input and is proved never to read out of range, with a `checksum` proved to be from 0 to 255 (division by a constant), a `slice` of exactly the requested size, an `encode` whose size and length field are proved, and an enum for the four outcomes | returns `711` |
 | `for_loops.tersus` | `for i in lo..hi` and `for x in list` / `for i, x in list`: a sum over a list, an early `return`, a list built to a given size, and nested ranges, with no invariant or termination clause | returns `33` |
 | `loops.tersus` | A `while` loop with an invariant, with the counter arithmetic proved by the validator | returns `30` |
 | `loop_return.tersus` | `return` inside a `while` body: a bounded search whose invariant must still hold on the paths that keep looping | returns `7` |
@@ -124,6 +125,9 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/division_not_below.tersus` | `n / 2 < n` claimed for `n >= 0`, which fails at `0` |
 | `rejected/sum_bound_too_strong.tersus` | `a + b <= 10` does not give a sum below `10` |
 | `rejected/loop_sum_not_kept.tersus` | A loop whose body breaks `s + i = n`, so nothing is inferred and the output contract fails |
+| `rejected/packet_off_by_one.tersus` | A parser whose length check leaves out the checksum, so it reads one past the end |
+| `rejected/packet_negative_length.tersus` | A parser that does not turn away a negative length, so the range to checksum can be backwards |
+| `rejected/packet_checksum_range.tersus` | A checksum that claims to stay below 255, which it does not |
 | `rejected/for_assigns_counter.tersus` | A `for` body that assigns its loop variable (refused when the program is read) |
 | `rejected/loop_without_termination.tersus` | A loop that says neither `shrinks` nor `~` |
 | `rejected/loop_variant_not_shrinking.tersus` | A loop whose variant `3 - i` is never made smaller by its body |
