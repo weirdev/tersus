@@ -1,4 +1,27 @@
-module TypeCheck (typeCheck, elaborate, renderType) where
+module TypeCheck
+    ( typeCheck
+    , elaborate
+    , renderType
+      -- What MirLower needs to give every local of the MIR its type: the checker's monad and the steps of inferExpr
+    , TC
+    , TcState
+    , initialTcState
+    , runTcState
+    , valueType
+    , builtinType
+    , checkCall
+    , checkConstruct
+    , readField
+    , typeCtors
+    , ctorInfo
+    , declareType
+    , declareTypeWith
+    , registerCtors
+    , checkType
+    , unify
+    , expect
+    , zonk
+    ) where
 
 import Data.List (intercalate)
 import qualified Data.Map as Map
@@ -46,7 +69,13 @@ data TcState = TcState
 newtype TC a = TC (TcState -> Either String (a, TcState))
 
 runTc :: TC a -> Either String a
-runTc (TC f) = fmap fst (f (TcState Map.empty 0 Map.empty Map.empty))
+runTc tc = fmap fst (runTcState tc initialTcState)
+
+initialTcState :: TcState
+initialTcState = TcState Map.empty 0 Map.empty Map.empty
+
+runTcState :: TC a -> TcState -> Either String (a, TcState)
+runTcState (TC f) = f
 
 instance Functor TC where
     fmap f (TC g) = TC (\s -> fmap (\(a, s') -> (f a, s')) (g s))

@@ -8,6 +8,9 @@ import qualified Data.Map as Map
 import System.Exit (exitFailure)
 
 import Cli
+import qualified Mir as M
+import MirEval
+import MirLower
 import Parse
 import Proof
 import qualified ProofEngine as Engine
@@ -1135,9 +1138,28 @@ checkExample stmts expectation =
         Error e -> Just $ "Validation failed with error: " ++ e
         Ok _ -> case evaluate stmts of
             Error e -> Just $ "Evaluation failed with error: " ++ e
-            Ok state -> case expectation of
-                ExpectReturn expected -> testAssertEq (getReturn state) (Just expected)
-                _ -> testAssertEq (getReturn state) Nothing
+            Ok state ->
+                -- (the program must also lower to the MIR and give the same answer there)
+                case (expectation, mirReturn stmts) of
+                    (_, Left e) -> Just $ "MIR failed: " ++ e
+                    (ExpectReturn expected, Right mirResult) ->
+                        testAssertEq (getReturn state) (Just expected)
+                            `orElse` testAssertEq mirResult (Just (renderValue expected))
+                    (_, Right mirResult) ->
+                        testAssertEq (getReturn state) Nothing `orElse` testAssertEq mirResult Nothing
+
+-- The first failure of two checks
+orElse :: TestResult -> TestResult -> TestResult
+orElse Nothing other = other
+orElse failure _ = failure
+
+-- What a program returns when it is lowered to the MIR and run, rendered
+mirReturn :: [Statement] -> Either String (Maybe String)
+mirReturn stmts = case lowerProgram stmts of
+    Error e -> Left ("lowering: " ++ e)
+    Ok program -> case runProgram program of
+        Error e -> Left ("running: " ++ e)
+        Ok result -> Right (fmap renderMirValue result)
 
 testExamples :: Test
 testExamples =
@@ -1240,6 +1262,7 @@ testCliParseCommandLine =
     testAssertEq
         (map parseCommandLine [["check", "a.tersus"], ["run", "-"], ["run"], ["frob", "a.tersus"], []])
         [Just (Check, "a.tersus"), Just (Run, "-"), Nothing, Nothing, Nothing]
+        `orElse` testAssertEq (parseCommandLine ["mir", "a.tersus"]) (Just (Mir, "a.tersus"))
 
 testCliRenderValue :: TestResult
 testCliRenderValue =
@@ -1269,6 +1292,180 @@ testCli =
         , testAssertErrorContains "Validation failed" (runSource Check "x = 5; affirm x < 4;")
         , -- Validation must reject the program before it is evaluated
           testAssertErrorContains "Validation failed" (runSource Run "return first([]);")
+        ]
+
+-- MIR tests
+-- Programs are lowered without being validated here (the examples are validated by testExamples), so a program may
+-- do what validation would refuse.
+lowerSource :: String -> Either String M.Program
+lowerSource source = case parseStatementBlock source of
+    Left err -> Left ("Parse failed: " ++ show err)
+    Right stmts -> case lowerProgram stmts of
+        Error e -> Left e
+        Ok program -> Right program
+
+withMir :: String -> (M.Program -> TestResult) -> TestResult
+withMir source check = either Just check (lowerSource source)
+
+-- What the program returns, run on the MIR, and the same on the AST evaluator
+runMir :: String -> Result (Maybe String) String
+runMir source = case lowerSource source of
+    Left e -> Error e
+    Right program -> mapResult (fmap renderMirValue) (runProgram program)
+
+sameOnBoth :: String -> TestResult
+sameOnBoth source =
+    case parseStatementBlock source of
+        Left err -> Just ("Parse failed: " ++ show err)
+        Right stmts -> case (evaluate stmts, mirReturn stmts) of
+            (Ok state, Right mirResult) -> testAssertEq mirResult (fmap renderValue (getReturn state))
+            (Error _, Left _) -> Nothing
+            (Error e, Right _) -> Just ("only the MIR ran it; the evaluator said: " ++ e)
+            (Ok _, Left e) -> Just ("only the evaluator ran it; the MIR said: " ++ e)
+
+blocksOf :: M.Function -> [(M.BlockId, M.BasicBlock)]
+blocksOf = Map.toList . M.fnBlocks
+
+mainFunction :: M.Program -> M.Function
+mainFunction = M.progMain
+
+-- The local with this source name (every one, as a variable can have several in different scopes)
+localsNamed :: String -> M.Function -> [M.Local]
+localsNamed name fn = [l | (l, d) <- Map.toList (M.fnLocals fn), M.localName d == Just name]
+
+testMirStructure :: Test
+testMirStructure =
+    testCaseSeq
+        "testMirStructure"
+        [ -- A loop is a header that the end of the body jumps back to, and the header is the loop's
+          withMir "i = 0; while i < 3 [{ affirm i <= 3; }] shrinks 3 - i { i = i + 1; }; return i;" $ \p ->
+            let fn = mainFunction p
+                headers = Map.keys (M.specLoops (M.fnSpec fn))
+                backEdges = [(from, to) | (from, M.BasicBlock _ (M.Goto to)) <- blocksOf fn, to <= from]
+             in testAssertEq (length headers, map snd backEdges) (1, headers)
+        , -- An if is a switch whose two branches meet at one block
+          withMir "x = 1; if x < 2 { x = 5; } else { x = 6; }; return x;" $ \p ->
+            let fn = mainFunction p
+                gotos = [to | (_, M.BasicBlock _ (M.Goto to)) <- blocksOf fn]
+             in testAssertEq (length (blocksOf fn), length gotos, length (filter (== head gotos) gotos)) (4, 2, 2)
+        , -- With a return in both branches nothing is left to join
+          withMir "x = 1; if x < 2 { return 5; } else { return 6; };" $ \p ->
+            let fn = mainFunction p
+             in testAssertEq (length (blocksOf fn), length [t | (_, M.BasicBlock _ t) <- blocksOf fn, isReturn t]) (3, 2)
+        , -- A statement after a return is not lowered
+          withMir "return 1; x = 2; return x;" $ \p ->
+            testAssertEq (length (blocksOf (mainFunction p)), Map.size (M.fnLocals (mainFunction p))) (1, 1)
+        , -- A function in a function is lifted to the top, and a function at the top keeps its name
+          withMir "fn outer(n: Int) -> Int { fn inner(m: Int) -> Int { return m + 1; }; return inner(n); }; return outer(1);" $ \p ->
+            testAssertEq (Map.keys (M.progFunctions p)) ["outer", "outer::inner"]
+        , -- A variable made in a block is a local of its own: the two y are not the same, the x is one
+          withMir "x = 1; { x = 2; y = 3; }; { y = 4; }; return x;" $ \p ->
+            let fn = mainFunction p
+             in testAssertEq (length (localsNamed "x" fn), length (localsNamed "y" fn)) (1, 2)
+        , -- A shadowing let is another local too
+          withMir "fn f(a: Int) -> Int { return a; }; x = 1; return f(x) + x;" $ \p ->
+            testAssertEq (length (localsNamed "x" (mainFunction p))) 1
+        , -- A function passed as a value is a constant function
+          withMir "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; return apply(inc, 1);" $ \p ->
+            testAssertTrue ("const fn inc" `isInfixOf` M.renderProgram p)
+        , -- The element type of an empty list is the one a later push decides, and every local has a type
+          withMir "x = []; x = push(x, 1); return x;" $ \p ->
+            testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "x"] [TList TInt]
+        , -- A list that is never used still has a type
+          withMir "x = [];" $ \p ->
+            testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "x"] [TList TInt]
+        , -- Types come out right for structs and enums
+          withMir "struct P { x: Int, y: Bool }; p = P { x: 1, y: true }; q = p.y; r = p.x; return r;" $ \p ->
+            testAssertEq [M.localType d | d <- Map.elems (M.fnLocals (mainFunction p)), M.localName d == Just "q"] [TBool]
+        , -- The contracts, the loop and the proofs are kept, and the types are declared
+          withMir "struct P { x: Int }; fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { affirm n > 0; return n; }; return f(1);" $ \p ->
+            case Map.lookup "f" (M.progFunctions p) of
+                Nothing -> Just "f is not in the program"
+                Just fn ->
+                    testAssertEq
+                        (length (M.specRequires (M.fnSpec fn)), length (M.specEnsures (M.fnSpec fn)), length [() | (_, M.BasicBlock stmts _) <- blocksOf fn, M.Ghost{} <- stmts], Map.keys (M.progTypes p))
+                        (1, 1, 1, ["P"])
+        , -- A builtin used as a value is a function of the program
+          case lowerProgram [Assign "f" (Val (builtinFunct Plus)), Assign "r" (F (Var "f") [Val (VInt 1), Val (VInt 2)]), Return (Var "r")] of
+            Error e -> Just e
+            Ok p -> testAssertEq (Map.keys (M.progFunctions p), mapResult (fmap renderMirValue) (runProgram p)) (["builtin::add"], Ok (Just "3"))
+        , -- A call ends the block it is in
+          withMir "fn f(n: Int) -> Int { return n; }; a = f(1); b = f(a); return b;" $ \p ->
+            testAssertEq (length [() | (_, M.BasicBlock _ M.Call{}) <- blocksOf (mainFunction p)]) 2
+        , -- Every program lowers to a well formed MIR
+          withMir "fn f(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ }] { return get(l, i); }; s = 0; for x in [1, 2, 3] { s = s + x; }; l = push([], s); return f(l, 0);" $ \p ->
+            testAssertEq (M.checkProgram p) (Ok ())
+        ]
+  where
+    isReturn M.Return = True
+    isReturn _ = False
+
+-- A malformed program is refused by the check that every lowering goes through
+testMirWellFormed :: Test
+testMirWellFormed =
+    testCaseSeq
+        "testMirWellFormed"
+        [ withMir "return 1;" $ \p ->
+            let fn = mainFunction p
+                broken = p{M.progMain = fn{M.fnBlocks = Map.map (\b -> b{M.blockTerminator = M.Goto (M.BlockId 7)}) (M.fnBlocks fn)}}
+             in testAssertErrorContains "bb7" (M.checkProgram broken)
+        , withMir "x = 1; return x;" $ \p ->
+            let fn = mainFunction p
+                broken = p{M.progMain = fn{M.fnLocals = Map.delete (M.Local 1) (M.fnLocals fn)}}
+             in testAssertErrorContains "undeclared" (M.checkProgram broken)
+        , withMir "x = 1; return x;" $ \p ->
+            let fn = mainFunction p
+                broken = p{M.progMain = fn{M.fnLocals = Map.map (\d -> d{M.localType = TVar 3}) (M.fnLocals fn)}}
+             in testAssertErrorContains "no known type" (M.checkProgram broken)
+        ]
+
+-- Running the MIR gives what the evaluator of the AST gives
+testMirRun :: Test
+testMirRun =
+    testCaseSeq
+        "testMirRun"
+        ( map
+            sameOnBoth
+            [ "return 1 + 2 * 3;"
+            , "x = 7; y = x % 3; z = x / 2; return y * 10 + z;"
+            , "return -7 / 2 + -7 % 3;"
+            , "l = [1, 2, 3]; l = push(l, 4); l = set(l, 0, 9); return l;"
+            , "l = [1, 2, 3]; return get(l, 1) + first(l) + last(l) + size(l);"
+            , "x = 0; i = 0; while i < 10 [{ affirm i <= 10; }] shrinks 10 - i { if i % 2 = 0 { x = x + i; }; i = i + 1; }; return x;"
+            , "fn fact(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return 1; } else { return n * fact(n - 1); }; }; return fact(10);"
+            , "fn first2(l: List<Int>) -> Int [{ affirm size(l) > 1; }] [{ }] { return get(l, 1); }; return first2([4, 5, 6]);"
+            , "fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; fn inc(n: Int) -> Int { return n + 1; }; return apply(inc, 1);"
+            , "fn outer(n: Int) -> Int { fn inner(m: Int) -> Int { return m * 2; }; return inner(n) + inner(1); }; return outer(5);"
+            , "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; q = P { y: 5, ..p }; return q.x + q.y;"
+            , "enum S { A { r: Int }, B, C { w: Int, h: Int } }; fn area(s: S) -> Int { return match s { S::A { r: r } => r * 3, S::B => 0, S::C { w: w, h: h } => w * h }; }; return area(S::A { r: 2 }) + area(S::B) + area(S::C { w: 3, h: 4 });"
+            , "s = 0; for i in 0..5 { s = s + i; }; for x in [10, 20] { s = s + x; }; return s;"
+            , "x = 1; if x = 1 { y = 2; x = x + y; }; return x;"
+            , "x = 5; { x = 6; y = 1; }; return x;"
+            , "a = true; b = false; return a = b;"
+            , "x = 1; affirm x = 1; return x;"
+            , "x = 1;"
+            , "return [];"
+            , "return 1 / 0;"
+            , "return get([1], 3);"
+            , "fn f(n: Int) -> Int { if n > 0 { return 1; }; }; return f(0);"
+            ]
+        )
+
+testMir :: Test
+testMir =
+    TestList
+        "testMir"
+        [ testMirStructure
+        , testMirWellFormed
+        , testMirRun
+        , testCaseSeq
+            "testMirCli"
+            [ -- `mir` prints the blocks
+              testAssertEq (runSource Mir "x = 1 + 2; return x;") (Ok (unlines ["fn main() -> Int {", "    let _0: Int;", "    let _1: Int; // x", "    bb0: {", "        _1 = Add(const 1, const 2);", "        _0 = _1;", "        return;", "    }", "}"]))
+            , testAssertErrorContains "Validation failed" (runSource Mir "x = 1; affirm x = 2;")
+            , -- A run reports the errors that validation would have prevented
+              testAssertEq (runMir "return 1 / 0;") (Error "Division by zero")
+            ]
         ]
 
 -- Control flow tests
@@ -3034,6 +3231,7 @@ main = do
                 , testCrashRegression
                 , testExamples
                 , testCli
+                , testMir
                 , testControlFlow
                 , testLists
                 , testArithmetic

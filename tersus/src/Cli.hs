@@ -8,14 +8,17 @@ module Cli
 
 import Data.List (intercalate)
 
+import Mir (renderProgram)
+import MirEval (renderMirValue, runProgram)
+import MirLower (lowerProgram)
 import Parse
 import Proof
-import ProofHelpers (getReturn)
 import TersusTypes
 import Utils
 
--- `Check` parses and validates a program. `Run` also evaluates it, but only after it validates.
-data Command = Check | Run deriving (Show, Eq)
+-- `Check` parses and validates a program. `Run` also lowers it to the MIR and runs that, but only after it validates,
+-- and `Mir` prints the MIR instead.
+data Command = Check | Run | Mir deriving (Show, Eq)
 
 usage :: String
 usage =
@@ -24,7 +27,8 @@ usage =
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
-        , "  run <file>    Validate a program, then evaluate it and print its return value"
+        , "  run <file>    Validate a program, then lower it to the MIR, run that and print its return value"
+        , "  mir <file>    Validate a program, then print its MIR"
         , ""
         , "Use - as the file to read the program from standard input."
         ]
@@ -33,6 +37,7 @@ usage =
 parseCommandLine :: [String] -> Maybe (Command, FilePath)
 parseCommandLine ["check", file] = Just (Check, file)
 parseCommandLine ["run", file] = Just (Run, file)
+parseCommandLine ["mir", file] = Just (Mir, file)
 parseCommandLine _ = Nothing
 
 -- Runs a command over program source. Ok holds the text to print on success, which is
@@ -46,9 +51,15 @@ runSource command source =
                 Error e -> Error ("Validation failed: " ++ e)
                 Ok _ -> case command of
                     Check -> Ok "OK"
-                    Run -> case evaluate stmts of
-                        Error e -> Error ("Evaluation failed: " ++ e)
-                        Ok state -> Ok (maybe "" renderValue (getReturn state))
+                    Run -> lowered stmts `bindResult` \program ->
+                        case runProgram program of
+                            Error e -> Error ("Evaluation failed: " ++ e)
+                            Ok result -> Ok (maybe "" renderMirValue result)
+                    Mir -> mapResult renderProgram (lowered stmts)
+  where
+    lowered stmts = case lowerProgram stmts of
+        Error e -> Error ("Lowering failed: " ++ e)
+        Ok program -> Ok program
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
