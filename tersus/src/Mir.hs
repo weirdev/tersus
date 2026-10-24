@@ -87,6 +87,11 @@ data Statement
     = Assign Local Rvalue
     | -- Does nothing when the program runs; the validator's. The names are those the program can use at this point.
       Ghost Env GhostStatement
+    | -- The next two are added by MirOwnership, which makes who owns what explicit, and only native code needs them.
+      -- Frees what the local owns, and leaves it holding nothing
+      Drop Local
+    | -- The local points into a value that something else owns: it does not own what it holds, and so does not free it
+      Peek Local Rvalue
     deriving (Show, Eq)
 
 -- What the names of the source mean at a point: the local of a variable, or the function (a constant) of a name that
@@ -115,6 +120,10 @@ data Rvalue
     | -- The same value, known to be that variant because the validator proved it (`value as Enum::Variant`). The value is
       -- not changed or checked, and the local that gets it has the variant's type, so its fields can be read.
       AsVariant Operand Name
+    | -- A copy of the value that shares nothing with it (MirOwnership)
+      Clone Operand
+    | -- The field of the value the local owns, taken out of it: the local does not hold it any more (MirOwnership)
+      TakeField Local Name Variable
     deriving (Show, Eq)
 
 -- Div and Mod need a divisor that is not 0. Compare Eq and NotEq are structural, and the other comparisons are of Ints.
@@ -125,7 +134,8 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 data ListOp = Length | First | Last | Get | Push | Set
     deriving (Show, Eq)
 
-data Operand = Copy Local | Const Constant
+-- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns
+data Operand = Copy Local | Move Local | Const Constant
     deriving (Show, Eq)
 
 data Constant
@@ -256,6 +266,8 @@ renderStatement (Ghost _ (GhostValidation v)) = "ghost " ++ renderValidation v +
 renderStatement (Ghost _ (GhostAxiom name args _ _)) = "ghost axiom " ++ name ++ "(" ++ intercalate ", " args ++ ");"
 renderStatement (Ghost _ (GhostProof name args _ _ _)) = "ghost proof " ++ name ++ "(" ++ intercalate ", " args ++ ");"
 renderStatement (Ghost _ (GhostFunction name _ _)) = "ghost fn " ++ name ++ ";"
+renderStatement (Drop l) = "drop " ++ show l ++ ";"
+renderStatement (Peek dest rv) = show dest ++ " = peek " ++ renderRvalue rv ++ ";"
 
 renderRvalue :: Rvalue -> String
 renderRvalue (Use o) = renderOperand o
@@ -267,6 +279,8 @@ renderRvalue (MakeData name fields) = name ++ " { " ++ intercalate ", " [f ++ ":
 renderRvalue (ReadField o name field) = "(" ++ renderOperand o ++ " as " ++ name ++ ")." ++ field
 renderRvalue (IsVariant o name) = renderOperand o ++ " is " ++ name
 renderRvalue (AsVariant o name) = renderOperand o ++ " as " ++ name
+renderRvalue (Clone o) = "clone " ++ renderOperand o
+renderRvalue (TakeField l name field) = "take (" ++ show l ++ " as " ++ name ++ ")." ++ field
 
 renderBinOp :: BinOp -> String
 renderBinOp (Compare rel) = case rel of
@@ -280,6 +294,7 @@ renderBinOp op = show op
 
 renderOperand :: Operand -> String
 renderOperand (Copy l) = show l
+renderOperand (Move l) = "move " ++ show l
 renderOperand (Const c) = "const " ++ renderConstant c
 
 renderConstant :: Constant -> String

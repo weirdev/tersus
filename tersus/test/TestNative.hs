@@ -1,5 +1,8 @@
 module TestNative
     ( testNative
+    , nativeExamples
+    , validatedPrograms
+    , unvalidatedPrograms
     ) where
 
 import Control.Exception (IOException, try)
@@ -15,7 +18,7 @@ import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
 import LlvmEmit (emitProgram)
-import Native (buildExecutable)
+import Native (buildExecutable, buildExecutableWith)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestHarness
@@ -37,6 +40,7 @@ testNative =
         , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestList "build" [testBuildKeepsFiles]
+        , TestList "memory" memoryTests
         , TestList "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
         ]
 
@@ -92,8 +96,8 @@ testNativeIr =
             testAssertErrorContains "Validation failed" (llvmSource "x = 5; affirm x < 4;")
         , TestCase "command line" . pure $
             testAssertEq
-                (map parseCommandLine [["llvm", "a.tersus"], ["build", "a.tersus", "-o", "a"], ["build", "a.tersus"]])
-                [Just (Llvm, "a.tersus"), Just (Build "a", "a.tersus"), Nothing]
+                (map parseCommandLine [["llvm", "a.tersus"], ["build", "a.tersus", "-o", "a"], ["build", "a.tersus"], ["owned", "a.tersus"]])
+                [Just (Llvm, "a.tersus"), Just (Build "a", "a.tersus"), Nothing, Just (Owned, "a.tersus")]
         ]
   where
     withIr source check = case llvmSource source of
@@ -214,6 +218,13 @@ controlPrograms =
     , ("boolean parameter", "fn pick(c: Bool, a: Int, b: Int) -> Int { if c { return a; }; return b; }; return pick(1 < 2, 10, 20);")
     ]
 
+-- Every program of these tests that validates, and every one that is lowered without being validated
+validatedPrograms :: [(String, String)]
+validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ stopPrograms
+
+unvalidatedPrograms :: [(String, String)]
+unvalidatedPrograms = functionPrograms
+
 -- Programs that stop on an overflow, with the message and status of `tersus run`
 stopPrograms :: [(String, String)]
 stopPrograms =
@@ -257,19 +268,39 @@ sameAsMir name source = do
             Ok _ -> case llvmSource source of
                 Error e -> pure (Just e)
                 Ok ir -> do
+                    buildAndRun (map safeChar name) name ir (expected (runSource Run source))
+  where
+    expected (Ok output) = (ExitSuccess, if null output then "" else output ++ "\n", "")
+    expected (Error e) = (ExitFailure 1, "", e ++ "\n")
+
+-- A list built by pushing, and changed by setting, is built in place: it needs memory in proportion to its length and not to its
+-- length squared (a million pushes copied each time would need terabytes), and a limit on the memory of the program shows it
+memoryTests :: [Test]
+memoryTests =
+    [ TestCase "a million pushes" (underLimit "l = []; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { l = push(l, i); i = i + 1; }; return size(l);" "1000000\n")
+    , TestCase "pushes and sets" (underLimit "l = []; i = 0; while i < 300000 [{ affirm i >= 0; }] shrinks 300000 - i { l = push(l, i); i = i + 1; }; k = 0; while k < 300000 [{ affirm k >= 0; }] shrinks 300000 - k { l = set(l, k, get(l, k) + 1); k = k + 1; }; return get(l, 299999);" "300000\n")
+    , TestCase "lists of lists" (underLimit "rows = []; i = 0; while i < 20000 [{ affirm i >= 0; }] shrinks 20000 - i { row = push(push([], i), i); rows = push(rows, row); i = i + 1; }; return size(rows);" "20000\n")
+    , TestCase "values made and dropped in a loop" (underLimit "struct P { x: Int, ys: List<Int> }; s = 0; i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { p = P { x: i, ys: push(push([], i), 1) }; s = s + p.x; i = i + 1; }; return s;" "1999999000000\n")
+    ]
+  where
+    underLimit source expected = do
+        available <- clangAvailable
+        if not available
+            then pure Nothing
+            else case llvmSource source of
+                Error e -> pure (Just e)
+                Ok ir -> do
                     tmp <- getTemporaryDirectory
                     let dir = tmp </> "tersus-native-test"
-                        exe = dir </> map safeChar name
+                        exe = dir </> "memory_limit"
                     createDirectoryIfMissing True dir
                     built <- buildExecutable exe ir
                     case built of
                         Error e -> pure (Just e)
                         Ok () -> do
-                            (code, out, err) <- readProcessWithExitCode exe [] ""
-                            pure (testAssertEq (code, out, err) (expected (runSource Run source)))
-  where
-    expected (Ok output) = (ExitSuccess, if null output then "" else output ++ "\n", "")
-    expected (Error e) = (ExitFailure 1, "", e ++ "\n")
+                            -- 150 MB of address space
+                            (code, out, err) <- readProcessWithExitCode "sh" ["-c", "ulimit -v 150000; " ++ exe] ""
+                            pure (testAssertEq (code, out, err) (ExitSuccess, expected, ""))
 
 -- Builds the program, which tests the IR without running it
 buildsOnly :: String -> IO TestResult
@@ -288,6 +319,56 @@ buildsOnly source = do
                     Error e -> Just e
                     Ok () -> Nothing
 
+-- The programs are built so that the runtime checks its use of memory: a value freed twice, or still there when the program
+-- ends, fails the run, and a value that is used after it is freed reads 0xDD
+checkedBuild :: [String]
+checkedBuild = ["-DTERSUS_CHECK"]
+
+-- The programs that are run again under valgrind, which finds the same mistakes without the help of the runtime: those that
+-- take values apart, change them in place, or call through a function value
+valgrindCases :: [String]
+valgrindCases =
+    [ "examples/enums.tersus", "examples/structs.tersus", "examples/linked_list.tersus", "examples/update_list.tersus"
+    , "examples/termination.tersus", "examples/packet_parser.tersus"
+    , "recursive function", "data built in a loop", "struct update", "match", "build in a loop", "set a list in a list"
+    , "push to an empty list of lists", "in a list", "in a struct", "a parameter", "a builtin on lists"
+    ]
+
+-- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
+-- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to
+-- print what the executor prints, and have nothing to say to valgrind.
+buildAndRun :: String -> String -> String -> (ExitCode, String, String) -> IO TestResult
+buildAndRun file name ir expectation = do
+    tmp <- getTemporaryDirectory
+    let dir = tmp </> "tersus-native-test"
+        exe = dir </> file
+    createDirectoryIfMissing True dir
+    checked <- buildExecutableWith checkedBuild exe ir
+    case checked of
+        Error e -> pure (Just e)
+        Ok () -> do
+            plain <- readProcessWithExitCode exe [] ""
+            case testAssertEq plain expectation of
+                Just failure -> pure (Just failure)
+                Nothing -> do
+                    available <- if name `elem` valgrindCases then valgrindAvailable else pure False
+                    if not available
+                        then pure Nothing
+                        else do
+                            built <- buildExecutable (exe ++ "_plain") ir
+                            case built of
+                                Error e -> pure (Just e)
+                                Ok () -> do
+                                    result <- readProcessWithExitCode "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"] ""
+                                    pure (fmap ("under valgrind:\n" ++) (testAssertEq result expectation))
+
+valgrindAvailable :: IO Bool
+valgrindAvailable = do
+    outcome <- try (readProcessWithExitCode "valgrind" ["--version"] "")
+    pure $ case outcome of
+        Left e -> const False (e :: IOException)
+        Right (code, _, _) -> code == ExitSuccess
+
 -- The same for a program that is lowered without being validated
 sameAsUnvalidated :: String -> String -> IO TestResult
 sameAsUnvalidated name source = do
@@ -299,16 +380,7 @@ sameAsUnvalidated name source = do
             Right program -> case emitProgram program of
                 Error e -> pure (Just e)
                 Ok ir -> do
-                    tmp <- getTemporaryDirectory
-                    let dir = tmp </> "tersus-native-test"
-                        exe = dir </> ("unvalidated_" ++ map safeChar name)
-                    createDirectoryIfMissing True dir
-                    built <- buildExecutable exe ir
-                    case built of
-                        Error e -> pure (Just e)
-                        Ok () -> do
-                            (code, out, err) <- readProcessWithExitCode exe [] ""
-                            pure (testAssertEq (code, out, err) (expected (runProgram program)))
+                    buildAndRun ("unvalidated_" ++ map safeChar name) name ir (expected (runProgram program))
   where
     expected (Ok result) = (ExitSuccess, maybe "" ((++ "\n") . renderMirValue) result, "")
     expected (Error e) = (ExitFailure 1, "", "Evaluation failed: " ++ e ++ "\n")

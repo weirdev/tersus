@@ -108,6 +108,8 @@ mapResults = flatResultMap
 runStatements :: Frame -> [Statement] -> E Frame
 runStatements frame [] = return frame
 runStatements frame (Ghost{} : rest) = runStatements frame rest
+runStatements frame (Drop{} : rest) = runStatements frame rest
+runStatements frame (Peek dest rv : rest) = runStatements frame (Assign dest rv : rest)
 runStatements frame (Assign dest rv : rest) = do
     tick
     v <- liftE (evalRvalue frame rv)
@@ -115,6 +117,8 @@ runStatements frame (Assign dest rv : rest) = do
 
 operandValue :: Frame -> Operand -> Result MirValue String
 operandValue frame (Copy l) = maybe (Error ("Undefined variable: " ++ show l)) Ok (Map.lookup l frame)
+-- (a value is a value here: who owns it only matters to native code, so owned MIR gives the same results)
+operandValue frame (Move l) = operandValue frame (Copy l)
 operandValue _ (Const c) = Ok (constantValue c)
 
 constantValue :: Constant -> MirValue
@@ -140,6 +144,8 @@ evalRvalue frame rv =
                 _ -> Error "A field can only be read from a struct"
         -- (a wrong cast is undefined behaviour, as in the evaluator of the AST: reading a field that is not there is the error)
         AsVariant o _ -> operandValue frame o
+        Clone o -> operandValue frame o
+        TakeField l name field -> evalRvalue frame (ReadField (Copy l) name field)
         IsVariant o name ->
             operandValue frame o `bindResult` \v -> case v of
                 MData actual _ -> Ok (MBool (actual == name))

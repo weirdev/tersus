@@ -1,6 +1,7 @@
 module Pipeline
     ( parseSource
     , compileSource
+    , ownedSource
     , llvmSource
     , validateStatements
     , runStatements
@@ -8,6 +9,8 @@ module Pipeline
 
 import LlvmEmit (emitProgram)
 import qualified Mir as M
+import MirOwnership (insertOwnership)
+import MirVerify (verifyProgram)
 import MirEval (MirValue, runProgram)
 import MirLower (lowerElaborated)
 import MirValidate (Validated, validateProgram)
@@ -38,6 +41,13 @@ compileSource source =
             stage "Lowering failed: " (lowerElaborated elaborated) `bindResult` \program ->
                 stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
                     Ok program
+
+-- The MIR of a program that passes every check, with who owns each value made explicit (MirOwnership), for native code
+ownedSource :: String -> Result M.Program String
+ownedSource source =
+    compileSource source `bindResult` \program ->
+        let owned = insertOwnership program
+         in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
 
 -- The LLVM IR of a program that passes every check
 llvmSource :: String -> Result String String

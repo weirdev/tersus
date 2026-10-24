@@ -7,6 +7,8 @@ import qualified Data.Map.Strict as Map
 import Data.Maybe (listToMaybe)
 
 import Mir
+import MirOwnership (insertOwnership)
+import MirVerify (verifyProgram)
 import Pretty (renderType)
 import TersusTypes (Name, Rel (..), Type (..), Variable)
 import Utils
@@ -28,11 +30,22 @@ import Utils
 -- element: an Int, a Bool as 0 or 1, or a pointer), made by the runtime, which `push` and `set` copy. A struct or an enum value
 -- is a pointer to `{ rc, tag, fields }` (16 bytes of header, then a slot per field of its variant; the tag is the position of
 -- the variant in the enum, and 0 for a struct), so that a type that contains itself needs no layout of its own. A function
--- value is the address of the function. Nothing is freed yet. The runtime prints and compares values by a descriptor of
--- their type, a constant global `@"type.<type>"`.
+-- value is the address of the function. The runtime prints, compares, copies and frees values by a descriptor of their type, a
+-- constant global `@"type.<type>"`.
+--
+-- The program is the owned MIR of MirOwnership, which says who owns each value of the heap. A local that holds a value it
+-- owns is a pointer that is null when it holds none: `Move` reads it and stores null, `Drop` frees what it holds and stores
+-- null, and assigning a local frees what it held. A `Peek` local only looks at a value, and is neither freed nor assigned
+-- over.
 
+-- The program is given as the validated MIR; who owns each value is added here (MirOwnership), since the code that is made
+-- frees values and changes lists in place on the strength of it
 emitProgram :: Program -> Result String String
-emitProgram program =
+emitProgram validated =
+    verifyProgram (insertOwnership validated) `bindResult` \_ -> emitOwned (insertOwnership validated)
+
+emitOwned :: Program -> Result String String
+emitOwned program =
     flatResultMap (\(name, fn) -> emitFunction program False (functionSymbol name) fn) (Map.toList (progFunctions program))
         `bindResult` \functions ->
             emitFunction program True "@tersus_main" (progMain program) `bindResult` \mainFunction ->
@@ -51,7 +64,9 @@ declarations =
     , "declare i32 @tersus_equal(ptr, i64, i64)"
     , "declare ptr @tersus_list_new(i64)"
     , "declare ptr @tersus_list_push(ptr, i64)"
-    , "declare ptr @tersus_list_set(ptr, i64, i64)"
+    , "declare ptr @tersus_list_set(ptr, i64, i64, ptr)"
+    , "declare ptr @tersus_clone(ptr, ptr)"
+    , "declare void @tersus_drop(ptr, ptr)"
     , "declare ptr @tersus_data_new(i64, i64)"
     , ""
     ]
@@ -77,7 +92,9 @@ entryPoint program fn =
                               , "%v = extractvalue " ++ result ++ " %r, 0"
                               ]
                                 ++ convert
-                                ++ ["call void @tersus_print(ptr " ++ typeSymbol program ty ++ ", i64 " ++ word ++ ")", "br label %done", "done:", "ret i32 0"]
+                                ++ ["call void @tersus_print(ptr " ++ typeSymbol program ty ++ ", i64 " ++ word ++ ")"]
+                                ++ ["call void @tersus_drop(ptr " ++ typeSymbol program ty ++ ", ptr %v)" | isPointer ty]
+                                ++ ["br label %done", "done:", "ret i32 0"]
                             )
                         , [ty]
                         )
@@ -250,6 +267,7 @@ emitFunction program entry symbol fn =
                         prologue =
                             ["entry:"]
                                 ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes]
+                                ++ ["    store ptr null, ptr " ++ slot l | (l, d) <- Map.toList (fnLocals fn), isPointer (localType d), l `notElem` fnParams fn]
                                 ++ ["    store " ++ t ++ " %p." ++ localNumber p ++ ", ptr " ++ slot p | (p, t) <- zip (fnParams fn) paramTypes]
                                 ++ entryPrologue
                                 ++ ["    br label %bb" ++ blockNumber (BlockId 0)]
@@ -281,6 +299,18 @@ emitBlock program entry fn (b, BasicBlock stmts term) = do
 
 emitStatement :: Bool -> Function -> Statement -> G ()
 emitStatement _ _ (Ghost _ _) = pure ()
+emitStatement _ fn (Drop l) = do
+    ty <- localTypeG fn l
+    if isPointer ty
+        then do
+            dropSlot ty l
+            emit ("store ptr null, ptr " ++ slot l)
+        else pure ()
+emitStatement _ fn (Peek dest rv) = do
+    destType <- localTypeG fn dest
+    result <- rvalue fn destType rv
+    t <- typeG destType
+    emit ("store " ++ t ++ " " ++ result ++ ", ptr " ++ slot dest)
 emitStatement entry fn (Assign dest rv) = do
     destType <- localTypeG fn dest
     result <- rvalue fn destType rv
@@ -333,6 +363,23 @@ rvalue fn destType rv =
         AsVariant o name -> do
             program <- programG
             operandAt fn (constructedType program name) o
+        Clone o -> do
+            ty <- sharedType fn [o]
+            value <- operandAt fn ty o
+            d <- descriptor ty
+            ins "k" ("call ptr @tersus_clone(ptr " ++ d ++ ", ptr " ++ value ++ ")")
+        -- the field is moved out of the value: what it held is left holding nothing
+        TakeField s name field -> do
+            program <- programG
+            (_, declared) <- constructorG program name
+            case elemIndex field (map fst declared) of
+                Nothing -> failG ("Variant " ++ name ++ " has no field " ++ field)
+                Just i -> do
+                    object <- operandAt fn (constructedType program name) (Copy s)
+                    taken <- loadSlot (snd (declared !! i)) object (dataHeader + 8 * i)
+                    p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show (dataHeader + 8 * i))
+                    emit ("store ptr null, ptr " ++ p)
+                    pure taken
 
 newList :: Int -> G String
 newList n = ins "l" ("call ptr @tersus_list_new(i64 " ++ show n ++ ")")
@@ -372,7 +419,8 @@ listOperation fn destType op os =
             (t, list) <- listArg l
             index <- operandAt fn TInt i
             word <- operandAt fn t x >>= toWord t
-            ins "l" ("call ptr @tersus_list_set(ptr " ++ list ++ ", i64 " ++ index ++ ", i64 " ++ word ++ ")")
+            d <- descriptor t
+            ins "l" ("call ptr @tersus_list_set(ptr " ++ list ++ ", i64 " ++ index ++ ", i64 " ++ word ++ ", ptr " ++ d ++ ")")
         _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " yet")
   where
     listArg o = do
@@ -568,6 +616,12 @@ operandAt :: Function -> Type -> Operand -> G String
 operandAt fn _ (Copy l) = do
     t <- localTypeG fn l >>= typeG
     ins "v" ("load " ++ t ++ ", ptr " ++ slot l)
+operandAt fn _ (Move l) = do
+    ty <- localTypeG fn l
+    t <- typeG ty
+    v <- ins "v" ("load " ++ t ++ ", ptr " ++ slot l)
+    emit ("store " ++ t ++ " " ++ zeroOf t ++ ", ptr " ++ slot l)
+    pure v
 operandAt _ ty (Const c) = constantValue ty c
 
 constantValue :: Type -> Constant -> G String
@@ -603,6 +657,7 @@ sharedType fn os = do
         [] -> TList TInt
   where
     local (Copy l) = localType <$> Map.lookup l (fnLocals fn)
+    local (Move l) = localType <$> Map.lookup l (fnLocals fn)
     local (Const _) = Nothing
 
 -- The type of a constant, as far as its contents say: an empty list of lists is a List<List<Int>>
@@ -630,10 +685,20 @@ storeResult entry fn dest value = do
     store fn dest value
     if entry && dest == Local 0 then emit "store i1 true, ptr %returned" else pure ()
 
+-- A local that owns a value frees the one it held when it is given another
 store :: Function -> Local -> String -> G ()
 store fn dest value = do
-    t <- localTypeG fn dest >>= typeG
+    ty <- localTypeG fn dest
+    t <- typeG ty
+    if isPointer ty then dropSlot ty dest else pure ()
     emit ("store " ++ t ++ " " ++ value ++ ", ptr " ++ slot dest)
+
+-- Frees the value a local holds (nothing, if it holds none)
+dropSlot :: Type -> Local -> G ()
+dropSlot ty l = do
+    old <- ins "o" ("load ptr, ptr " ++ slot l)
+    d <- descriptor ty
+    emit ("call void @tersus_drop(ptr " ++ d ++ ", ptr " ++ old ++ ")")
 
 localTypeG :: Function -> Local -> G Type
 localTypeG fn l = maybe (failG ("Undeclared local " ++ show l)) (pure . localType) (Map.lookup l (fnLocals fn))
