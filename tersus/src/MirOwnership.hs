@@ -69,13 +69,16 @@ needsDrop program = owning
         TBox{} -> True
         TArrayOf t _ -> owning t
         TNamed n -> declared n
-        TVariant v -> maybe False declared (enumOf v)
+        TVariant v -> maybe False declared (ownerOf v)
         _ -> False
     declared n = case Map.lookup n (progTypes program) of
         Just (StructDecl fields) -> any (owning . snd) fields
         Just (EnumDecl variants) -> any (owning . snd) (concatMap snd variants)
         Nothing -> False
-    enumOf v = listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
+    -- (a struct is its own constructor, and a cast to it has the type of a variant of it)
+    ownerOf v = case Map.lookup v (progTypes program) of
+        Just StructDecl{} -> Just v
+        _ -> listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
 
 heap :: Ctx -> Type -> Bool
 heap cx = needsDrop (cxProgram cx)
