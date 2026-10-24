@@ -3,6 +3,7 @@
 module TersusTypes where
 
 import qualified Data.IntMap.Strict as IntMap
+import Data.List (isPrefixOf)
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as S
@@ -119,7 +120,43 @@ data Statement
       If Expression [Statement] [Statement]
     | -- While condition invariant termination body; the invariant and termination are only used by the validator
       While Expression [ValidationStatement] (Maybe Termination) [Statement]
+    | -- trait Name { fn f(...) -> T [{ in }] [{ out }]; ... }: the functions an impl must have. The type checker takes it
+      -- apart; it does not reach the lowering.
+      TraitDef Name [TraitFn]
+    | -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions, which are named Type::f. The type checker
+      -- checks them against the trait and hands them back as ordinary function definitions, so the lowering never sees it.
+      ImplDef (Maybe Name) Name [Statement]
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
+
+-- A function a trait asks for: its name, the names of its parameters, the signature (Self stands for the type that
+-- implements the trait), and the contracts every implementation has to meet
+data TraitFn = TraitFn
+    { traitFnName :: Name
+    , traitFnParams :: [Variable]
+    , traitFnSignature :: Signature
+    , traitFnRequires :: [ValidationStatement]
+    , traitFnEnsures :: [ValidationStatement]
+    }
+    deriving (Show, Eq, Ord)
+
+-- The function that stands for the check that an impl meets its trait (see TypeCheck.checkImpl) is named after the trait, the
+-- type and the function, in a way no program can write: "Trait for Type::function"
+implCheckName :: Name -> Name -> Name -> Name
+implCheckName trait owner function = trait ++ " for " ++ owner ++ "::" ++ function
+
+-- (trait, type, function) of such a name
+parseImplCheckName :: Name -> Maybe (Name, Name, Name)
+parseImplCheckName name =
+    case breakOn " for " name of
+        Just (trait, rest) | Just (owner, function) <- breakOn "::" rest -> Just (trait, owner, function)
+        _ -> Nothing
+  where
+    breakOn needle = go ""
+      where
+        go acc text@(c : cs)
+            | needle `isPrefixOf` text = Just (reverse acc, drop (length needle) text)
+            | otherwise = go (c : acc) cs
+        go _ [] = Nothing
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
 data Rel = Eq | NotEq | Lt | Gt | LtEq | GtEq deriving (Eq, Ord, Show)

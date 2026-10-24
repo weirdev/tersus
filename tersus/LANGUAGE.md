@@ -190,6 +190,57 @@ match s {                                   // as a statement, the arms are bloc
 
 See `examples/enums.tersus`.
 
+## Traits And Impls
+
+An `impl` gives a struct or enum functions of its own, and a `trait` names functions that several types provide, with the contracts every one of them must meet.
+
+```tersus
+struct Counter { value: Int };
+
+impl Counter {                                   // functions of Counter that belong to no trait
+    fn new(value: Int) -> Self { return Self { value: value }; };
+    fn plus(self: Self, by: Int) -> Self { return Self { value: self.value + by }; };
+};
+
+trait Measure {                                  // signatures and contracts, no bodies
+    fn size(self: Self) -> Int [{ }] [{ affirm return >= 0; }];
+};
+
+impl Measure for Counter {
+    fn size(self: Self) -> Int [{ }] [{ affirm return = 1; }] { return 1; };
+};
+
+c = Counter::new(4).plus(1);                     // Type::function(...), and x.function(...)
+n = c.size() + Measure::size(c);                 // through the trait
+```
+
+- **The functions of an impl are named `Type::function`.** An impl is nothing but a way to define them, so `Counter::plus(c, 1)` is an ordinary call, checked and validated like the call of any function, against the contracts of the function it names. A type has one function of each name, whether it comes from an impl of a trait or not, and a function cannot be named like a variant (`Shape::Circle`). Defining the same name twice is `Function already defined`. An impl is written for a struct or an enum declared before it (not for `Int`, `Bool` or a list), and can be written only at the top of the program. A function sees the functions defined before it, so an impl comes before the code that calls its functions, and the functions of an impl can call each other in the order they are written.
+- **`Self`** is the type the impl is for, in the signatures and the bodies of its functions: `Self`, `Self::Variant` (a variant of an enum), and `Self { ... }` as a literal. In a trait it is the type that implements the trait.
+- **`x.function(a, b)` is `Type::function(x, a, b)`** where `Type` is the type of `x` (a value cast to a variant, `(s as Shape::Circle).area()`, is a value of its enum). The checker decides it from the type of `x`, and fails if there is no such function, or if `x` has no type with functions (an `Int`, a list). `x.f(a)` always calls a function of the type: it is not a call of a field that holds a function.
+- **`Trait::function(x, ...)`** calls the function of the type of the argument that the trait's signature gives the type `Self` (the first, if several do), and the type must implement the trait. A trait function with no `Self` parameter (`fn start() -> Self`) cannot be called through the trait, since nothing says which type is meant: write `Counter::start()`.
+- **An impl of a trait has exactly the trait's functions**, with the types the trait declares and `Self` replaced by the type. A missing function, an extra one and a different type are type errors, and so is implementing a trait twice for one type. A trait and a type cannot have the same name.
+- **The contracts of the trait bind every impl.** An impl may ask for less than the trait does (a weaker input contract) and promise more (a stronger output contract), but not the other way round. The checker adds to the program, for each function of the impl, a function that has the trait's contracts and calls the impl's function, and the validator checks it like any other:
+
+  ```tersus
+  fn "Measure for Counter::size"(self: Counter) -> Int [{ }] [{ affirm return >= 0; }] { return Counter::size(self); };
+  ```
+
+  The call has to meet the impl's input contract, which the trait's input contract is assumed to give, and the impl's output contract has to give the trait's. The failure names the impl: `impl Step for Counter: advance does not meet what Step declares (...): Funct input validation failed: Could not prove: by > 5`. (The validator also exports what it can see in a body, so an impl that writes no output contract still meets one that its body makes provable.) These functions show in `mir` and are compiled, and nothing calls them.
+- **A call is to the impl's function**, so the caller knows the impl's contracts, which may be stronger than the trait's (`examples/traits.tersus`). A function that may not end (`~`) can implement a trait, and the functions that call it have to be `~` as for any function.
+- **A trait's contracts are type checked where the trait is written**, with `Self` as a type that has no fields, so they can mention the other parameters and `return` but not read a field of a `Self` value (`affirm self.value > 0;` in a trait is a type error). A proof cannot call a function.
+- `trait`, `impl` and `Self` are reserved (`Self` cannot be the name of a type or a trait); `implement` and `traits` are still ordinary names. Trait and impl blocks end with `;` like every declaration.
+
+A wrong call reads like this:
+
+```
+Type error: Counter::nothing is not defined before this call (there is no such function, or its impl comes later)
+Type error: Counter does not implement Measure
+Type error: impl Step for Counter lacks the function start
+Type error: impl Step for Counter: start is fn() -> Int, but Step declares fn() -> Counter
+```
+
+See `examples/traits.tersus`, and `examples/rejected/` for `trait_input_stronger`, `trait_output_weaker` and `trait_missing_function`.
+
 ## Expressions
 
 Expressions can be literals, variables, function calls, parenthesized expressions, or infix operations.
@@ -971,6 +1022,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is use
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
+- Traits are checked and called, not used as types: a function cannot take "any type that implements `Measure`" (no generics, see `DATA_MODEL.md`), so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, one function of each name per type, with no default bodies, no associated types or constants, and no `Self` in the contracts of a trait beyond being a parameter. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
 - The CLI runs one file at a time and has no REPL or multi-file programs.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - The source file is read in the encoding of the locale, so a program with a letter that is not ASCII in a name (the parser accepts any letter) needs a UTF-8 locale to load.

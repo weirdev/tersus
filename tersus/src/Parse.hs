@@ -31,10 +31,11 @@ import TersusTypes
 data Decls = Decls
     { declCtors :: Map.Map Name [Variable]
     , declTypes :: Map.Map Name [Name]
+    , declSelf :: Maybe Name -- the type of the impl being read, which `Self` stands for
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty
+emptyDecls = Decls Map.empty Map.empty Nothing
 
 type Parser = Parsec String Decls
 
@@ -70,6 +71,11 @@ skipWhitespace p = do
     out <- p
     whitespace
     return out
+
+-- Self is the type of the impl that is being read; in a trait it stays Self, for the type checker to replace
+resolveSelf :: Name -> Parser Name
+resolveSelf "Self" = maybe "Self" id . declSelf <$> getState
+resolveSelf name = return name
 
 variable :: Parser String
 variable = do
@@ -115,6 +121,8 @@ statement =
             )
         <|> structStatement
         <|> enumStatement
+        <|> traitStatement
+        <|> implStatement
         <|> functStatement
         <|> assignStatement
         <|> blockStatement
@@ -257,7 +265,7 @@ enumStatement = do
     variants <- variant name `sepEndBy` (char ',' >> whitespace)
     void (char '}')
     whitespace
-    when (name `elem` ["Int", "Bool", "List"]) $ fail (name ++ " is a builtin type and cannot be an enum name")
+    when (name `elem` ["Int", "Bool", "List", "Self"]) $ fail (name ++ " is a builtin type and cannot be an enum name")
     when (null variants) $ fail ("Enum " ++ name ++ " has no variants")
     when (length (nub (map fst variants)) /= length variants) $ fail ("Enum " ++ name ++ " repeats a variant")
     modifyState
@@ -288,7 +296,7 @@ structStatement = do
     void (char '}')
     whitespace
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
-    when (name `elem` ["Int", "Bool", "List"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
+    when (name `elem` ["Int", "Bool", "List", "Self"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
     return (StructDef name fields)
   where
@@ -358,7 +366,7 @@ structFields element apply name declared = do
 -- Name or Enum::Variant
 qualifiedName :: Parser Name
 qualifiedName = do
-    first <- variable
+    first <- variable >>= resolveSelf
     option first (try (string "::" >> variable) >>= \second -> return (first ++ "::" ++ second))
 
 -- A struct or variant that has been declared, with its fields
@@ -456,19 +464,36 @@ matchReturn = do
 
 -- x.field and x as Enum::Variant, repeated. A `..` after a term is a range, not a field. A field of an enum value
 -- is read after a cast to the variant that has it: (s as Shape::Circle).radius
-withFields :: (Value -> [a] -> a) -> Parser a -> Parser a
-withFields apply term = do
+--
+-- In an expression a field read followed by arguments, x.f(a, b), is a call of the function f that belongs to the type of x.
+-- Which function that is depends on the type of x, so the checker decides: it is F (Var ".f") (x : arguments) until then.
+withFields :: (Value -> [a] -> a) -> Maybe (Parser a, Variable -> a -> [a] -> a) -> Parser a -> Parser a
+withFields apply methods term = do
     base <- term
     suffixes <- many (try fieldSuffix <|> castSuffix)
-    return (foldl (\acc funct -> apply (builtinFunct funct) [acc]) base suffixes)
+    return (foldl (flip ($)) base suffixes)
   where
-    fieldSuffix = Field Nothing <$> (char '.' >> notFollowedBy (char '.') >> variable <* whitespace)
+    fieldSuffix = do
+        void (char '.')
+        notFollowedBy (char '.')
+        field <- variable
+        arguments <- case methods of
+            Just (element, _) -> optionMaybe (char '(' >> whitespace >> element `sepBy` skipWhitespace (char ',') <* whitespace <* char ')')
+            Nothing -> return Nothing
+        whitespace
+        return $ case (arguments, methods) of
+            (Just args, Just (_, call)) -> \receiver -> call field receiver args
+            _ -> \acc -> apply (builtinFunct (Field Nothing field)) [acc]
     castSuffix = do
         keyword "as"
         whitespace
         (variant, _) <- declaredCtor
         whitespace
-        return (Cast variant)
+        return (\acc -> apply (builtinFunct (Cast variant)) [acc])
+
+-- x.f(arguments) in an expression, before the checker has said which function f is
+methodCall :: Variable -> Expression -> [Expression] -> Expression
+methodCall name receiver args = F (Var ('.' : name)) (receiver : args)
 
 expressionApply :: Value -> [Expression] -> Expression
 expressionApply funct = F (Val funct)
@@ -482,6 +507,15 @@ functStatement = do
     whitespace
     var <- variable
     whitespace
+    (params, returnType, inputReqs, outputReqs) <- functHeader
+    termination <- terminationClause
+    fnBody <- curlyBracesParse statementBlock
+    whitespace
+    return (Assign var (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType) termination fnBody) [])))
+
+-- (parameters) -> Type [{ input contract }] [{ output contract }], the part of a function before its termination clause
+functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement])
+functHeader = do
     void (char '(')
     whitespace
     params <- parameter `sepBy` skipWhitespace (char ',')
@@ -494,10 +528,55 @@ functStatement = do
     whitespace
     outputReqs <- option [] functContractReqs
     whitespace
-    termination <- terminationClause
-    fnBody <- curlyBracesParse statementBlock
+    return (params, returnType, inputReqs, outputReqs)
+
+-- trait Name { fn f(params) -> Type [{ input contract }] [{ output contract }]; ... }: what a type has to provide to
+-- implement the trait. Self is the implementing type. The contracts are met by every implementation: it may ask for less
+-- and promise more, which the validator checks (see TypeCheck.implementation).
+traitStatement :: Parser Statement
+traitStatement = do
+    keyword "trait"
     whitespace
-    return (Assign var (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType) termination fnBody) [])))
+    name <- variable
+    whitespace
+    when (name `elem` ["Int", "Bool", "List", "Self"]) $ fail (name ++ " is a builtin type and cannot be a trait name")
+    functions <- curlyBracesParse (genericStatementBlock traitFunction)
+    whitespace
+    when (length (nub (map traitFnName functions)) /= length functions) $ fail ("Trait " ++ name ++ " repeats a function")
+    return (TraitDef name functions)
+  where
+    traitFunction = do
+        keyword "fn"
+        whitespace
+        fname <- variable
+        whitespace
+        (params, returnType, inputReqs, outputReqs) <- functHeader
+        return (TraitFn fname (map fst params) (Signature (map snd params) returnType) inputReqs outputReqs)
+
+-- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are defined as Type::f, so they are called by that
+-- name (and as x.f(...) when x is a Type). Self stands for Type in them.
+implStatement :: Parser Statement
+implStatement = do
+    keyword "impl"
+    whitespace
+    first <- variable
+    whitespace
+    (trait, typeName) <- option (Nothing, first) (keyword "for" >> whitespace >> variable >>= \t -> whitespace >> return (Just first, t))
+    types <- declTypes <$> getState
+    when (not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
+    modifyState (\d -> d{declSelf = Just typeName})
+    functions <- curlyBracesParse (genericStatementBlock (implFunction typeName))
+    modifyState (\d -> d{declSelf = Nothing})
+    whitespace
+    ctors <- declCtors <$> getState
+    mapM_ (\(Assign full _) -> when (Map.member full ctors) $ fail (full ++ " is a variant, and cannot also be a function")) functions
+    return (ImplDef trait typeName functions)
+  where
+    implFunction typeName = do
+        definition <- functStatement
+        case definition of
+            Assign var fn -> return (Assign (typeName ++ "::" ++ var) fn)
+            other -> return other
 
 -- A parameter is a name and its type: `n: Int`
 parameter :: Parser (Variable, Type)
@@ -528,7 +607,7 @@ typeAnnotation = do
         whitespace
         TFn args <$> typeAnnotation
     namedType = do
-        name <- variable
+        name <- variable >>= resolveSelf
         case name of
             "Int" -> return TInt
             "Bool" -> return TBool
@@ -662,7 +741,7 @@ bindIndex _ other = other
 nonInfixProof :: Parser VariableProof
 nonInfixProof =
     concreteProof
-        <|> withFields proofApply (parensProof <|> structLiteral proof proofApply <|> try functionProof <|> try abstractProof)
+        <|> withFields proofApply Nothing (parensProof <|> structLiteral proof proofApply <|> try functionProof <|> try abstractProof)
 
 infixProof :: Parser VariableProof
 infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof]) (\funct proof' -> FApp (CTerm (builtinFunct funct)) [proof'])
@@ -737,9 +816,11 @@ expression = try infixExpression <|> nonInfixExpression
 
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
-    withFields expressionApply (structLiteral expression expressionApply <|> try fExpression)
+    withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression)
         <|> (Val <$> value)
-        <|> withFields expressionApply (varExpression <|> parensExpression)
+        <|> withFields expressionApply methods (varExpression <|> parensExpression)
+  where
+    methods = Just (expression, methodCall)
 
 bracketsParse :: Parser o -> Parser c -> Parser a -> Parser a
 bracketsParse open close innerParser = do
@@ -798,7 +879,7 @@ varExpression = do
 
 fExpression :: Parser Expression
 fExpression = do
-    fname <- variable
+    fname <- qualifiedName
     void (char '(')
     whitespace
     args <- expression `sepBy` skipWhitespace (char ',')

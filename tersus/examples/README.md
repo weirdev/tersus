@@ -34,6 +34,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `generic_lists.tersus` | Lists of `Bool` and of lists, built by a `for` loop over the elements, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
 | `structs.tersus` | A `struct`, literals, field reads, `..base` updates with a contract proving the other fields are unchanged, and updating one element of a list of structs | returns `11` |
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
+| `traits.tersus` | A `trait` with contracts, `impl`s for an enum and a struct, `Self`, and the three ways to call a function of a type (`Shape::unit()`, `s.sides()` and `Measure::sides(s)`); an impl that asks for less and promises more than its trait | returns `55` |
 | `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
 | `types.tersus` | Parameter and return types, a `Bool`-returning function, and a list built element by element | returns `6` |
 | `linear.tersus` | Sums of variables, multiples and division by a constant as linear arithmetic: contracts like `a + b <= 10` and `2 * x <= y`, a loop with an inferred `s + i = n`, `bits` that halves (`shrinks n`, `n / 2`), and a binary search over a range whose `if` states neither the invariant nor the variant | returns `633` |
@@ -107,6 +108,9 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/linked_list_unchecked_walk.tersus` | A walk over a list whose links nothing says are valid |
 | `rejected/struct_update_frame.tersus` | A contract claims a field that an update did not set equals another field |
 | `rejected/struct_field_type.tersus` | A struct literal gives a `Bool` for an `Int` field |
+| `rejected/trait_input_stronger.tersus` | An impl asks for `by > 5` where its trait allows any `by > 0`: code written against the trait could call it with a step it refuses |
+| `rejected/trait_output_weaker.tersus` | An impl of `Measure` returns a product of two unknowns, and the trait promises a result that is not negative |
+| `rejected/trait_missing_function.tersus` | An impl lacks one of the functions of its trait |
 | `rejected/type_return_mismatch.tersus` | A function declared to return an `Int` returns a list |
 | `rejected/type_argument_mismatch.tersus` | `size` is applied to an `Int` |
 | `rejected/call_before_definition.tersus` | A function calls one defined after it |
