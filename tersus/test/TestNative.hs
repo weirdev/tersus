@@ -36,6 +36,7 @@ testNative =
         , TestList "examples" [testNativeProgram path | path <- nativeExamples]
         , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
+        , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
@@ -49,7 +50,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "arrays", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "safe_access", "structs", "termination", "traits", "types", "update_list"
@@ -203,6 +204,30 @@ listPrograms =
     , ("returned in a branch only", "x = [1]; if size(x) > 5 { return x; };")
     ]
 
+-- Arrays share the layout of lists, with a size that never changes
+arrayPrograms :: [(String, String)]
+arrayPrograms =
+    [ ("array of copies", "return array(3, 7);")
+    , ("array of no elements", "return array(0, 7);")
+    , ("literal", "return #[1, 2, 3];")
+    , ("empty literal", "a = #[]; return size(a);")
+    , ("booleans", "return array(2, true);")
+    , ("size, get, first and last", "a = #[4, 5, 6]; return size(a) * 1000 + get(a, 1) * 100 + first(a) * 10 + last(a);")
+    , ("set", "a = #[1, 2, 3]; b = set(a, 1, 9); return b;")
+    , ("set does not change its argument", "a = #[1, 2, 3]; b = set(a, 1, 9); return a;")
+    , ("set again and again", "a = array(3, 0); a = set(a, 0, 1); a = set(a, 2, 3); a = set(a, 0, 4); return a;")
+    , ("equality", "return #[1, 2] = #[1, 2];")
+    , ("inequality of different sizes", "return array(2, 0) = array(3, 0);")
+    , ("a copy of a list in each slot", "rows = array(3, [1, 2]); rows = set(rows, 1, [9]); return rows;")
+    , ("a copy of an array in each slot", "m = array(2, array(2, 0)); m = set(m, 0, array(2, 5)); return m;")
+    , ("a copy of a struct in each slot", "struct P { x: Int, ys: List<Int> }; ps = array(2, P { x: 1, ys: [2] }); return ps;")
+    , ("the element is still there after", "x = [1, 2]; rows = array(2, x); return x;")
+    , ("an array in a struct", "struct Grid { cells: Array<Int> }; g = Grid { cells: array(3, 2) }; return get(g.cells, 2);")
+    , ("an array parameter", "fn total(a: Array<Int>) -> Int { s = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { s = s + get(a, i); i = i + 1; }; return s; }; return total(#[1, 2, 3, 4]);")
+    , ("an array that is returned", "fn make(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] { return array(n, 1); }; return make(4);")
+    , ("filled in a loop", "a = array(300, 0); i = 0; while i < 300 [{ affirm i >= 0; affirm i <= 300; affirm size(a) = 300; }] shrinks 300 - i { a = set(a, i, i * i); i = i + 1; }; return get(a, 299);")
+    ]
+
 controlPrograms :: [(String, String)]
 controlPrograms =
     [ ("comparisons", "a = 3; b = 5; return a < b;")
@@ -223,7 +248,7 @@ controlPrograms =
 
 -- Every program of these tests that validates, and every one that is lowered without being validated
 validatedPrograms :: [(String, String)]
-validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ stopPrograms
+validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ arrayPrograms ++ dataPrograms ++ stopPrograms
 
 unvalidatedPrograms :: [(String, String)]
 unvalidatedPrograms = functionPrograms
@@ -282,6 +307,8 @@ memoryTests :: [Test]
 memoryTests =
     [ TestCase "a million pushes" (underLimit "l = []; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { l = push(l, i); i = i + 1; }; return size(l);" "1000000\n")
     , TestCase "pushes and sets" (underLimit "l = []; i = 0; while i < 300000 [{ affirm i >= 0; }] shrinks 300000 - i { l = push(l, i); i = i + 1; }; k = 0; while k < 300000 [{ affirm k >= 0; }] shrinks 300000 - k { l = set(l, k, get(l, k) + 1); k = k + 1; }; return get(l, 299999);" "300000\n")
+    , TestCase "a million-element array set in place" (underLimit "a = array(1000000, 0); i = 0; while i < 1000000 [{ affirm i >= 0; affirm i <= 1000000; affirm size(a) = 1000000; }] shrinks 1000000 - i { a = set(a, i, i); i = i + 1; }; return get(a, 999999);" "999999\n")
+    , TestCase "arrays made and dropped in a loop" (underLimit "s = 0; i = 0; while i < 200000 [{ affirm i >= 0; }] shrinks 200000 - i { m = array(3, array(3, i)); s = s + size(m); i = i + 1; }; return s;" "600000\n")
     , TestCase "lists of lists" (underLimit "rows = []; i = 0; while i < 20000 [{ affirm i >= 0; }] shrinks 20000 - i { row = push(push([], i), i); rows = push(rows, row); i = i + 1; }; return size(rows);" "20000\n")
     , TestCase "values made and dropped in a loop" (underLimit "struct P { x: Int, ys: List<Int> }; s = 0; i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { p = P { x: i, ys: push(push([], i), 1) }; s = s + p.x; i = i + 1; }; return s;" "1999999000000\n")
     ]

@@ -59,6 +59,7 @@ data Role = Read | Consume
 
 isHeap :: Type -> Bool
 isHeap TList{} = True
+isHeap TArray{} = True
 isHeap TNamed{} = True
 isHeap TVariant{} = True
 isHeap _ = False

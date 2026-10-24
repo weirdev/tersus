@@ -223,6 +223,7 @@ resolveType ty = defaultType <$> tc (zonk ty)
   where
     defaultType (TVar _) = TInt
     defaultType (TList t) = TList (defaultType t)
+    defaultType (TArray t) = TArray (defaultType t)
     defaultType (TFn args ret) = TFn (map defaultType args) (defaultType ret)
     defaultType t = t
 
@@ -471,7 +472,7 @@ lowerBuiltin b args = do
     result <- case (b, tys) of
         (Field owner field, [structTy]) -> tc (readField owner field structTy)
         (Ctor name fields, _) -> tc (checkConstruct name fields tys)
-        _ -> tc (builtinType b >>= \ft -> checkCall "call" ft tys)
+        _ -> tc (builtinType b >>= \ft -> checkBuiltinCall (Just b) "call" ft tys)
     rv <- builtinRvalue b tys (map fst operands)
     return (PRvalue rv, result)
 
@@ -485,6 +486,8 @@ builtinRvalue b tys ops =
         (Get, [_, _]) -> return (M.ListOp M.Get ops)
         (Push, [_, _]) -> return (M.ListOp M.Push ops)
         (Set, [_, _, _]) -> return (M.ListOp M.Set ops)
+        (NewArray, [_, _]) -> return (M.ListOp M.NewArray ops)
+        (ArrayFrom, [o]) -> return (M.Use o)
         (Plus, [x, y]) -> return (M.BinaryOp M.Add x y)
         (Minus, [x, y]) -> return (M.BinaryOp M.Sub x y)
         (Times, [x, y]) -> return (M.BinaryOp M.Mul x y)
@@ -572,6 +575,8 @@ builtinLabel b = case b of
     Get -> "get"
     Push -> "push"
     Set -> "set"
+    NewArray -> "array"
+    ArrayFrom -> "array_from"
     Plus -> "add"
     Minus -> "sub"
     Times -> "mul"

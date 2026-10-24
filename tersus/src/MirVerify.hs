@@ -92,6 +92,7 @@ problems program fn =
 
     hasUnknown (TVar _) = True
     hasUnknown (TList t) = hasUnknown t
+    hasUnknown (TArray t) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
     hasUnknown _ = False
 
@@ -106,9 +107,10 @@ rvalueProblems env localTy d rv =
             Compare _ -> ints [a, b] ++ result TBool
             _ -> ints [a, b] ++ result TInt
         ListOp Length [l] -> [expected' "a list" l | not (isList l)] ++ result TInt
-        ListOp First [l] -> [expected (TList d) l | not (fits' (TList d) l)]
-        ListOp Last [l] -> [expected (TList d) l | not (fits' (TList d) l)]
-        ListOp Get [l, i] -> [expected (TList d) l | not (fits' (TList d) l)] ++ ints [i]
+        ListOp First [l] -> [expected (TList d) l | not (fitsSequence d l)]
+        ListOp Last [l] -> [expected (TList d) l | not (fitsSequence d l)]
+        ListOp Get [l, i] -> [expected (TList d) l | not (fitsSequence d l)] ++ ints [i]
+        ListOp NewArray [n, x] -> ints [n] ++ withElement (\e -> [expected e x | not (fits' e x)])
         ListOp Push [l, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ [expected e x | not (fits' e x)])
         ListOp Set [l, i, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ ints [i] ++ [expected e x | not (fits' e x)])
         ListOp op os -> [show op ++ " is applied to " ++ show (length os) ++ " operands"]
@@ -137,6 +139,13 @@ rvalueProblems env localTy d rv =
         TakeField l name field -> rvalueProblems env localTy d (ReadField (Copy l) name field)
   where
     fits' = fits env localTy
+    -- the sequence an element is read from is a list or an array
+    fitsSequence e l = fits' (TList e) l || fits' (TArray e) l
+    -- the result of set is the array it was given; the result of array(n, x) is an array
+    arrayResult = case rv of
+        ListOp Set [l, _, _] -> fits' d l
+        ListOp NewArray _ -> True
+        _ -> False
     expected t o = renderOperand' o ++ " is not " ++ renderType t
     expected' what o = renderOperand' o ++ " is not " ++ what
     renderOperand' o = case o of
@@ -147,6 +156,7 @@ rvalueProblems env localTy d rv =
     result t = ["the result is " ++ renderType t ++ ", not " ++ renderType d | d /= t]
     withElement k = case d of
         TList e -> k e
+        TArray e | arrayResult -> k e
         _ -> ["the result is " ++ renderType d ++ ", not a list"]
     comparison a b =
         result TBool
@@ -159,6 +169,7 @@ rvalueProblems env localTy d rv =
     isFn _ = False
     isList o = case operandType env localTy o of
         Just (TList _) -> True
+        Just (TArray _) -> True
         Nothing -> case o of
             Const (CList _) -> True
             _ -> False
@@ -193,6 +204,7 @@ constantFits env wanted c = case c of
     CBool _ -> wanted == TBool
     CList cs -> case wanted of
         TList e -> all (constantFits env e) cs
+        TArray e -> all (constantFits env e) cs
         _ -> False
     CData name fields -> case Map.lookup name (envCtors env) of
         Nothing -> False
@@ -208,6 +220,7 @@ sub :: Env -> Type -> Type -> Bool
 sub env wanted actual = case (wanted, actual) of
     (TNamed t, TVariant v) -> maybe False ((== t) . fst) (Map.lookup v (envCtors env))
     (TList a, TList b) -> sub env a b
+    (TArray a, TArray b) -> sub env a b
     _ -> wanted == actual
 
 statementLocals :: Statement -> [Local]

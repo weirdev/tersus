@@ -1,0 +1,41 @@
+// Array<T> holds a sequence whose size is fixed when it is made. array(n, x) makes n copies of x, #[1, 2, 3] writes one out,
+// and size, get, first, last and set work on it as on a list (set gives a new array and leaves its argument alone). There is
+// no push: the size of an array never changes, so what is known about it stays known.
+//
+// The type does not say the size. A function that takes an array of any size says what it needs of the size in its input
+// contract, and the caller has to show it.
+fn dot(a: Array<Int>, b: Array<Int>) -> Int [{ affirm size(a) = size(b); }] [{ }] {
+    total = 0;
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); affirm size(b) = size(a); }] shrinks size(a) - i {
+        total = total + get(a, i) * get(b, i);
+        i = i + 1;
+    };
+    return total;
+};
+
+// A function that makes an array says its size in its output contract
+fn squares(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] {
+    out = array(n, 0);
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = n; }] shrinks n - i {
+        out = set(out, i, i * i);
+        i = i + 1;
+    };
+    return out;
+};
+
+// When the sizes are only known when the program runs, it can check them: the branch knows what the condition says
+fn checkedDot(a: Array<Int>, b: Array<Int>) -> Int {
+    if size(a) = size(b) {
+        return dot(a, b);
+    };
+    return 0;
+};
+
+s = squares(5);                 // #[0, 1, 4, 9, 16]
+ones = array(5, 1);
+affirm size(s) = 5;
+total = dot(s, ones);           // 30
+mismatched = checkedDot(s, array(3, 1));
+return total + mismatched + size(#[7, 8, 9]);

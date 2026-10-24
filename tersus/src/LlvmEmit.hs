@@ -63,6 +63,7 @@ declarations =
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
     , "declare ptr @tersus_list_new(i64)"
+    , "declare ptr @tersus_array_new(i64, i64, ptr)"
     , "declare ptr @tersus_list_push(ptr, i64)"
     , "declare ptr @tersus_list_set(ptr, i64, i64, ptr)"
     , "declare ptr @tersus_clone(ptr, ptr)"
@@ -115,6 +116,7 @@ closeTypes program = go [] . map (canonical program)
         | ty `elem` seen = go seen rest
         | otherwise = go (ty : seen) (parts ty ++ rest)
     parts (TList t) = [canonical program t]
+    parts (TArray t) = [canonical program t]
     parts (TNamed n) = [canonical program t | (_, fields) <- variantsOf program n, (_, t) <- fields]
     parts _ = []
 
@@ -139,6 +141,8 @@ typeDescriptors program types =
     body TInt = "{ i64 0, ptr null }"
     body TBool = "{ i64 1, ptr null }"
     body (TList t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
+    -- (an array is laid out and walked as a list is: its capacity is its length)
+    body (TArray t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
     body (TNamed n) = "{ i64 3, ptr " ++ global "data." n ++ " }"
     body (TFn _ _) = "{ i64 4, ptr null }"
     body _ = "{ i64 -1, ptr null }"
@@ -411,6 +415,13 @@ listOperation fn destType op os =
             (t, list) <- listArg l
             index <- operandAt fn TInt i
             elementPtr list index >>= loadElement t
+        (NewArray, [n, x]) -> case destType of
+            TArray t -> do
+                count <- operandAt fn TInt n
+                word <- operandAt fn t x >>= toWord t
+                d <- descriptor t
+                ins "l" ("call ptr @tersus_array_new(i64 " ++ count ++ ", i64 " ++ word ++ ", ptr " ++ d ++ ")")
+            _ -> failG "array must make an array"
         (Push, [l, x]) -> do
             (t, list) <- listArg l
             word <- operandAt fn t x >>= toWord t
@@ -429,12 +440,18 @@ listOperation fn destType op os =
             Set -> pure destType
             Length -> sharedType fn [o]
             _ -> pure (TList destType)
-        case ty of
-            TList t -> operandAt fn ty o >>= \list -> pure (t, list)
-            _ -> failG "A list operation needs a list"
+        case sequenceElement ty of
+            Just t -> operandAt fn ty o >>= \list -> pure (t, list)
+            Nothing -> failG "A list operation needs a list"
     lengthOf list = do
         p <- ins "p" ("getelementptr i8, ptr " ++ list ++ ", i64 8")
         ins "n" ("load i64, ptr " ++ p)
+
+-- What a list or an array holds
+sequenceElement :: Type -> Maybe Type
+sequenceElement (TList t) = Just t
+sequenceElement (TArray t) = Just t
+sequenceElement _ = Nothing
 
 -- The address of an element: a list is 24 bytes of header (count, length, capacity) and then a slot of 8 bytes per element
 elementPtr :: String -> String -> G String
@@ -483,6 +500,7 @@ loadAt t p =
 -- Whether a value is the address of an object (what the runtime compares by the descriptor of its type)
 isPointer :: Type -> Bool
 isPointer TList{} = True
+isPointer TArray{} = True
 isPointer TNamed{} = True
 isPointer TVariant{} = True
 isPointer _ = False
@@ -627,7 +645,7 @@ operandAt _ ty (Const c) = constantValue ty c
 constantValue :: Type -> Constant -> G String
 constantValue _ (CInt i) = pure (show i)
 constantValue _ (CBool b) = pure (if b then "true" else "false")
-constantValue (TList t) (CList cs) = do
+constantValue ty (CList cs) | Just t <- sequenceElement ty = do
     list <- newList (length cs)
     mapM_ (\(i, c) -> constantValue t c >>= storeElement t list (show i)) (zip [0 :: Int ..] cs)
     pure list
@@ -716,6 +734,7 @@ llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TBool = Ok "i1"
 llvmType (TList t) = llvmType t `bindResult` \_ -> Ok "ptr"
+llvmType (TArray t) = llvmType t `bindResult` \_ -> Ok "ptr"
 llvmType TNamed{} = Ok "ptr"
 llvmType TVariant{} = Ok "ptr"
 llvmType TFn{} = Ok "ptr"

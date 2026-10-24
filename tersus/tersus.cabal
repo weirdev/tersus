@@ -88,6 +88,7 @@ test-suite tersus-test
       TestHarness
       TestNative
       TestOwnership
+      TestArrays
       TestTraits
       TestPipeline
       TestProofs

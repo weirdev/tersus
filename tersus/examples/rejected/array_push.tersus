@@ -1,0 +1,4 @@
+// An array has no push: its size is fixed when it is made.
+a = array(2, 0);
+a = push(a, 1);
+return size(a);

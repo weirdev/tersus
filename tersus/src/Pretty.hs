@@ -76,6 +76,8 @@ builtinName Last = "last"
 builtinName Get = "get"
 builtinName Push = "push"
 builtinName Set = "set"
+builtinName NewArray = "array"
+builtinName ArrayFrom = "array"
 builtinName Plus = "+"
 builtinName Minus = "-"
 builtinName Times = "*"
@@ -103,6 +105,7 @@ renderType :: Type -> String
 renderType TInt = "Int"
 renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
+renderType (TArray t) = "Array<" ++ renderType t ++ ">"
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
 renderType (TNamed name) = name
 renderType (TVariant name) = name
