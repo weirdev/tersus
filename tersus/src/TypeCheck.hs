@@ -647,13 +647,20 @@ substSelf _ t = t
 checkImpl :: Ctx -> Env -> Maybe Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
 checkImpl ctx env trait typeName functions = do
     _ <- typeCtors typeName
+    -- (the type implements the trait from the first function on, so a function can call an earlier one through the trait; if the
+    -- impl is not accepted the program is refused, so this is never seen)
+    required <- case trait of
+        Nothing -> return []
+        Just traitName -> do
+            s <- getState
+            found <- maybe (failTc ("Type error: unknown trait " ++ traitName)) return (Map.lookup traitName (tcTraits s))
+            when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
+            putState s{tcImpls = Set.insert (traitName, typeName) (tcImpls s)}
+            return found
     (ctx', env', checked) <- definitions True (ctx, env, []) functions
     case trait of
         Nothing -> return (ctx', env', checked)
         Just traitName -> do
-            s <- getState
-            required <- maybe (failTc ("Type error: unknown trait " ++ traitName)) return (Map.lookup traitName (tcTraits s))
-            when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
             let here = "impl " ++ traitName ++ " for " ++ typeName
                 defined = [(implFunctionPart name, (Signature ptys rty, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty) term _) _)) <- checked]
                 wanted = map traitFnName required
@@ -673,8 +680,6 @@ checkImpl ctx env trait typeName functions = do
                         return (wrapper traitName typeName f expected term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
             (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
-            s' <- getState
-            putState s'{tcImpls = Set.insert (traitName, typeName) (tcImpls s')}
             return (ctx'', env'', checked ++ wrapped)
   where
     -- The functions of the impl can be called as Type::f from the next one on, itself included; the functions that check

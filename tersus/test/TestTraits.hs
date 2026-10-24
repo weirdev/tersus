@@ -55,6 +55,7 @@ testTraits =
                 , testCase "a recursive function of an impl" (runs "impl Counter { fn count(self: Self) -> Int [{ affirm self.value >= 0; }] shrinks self.value { if self.value = 0 { return 0; } else { return 1 + Counter { value: self.value - 1 }.count(); }; }; }; return Counter { value: 3 }.count();" 3)
                 , testCase "a method in a condition and a loop bound" (runs "impl Counter { fn limit(self: Self) -> Int { return self.value; }; }; c = Counter { value: 3 }; n = 0; if c.limit() > 2 { n = n + 1; }; return n;" 1)
                 , testCase "a type may implement several traits" (runs (measure ++ "trait Name { fn id(self: Self) -> Int; }; impl Name for Shape { fn id(self: Self) -> Int { return 7; }; }; s = Shape::Empty; return s.sides() + Name::id(s);") 7)
+                , testCase "a function of a trait impl calls an earlier one through the trait" (runs "trait T { fn first(self: Self) -> Int; fn second(self: Self) -> Int; }; impl T for Counter { fn first(self: Self) -> Int { return 4; }; fn second(self: Self) -> Int { return T::first(self) + 1; }; }; return T::second(Counter { value: 0 });" 5)
                 , testCase "a trait with no functions" (valid "trait Marker { }; impl Marker for Counter { }; x = 1;")
                 ]
             , TestList
