@@ -135,6 +135,28 @@ builtinFunct Set =
             ]
             (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
         ]
+-- array(n, x) is an array of n copies of x, so it needs a size that is not negative. Its size is n and every element is x;
+-- the result is also equal to the term array(n, x). An array has no push: its size never changes, which is all that makes this
+-- a fact a caller can keep.
+builtinFunct NewArray =
+    VFunct
+        ["n", "x"]
+        [ Rewrite (CheckRel (relProof GtEq (ATerm "n") (CTerm (VInt 0))))
+        , ProofAssert (relProof GtEq (ATerm "n") (CTerm (VInt 0)))
+        ]
+        []
+        (BuiltinFunct NewArray)
+        [ relProof Eq (ATerm "return") (FApp (CTerm newArraySymbol) [ATerm "n", ATerm "x"])
+        , relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (ATerm "n")
+        , Forall
+            "j"
+            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
+            , relProof Lt (BVar "j") (ATerm "n")
+            ]
+            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (ATerm "x"))
+        ]
+-- The array that a literal makes is the list of its elements, read as an array: the same value
+builtinFunct ArrayFrom = VFunct ["list"] [] [] (BuiltinFunct ArrayFrom) []
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []
@@ -182,6 +204,7 @@ stdLibCtx =
         , ("get", builtinFunct Get)
         , ("push", builtinFunct Push)
         , ("set", builtinFunct Set)
+        , ("array", builtinFunct NewArray)
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
         , ("*", builtinFunct Times)
@@ -215,6 +238,13 @@ evalBuiltinFunct Set [VList l, VInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VList (before ++ x : drop 1 after)
 evalBuiltinFunct Set _ = Error "Set only valid for a list, an int and an element"
+-- (an array too large to write out is not evaluated: the validator knows its size from the contract, and does not need it)
+evalBuiltinFunct NewArray [VInt n, x]
+    | n >= 0 && n <= maxUnfolded = Ok $ VList (replicate (fromIntegral n) x)
+    | otherwise = Error "The array is not evaluated"
+evalBuiltinFunct NewArray _ = Error "array takes a size and an element"
+evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l
+evalBuiltinFunct ArrayFrom _ = Error "An array literal is made from a list"
 evalBuiltinFunct (Ctor name fields) args
     | length fields == length args = Ok $ VData name (zip fields args)
     | otherwise = Error ("Struct " ++ name ++ " takes " ++ show (length fields) ++ " fields, got " ++ show (length args))
@@ -307,6 +337,13 @@ pushSymbol = VFunct ["list", "x"] [] [] (BuiltinFunct Push) []
 
 setSymbol :: Value
 setSymbol = VFunct ["list", "index", "x"] [] [] (BuiltinFunct Set) []
+
+newArraySymbol :: Value
+newArraySymbol = VFunct ["n", "x"] [] [] (BuiltinFunct NewArray) []
+
+-- The largest array that the validator writes out as a value when it knows the size
+maxUnfolded :: Integer
+maxUnfolded = 1024
 
 relProof :: Rel -> VariableProof -> VariableProof -> VariableProof
 relProof rel lhs rhs = FApp (CTerm (builtinFunct (Rel rel))) [lhs, rhs]

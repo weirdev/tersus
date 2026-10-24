@@ -596,6 +596,13 @@ typeAnnotation = do
     whitespace
     return ty
   where
+    typeArgument = do
+        whitespace
+        void (char '<')
+        whitespace
+        element <- typeAnnotation
+        void (char '>')
+        return element
     functionType = do
         keyword "fn"
         whitespace
@@ -612,13 +619,8 @@ typeAnnotation = do
         case name of
             "Int" -> return TInt
             "Bool" -> return TBool
-            "List" -> do
-                whitespace
-                void (char '<')
-                whitespace
-                element <- typeAnnotation
-                void (char '>')
-                return (TList element)
+            "List" -> TList <$> typeArgument
+            "Array" -> TArray <$> typeArgument
             _ -> do
                 variant <- optionMaybe (try (string "::" >> variable))
                 return (maybe (TNamed name) (\v -> TVariant (name ++ "::" ++ v)) variant)
@@ -760,6 +762,7 @@ functionProof = do
         "get" -> return Get
         "push" -> return Push
         "set" -> return Set
+        "array" -> return NewArray
         _ -> fail "Functions in proofs only support builtins for now"
     void (char '(')
     whitespace
@@ -776,7 +779,11 @@ abstractProof = do
     return p
 
 concreteProof :: Parser VariableProof
-concreteProof = CTerm <$> value
+concreteProof = arrayLiteral (\items -> FApp (CTerm (builtinFunct ArrayFrom)) [CTerm items]) <|> (CTerm <$> value)
+
+-- #[1, 2, 3]: an array of constants, which is the list of them read as an array
+arrayLiteral :: (Value -> a) -> Parser a
+arrayLiteral build = char '#' >> (build <$> vlist)
 
 blockStatement :: Parser Statement
 blockStatement = do
@@ -818,6 +825,7 @@ expression = try infixExpression <|> nonInfixExpression
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
     withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression <|> qualifiedCall)
+        <|> arrayLiteral (\items -> F (Val (builtinFunct ArrayFrom)) [Val items])
         <|> (Val <$> value)
         <|> withFields expressionApply methods (varExpression <|> parensExpression)
   where

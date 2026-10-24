@@ -1,0 +1,6 @@
+// dot asks for two arrays of the same size, and these are not: the size of an array is known from where it was made.
+fn dot(a: Array<Int>, b: Array<Int>) -> Int [{ affirm size(a) = size(b); }] [{ }] {
+    return size(a) * size(b);
+};
+
+return dot(array(3, 1), array(4, 1));

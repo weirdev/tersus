@@ -10,6 +10,7 @@ module TypeCheck
     , valueType
     , builtinType
     , checkCall
+    , checkBuiltinCall
     , checkConstruct
     , readField
     , typeCtors
@@ -113,6 +114,7 @@ zonk t@(TVar n) = do
         Just t' -> zonk t'
         Nothing -> return t
 zonk (TList t) = TList <$> zonk t
+zonk (TArray t) = TArray <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
 zonk t = return t
 
@@ -124,6 +126,7 @@ bindVar n t = do
 occurs :: Int -> Type -> Bool
 occurs n (TVar m) = n == m
 occurs n (TList t) = occurs n t
+occurs n (TArray t) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
 
@@ -145,6 +148,7 @@ unify a b = do
         (TNamed t, TVariant v) -> variantOf t v
         (TVariant _, TNamed _) -> return False
         (TList x, TList y) -> unify x y
+        (TArray x, TArray y) -> unify x y
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
         _ -> return False
@@ -289,6 +293,7 @@ checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
 checkType (TVariant name) = () <$ ctorInfo name
 checkType (TList t) = checkType t
+checkType (TArray t) = checkType t
 checkType (TFn args ret) = mapM_ checkType (ret : args)
 checkType _ = return ()
 
@@ -303,6 +308,8 @@ builtinType funct =
         Get -> list (\a -> TFn [TList a, TInt] a)
         Push -> list (\a -> TFn [TList a, a] (TList a))
         Set -> list (\a -> TFn [TList a, TInt, a] (TList a))
+        NewArray -> list (\a -> TFn [TInt, a] (TArray a))
+        ArrayFrom -> list (\a -> TFn [TList a] (TArray a))
         Plus -> arith
         Minus -> arith
         Times -> arith
@@ -333,6 +340,33 @@ builtinType funct =
         case lookup field declared of
             Just fieldTy -> return (TFn [TNamed typeName] fieldTy)
             Nothing -> failTc ("Type error: " ++ variant ++ " has no field " ++ field)
+
+-- size, first, last, get and set work on an array as on a list: the same contracts, so a call is typed by the kind of its first
+-- argument. (A builtin used as a value, such as `h = size`, is the one for lists.)
+checkBuiltinCall :: Maybe BuiltinFunct -> String -> Type -> [Type] -> TC Type
+checkBuiltinCall (Just b) name ft ats@(container : _)
+    | b `elem` [Size, First, Last, Get, Set] = do
+        t <- zonk container
+        case t of
+            TArray _ -> arrayVersion b >>= \aft -> checkCall name aft ats
+            _ -> checkCall name ft ats
+  where
+    arrayVersion funct = do
+        a <- freshVar
+        return $ case funct of
+            Size -> TFn [TArray a] TInt
+            Get -> TFn [TArray a, TInt] a
+            Set -> TFn [TArray a, TInt, a] (TArray a)
+            _ -> TFn [TArray a] a
+checkBuiltinCall _ name ft ats = checkCall name ft ats
+
+-- The builtin that the head of a call names, unless a variable of the program hides it
+builtinHead :: Ctx -> Env -> Expression -> Maybe BuiltinFunct
+builtinHead _ _ (Val (VFunct _ _ _ (BuiltinFunct b) _)) = Just b
+builtinHead ctx env (Var var)
+    | any (Map.member var) env || Map.member var (ctxFns ctx) = Nothing
+    | Just (VFunct _ _ _ (BuiltinFunct b) _) <- Map.lookup var stdLibCtx = Just b
+builtinHead _ _ _ = Nothing
 
 valueType :: Value -> TC Type
 valueType (VInt _) = return TInt
@@ -539,7 +573,7 @@ inferExprR ctx env expr =
         (ft, funct') <- inferExprR ctx env funct
         inferred <- mapM (inferExprR ctx env) args
         let ats = map fst inferred
-        result <- checkCall (describe funct) ft ats
+        result <- checkBuiltinCall (builtinHead ctx env funct) (describe funct) ft ats
         comparing funct ats
         return (result, F funct' (map snd inferred))
     describe (Var name) = name
@@ -630,6 +664,7 @@ checkTrait name functions = do
 substSelf :: Name -> Type -> Type
 substSelf owner (TNamed "Self") = TNamed owner
 substSelf owner (TList t) = TList (substSelf owner t)
+substSelf owner (TArray t) = TArray (substSelf owner t)
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
 
@@ -720,7 +755,7 @@ inferProof ctx env proof =
         FApp funct args -> do
             ft <- inferProof ctx env funct
             ats <- mapM (inferProof ctx env) args
-            result <- checkCall "call" ft ats
+            result <- checkBuiltinCall (proofBuiltin funct) "call" ft ats
             comparing (proofHead funct) ats
             return result
         Forall index guards body -> do
@@ -728,6 +763,11 @@ inferProof ctx env proof =
             mapM_ (\g -> inferProof ctx env' g >>= expect "guard of forall" TBool) guards
             inferProof ctx env' body >>= expect "body of forall" TBool
             return TBool
+
+-- (a name in a proof is a variable of the program or the builtin of that name, as for an expression)
+proofBuiltin :: VariableProof -> Maybe BuiltinFunct
+proofBuiltin (CTerm (VFunct _ _ _ (BuiltinFunct b) _)) = Just b
+proofBuiltin _ = Nothing
 
 -- Equality is structural, which functions do not have
 comparing :: Expression -> [Type] -> TC ()

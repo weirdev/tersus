@@ -13,6 +13,7 @@ import TestPipeline
 import TestNative
 import TestOwnership
 import TestTraits
+import TestArrays
 
 main :: IO ()
 main = do
@@ -70,6 +71,7 @@ main = do
                 , testNative
                 , testOwnership
                 , testTraits
+                , testArrays
                 ]
     putStrLn $
         "Summary: "

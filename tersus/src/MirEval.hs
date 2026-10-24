@@ -176,6 +176,9 @@ listOp Get [MList l, MInt i]
     | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
     | otherwise = Ok (l !! fromIntegral i)
 listOp Push [MList l, x] = Ok (MList (l ++ [x]))
+listOp NewArray [MInt n, x]
+    | n < 0 = Error "array needs a size that is not negative"
+    | otherwise = Ok (MList (replicate (fromIntegral n) x))
 listOp Set [MList l, MInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok (MList (before ++ x : drop 1 after))
