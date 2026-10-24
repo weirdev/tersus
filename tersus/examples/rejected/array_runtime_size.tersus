@@ -1,4 +1,5 @@
 // An array is held inline, in the frame of the function, so its size must be known when the program is compiled: n is a
-// variable here, and array(3, 0) would do.
+// variable here, and array(3, 0) would do. (An array whose size the program works out is made on the heap, in a Box:
+// Array::boxed(n, 0).)
 n = 3;
 return size(array(n, 0));

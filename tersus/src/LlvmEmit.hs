@@ -143,6 +143,7 @@ closeTypes program = go [] . map (canonical program)
         | otherwise = go (ty : seen) (parts ty ++ rest)
     parts (TList t) = [canonical program t]
     parts (TArray t _) = [canonical program t]
+    parts (TBox (TArrayOf t SizeAny)) = [canonical program t]
     parts (TBox t) = [canonical program t]
     parts (TNamed n) = [canonical program t | (_, fields) <- variantsOf program n, (_, t) <- fields]
     parts _ = []
@@ -152,8 +153,9 @@ canonical :: Program -> Type -> Type
 canonical program (TVariant v) = maybe (TVariant v) TNamed (ownerOf program v)
 canonical _ ty = ty
 
--- A constant global for each type: its kind (0 Int, 1 Bool, 2 List, 3 struct or enum, 4 function, 5 array, 6 Box) and what the
--- runtime needs to walk a value: the descriptor of the elements of a list, an array or a Box, or the variants of a struct or enum
+-- A constant global for each type: its kind (0 Int, 1 Bool, 2 List, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array
+-- of no size) and what the
+-- runtime needs to walk a value: the descriptor of the elements of a list, an array, a Box of an array of no size, or of what a Box holds, or the variants of a struct or enum
 -- with the names and the descriptors of their fields, and whether the value starts with a word that says the variant (an enum)
 typeDescriptors :: Program -> [Type] -> [String]
 typeDescriptors program types =
@@ -172,6 +174,7 @@ typeDescriptors program types =
     body TBool = "{ i64 1, ptr null }"
     body (TList t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
     body ty@TArray{} = "{ i64 5, ptr " ++ global "array." (renderType ty) ++ " }"
+    body (TBox (TArrayOf t SizeAny)) = "{ i64 7, ptr " ++ typeSymbol program t ++ " }"
     body (TBox t) = "{ i64 6, ptr " ++ typeSymbol program t ++ " }"
     body (TNamed n) = "{ i64 3, ptr " ++ global "data." n ++ " }"
     body (TFn _ _) = "{ i64 4, ptr null }"
@@ -414,10 +417,21 @@ rvalue fn destType rv =
             TBox held -> do
                 count <- slotsG held
                 block <- ins "x" ("call ptr @tersus_box_new(i64 " ++ show count ++ ")")
-                from <- operandAddress fn held o
-                copyWords block from (8 * count)
+                if isAggregate held
+                    then operandAddress fn held o >>= \from -> copyWords block from (8 * count)
+                    else operandAt fn held o >>= storeAt held block
                 pure block
             _ -> failG "A Box is made into a Box"
+        -- what a Box holds that is a word is read from its room, which is freed when the Box is moved
+        Unbox o -> do
+            held <- operandLocalType fn o
+            boxTy <- maybe (failG "Box::unbox was given a constant") pure held
+            block <- operandAt fn boxTy o
+            value <- loadAt destType block
+            case o of
+                Move _ -> emit ("call void @tersus_box_free(ptr " ++ block ++ ")")
+                _ -> pure ()
+            pure value
         BinaryOp op a b -> do
             ty <- sharedType fn [a, b]
             x <- operandAt fn ty a
@@ -550,17 +564,29 @@ isArray :: Type -> Bool
 isArray TArray{} = True
 isArray _ = False
 
+-- A Box of an array, of a size or of any size: the array is on the heap, and the address of it is the first word of the Box
+isBoxedArray :: Type -> Bool
+isBoxedArray (TBox TArrayOf{}) = True
+isBoxedArray _ = False
+
 isAggregate :: Type -> Bool
 isAggregate TArray{} = True
 isAggregate TNamed{} = True
 isAggregate TVariant{} = True
-isAggregate _ = False
+isAggregate ty = isFat ty
+
+-- A Box of an array of no size is two words held inline, as an aggregate: the address of the elements and how many there are. (A Box of
+-- anything that has a size is the one word, the address of what it holds.)
+isFat :: Type -> Bool
+isFat (TBox (TArrayOf _ SizeAny)) = True
+isFat _ = False
 
 -- The 8-byte words of a value held inline: an Int, a Bool or an address is one, and an array is its elements', a struct its fields' and
 -- an enum a word and the widest of its variants'
 slotsOf :: Program -> Type -> Integer
 slotsOf program ty =
     case ty of
+        _ | isFat ty -> 2
         TArray t n -> n * slotsOf program t
         TNamed n -> declaredWords n
         TVariant v -> maybe 1 declaredWords (ownerOf program v)
@@ -606,14 +632,19 @@ isArrayOperand fn o = case o of
     Const CArray{} -> True
     Const _ -> False
   where
-    arrayLocal l = maybe False (isArray . localType) (Map.lookup l (fnLocals fn))
+    arrayLocal l = maybe False (\d -> isArray (localType d) || isBoxedArray (localType d)) (Map.lookup l (fnLocals fn))
 
 -- The address of the words of an array operand: a local, or a constant that is a global
-arrayPtr :: Operand -> G String
-arrayPtr (Copy l) = pure (slot l)
-arrayPtr (Move l) = pure (slot l)
-arrayPtr (Const (CArray cs)) = constantWords cs
-arrayPtr o = failG ("Not an array: " ++ renderOperand' o)
+arrayPtr :: Function -> Operand -> G String
+arrayPtr fn o =
+    case o of
+        Copy l -> ofLocal l
+        Move l -> ofLocal l
+        Const (CArray cs) -> constantWords cs
+        _ -> failG ("Not an array: " ++ renderOperand' o)
+  where
+    -- (a Box of an array holds the address of the elements in its first word, whether it carries the size too or not)
+    ofLocal l = localTypeG fn l >>= \ty -> if isBoxedArray ty then ins "a" ("load ptr, ptr " ++ slot l) else pure (slot l)
 
 -- The address of the words of a value held inline that an operand is, ready for something to take: a value that is moved out of a
 -- local and owns something is copied to room of its own and the local is cleared, so that what takes it can copy it later with the
@@ -751,7 +782,7 @@ assignAggregate dropsOld fn dest ty rv = do
         freeOld = if dropsOld && owns then dropSlot ty dest else pure ()
         -- the address of the element at an index of an array or of a list, the element being the value that is made
         elementOf container index
-            | isArrayOperand fn container = arrayPtr container >>= \base -> elementAddress base index bytes
+            | isArrayOperand fn container = arrayPtr fn container >>= \base -> elementAddress base index bytes
             | otherwise = operandAt fn (TList ty) container >>= \list -> slotsG ty >>= \stride -> elementSlot stride list index
         lengthOfList container = operandAt fn (TList ty) container >>= \list -> ins "p" ("getelementptr i8, ptr " ++ list ++ ", i64 8") >>= \p -> ins "n" ("load i64, ptr " ++ p)
         -- a value that is a part of another is copied out of it, and the other is left as it was or with the part cleared. When the
@@ -771,11 +802,41 @@ assignAggregate dropsOld fn dest ty rv = do
         Use o -> operandAddress fn ty o >>= \src -> fromPart src False
         ListOp NewArray [_, x] | TArray elementTy n <- ty -> fillArray fn target elementTy n x
         ListOp Set [a, i, x] | TArray elementTy _ <- ty -> do
-            src <- arrayPtr a
+            src <- arrayPtr fn a
             index <- operandAt fn TInt i
             value <- elementValue fn elementTy x
             copyWords target src bytes
             writeElement elementTy target index value
+        -- Array::boxed(n, x): room on the heap for n elements, filled with x; the Box holds where it is and n
+        ListOp NewBoxed [n, x] | TBox (TArrayOf elementTy _) <- ty -> do
+            count <- operandAt fn TInt n
+            stride <- slotsG elementTy
+            total <- if stride == 1 then pure count else checked "smul" count (show stride)
+            block <- ins "x" ("call ptr @tersus_box_new(i64 " ++ total ++ ")")
+            fillElements fn block elementTy count Nothing x
+            freeOld
+            emit ("store ptr " ++ block ++ ", ptr " ++ target)
+            lengthSlot <- ins "p" ("getelementptr i8, ptr " ++ target ++ ", i64 8")
+            emit ("store i64 " ++ count ++ ", ptr " ++ lengthSlot)
+        -- a Box of an array of a size as a Box of an array of any size: the address, and the size the type had
+        Unsize o -> do
+            held <- operandLocalType fn o
+            case held of
+                Just boxTy@(TBox (TArray _ n)) -> do
+                    block <- operandAt fn boxTy o
+                    freeOld
+                    emit ("store ptr " ++ block ++ ", ptr " ++ target)
+                    lengthSlot <- ins "p" ("getelementptr i8, ptr " ++ target ++ ", i64 8")
+                    emit ("store i64 " ++ show n ++ ", ptr " ++ lengthSlot)
+                _ -> failG "unsize was given something that is not a Box of an array of a size"
+        -- the elements of a Box that carries its size are changed where they are, and the Box is given back
+        ListOp Set [a, i, x] | TBox (TArrayOf elementTy _) <- ty -> do
+            src <- operandAddress fn ty a
+            block <- ins "a" ("load ptr, ptr " ++ src)
+            index <- operandAt fn TInt i
+            value <- elementValue fn elementTy x
+            writeElement elementTy block index value
+            fromPart src False
         -- an element that is a value held inline, of an array or of a list
         ListOp Get [a, i] -> do
             index <- operandAt fn TInt i
@@ -784,7 +845,7 @@ assignAggregate dropsOld fn dest ty rv = do
         ListOp Last [a] -> do
             index <-
                 if isArrayOperand fn a
-                    then (\count -> show (count - 1)) <$> arrayLength fn a
+                    then arrayLength fn a >>= \count -> lastIndex count
                     else lengthOfList a >>= \len -> ins "i" ("sub i64 " ++ len ++ ", 1")
             elementOf a index >>= \p -> fromPart p False
         -- a field that is held inline
@@ -847,9 +908,15 @@ assignAggregate dropsOld fn dest ty rv = do
 
 -- n copies of an element: one store of zeros when it is a zero, and a loop otherwise
 fillArray :: Function -> String -> Type -> Integer -> Operand -> G ()
-fillArray fn target elementTy n x
-    | n == 0 = pure ()
-    | zero x && not (isAggregate elementTy) = emit ("call void @llvm.memset.p0.i64(ptr " ++ target ++ ", i8 0, i64 " ++ show (8 * n) ++ ", i1 false)")
+fillArray fn target elementTy n = fillElements fn target elementTy (show n) (Just n)
+
+-- The same for a number of elements that the text gives (a number, or a value of the program), known if the program says so
+fillElements :: Function -> String -> Type -> String -> Maybe Integer -> Operand -> G ()
+fillElements fn target elementTy count known x
+    | known == Just 0 = pure ()
+    | zero x && not (isAggregate elementTy) = do
+        bytes <- maybe (ins "z" ("mul i64 " ++ count ++ ", 8")) (pure . show . (8 *)) known
+        emit ("call void @llvm.memset.p0.i64(ptr " ++ target ++ ", i8 0, i64 " ++ bytes ++ ", i1 false)")
     | otherwise = do
         value <- elementValue fn elementTy x
         k <- freshLabel "fill"
@@ -864,7 +931,7 @@ fillArray fn target elementTy n x
         emit ("br label %" ++ header)
         label header
         emit (i ++ " = phi i64 [ 0, %" ++ before ++ " ], [ " ++ next ++ ", %" ++ body ++ " ]")
-        c <- ins "c" ("icmp slt i64 " ++ i ++ ", " ++ show n)
+        c <- ins "c" ("icmp slt i64 " ++ i ++ ", " ++ count)
         emit ("br i1 " ++ c ++ ", label %" ++ body ++ ", label %" ++ done)
         label body
         writeElement elementTy target i value
@@ -877,29 +944,45 @@ fillArray fn target elementTy n x
     zero _ = False
 
 -- The number of elements of an array operand
-arrayLength :: Function -> Operand -> G Integer
+-- (the text of a number: a constant when the size is in the type, and what a Box of an array of no size carries otherwise)
+arrayLength :: Function -> Operand -> G String
 arrayLength fn o = case o of
-    Const (CArray cs) -> pure (toInteger (length cs))
+    Const (CArray cs) -> pure (show (length cs))
     Copy l -> ofLocal l
     Move l -> ofLocal l
     Const _ -> failG ("Not an array: " ++ renderOperand' o)
   where
     ofLocal l = localTypeG fn l >>= \ty -> case ty of
-        TArray _ n -> pure n
+        TArray _ n -> pure (show n)
+        TBox (TArray _ n) -> pure (show n)
+        TBox (TArrayOf _ SizeAny) -> ins "p" ("getelementptr i8, ptr " ++ slot l ++ ", i64 8") >>= \p -> ins "n" ("load i64, ptr " ++ p)
         _ -> failG ("Not an array: " ++ show l)
+
+-- The text of the index of the last element, given the text of the length
+lastIndex :: String -> G String
+lastIndex count = case reads count :: [(Integer, String)] of
+    [(n, "")] -> pure (show (n - 1))
+    _ -> ins "i" ("sub i64 " ++ count ++ ", 1")
 
 -- An element of an array that is a word, or its length
 arrayRead :: Function -> Type -> ListOp -> [Operand] -> G String
 arrayRead fn destType op os =
     case (op, os) of
-        (Length, [a]) -> show <$> arrayLength fn a
-        (First, [a]) -> arrayPtr a >>= \base -> loadElement destType base
+        (Length, [a]) -> arrayLength fn a
+        (First, [a]) -> arrayPtr fn a >>= \base -> loadElement destType base
         (Last, [a]) -> do
-            count <- arrayLength fn a
-            base <- arrayPtr a
-            elementAddress base (show (count - 1)) 8 >>= loadElement destType
+            index <- arrayLength fn a >>= lastIndex
+            base <- arrayPtr fn a
+            elementAddress base index 8 >>= loadElement destType
+        -- the elements of a Box of an array are changed where they are, and the Box is given back (it is moved in, so nothing else has it)
+        (Set, [a, i, x]) | TBox (TArrayOf elementTy _) <- destType -> do
+            block <- operandAt fn destType a
+            index <- operandAt fn TInt i
+            value <- elementValue fn elementTy x
+            writeElement elementTy block index value
+            pure block
         (Get, [a, i]) -> do
-            base <- arrayPtr a
+            base <- arrayPtr fn a
             index <- operandAt fn TInt i
             elementAddress base index 8 >>= loadElement destType
         _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " for an array yet")
@@ -957,7 +1040,7 @@ loadAt t p =
 -- Whether a value is the address of a value of the heap, which has one owner (a list, or a Box)
 isPointer :: Type -> Bool
 isPointer TList{} = True
-isPointer TBox{} = True
+isPointer ty@TBox{} = not (isFat ty)
 isPointer _ = False
 
 -- A value as the word the runtime takes: an Int as it is, a Bool as 0 or 1, a list as its address

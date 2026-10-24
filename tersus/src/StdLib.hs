@@ -155,6 +155,13 @@ builtinFunct NewArray =
             ]
             (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (ATerm "x"))
         ]
+-- Array::boxed(n, x) promises what array(n, x) does, for an n that need not be a constant
+builtinFunct NewBoxedArray =
+    case builtinFunct NewArray of
+        VFunct params ins outs _ proofs -> VFunct params ins outs (BuiltinFunct NewBoxedArray) proofs
+        other -> other
+-- Unsize b is b: the Box has the same value, it carries the size
+builtinFunct Unsize = VFunct ["box"] [] [] (BuiltinFunct Unsize) []
 -- The array that a literal makes is the list of its elements, read as an array: the same value
 builtinFunct ArrayFrom = VFunct ["list"] [] [] (BuiltinFunct ArrayFrom) []
 -- Box::new(x) is x: a Box has the value of what it holds
@@ -246,6 +253,9 @@ evalBuiltinFunct NewArray [VInt n, x]
     | n >= 0 && n <= maxUnfolded = Ok $ VList (replicate (fromIntegral n) x)
     | otherwise = Error "The array is not evaluated"
 evalBuiltinFunct NewArray _ = Error "array takes a size and an element"
+evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
+evalBuiltinFunct Unsize [value] = Ok value
+evalBuiltinFunct Unsize _ = Error "unsize takes one Box"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l
 evalBuiltinFunct ArrayFrom _ = Error "An array literal is made from a list"
 evalBuiltinFunct NewBox [value] = Ok value

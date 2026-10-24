@@ -167,6 +167,27 @@ variantOf typeName variant = do
     s <- getState
     return (variant `elem` Map.findWithDefault [] typeName (tcTypes s))
 
+-- Where a value is given to something that has a type (an argument, a field, a returned value, a variable that has one), a Box of an
+-- array of a size can be given where a Box of an array of any size is wanted: the unsizing conversion, which keeps the value and
+-- makes the size part of the Box. It is written into the expression, since the Box is not the same in memory afterwards.
+coerce :: Type -> (Type, Expression) -> TC (Type, Expression)
+coerce wanted (actual, expr) = do
+    w <- zonk wanted
+    a <- zonk actual
+    case (w, a) of
+        (TBox (TArrayOf x SizeAny), TBox (TArrayOf y (SizeConst _))) -> do
+            same <- unify x y
+            return (if same then (w, F (Val (builtinFunct Unsize)) [expr]) else (actual, expr))
+        _ -> return (actual, expr)
+
+-- The arguments of a call of a function of the program, given the unsizing conversions its parameters ask for
+coerceArguments :: Type -> [(Type, Expression)] -> TC [(Type, Expression)]
+coerceArguments ft inferred = do
+    ft' <- zonk ft
+    case ft' of
+        TFn pts _ | length pts == length inferred -> mapM (uncurry coerce) (zip pts inferred)
+        _ -> return inferred
+
 -- Fails with the context if the types cannot be made equal
 expect :: String -> Type -> Type -> TC ()
 expect context expected actual = do
@@ -315,13 +336,9 @@ checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
 checkType (TVariant name) = () <$ ctorInfo name
 checkType (TList t) = checkType t
-checkType (TBox t) = do
-    checkType t
-    case t of
-        TNamed _ -> return ()
-        TVariant _ -> return ()
-        TVar _ -> return ()
-        _ -> failTc ("Type error: Box<T> holds a struct or an enum for now, not " ++ renderType t)
+-- (a Box holds any type that has a size; the one place an array of no size can be is behind it)
+checkType (TBox t@(TArrayOf e SizeAny)) = checkType e >> arrayOk t
+checkType (TBox t) = checkType t
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
 checkType ty@(TArrayOf t _) = checkType t >> arrayOk ty
 checkType (TFn args ret) = mapM_ checkType (ret : args)
@@ -342,6 +359,8 @@ builtinType funct =
         NewBox -> failTc "Type error: Box::new is called, as in Box::new(x), and cannot be used as a value"
         NewArray -> failTc "Type error: array needs a size that is a constant, so it is written array(3, x) and cannot be used as a value"
         ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
+        NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
+        Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
         Plus -> arith
         Minus -> arith
         Times -> arith
@@ -380,16 +399,18 @@ checkBuiltinCall (Just b) name ft ats@(container : _)
     | b `elem` [Size, First, Last, Get, Set] = do
         t <- zonk container
         case t of
-            TArray _ n -> arrayVersion n b >>= \aft -> checkCall name aft ats
+            TArrayOf _ n -> arrayVersion (\a -> TArrayOf a n) b >>= \aft -> checkCall name aft ats
+            -- (a Box of an array is looked through, and set gives the Box back)
+            TBox (TArrayOf _ n) -> arrayVersion (\a -> TBox (TArrayOf a n)) b >>= \aft -> checkCall name aft ats
             _ -> checkCall name ft ats
   where
-    arrayVersion n funct = do
+    arrayVersion sequenceOf funct = do
         a <- freshVar
         return $ case funct of
-            Size -> TFn [TArray a n] TInt
-            Get -> TFn [TArray a n, TInt] a
-            Set -> TFn [TArray a n, TInt, a] (TArray a n)
-            _ -> TFn [TArray a n] a
+            Size -> TFn [sequenceOf a] TInt
+            Get -> TFn [sequenceOf a, TInt] a
+            Set -> TFn [sequenceOf a, TInt, a] (sequenceOf a)
+            _ -> TFn [sequenceOf a] a
 -- (a Box is its contents wherever a struct or an enum is looked at: tested for its variant, cast to one, or read for a field)
 checkBuiltinCall (Just b) name ft (first : rest)
     | isLookingAt b = do
@@ -427,7 +448,7 @@ plainElement _ = False
 
 -- (the pointer that an unsized type goes behind comes with Box, which the language does not have yet)
 unsizedByValue :: String
-unsizedByValue = "Type error: an array with no size (Array<T> is Array<T, ?>) can only be used behind a pointer, which the language does not have yet: write the size, as in Array<Int, 3>"
+unsizedByValue = "Type error: an array with no size (Array<T> is Array<T, ?>) can only be used behind a Box, as in Box<Array<Int>>, or be given a size, as in Array<Int, 3>"
 
 arrayOk :: Type -> TC ()
 arrayOk ty@(TArray e n) = do
@@ -437,6 +458,10 @@ arrayOk ty@(TArray e n) = do
         failTc ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType e' ++ " (elements that live on the heap come with the heap form of an array)")
     when (arraySlots ty > maxArraySlots) $
         failTc ("Type error: " ++ renderType ty ++ " takes " ++ show (arraySlots ty) ++ " words, more than the " ++ show maxArraySlots ++ " that an array held in a frame can have")
+arrayOk (TArrayOf e SizeAny) = do
+    e' <- zonk e
+    unless (plainElement e') $
+        failTc ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType e' ++ " (elements that live on the heap come with the heap form of an array)")
 arrayOk _ = return ()
 
 -- The value of an expression made of numbers and arithmetic, which is what a size can be. Nothing if it is anything else. The
@@ -485,7 +510,7 @@ constantSize folded =
         Just (Right n) -> return n
 
 noConstantSize :: String
-noConstantSize = "Type error: the size of an array must be a constant (a number, or arithmetic on numbers), since the array is held inline"
+noConstantSize = "Type error: the size of an array must be a constant (a number, or arithmetic on numbers), since the array is held inline (for a size that the program works out, use Array::boxed(n, x), which puts the array on the heap in a Box)"
 
 -- The builtin that the head of a call names, unless a variable of the program hides it
 builtinHead :: Ctx -> Env -> Expression -> Maybe BuiltinFunct
@@ -550,7 +575,11 @@ checkStatement top ctx env stmt =
             (term', ins', outs', body') <- checkFunction ctx' var params ptys rty ins outs term body
             return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty) term' body') proofs)))
         Assign var expr -> do
-            (t, expr') <- inferExprR ctx env expr
+            inferred <- inferExprR ctx env expr
+            -- (a variable that has a type already is given a value of it)
+            (t, expr') <- case [existing | scope <- env, Just existing <- [Map.lookup var scope]] of
+                existing : _ -> coerce existing inferred
+                [] -> return inferred
             env' <- assignVar ctx env var t
             return (ctx, env', Assign var expr')
         Let var expr -> do
@@ -559,7 +588,8 @@ checkStatement top ctx env stmt =
                 scope : outer -> return (ctx, Map.insert var t scope : outer, Let var expr')
                 [] -> return (ctx, [Map.singleton var t], Let var expr')
         Return expr -> do
-            (t, expr') <- inferExprR ctx env expr
+            inferred <- inferExprR ctx env expr
+            (t, expr') <- maybe (return inferred) (\rty -> coerce rty inferred) (ctxReturn ctx)
             case ctxReturn ctx of
                 Just rty -> expect "returned value" rty t
                 -- the program has no declared type: every return in it has the type of the first
@@ -676,19 +706,15 @@ inferExprR ctx env expr =
             t <- readField owner field structTy
             return (t, F funct [struct'])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
-            inferred <- mapM (inferExprR ctx env) args
+            inferred0 <- mapM (inferExprR ctx env) args
+            (_, declared) <- ctorInfo name
+            inferred <- if length declared == length inferred0 then mapM (uncurry coerce) (zip (map snd declared) inferred0) else return inferred0
             t <- checkConstruct name fields (map fst inferred)
             return (t, F funct (map snd inferred))
         -- Box::new(x): x held in a Box, which has its value
         F (Var "Box::new") args -> case args of
             [x] -> do
                 (xt, x') <- inferExprR ctx env x
-                t <- zonk xt
-                case t of
-                    TNamed _ -> return ()
-                    TVariant _ -> return ()
-                    TVar _ -> return ()
-                    _ -> failTc ("Type error: Box<T> holds a struct or an enum for now, not " ++ renderType t)
                 return (TBox xt, F (Val (builtinFunct NewBox)) [x'])
             _ -> failTc ("Type error: Box::new takes 1 argument, got " ++ show (length args))
         -- Box::unbox(b): the value that b holds
@@ -697,9 +723,20 @@ inferExprR ctx env expr =
                 (bt, b') <- inferExprR ctx env b
                 t <- zonk bt
                 case t of
+                    TBox (TArrayOf _ SizeAny) -> failTc "Type error: Box::unbox cannot take an array of no size out of its Box, since it would not know how much to take: read its elements with get and size"
                     TBox inner -> return (inner, F (Val (builtinFunct UnBox)) [b'])
                     _ -> failTc ("Type error: Box::unbox takes a Box, got " ++ renderType t)
             _ -> failTc ("Type error: Box::unbox takes 1 argument, got " ++ show (length args))
+        -- Array::boxed(n, x): n copies of x, n known only when the program runs, in a Box that carries the size
+        F (Var "Array::boxed") args -> case args of
+            [n, x] -> do
+                (nt, n') <- inferExprR ctx env n
+                expect "argument 1 of Array::boxed" TInt nt
+                (xt, x') <- inferExprR ctx env x
+                let ty = TArrayOf xt SizeAny
+                arrayOk ty
+                return (TBox ty, F (Val (builtinFunct NewBoxedArray)) [n', x'])
+            _ -> failTc ("Type error: Array::boxed takes 2 arguments, got " ++ show (length args))
         F funct args
             | Just NewArray <- builtinHead ctx env funct -> case args of
                 [n, x] -> do
@@ -741,7 +778,11 @@ inferExprR ctx env expr =
   where
     general funct args = do
         (ft, funct') <- inferExprR ctx env funct
-        inferred <- mapM (inferExprR ctx env) args
+        inferred0 <- mapM (inferExprR ctx env) args
+        -- (a builtin takes what it is given: it looks through a Box itself)
+        inferred <- case builtinHead ctx env funct of
+            Just _ -> return inferred0
+            Nothing -> coerceArguments ft inferred0
         let ats = map fst inferred
         result <- checkBuiltinCall (builtinHead ctx env funct) (describe funct) ft ats
         comparing funct ats
@@ -749,10 +790,11 @@ inferExprR ctx env expr =
     describe (Var name) = name
     describe _ = "call"
     -- the call of a function of the program by name, with arguments that are checked already
-    callResolved name inferred = do
+    callResolved name inferred0 = do
         unless (Map.member name (ctxFns ctx)) $
             failTc ("Type error: " ++ name ++ " is not defined before this call (there is no such function, or its impl comes later)")
         ft <- lookupVar ctx env name
+        inferred <- coerceArguments ft inferred0
         result <- checkCall name ft (map fst inferred)
         return (result, F (Var name) (map snd inferred))
 

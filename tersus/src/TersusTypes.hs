@@ -17,6 +17,10 @@ data BuiltinFunct
     = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Mod
     | -- NewArray n x: an array of n copies of x, n being a constant. ArrayFrom is the array that a literal list of constants makes (`#[1, 2]`).
       NewArray | ArrayFrom
+    | -- NewBoxedArray n x: Array::boxed(n, x), an array of n copies of x, n being any Int not negative, in a Box that carries the size
+      NewBoxedArray
+    | -- Unsize b: the Box of an array of a size, as a Box of an array of any size (the size goes into the Box, the value is the same)
+      Unsize
     | -- NewBox x: x held in a Box. A Box has the value of what it holds (it is where that lives that differs), so in a value it is x.
       NewBox
     | -- UnBox b: the value that b holds, taken out of it

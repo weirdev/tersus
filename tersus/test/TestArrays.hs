@@ -127,7 +127,7 @@ testArrays =
                 , testCase "array in a proof" (valid "a = array(3, 4); affirm a = array(3, 4); return 0;")
                 , testCase "spaces in the type" (valid "fn f(a: Array <Int , 2>) -> Int { return 0; }; return 0;")
                 , testCase "a literal is an operand" (runs "return size(#[1, 2]) + size(#[3]);" (VInt 3))
-                , testCase "a size can be left out, and then it is ?" (rejected "fn f(a: Array<Int>) -> Int { return 0; }; return 0;" "an array with no size (Array<T> is Array<T, ?>) can only be used behind a pointer")
+                , testCase "a size can be left out, and then it is ?" (rejected "fn f(a: Array<Int>) -> Int { return 0; }; return 0;" "an array with no size (Array<T> is Array<T, ?>) can only be used behind a Box, as in Box<Array<Int>>")
                 , testCase "or written as ?" (rejected "fn f(a: Array<Int, ?>) -> Int { return 0; }; return 0;" "an array with no size")
                 , testCase "with spaces" (rejected "fn f(a: Array <Int , ?>) -> Int { return 0; }; return 0;" "an array with no size")
                 , testCase "an array with no size is not held by value as a result" (rejected "fn f() -> Array<Int> { return #[1]; }; return 0;" "an array with no size")

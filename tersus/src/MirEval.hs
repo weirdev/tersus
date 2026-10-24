@@ -121,6 +121,7 @@ evalRvalue frame rv =
         MakeList os -> MList <$$> mapResults (operandValue frame) os
         MakeBox o -> operandValue frame o
         Unbox o -> operandValue frame o
+        Unsize o -> operandValue frame o
         MakeData name fields -> MData name <$$> mapResults (\(f, o) -> (,) f <$$> operandValue frame o) fields
         ReadField o name field ->
             operandValue frame o `bindResult` \v -> case v of
@@ -179,6 +180,7 @@ listOp Get [MList l, MInt i]
     | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
     | otherwise = Ok (l !! fromIntegral i)
 listOp Push [MList l, x] = Ok (MList (l ++ [x]))
+listOp NewBoxed args = listOp NewArray args
 listOp NewArray [MInt n, x]
     | n < 0 = Error "array needs a size that is not negative"
     | otherwise = Ok (MList (replicate (fromIntegral n) x))

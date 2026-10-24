@@ -95,6 +95,7 @@ roles rv =
         MakeList os -> [(o, Consume) | o <- os]
         MakeBox o -> [(o, Consume)]
         Unbox o -> [(o, Consume)]
+        Unsize o -> [(o, Consume)]
         MakeData _ fields -> [(o, Consume) | (_, o) <- fields]
         ReadField o _ _ -> [(o, Read)]
         IsVariant o _ -> [(o, Read)]
@@ -441,6 +442,7 @@ withOperands rv operands =
         (MakeList _, os) -> MakeList os
         (MakeBox _, [o]) -> MakeBox o
         (Unbox _, [o]) -> Unbox o
+        (Unsize _, [o]) -> Unsize o
         (MakeData name fields, os) -> MakeData name (zip (map fst fields) os)
         (ReadField _ name field, [o]) -> ReadField o name field
         (IsVariant _ name, [o]) -> IsVariant o name

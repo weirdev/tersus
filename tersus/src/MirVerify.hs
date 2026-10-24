@@ -118,6 +118,9 @@ rvalueProblems env localTy d rv =
                 | size == given -> [expected e x | not (fits' e x)]
                 | otherwise -> ["the size of the array is " ++ show given ++ ", not " ++ show size]
             _ -> ["array needs a result that is an array and a size that is a constant"]
+        ListOp NewBoxed [n, x] -> case d of
+            TBox (TArrayOf e SizeAny) -> ints [n] ++ [expected e x | not (fits' e x)]
+            _ -> ["Array::boxed needs a result that is a Box of an array of any size"]
         ListOp Push [l, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ [expected e x | not (fits' e x)])
         ListOp Set [l, i, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ ints [i] ++ [expected e x | not (fits' e x)])
         ListOp op os -> [show op ++ " is applied to " ++ show (length os) ++ " operands"]
@@ -125,6 +128,9 @@ rvalueProblems env localTy d rv =
         Unbox o -> case operandType env localTy o of
             Just (TBox held) -> ["the result is " ++ renderType d ++ ", not " ++ renderType held | not (sub env d held)]
             _ -> [expected' "a Box" o]
+        Unsize o -> case (d, operandType env localTy o) of
+            (TBox (TArrayOf e SizeAny), Just (TBox (TArray e' _))) -> [expected d o | not (sub env e e')]
+            _ -> ["unsize needs a Box of an array, and a result that is a Box of an array of any size"]
         MakeBox o -> case d of
             TBox held -> [expected held o | not (fits' held o)]
             _ -> ["the result is " ++ renderType d ++ ", not a Box"]
@@ -159,7 +165,8 @@ rvalueProblems env localTy d rv =
         _ -> False
     -- (an array operand that is a local has its type; a constant array is not typed by its elements alone)
     arrayOf l e = case operandType env localTy l of
-        Just (TArray e' n) | sub env e e' -> Just (TArray e' n)
+        Just ty@(TArrayOf e' _) | sub env e e' -> Just ty
+        Just ty@(TBox (TArrayOf e' _)) | sub env e e' -> Just ty
         _ -> Nothing
     -- the result of set is the array it was given; the result of array(n, x) is an array
     arrayResult = case rv of
@@ -176,7 +183,8 @@ rvalueProblems env localTy d rv =
     result t = ["the result is " ++ renderType t ++ ", not " ++ renderType d | d /= t]
     withElement k = case d of
         TList e -> k e
-        TArray e _ | arrayResult -> k e
+        TArrayOf e _ | arrayResult -> k e
+        TBox (TArrayOf e _) | arrayResult -> k e
         _ -> ["the result is " ++ renderType d ++ ", not a list"]
     comparison a b =
         result TBool
@@ -189,7 +197,8 @@ rvalueProblems env localTy d rv =
     isFn _ = False
     isList o = case operandType env localTy o of
         Just (TList _) -> True
-        Just TArray{} -> True
+        Just TArrayOf{} -> True
+        Just (TBox TArrayOf{}) -> True
         Nothing -> case o of
             Const (CList _) -> True
             Const (CArray _) -> True
@@ -247,6 +256,7 @@ sub env wanted actual = case (wanted, actual) of
     (TNamed t, TVariant v) -> maybe False ((== t) . fst) (Map.lookup v (envCtors env))
     (TList a, TList b) -> sub env a b
     (TArray a n, TArray b m) -> n == m && sub env a b
+    (TArrayOf a SizeAny, TArrayOf b SizeAny) -> sub env a b
     (TBox a, TBox b) -> sub env a b
     _ -> wanted == actual
 
@@ -263,6 +273,7 @@ rvalueOperands (ListOp _ os) = os
 rvalueOperands (MakeList os) = os
 rvalueOperands (MakeBox o) = [o]
 rvalueOperands (Unbox o) = [o]
+rvalueOperands (Unsize o) = [o]
 rvalueOperands (MakeData _ fields) = map snd fields
 rvalueOperands (ReadField o _ _) = [o]
 rvalueOperands (IsVariant o _) = [o]

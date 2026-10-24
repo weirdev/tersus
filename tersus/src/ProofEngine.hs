@@ -797,7 +797,7 @@ internTerm table (FApp funct args) =
 -- A proof with the large builtin function values replaced by plain symbols
 lightProof :: IotaProof -> IotaProof
 lightProof (CTerm value@(VFunct _ _ _ (BuiltinFunct funct) _))
-    | funct `elem` [Get, Push, Set, First, Last, NewArray] = CTerm (canonicalValue value)
+    | funct `elem` [Get, Push, Set, First, Last, NewArray, NewBoxedArray] = CTerm (canonicalValue value)
 lightProof (FApp funct args) = FApp (lightProof funct) (map lightProof args)
 lightProof (Forall index guards body) = Forall index (map lightProof guards) (lightProof body)
 lightProof other = other

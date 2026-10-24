@@ -193,7 +193,7 @@ See `examples/enums.tersus`.
 
 ## Box
 
-`Box<T>` holds a struct or an enum `T` apart from where it is used, and is what a type that contains itself holds its recursion in. A type cannot hold itself by value, since it would have no size; the declaration is refused (`Tree holds itself, so it would have no size: hold the recursion in a Box, as in Box<Tree>`). A `List<Tree>` would also do, since the elements of a list are kept apart.
+`Box<T>` holds a value `T` of any type that has a size apart from where it is used, and is what a type that contains itself holds its recursion in. It also holds an array of no size, which can only be behind a pointer (see Arrays). A type cannot hold itself by value, since it would have no size; the declaration is refused (`Tree holds itself, so it would have no size: hold the recursion in a Box, as in Box<Tree>`). A `List<Tree>` would also do, since the elements of a list are kept apart.
 
 ```tersus
 enum Tree {
@@ -215,8 +215,9 @@ return sum(Box::new(Tree::Branch { left: leaf, value: 2, right: Box::new(Tree::L
 - **`Box::new(x)`** holds `x` in a Box; `Box::unbox(b)` gives back what a Box holds. They are written as calls and cannot be used as values (`h = Box::new` is an error).
 - **A Box has the value of what it holds.** It changes where the value lives, not what it is: `Box::new(p) = Box::new(q)` compares `p` and `q`, the validator reasons about a Box as about its contents, and `Box::unbox(Box::new(x))` is `x`. `Box<Tree>` and `Tree` are different types, and neither is used for the other.
 - **A Box is looked into where a struct or an enum is looked at.** A field of a boxed struct is read as `b.x`, the base of an update can be a Box (`P { x: 9, ..b }`), `b is Tree::Branch`, `b as Tree::Branch` and `match b { ... }` work on a Box, and `shrinks b` is the shrinking of a value that loses a field at a time. A function over the contents of a Box is called on `Box::unbox(b)`, as in `Box::unbox(b).total()`.
-- **What a Box can hold.** For now a struct or an enum (`Box<Int>` and `Box<List<Int>>` are errors); a Box of any type that has a size, and the builtins on a Box of an array, come with the unsized types (see the roadmap in `README.md`).
-- **Where a Box lives.** Natively a struct or an enum is not on the heap: it is held where it is made, as the words of its fields (an enum a word that says the variant and then the fields of that variant), in the frame of a function, in a field, or in a list, and copied by value. A `Box` is what puts one on the heap, and the pointer to it is one word, so a type that holds itself holds it in a `Box`; the list is the other thing on the heap.
+- **What a Box can hold.** Any type that has a size: a struct or an enum, an `Int` or a `Bool`, a list, an array of a size, another Box (`Box::unbox(Box::new(3))` is `3`). An array of no size, `Array<T>` or `Array<T, ?>`, is held only behind a Box (see Arrays), and `Box::unbox` cannot take one out, since it would not know how much to take.
+- **A Box of an array is looked through by `size`, `first`, `last`, `get` and `set`**, which work on it as on the array (`set` gives the Box back with the element changed, in place when nothing else has the Box).
+- **Where a Box lives.** Natively a struct or an enum is not on the heap: it is held where it is made, as the words of its fields (an enum a word that says the variant and then the fields of that variant), in the frame of a function, in a field, or in a list, and copied by value. A `Box` is what puts one on the heap, and the pointer to it is one word, so a type that holds itself holds it in a `Box`; the list is the other thing on the heap. A `Box` of an array of no size is two words held in line, the address and the number of elements (see Arrays).
 
 ## Traits And Impls
 
@@ -1098,11 +1099,33 @@ dot(x, x);                   // fine
 
 See `examples/arrays.tersus`. Natively an array is `N` 8-byte words in the slot of its local (an element that is an array is its words, in line), an array given to a function is its address and the function copies it, and an array that a function returns is written into room the caller gives it. A result is printed as a list is, `[0, 9, 0, 0]`.
 
-The size can be written `?`, or left out (`Array<Int>` is `Array<Int, ?>`), for an array whose size the type does not say. Such an array is *unsized*: it can only be used behind a pointer that carries the size, and the language has no pointers yet, so for now it is an error to write one (`fn f(a: Array<Int>)` says so, and suggests writing the size). It is the type that the planned `Box<Array<Int>>` will have (see the roadmap in `README.md`).
+The size can be written `?`, or left out (`Array<Int>` is `Array<Int, ?>`), for an array whose size the type does not say. Such an array is *unsized*: it is not a value of its own, and can only be used behind a pointer that carries the size. The pointer is `Box`: `Box<Array<Int>>` is the address of the elements and how many there are, and it is the type of an array on the heap whose size the program works out.
+
+```tersus
+fn total(a: Box<Array<Int>>) -> Int [{ define s = size(a); affirm s >= 0; }] [{ }] {
+    sum = 0;
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {
+        sum = sum + get(a, i);
+        i = i + 1;
+    };
+    return sum;
+};
+
+n = 3 + 2;
+five = Array::boxed(n, 2);          // n is any Int that is not negative: Box<Array<Int>>
+fixed = Box::new(#[1, 2, 3, 4]);    // Box<Array<Int, 4>>: the size is in the type
+return total(five) + total(fixed);  // 20
+```
+
+- **`Array::boxed(n, x)`** makes `n` copies of `x` on the heap, with an `n` that the program works out (`array(n, x)` needs a constant, since it is held inline). It has the contract of `array`: `n` must not be negative, the size is `n`, and every element is `x`. It is written as a call and cannot be used as a value.
+- **A Box of an array of a size is a Box of an array of any size where one is wanted** (`Box<Array<Int, 4>>` is given to a parameter of type `Box<Array<Int>>`): the unsizing conversion, which keeps the value and makes the size part of the Box. It is made where a value is given to something that has a type: an argument, a field of a struct or enum, a returned value, and a variable that already has the type. It does not go the other way (`Box<Array<Int>>` is not a `Box<Array<Int, 3>>`), since the size is then only known when the program runs.
+- **What the validator knows.** A `Box<Array<T, N>>` has the size `N` from its type, as an array has, and the size carried by a `Box<Array<T>>` is the `size` of it, so a function over any size says what it needs of it in a contract (`get(a, 0)` needs `size(a) > 0`) and the caller proves it.
+- **What it holds.** The elements are plain, as for any array: `Int`, `Bool` or arrays of them.
 
 An array is a value like a number, so it can be a field of a struct or an enum and an element of a list (`examples/array_data.tersus`): `struct Image { id: Int, pixels: Array<Int, 4> }`, `enum Tile { Row { cells: Array<Int, 2> }, Block { id: Int, cells: Array<Int, 4> } }`, `List<Array<Int, 2>>`. Reading a field or an element gives a copy of the array, which the program can change without changing the struct or the list (`set` gives a new array), and a struct is updated around a new one with `..base`. The array's words are in line, in the struct (the variants of an enum are as wide as their fields) or one after another in the list, so no array is allocated apart.
 
-What an array cannot be yet, because a heap form of it is to come (see the roadmap in `README.md`): an array whose size is only known when the program runs, a parameter that takes an array of any size, and an element that is a list, a struct or an enum.
+What an array cannot be yet: an element that is a list, a struct or an enum, and a size that is a parameter of a function (`fn dot<n>`, a later step of the roadmap in `README.md`).
 
 ## Current Limitations
 
