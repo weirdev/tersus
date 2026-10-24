@@ -149,7 +149,7 @@ closeTypes program = go [] . map (canonical program)
 
 -- A value of a variant has the representation of its enum, so one descriptor serves both
 canonical :: Program -> Type -> Type
-canonical program (TVariant v) = maybe (TVariant v) TNamed (enumOf program v)
+canonical program (TVariant v) = maybe (TVariant v) TNamed (ownerOf program v)
 canonical _ ty = ty
 
 -- A constant global for each type: its kind (0 Int, 1 Bool, 2 List, 3 struct or enum, 4 function, 5 array, 6 Box) and what the
@@ -240,8 +240,12 @@ constructor program name =
         _ -> listToMaybe [(i, fields) | EnumDecl variants <- Map.elems (progTypes program), (i, (v, fields)) <- zip [0 ..] variants, v == name]
 
 -- The enum that has the variant
-enumOf :: Program -> Name -> Maybe Name
-enumOf program v = listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
+-- (a struct is its own constructor, and a cast to it, `p as P`, has the type of a variant of it)
+ownerOf :: Program -> Name -> Maybe Name
+ownerOf program v =
+    case Map.lookup v (progTypes program) of
+        Just StructDecl{} -> Just v
+        _ -> listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
 
 -- The type of a value that a struct or a variant builds
 constructedType :: Program -> Name -> Type
@@ -439,9 +443,13 @@ rvalue fn destType rv =
         IsVariant o name -> do
             program <- programG
             (tag, _) <- constructorG program name
-            base <- dataBase fn (constructedType program name) o
-            found <- ins "t" ("load i64, ptr " ++ base)
-            ins "c" ("icmp eq i64 " ++ found ++ ", " ++ show tag)
+            -- (a struct has no tag, and a value of its type is that struct)
+            if tagWords program name == 0
+                then pure "true"
+                else do
+                    base <- dataBase fn (constructedType program name) o
+                    found <- ins "t" ("load i64, ptr " ++ base)
+                    ins "c" ("icmp eq i64 " ++ found ++ ", " ++ show tag)
         -- the field is moved out of the value: what it held is left holding nothing
         TakeField s name field -> do
             program <- programG
@@ -555,7 +563,7 @@ slotsOf program ty =
     case ty of
         TArray t n -> n * slotsOf program t
         TNamed n -> declaredWords n
-        TVariant v -> maybe 1 declaredWords (enumOf program v)
+        TVariant v -> maybe 1 declaredWords (ownerOf program v)
         _ -> 1
   where
     declaredWords n =

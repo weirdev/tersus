@@ -175,6 +175,13 @@ dataPrograms =
     , ("a struct holds a Box that holds a struct", "struct P { x: Int }; struct Q { b: Box<P>, n: Int }; q = Q { b: Box::new(P { x: 4 }), n: 5 }; r = q; return r;")
     , ("a Box is cast and read", "enum E { A { v: Int }, B }; b = Box::new(E::A { v: 7 }); return (b as E::A).v;")
     , ("a Box is unboxed and boxed again", "struct P { x: Int, xs: List<Int> }; b = Box::new(P { x: 1, xs: [2] }); p = Box::unbox(b); c = Box::new(p); return c;")
+    , -- a struct has no tag: it is its own constructor, and `is` and `as` of it are about its type
+      ("a struct is its own type", "struct P { x: Int }; p = P { x: 7 }; return p is P;")
+    , ("an empty struct is its own type", "struct E {}; e = E {}; return e is E;")
+    , ("a Box of a struct is its own type", "struct P { x: Int }; b = Box::new(P { x: 4 }); return b is P;")
+    , ("a struct is cast to itself and passed", "struct P { x: Int, y: Int }; fn f(p: P) -> Int { return p.y; }; p = P { x: 1, y: 2 }; q = p as P; return f(q);")
+    , ("a struct with a list is cast to itself and passed", "struct P { x: Int, xs: List<Int> }; fn f(p: P) -> Int { return size(p.xs) + p.x; }; p = P { x: 1, xs: [2, 3] }; q = p as P; return f(q);")
+    , ("a Box of a struct is cast to it", "struct P { x: Int, y: Int }; b = Box::new(P { x: 4, y: 5 }); q = b as P; return q.y;")
     , ("a loop walks down a tree", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn depth(t: Box<T>) -> Int { d = 0; while t is T::Node shrinks t { t = (t as T::Node).l; d = d + 1; }; return d; }; return depth(Box::new(T::Node { l: Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }), v: 2, r: Box::new(T::Leaf) }));")
     , ("lists of structs equal", "struct P { x: Int }; l = push([], P { x: 1 }); return l = push([], P { x: 1 });")
     , ("data parameter and result", "struct P { x: Int, y: Int }; fn swap(p: P) -> P { return P { x: p.y, y: p.x }; }; return swap(P { x: 1, y: 2 });")
