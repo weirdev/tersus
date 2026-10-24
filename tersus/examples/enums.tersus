@@ -20,7 +20,7 @@ fn area(s: Shape) -> Int {
 // cast does nothing, and a wrong one is undefined behaviour.
 fn radiusOf(s: Shape) -> Int
     [{ affirm s is Shape::Circle; }]
-    [{ }]
+    [{ affirm return = (s as Shape::Circle).radius; }]
 {
     return (s as Shape::Circle).radius;
 };

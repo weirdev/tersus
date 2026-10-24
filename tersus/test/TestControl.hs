@@ -315,7 +315,9 @@ testCfgValidation =
           parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] { for i in 0..n { for j in 0..n { if i + j > 3 { return i + j; }; }; }; return 0; }; x = f(3);"
         , -- The result of a function that returns what it was given is that argument
           parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; x = 3; y = id(x); affirm y = x; affirm y = 3;"
-        , parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ }] { return n; }; fn twice(n: Int) -> Int [{ }] [{ affirm return = n; }] { return id(id(n)); }; x = twice(2); affirm x = 2;"
+        , -- (what a body establishes is not exported: a caller has only the contract)
+          parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ }] { return n; }; fn twice(n: Int) -> Int [{ }] [{ affirm return = n; }] { return id(id(n)); };" "Could not prove: return = n"
+        , parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; fn twice(n: Int) -> Int [{ }] [{ affirm return = n; }] { return id(id(n)); }; x = twice(2); affirm x = 2;"
         , -- A function defined in a branch is local to it
           parseValidProgramHelper "x = 0; if true { fn inc(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n + 1; }; x = inc(1); } else { x = 2; }; affirm x = 2;"
         , -- A function defined in a loop is checked, and used there

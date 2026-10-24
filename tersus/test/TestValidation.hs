@@ -5,7 +5,7 @@ module TestValidation
     , testUserRewriteValidation
     , testParseVal
     , testParseValFail
-    , testValidationFuel
+    , testCallsUseContracts
     , testRecursion
     ) where
 
@@ -284,20 +284,19 @@ testParseValLastWInputStatements =
 
 testParseValWUdfCall :: TestResult
 testParseValWUdfCall =
-    parseValReturningStmtHelper
-        "{\
-        \  fn sumFirstLast(lst: List<Int>) -> Int [{\
-        \    define s = size(lst);\
-        \    rewrite eqToGtZero s;\
-        \    affirm s > 0;\
-        \  }] {\
-        \    return first(lst) + last(lst);\
-        \  };\
-        \  x = [3, 6, 9, 12];\
-        \  return sumFirstLast(x);\
-        \}"
-        "ret"
-        [FApp eqVarProof [ATerm "ret", CTerm (VInt 15)]]
+    parseValidProgramHelper
+        "fn sumFirstLast(lst: List<Int>) -> Int [{\
+        \  define s = size(lst);\
+        \  rewrite eqToGtZero s;\
+        \  affirm s > 0;\
+        \}] [{\
+        \  affirm return = first(lst) + last(lst);\
+        \}] {\
+        \  return first(lst) + last(lst);\
+        \};\
+        \x = [3, 6, 9, 12];\
+        \ret = sumFirstLast(x);\
+        \affirm ret = 15;"
 
 testValidateNestedBlocks :: TestResult
 testValidateNestedBlocks =
@@ -314,24 +313,23 @@ testValidateNestedBlocks =
 
 testParseValFunctReturnNestedBlocks :: TestResult
 testParseValFunctReturnNestedBlocks =
-    parseValReturningStmtHelper
-        "{\
-        \  x = [3, 6, 9, 12];\
-        \  fn getFirst(y: List<Int>) -> Int [{\
-        \    define s = size(y);\
-        \    rewrite eqToGtZero s;\
-        \    affirm s > 0;\
-        \  }] {\
-        \    x = [1];\
-        \    {\
-        \      return first(y);\
-        \    };\
-        \    return first(x);\
+    parseValidProgramHelper
+        "x = [3, 6, 9, 12];\
+        \fn getFirst(y: List<Int>) -> Int [{\
+        \  define s = size(y);\
+        \  rewrite eqToGtZero s;\
+        \  affirm s > 0;\
+        \}] [{\
+        \  affirm return = first(y);\
+        \}] {\
+        \  x = [1];\
+        \  {\
+        \    return first(y);\
         \  };\
-        \  return getFirst(x);\
-        \}"
-        "ret"
-        [FApp eqVarProof [ATerm "ret", CTerm (VInt 3)]]
+        \  return first(x);\
+        \};\
+        \ret = getFirst(x);\
+        \affirm ret = 3;"
 
 testParseValFunctWOutputStatements :: TestResult
 testParseValFunctWOutputStatements =
@@ -349,24 +347,21 @@ testParseValFunctWOutputStatements =
 
 testParseValFunctExportsProofVar :: TestResult
 testParseValFunctExportsProofVar =
-    parseValidateWEMatchHelper
-        "{\
-        \  fn getFirstWithSize(lst: List<Int>) -> Int [{\
-        \    define s = size(lst);\
-        \    rewrite eqToGtZero s;\
-        \    affirm s > 0;\
-        \  }] [{\
-        \    affirm s > 0;\
-        \  }] {\
-        \    return first(lst);\
-        \  };\
-        \  x = [3, 6, 9, 12];\
-        \  y = getFirstWithSize(x);\
+    parseValidProgramHelper
+        "fn getFirstWithSize(lst: List<Int>) -> Int [{\
+        \  define s = size(lst);\
+        \  rewrite eqToGtZero s;\
         \  affirm s > 0;\
-        \}"
-        [ FApp eqVarProof [ATerm "y", CTerm (VInt 3)]
-        , FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "s", CTerm (VInt 0)]
-        ]
+        \}] [{\
+        \  affirm s > 0;\
+        \  affirm return = first(lst);\
+        \}] {\
+        \  return first(lst);\
+        \};\
+        \x = [3, 6, 9, 12];\
+        \y = getFirstWithSize(x);\
+        \affirm y = 3;\
+        \affirm s > 0;"
 
 testParseVal :: Test
 testParseVal =
@@ -468,9 +463,9 @@ testParseValFail =
         , testParseValMissingExportedProofValidationFail
         ]
 
--- forall in loop invariants and the contracts of functions that build lists
-testValidationFuel :: Test
-testValidationFuel =
+-- What a caller knows of a function is its contracts: the body is neither run nor read for facts
+testCallsUseContracts :: Test
+testCallsUseContracts =
     let twice n =
             "fn twice(n: Int) -> Int [{ affirm n >= 0; }] [{ }] { i = 0; c = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { i = i + 1; c = c + 2; }; return c; };"
                 ++ "x = twice("
@@ -479,13 +474,19 @@ testValidationFuel =
                 ++ show (2 * n)
                 ++ ";"
      in testCaseSeq
-            "testValidationFuel"
-            [ -- Validation evaluates a call whose arguments are known, so its result is a fact
-              parseValidProgramHelper (twice 1000)
-            , -- A computation longer than the budget is given up on, so its result is not known
-              -- (the program still runs: concrete evaluation has no budget)
-              parseValidateFailProgramHelper (twice 50000) "Could not prove: x = 100000"
-            , parseEvalProgramHelper (twice 50000 ++ " return x;") (Just (VInt 100000))
+            "testCallsUseContracts"
+            [ -- A call with known arguments is not run to learn its result, however short the computation
+              parseValidateFailProgramHelper (twice 3) "Could not prove: x = 6"
+            , parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ }] { return n; }; x = id(3); affirm x = 3;" "Could not prove: x = 3"
+            , -- The program itself runs, whatever validation knows
+              parseEvalProgramHelper (twice 50000 ++ " return x;") (Just (VInt 100000))
+            , -- What the output contract says is known, for known arguments too
+              parseValidProgramHelper "fn dbl(n: Int) -> Int [{ }] [{ affirm return = n + n; }] { return n + n; }; x = dbl(5); affirm x = 10;"
+            , -- What the body establishes is not exported, though it holds
+              parseValidateFailProgramHelper "fn id(n: Int) -> Int [{ }] [{ }] { return n; }; fn use(n: Int) -> Int [{ }] [{ affirm return = n; }] { return id(n); };" "Could not prove: return = n"
+            , parseValidateFailProgramHelper "fn big(n: Int) -> Int [{ affirm n > 5; }] [{ }] { return n; }; fn use(n: Int) -> Int [{ affirm n > 5; }] [{ affirm return > 5; }] { return big(n); };" "Could not prove: return > 5"
+            , -- The input contract is not exported as a fact about the result either
+              parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ }] { return 1; }; x = f(2); affirm x = 1;" "Could not prove: x = 1"
             , -- Naming an element with define is how a forall fact gets used at it (LANGUAGE.md, How Validation Works)
               parseValidProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { define v = get(l, 1); affirm v = 0; return 1; };"
             , -- A callee that never ends does not stop validation

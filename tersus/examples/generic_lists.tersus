@@ -1,6 +1,6 @@
 // Lists hold any one type of element: List<Int>, List<Bool>, List<List<Int>>.
 // An element is a term like any other, so contracts and foralls work on them.
-fn flags(values: List<Int>) -> List<Bool> {
+fn flags(values: List<Int>) -> List<Bool> [{ }] [{ affirm size(return) = size(values); }] {
     out = [];
     for value in values {
         out = push(out, value > 0);

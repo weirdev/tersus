@@ -1,0 +1,7 @@
+// A caller knows a function by its contracts alone. `id` returns its argument, but it does not say so, so `twice` cannot
+// use that: the validator does not read the body of a callee for facts, and does not run it when the arguments are known.
+fn id(n: Int) -> Int { return n; };
+
+fn twice(n: Int) -> Int [{ }] [{ affirm return = n; }] {
+    return id(id(n));
+};

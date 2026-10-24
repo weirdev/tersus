@@ -108,6 +108,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/linked_list_unchecked_walk.tersus` | A walk over a list whose links nothing says are valid |
 | `rejected/struct_update_frame.tersus` | A contract claims a field that an update did not set equals another field |
 | `rejected/struct_field_type.tersus` | A struct literal gives a `Bool` for an `Int` field |
+| `rejected/body_not_exported.tersus` | A function that returns its argument without saying so in a contract: its caller cannot use that |
 | `rejected/trait_input_stronger.tersus` | An impl asks for `by > 5` where its trait allows any `by > 0`: code written against the trait could call it with a step it refuses |
 | `rejected/trait_output_weaker.tersus` | An impl of `Measure` returns a product of two unknowns, and the trait promises a result that is not negative |
 | `rejected/trait_ambiguous_call.tersus` | Two traits give a type a function of one name, and `c.label()` does not say which |

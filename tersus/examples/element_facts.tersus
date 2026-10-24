@@ -14,7 +14,7 @@ fn replace(l: List<Int>, i: Int, x: Int) -> List<Int> [{
     return set(l, i, x);
 };
 
-fn append(l: List<Int>, x: Int) -> List<Int> [{ }] [{ affirm get(return, size(l)) = x; }] {
+fn append(l: List<Int>, x: Int) -> List<Int> [{ }] [{ affirm get(return, size(l)) = x; affirm size(return) = size(l) + 1; }] {
     return push(l, x);
 };
 

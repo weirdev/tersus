@@ -66,7 +66,7 @@ main = do
                 , testPrecedence
                 , testFirstLast
                 , testFunctionCalls
-                , testValidationFuel
+                , testCallsUseContracts
                 , testNative
                 , testOwnership
                 , testTraits
