@@ -972,3 +972,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is use
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
 - The CLI runs one file at a time and has no REPL or multi-file programs.
+- The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
+- The source file is read in the encoding of the locale, so a program with a letter that is not ASCII in a name (the parser accepts any letter) needs a UTF-8 locale to load.
+- A program has no input or output: it computes and returns one value, which `run` and an executable print.
+- Native code (`build`) copies an argument that is passed to a function and used again afterwards, and recursion that is very deep, or a recursive value that is very long to free or copy, can overflow the stack of the process (see the roadmap in `README.md`).

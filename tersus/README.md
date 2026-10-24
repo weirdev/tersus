@@ -78,8 +78,24 @@ Next steps, roughly in priority order:
     2. Done: lists, with a runtime of C (`LlvmRuntime`): literals and operations, structural equality and printing by a descriptor of the type
     3. Done: structs, enums and function values: every example builds natively and prints what `tersus run` prints
     4. Done: memory (`MirOwnership`, MIR.md, Ownership): every value of the heap has one owner, the last use of a local moves the value out of it, a value that is wanted twice is copied, values are freed when their owner lets go, and `push`/`set` change the list in place; a list built by pushing takes time and memory in proportion to its length
-    5. A flag for the stack depth of deep recursion
-    6. Borrowing a value to a function that only reads it, so that a call does not copy an argument that is used afterwards
+    5. Borrowing a value to a function that only reads it, so that a call does not copy an argument that is used afterwards
+        Every parameter is owned today (MIR.md, Ownership), so `helper(l, i)` called again and again on a list that is used afterwards copies the list at each call, which makes a loop of such calls take time in proportion to the square of the length. The pass already decides move, copy or look per operand, so a borrowed argument is a fourth outcome, plus an inference of which parameters of a function it only reads (a fixpoint over the calls: a parameter is owned if some path moves it, or passes it where it is owned)
+        What needs care: a function reached through a function value (its convention has to be one for every function, or a small wrapper made when a function is used as a value), a value passed both borrowed and owned in one call (the owned one has to be a copy), and the check of the result by the model of the heap (`TestOwnership`), which has to learn what a borrowed parameter may do
+    6. Deep recursion and deep values
+        Native recursion uses the C stack, and freeing or copying a very long recursive value (a million-node list built of an enum) recurses too, so either could overflow it, where `tersus run` has no such limit. An iterative free and copy, and a bigger stack or a clear error when it runs out, would fix both
+    7. Contracts as hints to LLVM
+        The code assumes what validation proved (a divisor that is not 0, an index in range, a list that is not empty) without checking, but LLVM does not know the proofs, so it cannot drop the work around them. Emitting `llvm.assume` for the facts that justify each `get`, division, `first` and `last` could let it. A mistake in the validator would then be wrong code that the optimiser has built on, so it needs the memory and answer checks of the tests to run with the hints on
+    8. Cheaper ownership
+        A part that is kept (`row = get(rows, i)`) is copied, and so is the inner list of `rows = set(rows, i, push(get(rows, i), x))`, which costs the size of the inner list where a move out and back in would cost nothing; a field update through `..p` copies a list field unless `p` is dead; a value that is read for the last time is only freed when its local is assigned or the function returns; and only temporaries can look at a value, not named locals that are only read
+    9. Run the valgrind checks in CI
+        `testNative` runs some programs under valgrind when it is installed, and the CI runner does not have it, so there only the checks of the runtime (`-DTERSUS_CHECK`) and the model of the heap run. Installing it in the workflow would keep the independent check
+18. Validate calls of function values
+    The validator does not follow a call of a function that is a value: `fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }` is refused with `Function object not validated`, though the type checker, the executor and native code run it. The tests of native code for function values lower the programs without validating them (`functionPrograms` in `TestNative`) because of this
+    The function a call reaches is not known statically, so the call needs the contract of the function type (the contracts of a parameter that is a function would be written in its type), or the callee has to be one of a known few
+19. Read source files as UTF-8
+    The parser accepts any letter in a name, but the CLI reads the file in the encoding of the locale, so a program with a name like `é` fails to load under a plain POSIX locale (`cannot decode byte sequence`). Reading and writing with an explicit UTF-8 encoding in `app/Main.hs` and `Cli.hs` would fix it. Native code is already independent of the locale: the IR is written as ASCII
+20. Strings, and input and output
+    A program computes and returns one value, which `run` and an executable print; it reads nothing and prints nothing, and there are no strings or floats (DATA_MODEL.md defers them). This is the largest step towards programs that do something, and it is a design decision of its own: the type of a string and what a contract can say about one, how a program gets its input (arguments, standard input, files) and how the validator treats a value it does not know, and what `print` is in a function that the validator has to reason about
 
 Running (from this (tersus/) directory):
     0. stack run -- run examples/basics.tersus

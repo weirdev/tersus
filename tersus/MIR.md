@@ -172,7 +172,7 @@ fn main() -> Int {
 
 1. **This step**: the model, the renderer, lowering, the executor, the flow change, the tests and docs above.
 2. **Done**: validation moved onto the MIR (`MirValidate.hs`, `Ghost.hs`, `ProofState.hs`; see Validation), and the AST evaluator and the AST validator (`Proof.hs`) are gone.
-3. **In progress**: LLVM lowering (`LlvmEmit.hs`, see Native code): steps 1 to 4 (`Int`, `Bool`, control flow, calls, lists, structs, enums, function values and memory management) are done; a flag for the stack depth of deep recursion remains.
+3. **In progress**: LLVM lowering (`LlvmEmit.hs`, see Native code): steps 1 to 4 (`Int`, `Bool`, control flow, calls, lists, structs, enums, function values and memory management) are done. What is left (borrowing a value to a function that only reads it, deep recursion, contracts as hints to LLVM, cheaper ownership, and valgrind in CI) is in the roadmap of `README.md`, item 17.
 
 ## Arithmetic and traps
 
