@@ -1,0 +1,35 @@
+// An array is a value like a number, so it can be a field of a struct or an enum, and an element of a list. It is held where it
+// is: a struct that has an array field has its words in line, and a list of arrays has them one after another.
+struct Image { id: Int, pixels: Array<Int, 4>, tag: Int };
+
+enum Tile { Empty, Row { cells: Array<Int, 2> }, Block { id: Int, cells: Array<Int, 4> } };
+
+// Reading the field gives a copy of the array, and the update builds a new Image around the new array
+fn brighten(img: Image) -> Image {
+    px = img.pixels;
+    i = 0;
+    while i < 4 [{ affirm i >= 0; affirm i <= 4; }] shrinks 4 - i {
+        px = set(px, i, get(px, i) + 10);
+        i = i + 1;
+    };
+    return Image { pixels: px, ..img };
+};
+
+// The variants of an enum are as wide as their fields
+fn weight(t: Tile) -> Int {
+    return match t {
+        Tile::Empty => 0,
+        Tile::Row { cells: c } => get(c, 0) + get(c, 1),
+        Tile::Block { id: id, cells: c } => id + get(c, 3)
+    };
+};
+
+images = push([], Image { id: 1, pixels: #[1, 2, 3, 4], tag: 7 });
+images = push(images, brighten(Image { id: 2, pixels: array(4, 0), tag: 8 }));
+
+// A list of arrays, whose last element is an array
+board = push(push([], #[1, 2]), #[3, 4]);
+board = set(board, 0, #[5, 6]);
+
+total = get(get(images, 1).pixels, 3) + weight(Tile::Block { id: 5, cells: #[1, 2, 3, 4] }) + weight(Tile::Row { cells: #[7, 8] });
+return total + get(last(board), 1) + get(first(board), 0) + size(images);

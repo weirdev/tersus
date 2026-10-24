@@ -67,6 +67,9 @@ declarations =
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
     , "declare ptr @tersus_list_new(i64)"
+    , "declare ptr @tersus_list_new_words(i64, i64)"
+    , "declare ptr @tersus_list_push_words(ptr, ptr, i64)"
+    , "declare ptr @tersus_list_set_words(ptr, i64, ptr, i64)"
     , "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
     , "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
     , "declare ptr @tersus_list_push(ptr, i64)"
@@ -372,7 +375,7 @@ rvalue fn destType rv =
             binary op ty x y
         MakeList os -> case destType of
             TList t -> do
-                list <- newList (length os)
+                list <- newList (length os) (slotsOf t)
                 mapM_ (\(i, o) -> operandAt fn t o >>= storeElement t list (show i)) (zip [0 :: Int ..] os)
                 pure list
             _ -> failG "A list literal must make a list"
@@ -381,10 +384,10 @@ rvalue fn destType rv =
         MakeData name fields -> do
             program <- programG
             (tag, declared) <- constructorG program name
-            object <- newData tag (length declared)
+            object <- newData tag (dataWords declared)
             mapM_
                 ( \(i, (f, t)) -> case lookup f fields of
-                    Just o -> operandAt fn t o >>= storeSlot t object (dataHeader + 8 * i)
+                    Just o -> operandAt fn t o >>= storeSlot t object (fieldOffset declared i)
                     Nothing -> failG ("A field is missing: " ++ name ++ "." ++ f)
                 )
                 (zip [0 ..] declared)
@@ -396,7 +399,7 @@ rvalue fn destType rv =
                 Nothing -> failG ("Variant " ++ name ++ " has no field " ++ field)
                 Just i -> do
                     object <- operandAt fn (constructedType program name) o
-                    loadSlot (snd (declared !! i)) object (dataHeader + 8 * i)
+                    loadSlot (snd (declared !! i)) object (fieldOffset declared i)
         IsVariant o name -> do
             program <- programG
             (tag, _) <- constructorG program name
@@ -421,13 +424,15 @@ rvalue fn destType rv =
                 Nothing -> failG ("Variant " ++ name ++ " has no field " ++ field)
                 Just i -> do
                     object <- operandAt fn (constructedType program name) (Copy s)
-                    taken <- loadSlot (snd (declared !! i)) object (dataHeader + 8 * i)
-                    p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show (dataHeader + 8 * i))
+                    taken <- loadSlot (snd (declared !! i)) object (fieldOffset declared i)
+                    p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show (fieldOffset declared i))
                     emit ("store ptr null, ptr " ++ p)
                     pure taken
 
-newList :: Int -> G String
-newList n = ins "l" ("call ptr @tersus_list_new(i64 " ++ show n ++ ")")
+-- A list of n elements that are stride words each, which the caller fills in
+newList :: Int -> Integer -> G String
+newList n 1 = ins "l" ("call ptr @tersus_list_new(i64 " ++ show n ++ ")")
+newList n stride = ins "l" ("call ptr @tersus_list_new_words(i64 " ++ show n ++ ", i64 " ++ show stride ++ ")")
 
 -- A struct or an enum value with room for its fields, which the caller fills in
 newData :: Int -> Int -> G String
@@ -436,6 +441,14 @@ newData tag fields = ins "d" ("call ptr @tersus_data_new(i64 " ++ show tag ++ ",
 -- The bytes before the first field of a struct or an enum value: the count and the tag
 dataHeader :: Int
 dataHeader = 16
+
+-- The words that the fields of a variant take, and the byte offset of the field at a position: a field is a word, or for an array
+-- its elements' words in line
+dataWords :: [(Variable, Type)] -> Int
+dataWords declared = fromInteger (sum [slotsOf t | (_, t) <- declared])
+
+fieldOffset :: [(Variable, Type)] -> Int -> Int
+fieldOffset declared i = dataHeader + 8 * fromInteger (sum [slotsOf t | (_, t) <- take i declared])
 
 constructorG :: Program -> Name -> G (Int, [(Variable, Type)])
 constructorG program name = maybe (failG ("Unknown struct or variant: " ++ name)) pure (constructor program name)
@@ -456,16 +469,27 @@ listOperation fn destType op os =
             (t, list) <- listArg l
             index <- operandAt fn TInt i
             elementPtr list index >>= loadElement t
+        -- (an element that is an array is copied in from where it is)
         (Push, [l, x]) -> do
             (t, list) <- listArg l
-            word <- operandAt fn t x >>= toWord t
-            ins "l" ("call ptr @tersus_list_push(ptr " ++ list ++ ", i64 " ++ word ++ ")")
+            if isArray t
+                then do
+                    from <- arrayPtr x
+                    ins "l" ("call ptr @tersus_list_push_words(ptr " ++ list ++ ", ptr " ++ from ++ ", i64 " ++ show (slotsOf t) ++ ")")
+                else do
+                    word <- operandAt fn t x >>= toWord t
+                    ins "l" ("call ptr @tersus_list_push(ptr " ++ list ++ ", i64 " ++ word ++ ")")
         (Set, [l, i, x]) -> do
             (t, list) <- listArg l
             index <- operandAt fn TInt i
-            word <- operandAt fn t x >>= toWord t
-            d <- descriptor t
-            ins "l" ("call ptr @tersus_list_set(ptr " ++ list ++ ", i64 " ++ index ++ ", i64 " ++ word ++ ", ptr " ++ d ++ ")")
+            if isArray t
+                then do
+                    from <- arrayPtr x
+                    ins "l" ("call ptr @tersus_list_set_words(ptr " ++ list ++ ", i64 " ++ index ++ ", ptr " ++ from ++ ", i64 " ++ show (slotsOf t) ++ ")")
+                else do
+                    word <- operandAt fn t x >>= toWord t
+                    d <- descriptor t
+                    ins "l" ("call ptr @tersus_list_set(ptr " ++ list ++ ", i64 " ++ index ++ ", i64 " ++ word ++ ", ptr " ++ d ++ ")")
         _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " yet")
   where
     listArg o = do
@@ -570,6 +594,11 @@ assignArray fn dest ty rv =
         TArray elementTy n -> do
             let target = slot dest
                 bytes = 8 * slotsOf ty
+                -- the address of the element at an index of an array or of a list, the element being the array that is made
+                elementOf container index
+                    | isArrayOperand fn container = arrayPtr container >>= \base -> elementAddress base index bytes
+                    | otherwise = operandAt fn (TList ty) container >>= \list -> elementSlot (slotsOf ty) list index
+                lengthOfList container = operandAt fn (TList ty) container >>= \list -> ins "p" ("getelementptr i8, ptr " ++ list ++ ", i64 8") >>= \p -> ins "n" ("load i64, ptr " ++ p)
             case rv of
                 Use o -> arrayPtr o >>= \src -> copyWords target src bytes
                 ListOp NewArray [_, x] -> fillArray fn target elementTy n x
@@ -579,16 +608,27 @@ assignArray fn dest ty rv =
                     value <- elementValue fn elementTy x
                     copyWords target src bytes
                     writeElement elementTy target index value
-                -- an element that is an array
+                -- an element that is an array, of an array or of a list
                 ListOp Get [a, i] -> do
-                    src <- arrayPtr a
                     index <- operandAt fn TInt i
-                    elementAddress src index bytes >>= \p -> copyWords target p bytes
-                ListOp First [a] -> arrayPtr a >>= \src -> copyWords target src bytes
+                    elementOf a index >>= \p -> copyWords target p bytes
+                ListOp First [a] -> elementOf a "0" >>= \p -> copyWords target p bytes
                 ListOp Last [a] -> do
-                    count <- arrayLength fn a
-                    src <- arrayPtr a
-                    elementAddress src (show (count - 1)) bytes >>= \p -> copyWords target p bytes
+                    index <-
+                        if isArrayOperand fn a
+                            then (\count -> show (count - 1)) <$> arrayLength fn a
+                            else lengthOfList a >>= \len -> ins "i" ("sub i64 " ++ len ++ ", 1")
+                    elementOf a index >>= \p -> copyWords target p bytes
+                -- a field that is an array
+                ReadField o name field -> do
+                    program <- programG
+                    (_, declared) <- constructorG program name
+                    case elemIndex field (map fst declared) of
+                        Nothing -> failG ("Variant " ++ name ++ " has no field " ++ field)
+                        Just i -> do
+                            object <- operandAt fn (constructedType program name) o
+                            p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show (fieldOffset declared i))
+                            copyWords target p bytes
                 _ -> failG ("Native code does not support " ++ renderRvalue rv ++ " for an array yet")
         _ -> failG "An array is assigned to something that is not an array"
 
@@ -639,16 +679,21 @@ arrayRead fn destType op os =
             elementAddress base index 8 >>= loadElement destType
         _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " for an array yet")
 
--- The address of an element: a list is 24 bytes of header (count, length, capacity) and then a slot of 8 bytes per element
-elementPtr :: String -> String -> G String
-elementPtr list index = do
+-- The address of an element: a list is 24 bytes of header (count, length, capacity) and then the elements, stride words apart (an
+-- element is a word, or for an array its words)
+elementSlot :: Integer -> String -> String -> G String
+elementSlot stride list index = do
     elements <- ins "e" ("getelementptr i8, ptr " ++ list ++ ", i64 24")
-    ins "p" ("getelementptr i64, ptr " ++ elements ++ ", i64 " ++ index)
+    at <- if stride == 1 then pure index else ins "o" ("mul i64 " ++ index ++ ", " ++ show stride)
+    ins "p" ("getelementptr i64, ptr " ++ elements ++ ", i64 " ++ at)
+
+elementPtr :: String -> String -> G String
+elementPtr = elementSlot 1
 
 storeElement :: Type -> String -> String -> String -> G ()
 storeElement t list index value = do
-    p <- elementPtr list index
-    storeAt t p value
+    p <- elementSlot (slotsOf t) list index
+    if isArray t then copyWords p value (8 * slotsOf t) else storeAt t p value
 
 loadElement :: Type -> String -> G String
 loadElement = loadAt
@@ -657,7 +702,7 @@ loadElement = loadAt
 storeSlot :: Type -> String -> Int -> String -> G ()
 storeSlot t object offset value = do
     p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show offset)
-    storeAt t p value
+    if isArray t then copyWords p value (8 * slotsOf t) else storeAt t p value
 
 loadSlot :: Type -> String -> Int -> G String
 loadSlot t object offset = do
@@ -850,16 +895,16 @@ constantValue _ (CInt i) = pure (show i)
 constantValue _ (CBool b) = pure (if b then "true" else "false")
 constantValue _ (CArray cs) = constantWords cs
 constantValue (TList t) (CList cs) = do
-    list <- newList (length cs)
+    list <- newList (length cs) (slotsOf t)
     mapM_ (\(i, c) -> constantValue t c >>= storeElement t list (show i)) (zip [0 :: Int ..] cs)
     pure list
 constantValue _ (CData name fields) = do
     program <- programG
     (tag, declared) <- constructorG program name
-    object <- newData tag (length declared)
+    object <- newData tag (dataWords declared)
     mapM_
         ( \(i, (f, t)) -> case lookup f fields of
-            Just c -> constantValue t c >>= storeSlot t object (dataHeader + 8 * i)
+            Just c -> constantValue t c >>= storeSlot t object (fieldOffset declared i)
             Nothing -> failG ("A field is missing: " ++ name ++ "." ++ f)
         )
         (zip [0 ..] declared)

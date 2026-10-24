@@ -97,11 +97,29 @@ testArrays =
                 , testCase "arrays inside an array count" (rejected "fn f(a: Array<Array<Int, 100>, 100>) -> Int { return 0; }; return 0;" "takes 10000 words")
                 , testCase "an element on the heap is not plain" (rejected "return size(array(2, [1]));" "an array holds Int, Bool or arrays of them, not List<Int>")
                 , testCase "an element that is a struct" (rejected "struct P { x: Int }; return size(array(2, P { x: 1 }));" "an array holds Int, Bool or arrays of them, not P")
-                , testCase "a struct field is not an array" (rejected "struct S { a: Array<Int, 2> }; return 0;" "cannot hold an Array yet")
-                , testCase "an enum field is not an array" (rejected "enum E { A { a: Array<Int, 2> }, B }; return 0;" "cannot hold an Array yet")
-                , testCase "a list parameter does not hold arrays" (rejected "fn f(l: List<Array<Int, 2>>) -> Int { return 0; }; return 0;" "cannot hold an Array yet")
-                , testCase "a list is not pushed an array" (rejected "rows = push([], array(2, 0)); return 0;" "cannot hold an Array yet")
                 , testCase "array is not a value" (rejected "h = array; return 0;" "cannot be used as a value")
+                ]
+            , TestList
+                "arrays in structs, enums and lists"
+                [ testCase "a struct with an array field" (runs "struct G { name: Int, cells: Array<Int, 3>, last: Int }; g = G { name: 1, cells: #[4, 5, 6], last: 9 }; return get(g.cells, 2) + g.last;" (VInt 15))
+                , testCase "the fields around it are not disturbed" (runs "struct G { name: Int, cells: Array<Int, 3>, last: Int }; g = G { name: 1, cells: #[4, 5, 6], last: 9 }; return g.name * 10 + g.last;" (VInt 19))
+                , testCase "an update builds a struct around a new array" (runs "struct G { name: Int, cells: Array<Int, 3> }; g = G { name: 1, cells: #[4, 5, 6] }; h = G { cells: set(g.cells, 0, 7), ..g }; return h.cells;" (ints [7, 5, 6]))
+                , testCase "and leaves the first one as it was" (runs "struct G { name: Int, cells: Array<Int, 3> }; g = G { name: 1, cells: #[4, 5, 6] }; h = G { cells: set(g.cells, 0, 7), ..g }; return g.cells;" (ints [4, 5, 6]))
+                , testCase "a struct with an array field is equal to another" (runs "struct G { cells: Array<Int, 2> }; return G { cells: #[1, 2] } = G { cells: array(2, 1) };" (VBool False))
+                , testCase "an enum whose variants have arrays of different sizes" (runs "enum E { A { v: Array<Int, 2> }, B { x: Int, v: Array<Int, 4> }, C }; e = E::B { x: 1, v: array(4, 7) }; return match e { E::A { v: v } => size(v), E::B { x: x, v: v } => size(v) + x, E::C => 0 };" (VInt 5))
+                , testCase "a list of arrays" (runs "rows = push(push([], #[1, 2]), #[3, 4]); return get(get(rows, 1), 0) + size(rows);" (VInt 5))
+                , testCase "first and set on a list of arrays" (runs "rows = push(push([], #[1, 2]), #[3, 4]); rows = set(rows, 0, #[9, 9]); return first(rows);" (ints [9, 9]))
+                , testCase "last of a list of arrays" (runs "rows = push(push([], #[1, 2]), #[3, 4]); rows = set(rows, 0, #[9, 9]); return last(rows);" (ints [3, 4]))
+                , testCase "a list of arrays that grows" (runs "rows = []; i = 0; while i < 50 [{ affirm i >= 0; }] shrinks 50 - i { rows = push(rows, array(3, i)); i = i + 1; }; return get(get(rows, 49), 2) + size(rows);" (VInt 99))
+                , testCase "a list of lists of arrays" (runs "inner = push([], #[1, 2]); outer = push([], inner); return get(get(get(outer, 0), 0), 1);" (VInt 2))
+                , testCase "an array in a struct in a list" (runs "struct P { v: Array<Int, 2> }; ps = push([], P { v: #[3, 4] }); return get(get(ps, 0).v, 1);" (VInt 4))
+                , testCase "the copy of a list of arrays is its own" (runs "rows = push([], #[1, 2]); other = rows; other = set(other, 0, #[0, 0]); return rows;" (VList [ints [1, 2]]))
+                , testCase "an array of arrays in a struct" (runs "struct G { m: Array<Array<Int, 2>, 2> }; g = G { m: array(2, array(2, 5)) }; return get(get(g.m, 1), 0);" (VInt 5))
+                , testCase "a function takes and gives a struct with an array" (runs "struct G { cells: Array<Int, 2> }; fn bump(g: G) -> G { return G { cells: set(g.cells, 0, get(g.cells, 0) + 1) }; }; return bump(bump(G { cells: #[1, 1] })).cells;" (ints [3, 1]))
+                , testCase "what is known of the size of an array that was a field" (valid "struct G { cells: Array<Int, 3> }; g = G { cells: #[1, 2, 3] }; c = g.cells; affirm size(c) = 3; return get(c, 2);")
+                , testCase "what is known of the size of an array that was an element" (valid "rows = push([], #[1, 2]); row = get(rows, 0); affirm size(row) = 2; return get(row, 1);")
+                , testCase "an element of a list of arrays is read past its end" (rejected "rows = push([], #[1, 2]); return get(get(rows, 0), 2);" "Relation does not hold")
+                , testCase "a list of arrays is read past its end" (rejected "rows = push([], #[1, 2]); return get(rows, 1);" "Relation does not hold")
                 ]
             , TestList
                 "parsing"

@@ -11,8 +11,6 @@ module TypeCheck
     , builtinType
     , checkCall
     , plainElement
-    , containsArray
-    , listOfArrays
     , checkBuiltinCall
     , checkConstruct
     , readField
@@ -291,19 +289,11 @@ registerCtors typeName ctors = do
     s <- getState
     putState s{tcCtors = foldr (\(ctor, fields) -> Map.insert ctor (typeName, fields)) (tcCtors s) ctors}
 
--- A field of a struct or an enum is one word of a value of the heap, so it cannot be an array
-checkField :: Type -> TC ()
-checkField ty = do
-    checkType ty
-    when (containsArray ty) $ failTc listOfArrays
-
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
 checkType (TVariant name) = () <$ ctorInfo name
-checkType (TList t) = do
-    checkType t
-    when (containsArray t) $ failTc listOfArrays
+checkType (TList t) = checkType t
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
 checkType ty@(TArrayOf t _) = checkType t >> arrayOk ty
 checkType (TFn args ret) = mapM_ checkType (ret : args)
@@ -370,13 +360,6 @@ checkBuiltinCall (Just b) name ft ats@(container : _)
             Get -> TFn [TArray a n, TInt] a
             Set -> TFn [TArray a n, TInt, a] (TArray a n)
             _ -> TFn [TArray a n] a
--- (a list holds values of the heap, and an array is held inline: the two do not mix yet)
-checkBuiltinCall (Just Push) name ft ats = do
-    result <- checkCall name ft ats
-    r <- zonk result
-    case r of
-        TList e | containsArray e -> failTc listOfArrays
-        _ -> return result
 checkBuiltinCall _ name ft ats = checkCall name ft ats
 
 -- Arrays: held inline, so their size is a constant of the type and their elements are plain
@@ -400,17 +383,9 @@ plainElement (TArrayOf t _) = plainElement t
 plainElement (TVar _) = True
 plainElement _ = False
 
-containsArray :: Type -> Bool
-containsArray TArrayOf{} = True
-containsArray (TList t) = containsArray t
-containsArray _ = False
-
 -- (the pointer that an unsized type goes behind comes with Box, which the language does not have yet)
 unsizedByValue :: String
 unsizedByValue = "Type error: an array with no size (Array<T> is Array<T, ?>) can only be used behind a pointer, which the language does not have yet: write the size, as in Array<Int, 3>"
-
-listOfArrays :: String
-listOfArrays = "Type error: a List or a struct cannot hold an Array yet: an array is held inline, in the frame of a function, and the values of the heap have a slot of one word"
 
 arrayOk :: Type -> TC ()
 arrayOk ty@(TArray e n) = do
@@ -557,13 +532,13 @@ checkStatement top ctx env stmt =
             return (ctx, env', ValidationStatement vs')
         StructDef name fields -> do
             declareType name
-            mapM_ (checkField . snd) fields
+            mapM_ (checkType . snd) fields
             registerCtors name [(name, fields)]
             return (ctx, env, stmt)
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
-            mapM_ (mapM_ (checkField . snd) . snd) variants
+            mapM_ (mapM_ (checkType . snd) . snd) variants
             registerCtors name variants
             return (ctx, env, stmt)
         AxiomDef{} -> return (ctx, env, stmt)
