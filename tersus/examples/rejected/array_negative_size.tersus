@@ -1,0 +1,3 @@
+// array(n, x) needs a size that is not negative.
+n = 2 - 5;
+return size(array(n, 0));

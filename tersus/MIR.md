@@ -47,7 +47,7 @@ data Function = Function
     }
 
 data LocalDecl = LocalDecl
-    { localType :: Type                     -- the checker's types: TInt, TBool, TList, TFn, TNamed, TVariant
+    { localType :: Type                     -- the checker's types: TInt, TBool, TList, TArray, TFn, TNamed, TVariant
     , localName :: Maybe Variable           -- the source name, for messages and for the validator later; Nothing for temporaries
     }
 
@@ -71,7 +71,10 @@ data Rvalue
     | AsVariant Operand Name                -- the same value, known to be that variant (`value as Enum::Variant`); gives the local the variant's type
 
 data BinOp  = Add | Sub | Mul | Div | Mod | Compare Rel      -- Div and Mod need a divisor /= 0; Compare Eq is structural
-data ListOp = Length | First | Last | Get | Push | Set       -- First and Last need a non-empty list, Get and Set an index in range
+data ListOp = Length | First | Last | Get | Push | Set | NewArray
+                                                            -- First and Last need a non-empty list, Get and Set an index in range;
+                                                            -- they work on a list or an array (TArray), Push only on a list;
+                                                            -- NewArray n x makes an array of n copies of x (n >= 0)
 
 data Operand = Copy Local | Const Constant
 data Constant
@@ -193,6 +196,7 @@ So an operation of the MIR either gives a value or traps. Two kinds of trap:
 - **Names.** A function of the program is `@"fn.<name>"` (internal, quoted, since a lifted function is named `outer::inner`), the statements of `main` are `@tersus_main` (names of the program may use any letter, so a name is written as its UTF-8 bytes, with every one that is not printable ASCII as `\hh`, and the file stays ASCII), and the C-level `main` calls that and prints the result by the descriptor of its type (`tersus_print`). A program can finish without returning on some path (`if c { return 1; };`), where `tersus run` prints nothing, so when `main` returns a value its function returns the value with a flag that says whether `_0` was assigned (kept in a slot that every assignment of `_0` sets), and the C-level `main` prints only then.
 - **Types.** `Int` is `i64`, `Bool` is `i1`, and a list is a `ptr` to a heap object `{ rc, len, cap, elements }`: 24 bytes of header, then one 8-byte slot per element (an `Int`, a `Bool` as 0 or 1, or the `ptr` of an inner list), so that one runtime function serves every element type. `rc` is not used (see Ownership). A struct or an enum value is a `ptr` to `{ rc, tag, fields }`: 16 bytes of header, then a slot per field of its variant, in declaration order. The tag is the position of the variant in the enum (0 for a struct), and the object is as large as its variant, so a type that contains itself needs no layout of its own (a field that is a `Tree` is a pointer). A function value is the address of the function (`ptr @"fn.<name>"`), since functions capture nothing, and a call of a local is a call through that address with the parameter and result types of its `TFn`.
 - **Lists.** `Length`, `First`, `Last` and `Get` are loads (`First` and `Last` of an empty list, and `Get` out of range, are assumed not to happen). `MakeList` and a constant list call `tersus_list_new` and store the elements, each time the statement runs, so that a constant is a value owned like any other when memory is managed in step 4. `Push` and `Set` call the runtime, which changes the list it is given (growing it by doubling when it is full, and freeing the element `Set` replaces); the list is the caller's to change because of what MirOwnership decided (see Ownership).
+- **Arrays.** An array (`TArray`) is laid out and walked as a list is, with a capacity equal to its length, and has the same kind of descriptor (`aux` is the descriptor of its elements), so `Length`, `First`, `Last`, `Get`, `Set`, equality, printing, cloning and freeing are the code of lists. A literal (`#[1, 2]`) is a constant list assigned to a local of type `Array<Int>`; `NewArray` calls `tersus_array_new(n, x, element descriptor)`, which makes the array and puts a copy of `x` (borrowed from its owner, and cloned for a value of the heap) in each slot. In MirOwnership an array is a value of the heap like a list; `NewArray` only reads its operands.
 - **Data.** `MakeData` and a constant `CData` call `tersus_data_new(tag, fields)` and store the fields (the tag and field order come from `progTypes`), `ReadField` is a load at `16 + 8 * index`, `IsVariant` compares the tag, and `AsVariant` is the same pointer (the cast was proved). A variant's fields are those of the variant, so reading a field of another variant is the undefined behaviour the validator keeps out. A fieldless variant is still an object, made each time it is written.
 - **Descriptors.** The runtime prints and compares values by the descriptor of their type: a constant global `@"type.List<Int>"` of `{ kind, aux }` for each type the program uses (and each type inside it, so a type that contains itself is there once): `aux` is the descriptor of the elements of a list, or the variants of a struct or an enum (each with its name, written `Enum::Variant`, and the names and descriptors of its fields). Equality (`Compare Eq` and `NotEq`, structural) and the printing of the result are then written once, in C, and print a value as `renderMirValue` does. A value of a variant (`TVariant`) has the descriptor of its enum. Step 4 adds how to free a value of the type.
 - **Memory** is managed by ownership, decided on the MIR (see Ownership): nothing is counted at run time, and a value is freed when its owner lets go of it.

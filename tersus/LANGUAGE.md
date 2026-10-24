@@ -93,6 +93,7 @@ Every value has a type, and programs are type checked before they are validated:
 
 - A declared struct or enum, such as `Node` or `Shape`,
 - `Int`, `Bool`, and `List<T>` for any element type `T`, such as `List<Int>`, `List<Bool>` or `List<List<Int>>`. All the elements of a list have the same type, and `[]` takes its element type from how it is used. A variable holding `[]` has one type for its whole life, so `e = []` cannot be pushed an `Int` once and a list later,
+- `Array<T>`, a sequence of elements of one type whose size is fixed when it is made (see Arrays). `Array<Int>` and `List<Int>` are different types, and neither is used for the other,
 - `fn(Int, Int) -> Int` for a function value.
 
 A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Types exist only for checking: validation and evaluation never look at them. Every `return` of the program itself (outside any function) must have the type of the first, as `if c { return 1; } else { return false; };` has none.
@@ -109,7 +110,7 @@ fn scale(values: List<Int>, factor: Int) -> List<Int> {
 };
 ```
 
-The builtins have these signatures: `size : fn(List<a>) -> Int` (`a` is any one type, chosen anew at each use), `first` and `last : fn(List<a>) -> a`, `get : fn(List<a>, Int) -> a`, `push : fn(List<a>, a) -> List<a>`, `set : fn(List<a>, Int, a) -> List<a>`, `+ - * /` on `Int`, `=` and `!=` on two values of the same type (any type but a function), and `< <= > >=` on `Int`. A mismatch is reported before anything runs:
+The builtins have these signatures: `size : fn(List<a>) -> Int` (`a` is any one type, chosen anew at each use), `first` and `last : fn(List<a>) -> a`, `get : fn(List<a>, Int) -> a`, `push : fn(List<a>, a) -> List<a>`, `set : fn(List<a>, Int, a) -> List<a>`, `array : fn(Int, a) -> Array<a>`, `+ - * /` on `Int`, `=` and `!=` on two values of the same type (any type but a function), and `< <= > >=` on `Int`. `size`, `first`, `last`, `get` and `set` also take an array in place of the list, with `Array<a>` for `List<a>` in the signature: which one is meant is decided by the type of the first argument. (A builtin used as a value, such as `h = size;`, is the one for lists.) A mismatch is reported before anything runs:
 
 ```
 Type error: argument 1 of size: expected List<?>, got Int
@@ -282,6 +283,8 @@ The standard library seeds these builtin functions:
 - `get(list, index)`: returns the element at `index`, counting from 0. The index must satisfy `0 <= index < size(list)`.
 - `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
 - `set(list, index, x)`: returns a new list with the element at `index` replaced by `x`. The index must satisfy `0 <= index < size(list)`, and the argument list is unchanged.
+- `array(n, x)`: returns an array of `n` copies of `x`. The size must satisfy `n >= 0` (see Arrays).
+- `#[1, 2, 3]`: an array written out, the elements being literals.
 - `+` and `-`: integer arithmetic.
 - `*`, `/` and `%`: integer arithmetic. `/` rounds down and `x % y` is what is left, `x = (x / y) * y + x % y`, so it has the sign of `y` (`-7 % 3` is `2`, `7 % -3` is `-2`). Like `/`, a divisor must be shown to be non-zero.
 - `=`, `!=`, `<`, `>`, `<=`, `>=`: integer relations returning booleans.
@@ -1021,6 +1024,52 @@ See `examples/arithmetic.tersus`.
 
 A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is used the other way: when `x <= y` is known too, `x < y` is, which an `i != n` loop condition needs to keep `i` below `n`. Contradictory facts, such as the guard of an unreachable branch, prove every comparison.
 
+## Arrays
+
+`Array<T>` is the builtin for a sequence of elements of one type whose size is fixed when it is made. It is read and replaced like a list, but it has no `push`: the size never changes, so what is known of it stays known for as long as the array lives.
+
+```tersus
+a = array(4, 0);          // #[0, 0, 0, 0]: four copies of 0
+b = #[5, 6, 7];           // an array written out (the elements are literals, as in a list literal)
+c = set(a, 1, 9);         // a new array, #[0, 9, 0, 0]; a is unchanged
+return get(c, 1) + size(b) + first(b);
+```
+
+`size`, `get`, `first`, `last` and `set` are the functions of lists, with the same contracts (an index in range for `get` and `set`, an array with elements for `first` and `last`) and the same facts about the result. `array(n, x)` has an input contract, `n >= 0`, that is checked like the index of `get` (a literal size needs no proof; a symbolic one has to be shown), and an output contract: `size(return) = n`, and `forall j in 0..n: get(return, j) = x`. Each slot holds its own copy of `x`, so `array(3, array(3, 0))` is a grid of nine zeros whose rows can be set one at a time. `=` and `!=` compare two arrays structurally, as for lists, and two arrays of different sizes differ. The size of a very large array is not written out as a value for the validator, which has the size from the contract and needs no more.
+
+**The type does not say the size.** A function takes `Array<Int>` for an array of any size, and says what it needs of the size in its input contract. The caller has to show it, and the size it knows is the one the array was made with:
+
+```tersus
+fn dot(a: Array<Int>, b: Array<Int>) -> Int [{ affirm size(a) = size(b); }] [{ }] {
+    total = 0;
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); affirm size(b) = size(a); }] shrinks size(a) - i {
+        total = total + get(a, i) * get(b, i);
+        i = i + 1;
+    };
+    return total;
+};
+
+x = array(4, 3);
+dot(x, x);                   // fine: size(x) = size(x)
+// dot(x, array(3, 1));      // rejected: Could not prove: size(a) = size(b)
+```
+
+A size that is only known when the program runs is checked with an `if`, whose branch knows what the condition said (see Validating branches), and a function that makes an array says its size in its output contract, as a function that builds a list does:
+
+```tersus
+fn checked(a: Array<Int>, b: Array<Int>) -> Int {
+    if size(a) = size(b) { return dot(a, b); };
+    return 0;
+};
+
+fn zeros(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] {
+    return array(n, 0);
+};
+```
+
+See `examples/arrays.tersus`. Natively an array has the layout of a list whose capacity is its size, and `set` changes it in place when nothing else holds it. A result is printed as a list is, `[0, 9, 0, 0]`.
+
 ## Current Limitations
 
 - No `break` or `continue`. `for` goes through a range or the elements of a list, not by a step other than `1` or backwards.
@@ -1028,6 +1077,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is use
 - A condition is one relation or boolean: there is no `&&` or `||`, so a guard with several parts is nested `if`s or sequential early returns (see `parse` in `examples/packet_parser.tersus`). The intended form is short-circuit sugar for nested `if`s, with a boolean value that a proof can mention left out.
 - An output contract cannot depend on which variant is returned, so "if `parse` returns `Parsed::Message`, its payload fits in the buffer" cannot be stated to a caller. The intended form is an implication in contracts, `affirm return is Parsed::Message => ...;`, proved for each way out of the function and assumed by a caller once it knows the variant.
 - No declarations separate from assignment.
+- `Array<T>` is a second sequence type beside `List<T>`, not yet a replacement for it: a list is still what `push` makes, and `h = size;` is the function for lists, so `h` cannot be applied to an array. An array literal holds literals only (`#[1, 2]`); an array of variables is made with `array` and `set`. There is no way to write the size in the type (`Array<Int, 3>`) or to name it in a signature; a function states what it needs in its contract. Every array that is a function's result says its size in the contract, or a caller does not know it.
 - No strings or floats yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
 - Arithmetic is linear (see Arithmetic): comparisons, sums and differences, multiples by a known constant and division by a known constant. A product of two unknowns, and a division by an unknown, are evaluated when their operands are known, but otherwise opaque. `x / c` is rounded down, so `x / c * c = x` is not known.
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.

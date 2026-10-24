@@ -138,6 +138,7 @@ localHeap f l = maybe False (heapType . localType) (Map.lookup l (fnLocals (fram
 
 heapType :: Type -> Bool
 heapType TList{} = True
+heapType TArray{} = True
 heapType TNamed{} = True
 heapType TVariant{} = True
 heapType _ = False
@@ -268,6 +269,12 @@ listOp op os =
         (Get, [l, i]) -> do
             n <- intOperand i
             item l (const (fromIntegral n))
+        -- the element is only looked at: each slot gets a copy of it
+        (NewArray, [n, x]) -> do
+            count <- intOperand n
+            v <- readOperand x
+            copies <- mapM (const (cloneVal v)) [1 .. count]
+            alloc (OList copies)
         (Push, [l, x]) -> do
             list <- readOperand l
             v <- readOperand x
