@@ -227,7 +227,6 @@ resolveFunction fn = do
         _ -> []
     arrayHolds ty = case ty of
         TArray t _ | not (plainElement t) -> failL ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType t)
-        TList t | containsArray t -> failL listOfArrays
         _ -> return ()
 
 resolveType :: Type -> L Type

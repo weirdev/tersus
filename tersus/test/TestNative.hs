@@ -50,7 +50,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "arrays", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "array_data", "arrays", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "safe_access", "structs", "termination", "traits", "types", "update_list"
@@ -246,6 +246,32 @@ arrayPrograms =
     , ("a branch that sets", "a = array(2, 0); if size(a) > 1 { a = set(a, 0, 1); } else { a = set(a, 1, 1); }; return a;")
     , ("the most the frame can hold", "a = array(8192, 1); a = set(a, 8191, 5); return get(a, 8191) + get(a, 0) + size(a);")
     , ("a struct beside an array", "struct P { x: Int, ys: List<Int> }; p = P { x: 1, ys: [2, 3] }; a = array(2, p.x); return a;")
+    , -- arrays in structs, enums and lists: their words in line
+      ("a struct with an array field", "struct G { name: Int, cells: Array<Int, 3>, last: Int }; g = G { name: 1, cells: #[4, 5, 6], last: 9 }; return g;")
+    , ("a field read after an array", "struct G { name: Int, cells: Array<Int, 3>, last: Int }; g = G { name: 1, cells: #[4, 5, 6], last: 9 }; return g.last * 100 + get(g.cells, 2) * 10 + g.name;")
+    , ("an update around an array", "struct G { name: Int, cells: Array<Int, 3>, last: Int }; g = G { name: 1, cells: #[4, 5, 6], last: 9 }; h = G { cells: set(g.cells, 0, 7), ..g }; return h;")
+    , ("the first struct after an update", "struct G { name: Int, cells: Array<Int, 3> }; g = G { name: 1, cells: #[4, 5, 6] }; h = G { cells: set(g.cells, 0, 7), ..g }; return g;")
+    , ("a struct with an array is used twice", "struct G { name: Int, cells: Array<Int, 2> }; g = G { name: 1, cells: #[4, 5] }; h = g; return G { name: 2, cells: h.cells } = g;")
+    , ("a struct with two arrays and a list", "struct G { a: Array<Int, 2>, xs: List<Int>, b: Array<Bool, 3> }; return G { a: #[1, 2], xs: [3], b: #[true, false, true] };")
+    , ("equality of structs with arrays", "struct G { cells: Array<Int, 2> }; return G { cells: #[1, 2] } = G { cells: array(2, 1) };")
+    , ("enum variants of different widths", "enum E { A { v: Array<Int, 2> }, B { x: Int, v: Array<Int, 4> }, C }; return E::B { x: 1, v: array(4, 7) };")
+    , ("a match takes the array out", "enum E { A { v: Array<Int, 2> }, B { x: Int, v: Array<Int, 4> }, C }; e = E::B { x: 1, v: array(4, 7) }; return match e { E::A { v: v } => size(v), E::B { x: x, v: v } => get(v, 3) + x, E::C => 0 };")
+    , ("a list of arrays", "rows = push(push([], #[1, 2]), #[3, 4]); return rows;")
+    , ("a list of arrays is read", "rows = push(push([], #[1, 2]), #[3, 4]); return get(get(rows, 1), 0) * 10 + size(rows);")
+    , ("first and last of a list of arrays", "rows = push(push([], #[1, 2]), #[3, 4]); return first(rows) = last(rows);")
+    , ("last of a list of arrays", "rows = push(push([], #[1, 2]), #[3, 4]); return last(rows);")
+    , ("set in a list of arrays", "rows = push(push([], #[1, 2]), #[3, 4]); rows = set(rows, 0, #[9, 9]); return rows;")
+    , ("an empty list of arrays", "rows = push([], #[1]); rows = set(rows, 0, #[2]); return size(rows);")
+    , ("a list of arrays that grows", "rows = []; i = 0; while i < 300 [{ affirm i >= 0; }] shrinks 300 - i { rows = push(rows, array(3, i)); i = i + 1; }; return get(get(rows, 299), 2) + size(rows);")
+    , ("a list of arrays is used twice", "rows = push(push([], #[1, 2]), #[3, 4]); other = rows; other = set(other, 0, #[0, 0]); return rows;")
+    , ("lists of arrays are equal", "rows = push(push([], #[1, 2]), #[3, 4]); return rows = push(push([], #[1, 2]), #[3, 4]);")
+    , ("a list of lists of arrays", "inner = push([], #[1, 2]); outer = push([], inner); return outer;")
+    , ("an array of arrays in a list", "m = array(2, array(2, 5)); rows = push([], m); return get(get(get(rows, 0), 1), 0);")
+    , ("an array in a struct in a list", "struct P { v: Array<Int, 2> }; ps = push([], P { v: #[3, 4] }); ps = push(ps, P { v: #[5, 6] }); return ps;")
+    , ("a list of structs with arrays is used twice", "struct P { v: Array<Int, 2> }; ps = push([], P { v: #[3, 4] }); qs = ps; qs = set(qs, 0, P { v: #[0, 0] }); return ps;")
+    , ("a function takes and gives a struct with an array", "struct G { cells: Array<Int, 2> }; fn bump(g: G) -> G { return G { cells: set(g.cells, 0, get(g.cells, 0) + 1) }; }; return bump(bump(G { cells: #[1, 1] }));")
+    , ("a function takes a list of arrays", "fn total(rows: List<Array<Int, 2>>) -> Int { s = 0; i = 0; while i < size(rows) [{ affirm i >= 0; affirm i <= size(rows); }] shrinks size(rows) - i { s = s + get(get(rows, i), 0) + get(get(rows, i), 1); i = i + 1; }; return s; }; return total(push(push([], #[1, 2]), #[3, 4]));")
+    , ("a function gives a list of arrays", "fn make(n: Int) -> List<Array<Int, 2>> [{ affirm n >= 0; }] [{ }] { rows = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { rows = push(rows, array(2, i)); i = i + 1; }; return rows; }; return make(4);")
     ]
 
 controlPrograms :: [(String, String)]
