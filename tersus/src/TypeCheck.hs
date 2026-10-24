@@ -417,24 +417,50 @@ arrayOk ty@(TArray e n) = do
         failTc ("Type error: " ++ renderType ty ++ " takes " ++ show (arraySlots ty) ++ " words, more than the " ++ show maxArraySlots ++ " that an array held in a frame can have")
 arrayOk _ = return ()
 
--- The value of an expression made of numbers and arithmetic, which is what a size can be
-constantInt :: Expression -> Maybe Integer
-constantInt (Val (VInt i)) = Just i
-constantInt (F (Val (VFunct _ _ _ (BuiltinFunct b) _)) [x, y]) = constantArithmetic b <$> constantInt x <*> constantInt y >>= id
+-- The value of an expression made of numbers and arithmetic, which is what a size can be. Nothing if it is anything else. The
+-- arithmetic is the program's: each step has to fit in an Int and a divisor cannot be 0, as when it runs, so an expression that
+-- would stop the program is refused and not folded into a number that hides it.
+constantInt :: Expression -> Maybe (Either String Integer)
+constantInt (Val (VInt i)) = Just (Right i)
+constantInt (F (Val (VFunct _ _ _ (BuiltinFunct b) _)) [x, y])
+    | b `elem` [Plus, Minus, Times, Div, Mod] = do
+        a <- constantInt x
+        c <- constantInt y
+        Just (a >>= \a' -> c >>= constantArithmetic b a')
 constantInt _ = Nothing
 
-constantArithmetic :: BuiltinFunct -> Integer -> Integer -> Maybe Integer
-constantArithmetic Plus a c = Just (a + c)
-constantArithmetic Minus a c = Just (a - c)
-constantArithmetic Times a c = Just (a * c)
-constantArithmetic Div a c | c /= 0 = Just (a `div` c)
-constantArithmetic Mod a c | c /= 0 = Just (a `mod` c)
-constantArithmetic _ _ _ = Nothing
-
-constantProofInt :: VariableProof -> Maybe Integer
-constantProofInt (CTerm (VInt i)) = Just i
-constantProofInt (FApp (CTerm (VFunct _ _ _ (BuiltinFunct b) _)) [x, y]) = constantArithmetic b <$> constantProofInt x <*> constantProofInt y >>= id
+constantProofInt :: VariableProof -> Maybe (Either String Integer)
+constantProofInt (CTerm (VInt i)) = Just (Right i)
+constantProofInt (FApp (CTerm (VFunct _ _ _ (BuiltinFunct b) _)) [x, y])
+    | b `elem` [Plus, Minus, Times, Div, Mod] = do
+        a <- constantProofInt x
+        c <- constantProofInt y
+        Just (a >>= \a' -> c >>= constantArithmetic b a')
 constantProofInt _ = Nothing
+
+-- One step of the arithmetic of a size
+constantArithmetic :: BuiltinFunct -> Integer -> Integer -> Either String Integer
+constantArithmetic b a c =
+    case b of
+        Div | c == 0 -> Left "Type error: division by zero in the size of an array"
+        Mod | c == 0 -> Left "Type error: modulo by zero in the size of an array"
+        Plus -> fits (a + c)
+        Minus -> fits (a - c)
+        Times -> fits (a * c)
+        Div -> fits (a `div` c)
+        _ -> fits (a `mod` c)
+  where
+    fits n
+        | inIntRange n = Right n
+        | otherwise = Left "Type error: integer overflow in the size of an array (an Int is 64 bits)"
+
+-- The size an expression folds to, or why it is not one
+constantSize :: Maybe (Either String Integer) -> TC Integer
+constantSize folded =
+    case folded of
+        Nothing -> failTc noConstantSize
+        Just (Left e) -> failTc e
+        Just (Right n) -> return n
 
 noConstantSize :: String
 noConstantSize = "Type error: the size of an array must be a constant (a number, or arithmetic on numbers), since the array is held inline"
@@ -634,7 +660,7 @@ inferExprR ctx env expr =
                     (nt, n') <- inferExprR ctx env n
                     expect "argument 1 of array" TInt nt
                     (xt, x') <- inferExprR ctx env x
-                    size <- maybe (failTc noConstantSize) return (constantInt n')
+                    size <- constantSize (constantInt n')
                     let ty = TArray xt size
                     arrayOk ty
                     return (ty, F funct [Val (VInt size), x'])
@@ -853,7 +879,7 @@ inferProof ctx env proof =
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct NewArray) _)) [n, x] -> do
             inferProof ctx env n >>= expect "argument 1 of array" TInt
             xt <- inferProof ctx env x
-            size <- maybe (failTc noConstantSize) return (constantProofInt n)
+            size <- constantSize (constantProofInt n)
             let ty = TArray xt size
             arrayOk ty
             return ty
