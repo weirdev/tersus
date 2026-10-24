@@ -26,7 +26,7 @@ module TypeCheck
 import Control.Monad (forM, forM_, unless, when)
 import qualified Data.Map as Map
 import Data.Map (Map)
-import Data.List ((\\))
+import Data.List (intercalate, (\\))
 import qualified Data.Set as Set
 
 import Pretty (renderType)
@@ -62,6 +62,7 @@ data TcState = TcState
     , tcProgramReturn :: Maybe Type -- what the first return of the program itself (not of a function) returned
     , tcTraits :: Map Name [TraitFn]
     , tcImpls :: Set.Set (Name, Name) -- (trait, type) for each trait a type implements
+    , tcAssoc :: Map (Name, Name) [Maybe Name] -- for a type and a function name, the impls that define it (Nothing is an impl of the type itself), in order
     }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
@@ -70,7 +71,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -517,16 +518,21 @@ inferExprR ctx env expr =
         F (Var ('.' : method)) (receiver : args) -> do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
             owner <- ownerOfValue method (fst (head inferred))
-            callResolved (owner ++ "::" ++ method) inferred
+            resolveAssociated owner method >>= \name -> callResolved name inferred
+        -- <Type as Trait>::f, written in full
+        F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
         F (Var name) args
-            | Just (trait, function) <- traitPath name -> do
-                traits <- tcTraits <$> getState
-                case Map.lookup trait traits of
-                    Nothing -> general (Var name) args
-                    Just functions -> do
+            | Just (path, function) <- traitPath name -> do
+                s <- getState
+                case (Map.lookup path (tcTraits s), Map.member path (tcTypes s)) of
+                    (Just functions, _) -> do
                         inferred <- mapM (inferExprR ctx env) args
-                        owner <- ownerThroughTrait trait functions function (map fst inferred)
-                        callResolved (owner ++ "::" ++ function) inferred
+                        owner <- ownerThroughTrait path functions function (map fst inferred)
+                        callResolved (implFunctionName owner (Just path) function) inferred
+                    (Nothing, True) -> do
+                        inferred <- mapM (inferExprR ctx env) args
+                        resolveAssociated path function >>= \full -> callResolved full inferred
+                    _ -> general (Var name) args
         F funct args -> general funct args
   where
     general funct args = do
@@ -545,6 +551,24 @@ inferExprR ctx env expr =
         ft <- lookupVar ctx env name
         result <- checkCall name ft (map fst inferred)
         return (result, F (Var name) (map snd inferred))
+
+-- The function that Type::f means: the one function of that name that the impls of Type define. If several do, the call has
+-- to say which, with Trait::f(x), <Type as Trait>::f(...) or <Type>::f(...).
+resolveAssociated :: Name -> Name -> TC Name
+resolveAssociated owner function = do
+    s <- getState
+    case Map.findWithDefault [] (owner, function) (tcAssoc s) of
+        [] -> failTc ("Type error: " ++ owner ++ "::" ++ function ++ " is not defined before this call (there is no such function, or its impl comes later)")
+        [origin] -> return (implFunctionName owner origin function)
+        origins ->
+            failTc
+                ( "Type error: "
+                    ++ owner
+                    ++ "::"
+                    ++ function
+                    ++ " is ambiguous, several impls define it. Call the one that is meant by its path: "
+                    ++ intercalate " or " [implFunctionName owner origin function ++ "(...)" | origin <- origins]
+                )
 
 -- Trait::function
 traitPath :: Name -> Maybe (Name, Name)
@@ -623,7 +647,7 @@ substSelf _ t = t
 checkImpl :: Ctx -> Env -> Maybe Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
 checkImpl ctx env trait typeName functions = do
     _ <- typeCtors typeName
-    (ctx', env', checked) <- definitions (ctx, env, []) functions
+    (ctx', env', checked) <- definitions True (ctx, env, []) functions
     case trait of
         Nothing -> return (ctx', env', checked)
         Just traitName -> do
@@ -631,7 +655,7 @@ checkImpl ctx env trait typeName functions = do
             required <- maybe (failTc ("Type error: unknown trait " ++ traitName)) return (Map.lookup traitName (tcTraits s))
             when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
             let here = "impl " ++ traitName ++ " for " ++ typeName
-                defined = [(drop (length typeName + 2) name, (Signature ptys rty, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty) term _) _)) <- checked]
+                defined = [(implFunctionPart name, (Signature ptys rty, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty) term _) _)) <- checked]
                 wanted = map traitFnName required
             case map fst defined \\ wanted of
                 extra : _ -> failTc ("Type error: " ++ here ++ " has a function " ++ extra ++ ", which " ++ traitName ++ " does not declare")
@@ -648,15 +672,22 @@ checkImpl ctx env trait typeName functions = do
                             failTc ("Type error: " ++ here ++ ": " ++ traitFnName f ++ " is " ++ renderSignature actual ++ ", but " ++ traitName ++ " declares " ++ renderSignature expected)
                         return (wrapper traitName typeName f expected term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
-            (ctx'', env'', wrapped) <- definitions (ctx', env', []) wrappers
+            (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
             s' <- getState
             putState s'{tcImpls = Set.insert (traitName, typeName) (tcImpls s')}
             return (ctx'', env'', checked ++ wrapped)
   where
-    definitions state [] = return state
-    definitions (c, e, done) (stmt : rest) = do
+    -- The functions of the impl can be called as Type::f from the next one on, itself included; the functions that check
+    -- the impl against its trait cannot
+    definitions _ state [] = return state
+    definitions own (c, e, done) (stmt : rest) = do
+        case stmt of
+            Assign name _ | own -> do
+                s <- getState
+                putState s{tcAssoc = Map.insertWith (\new old -> old ++ new) (typeName, implFunctionPart name) [trait] (tcAssoc s)}
+            _ -> return ()
         (c', e', stmt') <- checkStatement True c e stmt
-        definitions (c', e', done ++ [stmt']) rest
+        definitions own (c', e', done ++ [stmt']) rest
     renderSignature (Signature ptys rty) = renderType (TFn ptys rty)
     wrapper traitName owner f signature term =
         Assign
@@ -666,7 +697,7 @@ checkImpl ctx env trait typeName functions = do
                     (traitFnParams f)
                     (traitFnRequires f)
                     (traitFnEnsures f)
-                    (NativeFunct signature (if term == Just MayDiverge then Just MayDiverge else Nothing) [Return (F (Var (owner ++ "::" ++ traitFnName f)) (map Var (traitFnParams f)))])
+                    (NativeFunct signature (if term == Just MayDiverge then Just MayDiverge else Nothing) [Return (F (Var (implFunctionName owner (Just traitName) (traitFnName f))) (map Var (traitFnParams f)))])
                     []
                 )
             )

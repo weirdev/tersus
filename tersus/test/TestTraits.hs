@@ -17,6 +17,14 @@ testTraits =
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
             _ -> Just ("Expected a parse error for: " ++ source)
+        conflict =
+            unlines
+                [ "trait Name { fn label(self: Self) -> Int; fn make() -> Self; };"
+                , "trait Code { fn label(self: Self) -> Int; fn make() -> Self; };"
+                , "impl Name for Counter { fn label(self: Self) -> Int { return 1; }; fn make() -> Self { return Self { value: 10 }; }; };"
+                , "impl Code for Counter { fn label(self: Self) -> Int { return 2; }; fn make() -> Self { return Self { value: 20 }; }; };"
+                , "impl Counter { fn label(self: Self) -> Int { return 3; }; };"
+                ]
         measure =
             unlines
                 [ "trait Measure { fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; }]; };"
@@ -65,6 +73,23 @@ testTraits =
                 , testCase "a function that calls it has to say so" (rejected "trait Run { fn run(n: Int) -> Int; }; impl Run for Counter { fn run(n: Int) -> Int ~ { return n; }; }; fn go() -> Int { return Counter::run(1); };" "Not guaranteed to terminate")
                 ]
             , TestList
+                "conflicts"
+                [ -- Two impls that define the same name do not clash until a call says only the type's name
+                  testCase "the trait picks the function" (runs (conflict ++ "c = Counter { value: 0 }; return Name::label(c) * 100 + Code::label(c) * 10;") 120)
+                , testCase "a path names the impl in full" (runs (conflict ++ "c = Counter { value: 0 }; return <Counter as Name>::label(c) + <Counter as Code>::label(c) * 10 + <Counter>::label(c) * 100;") 321)
+                , testCase "a function with no Self argument is named in full" (runs (conflict ++ "return <Counter as Name>::make().value + <Counter as Code>::make().value;") 30)
+                , testCase "a method call is ambiguous" (rejected (conflict ++ "c = Counter { value: 0 }; x = c.label();") "Counter::label is ambiguous")
+                , testCase "a call by the type is ambiguous" (rejected (conflict ++ "x = Counter::label(Counter { value: 0 });") "Counter::label is ambiguous")
+                , testCase "the error lists the paths" (rejected (conflict ++ "x = Counter::make();") "<Counter as Name>::make(...) or <Counter as Code>::make(...)")
+                , testCase "the type's own function is a path too" (rejected (conflict ++ "x = Counter::label(Counter { value: 0 });") "<Counter>::label(...)")
+                , testCase "a trait impl alone is reached by the type's name" (runs "trait Name { fn label(self: Self) -> Int; }; impl Name for Counter { fn label(self: Self) -> Int { return 4; }; }; return Counter { value: 0 }.label() + Counter::label(Counter { value: 0 });" 8)
+                , testCase "a function of the type's own impl is not ambiguous without a clash" (runs "impl Counter { fn label(self: Self) -> Int { return 5; }; }; return Counter { value: 0 }.label();" 5)
+                , testCase "Self::f is ambiguous in an impl too" (rejected (conflict ++ "impl Counter { fn twice(self: Self) -> Int { return Self::label(self); }; };") "Counter::label is ambiguous")
+                , testCase "a full path to a function that is not there" (rejected "x = <Counter as Nothing>::f(1);" "<Counter as Nothing>::f is not defined before this call")
+                , testCase "a full path inside the impl's own function" (runs "impl Counter { fn count(self: Self) -> Int [{ affirm self.value >= 0; }] shrinks self.value { if self.value = 0 { return 0; } else { return 1 + <Counter>::count(Self { value: self.value - 1 }); }; }; }; return Counter::count(Counter { value: 3 });" 3)
+                , testCase "the impls of a type are checked against their traits as before" (rejected (conflict ++ "impl Name for Counter { };") "Counter already implements Name")
+                ]
+            , TestList
                 "type errors"
                 [ testCase "lacks a function" (rejected "trait Step { fn a() -> Int; fn b() -> Int; }; impl Step for Counter { fn a() -> Int { return 1; }; };" "impl Step for Counter lacks the function b")
                 , testCase "has an extra function" (rejected "trait Step { fn a() -> Int; }; impl Step for Counter { fn a() -> Int { return 1; }; fn b() -> Int { return 2; }; };" "has a function b, which Step does not declare")
@@ -72,12 +97,12 @@ testTraits =
                 , testCase "wrong result type" (rejected "trait Step { fn a() -> Self; }; impl Step for Counter { fn a() -> Int { return 1; }; };" "a is fn() -> Int, but Step declares fn() -> Counter")
                 , testCase "unknown trait" (rejected "impl Missing for Counter { };" "unknown trait Missing")
                 , testCase "implemented twice" (rejected "trait Step { }; impl Step for Counter { }; impl Step for Counter { };" "Counter already implements Step")
-                , testCase "two functions of one name" (rejected "impl Counter { fn a() -> Int { return 1; }; }; impl Counter { fn a() -> Int { return 2; }; };" "Function already defined: Counter::a")
+                , testCase "two functions of one name" (rejected "impl Counter { fn a() -> Int { return 1; }; }; impl Counter { fn a() -> Int { return 2; }; };" "Function already defined: <Counter>::a")
                 , testCase "a type does not implement the trait" (rejected (measure ++ "return Measure::sides(Counter { value: 1 });") "Counter does not implement Measure")
                 , testCase "no function of the type" (rejected "x = Counter { value: 1 }.nothing();" "Counter::nothing is not defined before this call")
                 , testCase "a function of the type is defined later" (rejected "c = Counter { value: 1 }; x = c.later(); impl Counter { fn later(self: Self) -> Int { return 1; }; };" "Counter::later is not defined before this call")
-                , testCase "wrong argument" (rejected "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus(true);" "argument 2 of Counter::plus: expected Int, got Bool")
-                , testCase "wrong number of arguments" (rejected "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus();" "Counter::plus takes 2 arguments, got 1")
+                , testCase "wrong argument" (rejected "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus(true);" "argument 2 of <Counter>::plus: expected Int, got Bool")
+                , testCase "wrong number of arguments" (rejected "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus();" "<Counter>::plus takes 2 arguments, got 1")
                 , testCase "a method of an integer" (rejected "x = 5; y = x.double();" "double is called on a Int, which has no functions")
                 , testCase "a trait function with no Self parameter, through the trait" (rejected "trait Make { fn make() -> Self; }; impl Make for Counter { fn make() -> Self { return Self { value: 0 }; }; }; c = Make::make();" "has no Self parameter to tell the type by")
                 , testCase "a function the trait lacks" (rejected "trait Make { }; x = Make::nothing(Counter { value: 1 });" "trait Make has no function nothing")

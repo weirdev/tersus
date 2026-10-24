@@ -553,8 +553,8 @@ traitStatement = do
         (params, returnType, inputReqs, outputReqs) <- functHeader
         return (TraitFn fname (map fst params) (Signature (map snd params) returnType) inputReqs outputReqs)
 
--- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are defined as Type::f, so they are called by that
--- name (and as x.f(...) when x is a Type). Self stands for Type in them.
+-- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are named <Type>::f and <Type as Trait>::f (see
+-- implFunctionName), and the checker resolves Type::f and x.f(...) to the one that is meant. Self stands for Type in them.
 implStatement :: Parser Statement
 implStatement = do
     keyword "impl"
@@ -565,17 +565,18 @@ implStatement = do
     types <- declTypes <$> getState
     when (not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
     modifyState (\d -> d{declSelf = Just typeName})
-    functions <- curlyBracesParse (genericStatementBlock (implFunction typeName))
+    functions <- curlyBracesParse (genericStatementBlock (implFunction typeName trait))
     modifyState (\d -> d{declSelf = Nothing})
     whitespace
-    ctors <- declCtors <$> getState
-    mapM_ (\(Assign full _) -> when (Map.member full ctors) $ fail (full ++ " is a variant, and cannot also be a function")) functions
     return (ImplDef trait typeName functions)
   where
-    implFunction typeName = do
+    implFunction typeName trait = do
         definition <- functStatement
         case definition of
-            Assign var fn -> return (Assign (typeName ++ "::" ++ var) fn)
+            Assign var fn -> do
+                ctors <- declCtors <$> getState
+                when (Map.member (typeName ++ "::" ++ var) ctors) $ fail (typeName ++ "::" ++ var ++ " is a variant, and cannot also be a function")
+                return (Assign (implFunctionName typeName trait var) fn)
             other -> return other
 
 -- A parameter is a name and its type: `n: Int`
@@ -816,7 +817,7 @@ expression = try infixExpression <|> nonInfixExpression
 
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
-    withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression)
+    withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression <|> qualifiedCall)
         <|> (Val <$> value)
         <|> withFields expressionApply methods (varExpression <|> parensExpression)
   where
@@ -876,6 +877,26 @@ varExpression = do
     var <- variable
     whitespace
     return (Var var)
+
+-- <Type>::f(args) and <Type as Trait>::f(args): the function that an impl defines, named in full. This is how a call is written
+-- when Type::f(args) is ambiguous, or when the trait function has no Self argument to tell the type by.
+qualifiedCall :: Parser Expression
+qualifiedCall = do
+    void (char '<')
+    whitespace
+    owner <- variable >>= resolveSelf
+    whitespace
+    trait <- optionMaybe (keyword "as" >> whitespace >> variable <* whitespace)
+    void (char '>')
+    void (string "::")
+    function <- variable
+    void (char '(')
+    whitespace
+    args <- expression `sepBy` skipWhitespace (char ',')
+    whitespace
+    void (char ')')
+    whitespace
+    return (F (Var (implFunctionName owner trait function)) args)
 
 fExpression :: Parser Expression
 fExpression = do

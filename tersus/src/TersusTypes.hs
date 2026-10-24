@@ -139,6 +139,17 @@ data TraitFn = TraitFn
     }
     deriving (Show, Eq, Ord)
 
+-- What a function of an impl is called in the program: <Type>::f for an impl of Type, and <Type as Trait>::f for an impl of a
+-- trait. The programs write Type::f, x.f(...) and Trait::f(x), which the type checker resolves to one of these (Type::f is
+-- ambiguous if several impls of Type define f), or write the name in full as <Type as Trait>::f(...).
+implFunctionName :: Name -> Maybe Name -> Name -> Name
+implFunctionName owner Nothing function = "<" ++ owner ++ ">::" ++ function
+implFunctionName owner (Just trait) function = "<" ++ owner ++ " as " ++ trait ++ ">::" ++ function
+
+-- The f of such a name
+implFunctionPart :: Name -> Name
+implFunctionPart = drop 3 . dropWhile (/= '>')
+
 -- The function that stands for the check that an impl meets its trait (see TypeCheck.checkImpl) is named after the trait, the
 -- type and the function, in a way no program can write: "Trait for Type::function"
 implCheckName :: Name -> Name -> Name -> Name

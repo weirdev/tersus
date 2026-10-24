@@ -110,6 +110,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/struct_field_type.tersus` | A struct literal gives a `Bool` for an `Int` field |
 | `rejected/trait_input_stronger.tersus` | An impl asks for `by > 5` where its trait allows any `by > 0`: code written against the trait could call it with a step it refuses |
 | `rejected/trait_output_weaker.tersus` | An impl of `Measure` returns a product of two unknowns, and the trait promises a result that is not negative |
+| `rejected/trait_ambiguous_call.tersus` | Two traits give a type a function of one name, and `c.label()` does not say which |
 | `rejected/trait_missing_function.tersus` | An impl lacks one of the functions of its trait |
 | `rejected/type_return_mismatch.tersus` | A function declared to return an `Int` returns a list |
 | `rejected/type_argument_mismatch.tersus` | `size` is applied to an `Int` |

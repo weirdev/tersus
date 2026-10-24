@@ -214,7 +214,17 @@ c = Counter::new(4).plus(1);                     // Type::function(...), and x.f
 n = c.size() + Measure::size(c);                 // through the trait
 ```
 
-- **The functions of an impl are named `Type::function`.** An impl is nothing but a way to define them, so `Counter::plus(c, 1)` is an ordinary call, checked and validated like the call of any function, against the contracts of the function it names. A type has one function of each name, whether it comes from an impl of a trait or not, and a function cannot be named like a variant (`Shape::Circle`). Defining the same name twice is `Function already defined`. An impl is written for a struct or an enum declared before it (not for `Int`, `Bool` or a list), and can be written only at the top of the program. A function sees the functions defined before it, so an impl comes before the code that calls its functions, and the functions of an impl can call each other in the order they are written.
+- **The functions of an impl are named in full**, `<Counter>::plus` for an impl of the type and `<Counter as Measure>::size` for an impl of a trait, and a call is an ordinary call of that function, checked and validated against its contracts like the call of any function. The short forms are resolved by the checker (below). An impl is written for a struct or an enum declared before it (not for `Int`, `Bool` or a list), and can be written only at the top of the program. A function sees the functions defined before it, so an impl comes before the code that calls its functions; the functions of an impl can call each other in the order they are written, and themselves. A function cannot be named like a variant (`Shape::Circle`), and defining the same full name twice is `Function already defined`.
+- **`Type::function(...)` and `x.function(...)` need the name to be unambiguous.** If exactly one impl of the type defines `function`, that is the one called. If several do (the type's own impl and one of a trait, or two traits), the call is an error that lists the paths, and the program names the one it means:
+
+  ```tersus
+  c.label()                       // error: Counter::label is ambiguous
+  Name::label(c)                  // the function of the trait Name, for the type of c
+  <Counter as Name>::label(c)     // the function of the impl of Name for Counter, written in full
+  <Counter>::label(c)             // the function of the impl of Counter itself
+  ```
+
+  The full form is also how a trait function with no `Self` parameter is called when it is ambiguous (`<Counter as Name>::make()`). Two functions of a type can have one name only when they come from different impls, and an ambiguity is only reported by a call that uses the short form.
 - **`Self`** is the type the impl is for, in the signatures and the bodies of its functions: `Self`, `Self::Variant` (a variant of an enum), and `Self { ... }` as a literal. In a trait it is the type that implements the trait.
 - **`x.function(a, b)` is `Type::function(x, a, b)`** where `Type` is the type of `x` (a value cast to a variant, `(s as Shape::Circle).area()`, is a value of its enum). The checker decides it from the type of `x`, and fails if there is no such function, or if `x` has no type with functions (an `Int`, a list). `x.f(a)` always calls a function of the type: it is not a call of a field that holds a function.
 - **`Trait::function(x, ...)`** calls the function of the type of the argument that the trait's signature gives the type `Self` (the first, if several do), and the type must implement the trait. A trait function with no `Self` parameter (`fn start() -> Self`) cannot be called through the trait, since nothing says which type is meant: write `Counter::start()`.
@@ -235,11 +245,12 @@ A wrong call reads like this:
 ```
 Type error: Counter::nothing is not defined before this call (there is no such function, or its impl comes later)
 Type error: Counter does not implement Measure
+Type error: Counter::label is ambiguous, several impls define it. Call the one that is meant by its path: <Counter as Name>::label(...) or <Counter as Code>::label(...)
 Type error: impl Step for Counter lacks the function start
 Type error: impl Step for Counter: start is fn() -> Int, but Step declares fn() -> Counter
 ```
 
-See `examples/traits.tersus`, and `examples/rejected/` for `trait_input_stronger`, `trait_output_weaker` and `trait_missing_function`.
+See `examples/traits.tersus`, and `examples/rejected/` for `trait_input_stronger`, `trait_output_weaker`, `trait_missing_function` and `trait_ambiguous_call`.
 
 ## Expressions
 
@@ -1022,7 +1033,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is use
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
-- Traits are checked and called, not used as types: a function cannot take "any type that implements `Measure`" (no generics, see `DATA_MODEL.md`), so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, one function of each name per type, with no default bodies, no associated types or constants, and no `Self` in the contracts of a trait beyond being a parameter. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
+- Traits are checked and called, not used as types: a function cannot take "any type that implements `Measure`" (no generics, see `DATA_MODEL.md`), so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and no `Self` in the contracts of a trait beyond being a parameter. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
 - The CLI runs one file at a time and has no REPL or multi-file programs.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - The source file is read in the encoding of the locale, so a program with a letter that is not ASCII in a name (the parser accepts any letter) needs a UTF-8 locale to load.
