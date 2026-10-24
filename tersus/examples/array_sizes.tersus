@@ -1,0 +1,34 @@
+// A function can be written for arrays of any size. `fn dot<n>(...)` declares a size n that a call gives: the arguments decide
+// it (Array<Int, n> given an Array<Int, 3> makes n 3) and every parameter that uses n has to agree. Inside the function n is an
+// Int, so a loop can run to it, a contract can speak of it, and array(n, x) makes an array of it. The sizes are not written in a
+// call; it is the type of the arguments that carries them.
+//
+// The function is validated once, for an n it knows nothing of but that it is the size of the arrays it is given. Native code is
+// made for each size the program calls it with (dot<3>, dot<1>), since an array is held inline and needs its size.
+fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int {
+    total = 0;
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        total = total + get(a, i) * get(b, i);
+        i = i + 1;
+    };
+    return total;
+};
+
+// The size can be the size of the result, and two sizes can be declared
+fn ones<n>(a: Array<Int, n>) -> Array<Int, n> {
+    return array(n, 1);
+};
+
+fn cells<rows, columns>(grid: Array<Array<Int, columns>, rows>) -> Int {
+    return rows * columns;
+};
+
+// A function with sizes can call another with its own
+fn lengthOfOnes<m>(a: Array<Int, m>) -> Int {
+    return dot(ones(a), ones(a));
+};
+
+return dot(#[1, 2, 3], #[4, 5, 6])          // 32
+    + lengthOfOnes(#[7, 8, 9, 10])        // 4
+    + cells(array(3, array(2, 0)));         // 6

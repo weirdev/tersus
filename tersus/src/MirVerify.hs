@@ -9,6 +9,7 @@ import qualified Data.Map.Strict as Map
 import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
+import TypeCheck (functionType, substSizes)
 import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray)
 import Utils (Result (..))
 
@@ -38,7 +39,7 @@ environment program =
   where
     ctors (name, StructDecl fields) = [(name, (name, fields))]
     ctors (name, EnumDecl variants) = [(v, (name, fields)) | (v, fields) <- variants]
-    fnType f = TFn [maybe (TVar 0) localType (Map.lookup p (fnLocals f)) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
+    fnType f = functionType (fnSizeParams f) [maybe (TVar 0) localType (Map.lookup p (fnLocals f)) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
 
 problems :: Program -> Function -> [String]
 problems program fn =
@@ -82,7 +83,7 @@ problems program fn =
     terminatorProblems term = case term of
         SwitchBool test _ _ -> [renderTerminator term ++ " is ill typed: the test is not a Bool" | not (fits env localTy TBool test)]
         Call callee args dest _ ->
-            let why = case operandType env localTy callee of
+            let why = case instantiated args (operandType env localTy callee) of
                     Just (TFn params result)
                         | length params /= length args -> ["it takes " ++ show (length params) ++ " arguments, got " ++ show (length args)]
                         | otherwise ->
@@ -92,6 +93,20 @@ problems program fn =
              in [renderTerminator term ++ " is ill typed: " ++ w | w <- why]
         _ -> []
 
+    -- a function with size parameters is called with their values as its last arguments (a constant, or a size parameter of the
+    -- function that calls), which the types of the other parameters are taken with
+    instantiated args t = case t of
+        Just (TForall names inner)
+            | length args >= length names ->
+                let given = drop (length args - length names) args
+                 in Just (substSizes (zip names (map sizeOf given)) inner)
+        _ -> t
+    sizeOf o = case o of
+        Const (CInt c) -> SizeConst c
+        Copy l -> maybe SizeAny SizeParam (nameOf l)
+        Move l -> maybe SizeAny SizeParam (nameOf l)
+        _ -> SizeAny
+    nameOf l = Map.lookup l (fnLocals fn) >>= localName
     hasUnknown (TVar _) = True
     hasUnknown (TList t) = hasUnknown t
     hasUnknown (TArray t _) = hasUnknown t
@@ -117,6 +132,8 @@ rvalueProblems env localTy d rv =
             (TArray e size, Const (CInt given))
                 | size == given -> [expected e x | not (fits' e x)]
                 | otherwise -> ["the size of the array is " ++ show given ++ ", not " ++ show size]
+            -- (the size of an array made from a size parameter is that parameter)
+            (TArrayOf e (SizeParam _), Copy _) -> [expected e x | not (fits' e x)]
             _ -> ["array needs a result that is an array and a size that is a constant"]
         ListOp NewBoxed [n, x] -> case d of
             TBox (TArrayOf e SizeAny) -> ints [n] ++ [expected e x | not (fits' e x)]
@@ -129,7 +146,7 @@ rvalueProblems env localTy d rv =
             Just (TBox held) -> ["the result is " ++ renderType d ++ ", not " ++ renderType held | not (sub env d held)]
             _ -> [expected' "a Box" o]
         Unsize o -> case (d, operandType env localTy o) of
-            (TBox (TArrayOf e SizeAny), Just (TBox (TArray e' _))) -> [expected d o | not (sub env e e')]
+            (TBox (TArrayOf e SizeAny), Just (TBox (TArrayOf e' size))) | size /= SizeAny -> [expected d o | not (sub env e e')]
             _ -> ["unsize needs a Box of an array, and a result that is a Box of an array of any size"]
         MakeBox o -> case d of
             TBox held -> [expected held o | not (fits' held o)]

@@ -158,4 +158,4 @@ parseValidateFailProgramHelper source expectedError =
 -- Run tests
 -- A function over integers only
 nativeInts :: Int -> [Statement] -> FunctBody
-nativeInts n = NativeFunct (Signature (replicate n TInt) TInt) Nothing
+nativeInts n = NativeFunct (Signature (replicate n TInt) TInt []) Nothing

@@ -250,9 +250,16 @@ withTypeFacts fn l st =
     case (M.localType <$> Map.lookup l (M.fnLocals fn), Map.lookup l (psLocals st)) of
         (Just (TArray _ n), Just iota) -> sized n iota
         (Just (TBox (TArray _ n)), Just iota) -> sized n iota
+        (Just (TArrayOf _ (SizeParam p)), Just iota) -> sizedByParam p iota
+        (Just (TBox (TArrayOf _ (SizeParam p))), Just iota) -> sizedByParam p iota
         _ -> st
   where
     sized n iota = addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], CTerm (VInt n)]]
+    -- (a size parameter is the parameter of the function that is named like it)
+    sizedByParam p iota =
+        case [value | (param, M.LocalDecl _ (Just name)) <- Map.toList (M.fnLocals fn), name == p, param `elem` M.fnParams fn, Just value <- [Map.lookup param (psLocals st)]] of
+            value : _ -> addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], ATerm value]]
+            [] -> st
 
 -- The term for the value of an operand
 operandTerm :: PState -> M.Operand -> V IotaProof
