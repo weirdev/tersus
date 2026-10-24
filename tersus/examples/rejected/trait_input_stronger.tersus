@@ -1,0 +1,13 @@
+// An impl may not ask for more than its trait does: Step allows any positive step, and this one wants more than 5,
+// so code written against Step could call it with a step it refuses.
+struct Counter { value: Int };
+
+trait Step {
+    fn advance(self: Self, by: Int) -> Self [{ affirm by > 0; }];
+};
+
+impl Step for Counter {
+    fn advance(self: Self, by: Int) -> Self [{ affirm by > 5; }] {
+        return Self { value: self.value + by };
+    };
+};

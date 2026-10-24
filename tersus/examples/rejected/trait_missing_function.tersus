@@ -1,0 +1,11 @@
+// An impl gives every function of its trait
+struct Counter { value: Int };
+
+trait Step {
+    fn start() -> Self;
+    fn total(self: Self) -> Int;
+};
+
+impl Step for Counter {
+    fn start() -> Self { return Self { value: 0 }; };
+};

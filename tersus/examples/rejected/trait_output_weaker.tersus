@@ -1,0 +1,13 @@
+// An impl must promise what its trait does: Measure says the result is not negative, and nothing here shows it
+// (the product of two unknowns is not known to be non-negative).
+struct Pair { a: Int, b: Int };
+
+trait Measure {
+    fn measure(self: Self) -> Int [{ }] [{ affirm return >= 0; }];
+};
+
+impl Measure for Pair {
+    fn measure(self: Self) -> Int {
+        return self.a * self.b;
+    };
+};

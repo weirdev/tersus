@@ -261,9 +261,21 @@ ghostStatement _ st env g =
 defineFunction :: PState -> Name -> Variable -> Bool -> V PState
 defineFunction st name source top = do
     when (top && Map.member source (psGlobals st)) (throwV ("Function already defined: " ++ source))
-    info <- validateFunction st name top
+    info <- inImplCheck name (validateFunction st name top)
     let st' = st{psFns = Map.insert name info (psFns st)}
     return (if top then st'{psGlobals = Map.insert source (fnIota name) (psGlobals st')} else st')
+
+-- The function that stands for the check that an impl meets its trait fails with the reason, and says which impl
+inImplCheck :: Name -> V a -> V a
+inImplCheck name action =
+    case parseImplCheckName name of
+        Nothing -> action
+        Just (trait, owner, function) -> do
+            outcome <- tryV action
+            case outcome of
+                Ok a -> return a
+                Error e ->
+                    throwV ("impl " ++ trait ++ " for " ++ owner ++ ": " ++ function ++ " does not meet what " ++ trait ++ " declares (its input contract must follow from " ++ trait ++ "'s, and its output contract must give " ++ trait ++ "'s): " ++ e)
 
 validateFunction :: PState -> Name -> Bool -> V FnInfo
 validateFunction st name top = do

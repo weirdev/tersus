@@ -1,0 +1,51 @@
+// A trait names the functions a type has to provide, with the contracts every implementation must meet. An impl gives a
+// type its functions, which are called by the type's name, as Shape::unit(), on a value, as s.sides(), or through the
+// trait, as Measure::sides(s): the argument that the trait calls Self says which type's function it is. Self stands for
+// the type in an impl.
+enum Shape {
+    Circle { radius: Int },
+    Rect { width: Int, height: Int },
+    Empty,
+};
+
+struct Counter { value: Int };
+
+trait Measure {
+    fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; }];
+};
+
+trait Step {
+    fn start() -> Self;
+    fn advance(self: Self, by: Int) -> Self [{ affirm by > 0; }];
+};
+
+// Functions of a type that belong to no trait
+impl Shape {
+    fn unit() -> Self { return Self::Rect { width: 1, height: 1 }; };
+};
+
+// An impl may promise more than the trait does (the output contract is stronger here), and may ask for less
+impl Measure for Shape {
+    fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; affirm return <= 4; }] {
+        return match self {
+            Self::Circle { radius: r } => 1,
+            Self::Rect { width: w, height: h } => 4,
+            Self::Empty => 0,
+        };
+    };
+};
+
+impl Step for Counter {
+    fn start() -> Self { return Self { value: 0 }; };
+    // the trait only allows a positive step; this accepts 0 too, and says what the new value is
+    fn advance(self: Self, by: Int) -> Self [{ affirm by >= 0; }] [{ affirm return.value = self.value + by; }] {
+        return Self { value: self.value + by };
+    };
+};
+
+s = Shape::unit();
+n = s.sides() + Measure::sides(Shape::Circle { radius: 5 }) + Shape::sides(Shape::Empty);
+c = Counter::start().advance(2).advance(3);
+affirm n = 5;
+affirm c.value = 5;
+return n * 10 + c.value;

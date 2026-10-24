@@ -52,7 +52,7 @@ nativeExamples =
         [ "arithmetic", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "safe_access", "structs", "termination", "types", "update_list"
+        , "safe_access", "structs", "termination", "traits", "types", "update_list"
         ]
     ]
 
