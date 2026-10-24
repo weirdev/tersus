@@ -105,7 +105,7 @@ renderType :: Type -> String
 renderType TInt = "Int"
 renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
-renderType (TArray t) = "Array<" ++ renderType t ++ ">"
+renderType (TArray t n) = "Array<" ++ renderType t ++ ", " ++ show n ++ ">"
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
 renderType (TNamed name) = name
 renderType (TVariant name) = name

@@ -1,41 +1,37 @@
-// Array<T> holds a sequence whose size is fixed when it is made. array(n, x) makes n copies of x, #[1, 2, 3] writes one out,
-// and size, get, first, last and set work on it as on a list (set gives a new array and leaves its argument alone). There is
-// no push: the size of an array never changes, so what is known about it stays known.
+// Array<T, N> holds N elements, and the size is part of the type. An array is held inline, wherever it is made: in the frame of
+// a function, with no pointer to it, so it costs no allocation. The size is a constant (array(5, 0), #[7, 8, 9]), and an
+// element is an Int, a Bool or another array.
 //
-// The type does not say the size. A function that takes an array of any size says what it needs of the size in its input
-// contract, and the caller has to show it.
-fn dot(a: Array<Int>, b: Array<Int>) -> Int [{ affirm size(a) = size(b); }] [{ }] {
+// size, get, first, last and set work on it as on a list (set gives a new array and leaves its argument alone, and in a loop
+// that assigns the array back to itself it is a store into the array). There is no push: the size never changes.
+//
+// The validator knows the size of every array from its type, so no contract or loop invariant has to say it.
+fn dot(a: Array<Int, 5>, b: Array<Int, 5>) -> Int {
     total = 0;
     i = 0;
-    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); affirm size(b) = size(a); }] shrinks size(a) - i {
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {
         total = total + get(a, i) * get(b, i);
         i = i + 1;
     };
     return total;
 };
 
-// A function that makes an array says its size in its output contract
-fn squares(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] {
-    out = array(n, 0);
+// An array comes back from a function by value, as any other value
+fn squares() -> Array<Int, 5> {
+    out = array(5, 0);
     i = 0;
-    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = n; }] shrinks n - i {
+    while i < 5 [{ affirm i >= 0; affirm i <= 5; }] shrinks 5 - i {
         out = set(out, i, i * i);
         i = i + 1;
     };
     return out;
 };
 
-// When the sizes are only known when the program runs, it can check them: the branch knows what the condition says
-fn checkedDot(a: Array<Int>, b: Array<Int>) -> Int {
-    if size(a) = size(b) {
-        return dot(a, b);
-    };
-    return 0;
-};
-
-s = squares(5);                 // #[0, 1, 4, 9, 16]
+s = squares();                  // #[0, 1, 4, 9, 16]
 ones = array(5, 1);
-affirm size(s) = 5;
 total = dot(s, ones);           // 30
-mismatched = checkedDot(s, array(3, 1));
-return total + mismatched + size(#[7, 8, 9]);
+
+// Arrays nest inline: a grid of 2 rows of 3 is six words
+grid = array(2, array(3, 1));
+grid = set(grid, 1, set(get(grid, 1), 2, 9));       // #[#[1, 1, 1], #[1, 1, 9]]
+return total + get(get(grid, 1), 2) + size(#[7, 8, 9]);

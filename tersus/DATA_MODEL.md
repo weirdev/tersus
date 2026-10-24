@@ -26,7 +26,7 @@ Three constraints from the rest of the language shape every choice below:
 | `match` | Both a statement and an expression. |
 | Recursive types | Allowed. See Recursive types and compilation. |
 | Naming | PascalCase types and variants, camelCase variables, functions and fields. A convention, not a compiler rule. |
-| User generics | Deferred. `List<T>` and `Array<T>` are the only parameterized types (`Array<T>` is a sequence whose size is fixed when it is made; LANGUAGE.md, Arrays). |
+| User generics | Deferred. `List<T>` and `Array<T, N>` are the only parameterized types (`Array<T, N>` is `N` elements held inline, with the size part of the type; LANGUAGE.md, Arrays). |
 | Associated functions and traits | `impl Type { fn f }` defines `Type::f`; a `trait` declares signatures with contracts, an `impl Trait for Type` must have them and meet the contracts (checked by the validator once), and `x.f()`, `Type::f(x)` and `Trait::f(x)` are resolved by the checker from the type of the argument. A name that several impls of a type define must be called by a path: `Trait::f(x)`, `<Type as Trait>::f(x)` or `<Type>::f(x)`. No generics over traits yet. |
 | Field access that may not apply | A contract the caller proves (`x is Variant`), like `get` and `/`. |
 
@@ -89,7 +89,7 @@ match s {                                      // statement form: arms are block
 A type checker runs between parsing and validation. Today a type error (`size(5)`) is found at evaluation, or not at all.
 
 ```
-Type = Int | Bool | List<Type> | Array<Type> | Name | fn(Type, ...) -> Type
+Type = Int | Bool | List<Type> | Array<Type, N> | Name | fn(Type, ...) -> Type
 ```
 
 - **Functions** annotate every parameter and the return type, which come before the contracts: `fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node> [{ ... }] [{ ... }] { ... }`. A function value is typed by its signature, which also gives a recursive function its type before its body is checked.

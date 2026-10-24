@@ -172,7 +172,7 @@ processBlock cx run b st0 = do
             info <- liftR (resolveFunction st calleeTerm)
             result <- fresh
             st' <- applyCall st info argTerms result
-            return noWalk{wdExits = [(next, forgetProofVar dest st'{psLocals = Map.insert dest result (psLocals st')})]}
+            return noWalk{wdExits = [(next, forgetProofVar dest (withTypeFacts (cxFn cx) dest st'{psLocals = Map.insert dest result (psLocals st')}))]}
         M.Return -> return noWalk{wdReturns = [st]}
         M.Unreachable
             | unreachable st -> return noWalk
@@ -210,7 +210,12 @@ forgetProofVar dest st = case Map.lookup dest (psLocalNames st) of
     Nothing -> st
 
 execStatement :: Ctx -> PState -> M.Statement -> V PState
-execStatement _ st (M.Assign dest rv) = forgetProofVar dest <$> assign st dest rv
+execStatement cx st (M.Assign dest rv) = forgetProofVar dest . typed <$> assign st dest rv
+  where
+    -- (a local that is another local has its facts already)
+    typed = case rv of
+        M.Use (M.Copy _) -> id
+        _ -> withTypeFacts (cxFn cx) dest
 execStatement cx st (M.Ghost env g) = ghostStatement cx st env g
 
 assign :: PState -> M.Local -> M.Rvalue -> V PState
@@ -233,6 +238,14 @@ assign st dest rv =
                 return (bind st' result)
   where
     bind s iota = s{psLocals = Map.insert dest iota (psLocals s)}
+
+-- What the type of a local says of its value: an array has the size of its type, wherever it came from, so a contract or a
+-- loop invariant need not say it
+withTypeFacts :: M.Function -> M.Local -> PState -> PState
+withTypeFacts fn l st =
+    case (M.localType <$> Map.lookup l (M.fnLocals fn), Map.lookup l (psLocals st)) of
+        (Just (TArray _ n), Just iota) -> addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], CTerm (VInt n)]]
+        _ -> st
 
 -- The term for the value of an operand
 operandTerm :: PState -> M.Operand -> V IotaProof
@@ -296,7 +309,7 @@ validateFunction st name top = do
     entry <- freshN (length params)
     let started = inner{psLocals = Map.fromList (zip params entry)}
         env = M.specEnv spec
-    withRequires <- assumeStatements (withEnv env started) requires
+    withRequires <- assumeStatements (withEnv env (foldr (withTypeFacts fn) started params)) requires
     withVariant <- startFunctionVariant (withEnv env withRequires) term
     returned <- walkFunction withVariant fn
     let returnEnv = Map.insert "return" (M.Copy (M.Local 0)) env
@@ -526,7 +539,7 @@ enterLoop cx header info incoming = do
     prefixError "Loop invariant does not hold on entry: " (rangeHint (checkStatements (withEnv env entry) invariant))
     let loopLocals = [l | l <- Set.toList (assignedIn cx (liRegion info)), Map.member l (psLocals entry)]
     freshIotas <- freshN (length loopLocals)
-    let havocked = entry{psLocals = Map.union (Map.fromList (zip loopLocals freshIotas)) (psLocals entry)}
+    let havocked = foldr (withTypeFacts (cxFn cx)) entry{psLocals = Map.union (Map.fromList (zip loopLocals freshIotas)) (psLocals entry)} loopLocals
     let variantName = loopVariantName header
         -- (the candidates are written for the locals the loop assigns, by names that no program can write)
         env' = Map.union env (Map.fromList [(pseudo l, M.Copy l) | l <- loopLocals])

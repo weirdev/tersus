@@ -210,5 +210,6 @@ valueOfConstant :: M.Constant -> Value
 valueOfConstant (M.CInt i) = VInt i
 valueOfConstant (M.CBool b) = VBool b
 valueOfConstant (M.CList cs) = VList (map valueOfConstant cs)
+valueOfConstant (M.CArray cs) = VList (map valueOfConstant cs)
 valueOfConstant (M.CData name fields) = VData name [(f, valueOfConstant c) | (f, c) <- fields]
 valueOfConstant (M.CFn name) = VFnRef name

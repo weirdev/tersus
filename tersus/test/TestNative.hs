@@ -204,28 +204,48 @@ listPrograms =
     , ("returned in a branch only", "x = [1]; if size(x) > 5 { return x; };")
     ]
 
--- Arrays share the layout of lists, with a size that never changes
+-- Arrays are held inline, in the frame of the function: no pointer, nothing to free
 arrayPrograms :: [(String, String)]
 arrayPrograms =
     [ ("array of copies", "return array(3, 7);")
     , ("array of no elements", "return array(0, 7);")
+    , ("array of zeros", "return array(5, 0);")
+    , ("array of false", "return array(3, false);")
+    , ("size is arithmetic", "return array(2 * 3 - 1, 4);")
     , ("literal", "return #[1, 2, 3];")
+    , ("negative elements", "return #[-1, 2];")
     , ("empty literal", "a = #[]; return size(a);")
-    , ("booleans", "return array(2, true);")
+    , ("booleans", "return #[true, false, true];")
     , ("size, get, first and last", "a = #[4, 5, 6]; return size(a) * 1000 + get(a, 1) * 100 + first(a) * 10 + last(a);")
     , ("set", "a = #[1, 2, 3]; b = set(a, 1, 9); return b;")
     , ("set does not change its argument", "a = #[1, 2, 3]; b = set(a, 1, 9); return a;")
     , ("set again and again", "a = array(3, 0); a = set(a, 0, 1); a = set(a, 2, 3); a = set(a, 0, 4); return a;")
+    , ("a copy is its own", "a = #[1, 2]; b = a; b = set(b, 0, 9); return a;")
+    , ("a constant is read", "return get(#[7, 8, 9], 2) + first(#[5]) + last(#[1, 2]) + size(#[0, 0]);")
     , ("equality", "return #[1, 2] = #[1, 2];")
-    , ("inequality of different sizes", "return array(2, 0) = array(3, 0);")
-    , ("a copy of a list in each slot", "rows = array(3, [1, 2]); rows = set(rows, 1, [9]); return rows;")
-    , ("a copy of an array in each slot", "m = array(2, array(2, 0)); m = set(m, 0, array(2, 5)); return m;")
-    , ("a copy of a struct in each slot", "struct P { x: Int, ys: List<Int> }; ps = array(2, P { x: 1, ys: [2] }); return ps;")
-    , ("the element is still there after", "x = [1, 2]; rows = array(2, x); return x;")
-    , ("an array in a struct", "struct Grid { cells: Array<Int> }; g = Grid { cells: array(3, 2) }; return get(g.cells, 2);")
-    , ("an array parameter", "fn total(a: Array<Int>) -> Int { s = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { s = s + get(a, i); i = i + 1; }; return s; }; return total(#[1, 2, 3, 4]);")
-    , ("an array that is returned", "fn make(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] { return array(n, 1); }; return make(4);")
-    , ("filled in a loop", "a = array(300, 0); i = 0; while i < 300 [{ affirm i >= 0; affirm i <= 300; affirm size(a) = 300; }] shrinks 300 - i { a = set(a, i, i * i); i = i + 1; }; return get(a, 299);")
+    , ("equality of a local and a constant", "a = array(2, 1); return a = #[1, 1];")
+    , ("inequality", "a = #[1, 2]; return a != #[1, 3];")
+    , ("equality of booleans", "return array(2, true) = #[true, true];")
+    , ("a grid", "m = array(2, array(3, 1)); return m;")
+    , ("a row of a grid", "m = array(2, array(3, 1)); m = set(m, 1, set(get(m, 1), 2, 9)); return get(m, 1);")
+    , ("an element of a grid", "m = array(2, array(3, 1)); m = set(m, 1, set(get(m, 1), 2, 9)); return get(get(m, 1), 2);")
+    , ("the last row", "m = set(array(3, array(2, 0)), 2, #[5, 6]); return last(m);")
+    , ("a grid of grids", "return get(get(array(2, array(2, array(2, 3))), 1), 0);")
+    , ("equality of grids", "return array(2, array(2, 1)) = array(2, array(2, 1));")
+    , ("a parameter indexed under a contract", "fn pick(a: Array<Int, 3>, i: Int) -> Int [{ affirm i >= 0; affirm i < 3; }] [{ }] { return get(a, i); }; return pick(#[5, 6, 7], 2);")
+    , ("an array parameter", "fn total(a: Array<Int, 4>) -> Int { s = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { s = s + get(a, i); i = i + 1; }; return s; }; return total(#[1, 2, 3, 4]);")
+    , ("the argument is not changed", "fn bump(a: Array<Int, 2>) -> Array<Int, 2> { a = set(a, 0, 9); return a; }; x = array(2, 1); y = bump(x); return x;")
+    , ("an array that is returned", "fn make() -> Array<Int, 4> { return array(4, 1); }; return make();")
+    , ("a function given its own result", "fn bump(a: Array<Int, 2>) -> Array<Int, 2> { return set(a, 0, get(a, 0) + 1); }; x = array(2, 1); x = bump(x); x = bump(x); return x;")
+    , ("two arrays given", "fn add(a: Array<Int, 2>, b: Array<Int, 2>) -> Array<Int, 2> { return set(set(array(2, 0), 0, get(a, 0) + get(b, 0)), 1, get(a, 1) + get(b, 1)); }; return add(#[1, 2], #[10, 20]);")
+    , ("one array given twice", "fn same(a: Array<Int, 2>, b: Array<Int, 2>) -> Bool { return a = b; }; x = #[3, 4]; return same(x, x);")
+    , ("a grid given", "fn corner(m: Array<Array<Int, 2>, 2>) -> Int { return get(get(m, 1), 1); }; return corner(set(array(2, array(2, 0)), 1, #[5, 6]));")
+    , ("a recursive function with an array", "fn count(a: Array<Int, 2>, n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n = 0 { return get(a, 0); }; return count(set(a, 0, get(a, 0) + 1), n - 1); }; return count(#[0, 0], 5);")
+    , ("filled in a loop", "a = array(300, 0); i = 0; while i < 300 [{ affirm i >= 0; affirm i <= 300; }] shrinks 300 - i { a = set(a, i, i * i); i = i + 1; }; return get(a, 299);")
+    , ("a function that makes an array in a loop", "fn make(k: Int) -> Array<Int, 3> { return set(array(3, 0), 1, k); }; s = 0; i = 0; while i < 1000 [{ affirm i >= 0; affirm i <= 1000; }] shrinks 1000 - i { a = make(i); s = s + get(a, 1); i = i + 1; }; return s;")
+    , ("a branch that sets", "a = array(2, 0); if size(a) > 1 { a = set(a, 0, 1); } else { a = set(a, 1, 1); }; return a;")
+    , ("the most the frame can hold", "a = array(8192, 1); a = set(a, 8191, 5); return get(a, 8191) + get(a, 0) + size(a);")
+    , ("a struct beside an array", "struct P { x: Int, ys: List<Int> }; p = P { x: 1, ys: [2, 3] }; a = array(2, p.x); return a;")
     ]
 
 controlPrograms :: [(String, String)]
@@ -248,7 +268,7 @@ controlPrograms =
 
 -- Every program of these tests that validates, and every one that is lowered without being validated
 validatedPrograms :: [(String, String)]
-validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ arrayPrograms ++ dataPrograms ++ stopPrograms
+validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ stopPrograms
 
 unvalidatedPrograms :: [(String, String)]
 unvalidatedPrograms = functionPrograms
@@ -307,8 +327,8 @@ memoryTests :: [Test]
 memoryTests =
     [ TestCase "a million pushes" (underLimit "l = []; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { l = push(l, i); i = i + 1; }; return size(l);" "1000000\n")
     , TestCase "pushes and sets" (underLimit "l = []; i = 0; while i < 300000 [{ affirm i >= 0; }] shrinks 300000 - i { l = push(l, i); i = i + 1; }; k = 0; while k < 300000 [{ affirm k >= 0; }] shrinks 300000 - k { l = set(l, k, get(l, k) + 1); k = k + 1; }; return get(l, 299999);" "300000\n")
-    , TestCase "a million-element array set in place" (underLimit "a = array(1000000, 0); i = 0; while i < 1000000 [{ affirm i >= 0; affirm i <= 1000000; affirm size(a) = 1000000; }] shrinks 1000000 - i { a = set(a, i, i); i = i + 1; }; return get(a, 999999);" "999999\n")
-    , TestCase "arrays made and dropped in a loop" (underLimit "s = 0; i = 0; while i < 200000 [{ affirm i >= 0; }] shrinks 200000 - i { m = array(3, array(3, i)); s = s + size(m); i = i + 1; }; return s;" "600000\n")
+    , TestCase "the largest array set in place, again and again" (underLimit "a = array(8192, 0); i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { a = set(a, 8191, i); i = i + 1; }; return get(a, 8191);" "1999999\n")
+    , TestCase "arrays made, given and returned in a loop do not grow the frame" (underLimit "fn bump(a: Array<Int, 4>) -> Array<Int, 4> { return set(a, 0, get(a, 0) + 1); }; s = 0; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { a = bump(set(array(4, 0), 1, i)); s = s + get(a, 0) + get(#[1, 2], 1); i = i + 1; }; return s;" "3000000\n")
     , TestCase "lists of lists" (underLimit "rows = []; i = 0; while i < 20000 [{ affirm i >= 0; }] shrinks 20000 - i { row = push(push([], i), i); rows = push(rows, row); i = i + 1; }; return size(rows);" "20000\n")
     , TestCase "values made and dropped in a loop" (underLimit "struct P { x: Int, ys: List<Int> }; s = 0; i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { p = P { x: i, ys: push(push([], i), 1) }; s = s + p.x; i = i + 1; }; return s;" "1999999000000\n")
     ]

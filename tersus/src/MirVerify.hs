@@ -92,7 +92,7 @@ problems program fn =
 
     hasUnknown (TVar _) = True
     hasUnknown (TList t) = hasUnknown t
-    hasUnknown (TArray t) = hasUnknown t
+    hasUnknown (TArray t _) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
     hasUnknown _ = False
 
@@ -110,7 +110,11 @@ rvalueProblems env localTy d rv =
         ListOp First [l] -> [expected (TList d) l | not (fitsSequence d l)]
         ListOp Last [l] -> [expected (TList d) l | not (fitsSequence d l)]
         ListOp Get [l, i] -> [expected (TList d) l | not (fitsSequence d l)] ++ ints [i]
-        ListOp NewArray [n, x] -> ints [n] ++ withElement (\e -> [expected e x | not (fits' e x)])
+        ListOp NewArray [n, x] -> case (d, n) of
+            (TArray e size, Const (CInt given))
+                | size == given -> [expected e x | not (fits' e x)]
+                | otherwise -> ["the size of the array is " ++ show given ++ ", not " ++ show size]
+            _ -> ["array needs a result that is an array and a size that is a constant"]
         ListOp Push [l, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ [expected e x | not (fits' e x)])
         ListOp Set [l, i, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ ints [i] ++ [expected e x | not (fits' e x)])
         ListOp op os -> [show op ++ " is applied to " ++ show (length os) ++ " operands"]
@@ -140,7 +144,14 @@ rvalueProblems env localTy d rv =
   where
     fits' = fits env localTy
     -- the sequence an element is read from is a list or an array
-    fitsSequence e l = fits' (TList e) l || fits' (TArray e) l
+    fitsSequence e l = fits' (TList e) l || any (\ty -> fits' ty l) [t | Just t <- [arrayOf l e]] || arrayConstant l e
+    arrayConstant l e = case l of
+        Const (CArray cs) -> all (constantFits env e) cs
+        _ -> False
+    -- (an array operand that is a local has its type; a constant array is not typed by its elements alone)
+    arrayOf l e = case operandType env localTy l of
+        Just (TArray e' n) | sub env e e' -> Just (TArray e' n)
+        _ -> Nothing
     -- the result of set is the array it was given; the result of array(n, x) is an array
     arrayResult = case rv of
         ListOp Set [l, _, _] -> fits' d l
@@ -156,7 +167,7 @@ rvalueProblems env localTy d rv =
     result t = ["the result is " ++ renderType t ++ ", not " ++ renderType d | d /= t]
     withElement k = case d of
         TList e -> k e
-        TArray e | arrayResult -> k e
+        TArray e _ | arrayResult -> k e
         _ -> ["the result is " ++ renderType d ++ ", not a list"]
     comparison a b =
         result TBool
@@ -169,9 +180,10 @@ rvalueProblems env localTy d rv =
     isFn _ = False
     isList o = case operandType env localTy o of
         Just (TList _) -> True
-        Just (TArray _) -> True
+        Just TArray{} -> True
         Nothing -> case o of
             Const (CList _) -> True
+            Const (CArray _) -> True
             _ -> False
         _ -> False
     -- a value of the type with this name, or of one of its variants
@@ -188,6 +200,7 @@ operandType env localTy o = case o of
         CInt _ -> Just TInt
         CBool _ -> Just TBool
         CList _ -> Nothing
+        CArray _ -> Nothing
         CData name _ -> TNamed . fst <$> Map.lookup name (envCtors env)
         CFn name -> Map.lookup name (envFns env)
 
@@ -204,7 +217,9 @@ constantFits env wanted c = case c of
     CBool _ -> wanted == TBool
     CList cs -> case wanted of
         TList e -> all (constantFits env e) cs
-        TArray e -> all (constantFits env e) cs
+        _ -> False
+    CArray cs -> case wanted of
+        TArray e n -> toInteger (length cs) == n && all (constantFits env e) cs
         _ -> False
     CData name fields -> case Map.lookup name (envCtors env) of
         Nothing -> False
@@ -220,7 +235,7 @@ sub :: Env -> Type -> Type -> Bool
 sub env wanted actual = case (wanted, actual) of
     (TNamed t, TVariant v) -> maybe False ((== t) . fst) (Map.lookup v (envCtors env))
     (TList a, TList b) -> sub env a b
-    (TArray a, TArray b) -> sub env a b
+    (TArray a n, TArray b m) -> n == m && sub env a b
     _ -> wanted == actual
 
 statementLocals :: Statement -> [Local]
@@ -275,5 +290,6 @@ operandFunctions _ = []
 constantFunctions :: Constant -> [Name]
 constantFunctions (CFn n) = [n]
 constantFunctions (CList cs) = concatMap constantFunctions cs
+constantFunctions (CArray cs) = concatMap constantFunctions cs
 constantFunctions (CData _ fs) = concatMap (constantFunctions . snd) fs
 constantFunctions _ = []

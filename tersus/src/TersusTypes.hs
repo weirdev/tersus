@@ -15,7 +15,7 @@ type Name = String
 -- A struct literal is the application of its Ctor, so the proof engine sees structs as ordinary terms.
 data BuiltinFunct
     = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Mod
-    | -- NewArray n x: an array of n copies of x. ArrayFrom is the array that a literal list of constants makes (`#[1, 2]`).
+    | -- NewArray n x: an array of n copies of x, n being a constant. ArrayFrom is the array that a literal list of constants makes (`#[1, 2]`).
       NewArray | ArrayFrom
     | Rel Rel
     | -- Within a b: a is a field of b, or a field of a field, and so on. Never parsed: it is how the validator checks
@@ -33,7 +33,9 @@ data BuiltinFunct
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
 -- look at them. TVar is the checker's own unknown and is never written by a program.
-data Type = TInt | TBool | TList Type | TArray Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
+-- TArray element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
+-- or an element of a bigger array), with no pointer to it. The size is a constant and part of the type.
+data Type = TInt | TBool | TList Type | TArray Type Integer | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
     deriving (Show, Eq, Ord)
 
 -- The declared parameter types and return type of a user function

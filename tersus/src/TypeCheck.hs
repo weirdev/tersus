@@ -10,6 +10,9 @@ module TypeCheck
     , valueType
     , builtinType
     , checkCall
+    , plainElement
+    , containsArray
+    , listOfArrays
     , checkBuiltinCall
     , checkConstruct
     , readField
@@ -114,7 +117,7 @@ zonk t@(TVar n) = do
         Just t' -> zonk t'
         Nothing -> return t
 zonk (TList t) = TList <$> zonk t
-zonk (TArray t) = TArray <$> zonk t
+zonk (TArray t n) = (\t' -> TArray t' n) <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
 zonk t = return t
 
@@ -126,7 +129,7 @@ bindVar n t = do
 occurs :: Int -> Type -> Bool
 occurs n (TVar m) = n == m
 occurs n (TList t) = occurs n t
-occurs n (TArray t) = occurs n t
+occurs n (TArray t _) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
 
@@ -148,7 +151,7 @@ unify a b = do
         (TNamed t, TVariant v) -> variantOf t v
         (TVariant _, TNamed _) -> return False
         (TList x, TList y) -> unify x y
-        (TArray x, TArray y) -> unify x y
+        (TArray x n, TArray y m) | n == m -> unify x y
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
         _ -> return False
@@ -288,12 +291,20 @@ registerCtors typeName ctors = do
     s <- getState
     putState s{tcCtors = foldr (\(ctor, fields) -> Map.insert ctor (typeName, fields)) (tcCtors s) ctors}
 
+-- A field of a struct or an enum is one word of a value of the heap, so it cannot be an array
+checkField :: Type -> TC ()
+checkField ty = do
+    checkType ty
+    when (containsArray ty) $ failTc listOfArrays
+
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
 checkType (TVariant name) = () <$ ctorInfo name
-checkType (TList t) = checkType t
-checkType (TArray t) = checkType t
+checkType (TList t) = do
+    checkType t
+    when (containsArray t) $ failTc listOfArrays
+checkType ty@(TArray t _) = checkType t >> arrayOk ty
 checkType (TFn args ret) = mapM_ checkType (ret : args)
 checkType _ = return ()
 
@@ -308,8 +319,8 @@ builtinType funct =
         Get -> list (\a -> TFn [TList a, TInt] a)
         Push -> list (\a -> TFn [TList a, a] (TList a))
         Set -> list (\a -> TFn [TList a, TInt, a] (TList a))
-        NewArray -> list (\a -> TFn [TInt, a] (TArray a))
-        ArrayFrom -> list (\a -> TFn [TList a] (TArray a))
+        NewArray -> failTc "Type error: array needs a size that is a constant, so it is written array(3, x) and cannot be used as a value"
+        ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
         Plus -> arith
         Minus -> arith
         Times -> arith
@@ -348,17 +359,85 @@ checkBuiltinCall (Just b) name ft ats@(container : _)
     | b `elem` [Size, First, Last, Get, Set] = do
         t <- zonk container
         case t of
-            TArray _ -> arrayVersion b >>= \aft -> checkCall name aft ats
+            TArray _ n -> arrayVersion n b >>= \aft -> checkCall name aft ats
             _ -> checkCall name ft ats
   where
-    arrayVersion funct = do
+    arrayVersion n funct = do
         a <- freshVar
         return $ case funct of
-            Size -> TFn [TArray a] TInt
-            Get -> TFn [TArray a, TInt] a
-            Set -> TFn [TArray a, TInt, a] (TArray a)
-            _ -> TFn [TArray a] a
+            Size -> TFn [TArray a n] TInt
+            Get -> TFn [TArray a n, TInt] a
+            Set -> TFn [TArray a n, TInt, a] (TArray a n)
+            _ -> TFn [TArray a n] a
+-- (a list holds values of the heap, and an array is held inline: the two do not mix yet)
+checkBuiltinCall (Just Push) name ft ats = do
+    result <- checkCall name ft ats
+    r <- zonk result
+    case r of
+        TList e | containsArray e -> failTc listOfArrays
+        _ -> return result
 checkBuiltinCall _ name ft ats = checkCall name ft ats
+
+-- Arrays: held inline, so their size is a constant of the type and their elements are plain
+
+-- The largest array there can be, in 8-byte slots (64 KB), since it is held in the frame of a function
+maxArraySlots :: Integer
+maxArraySlots = 8192
+
+-- The 8-byte slots an array takes
+arraySlots :: Type -> Integer
+arraySlots (TArray t n) = n * arraySlots t
+arraySlots _ = 1
+
+-- What an array can hold: an Int, a Bool, or an array of those. (A list, struct or enum lives on the heap, and a pointer to
+-- it would be an owner to free, which waits for the heap form of an array.) A type not known yet is accepted: the lowering
+-- looks at the finished types.
+plainElement :: Type -> Bool
+plainElement TInt = True
+plainElement TBool = True
+plainElement (TArray t _) = plainElement t
+plainElement (TVar _) = True
+plainElement _ = False
+
+containsArray :: Type -> Bool
+containsArray TArray{} = True
+containsArray (TList t) = containsArray t
+containsArray _ = False
+
+listOfArrays :: String
+listOfArrays = "Type error: a List or a struct cannot hold an Array yet: an array is held inline, in the frame of a function, and the values of the heap have a slot of one word"
+
+arrayOk :: Type -> TC ()
+arrayOk ty@(TArray e n) = do
+    e' <- zonk e
+    when (n < 0) $ failTc ("Type error: the size of an array cannot be negative, got " ++ show n)
+    unless (plainElement e') $
+        failTc ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType e' ++ " (elements that live on the heap come with the heap form of an array)")
+    when (arraySlots ty > maxArraySlots) $
+        failTc ("Type error: " ++ renderType ty ++ " takes " ++ show (arraySlots ty) ++ " words, more than the " ++ show maxArraySlots ++ " that an array held in a frame can have")
+arrayOk _ = return ()
+
+-- The value of an expression made of numbers and arithmetic, which is what a size can be
+constantInt :: Expression -> Maybe Integer
+constantInt (Val (VInt i)) = Just i
+constantInt (F (Val (VFunct _ _ _ (BuiltinFunct b) _)) [x, y]) = constantArithmetic b <$> constantInt x <*> constantInt y >>= id
+constantInt _ = Nothing
+
+constantArithmetic :: BuiltinFunct -> Integer -> Integer -> Maybe Integer
+constantArithmetic Plus a c = Just (a + c)
+constantArithmetic Minus a c = Just (a - c)
+constantArithmetic Times a c = Just (a * c)
+constantArithmetic Div a c | c /= 0 = Just (a `div` c)
+constantArithmetic Mod a c | c /= 0 = Just (a `mod` c)
+constantArithmetic _ _ _ = Nothing
+
+constantProofInt :: VariableProof -> Maybe Integer
+constantProofInt (CTerm (VInt i)) = Just i
+constantProofInt (FApp (CTerm (VFunct _ _ _ (BuiltinFunct b) _)) [x, y]) = constantArithmetic b <$> constantProofInt x <*> constantProofInt y >>= id
+constantProofInt _ = Nothing
+
+noConstantSize :: String
+noConstantSize = "Type error: the size of an array must be a constant (a number, or arithmetic on numbers), since the array is held inline"
 
 -- The builtin that the head of a call names, unless a variable of the program hides it
 builtinHead :: Ctx -> Env -> Expression -> Maybe BuiltinFunct
@@ -447,13 +526,13 @@ checkStatement top ctx env stmt =
             return (ctx, env', ValidationStatement vs')
         StructDef name fields -> do
             declareType name
-            mapM_ (checkType . snd) fields
+            mapM_ (checkField . snd) fields
             registerCtors name [(name, fields)]
             return (ctx, env, stmt)
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
-            mapM_ (mapM_ (checkType . snd) . snd) variants
+            mapM_ (mapM_ (checkField . snd) . snd) variants
             registerCtors name variants
             return (ctx, env, stmt)
         AxiomDef{} -> return (ctx, env, stmt)
@@ -549,6 +628,25 @@ inferExprR ctx env expr =
             inferred <- mapM (inferExprR ctx env) args
             t <- checkConstruct name fields (map fst inferred)
             return (t, F funct (map snd inferred))
+        F funct args
+            | Just NewArray <- builtinHead ctx env funct -> case args of
+                [n, x] -> do
+                    (nt, n') <- inferExprR ctx env n
+                    expect "argument 1 of array" TInt nt
+                    (xt, x') <- inferExprR ctx env x
+                    size <- maybe (failTc noConstantSize) return (constantInt n')
+                    let ty = TArray xt size
+                    arrayOk ty
+                    return (ty, F funct [Val (VInt size), x'])
+                _ -> failTc ("Type error: array takes 2 arguments, got " ++ show (length args))
+        F (Val (VFunct _ _ _ (BuiltinFunct ArrayFrom) _)) [Val literal@(VList items)] -> do
+            listTy <- valueType literal
+            case listTy of
+                TList e -> do
+                    let ty = TArray e (fromIntegral (length items))
+                    arrayOk ty
+                    return (ty, expr)
+                _ -> failTc "Type error: an array literal is made from a list"
         F (Var ('.' : method)) (receiver : args) -> do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
             owner <- ownerOfValue method (fst (head inferred))
@@ -664,7 +762,7 @@ checkTrait name functions = do
 substSelf :: Name -> Type -> Type
 substSelf owner (TNamed "Self") = TNamed owner
 substSelf owner (TList t) = TList (substSelf owner t)
-substSelf owner (TArray t) = TArray (substSelf owner t)
+substSelf owner (TArray t n) = TArray (substSelf owner t) n
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
 
@@ -752,6 +850,22 @@ inferProof ctx env proof =
             inferProof ctx env struct >>= readField owner field
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args ->
             mapM (inferProof ctx env) args >>= checkConstruct name fields
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct NewArray) _)) [n, x] -> do
+            inferProof ctx env n >>= expect "argument 1 of array" TInt
+            xt <- inferProof ctx env x
+            size <- maybe (failTc noConstantSize) return (constantProofInt n)
+            let ty = TArray xt size
+            arrayOk ty
+            return ty
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct NewArray) _)) args -> failTc ("Type error: array takes 2 arguments, got " ++ show (length args))
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct ArrayFrom) _)) [CTerm literal@(VList items)] -> do
+            listTy <- valueType literal
+            case listTy of
+                TList e -> do
+                    let ty = TArray e (fromIntegral (length items))
+                    arrayOk ty
+                    return ty
+                _ -> failTc "Type error: an array literal is made from a list"
         FApp funct args -> do
             ft <- inferProof ctx env funct
             ats <- mapM (inferProof ctx env) args
