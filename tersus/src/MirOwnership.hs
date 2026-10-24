@@ -59,6 +59,7 @@ data Role = Read | Consume
 
 isHeap :: Type -> Bool
 isHeap TList{} = True
+isHeap TBox{} = True
 isHeap TNamed{} = True
 isHeap TVariant{} = True
 isHeap _ = False
@@ -73,6 +74,8 @@ roles rv =
         ListOp Set [l, i, x] -> [(l, Consume), (i, Read), (x, Consume)]
         ListOp _ os -> [(o, Read) | o <- os]
         MakeList os -> [(o, Consume) | o <- os]
+        MakeBox o -> [(o, Consume)]
+        Unbox o -> [(o, Consume)]
         MakeData _ fields -> [(o, Consume) | (_, o) <- fields]
         ReadField o _ _ -> [(o, Read)]
         IsVariant o _ -> [(o, Read)]
@@ -415,6 +418,8 @@ withOperands rv operands =
         (BinaryOp op _ _, [a, b]) -> BinaryOp op a b
         (ListOp op _, os) -> ListOp op os
         (MakeList _, os) -> MakeList os
+        (MakeBox _, [o]) -> MakeBox o
+        (Unbox _, [o]) -> Unbox o
         (MakeData name fields, os) -> MakeData name (zip (map fst fields) os)
         (ReadField _ name field, [o]) -> ReadField o name field
         (IsVariant _ name, [o]) -> IsVariant o name

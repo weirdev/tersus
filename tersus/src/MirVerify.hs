@@ -95,6 +95,7 @@ problems program fn =
     hasUnknown (TVar _) = True
     hasUnknown (TList t) = hasUnknown t
     hasUnknown (TArray t _) = hasUnknown t
+    hasUnknown (TBox t) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
     hasUnknown _ = False
 
@@ -121,6 +122,12 @@ rvalueProblems env localTy d rv =
         ListOp Set [l, i, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ ints [i] ++ [expected e x | not (fits' e x)])
         ListOp op os -> [show op ++ " is applied to " ++ show (length os) ++ " operands"]
         MakeList os -> withElement (\e -> [expected e o | o <- os, not (fits' e o)])
+        Unbox o -> case operandType env localTy o of
+            Just (TBox held) -> ["the result is " ++ renderType d ++ ", not " ++ renderType held | not (sub env d held)]
+            _ -> [expected' "a Box" o]
+        MakeBox o -> case d of
+            TBox held -> [expected held o | not (fits' held o)]
+            _ -> ["the result is " ++ renderType d ++ ", not a Box"]
         MakeData name fields -> case Map.lookup name (envCtors env) of
             Nothing -> ["there is no constructor " ++ name]
             Just (typeName, declared)
@@ -190,6 +197,8 @@ rvalueProblems env localTy d rv =
         _ -> False
     -- a value of the type with this name, or of one of its variants
     isValueOf typeName o = case operandType env localTy o of
+        -- (a Box is looked into)
+        Just (TBox t) -> sub env (TNamed typeName) t
         Just t -> sub env (TNamed typeName) t
         Nothing -> False
 
@@ -238,6 +247,7 @@ sub env wanted actual = case (wanted, actual) of
     (TNamed t, TVariant v) -> maybe False ((== t) . fst) (Map.lookup v (envCtors env))
     (TList a, TList b) -> sub env a b
     (TArray a n, TArray b m) -> n == m && sub env a b
+    (TBox a, TBox b) -> sub env a b
     _ -> wanted == actual
 
 statementLocals :: Statement -> [Local]
@@ -251,6 +261,8 @@ rvalueOperands (Use o) = [o]
 rvalueOperands (BinaryOp _ a b) = [a, b]
 rvalueOperands (ListOp _ os) = os
 rvalueOperands (MakeList os) = os
+rvalueOperands (MakeBox o) = [o]
+rvalueOperands (Unbox o) = [o]
 rvalueOperands (MakeData _ fields) = map snd fields
 rvalueOperands (ReadField o _ _) = [o]
 rvalueOperands (IsVariant o _) = [o]

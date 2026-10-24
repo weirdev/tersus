@@ -146,6 +146,8 @@ closeTypes program = go [] . map (canonical program)
 
 -- A value of a variant has the representation of its enum, so one descriptor serves both
 canonical :: Program -> Type -> Type
+-- (until structs and enums are held inline, a Box is the pointer to the object that they are, so it is described as what it holds)
+canonical program (TBox t) = canonical program t
 canonical program (TVariant v) = maybe (TVariant v) TNamed (enumOf program v)
 canonical _ ty = ty
 
@@ -368,6 +370,8 @@ rvalue :: Function -> Type -> Rvalue -> G String
 rvalue fn destType rv =
     case rv of
         Use o -> operandAt fn destType o
+        MakeBox o -> operandAt fn destType o
+        Unbox o -> operandAt fn destType o
         BinaryOp op a b -> do
             ty <- sharedType fn [a, b]
             x <- operandAt fn ty a
@@ -732,6 +736,7 @@ loadAt t p =
 isPointer :: Type -> Bool
 isPointer TList{} = True
 isPointer TNamed{} = True
+isPointer TBox{} = True
 isPointer TVariant{} = True
 isPointer _ = False
 
@@ -991,6 +996,7 @@ llvmType (TList t) = llvmType t `bindResult` \_ -> Ok "ptr"
 -- (an array is passed and held as the address of its words)
 llvmType (TArray t _) = llvmType t `bindResult` \_ -> Ok "ptr"
 llvmType TNamed{} = Ok "ptr"
+llvmType TBox{} = Ok "ptr"
 llvmType TVariant{} = Ok "ptr"
 llvmType TFn{} = Ok "ptr"
 llvmType ty = Error (unsupportedType ty)

@@ -26,10 +26,10 @@ fn countUp(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] 
 // For an enum or struct, whose value gets smaller when it is replaced by a field of itself.
 enum Tree {
     Leaf,
-    Branch { left: Tree, value: Int, right: Tree },
+    Branch { left: Box<Tree>, value: Int, right: Box<Tree> },
 };
 
-fn leaves(t: Tree) -> Int shrinks t {
+fn leaves(t: Box<Tree>) -> Int shrinks t {
     return match t {
         Tree::Leaf => 1,
         Tree::Branch { left: l, value: v, right: r } => leaves(l) + leaves(r),
@@ -37,7 +37,7 @@ fn leaves(t: Tree) -> Int shrinks t {
 };
 
 // A loop can walk down a value the same way.
-fn leftmostDepth(t: Tree) -> Int {
+fn leftmostDepth(t: Box<Tree>) -> Int {
     depth = 0;
     while t is Tree::Branch shrinks t {
         t = (t as Tree::Branch).left;
@@ -68,4 +68,4 @@ fn unreachableSpin(n: Int) -> Int {
     return n;
 };
 
-return countDown(5) + sumTo(4) + countUp(2, 6) + leaves(Tree::Branch { left: Tree::Leaf, value: 1, right: Tree::Leaf });
+return countDown(5) + sumTo(4) + countUp(2, 6) + leaves(Box::new(Tree::Branch { left: Box::new(Tree::Leaf), value: 1, right: Box::new(Tree::Leaf) }));

@@ -202,7 +202,7 @@ testInferredInvariants =
 -- Loops and recursive functions say why they end, and code that may not end is declared
 testTermination :: Test
 testTermination =
-    let tree = "enum Tree { Leaf, Branch { left: Tree, right: Tree } };"
+    let tree = "enum Tree { Leaf, Branch { left: Box<Tree>, right: Box<Tree> } };"
         settle = "fn settle(n: Int) -> Int ~ { while n != 1 ~ { n = n - 1; }; return n; };"
      in testCaseSeq
             "testTermination"
@@ -243,10 +243,10 @@ testTermination =
             , parseValidateFailProgramHelper "fn down(n: Int) -> Int shrinks n { if n < 1 { return 0; } else { return down(n - 1); }; };" "Function variant is not bounded below: n"
             , parseValidProgramHelper "fn down(n: Int) -> Int ~ { return down(n); };"
             , -- Recursion over a structure: the call is given a field of the value
-              parseValidProgramHelper (tree ++ "fn count(t: Tree) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(r) }; };")
-            , parseValidateFailProgramHelper (tree ++ "fn count(t: Tree) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(t) }; };") "Recursive call does not shrink the variant: t"
-            , parseValidProgramHelper (tree ++ "fn depth(t: Tree) -> Int { n = 0; while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; n = n + 1; }; return n; };")
-            , parseValidateFailProgramHelper (tree ++ "fn depth(t: Tree) -> Int { n = 0; while t is Tree::Branch shrinks t { n = n + 1; }; return n; };") "Loop variant does not shrink: t"
+              parseValidProgramHelper (tree ++ "fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(r) }; };")
+            , parseValidateFailProgramHelper (tree ++ "fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(t) }; };") "Recursive call does not shrink the variant: t"
+            , parseValidProgramHelper (tree ++ "fn depth(t: Box<Tree>) -> Int { n = 0; while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; n = n + 1; }; return n; };")
+            , parseValidateFailProgramHelper (tree ++ "fn depth(t: Box<Tree>) -> Int { n = 0; while t is Tree::Branch shrinks t { n = n + 1; }; return n; };") "Loop variant does not shrink: t"
             , -- Code that may not end makes a function that contains it say so
               parseValidProgramHelper settle
             , parseValidateFailProgramHelper "fn settle(n: Int) -> Int { while n != 1 ~ { n = n - 1; }; return n; };" "Not guaranteed to terminate: a loop is declared ~"
@@ -276,7 +276,7 @@ testTermination =
                 Right stmts -> case elaborate stmts of
                     Ok [_, While _ _ (Just (Counting _)) _] -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
-            , case parseStatementBlock (tree ++ "t = Tree::Leaf; while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
+            , case parseStatementBlock (tree ++ "t = Box::new(Tree::Leaf); while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborate stmts of
                     Ok [_, _, While _ _ (Just (Parts _)) _] -> Nothing

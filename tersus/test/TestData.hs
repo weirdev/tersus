@@ -209,7 +209,7 @@ testEnums :: Test
 testEnums =
     let shape = "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
         opt = "enum Opt { None, Some { value: Int } };"
-        tree = "enum Tree { Leaf, Branch { left: Tree, value: Int, right: Tree } };"
+        tree = "enum Tree { Leaf, Branch { left: Box<Tree>, value: Int, right: Box<Tree> } };"
         parseFailsWith source expected =
             case parseStatementBlock source of
                 Left err -> if expected `isInfixOf` show err then Nothing else Just ("Wrong parse error: " ++ show err)
@@ -234,7 +234,7 @@ testEnums =
             , -- A struct can be matched as the only variant of its type
               parseEvalProgramHelper "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return match p { P { y: b } => b };" (Just (VInt 2))
             , -- Recursive types
-              parseEvalProgramHelper (tree ++ "fn sum(t: Tree) -> Int shrinks t { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; return sum(Tree::Branch { left: Tree::Branch { left: Tree::Leaf, value: 1, right: Tree::Leaf }, value: 2, right: Tree::Leaf });") (Just (VInt 3))
+              parseEvalProgramHelper (tree ++ "fn sum(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(Tree::Branch { left: Box::new(Tree::Branch { left: Box::new(Tree::Leaf), value: 1, right: Box::new(Tree::Leaf) }), value: 2, right: Box::new(Tree::Leaf) }));") (Just (VInt 3))
             , -- Parse errors
               parseFailsWith (shape ++ "s = Shape::Empty; match s { Shape::Empty => { } };") "does not cover Shape::Circle Shape::Rect"
             , parseFailsWith (shape ++ "s = Shape::Empty; match s { Shape::Empty => { }, Shape::Empty => { }, Shape::Circle { radius: r } => { }, Shape::Rect { width: w } => { } };") "repeats a variant"
@@ -293,7 +293,7 @@ testEnums =
             , -- Enums in lists
               parseValidProgramHelper (opt ++ "l = push(push([], Opt::None), Opt::Some { value: 2 }); affirm get(l, 0) is Opt::None; affirm size(l) = 2;")
             , -- Recursive types
-              parseValidProgramHelper (tree ++ "fn sum(t: Tree) -> Int [{ }] [{ }] shrinks t { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; x = sum(Tree::Leaf);")
+              parseValidProgramHelper (tree ++ "fn sum(t: Box<Tree>) -> Int [{ }] [{ }] shrinks t { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; x = sum(Box::new(Tree::Leaf));")
             ]
 
 testEnumCast :: Test
