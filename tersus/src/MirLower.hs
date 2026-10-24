@@ -216,14 +216,26 @@ resolveFunction :: M.Function -> L M.Function
 resolveFunction fn = do
     locals <- mapM (\d -> (\t -> d{M.localType = t}) <$> resolveType (M.localType d)) (M.fnLocals fn)
     returns <- mapM resolveType (M.fnReturns fn)
+    -- (an element that no use decided was not looked at when the array was made: what it came to is looked at now)
+    mapM_ (mapM_ arrayHolds . universe . M.localType) (Map.elems locals)
     return fn{M.fnLocals = locals, M.fnReturns = returns}
+  where
+    universe ty = ty : case ty of
+        TList t -> universe t
+        TArray t _ -> universe t
+        TFn args ret -> concatMap universe (ret : args)
+        _ -> []
+    arrayHolds ty = case ty of
+        TArray t _ | not (plainElement t) -> failL ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType t)
+        TList t | containsArray t -> failL listOfArrays
+        _ -> return ()
 
 resolveType :: Type -> L Type
 resolveType ty = defaultType <$> tc (zonk ty)
   where
     defaultType (TVar _) = TInt
     defaultType (TList t) = TList (defaultType t)
-    defaultType (TArray t) = TArray (defaultType t)
+    defaultType (TArray t n) = TArray (defaultType t) n
     defaultType (TFn args ret) = TFn (map defaultType args) (defaultType ret)
     defaultType t = t
 
@@ -469,12 +481,20 @@ lowerBuiltin :: BuiltinFunct -> [Expression] -> L (Pending, Type)
 lowerBuiltin b args = do
     operands <- mapM lowerOperand args
     let tys = map snd operands
-    result <- case (b, tys) of
-        (Field owner field, [structTy]) -> tc (readField owner field structTy)
-        (Ctor name fields, _) -> tc (checkConstruct name fields tys)
-        _ -> tc (builtinType b >>= \ft -> checkBuiltinCall (Just b) "call" ft tys)
+    result <- case (b, operands) of
+        -- (the size is a constant: the checker has folded it, and the element decides the rest)
+        (NewArray, [(M.Const (M.CInt n), _), (_, elementTy)]) -> return (TArray elementTy n)
+        (NewArray, _) -> failL "array was not given a constant size"
+        (ArrayFrom, [(M.Const (M.CList items), TList elementTy)]) -> return (TArray elementTy (fromIntegral (length items)))
+        (ArrayFrom, _) -> failL "an array literal was not made from a list of constants"
+        _ -> builtinResult b tys
     rv <- builtinRvalue b tys (map fst operands)
     return (PRvalue rv, result)
+  where
+    builtinResult b' tys' = case (b', tys') of
+        (Field owner field, [structTy]) -> tc (readField owner field structTy)
+        (Ctor name fields, _) -> tc (checkConstruct name fields tys')
+        _ -> tc (builtinType b' >>= \ft -> checkBuiltinCall (Just b') "call" ft tys')
 
 -- The operation that a builtin applied to operands stands for. `as` keeps the value and gives it the variant's type.
 builtinRvalue :: BuiltinFunct -> [Type] -> [M.Operand] -> L M.Rvalue
@@ -487,6 +507,8 @@ builtinRvalue b tys ops =
         (Push, [_, _]) -> return (M.ListOp M.Push ops)
         (Set, [_, _, _]) -> return (M.ListOp M.Set ops)
         (NewArray, [_, _]) -> return (M.ListOp M.NewArray ops)
+        -- (the list of the literal, held as an array)
+        (ArrayFrom, [M.Const (M.CList items)]) -> return (M.Use (M.Const (M.CArray items)))
         (ArrayFrom, [o]) -> return (M.Use o)
         (Plus, [x, y]) -> return (M.BinaryOp M.Add x y)
         (Minus, [x, y]) -> return (M.BinaryOp M.Sub x y)

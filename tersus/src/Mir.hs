@@ -143,6 +143,7 @@ data Constant
     = CInt Integer
     | CBool Bool
     | CList [Constant]
+    | CArray [Constant] -- an array literal (#[1, 2]): held inline, where a list is on the heap
     | CData Name [(Variable, Constant)]
     | CFn Name -- a function of the program, as a value
     deriving (Show, Eq)
@@ -303,6 +304,7 @@ renderConstant (CInt i) = show i
 renderConstant (CBool True) = "true"
 renderConstant (CBool False) = "false"
 renderConstant (CList cs) = "[" ++ intercalate ", " (map renderConstant cs) ++ "]"
+renderConstant (CArray cs) = "#[" ++ intercalate ", " (map renderConstant cs) ++ "]"
 renderConstant (CData name []) = name
 renderConstant (CData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderConstant c | (f, c) <- fields] ++ " }"
 renderConstant (CFn name) = "fn " ++ name

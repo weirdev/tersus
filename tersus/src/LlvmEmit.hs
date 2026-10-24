@@ -30,7 +30,9 @@ import Utils
 -- element: an Int, a Bool as 0 or 1, or a pointer), made by the runtime, which `push` and `set` copy. A struct or an enum value
 -- is a pointer to `{ rc, tag, fields }` (16 bytes of header, then a slot per field of its variant; the tag is the position of
 -- the variant in the enum, and 0 for a struct), so that a type that contains itself needs no layout of its own. A function
--- value is the address of the function. The runtime prints, compares, copies and frees values by a descriptor of their type, a
+-- value is the address of the function. An array is not a value of the heap: it is the words of its elements in the slot of
+-- its local (`[N x i64]`), its value is the address of the first, and it is copied by `memcpy`; a function copies an array it is
+-- given, and writes an array it returns into room the caller gives (the first parameter). The runtime prints, compares, copies and frees values by a descriptor of their type, a
 -- constant global `@"type.<type>"`.
 --
 -- The program is the owned MIR of MirOwnership, which says who owns each value of the heap. A local that holds a value it
@@ -63,7 +65,8 @@ declarations =
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
     , "declare ptr @tersus_list_new(i64)"
-    , "declare ptr @tersus_array_new(i64, i64, ptr)"
+    , "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
+    , "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
     , "declare ptr @tersus_list_push(ptr, i64)"
     , "declare ptr @tersus_list_set(ptr, i64, i64, ptr)"
     , "declare ptr @tersus_clone(ptr, ptr)"
@@ -77,6 +80,22 @@ entryPoint :: Program -> Function -> Result ([String], [Type]) String
 entryPoint program fn =
     case fnReturns fn of
         Nothing -> Ok (wrap ["call void @tersus_main()", "ret i32 0"], [])
+        -- an array is made in a frame, so the program is given room for it, and prints it from there
+        Just ty | isArray ty ->
+            Ok
+                ( wrap
+                    [ "%out = alloca [" ++ show (slotsOf ty) ++ " x i64]"
+                    , "%ok = call i1 @tersus_main(ptr %out)"
+                    , "br i1 %ok, label %print, label %done"
+                    , "print:"
+                    , "%w = ptrtoint ptr %out to i64"
+                    , "call void @tersus_print(ptr " ++ typeSymbol program ty ++ ", i64 %w)"
+                    , "br label %done"
+                    , "done:"
+                    , "ret i32 0"
+                    ]
+                , [ty]
+                )
         Just ty ->
             llvmType ty `bindResult` \t ->
                 let result = resultStruct t
@@ -116,7 +135,7 @@ closeTypes program = go [] . map (canonical program)
         | ty `elem` seen = go seen rest
         | otherwise = go (ty : seen) (parts ty ++ rest)
     parts (TList t) = [canonical program t]
-    parts (TArray t) = [canonical program t]
+    parts (TArray t _) = [canonical program t]
     parts (TNamed n) = [canonical program t | (_, fields) <- variantsOf program n, (_, t) <- fields]
     parts _ = []
 
@@ -133,6 +152,9 @@ typeDescriptors program types =
     ["%tersus.type = type { i64, ptr }"]
         ++ [typeSymbol program ty ++ " = private constant %tersus.type " ++ body ty | ty <- types]
         ++ concat [dataDescriptor n | TNamed n <- types]
+        ++ [ global "array." (renderType ty) ++ " = private constant { i64, ptr } { i64 " ++ show n ++ ", ptr " ++ typeSymbol program t ++ " }"
+           | ty@(TArray t n) <- types
+           ]
         ++ [ global "str." name ++ " = private constant [" ++ show (byteLength name + 1) ++ " x i8] c\"" ++ escaped name ++ "\\00\""
            | name <- nub (concat [v : map fst fields | TNamed n <- types, (v, fields) <- variantsOf program n])
            ]
@@ -141,8 +163,7 @@ typeDescriptors program types =
     body TInt = "{ i64 0, ptr null }"
     body TBool = "{ i64 1, ptr null }"
     body (TList t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
-    -- (an array is laid out and walked as a list is: its capacity is its length)
-    body (TArray t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
+    body ty@TArray{} = "{ i64 5, ptr " ++ global "array." (renderType ty) ++ " }"
     body (TNamed n) = "{ i64 3, ptr " ++ global "data." n ++ " }"
     body (TFn _ _) = "{ i64 4, ptr null }"
     body _ = "{ i64 -1, ptr null }"
@@ -219,7 +240,7 @@ constructedType program name =
 
 -- Generating the code of one function: a counter for the names of temporaries and labels, the lines so far (last first),
 -- and the types whose descriptors the code refers to
-data S = S {sCount :: Int, sLines :: [String], sTypes :: [Type], sProgram :: Program}
+data S = S {sCount :: Int, sLines :: [String], sTypes :: [Type], sProgram :: Program, sGlobals :: [String], sOwner :: Name}
 
 newtype G a = G {runG :: S -> Result (a, S) String}
 
@@ -264,25 +285,36 @@ emitFunction :: Program -> Bool -> String -> Function -> Result ([String], [Type
 emitFunction program entry symbol fn =
     inFunction (flatResultMap (localLlvmType fn) (fnParams fn)) `bindResult` \paramTypes ->
         inFunction (maybe (Ok "void") llvmType (fnReturns fn)) `bindResult` \valueType ->
-            let returnType = if entry && fnReturns fn /= Nothing then resultStruct valueType else valueType
-             in inFunction (flatResultMap (\(l, d) -> mapResult ((,) l) (llvmType (localType d))) (Map.toList (fnLocals fn))) `bindResult` \localTypes ->
-                    let params = intercalate ", " [t ++ " %p." ++ localNumber p | (p, t) <- zip (fnParams fn) paramTypes]
+            let returnsArray = maybe False isArray (fnReturns fn)
+                -- (an array comes back in room that the caller gives, as the first parameter)
+                returnType
+                    | returnsArray = if entry then "i1" else "void"
+                    | entry && fnReturns fn /= Nothing = resultStruct valueType
+                    | otherwise = valueType
+             in inFunction (flatResultMap (\(l, d) -> mapResult ((,) l) (storageType (localType d))) (Map.toList (fnLocals fn))) `bindResult` \localTypes ->
+                    let params = intercalate ", " (["ptr %ret" | returnsArray] ++ [t ++ " %p." ++ localNumber p | (p, t) <- zip (fnParams fn) paramTypes])
                         header = "define internal " ++ returnType ++ " " ++ symbol ++ "(" ++ params ++ ") {"
                         prologue =
                             ["entry:"]
                                 ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes]
                                 ++ ["    store ptr null, ptr " ++ slot l | (l, d) <- Map.toList (fnLocals fn), isPointer (localType d), l `notElem` fnParams fn]
-                                ++ ["    store " ++ t ++ " %p." ++ localNumber p ++ ", ptr " ++ slot p | (p, t) <- zip (fnParams fn) paramTypes]
+                                ++ concat
+                                    [ case Map.lookup p (fnLocals fn) of
+                                        -- (an array is given by its address, and the function works on its own copy)
+                                        Just d | isArray (localType d) -> ["    " ++ memcpyText (slot p) ("%p." ++ localNumber p) (8 * slotsOf (localType d))]
+                                        _ -> ["    store " ++ t ++ " %p." ++ localNumber p ++ ", ptr " ++ slot p]
+                                    | (p, t) <- zip (fnParams fn) paramTypes
+                                    ]
                                 ++ entryPrologue
                                 ++ ["    br label %bb" ++ blockNumber (BlockId 0)]
                         entryPrologue =
                             if entry && fnReturns fn /= Nothing
-                                then ["    %returned = alloca i1", "    store i1 false, ptr %returned", "    store " ++ valueType ++ " " ++ zeroOf valueType ++ ", ptr " ++ slot (Local 0)]
+                                then ["    %returned = alloca i1", "    store i1 false, ptr %returned"] ++ ["    store " ++ valueType ++ " " ++ zeroOf valueType ++ ", ptr " ++ slot (Local 0) | not returnsArray]
                                 else []
-                     in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) (S 0 [] [] program) of
+                     in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) (S 0 [] [] program [] (fnName fn)) of
                             Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
                             Ok (_, s) ->
-                                Ok ([header] ++ prologue ++ reverse (sLines s) ++ overflowBlock ++ ["}"], sTypes s)
+                                Ok (reverse (sGlobals s) ++ [header] ++ prologue ++ reverse (sLines s) ++ overflowBlock ++ ["}"], sTypes s)
   where
     inFunction r = case r of
         Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
@@ -317,8 +349,14 @@ emitStatement _ fn (Peek dest rv) = do
     emit ("store " ++ t ++ " " ++ result ++ ", ptr " ++ slot dest)
 emitStatement entry fn (Assign dest rv) = do
     destType <- localTypeG fn dest
-    result <- rvalue fn destType rv
-    storeResult entry fn dest result
+    if isArray destType
+        then do
+            assignArray fn dest destType rv
+            -- (in the entry, the return slot being assigned is what makes the program return a value)
+            if entry && dest == Local 0 then emit "store i1 true, ptr %returned" else pure ()
+        else do
+            result <- rvalue fn destType rv
+            storeResult entry fn dest result
 
 -- The value of an rvalue, given the type of the local it is for (which says what a constant list holds)
 rvalue :: Function -> Type -> Rvalue -> G String
@@ -336,6 +374,7 @@ rvalue fn destType rv =
                 mapM_ (\(i, o) -> operandAt fn t o >>= storeElement t list (show i)) (zip [0 :: Int ..] os)
                 pure list
             _ -> failG "A list literal must make a list"
+        ListOp op os@(first : _) | isArrayOperand fn first -> arrayRead fn destType op os
         ListOp op os -> listOperation fn destType op os
         MakeData name fields -> do
             program <- programG
@@ -415,13 +454,6 @@ listOperation fn destType op os =
             (t, list) <- listArg l
             index <- operandAt fn TInt i
             elementPtr list index >>= loadElement t
-        (NewArray, [n, x]) -> case destType of
-            TArray t -> do
-                count <- operandAt fn TInt n
-                word <- operandAt fn t x >>= toWord t
-                d <- descriptor t
-                ins "l" ("call ptr @tersus_array_new(i64 " ++ count ++ ", i64 " ++ word ++ ", ptr " ++ d ++ ")")
-            _ -> failG "array must make an array"
         (Push, [l, x]) -> do
             (t, list) <- listArg l
             word <- operandAt fn t x >>= toWord t
@@ -440,18 +472,170 @@ listOperation fn destType op os =
             Set -> pure destType
             Length -> sharedType fn [o]
             _ -> pure (TList destType)
-        case sequenceElement ty of
-            Just t -> operandAt fn ty o >>= \list -> pure (t, list)
-            Nothing -> failG "A list operation needs a list"
+        case ty of
+            TList t -> operandAt fn ty o >>= \list -> pure (t, list)
+            _ -> failG "A list operation needs a list"
     lengthOf list = do
         p <- ins "p" ("getelementptr i8, ptr " ++ list ++ ", i64 8")
         ins "n" ("load i64, ptr " ++ p)
 
--- What a list or an array holds
-sequenceElement :: Type -> Maybe Type
-sequenceElement (TList t) = Just t
-sequenceElement (TArray t) = Just t
-sequenceElement _ = Nothing
+-- Arrays. An array is held inline: the words of its elements one after another in the slot of the local that has it (an
+-- element that is an array is its words, in line), and its value, wherever one is wanted, is the address of the first. It
+-- is copied by copying the words, and there is nothing in it to free: its elements are plain.
+
+isArray :: Type -> Bool
+isArray TArray{} = True
+isArray _ = False
+
+-- The 8-byte words of a value held inline: an Int or a Bool is one, and an array is its elements'
+slotsOf :: Type -> Integer
+slotsOf (TArray t n) = n * slotsOf t
+slotsOf _ = 1
+
+memcpyText :: String -> String -> Integer -> String
+memcpyText to from bytes = "call void @llvm.memcpy.p0.p0.i64(ptr " ++ to ++ ", ptr " ++ from ++ ", i64 " ++ show bytes ++ ", i1 false)"
+
+-- Copies the words of an array to where another is (nothing to do when it is where it is)
+copyWords :: String -> String -> Integer -> G ()
+copyWords to from bytes = if to == from || bytes == 0 then pure () else emit (memcpyText to from bytes)
+
+-- Whether an operand is an array
+isArrayOperand :: Function -> Operand -> Bool
+isArrayOperand fn o = case o of
+    Copy l -> arrayLocal l
+    Move l -> arrayLocal l
+    Const CArray{} -> True
+    Const _ -> False
+  where
+    arrayLocal l = maybe False (isArray . localType) (Map.lookup l (fnLocals fn))
+
+-- The address of the words of an array operand: a local, or a constant that is a global
+arrayPtr :: Operand -> G String
+arrayPtr (Copy l) = pure (slot l)
+arrayPtr (Move l) = pure (slot l)
+arrayPtr (Const (CArray cs)) = constantWords cs
+arrayPtr o = failG ("Not an array: " ++ renderOperand' o)
+
+-- The number of elements of an array operand
+arrayLength :: Function -> Operand -> G Integer
+arrayLength fn o = case o of
+    Const (CArray cs) -> pure (toInteger (length cs))
+    Copy l -> ofLocal l
+    Move l -> ofLocal l
+    Const _ -> failG ("Not an array: " ++ renderOperand' o)
+  where
+    ofLocal l = localTypeG fn l >>= \ty -> case ty of
+        TArray _ n -> pure n
+        _ -> failG ("Not an array: " ++ show l)
+
+-- The words of a constant array as a global that the code only reads, and its name
+constantWords :: [Constant] -> G String
+constantWords cs = do
+    k <- G (\s -> let name = global "const." (sOwner s ++ "#" ++ show (sCount s)) in Ok (name, s{sCount = sCount s + 1}))
+    let words' = concatMap flatten cs
+        flatten c = case c of
+            CInt i -> [show i]
+            CBool b -> [if b then "1" else "0"]
+            CArray inner -> concatMap flatten inner
+            _ -> []
+        body
+            | null words' = "zeroinitializer"
+            | otherwise = "[" ++ intercalate ", " ["i64 " ++ w | w <- words'] ++ "]"
+    G (\s -> Ok ((), s{sGlobals = (k ++ " = private constant [" ++ show (length words') ++ " x i64] " ++ body) : sGlobals s}))
+    pure k
+
+-- The address of the element at an index, an element being so many bytes
+elementAddress :: String -> String -> Integer -> G String
+elementAddress base index bytes = do
+    offset <- ins "o" ("mul i64 " ++ index ++ ", " ++ show bytes)
+    ins "p" ("getelementptr i8, ptr " ++ base ++ ", i64 " ++ offset)
+
+-- What an array operand's element is, ready to be written: the word, or for an array the address of its words
+elementValue :: Function -> Type -> Operand -> G String
+elementValue fn elementTy o = if isArray elementTy then arrayPtr o else operandAt fn elementTy o
+
+writeElement :: Type -> String -> String -> String -> G ()
+writeElement elementTy base index value = do
+    p <- elementAddress base index (8 * slotsOf elementTy)
+    if isArray elementTy then copyWords p value (8 * slotsOf elementTy) else storeAt elementTy p value
+
+-- The statement that gives an array to a local. The array is made where the local is, with no pointer to it: `set` on the local
+-- that is the array is a store into its slot, and on another it is a copy and a store. The contracts (an index in range) are
+-- assumed.
+assignArray :: Function -> Local -> Type -> Rvalue -> G ()
+assignArray fn dest ty rv =
+    case ty of
+        TArray elementTy n -> do
+            let target = slot dest
+                bytes = 8 * slotsOf ty
+            case rv of
+                Use o -> arrayPtr o >>= \src -> copyWords target src bytes
+                ListOp NewArray [_, x] -> fillArray fn target elementTy n x
+                ListOp Set [a, i, x] -> do
+                    src <- arrayPtr a
+                    index <- operandAt fn TInt i
+                    value <- elementValue fn elementTy x
+                    copyWords target src bytes
+                    writeElement elementTy target index value
+                -- an element that is an array
+                ListOp Get [a, i] -> do
+                    src <- arrayPtr a
+                    index <- operandAt fn TInt i
+                    elementAddress src index bytes >>= \p -> copyWords target p bytes
+                ListOp First [a] -> arrayPtr a >>= \src -> copyWords target src bytes
+                ListOp Last [a] -> do
+                    count <- arrayLength fn a
+                    src <- arrayPtr a
+                    elementAddress src (show (count - 1)) bytes >>= \p -> copyWords target p bytes
+                _ -> failG ("Native code does not support " ++ renderRvalue rv ++ " for an array yet")
+        _ -> failG "An array is assigned to something that is not an array"
+
+-- n copies of an element: one store of zeros when it is a zero, and a loop otherwise
+fillArray :: Function -> String -> Type -> Integer -> Operand -> G ()
+fillArray fn target elementTy n x
+    | n == 0 = pure ()
+    | zero x && not (isArray elementTy) = emit ("call void @llvm.memset.p0.i64(ptr " ++ target ++ ", i8 0, i64 " ++ show (8 * n) ++ ", i1 false)")
+    | otherwise = do
+        value <- elementValue fn elementTy x
+        k <- freshLabel "fill"
+        let before = k ++ ".before"
+            header = k ++ ".header"
+            body = k ++ ".body"
+            done = k ++ ".done"
+            i = "%" ++ k ++ ".i"
+            next = "%" ++ k ++ ".next"
+        emit ("br label %" ++ before)
+        label before
+        emit ("br label %" ++ header)
+        label header
+        emit (i ++ " = phi i64 [ 0, %" ++ before ++ " ], [ " ++ next ++ ", %" ++ body ++ " ]")
+        c <- ins "c" ("icmp slt i64 " ++ i ++ ", " ++ show n)
+        emit ("br i1 " ++ c ++ ", label %" ++ body ++ ", label %" ++ done)
+        label body
+        writeElement elementTy target i value
+        emit (next ++ " = add i64 " ++ i ++ ", 1")
+        emit ("br label %" ++ header)
+        label done
+  where
+    zero (Const (CInt 0)) = True
+    zero (Const (CBool False)) = True
+    zero _ = False
+
+-- An element of an array, or its length, as a word
+arrayRead :: Function -> Type -> ListOp -> [Operand] -> G String
+arrayRead fn destType op os =
+    case (op, os) of
+        (Length, [a]) -> show <$> arrayLength fn a
+        (First, [a]) -> arrayPtr a >>= \base -> loadElement destType base
+        (Last, [a]) -> do
+            count <- arrayLength fn a
+            base <- arrayPtr a
+            elementAddress base (show (count - 1)) 8 >>= loadElement destType
+        (Get, [a, i]) -> do
+            base <- arrayPtr a
+            index <- operandAt fn TInt i
+            elementAddress base index 8 >>= loadElement destType
+        _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " for an array yet")
 
 -- The address of an element: a list is 24 bytes of header (count, length, capacity) and then a slot of 8 bytes per element
 elementPtr :: String -> String -> G String
@@ -500,7 +684,6 @@ loadAt t p =
 -- Whether a value is the address of an object (what the runtime compares by the descriptor of its type)
 isPointer :: Type -> Bool
 isPointer TList{} = True
-isPointer TArray{} = True
 isPointer TNamed{} = True
 isPointer TVariant{} = True
 isPointer _ = False
@@ -536,7 +719,7 @@ binary Mod _ x y = do
     adjust <- roundsTheOtherWay r y
     shifted <- ins "r" ("add i64 " ++ r ++ ", " ++ y)
     ins "r" ("select i1 " ++ adjust ++ ", i64 " ++ shifted ++ ", i64 " ++ r)
-binary (Compare rel) ty x y | isPointer ty = do
+binary (Compare rel) ty x y | isPointer ty || isArray ty = do
     -- structural equality, which the runtime does by the descriptor of the type
     d <- descriptor ty
     a <- toWord ty x
@@ -603,6 +786,11 @@ emitTerminator _ entry fn (Call callee args dest next) = do
 emitTerminator _ entry fn Return =
     case fnReturns fn of
         Nothing -> emit "ret void"
+        Just ty | isArray ty -> do
+            copyWords "%ret" (slot (Local 0)) (8 * slotsOf ty)
+            if entry
+                then ins "f" "load i1, ptr %returned" >>= \returned -> emit ("ret i1 " ++ returned)
+                else emit "ret void"
         Just ty -> do
             t <- typeG ty
             v <- ins "v" ("load " ++ t ++ ", ptr " ++ slot (Local 0))
@@ -621,8 +809,16 @@ call entry fn target argTypes returnType args dest next = do
     values <- sequence (zipWith (operandAt fn) argTypes args)
     paramTypes <- mapM typeG argTypes
     result <- typeG returnType
-    r <- ins "c" ("call " ++ result ++ " " ++ target ++ "(" ++ intercalate ", " (zipWith (\t v -> t ++ " " ++ v) paramTypes values) ++ ")")
-    storeResult entry fn dest r
+    let arguments = zipWith (\t v -> t ++ " " ++ v) paramTypes values
+    if isArray returnType
+        then do
+            -- the callee makes an array in the room it is given: the slot of the local that gets it (it has copied its arguments
+            -- by the time it writes, so the local may be one of them)
+            emit ("call void " ++ target ++ "(" ++ intercalate ", " (("ptr " ++ slot dest) : arguments) ++ ")")
+            if entry && dest == Local 0 then emit "store i1 true, ptr %returned" else pure ()
+        else do
+            r <- ins "c" ("call " ++ result ++ " " ++ target ++ "(" ++ intercalate ", " arguments ++ ")")
+            storeResult entry fn dest r
     emit ("br label %bb" ++ blockNumber next)
 
 renderOperand' :: Operand -> String
@@ -632,20 +828,26 @@ renderOperand' o = renderRvalue (Use o)
 -- number or a Bool, or a list made from a constant (the type says what an empty one holds)
 operandAt :: Function -> Type -> Operand -> G String
 operandAt fn _ (Copy l) = do
-    t <- localTypeG fn l >>= typeG
-    ins "v" ("load " ++ t ++ ", ptr " ++ slot l)
+    ty <- localTypeG fn l
+    t <- typeG ty
+    -- (an array is the address of the words it is made of)
+    if isArray ty then pure (slot l) else ins "v" ("load " ++ t ++ ", ptr " ++ slot l)
 operandAt fn _ (Move l) = do
     ty <- localTypeG fn l
     t <- typeG ty
-    v <- ins "v" ("load " ++ t ++ ", ptr " ++ slot l)
-    emit ("store " ++ t ++ " " ++ zeroOf t ++ ", ptr " ++ slot l)
-    pure v
+    if isArray ty
+        then pure (slot l)
+        else do
+            v <- ins "v" ("load " ++ t ++ ", ptr " ++ slot l)
+            emit ("store " ++ t ++ " " ++ zeroOf t ++ ", ptr " ++ slot l)
+            pure v
 operandAt _ ty (Const c) = constantValue ty c
 
 constantValue :: Type -> Constant -> G String
 constantValue _ (CInt i) = pure (show i)
 constantValue _ (CBool b) = pure (if b then "true" else "false")
-constantValue ty (CList cs) | Just t <- sequenceElement ty = do
+constantValue _ (CArray cs) = constantWords cs
+constantValue (TList t) (CList cs) = do
     list <- newList (length cs)
     mapM_ (\(i, c) -> constantValue t c >>= storeElement t list (show i)) (zip [0 :: Int ..] cs)
     pure list
@@ -685,6 +887,10 @@ constantShape program (CList cs) =
     case [c | c <- cs, constantKnown c] ++ cs of
         c : _ -> TList (constantShape program c)
         [] -> TList TInt
+constantShape program (CArray cs) =
+    case [c | c <- cs, constantKnown c] ++ cs of
+        c : _ -> TArray (constantShape program c) (toInteger (length cs))
+        [] -> TArray TInt 0
 constantShape program (CData name _) = constructedType program name
 constantShape program (CFn name) =
     case Map.lookup name (progFunctions program) of
@@ -695,6 +901,7 @@ constantShape _ _ = TInt
 -- Whether the contents of a constant say what it is made of: a number or a Bool is, and a list is when one element is
 constantKnown :: Constant -> Bool
 constantKnown (CList cs) = any constantKnown cs
+constantKnown (CArray cs) = any constantKnown cs
 constantKnown _ = True
 
 -- Stores the result of a statement; in the entry, the return slot being assigned is what makes the program return a value
@@ -734,11 +941,17 @@ llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TBool = Ok "i1"
 llvmType (TList t) = llvmType t `bindResult` \_ -> Ok "ptr"
-llvmType (TArray t) = llvmType t `bindResult` \_ -> Ok "ptr"
+-- (an array is passed and held as the address of its words)
+llvmType (TArray t _) = llvmType t `bindResult` \_ -> Ok "ptr"
 llvmType TNamed{} = Ok "ptr"
 llvmType TVariant{} = Ok "ptr"
 llvmType TFn{} = Ok "ptr"
 llvmType ty = Error (unsupportedType ty)
+
+-- What a local takes in the frame: a word, or for an array all the words it is made of
+storageType :: Type -> Result String String
+storageType ty@(TArray t _) = llvmType t `bindResult` \_ -> Ok ("[" ++ show (slotsOf ty) ++ " x i64]")
+storageType ty = llvmType ty
 
 unsupportedType :: Type -> String
 unsupportedType ty = "Native code does not support " ++ renderType ty ++ " yet"

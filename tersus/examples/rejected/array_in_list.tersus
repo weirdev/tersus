@@ -1,0 +1,3 @@
+// A list keeps its elements on the heap, one word each, and an array is held inline: a list cannot hold one yet.
+rows = push([], array(2, 0));
+return size(rows);

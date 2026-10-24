@@ -138,7 +138,6 @@ localHeap f l = maybe False (heapType . localType) (Map.lookup l (fnLocals (fram
 
 heapType :: Type -> Bool
 heapType TList{} = True
-heapType TArray{} = True
 heapType TNamed{} = True
 heapType TVariant{} = True
 heapType _ = False
@@ -269,12 +268,6 @@ listOp op os =
         (Get, [l, i]) -> do
             n <- intOperand i
             item l (const (fromIntegral n))
-        -- the element is only looked at: each slot gets a copy of it
-        (NewArray, [n, x]) -> do
-            count <- intOperand n
-            v <- readOperand x
-            copies <- mapM (const (cloneVal v)) [1 .. count]
-            alloc (OList copies)
         (Push, [l, x]) -> do
             list <- readOperand l
             v <- readOperand x
@@ -486,6 +479,12 @@ planTests :: [Test]
 planTests =
     [ TestCase "a list pushed to in a loop is changed in place" . pure $
         withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue ("Push(move _1" `isInfixOf` t))
+    , -- an array is held inline and has nothing in it to free, so the pass leaves it alone (the model of the heap holds values of the
+      -- heap, and the programs with arrays are not run on it)
+      TestCase "an array is not owned: no copy, no move, nothing to free" . pure $
+        withOwned "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);" (\t -> testAssertEq (count "clone" t, count "move" t, count "drop" t, count "peek" t) (0, 0, 0, 0))
+    , TestCase "an array beside a list: only the list is freed" . pure $
+        withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> testAssertEq (count "clone" t, count "drop" t) (0, 1))
     , TestCase "a list that is used after a push is copied once" . pure $
         withOwned "x = [1]; y = push(x, 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" t) 1)
     , TestCase "a match takes the fields out of the value" . pure $
@@ -580,7 +579,7 @@ testOwnership :: Test
 testOwnership =
     TestList
         "testOwnership"
-        [ TestList "examples" [TestCase path (onSource path <$> readFile path) | path <- nativeExamples]
+        [ TestList "examples" [TestCase path (onSource path <$> readFile path) | path <- nativeExamples, path /= "examples/arrays.tersus"]
         , TestList "programs" [TestCase name (pure (onSource name source)) | (name, source) <- validatedPrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests

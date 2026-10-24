@@ -3,8 +3,8 @@ module TestArrays (testArrays) where
 import TersusTypes
 import TestHarness
 
--- Array<T>: a sequence whose size is fixed when it is made. Reading and replacing work as they do for lists; what is known of
--- the size comes from where the array was made, and a function says what it needs of the size in its input contract.
+-- Array<T, N>: N elements held inline, wherever the array is made. The size is a constant and part of the type; the validator
+-- knows it from the type of every local, and the elements are Int, Bool or arrays of them.
 testArrays :: Test
 testArrays =
     let runs body expected = parseEvalProgramHelper body (Just expected)
@@ -16,9 +16,9 @@ testArrays =
             _ -> Just ("Expected a parse error for: " ++ source)
         dot =
             unlines
-                [ "fn dot(a: Array<Int>, b: Array<Int>) -> Int [{ affirm size(a) = size(b); }] [{ }] {"
+                [ "fn dot(a: Array<Int, 3>, b: Array<Int, 3>) -> Int {"
                 , "    total = 0; i = 0;"
-                , "    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); affirm size(b) = size(a); }] shrinks size(a) - i {"
+                , "    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {"
                 , "        total = total + get(a, i) * get(b, i); i = i + 1;"
                 , "    };"
                 , "    return total;"
@@ -30,15 +30,16 @@ testArrays =
                 "construction"
                 [ testCase "n copies of an element" (runs "return array(3, 7);" (ints [7, 7, 7]))
                 , testCase "an array of no elements" (runs "return array(0, 7);" (ints []))
-                , testCase "the size can be computed" (runs "n = 2 + 1; return array(n, 4);" (ints [4, 4, 4]))
+                , testCase "the size is arithmetic on numbers" (runs "return array(2 * 3 - 1, 4);" (ints [4, 4, 4, 4, 4]))
                 , testCase "a literal" (runs "return #[1, 2, 3];" (ints [1, 2, 3]))
                 , testCase "an empty literal" (runs "a = #[]; return size(a);" (VInt 0))
                 , testCase "an array of Bool" (runs "return array(2, true);" (VList [VBool True, VBool True]))
-                , testCase "a literal of lists" (runs "return get(#[[1], [2, 3]], 1);" (ints [2, 3]))
                 , testCase "an array of arrays has a copy of the element in each slot" (runs "m = array(2, array(2, 0)); m = set(m, 0, array(2, 5)); return m;" (VList [ints [5, 5], ints [0, 0]]))
-                , testCase "an array of lists" (runs "rows = array(2, [1]); return rows;" (VList [ints [1], ints [1]]))
-                , testCase "a list of arrays" (runs "rows = push([], array(2, 1)); return rows;" (VList [ints [1, 1]]))
-                , testCase "an array is made in a function" (runs "fn make(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] { return array(n, 1); }; return make(2);" (ints [1, 1]))
+                , testCase "an array of arrays of arrays" (runs "return get(get(array(2, array(2, array(2, 3))), 1), 0);" (ints [3, 3]))
+                , testCase "an array is made in a function and returned" (runs "fn make() -> Array<Int, 2> { return array(2, 1); }; return make();" (ints [1, 1]))
+                , testCase "a function takes an array" (runs (dot ++ "return dot(#[1, 2, 3], array(3, 2));") (VInt 12))
+                , testCase "the argument is not changed by the function" (runs "fn bump(a: Array<Int, 2>) -> Array<Int, 2> { a = set(a, 0, 9); return a; }; x = array(2, 1); y = bump(x); return x;" (ints [1, 1]))
+                , testCase "a function can be given its own result" (runs "fn bump(a: Array<Int, 2>) -> Array<Int, 2> { return set(a, 0, get(a, 0) + 1); }; x = array(2, 1); x = bump(x); x = bump(x); return x;" (ints [3, 1]))
                 ]
             , TestList
                 "reading and replacing"
@@ -47,61 +48,63 @@ testArrays =
                 , testCase "set" (runs "a = #[1, 2, 3]; b = set(a, 1, 9); return b;" (ints [1, 9, 3]))
                 , testCase "set does not change its argument" (runs "a = #[1, 2, 3]; b = set(a, 1, 9); return a;" (ints [1, 2, 3]))
                 , testCase "an element can be written again and again" (runs "a = array(3, 0); a = set(a, 0, 1); a = set(a, 2, 3); a = set(a, 0, 4); return a;" (ints [4, 0, 3]))
+                , testCase "a row of a grid" (runs "m = array(2, array(2, 0)); m = set(m, 1, set(get(m, 1), 0, 7)); return get(m, 1);" (ints [7, 0]))
                 , testCase "equality is structural" (runs "return #[1, 2] = #[1, 2];" (VBool True))
                 , testCase "inequality" (runs "return #[1, 2] != array(2, 1);" (VBool True))
-                , testCase "arrays of different sizes differ" (runs "return array(2, 0) = array(3, 0);" (VBool False))
-                , testCase "an array in a struct" (runs "struct Grid { cells: Array<Int> }; g = Grid { cells: array(3, 2) }; return get(g.cells, 2);" (VInt 2))
-                , testCase "an array in an enum" (runs "enum Shape { Cells { cells: Array<Int> }, Empty }; s = Shape::Cells { cells: #[1, 2] }; return size((s as Shape::Cells).cells);" (VInt 2))
+                , testCase "equality of grids" (runs "return array(2, array(2, 1)) = array(2, array(2, 1));" (VBool True))
                 ]
             , TestList
                 "what is known of the size"
-                [ testCase "from the size it is made with" (valid "a = array(4, 0); affirm size(a) = 4; return 0;")
-                , testCase "from a computed size" (valid "n = 2 * 3; a = array(n, 0); affirm size(a) = 6; return 0;")
-                , testCase "from a literal" (valid "a = #[1, 2, 3]; affirm size(a) = 3; return 0;")
-                , testCase "set keeps the size" (valid "a = array(4, 0); b = set(a, 1, 9); affirm size(b) = 4; affirm get(b, 1) = 9; return 0;")
+                [ testCase "from the type of a local" (valid "a = array(4, 0); affirm size(a) = 4; return 0;")
+                , testCase "from the type of a parameter" (valid "fn f(a: Array<Int, 4>) -> Int { return get(a, 3); }; return f(array(4, 1));")
+                , testCase "from the type of a result" (valid "fn make() -> Array<Int, 5> { return array(5, 1); }; a = make(); affirm size(a) = 5; return get(a, 4);")
+                , testCase "from the type of a row" (valid "m = array(2, array(3, 0)); row = get(m, 1); affirm size(row) = 3; return get(row, 2);")
+                , testCase "through a loop that sets" (valid "a = array(3, 0); i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { a = set(a, i, i); i = i + 1; }; affirm size(a) = 3; return get(a, 2);")
+                , testCase "after a branch" (valid "a = array(2, 0); if size(a) > 1 { a = set(a, 0, 1); } else { a = set(a, 1, 1); }; affirm size(a) = 2; return get(a, 1);")
                 , testCase "every element is the one it was made with" (valid "a = array(5, 9); affirm forall j in 0..5: get(a, j) = 9; return 0;")
-                , testCase "an element can be read at an index in range" (valid "a = array(4, 8); return get(a, 3);")
-                , testCase "a symbolic size needs to be shown not to be negative" (rejected "fn f(n: Int) -> Int { a = array(n, 0); return size(a); }; return f(2);" "Funct input validation failed")
-                , testCase "a symbolic size that is not negative" (valid "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return = n; }] { a = array(n, 0); return size(a); }; return f(2);")
-                , testCase "a size that is negative" (rejected "n = 2 - 5; return size(array(n, 0));" "Relation does not hold")
-                , testCase "an index past the end" (rejected "a = array(3, 0); return get(a, 3);" "Relation does not hold")
-                , testCase "first of an array with no elements" (rejected "a = array(0, 0); return first(a);" "Funct input validation failed")
-                , testCase "a function states the size it makes" (valid "fn make(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] { return array(n, 0); }; a = make(5); affirm size(a) = 5; return 0;")
-                , testCase "a function that says nothing of the size leaves it unknown" (rejected "fn make(n: Int) -> Array<Int> [{ affirm n >= 0; }] [{ }] { return array(n, 0); }; a = make(5); affirm size(a) = 5; return 0;" "Could not prove: size(a) = 5")
-                ]
-            , TestList
-                "arrays of any size"
-                [ testCase "a function takes arrays of the size its contract asks for" (runs (dot ++ "return dot(#[1, 2, 3], array(3, 2));") (VInt 12))
-                , testCase "a size that does not meet the contract" (rejected (dot ++ "return dot(array(3, 1), array(4, 1));") "Could not prove: size(a) = size(b)")
-                , testCase "the contract is met by what was made" (valid (dot ++ "a = array(4, 1); b = set(a, 0, 5); return dot(a, b);"))
-                , testCase "a size checked when the program runs" (runs (dot ++ "fn safe(a: Array<Int>, b: Array<Int>) -> Int { if size(a) = size(b) { return dot(a, b); }; return -1; }; return safe(array(2, 1), array(3, 1)) + safe(array(2, 2), array(2, 3));") (VInt 11))
-                , testCase "the other branch does not know the sizes agree" (rejected (dot ++ "fn safe(a: Array<Int>, b: Array<Int>) -> Int { if size(a) != size(b) { return dot(a, b); }; return -1; }; return safe(array(2, 1), array(3, 1));") "Could not prove: size(a) = size(b)")
-                , testCase "a function that reads needs the size in its contract" (rejected "fn at(a: Array<Int>) -> Int { return get(a, 0); }; return at(array(1, 5));" "Relation lacks a proof")
-                , testCase "a function that reads, with the contract" (runs "fn at(a: Array<Int>) -> Int [{ affirm size(a) > 0; }] [{ }] { return get(a, 0); }; return at(array(1, 5));" (VInt 5))
-                , testCase "a size that is not enough" (rejected "fn at(a: Array<Int>) -> Int [{ affirm size(a) > 2; }] [{ }] { return get(a, 2); }; return at(array(2, 5));" "Could not prove: size(a) > 2")
-                , testCase "a loop keeps the size of an array it sets" (runs "a = array(3, 0); i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; affirm size(a) = 3; }] shrinks 3 - i { a = set(a, i, i + 1); i = i + 1; }; return a;" (ints [1, 2, 3]))
-                , testCase "a trait function takes an array" (runs "struct Box { n: Int }; trait Sized { fn cells(self: Self, a: Array<Int>) -> Int [{ }] [{ affirm return >= 0; }]; }; impl Sized for Box { fn cells(self: Self, a: Array<Int>) -> Int [{ }] [{ affirm return >= 0; }] { return size(a) + self.n; }; }; b = Box { n: 1 }; return b.cells(array(2, 0));" (VInt 3))
+                , testCase "set keeps the facts of the element it writes" (valid "a = array(4, 0); b = set(a, 1, 9); affirm get(b, 1) = 9; return 0;")
+                , testCase "an index past the end of a local" (rejected "return get(array(3, 0), 3);" "Relation does not hold")
+                , testCase "an index past the end of a parameter" (rejected "fn f(a: Array<Int, 4>) -> Int { return get(a, 4); }; return f(array(4, 1));" "Relation lacks a proof")
+                , testCase "first of an array with no elements" (rejected "return first(array(0, 0));" "Could not prove: size(list) > 0")
+                , testCase "a wrong claim about the size" (rejected "a = array(4, 0); affirm size(a) = 5; return 0;" "Could not prove: size(a) = 5")
                 ]
             , TestList
                 "types"
-                [ testCase "an array has no push" (rejected "a = array(2, 0); a = push(a, 1); return 0;" "argument 1 of push: expected List<?>, got Array<Int>")
-                , testCase "an array is not a list" (rejected "fn f(l: List<Int>) -> Int { return 0; }; return f(array(2, 0));" "argument 1 of f: expected List<Int>, got Array<Int>")
-                , testCase "a list is not an array" (rejected "fn f(a: Array<Int>) -> Int { return 0; }; return f([1, 2]);" "argument 1 of f: expected Array<Int>, got List<Int>")
-                , testCase "arrays and lists are not compared" (rejected "return array(2, 0) = [0, 0];" "Type error")
+                [ testCase "the size is part of the type" (rejected "fn f(a: Array<Int, 3>) -> Int { return 0; }; return f(array(4, 1));" "argument 1 of f: expected Array<Int, 3>, got Array<Int, 4>")
+                , testCase "two sizes are not compared" (rejected "return #[1, 2] = #[1, 2, 3];" "expected Array<Int, 2>, got Array<Int, 3>")
+                , testCase "a function returns the size it says" (rejected "fn f() -> Array<Int, 3> { return array(2, 0); }; return 0;" "returned value: expected Array<Int, 3>, got Array<Int, 2>")
+                , testCase "an array has no push" (rejected "a = array(2, 0); a = push(a, 1); return 0;" "argument 1 of push: expected List<?>, got Array<Int, 2>")
+                , testCase "an array is not a list" (rejected "fn f(l: List<Int>) -> Int { return 0; }; return f(array(2, 0));" "argument 1 of f: expected List<Int>, got Array<Int, 2>")
+                , testCase "a list is not an array" (rejected "fn f(a: Array<Int, 2>) -> Int { return 0; }; return f([1, 2]);" "argument 1 of f: expected Array<Int, 2>, got List<Int>")
                 , testCase "the size is an Int" (rejected "return size(array(true, 0));" "argument 1 of array: expected Int, got Bool")
                 , testCase "an element has the type of the others" (rejected "a = array(2, 0); a = set(a, 0, true); return 0;" "argument 3 of set")
                 , testCase "a literal has one element type" (rejected "return #[1, true];" "list element")
                 , testCase "size is not an array" (rejected "return size(3);" "argument 1 of size")
-                , testCase "array types are written in full" (parseFails "fn f(a: Array) -> Int { return 0; }; return 0;")
-                , testCase "arrays of arrays" (valid "fn f(m: Array<Array<Int>>) -> Int [{ affirm size(m) > 0; }] [{ }] { return size(get(m, 0)); }; return f(array(2, array(3, 0)));")
-                , testCase "the returned type is the declared one" (rejected "fn f() -> Array<Int> { return [1]; }; return 0;" "returned value: expected Array<Int>, got List<Int>")
+                , testCase "arrays of arrays" (valid "fn f(m: Array<Array<Int, 3>, 2>) -> Int { return size(get(m, 0)); }; return f(array(2, array(3, 0)));")
+                ]
+            , TestList
+                "what an array can be"
+                [ testCase "the size must be a constant" (rejected "n = 3; return size(array(n, 0));" "the size of an array must be a constant")
+                , testCase "the size must be known where the array is made, not in a function" (rejected "fn f(n: Int) -> Int { return size(array(n, 0)); }; return f(2);" "the size of an array must be a constant")
+                , testCase "the size cannot be negative" (rejected "return size(array(2 - 5, 0));" "the size of an array cannot be negative, got -3")
+                , testCase "an array that is too large for a frame" (rejected "return size(array(9000, 0));" "more than the 8192")
+                , testCase "arrays inside an array count" (rejected "fn f(a: Array<Array<Int, 100>, 100>) -> Int { return 0; }; return 0;" "takes 10000 words")
+                , testCase "an element on the heap is not plain" (rejected "return size(array(2, [1]));" "an array holds Int, Bool or arrays of them, not List<Int>")
+                , testCase "an element that is a struct" (rejected "struct P { x: Int }; return size(array(2, P { x: 1 }));" "an array holds Int, Bool or arrays of them, not P")
+                , testCase "a struct field is not an array" (rejected "struct S { a: Array<Int, 2> }; return 0;" "cannot hold an Array yet")
+                , testCase "an enum field is not an array" (rejected "enum E { A { a: Array<Int, 2> }, B }; return 0;" "cannot hold an Array yet")
+                , testCase "a list parameter does not hold arrays" (rejected "fn f(l: List<Array<Int, 2>>) -> Int { return 0; }; return 0;" "cannot hold an Array yet")
+                , testCase "a list is not pushed an array" (rejected "rows = push([], array(2, 0)); return 0;" "cannot hold an Array yet")
+                , testCase "array is not a value" (rejected "h = array; return 0;" "cannot be used as a value")
                 ]
             , TestList
                 "parsing"
                 [ testCase "a literal in a proof" (valid "a = #[1, 2]; affirm a = #[1, 2]; affirm size(#[4, 5, 6]) = 3; return 0;")
                 , testCase "array in a proof" (valid "a = array(3, 4); affirm a = array(3, 4); return 0;")
-                , testCase "a space before the type argument" (valid "fn f(a: Array <Int>) -> Int { return 0; }; return 0;")
+                , testCase "spaces in the type" (valid "fn f(a: Array <Int , 2>) -> Int { return 0; }; return 0;")
                 , testCase "a literal is an operand" (runs "return size(#[1, 2]) + size(#[3]);" (VInt 3))
+                , testCase "a type without a size" (parseFails "fn f(a: Array<Int>) -> Int { return 0; }; return 0;")
+                , testCase "a type without a type argument" (parseFails "fn f(a: Array) -> Int { return 0; }; return 0;")
                 , testCase "a hash needs a literal" (parseFails "return #;")
                 , testCase "variables are still named array" (runs "arrays = 2; return arrays;" (VInt 2))
                 ]

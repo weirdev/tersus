@@ -108,6 +108,7 @@ constantValue :: Constant -> MirValue
 constantValue (CInt i) = MInt i
 constantValue (CBool b) = MBool b
 constantValue (CList cs) = MList (map constantValue cs)
+constantValue (CArray cs) = MList (map constantValue cs)
 constantValue (CData name fields) = MData name [(f, constantValue c) | (f, c) <- fields]
 constantValue (CFn name) = MFn name
 

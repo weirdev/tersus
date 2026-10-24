@@ -1,0 +1,4 @@
+// An array is held inline, in the frame of the function, so its size must be known when the program is compiled: n is a
+// variable here, and array(3, 0) would do.
+n = 3;
+return size(array(n, 0));
