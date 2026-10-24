@@ -133,7 +133,7 @@ m = Node { next: 3, ..n };                 // a new Node: next replaced, the res
 
 - A literal gives every field, or names the fields that change and ends with `..base` to copy the rest. The base must be a value of the same struct. A missing, repeated or unknown field is a parse error, so is a `..base` that has nothing to copy, and so is a struct named `Int`, `Bool` or `List`.
 - Structs are values. Nothing is mutated: `Node { next: 3, ..n }` is a new struct and `n` is unchanged. There is no field assignment, so write `n = Node { next: 3, ..n };`.
-- `=` and `!=` compare structs field by field, and a struct can hold any type, including lists and other structs declared earlier. A struct cannot contain itself yet.
+- `=` and `!=` compare structs field by field, and a struct can hold any type, including lists and other structs declared earlier. A struct cannot hold itself (it would have no size); it holds the recursion in a `Box` (see Box).
 - Field reads and literals work in proofs too, so a contract can say `affirm return.next = target;`.
 - The validator treats a literal as a constructor applied to its fields. Reading a field of a literal gives the field (`Node { next: 3, ..n }.value` is `n.value`), two equal constructions agree field by field, and so an update's other fields are known without a `forall`. It does not yet know that a struct equals a rebuilt copy of its own fields (`Node { value: n.value, prev: n.prev, next: n.next } = n`), so state that with the fields you need.
 
@@ -183,13 +183,39 @@ match s {                                   // as a statement, the arms are bloc
 - A `match` is rewritten into an `if` chain of `is` tests, with the last variant in the final `else`, so it is validated like an `if`: an arm that cannot run is vacuous, and the facts of the arms that can are joined. A match with a missing, repeated or foreign variant is a parse error.
 - What an arm binds, and any variable first assigned in it, is local to the arm. A bound name hides a variable of the same name outside the match, which keeps its value. The value matched is read once.
 - A struct can be matched as the only variant of its type: `match p { Point { x: a } => a }`.
-- Enums can contain themselves: `enum Tree { Leaf, Branch { left: Tree, value: Int, right: Tree } }`, and a function over a tree recurses on its parts. (A compiled Tersus would have to put such fields behind a pointer; the language does not mention it.)
+- An enum cannot hold itself (it would have no size), but it can hold a `Box` of itself: `enum Tree { Leaf, Branch { left: Box<Tree>, value: Int, right: Box<Tree> } }`, and a function over a tree recurses on its parts (see Box).
 - Equality `=` is structural, and `x != y` is proved for values built by different variants or with different fields.
 - Fields of an enum value are read after a **cast** to the variant that has them: `(s as Shape::Circle).radius`. Several variants may have a field of the same name, so `s.radius` alone does not say which variant is meant, and it is a type error on an enum value (it works on a struct). The cast has the type `Shape::Circle`, which can be written as a parameter type (`fn r(c: Shape::Circle)`), and a value of that type can be passed where a `Shape` is wanted but not the other way round.
 - A cast is checked by the validator and does nothing when the program runs. The validator demands the proof that the value is that variant, the way `get` demands an index in range: an `affirm s is Shape::Circle;` in a contract, an earlier `affirm`, an `if s is Shape::Circle`, or a value built as a `Shape::Circle`. A cast it cannot prove is a validation error (`Could not prove: value is Shape::Circle`). If a wrong cast reaches execution anyway, the behaviour is undefined: this interpreter does not check the cast, and reading a field that the value does not have is an error that says so. What a program computes never depends on the proofs, so proofs could be used to speed a program up but not to change what it does.
 - A contract can demand a variant without a cast, `[{ affirm o is Opt::Some; }]`, and the caller has to show it. Updating a variant, `Shape::Rect { width: 10, ..s }`, copies the other fields from `s as Shape::Rect`, so it asks for the same proof.
 
 See `examples/enums.tersus`.
+
+## Box
+
+`Box<T>` holds a struct or an enum `T` apart from where it is used, and is what a type that contains itself holds its recursion in. A type cannot hold itself by value, since it would have no size; the declaration is refused (`Tree holds itself, so it would have no size: hold the recursion in a Box, as in Box<Tree>`). A `List<Tree>` would also do, since the elements of a list are kept apart.
+
+```tersus
+enum Tree {
+    Leaf,
+    Branch { left: Box<Tree>, value: Int, right: Box<Tree> },
+};
+
+fn sum(t: Box<Tree>) -> Int shrinks t {
+    return match t {
+        Tree::Leaf => 0,
+        Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r),
+    };
+};
+
+leaf = Box::new(Tree::Leaf);
+return sum(Box::new(Tree::Branch { left: leaf, value: 2, right: Box::new(Tree::Leaf) }));
+```
+
+- **`Box::new(x)`** holds `x` in a Box; `Box::unbox(b)` gives back what a Box holds. They are written as calls and cannot be used as values (`h = Box::new` is an error).
+- **A Box has the value of what it holds.** It changes where the value lives, not what it is: `Box::new(p) = Box::new(q)` compares `p` and `q`, the validator reasons about a Box as about its contents, and `Box::unbox(Box::new(x))` is `x`. `Box<Tree>` and `Tree` are different types, and neither is used for the other.
+- **A Box is looked into where a struct or an enum is looked at.** A field of a boxed struct is read as `b.x`, the base of an update can be a Box (`P { x: 9, ..b }`), `b is Tree::Branch`, `b as Tree::Branch` and `match b { ... }` work on a Box, and `shrinks b` is the shrinking of a value that loses a field at a time. A function over the contents of a Box is called on `Box::unbox(b)`, as in `Box::unbox(b).total()`.
+- **What a Box can hold.** For now a struct or an enum (`Box<Int>` and `Box<List<Int>>` are errors); other types wait for structs and enums to be held inline, when a Box holds any type that has a size (see the roadmap in `README.md`).
 
 ## Traits And Impls
 
@@ -680,7 +706,7 @@ fn countDown(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] {
     return steps;
 };
 
-fn leaves(t: Tree) -> Int shrinks t {
+fn leaves(t: Box<Tree>) -> Int shrinks t {
     return match t {
         Tree::Leaf => 1,
         Tree::Branch { left: l, value: v, right: r } => leaves(l) + leaves(r),

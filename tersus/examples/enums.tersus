@@ -25,13 +25,14 @@ fn radiusOf(s: Shape) -> Int
     return (s as Shape::Circle).radius;
 };
 
-// A type can contain itself, so a function over it recurses.
+// A type cannot hold itself (it would have no size), but it can hold a Box of itself. A Box has the value of what it holds, and
+// is looked into where the enum is: tested with `is`, cast, matched and read for a field as the enum would be.
 enum Tree {
     Leaf,
-    Branch { left: Tree, value: Int, right: Tree },
+    Branch { left: Box<Tree>, value: Int, right: Box<Tree> },
 };
 
-fn sum(t: Tree) -> Int shrinks t {
+fn sum(t: Box<Tree>) -> Int shrinks t {
     return match t {
         Tree::Leaf => 0,
         Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r),
@@ -42,9 +43,9 @@ circle = Shape::Circle { radius: 2 };
 affirm circle is Shape::Circle;
 radius = radiusOf(circle);
 affirm radius = 2;
-tree = Tree::Branch {
-    left: Tree::Branch { left: Tree::Leaf, value: 1, right: Tree::Leaf },
+tree = Box::new(Tree::Branch {
+    left: Box::new(Tree::Branch { left: Box::new(Tree::Leaf), value: 1, right: Box::new(Tree::Leaf) }),
     value: 2,
-    right: Tree::Leaf,
-};
+    right: Box::new(Tree::Leaf),
+});
 return area(circle) + area(Shape::Rect { width: 3, height: 4 }) + sum(tree);

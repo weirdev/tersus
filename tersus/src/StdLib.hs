@@ -157,6 +157,9 @@ builtinFunct NewArray =
         ]
 -- The array that a literal makes is the list of its elements, read as an array: the same value
 builtinFunct ArrayFrom = VFunct ["list"] [] [] (BuiltinFunct ArrayFrom) []
+-- Box::new(x) is x: a Box has the value of what it holds
+builtinFunct NewBox = VFunct ["value"] [] [] (BuiltinFunct NewBox) []
+builtinFunct UnBox = VFunct ["box"] [] [] (BuiltinFunct UnBox) []
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []
@@ -245,6 +248,10 @@ evalBuiltinFunct NewArray [VInt n, x]
 evalBuiltinFunct NewArray _ = Error "array takes a size and an element"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l
 evalBuiltinFunct ArrayFrom _ = Error "An array literal is made from a list"
+evalBuiltinFunct NewBox [value] = Ok value
+evalBuiltinFunct NewBox _ = Error "Box::new takes one value"
+evalBuiltinFunct UnBox [value] = Ok value
+evalBuiltinFunct UnBox _ = Error "Box::unbox takes one Box"
 evalBuiltinFunct (Ctor name fields) args
     | length fields == length args = Ok $ VData name (zip fields args)
     | otherwise = Error ("Struct " ++ name ++ " takes " ++ show (length fields) ++ " fields, got " ++ show (length args))

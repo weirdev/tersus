@@ -141,6 +141,8 @@ rvalueCall rv =
         M.AsVariant o name -> Just (Cast name, [o])
         M.Use _ -> Nothing
         M.MakeList _ -> Nothing
+        M.MakeBox _ -> Nothing
+        M.Unbox _ -> Nothing
   where
     binary op = case op of
         M.Add -> Plus

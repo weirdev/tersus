@@ -229,6 +229,9 @@ assign st dest rv =
                     iota <- fresh
                     return (addFacts (bind st iota) [FApp eqProof [ATerm iota, term]])
         M.MakeList _ -> throwV "A list written from variables is not supported by the validator"
+        -- (a Box has the value of what it holds)
+        M.MakeBox o -> assign st dest (M.Use o)
+        M.Unbox o -> assign st dest (M.Use o)
         _ -> case rvalueCall rv of
             Nothing -> throwV "An operation the validator does not know"
             Just (builtin, operands) -> do
@@ -413,6 +416,8 @@ upcoming cx b rules = concatMap fromBlock reachable
         M.IsVariant o _ -> [o]
         M.AsVariant o _ -> [o]
         M.MakeList os -> os
+        M.MakeBox o -> [o]
+        M.Unbox o -> [o]
     rvalueTerm rv = case rv of
         M.Use o -> Just (atom o)
         _ -> do

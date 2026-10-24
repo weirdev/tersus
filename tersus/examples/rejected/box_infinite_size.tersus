@@ -1,0 +1,8 @@
+// A type cannot hold itself: it would have no size. The recursion goes in a Box, as in `next: Box<Chain>`
+// (a `List<Chain>` would do as well, since the elements of a list are kept apart).
+enum Chain {
+    End,
+    Link { value: Int, next: Chain },
+};
+
+return Chain::End;

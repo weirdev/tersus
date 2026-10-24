@@ -65,6 +65,8 @@ data Rvalue
     | BinaryOp BinOp Operand Operand
     | ListOp ListOp [Operand]
     | MakeList [Operand]                    -- a list built from elements
+    | MakeBox Operand                       -- a value held in a Box: the same value (a Box has the value of what it holds)
+    | Unbox Operand                         -- the value that a Box holds, taken out of it
     | MakeData Name [(Variable, Operand)]   -- a struct or an enum variant (named Enum::Variant), fields in declaration order
     | ReadField Operand Name Variable       -- field of a value known to be that constructor (Field, Project and Cast fused)
     | IsVariant Operand Name

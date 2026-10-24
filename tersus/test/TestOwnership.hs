@@ -138,6 +138,7 @@ localHeap f l = maybe False (heapType . localType) (Map.lookup l (fnLocals (fram
 
 heapType :: Type -> Bool
 heapType TList{} = True
+heapType TBox{} = True
 heapType TNamed{} = True
 heapType TVariant{} = True
 heapType _ = False
@@ -212,6 +213,9 @@ evalRvalue :: Rvalue -> M Val
 evalRvalue rv =
     case rv of
         Use o -> readOperand o
+        -- (a Box is the object that a struct or an enum is, until they are held inline)
+        MakeBox o -> readOperand o
+        Unbox o -> readOperand o
         BinaryOp op a b -> do
             x <- readOperand a
             y <- readOperand b
@@ -488,7 +492,7 @@ planTests =
     , TestCase "a list that is used after a push is copied once" . pure $
         withOwned "x = [1]; y = push(x, 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" t) 1)
     , TestCase "a match takes the fields out of the value" . pure $
-        withOwned "enum T { Leaf, Node { l: T, v: Int, r: T } }; fn sum(t: T) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(T::Node { l: T::Leaf, v: 1, r: T::Leaf });" (\t -> let f = functionText "sum" t in testAssertEq (count "clone" f, count "take " f) (0, 2))
+        withOwned "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));" (\t -> let f = functionText "sum" t in testAssertEq (count "clone" f, count "take " f) (0, 2))
     , TestCase "a part that is only read is looked at" . pure $
         withOwned "rows = [[1], [2, 3]]; return size(get(rows, 1));" (\t -> testAssertEq (count "clone" t, count "peek Get" t) (0, 1))
     , TestCase "a part that is kept is copied" . pure $

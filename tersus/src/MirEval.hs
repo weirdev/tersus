@@ -119,6 +119,8 @@ evalRvalue frame rv =
         BinaryOp op a b -> operandValue frame a `bindResult` \x -> operandValue frame b `bindResult` \y -> binary op x y
         ListOp op os -> mapResults (operandValue frame) os `bindResult` listOp op
         MakeList os -> MList <$$> mapResults (operandValue frame) os
+        MakeBox o -> operandValue frame o
+        Unbox o -> operandValue frame o
         MakeData name fields -> MData name <$$> mapResults (\(f, o) -> (,) f <$$> operandValue frame o) fields
         ReadField o name field ->
             operandValue frame o `bindResult` \v -> case v of

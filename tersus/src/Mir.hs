@@ -112,6 +112,10 @@ data Rvalue
     | BinaryOp BinOp Operand Operand
     | ListOp ListOp [Operand]
     | MakeList [Operand]
+    | -- The value held in a Box. A Box has the value of what it holds, so this is the same value; what differs is where it lives.
+      MakeBox Operand
+    | -- The value that a Box holds, taken out of it
+      Unbox Operand
     | -- A struct or an enum variant (named Enum::Variant), with its fields in declaration order
       MakeData Name [(Variable, Operand)]
     | -- The field of a value that is that constructor (a struct, or a variant the program has shown the value to be)
@@ -275,6 +279,8 @@ renderRvalue :: Rvalue -> String
 renderRvalue (Use o) = renderOperand o
 renderRvalue (BinaryOp op a b) = renderBinOp op ++ "(" ++ renderOperand a ++ ", " ++ renderOperand b ++ ")"
 renderRvalue (ListOp op os) = show op ++ "(" ++ intercalate ", " (map renderOperand os) ++ ")"
+renderRvalue (MakeBox o) = "box " ++ renderOperand o
+renderRvalue (Unbox o) = "unbox " ++ renderOperand o
 renderRvalue (MakeList os) = "[" ++ intercalate ", " (map renderOperand os) ++ "]"
 renderRvalue (MakeData name []) = name
 renderRvalue (MakeData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderOperand o | (f, o) <- fields] ++ " }"

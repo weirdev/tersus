@@ -33,7 +33,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `termination.tersus` | How code says it ends: `shrinks` on loops and recursive functions (an integer counting down, or a tree losing a field), and `~` for code that is not shown to end, including a call in unreachable code | returns `23` |
 | `generic_lists.tersus` | Lists of `Bool` and of lists, built by a `for` loop over the elements, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
 | `structs.tersus` | A `struct`, literals, field reads, `..base` updates with a contract proving the other fields are unchanged, and updating one element of a list of structs | returns `11` |
-| `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree | returns `27` |
+| `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree that holds its subtrees in a `Box` | returns `27` |
 | `arrays.tersus` | `Array<T, N>`, `N` elements held inline with the size in the type: `array(5, 0)` and `#[7, 8, 9]`, `get`/`set` as for lists, `set` in a loop that stores into the array, a function that takes two arrays and returns one (`dot`, `squares`), and a grid of arrays inside an array | returns `42` |
 | `array_data.tersus` | An array as a field of a struct, as the fields of the variants of an enum (each as wide as its fields) and as the elements of a list; a function that builds a struct around a new array | returns `45` |
 | `traits.tersus` | A `trait` with contracts, `impl`s for an enum and a struct, `Self`, and the three ways to call a function of a type (`Shape::unit()`, `s.sides()` and `Measure::sides(s)`); an impl that asks for less and promises more than its trait | returns `55` |
@@ -146,6 +146,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/loop_variant_unbounded.tersus` | A countdown on a parameter that nothing shows is at least 0 |
 | `rejected/recursion_without_variant.tersus` | A function that calls itself and does not say what shrinks |
 | `rejected/recursion_variant_not_shrinking.tersus` | A recursive call that passes the same `n` |
+| `rejected/box_infinite_size.tersus` | An enum with a variant that holds the enum itself, which would have no size: the recursion has to be in a `Box` |
 | `rejected/recursion_shrinks_not_a_part.tersus` | A recursive call on a tree, passing the tree itself and not a field of it |
 | `rejected/diverging_call.tersus` | A function calls one declared `~` and does not say so itself |
 | `rejected/diverging_loop.tersus` | A function contains a `~` loop and does not say so itself |

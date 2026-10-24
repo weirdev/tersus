@@ -223,6 +223,7 @@ resolveFunction fn = do
     universe ty = ty : case ty of
         TList t -> universe t
         TArray t _ -> universe t
+        TBox t -> universe t
         TFn args ret -> concatMap universe (ret : args)
         _ -> []
     arrayHolds ty = case ty of
@@ -235,6 +236,7 @@ resolveType ty = defaultType <$> tc (zonk ty)
     defaultType (TVar _) = TInt
     defaultType (TList t) = TList (defaultType t)
     defaultType (TArray t n) = TArray (defaultType t) n
+    defaultType (TBox t) = TBox (defaultType t)
     defaultType (TFn args ret) = TFn (map defaultType args) (defaultType ret)
     defaultType t = t
 
@@ -484,6 +486,10 @@ lowerBuiltin b args = do
         -- (the size is a constant: the checker has folded it, and the element decides the rest)
         (NewArray, [(M.Const (M.CInt n), _), (_, elementTy)]) -> return (TArray elementTy n)
         (NewArray, _) -> failL "array was not given a constant size"
+        (NewBox, [(_, held)]) -> return (TBox held)
+        (UnBox, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
+            TBox held -> return held
+            _ -> failL "Box::unbox was given something that is not a Box"
         (ArrayFrom, [(M.Const (M.CList items), TList elementTy)]) -> return (TArray elementTy (fromIntegral (length items)))
         (ArrayFrom, _) -> failL "an array literal was not made from a list of constants"
         _ -> builtinResult b tys
@@ -520,6 +526,8 @@ builtinRvalue b tys ops =
             ctor <- maybe (structCtor (head tys)) return owner
             return (M.ReadField o ctor field)
         (Project variant field, [o]) -> return (M.ReadField o variant field)
+        (NewBox, [o]) -> return (M.MakeBox o)
+        (UnBox, [o]) -> return (M.Unbox o)
         (Is variant, [o]) -> return (M.IsVariant o variant)
         (Cast variant, [o]) -> return (M.AsVariant o variant)
         (Within, _) -> failL "within only exists in proofs"
@@ -530,6 +538,7 @@ structCtor :: Type -> L Name
 structCtor ty = do
     t <- tc (zonk ty)
     case t of
+        TBox inner -> structCtor inner
         TNamed name -> do
             ctors <- tc (typeCtors name)
             case ctors of
@@ -596,6 +605,8 @@ builtinLabel b = case b of
     Get -> "get"
     Push -> "push"
     Set -> "set"
+    NewBox -> "box"
+    UnBox -> "unbox"
     NewArray -> "array"
     ArrayFrom -> "array_from"
     Plus -> "add"

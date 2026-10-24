@@ -265,7 +265,7 @@ enumStatement = do
     variants <- variant name `sepEndBy` (char ',' >> whitespace)
     void (char '}')
     whitespace
-    when (name `elem` ["Int", "Bool", "List", "Self"]) $ fail (name ++ " is a builtin type and cannot be an enum name")
+    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be an enum name")
     when (null variants) $ fail ("Enum " ++ name ++ " has no variants")
     when (length (nub (map fst variants)) /= length variants) $ fail ("Enum " ++ name ++ " repeats a variant")
     modifyState
@@ -296,7 +296,7 @@ structStatement = do
     void (char '}')
     whitespace
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
-    when (name `elem` ["Int", "Bool", "List", "Self"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
+    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
     return (StructDef name fields)
   where
@@ -539,7 +539,7 @@ traitStatement = do
     whitespace
     name <- variable
     whitespace
-    when (name `elem` ["Int", "Bool", "List", "Self"]) $ fail (name ++ " is a builtin type and cannot be a trait name")
+    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a trait name")
     functions <- curlyBracesParse (genericStatementBlock traitFunction)
     whitespace
     when (length (nub (map traitFnName functions)) /= length functions) $ fail ("Trait " ++ name ++ " repeats a function")
@@ -620,6 +620,7 @@ typeAnnotation = do
             "Int" -> return TInt
             "Bool" -> return TBool
             "List" -> TList <$> typeArgument
+            "Box" -> TBox <$> typeArgument
             "Array" -> do
                 whitespace
                 void (char '<')

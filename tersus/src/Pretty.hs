@@ -78,6 +78,8 @@ builtinName Push = "push"
 builtinName Set = "set"
 builtinName NewArray = "array"
 builtinName ArrayFrom = "array"
+builtinName NewBox = "Box::new"
+builtinName UnBox = "Box::unbox"
 builtinName Plus = "+"
 builtinName Minus = "-"
 builtinName Times = "*"
@@ -109,6 +111,7 @@ renderType :: Type -> String
 renderType TInt = "Int"
 renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
+renderType (TBox t) = "Box<" ++ renderType t ++ ">"
 renderType (TArrayOf t size) = "Array<" ++ renderType t ++ ", " ++ renderSize size ++ ">"
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
 renderType (TNamed name) = name

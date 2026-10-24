@@ -116,6 +116,7 @@ zonk t@(TVar n) = do
         Nothing -> return t
 zonk (TList t) = TList <$> zonk t
 zonk (TArrayOf t size) = (\t' -> TArrayOf t' size) <$> zonk t
+zonk (TBox t) = TBox <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
 zonk t = return t
 
@@ -128,6 +129,7 @@ occurs :: Int -> Type -> Bool
 occurs n (TVar m) = n == m
 occurs n (TList t) = occurs n t
 occurs n (TArrayOf t _) = occurs n t
+occurs n (TBox t) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
 
@@ -150,6 +152,7 @@ unify a b = do
         (TVariant _, TNamed _) -> return False
         (TList x, TList y) -> unify x y
         (TArrayOf x n, TArrayOf y m) | n == m -> unify x y
+        (TBox x, TBox y) -> unify x y
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
         _ -> return False
@@ -246,8 +249,10 @@ checkConstruct name fields argTys = do
 -- Reading a field; the base of an update must be the struct being built
 readField :: Maybe Name -> Variable -> Type -> TC Type
 readField owner field structTy = do
+    -- (a Box is looked into for the base of an update as for a field)
+    held <- zonk structTy >>= \t -> return (case t of TBox inner -> inner; _ -> t)
     case owner of
-        Just name -> expect ("base of an update of " ++ name) (TNamed name) structTy
+        Just name -> expect ("base of an update of " ++ name) (TNamed name) held
         Nothing -> return ()
     fieldType field structTy
 
@@ -256,6 +261,8 @@ fieldType :: Variable -> Type -> TC Type
 fieldType field structTy = do
     t <- zonk structTy
     case t of
+        -- (a Box has the fields of what it holds)
+        TBox inner -> fieldType field inner
         TNamed "Self" -> failTc ("Type error: a trait does not know the fields of Self, so field " ++ field ++ " cannot be read from it")
         TNamed name -> do
             ctors <- typeCtors name
@@ -289,11 +296,32 @@ registerCtors typeName ctors = do
     s <- getState
     putState s{tcCtors = foldr (\(ctor, fields) -> Map.insert ctor (typeName, fields)) (tcCtors s) ctors}
 
+-- A struct or an enum that holds itself by value would have no size, so it holds the recursion in a Box (a List is a pointer
+-- to its elements, and does as well)
+checkFinite :: Name -> [[(Variable, Type)]] -> TC ()
+checkFinite root variants = do
+    s <- getState
+    let ownerOf v = fst <$> Map.lookup v (tcCtors s)
+        holds ty = case ty of
+            TNamed n -> n == root
+            TVariant v -> ownerOf v == Just root
+            TArrayOf t _ -> holds t
+            _ -> False
+    when (or [holds ty | fields <- variants, (_, ty) <- fields]) $
+        failTc ("Type error: " ++ root ++ " holds itself, so it would have no size: hold the recursion in a Box, as in Box<" ++ root ++ ">")
+
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
 checkType (TVariant name) = () <$ ctorInfo name
 checkType (TList t) = checkType t
+checkType (TBox t) = do
+    checkType t
+    case t of
+        TNamed _ -> return ()
+        TVariant _ -> return ()
+        TVar _ -> return ()
+        _ -> failTc ("Type error: Box<T> holds a struct or an enum for now, not " ++ renderType t)
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
 checkType ty@(TArrayOf t _) = checkType t >> arrayOk ty
 checkType (TFn args ret) = mapM_ checkType (ret : args)
@@ -310,6 +338,8 @@ builtinType funct =
         Get -> list (\a -> TFn [TList a, TInt] a)
         Push -> list (\a -> TFn [TList a, a] (TList a))
         Set -> list (\a -> TFn [TList a, TInt, a] (TList a))
+        UnBox -> failTc "Type error: Box::unbox is called, as in Box::unbox(b), and cannot be used as a value"
+        NewBox -> failTc "Type error: Box::new is called, as in Box::new(x), and cannot be used as a value"
         NewArray -> failTc "Type error: array needs a size that is a constant, so it is written array(3, x) and cannot be used as a value"
         ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
         Plus -> arith
@@ -360,6 +390,18 @@ checkBuiltinCall (Just b) name ft ats@(container : _)
             Get -> TFn [TArray a n, TInt] a
             Set -> TFn [TArray a n, TInt, a] (TArray a n)
             _ -> TFn [TArray a n] a
+-- (a Box is its contents wherever a struct or an enum is looked at: tested for its variant, cast to one, or read for a field)
+checkBuiltinCall (Just b) name ft (first : rest)
+    | isLookingAt b = do
+        t <- zonk first
+        case t of
+            TBox inner -> checkCall name ft (inner : rest)
+            _ -> checkCall name ft (first : rest)
+  where
+    isLookingAt (Is _) = True
+    isLookingAt (Cast _) = True
+    isLookingAt (Project _ _) = True
+    isLookingAt _ = False
 checkBuiltinCall _ name ft ats = checkCall name ft ats
 
 -- Arrays: held inline, so their size is a constant of the type and their elements are plain
@@ -534,12 +576,14 @@ checkStatement top ctx env stmt =
             declareType name
             mapM_ (checkType . snd) fields
             registerCtors name [(name, fields)]
+            checkFinite name [fields]
             return (ctx, env, stmt)
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
             mapM_ (mapM_ (checkType . snd) . snd) variants
             registerCtors name variants
+            checkFinite name (map snd variants)
             return (ctx, env, stmt)
         AxiomDef{} -> return (ctx, env, stmt)
         ProofDef{} -> return (ctx, env, stmt)
@@ -586,6 +630,7 @@ resolveTermination ctx env (Just (Shrinks variant)) = do
         TInt -> return (Just (Counting variant'))
         TNamed _ -> return (Just (Parts variant'))
         TVariant _ -> return (Just (Parts variant'))
+        TBox _ -> return (Just (Parts variant'))
         _ -> failTc ("Type error: shrinks needs an Int, an enum or a struct, got " ++ renderType ty)
 resolveTermination _ _ term = return term
 
@@ -634,6 +679,27 @@ inferExprR ctx env expr =
             inferred <- mapM (inferExprR ctx env) args
             t <- checkConstruct name fields (map fst inferred)
             return (t, F funct (map snd inferred))
+        -- Box::new(x): x held in a Box, which has its value
+        F (Var "Box::new") args -> case args of
+            [x] -> do
+                (xt, x') <- inferExprR ctx env x
+                t <- zonk xt
+                case t of
+                    TNamed _ -> return ()
+                    TVariant _ -> return ()
+                    TVar _ -> return ()
+                    _ -> failTc ("Type error: Box<T> holds a struct or an enum for now, not " ++ renderType t)
+                return (TBox xt, F (Val (builtinFunct NewBox)) [x'])
+            _ -> failTc ("Type error: Box::new takes 1 argument, got " ++ show (length args))
+        -- Box::unbox(b): the value that b holds
+        F (Var "Box::unbox") args -> case args of
+            [b] -> do
+                (bt, b') <- inferExprR ctx env b
+                t <- zonk bt
+                case t of
+                    TBox inner -> return (inner, F (Val (builtinFunct UnBox)) [b'])
+                    _ -> failTc ("Type error: Box::unbox takes a Box, got " ++ renderType t)
+            _ -> failTc ("Type error: Box::unbox takes 1 argument, got " ++ show (length args))
         F funct args
             | Just NewArray <- builtinHead ctx env funct -> case args of
                 [n, x] -> do
@@ -724,6 +790,7 @@ ownerOfValue function ty = do
         TNamed name -> return name
         TVariant variant -> fst <$> ctorInfo variant
         TVar _ -> failTc ("Type error: the type of the value whose function " ++ function ++ " is called is not known yet; annotate it")
+        other@TBox{} -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions: call it on the value inside, as in Box::unbox(b)." ++ function ++ "(...)")
         other -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions")
 
 -- Trait::function(x, ...) is the function of the type of the argument that the trait's signature gives the type Self. That
@@ -769,6 +836,7 @@ substSelf :: Name -> Type -> Type
 substSelf owner (TNamed "Self") = TNamed owner
 substSelf owner (TList t) = TList (substSelf owner t)
 substSelf owner (TArrayOf t size) = TArrayOf (substSelf owner t) size
+substSelf owner (TBox t) = TBox (substSelf owner t)
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
 

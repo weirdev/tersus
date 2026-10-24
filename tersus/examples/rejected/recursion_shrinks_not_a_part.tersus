@@ -1,13 +1,13 @@
 // Rejected: the call passes the tree itself, not one of its fields.
 enum Tree {
     Leaf,
-    Branch { left: Tree, right: Tree },
+    Branch { left: Box<Tree>, right: Box<Tree> },
 };
 
-fn count(t: Tree) -> Int shrinks t {
+fn count(t: Box<Tree>) -> Int shrinks t {
     return match t {
         Tree::Leaf => 1,
         Tree::Branch { left: l, right: r } => count(l) + count(t),
     };
 };
-return count(Tree::Leaf);
+return count(Box::new(Tree::Leaf));

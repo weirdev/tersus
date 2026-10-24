@@ -17,6 +17,10 @@ data BuiltinFunct
     = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Mod
     | -- NewArray n x: an array of n copies of x, n being a constant. ArrayFrom is the array that a literal list of constants makes (`#[1, 2]`).
       NewArray | ArrayFrom
+    | -- NewBox x: x held in a Box. A Box has the value of what it holds (it is where that lives that differs), so in a value it is x.
+      NewBox
+    | -- UnBox b: the value that b holds, taken out of it
+      UnBox
     | Rel Rel
     | -- Within a b: a is a field of b, or a field of a field, and so on. Never parsed: it is how the validator checks
       -- that what a loop or function says shrinks has done so.
@@ -35,7 +39,7 @@ data BuiltinFunct
 -- look at them. TVar is the checker's own unknown and is never written by a program.
 -- TArrayOf element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
 -- or an element of a bigger array), with no pointer to it. The size is part of the type.
-data Type = TInt | TBool | TList Type | TArrayOf Type Size | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
+data Type = TInt | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
     deriving (Show, Eq, Ord)
 
 -- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
