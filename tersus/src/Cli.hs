@@ -15,9 +15,10 @@ import TersusTypes
 import Utils
 
 -- `Check` parses a program, lowers it to the MIR and validates that. `Run` also runs it, but only after it validates, and
--- `Mir` prints the MIR instead. `Llvm` prints the LLVM IR of the validated program, and `Build` compiles that to the
+-- `Mir` prints the MIR instead, and `Owned` the MIR that native code is made from, with the owner of each value in it.
+-- `Llvm` prints the LLVM IR of the validated program, and `Build` compiles that to the
 -- executable at the path.
-data Command = Check | Run | Mir | Llvm | Build FilePath deriving (Show, Eq)
+data Command = Check | Run | Mir | Owned | Llvm | Build FilePath deriving (Show, Eq)
 
 usage :: String
 usage =
@@ -28,6 +29,7 @@ usage =
         , "  check <file>  Parse and validate a program"
         , "  run <file>    Validate a program, then run it and print its return value"
         , "  mir <file>    Validate a program, then print its MIR"
+        , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
         , "  build <file> -o <output>"
         , "                Validate a program, then compile it to an executable with clang"
@@ -40,6 +42,7 @@ parseCommandLine :: [String] -> Maybe (Command, FilePath)
 parseCommandLine ["check", file] = Just (Check, file)
 parseCommandLine ["run", file] = Just (Run, file)
 parseCommandLine ["mir", file] = Just (Mir, file)
+parseCommandLine ["owned", file] = Just (Owned, file)
 parseCommandLine ["llvm", file] = Just (Llvm, file)
 parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
 parseCommandLine _ = Nothing
@@ -54,6 +57,7 @@ runSource Run source =
             Error e -> Error ("Evaluation failed: " ++ e)
             Ok result -> Ok (maybe "" renderMirValue result)
 runSource Mir source = mapResult renderProgram (compileSource source)
+runSource Owned source = mapResult renderProgram (ownedSource source)
 runSource Llvm source = llvmSource source
 -- (compiling the IR is left to the caller, since it runs clang)
 runSource (Build _) source = llvmSource source

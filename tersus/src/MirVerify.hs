@@ -73,7 +73,9 @@ problems program fn =
         case localTy dest of
             Nothing -> []
             Just d -> [renderStatement stmt ++ " is ill typed: " ++ why | why <- rvalueProblems env localTy d rv]
+    statementProblems (Peek dest rv) = statementProblems (Assign dest rv)
     statementProblems Ghost{} = []
+    statementProblems Drop{} = []
 
     terminatorProblems term = case term of
         SwitchBool test _ _ -> [renderTerminator term ++ " is ill typed: the test is not a Bool" | not (fits env localTy TBool test)]
@@ -131,11 +133,14 @@ rvalueProblems env localTy d rv =
             Just (typeName, _) ->
                 [expected' ("a " ++ typeName) o | not (isValueOf typeName o)]
                     ++ ["the result is " ++ renderType d ++ ", not " ++ name | not (sub env d (TVariant name))]
+        Clone o -> [expected d o | not (fits' d o)]
+        TakeField l name field -> rvalueProblems env localTy d (ReadField (Copy l) name field)
   where
     fits' = fits env localTy
     expected t o = renderOperand' o ++ " is not " ++ renderType t
     expected' what o = renderOperand' o ++ " is not " ++ what
     renderOperand' o = case o of
+        Move l -> renderOperand' (Copy l)
         Copy l -> show l ++ maybe "" (\t -> " (" ++ renderType t ++ ")") (localTy l)
         Const _ -> "the constant"
     ints os = [expected TInt o | o <- os, not (fits' TInt o)]
@@ -167,6 +172,7 @@ rvalueProblems env localTy d rv =
 operandType :: Env -> (Local -> Maybe Type) -> Operand -> Maybe Type
 operandType env localTy o = case o of
     Copy l -> localTy l
+    Move l -> localTy l
     Const c -> case c of
         CInt _ -> Just TInt
         CBool _ -> Just TBool
@@ -178,6 +184,7 @@ operandType env localTy o = case o of
 fits :: Env -> (Local -> Maybe Type) -> Type -> Operand -> Bool
 fits env localTy wanted o = case o of
     Copy l -> maybe False (sub env wanted) (localTy l)
+    Move l -> fits env localTy wanted (Copy l)
     Const c -> constantFits env wanted c
 
 constantFits :: Env -> Type -> Constant -> Bool
@@ -206,6 +213,8 @@ sub env wanted actual = case (wanted, actual) of
 statementLocals :: Statement -> [Local]
 statementLocals (Assign dest rv) = dest : concatMap operandLocals (rvalueOperands rv)
 statementLocals (Ghost env _) = envLocals env
+statementLocals (Drop l) = [l]
+statementLocals (Peek dest rv) = statementLocals (Assign dest rv)
 
 rvalueOperands :: Rvalue -> [Operand]
 rvalueOperands (Use o) = [o]
@@ -216,9 +225,12 @@ rvalueOperands (MakeData _ fields) = map snd fields
 rvalueOperands (ReadField o _ _) = [o]
 rvalueOperands (IsVariant o _) = [o]
 rvalueOperands (AsVariant o _) = [o]
+rvalueOperands (Clone o) = [o]
+rvalueOperands (TakeField l _ _) = [Copy l]
 
 operandLocals :: Operand -> [Local]
 operandLocals (Copy l) = [l]
+operandLocals (Move l) = [l]
 operandLocals (Const _) = []
 
 terminatorLocals :: Terminator -> [Local]
@@ -229,6 +241,8 @@ terminatorLocals _ = []
 statementFunctions :: Statement -> [Name]
 statementFunctions (Assign _ rv) = concatMap operandFunctions (rvalueOperands rv)
 statementFunctions (Ghost env g) = envFunctions env ++ [n | GhostFunction n _ _ <- [g]]
+statementFunctions (Drop _) = []
+statementFunctions (Peek dest rv) = statementFunctions (Assign dest rv)
 
 envLocals :: Mir.Env -> [Local]
 envLocals env = [l | Copy l <- Map.elems env]

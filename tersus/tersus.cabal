@@ -29,6 +29,7 @@ library
       Mir
       MirEval
       MirLower
+      MirOwnership
       MirValidate
       MirVerify
       Native
@@ -86,6 +87,7 @@ test-suite tersus-test
       TestData
       TestHarness
       TestNative
+      TestOwnership
       TestPipeline
       TestProofs
       TestValidation

@@ -35,6 +35,7 @@ From the `tersus/` directory:
 stack run -- check program.tersus   # parse and validate; prints OK
 stack run -- run program.tersus     # validate, then lower to the MIR, run that and print the return value
 stack run -- mir program.tersus     # validate, then print the MIR
+stack run -- owned program.tersus   # validate, then print the MIR with who owns each value (moves, copies, frees)
 stack run -- llvm program.tersus    # validate, then print the LLVM IR
 stack run -- build program.tersus -o program   # validate, then compile to an executable with clang
 ```

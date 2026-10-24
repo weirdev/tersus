@@ -18,6 +18,7 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 - `stack run -- check <file>` parses the program, lowers it to the MIR and validates that, printing `OK` on success.
 - `stack run -- run <file>` validates the program, and only if that succeeds runs its MIR and prints its return value (nothing is printed when the program does not `return`).
 - `stack run -- mir <file>` validates the program, and only if that succeeds prints its MIR.
+- `stack run -- owned <file>` validates the program, and only if that succeeds prints the MIR that native code is made from, with the moves, copies and frees (`MirOwnership`).
 - `stack run -- llvm <file>` validates the program, and only if that succeeds prints its LLVM IR (`LlvmEmit`); `stack run -- build <file> -o <output>` compiles that and the C runtime (`LlvmRuntime`) with clang (`Native`). Native code handles every type of the language.
 - Use `-` as the file to read the program from standard input.
 - Errors go to standard error, prefixed with `Parse error:`, `Validation failed:`, `Lowering failed:` (a bug: a program that type checks always lowers) or `Evaluation failed:`. The exit code is 1 for a failed program and 2 for bad command-line usage.
@@ -74,16 +75,18 @@ Next steps, roughly in priority order:
 17. LLVM
     Validation walks the MIR (`MirValidate`), and the AST has no evaluator any more: the MIR executor runs programs, and the validator runs it for the result of a call with known arguments. The MIR is lowered to LLVM IR (`LlvmEmit`, MIR.md, Native code) in steps, each checked against the executor by building and running programs:
     1. Done: `Int` and `Bool`, control flow, calls and recursion, the overflow traps, and the printing of the result
-    2. Done: lists, with a runtime of C (`LlvmRuntime`): literals and operations (a copy on `push` and `set`, nothing freed yet), structural equality and printing by a descriptor of the type
+    2. Done: lists, with a runtime of C (`LlvmRuntime`): literals and operations, structural equality and printing by a descriptor of the type
     3. Done: structs, enums and function values: every example builds natively and prints what `tersus run` prints
-    4. Memory: the last use of a local moves it, reference counts free values, and `push`/`set` update in place when a list is not shared
-    5. A flag for the stack depth of deep recursion, and the docs
+    4. Done: memory (`MirOwnership`, MIR.md, Ownership): every value of the heap has one owner, the last use of a local moves the value out of it, a value that is wanted twice is copied, values are freed when their owner lets go, and `push`/`set` change the list in place; a list built by pushing takes time and memory in proportion to its length
+    5. A flag for the stack depth of deep recursion
+    6. Borrowing a value to a function that only reads it, so that a call does not copy an argument that is used afterwards
 
 Running (from this (tersus/) directory):
     0. stack run -- run examples/basics.tersus
     1. stack run -- check <file>
     2. stack run -- mir <file>
-    3. stack run -- llvm <file>
+    3. stack run -- owned <file>
+    4. stack run -- llvm <file>
 Tests:
     0. stack test (test/TestTersus.hs runs the groups of TestBasics, TestValidation, TestProofs, TestControl, TestData and TestPipeline, which share TestHarness)
 Examples:

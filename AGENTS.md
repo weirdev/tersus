@@ -1,13 +1,13 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; and regression tests are in `tersus/test/` (`TestTersus.hs` runs the groups, which live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`, `TestData`, `TestPipeline` and `TestNative`, with the shared harness in `TestHarness`). The `python/` directory contains older parser and proof prototypes plus `python/tests.py`. The `stack/tersus/` tree is a starter snapshot, not the main development target.
+The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; and regression tests are in `tersus/test/` (`TestTersus.hs` runs the groups, which live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`, `TestData`, `TestPipeline`, `TestNative` and `TestOwnership`, with the shared harness in `TestHarness`). The `python/` directory contains older parser and proof prototypes plus `python/tests.py`. The `stack/tersus/` tree is a starter snapshot, not the main development target.
 
 ## Build, Test, and Development Commands
 Work from `tersus/` unless you are touching the Python prototype.
 
 - `stack build`: compile the Haskell package and surface warnings.
-- `stack run -- check <file>` / `stack run -- run <file>`: validate, or validate and run, a `.tersus` program via the CLI in `app/Main.hs` (logic in `src/Cli.hs`). `stack run -- llvm <file>` prints the LLVM IR of a validated program and `stack run -- build <file> -o <output>` compiles it with clang (which `testNative` also needs to run the executables; it passes without).
+- `stack run -- check <file>` / `stack run -- run <file>`: validate, or validate and run, a `.tersus` program via the CLI in `app/Main.hs` (logic in `src/Cli.hs`). `stack run -- llvm <file>` prints the LLVM IR of a validated program and `stack run -- build <file> -o <output>` compiles it with clang (which `testNative` also needs to run the executables; it passes without). `testNative` also runs some programs under `valgrind` when it is installed; the heap model of `testOwnership` needs neither.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`.
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in `tersus/README.md`.
 - `python python/tests.py`: run legacy Python prototype checks from the repository root.

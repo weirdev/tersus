@@ -1,5 +1,6 @@
 module Native
     ( buildExecutable
+    , buildExecutableWith
     ) where
 
 import Control.Exception (IOException, finally, try)
@@ -14,12 +15,16 @@ import Utils
 -- Compiles LLVM IR (see LlvmEmit) and the runtime to an executable with clang. The two sources are written to files with
 -- names no other program has, in the temporary directory, and only those files are removed afterwards.
 buildExecutable :: FilePath -> String -> IO (Result () String)
-buildExecutable output ir = do
+buildExecutable = buildExecutableWith []
+
+-- With more flags for clang (the tests build with -DTERSUS_CHECK, which makes the runtime check its use of memory)
+buildExecutableWith :: [String] -> FilePath -> String -> IO (Result () String)
+buildExecutableWith flags output ir = do
     tmp <- getTemporaryDirectory
     irFile <- writeTemporary tmp "tersus.ll" ir
     runtimeFile <- writeTemporary tmp "tersus_rt.c" runtimeSource
     (do
-        outcome <- try (readProcessWithExitCode "clang" ["-O2", "-Wno-override-module", "-o", output, irFile, runtimeFile] "")
+        outcome <- try (readProcessWithExitCode "clang" (["-O2", "-Wno-override-module"] ++ flags ++ ["-o", output, irFile, runtimeFile]) "")
         return $ case outcome of
             Left e -> Error ("Could not run clang: " ++ show (e :: IOException))
             Right (ExitSuccess, _, _) -> Ok ()
