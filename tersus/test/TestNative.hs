@@ -76,10 +76,12 @@ testNativeIr =
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
         , TestCase "a list is a runtime list with a descriptor" . pure $
             withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("call ptr @tersus_list_push" `isInfixOf` ir && "@\"type.List<Int>\" = private constant" `isInfixOf` ir))
-        , TestCase "a struct is a runtime object with a descriptor" . pure $
-            withIr "struct P { x: Int }; p = P { x: 1 }; return p;" (\ir -> testAssertTrue ("call ptr @tersus_data_new(i64 0, i64 1)" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir))
-        , TestCase "an enum value has the tag of its variant" . pure $
-            withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("call ptr @tersus_data_new(i64 1, i64 1)" `isInfixOf` ir && "icmp eq i64" `isInfixOf` ir))
+        , TestCase "a struct is held in the frame, as its fields, with a descriptor" . pure $
+            withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir && not ("tersus_data_new" `isInfixOf` ir)))
+        , TestCase "an enum value is a tag and the widest of its variants, in the frame" . pure $
+            withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i64 1, ptr" `isInfixOf` ir && "icmp eq i64" `isInfixOf` ir))
+        , TestCase "a Box takes room on the heap for what it holds" . pure $
+            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call ptr @tersus_box_new(i64 2)" `isInfixOf` ir))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" . pure $
             withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[3 x i8] c\"\\C3\\A9\\00\"" `isInfixOf` ir))
         , TestCase "a letter of four bytes" . pure $
@@ -149,6 +151,30 @@ dataPrograms =
     , ("a tree is used twice", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; t = Box::new(T::Node { l: Box::new(T::Leaf), v: 3, r: Box::new(T::Node { l: Box::new(T::Leaf), v: 4, r: Box::new(T::Leaf) }) }); return sum(t) * 10 + sum(t);")
     , ("a chain", "enum C { End, Link { v: Int, rest: Box<C> } }; fn len(c: Box<C>) -> Int shrinks c { return match c { C::End => 0, C::Link { v: v, rest: r } => 1 + len(r) }; }; return len(Box::new(C::Link { v: 1, rest: Box::new(C::Link { v: 2, rest: Box::new(C::End) }) }));")
     , ("a tree built in a loop", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; t = Box::new(T::Leaf); i = 0; while i < 200 [{ affirm i >= 0; }] shrinks 200 - i { t = Box::new(T::Node { l: t, v: i, r: Box::new(T::Leaf) }); i = i + 1; }; return sum(t);")
+    , -- structs and enums are held inline, as their words
+      ("a struct in a struct", "struct In { a: Int, b: Int }; struct Out { i: In, c: Int }; o = Out { i: In { a: 1, b: 2 }, c: 3 }; return o;")
+    , ("a field of a field", "struct In { a: Int, b: Int }; struct Out { i: In, c: Int }; o = Out { i: In { a: 1, b: 2 }, c: 3 }; return o.i.b * 10 + o.c;")
+    , ("a struct in a variant", "struct P { x: Int, y: Int }; enum E { A { p: P }, B }; e = E::A { p: P { x: 1, y: 2 } }; return e;")
+    , ("a match takes a struct out of a variant", "struct P { x: Int, y: Int }; enum E { A { p: P }, B }; e = E::A { p: P { x: 1, y: 2 } }; return match e { E::A { p: p } => p.x + p.y, E::B => 0 };")
+    , ("a list of structs", "struct P { x: Int, y: Int }; ps = push(push([], P { x: 1, y: 2 }), P { x: 3, y: 4 }); return ps;")
+    , ("a field of an element of a list of structs", "struct P { x: Int, y: Int }; ps = push(push([], P { x: 1, y: 2 }), P { x: 3, y: 4 }); return get(ps, 1).x * 10 + size(ps);")
+    , ("first and last of a list of structs", "struct P { x: Int, y: Int }; ps = push(push([], P { x: 1, y: 2 }), P { x: 3, y: 4 }); return last(ps).y + first(ps).x;")
+    , ("set in a list of structs", "struct P { x: Int, y: Int }; ps = push(push([], P { x: 1, y: 2 }), P { x: 3, y: 4 }); ps = set(ps, 0, P { x: 9, y: 9 }); return ps;")
+    , ("a list of enums of different widths", "enum E { A { v: Int }, B { x: Int, y: Int }, C }; return push(push(push([], E::A { v: 1 }), E::B { x: 2, y: 3 }), E::C);")
+    , ("a list of structs with lists", "struct S { xs: List<Int> }; return push(push([], S { xs: [1] }), S { xs: [2, 3] });")
+    , ("a list of structs with lists is used twice", "struct S { xs: List<Int> }; ss = push(push([], S { xs: [1] }), S { xs: [2, 3] }); tt = ss; tt = set(tt, 0, S { xs: [] }); return ss;")
+    , ("a struct with a list is passed and returned", "struct S { n: Int, xs: List<Int> }; fn grow(s: S) -> S { return S { n: s.n + 1, xs: push(s.xs, s.n) }; }; return grow(grow(S { n: 0, xs: [] }));")
+    , ("a struct with a list is used twice", "struct S { n: Int, xs: List<Int> }; a = S { n: 1, xs: [2] }; b = a; return b = a;")
+    , ("a struct is updated in a loop", "struct S { n: Int, xs: List<Int> }; s = S { n: 0, xs: [] }; i = 0; while i < 100 [{ affirm i >= 0; }] shrinks 100 - i { s = S { n: s.n + 1, xs: push(s.xs, i) }; i = i + 1; }; return s.n + size(s.xs);")
+    , ("a struct is assigned again", "struct S { xs: List<Int> }; s = S { xs: [1] }; s = S { xs: [2, 3] }; return s;")
+    , ("a Box of a struct with a list", "struct S { xs: List<Int> }; b = Box::new(S { xs: [1, 2] }); c = b; return c.xs;")
+    , ("a struct made in a function in a loop", "struct S { n: Int, xs: List<Int> }; fn mk(i: Int) -> S { return S { n: i, xs: push([], i) }; }; t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { s = mk(i); t = t + s.n + size(s.xs); i = i + 1; }; return t;")
+    , ("an enum with a list is used twice", "enum E { A { xs: List<Int> }, B }; e = E::A { xs: [1, 2] }; f = e; return e = f;")
+    , ("a list taken out of a nested struct", "struct In { xs: List<Int> }; struct Out { i: In, n: Int }; o = Out { i: In { xs: [1, 2] }, n: 3 }; return o.i.xs;")
+    , ("a nested struct with a list is passed", "struct In { xs: List<Int> }; struct Out { i: In, n: Int }; fn total(o: Out) -> Int { return size(o.i.xs) + o.n; }; return total(Out { i: In { xs: [1, 2] }, n: 3 });")
+    , ("a struct holds a Box that holds a struct", "struct P { x: Int }; struct Q { b: Box<P>, n: Int }; q = Q { b: Box::new(P { x: 4 }), n: 5 }; r = q; return r;")
+    , ("a Box is cast and read", "enum E { A { v: Int }, B }; b = Box::new(E::A { v: 7 }); return (b as E::A).v;")
+    , ("a Box is unboxed and boxed again", "struct P { x: Int, xs: List<Int> }; b = Box::new(P { x: 1, xs: [2] }); p = Box::unbox(b); c = Box::new(p); return c;")
     , ("a loop walks down a tree", "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn depth(t: Box<T>) -> Int { d = 0; while t is T::Node shrinks t { t = (t as T::Node).l; d = d + 1; }; return d; }; return depth(Box::new(T::Node { l: Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }), v: 2, r: Box::new(T::Leaf) }));")
     , ("lists of structs equal", "struct P { x: Int }; l = push([], P { x: 1 }); return l = push([], P { x: 1 });")
     , ("data parameter and result", "struct P { x: Int, y: Int }; fn swap(p: P) -> P { return P { x: p.y, y: p.x }; }; return swap(P { x: 1, y: 2 });")
@@ -366,6 +392,8 @@ memoryTests =
     , TestCase "pushes and sets" (underLimit "l = []; i = 0; while i < 300000 [{ affirm i >= 0; }] shrinks 300000 - i { l = push(l, i); i = i + 1; }; k = 0; while k < 300000 [{ affirm k >= 0; }] shrinks 300000 - k { l = set(l, k, get(l, k) + 1); k = k + 1; }; return get(l, 299999);" "300000\n")
     , TestCase "the largest array set in place, again and again" (underLimit "a = array(8192, 0); i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { a = set(a, 8191, i); i = i + 1; }; return get(a, 8191);" "1999999\n")
     , TestCase "arrays made, given and returned in a loop do not grow the frame" (underLimit "fn bump(a: Array<Int, 4>) -> Array<Int, 4> { return set(a, 0, get(a, 0) + 1); }; s = 0; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { a = bump(set(array(4, 0), 1, i)); s = s + get(a, 0) + get(#[1, 2], 1); i = i + 1; }; return s;" "3000000\n")
+    , TestCase "a list of structs that own lists" (underLimit "struct S { n: Int, xs: List<Int> }; l = []; i = 0; while i < 50000 [{ affirm i >= 0; }] shrinks 50000 - i { l = push(l, S { n: i, xs: push([], i) }); i = i + 1; }; return size(l);" "50000\n")
+    , TestCase "a struct with a list is made and dropped in a loop" (underLimit "struct S { n: Int, xs: List<Int> }; fn mk(i: Int) -> S { return S { n: i, xs: push([], i) }; }; t = 0; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { s = mk(i); t = t + size(s.xs); i = i + 1; }; return t;" "1000000\n")
     , TestCase "lists of lists" (underLimit "rows = []; i = 0; while i < 20000 [{ affirm i >= 0; }] shrinks 20000 - i { row = push(push([], i), i); rows = push(rows, row); i = i + 1; }; return size(rows);" "20000\n")
     , TestCase "values made and dropped in a loop" (underLimit "struct P { x: Int, ys: List<Int> }; s = 0; i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { p = P { x: i, ys: push(push([], i), 1) }; s = s + p.x; i = i + 1; }; return s;" "1999999000000\n")
     ]

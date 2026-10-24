@@ -132,7 +132,7 @@ m = Node { next: 3, ..n };                 // a new Node: next replaced, the res
 ```
 
 - A literal gives every field, or names the fields that change and ends with `..base` to copy the rest. The base must be a value of the same struct. A missing, repeated or unknown field is a parse error, so is a `..base` that has nothing to copy, and so is a struct named `Int`, `Bool` or `List`.
-- Structs are values. Nothing is mutated: `Node { next: 3, ..n }` is a new struct and `n` is unchanged. There is no field assignment, so write `n = Node { next: 3, ..n };`.
+- Structs are values. Nothing is mutated: `Node { next: 3, ..n }` is a new struct and `n` is unchanged. There is no field assignment, so write `n = Node { next: 3, ..n };`. A struct is held where it is made, as its fields (natively, the words of its fields in the frame of the function, in another struct, or in a list), so a struct or an enum costs no allocation, and giving one to a function gives it a copy.
 - `=` and `!=` compare structs field by field, and a struct can hold any type, including lists and other structs declared earlier. A struct cannot hold itself (it would have no size); it holds the recursion in a `Box` (see Box).
 - Field reads and literals work in proofs too, so a contract can say `affirm return.next = target;`.
 - The validator treats a literal as a constructor applied to its fields. Reading a field of a literal gives the field (`Node { next: 3, ..n }.value` is `n.value`), two equal constructions agree field by field, and so an update's other fields are known without a `forall`. It does not yet know that a struct equals a rebuilt copy of its own fields (`Node { value: n.value, prev: n.prev, next: n.next } = n`), so state that with the fields you need.
@@ -215,7 +215,8 @@ return sum(Box::new(Tree::Branch { left: leaf, value: 2, right: Box::new(Tree::L
 - **`Box::new(x)`** holds `x` in a Box; `Box::unbox(b)` gives back what a Box holds. They are written as calls and cannot be used as values (`h = Box::new` is an error).
 - **A Box has the value of what it holds.** It changes where the value lives, not what it is: `Box::new(p) = Box::new(q)` compares `p` and `q`, the validator reasons about a Box as about its contents, and `Box::unbox(Box::new(x))` is `x`. `Box<Tree>` and `Tree` are different types, and neither is used for the other.
 - **A Box is looked into where a struct or an enum is looked at.** A field of a boxed struct is read as `b.x`, the base of an update can be a Box (`P { x: 9, ..b }`), `b is Tree::Branch`, `b as Tree::Branch` and `match b { ... }` work on a Box, and `shrinks b` is the shrinking of a value that loses a field at a time. A function over the contents of a Box is called on `Box::unbox(b)`, as in `Box::unbox(b).total()`.
-- **What a Box can hold.** For now a struct or an enum (`Box<Int>` and `Box<List<Int>>` are errors); other types wait for structs and enums to be held inline, when a Box holds any type that has a size (see the roadmap in `README.md`).
+- **What a Box can hold.** For now a struct or an enum (`Box<Int>` and `Box<List<Int>>` are errors); a Box of any type that has a size, and the builtins on a Box of an array, come with the unsized types (see the roadmap in `README.md`).
+- **Where a Box lives.** Natively a struct or an enum is not on the heap: it is held where it is made, as the words of its fields (an enum a word that says the variant and then the fields of that variant), in the frame of a function, in a field, or in a list, and copied by value. A `Box` is what puts one on the heap, and the pointer to it is one word, so a type that holds itself holds it in a `Box`; the list is the other thing on the heap.
 
 ## Traits And Impls
 

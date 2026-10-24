@@ -1,5 +1,6 @@
 module MirOwnership
     ( insertOwnership
+    , needsDrop
     ) where
 
 import Data.Map.Strict (Map)
@@ -57,12 +58,27 @@ type Live = Set (Local, Key)
 data Role = Read | Consume
     deriving (Eq)
 
-isHeap :: Type -> Bool
-isHeap TList{} = True
-isHeap TBox{} = True
-isHeap TNamed{} = True
-isHeap TVariant{} = True
-isHeap _ = False
+-- Whether a value of the type owns something to free: a list or a Box, or a struct, an enum or an array that holds one. A value that
+-- owns nothing (a number, a Bool, a function, and a struct, an enum or an array of them) is plain: it is copied where it is wanted
+-- and needs no care. A type that contains itself does so through a Box, which owns.
+needsDrop :: Program -> Type -> Bool
+needsDrop program = owning
+  where
+    owning ty = case ty of
+        TList{} -> True
+        TBox{} -> True
+        TArrayOf t _ -> owning t
+        TNamed n -> declared n
+        TVariant v -> maybe False declared (enumOf v)
+        _ -> False
+    declared n = case Map.lookup n (progTypes program) of
+        Just (StructDecl fields) -> any (owning . snd) fields
+        Just (EnumDecl variants) -> any (owning . snd) (concatMap snd variants)
+        Nothing -> False
+    enumOf v = listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
+
+heap :: Ctx -> Type -> Bool
+heap cx = needsDrop (cxProgram cx)
 
 -- The operands of an rvalue, and what is done with the value of each
 roles :: Rvalue -> [(Operand, Role)]
@@ -187,7 +203,7 @@ ownFunction program fn0 =
                 | BasicBlock stmts _ <- Map.elems (fnBlocks fn)
                 , Assign d rv <- stmts
                 , isProjection rv
-                , maybe False isHeap (Map.lookup d types)
+                , maybe False (needsDrop program) (Map.lookup d types)
                 ]
         usesOf =
             Map.fromListWith
@@ -224,7 +240,7 @@ ownFunction program fn0 =
         (blocks, finalState) =
             runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty)
         allLocals = Map.union (fnLocals fn) (rsNew finalState)
-        owned = [l | (l, d) <- Map.toList allLocals, isHeap (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState]
+        owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState]
         withDrops (b, BasicBlock stmts term) =
             (b, BasicBlock (if term == Return then stmts ++ map Drop owned else stmts) term)
      in fn{fnLocals = allLocals, fnBlocks = Map.fromList (map withDrops blocks)}
@@ -268,7 +284,7 @@ termOperandLocals term = map fst (Set.toList (termUses term))
 -- Whether the statement takes a field out of a value that is not used again, rather than copying it
 takesField :: Ctx -> Statement -> Live -> Bool
 takesField cx (Assign d (ReadField (Copy s) name field)) after =
-    maybe False isHeap (Map.lookup d (cxTypes cx))
+    maybe False (heap cx) (Map.lookup d (cxTypes cx))
         && s `Set.notMember` cxProjected cx
         && (s, Whole) `Set.notMember` after'
         && (s, Field name field) `Set.notMember` after'
@@ -310,7 +326,7 @@ rewriteStatement _ _ _ _ st@Ghost{} = pure [st]
 rewriteStatement _ _ _ _ st@Drop{} = pure [st]
 rewriteStatement _ _ _ _ st@Peek{} = pure [st]
 rewriteStatement cx b k after (Assign d rv)
-    | isProjection rv && isHeap (typeOf cx d) = projection
+    | isProjection rv && heap cx (typeOf cx d) = projection
     | otherwise = do
         (pre, post, operands) <- rewriteOperands cx after' (roles rv)
         pure $ case (pre, withOperands rv operands) of
@@ -364,8 +380,8 @@ rewriteOperands cx after' operands = go consumed operands
   where
     stillLive = localsOf after'
     -- how many operands give up each local, so that all but the last get a copy
-    consumed = Map.fromListWith (+) [(l, 1 :: Int) | (o, Consume) <- operands, Just l <- [operandLocal o], isHeap (typeOf cx l)]
-    siblingType = listToMaybe [typeOf cx l | (o, _) <- operands, Just l <- [operandLocal o], isHeap (typeOf cx l)]
+    consumed = Map.fromListWith (+) [(l, 1 :: Int) | (o, Consume) <- operands, Just l <- [operandLocal o], heap cx (typeOf cx l)]
+    siblingType = listToMaybe [typeOf cx l | (o, _) <- operands, Just l <- [operandLocal o], heap cx (typeOf cx l)]
     go _ [] = pure ([], [], [])
     go remaining ((o, role) : rest) = do
         (pre, post, o', remaining') <- one remaining o role
@@ -373,7 +389,7 @@ rewriteOperands cx after' operands = go consumed operands
         pure (pre ++ pres, post ++ posts, o' : os)
     one remaining o Consume
         | Just l <- operandLocal o
-        , isHeap (typeOf cx l) = do
+        , heap cx (typeOf cx l) = do
             let left = Map.findWithDefault 1 l remaining - 1
                 remaining' = Map.insert l left remaining
             if left > 0 || l `Set.member` stillLive
@@ -387,9 +403,11 @@ rewriteOperands cx after' operands = go consumed operands
             pure ([Assign temp (Use o)], [Drop temp], Copy temp, remaining)
     one remaining o _ = pure ([], [], o, remaining)
 
+-- A constant that owns something, which is made again each time it is wanted: a list, or a struct or an enum that has one. A
+-- constant that owns nothing needs no care.
 isHeapConstant :: Constant -> Bool
 isHeapConstant CList{} = True
-isHeapConstant CData{} = True
+isHeapConstant (CData _ fields) = any (isHeapConstant . snd) fields
 isHeapConstant _ = False
 
 -- The type of a constant that is only read, from what it is read with when that says, and from what it holds otherwise
