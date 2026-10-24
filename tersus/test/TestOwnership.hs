@@ -9,7 +9,7 @@ import qualified Data.Map.Strict as Map
 
 import Mir
 import MirEval (MirValue (..), runProgram)
-import MirOwnership (insertOwnership)
+import MirOwnership (insertOwnership, needsDrop)
 import MirVerify (verifyProgram)
 import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
@@ -26,15 +26,16 @@ import Utils
 
 -- The model of the heap
 
-data Val = VI Integer | VB Bool | VP Int | VNull | VF Name
+-- (a struct or an enum value, held inline, is its fields; VP is the address of a value of the heap: a list, or a Box)
+data Val = VI Integer | VB Bool | VP Int | VNull | VF Name | VS Name [(Variable, Val)]
     deriving (Eq, Show)
 
-data Obj = OList [Val] | OData Name [(Variable, Val)]
+data Obj = OList [Val] | OBox Val
 
 data Cell = Cell {cellGeneration :: Int, cellObject :: Obj}
 
 -- What a local holds, and for a local that only looks at a value, which one and how it was when it looked
-data Slot = Slot {slotValue :: Val, slotLook :: Maybe (Int, Int)}
+data Slot = Slot {slotValue :: Val, slotLook :: Maybe [(Int, Int)]}
 
 data Frame = Frame {frameFunction :: Function, frameSlots :: Map Local Slot}
 
@@ -43,6 +44,7 @@ data St = St
     , stNext :: Int
     , stFrames :: [Frame]
     , stFuel :: Int
+    , stProgram :: Program
     }
 
 newtype M a = M {runM :: St -> Either String (a, St)}
@@ -97,26 +99,34 @@ freeTree (VP a) = do
         Just c -> do
             putSt s{stHeap = Map.delete a (stHeap s)}
             mapM_ freeTree (children (cellObject c))
+freeTree (VS _ fs) = mapM_ (freeTree . snd) fs
 freeTree _ = return ()
 
 children :: Obj -> [Val]
 children (OList vs) = vs
-children (OData _ fs) = map snd fs
+children (OBox v) = [v]
+
+-- The values of the heap that a value holds, inline or not
+pointersOf :: Val -> [Int]
+pointersOf (VP a) = [a]
+pointersOf (VS _ fs) = concatMap (pointersOf . snd) fs
+pointersOf _ = []
 
 cloneVal :: Val -> M Val
 cloneVal (VP a) = do
     c <- cell a
     case cellObject c of
         OList vs -> mapM cloneVal vs >>= alloc . OList
-        OData name fs -> mapM (\(f, v) -> (,) f <$> cloneVal v) fs >>= alloc . OData name
+        OBox v -> cloneVal v >>= alloc . OBox
+cloneVal (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneVal v) fs
 cloneVal v = return v
 
 -- How many places own the value: locals (not those that only look) and slots of values
 owners :: Int -> M Int
 owners a = do
     s <- getSt
-    let fromFrames = length [() | f <- stFrames s, Slot (VP b) Nothing <- Map.elems (frameSlots f), b == a]
-        fromHeap = length [() | c <- Map.elems (stHeap s), VP b <- children (cellObject c), b == a]
+    let fromFrames = length [() | f <- stFrames s, Slot v Nothing <- Map.elems (frameSlots f), b <- pointersOf v, b == a]
+        fromHeap = length [() | c <- Map.elems (stHeap s), v <- children (cellObject c), b <- pointersOf v, b == a]
     return (fromFrames + fromHeap)
 
 currentFrame :: M Frame
@@ -133,15 +143,9 @@ putSlot l slot = do
         f : rest -> putSt s{stFrames = f{frameSlots = Map.insert l slot (frameSlots f)} : rest}
         [] -> failM "no frame"
 
-localHeap :: Frame -> Local -> Bool
-localHeap f l = maybe False (heapType . localType) (Map.lookup l (fnLocals (frameFunction f)))
-
-heapType :: Type -> Bool
-heapType TList{} = True
-heapType TBox{} = True
-heapType TNamed{} = True
-heapType TVariant{} = True
-heapType _ = False
+-- Whether a local owns what it holds
+localHeap :: Program -> Frame -> Local -> Bool
+localHeap program f l = maybe False (needsDrop program . localType) (Map.lookup l (fnLocals (frameFunction f)))
 
 -- Reading a local: it has to hold something, that has to be there, and be as it was when a local that only looks saw it
 readLocal :: Local -> M Val
@@ -151,13 +155,13 @@ readLocal l = do
         Nothing -> failM ("read of " ++ show l ++ " before it is given a value")
         Just (Slot VNull _) -> failM ("use of " ++ show l ++ " after it was moved from")
         Just (Slot v look) -> do
-            case v of
-                VP a -> do
+            -- (a local that only looks at a value sees it as it was when it looked)
+            mapM_
+                ( \(a, g) -> do
                     c <- cell a
-                    case look of
-                        Just (_, g) | g /= cellGeneration c -> failM (show l ++ " looks at a value that changed")
-                        _ -> return ()
-                _ -> return ()
+                    if g /= cellGeneration c then failM (show l ++ " looks at a value that changed") else return ()
+                )
+                (maybe [] id look)
             return v
 
 readOperand :: Operand -> M Val
@@ -176,7 +180,7 @@ constant :: Constant -> M Val
 constant (CInt i) = return (VI i)
 constant (CBool b) = return (VB b)
 constant (CList cs) = mapM constant cs >>= alloc . OList
-constant (CData name fs) = mapM (\(f, c) -> (,) f <$> constant c) fs >>= alloc . OData name
+constant (CData name fs) = VS name <$> mapM (\(f, c) -> (,) f <$> constant c) fs
 constant (CFn name) = return (VF name)
 
 -- The values compared and shown
@@ -192,7 +196,8 @@ toPure (VP a) = do
     c <- cell a
     case cellObject c of
         OList vs -> PL <$> mapM toPure vs
-        OData name fs -> PD name <$> mapM (\(f, v) -> (,) f <$> toPure v) fs
+        OBox v -> toPure v
+toPure (VS name fs) = PD name <$> mapM (\(f, v) -> (,) f <$> toPure v) fs
 
 fromPure :: Pure -> MirValue
 fromPure (PI i) = MInt i
@@ -207,52 +212,87 @@ object (VP a) = do
     return (a, cellObject c)
 object v = failM ("not a value of the heap: " ++ show v)
 
+-- The fields of a struct or an enum value that a value is: held inline, or in a Box
+dataValue :: Val -> M (Name, [(Variable, Val)])
+dataValue (VS name fs) = return (name, fs)
+dataValue v@(VP _) = do
+    (_, obj) <- object v
+    case obj of
+        OBox inner -> dataValue inner
+        _ -> failM "a field of a list"
+dataValue v = failM ("not a struct or an enum: " ++ show v)
+
+-- The value in a Box, taken out of it: the room of the Box is freed, and not what it held
+unbox :: Val -> M Val
+unbox v = do
+    (a, obj) <- object v
+    case obj of
+        OBox inner -> do
+            s <- getSt
+            putSt s{stHeap = Map.delete a (stHeap s)}
+            return inner
+        _ -> failM "unbox of a list"
+
 -- Running the MIR
 
 evalRvalue :: Rvalue -> M Val
 evalRvalue rv =
     case rv of
         Use o -> readOperand o
-        -- (a Box is the object that a struct or an enum is, until they are held inline)
-        MakeBox o -> readOperand o
-        Unbox o -> readOperand o
+        MakeBox o -> readOperand o >>= alloc . OBox
+        Unbox o -> readOperand o >>= unbox
         BinaryOp op a b -> do
             x <- readOperand a
             y <- readOperand b
             binary op x y
         MakeList os -> mapM readOperand os >>= alloc . OList
-        MakeData name fs -> mapM (\(f, o) -> (,) f <$> readOperand o) fs >>= alloc . OData name
+        MakeData name fs -> VS name <$> mapM (\(f, o) -> (,) f <$> readOperand o) fs
         ReadField o name field -> do
-            (_, obj) <- readOperand o >>= object
-            case obj of
-                OData actual fs
-                    | actual == name -> maybe (failM ("no field " ++ field)) return (lookup field fs)
-                    | otherwise -> failM ("expected a " ++ name ++ ", got a " ++ actual)
-                _ -> failM "a field of a list"
+            (actual, fs) <- readOperand o >>= dataValue
+            if actual == name then maybe (failM ("no field " ++ field)) return (lookup field fs) else failM ("expected a " ++ name ++ ", got a " ++ actual)
         IsVariant o name -> do
-            (_, obj) <- readOperand o >>= object
-            case obj of
-                OData actual _ -> return (VB (actual == name))
-                _ -> failM "is of a list"
-        AsVariant o _ -> readOperand o
+            (actual, _) <- readOperand o >>= dataValue
+            return (VB (actual == name))
+        -- (a Box that is cast is taken out of its room when the cast takes it, and is looked into when it does not)
+        AsVariant o _ -> do
+            v <- readOperand o
+            case (v, o) of
+                (VP _, Move _) -> unbox v
+                (VP _, _) -> dataValueOf v
+                _ -> return v
         Clone o -> readOperand o >>= cloneVal
         TakeField l name field -> do
             f <- currentFrame
             case Map.lookup l (frameSlots f) of
                 Just (Slot _ (Just _)) -> failM ("a field is taken from " ++ show l ++ ", which only looks")
                 _ -> return ()
-            (a, obj) <- readLocal l >>= object
-            case obj of
-                OData actual fs
-                    | actual == name -> case lookup field fs of
-                        Nothing -> failM ("no field " ++ field)
-                        Just VNull -> failM ("field " ++ field ++ " was taken twice")
-                        Just v -> do
-                            setObject a (OData actual [(g, if g == field then VNull else w) | (g, w) <- fs])
-                            return v
-                    | otherwise -> failM ("expected a " ++ name ++ ", got a " ++ actual)
-                _ -> failM "a field of a list"
+            v <- readLocal l
+            case v of
+                VS actual fs -> do
+                    (taken, fs') <- takeFrom actual fs
+                    putSlot l (Slot (VS actual fs') Nothing)
+                    return taken
+                VP a -> do
+                    (_, obj) <- object v
+                    case obj of
+                        OBox (VS actual fs) -> do
+                            (taken, fs') <- takeFrom actual fs
+                            setObject a (OBox (VS actual fs'))
+                            return taken
+                        _ -> failM "a field of a list"
+                _ -> failM ("a field taken from " ++ show v)
+          where
+            takeFrom actual fs
+                | actual /= name = failM ("expected a " ++ name ++ ", got a " ++ actual)
+                | otherwise = case lookup field fs of
+                    Nothing -> failM ("no field " ++ field)
+                    Just VNull -> failM ("field " ++ field ++ " was taken twice")
+                    Just v' -> return (v', [(g, if g == field then VNull else w) | (g, w) <- fs])
         ListOp op os -> listOp op os
+  where
+    dataValueOf v = do
+        (name, fs) <- dataValue v
+        return (VS name fs)
 
 intOperand :: Operand -> M Integer
 intOperand o = do
@@ -342,16 +382,14 @@ execStatement stmt = do
                 Just (Slot v Nothing) -> freeTree v >> putSlot l (Slot VNull Nothing)
         Peek d rv -> do
             v <- evalRvalue rv
-            look <- case v of
-                VP a -> do
-                    c <- cell a
-                    return (Just (a, cellGeneration c))
-                _ -> return Nothing
-            putSlot d (Slot v look)
+            -- (a local that only looks remembers how what it looks at was)
+            looks <- mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf v)
+            putSlot d (Slot v (if null looks then Nothing else Just looks))
         Assign d rv -> do
             v <- evalRvalue rv
             f <- currentFrame
-            if localHeap f d
+            program <- stProgram <$> getSt
+            if localHeap program f d
                 then do
                     -- what it held is freed, and a value that is only looked at cannot be what it is given
                     case rv of
@@ -374,7 +412,7 @@ callFunction program fn args = do
     s' <- getSt
     case stFrames s' of
         f : rest -> do
-            let leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap f l]
+            let leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap program f l]
             if null leftover
                 then putSt s'{stFrames = rest}
                 else failM ("a function returns while it owns " ++ show leftover)
@@ -410,7 +448,7 @@ runBlock program fn b = do
             v <- maybe (failM "a function did not return a value") return result
             f <- currentFrame
             case Map.lookup dest (frameSlots f) of
-                Just (Slot old Nothing) | localHeap f dest -> freeTree old
+                Just (Slot old Nothing) | localHeap program f dest -> freeTree old
                 _ -> return ()
             putSlot dest (Slot v Nothing)
             runBlock program fn next
@@ -418,7 +456,7 @@ runBlock program fn b = do
 -- Runs the whole program on the model, and checks that nothing is left on the heap
 runOwned :: Program -> Either String (Maybe MirValue)
 runOwned program =
-    case runM go (St Map.empty 0 [] 1000000) of
+    case runM go (St Map.empty 0 [] 1000000 program) of
         Left e -> Left e
         Right (r, _) -> Right r
   where
