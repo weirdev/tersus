@@ -86,6 +86,7 @@ testExamples =
         , testExampleFile "examples/rejected/array_size_mismatch.tersus" (ExpectRejected "argument 2 of dot: expected Array<Int, 5>, got Array<Int, 4>")
         , testExampleFile "examples/rejected/array_runtime_size.tersus" (ExpectRejected "the size of an array must be a constant")
         , testExampleFile "examples/rejected/array_in_list.tersus" (ExpectRejected "cannot hold an Array yet")
+        , testExampleFile "examples/rejected/array_unsized.tersus" (ExpectRejected "an array with no size")
         , testExampleFile "examples/rejected/array_push.tersus" (ExpectRejected "argument 1 of push: expected List<?>, got Array<Int, 2>")
         , testExampleFile "examples/generic_lists.tersus" (ExpectReturn (VList [VList [VInt 1, VInt 2], VList [VInt 3, VInt 4], VList [VInt 1, VInt 2]]))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))

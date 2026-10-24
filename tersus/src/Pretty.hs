@@ -100,12 +100,16 @@ renderValue (VList l) = "[" ++ intercalate ", " (map renderValue l) ++ "]"
 renderValue (VFunct args _ _ _ _) = "fn(" ++ intercalate ", " args ++ ")"
 renderValue (VFnRef name) = name
 
+renderSize :: Size -> String
+renderSize (SizeConst n) = show n
+renderSize SizeAny = "?"
+
 -- Renders a type in Tersus syntax
 renderType :: Type -> String
 renderType TInt = "Int"
 renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
-renderType (TArray t n) = "Array<" ++ renderType t ++ ", " ++ show n ++ ">"
+renderType (TArrayOf t size) = "Array<" ++ renderType t ++ ", " ++ renderSize size ++ ">"
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
 renderType (TNamed name) = name
 renderType (TVariant name) = name

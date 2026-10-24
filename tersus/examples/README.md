@@ -116,6 +116,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/trait_missing_function.tersus` | An impl lacks one of the functions of its trait |
 | `rejected/array_size_mismatch.tersus` | `dot` takes an `Array<Int, 5>` and is given an `Array<Int, 4>`: the size is part of the type |
 | `rejected/array_runtime_size.tersus` | `array(n, 0)` with an `n` that is a variable: the size of an inline array is a constant |
+| `rejected/array_unsized.tersus` | A parameter of type `Array<Int>`: with the size left out (it is `?`) the array can only be used behind a pointer, and there are none yet |
 | `rejected/array_in_list.tersus` | A list cannot hold an array, which is held inline |
 | `rejected/array_push.tersus` | An array has no `push`: its size never changes |
 | `rejected/type_return_mismatch.tersus` | A function declared to return an `Int` returns a list |

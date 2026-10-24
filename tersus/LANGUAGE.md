@@ -1071,6 +1071,8 @@ dot(x, x);                   // fine
 
 See `examples/arrays.tersus`. Natively an array is `N` 8-byte words in the slot of its local (an element that is an array is its words, in line), an array given to a function is its address and the function copies it, and an array that a function returns is written into room the caller gives it. A result is printed as a list is, `[0, 9, 0, 0]`.
 
+The size can be written `?`, or left out (`Array<Int>` is `Array<Int, ?>`), for an array whose size the type does not say. Such an array is *unsized*: it can only be used behind a pointer that carries the size, and the language has no pointers yet, so for now it is an error to write one (`fn f(a: Array<Int>)` says so, and suggests writing the size). It is the type that the planned `Box<Array<Int>>` will have (see the roadmap in `README.md`).
+
 What an array cannot be yet, because a heap form of it is to come (see the roadmap in `README.md`): an array whose size is only known when the program runs, a parameter that takes an array of any size, an element that is a list, a struct or an enum, and a field of a struct or an enum or an element of a list that is an array (those hold one word per value of the heap, and an array here is held inline).
 
 ## Current Limitations

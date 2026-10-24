@@ -625,12 +625,11 @@ typeAnnotation = do
                 void (char '<')
                 whitespace
                 element <- typeAnnotation
-                void (char ',') <?> "a size: an array is written Array<Int, 3>"
-                whitespace
-                size <- many1 digit
+                -- a size is a number or `?`, and one that is left out is `?`
+                size <- option SizeAny (char ',' >> whitespace >> ((SizeConst . read <$> many1 digit) <|> (SizeAny <$ char '?')))
                 whitespace
                 void (char '>')
-                return (TArray element (read size))
+                return (TArrayOf element size)
             _ -> do
                 variant <- optionMaybe (try (string "::" >> variable))
                 return (maybe (TNamed name) (\v -> TVariant (name ++ "::" ++ v)) variant)
