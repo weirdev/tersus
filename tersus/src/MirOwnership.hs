@@ -10,6 +10,7 @@ import Data.Set (Set)
 import qualified Data.Set as Set
 
 import Mir
+import MirMono (monomorphize)
 import TersusTypes (Name, Type (..), Variable)
 
 -- Native code frees what a program makes, and updates a list in place, so it needs to know who owns each list and each
@@ -43,11 +44,14 @@ import TersusTypes (Name, Type (..), Variable)
 -- from holds nothing, and dropping that does nothing.
 
 insertOwnership :: Program -> Program
-insertOwnership program =
+insertOwnership validated =
     program
         { progFunctions = Map.map (ownFunction program) (progFunctions program)
         , progMain = ownFunction program (progMain program)
         }
+  where
+    -- (a function with size parameters is made into a copy for each list of sizes it is called with, since native code needs them)
+    program = monomorphize validated
 
 -- What is used of a local: all of it, the tag that says which variant it is, or one field
 data Key = Whole | Tag | Field Name Variable

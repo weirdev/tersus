@@ -29,6 +29,7 @@ library
       Mir
       MirEval
       MirLower
+      MirMono
       MirOwnership
       MirValidate
       MirVerify

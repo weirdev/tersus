@@ -507,11 +507,15 @@ functStatement = do
     whitespace
     var <- variable
     whitespace
+    -- fn f<n, m>(...): the sizes that a call gives, which are the last parameters of the function (Ints that the body and the
+    -- contracts can read), and are not written in a call
+    sizes <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
     (params, returnType, inputReqs, outputReqs) <- functHeader
     termination <- terminationClause
     fnBody <- curlyBracesParse statementBlock
     whitespace
-    return (Assign var (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType) termination fnBody) [])))
+    let allParams = params ++ [(size, TInt) | size <- sizes]
+    return (Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType sizes) termination fnBody) [])))
 
 -- (parameters) -> Type [{ input contract }] [{ output contract }], the part of a function before its termination clause
 functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement])
@@ -551,7 +555,7 @@ traitStatement = do
         fname <- variable
         whitespace
         (params, returnType, inputReqs, outputReqs) <- functHeader
-        return (TraitFn fname (map fst params) (Signature (map snd params) returnType) inputReqs outputReqs)
+        return (TraitFn fname (map fst params) (Signature (map snd params) returnType []) inputReqs outputReqs)
 
 -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are named <Type>::f and <Type as Trait>::f (see
 -- implFunctionName), and the checker resolves Type::f and x.f(...) to the one that is meant. Self stands for Type in them.
@@ -626,8 +630,8 @@ typeAnnotation = do
                 void (char '<')
                 whitespace
                 element <- typeAnnotation
-                -- a size is a number or `?`, and one that is left out is `?`
-                size <- option SizeAny (char ',' >> whitespace >> ((SizeConst . read <$> many1 digit) <|> (SizeAny <$ char '?')))
+                -- a size is a number, `?`, or a size parameter of the function, and one that is left out is `?`
+                size <- option SizeAny (char ',' >> whitespace >> ((SizeConst . read <$> many1 digit) <|> (SizeAny <$ char '?') <|> (SizeParam <$> variable)))
                 whitespace
                 void (char '>')
                 return (TArrayOf element size)

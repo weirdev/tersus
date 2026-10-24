@@ -1,0 +1,7 @@
+// Both parameters of dot have the size n, so the arrays it is given have to be of one size: n is 2 from the first, and the
+// second has 3.
+fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int {
+    return 0;
+};
+
+return dot(#[1, 2], #[1, 2, 3]);

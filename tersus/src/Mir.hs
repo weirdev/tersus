@@ -67,6 +67,7 @@ data Function = Function
     , fnReturns :: Maybe Type -- Nothing for a program that does not return
     , fnLocals :: Map Local LocalDecl -- the return slot (when there is one), the parameters, and the rest
     , fnBlocks :: Map BlockId BasicBlock
+    , fnSizeParams :: [Variable] -- the names of the last parameters, which are the sizes that a call of the function gives (see Mono)
     , fnSpec :: FunctionSpec
     }
     deriving (Show, Eq)

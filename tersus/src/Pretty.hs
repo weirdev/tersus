@@ -107,6 +107,8 @@ renderValue (VFnRef name) = name
 renderSize :: Size -> String
 renderSize (SizeConst n) = show n
 renderSize SizeAny = "?"
+renderSize (SizeParam name) = name
+renderSize (SizeVar _) = "_"
 
 -- Renders a type in Tersus syntax
 renderType :: Type -> String
@@ -115,6 +117,7 @@ renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
 renderType (TBox t) = "Box<" ++ renderType t ++ ">"
 renderType (TArrayOf t size) = "Array<" ++ renderType t ++ ", " ++ renderSize size ++ ">"
+renderType (TForall names t) = "<" ++ intercalate ", " names ++ ">" ++ renderType t
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
 renderType (TNamed name) = name
 renderType (TVariant name) = name

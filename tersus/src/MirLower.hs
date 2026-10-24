@@ -68,6 +68,7 @@ data Binding = BLocal M.Local Type | BFn Name Type
 data Builder = Builder
     { bName :: Name
     , bIsMain :: Bool
+    , bSizes :: [Variable] -- the size parameters of the function
     , bReturns :: Maybe Type
     , bParams :: [M.Local]
     , bLocals :: Map M.Local M.LocalDecl
@@ -112,6 +113,7 @@ newBuilder name isMain returns =
     Builder
         { bName = name
         , bIsMain = isMain
+        , bSizes = []
         , bReturns = returns
         , bParams = []
         , bLocals = maybe Map.empty (\t -> Map.singleton (M.Local 0) (M.LocalDecl t Nothing)) returns
@@ -248,6 +250,7 @@ buildFunction requires ensures term env b =
         , M.fnParams = bParams b
         , M.fnReturns = bReturns b
         , M.fnLocals = bLocals b
+        , M.fnSizeParams = bSizes b
         , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
         , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env
         }
@@ -390,10 +393,10 @@ lowerWhile cond invariant term body = do
 -- parameters and the functions at the top, so there is nothing to capture). One defined at the top of the program is
 -- found by name from the bodies of the functions after it, and from itself; any other is a name in its scope.
 defineFunction :: Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Signature -> Maybe Termination -> [Statement] -> L ()
-defineFunction var params ins outs (Signature ptys rty) term body = do
+defineFunction var params ins outs (Signature ptys rty sizes) term body = do
     enclosing <- builder
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
-        fnTy = TFn ptys rty
+        fnTy = functionType sizes ptys rty
     name <- uniqueName (if atTop then var else bName enclosing ++ "::" ++ var)
     assigned <- (Set.member var . lsAssigned) <$> getS
     -- (the bodies of the functions after it find a function at the top by name, whatever the program does to the variable)
@@ -405,10 +408,10 @@ defineFunction var params ins outs (Signature ptys rty) term body = do
             bindName var (BLocal l fnTy)
             emit (M.Assign l (M.Use (M.Const (M.CFn name))))
         else unless atTop (bindName var (BFn name fnTy))
-    tc (mapM_ checkType (rty : ptys))
+    tc (withSizes sizes (mapM_ checkType (rty : ptys)))
     outer <- builder
     -- the body is lowered as a function of its own, then the outer one goes on
-    modifyB (const (newBuilder name False (Just rty)))
+    modifyB (const (newBuilder name False (Just rty)){bSizes = sizes})
     paramLocals <- mapM (\(p, ty) -> (\l -> (p, l, ty)) <$> newLocal (Just p) ty) (zip params ptys)
     modifyB (\b -> b{bParams = [l | (_, l, _) <- paramLocals], bScopes = [Map.fromList [(p, BLocal l ty) | (p, l, ty) <- paramLocals]]})
     env <- visibleEnv
@@ -485,6 +488,12 @@ lowerBuiltin b args = do
     result <- case (b, operands) of
         -- (the size is a constant: the checker has folded it, and the element decides the rest)
         (NewArray, [(M.Const (M.CInt n), _), (_, elementTy)]) -> return (TArray elementTy n)
+        -- (the size is a size parameter of the function: the local that holds it is named like it)
+        (NewArray, [(M.Copy l, _), (_, elementTy)]) -> do
+            b' <- builder
+            case Map.lookup l (bLocals b') of
+                Just (M.LocalDecl _ (Just name)) | name `elem` bSizes b' -> return (TArrayOf elementTy (SizeParam name))
+                _ -> failL "array was not given a constant size"
         (NewArray, _) -> failL "array was not given a constant size"
         (NewBox, [(_, held)]) -> return (TBox held)
         (NewBoxedArray, [_, (_, elementTy)]) -> return (TBox (TArrayOf elementTy SizeAny))

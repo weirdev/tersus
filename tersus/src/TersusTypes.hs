@@ -44,20 +44,26 @@ data BuiltinFunct
 -- TArrayOf element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
 -- or an element of a bigger array), with no pointer to it. The size is part of the type.
 data Type = TInt | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
+    | -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`): the type of the function for any values of the sizes. A call
+      -- gives each its value, so a use of one that is not a call has no type.
+      TForall [Variable] Type
     deriving (Show, Eq, Ord)
 
 -- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
 -- known only to something that holds a pointer to it and carries the size along (a Box, later), so it cannot be held by value.
 -- `Array<Int>` is `Array<Int, ?>`: a size that is left out is `?`.
-data Size = SizeConst Integer | SizeAny
+-- A name is a size parameter of the function (`n` in `fn dot<n>`), which stands for a constant that its callers give; SizeVar is the
+-- checker's own unknown, for the size a call gives a parameter, and is never written by a program.
+data Size = SizeConst Integer | SizeAny | SizeParam Name | SizeVar Int
     deriving (Show, Eq, Ord)
 
 -- An array of a size that is a constant, which is every array there can be in a program that runs
 pattern TArray :: Type -> Integer -> Type
 pattern TArray t n = TArrayOf t (SizeConst n)
 
--- The declared parameter types and return type of a user function
-data Signature = Signature [Type] Type deriving (Show, Eq, Ord)
+-- The declared parameter types and return type of a user function, and its size parameters, which are the last parameters (of type Int),
+-- given by the call and not written in it
+data Signature = Signature [Type] Type [Variable] deriving (Show, Eq, Ord)
 
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.

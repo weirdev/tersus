@@ -1125,7 +1125,32 @@ return total(five) + total(fixed);  // 20
 
 An array is a value like a number, so it can be a field of a struct or an enum and an element of a list (`examples/array_data.tersus`): `struct Image { id: Int, pixels: Array<Int, 4> }`, `enum Tile { Row { cells: Array<Int, 2> }, Block { id: Int, cells: Array<Int, 4> } }`, `List<Array<Int, 2>>`. Reading a field or an element gives a copy of the array, which the program can change without changing the struct or the list (`set` gives a new array), and a struct is updated around a new one with `..base`. The array's words are in line, in the struct (the variants of an enum are as wide as their fields) or one after another in the list, so no array is allocated apart.
 
-What an array cannot be yet: an element that is a list, a struct or an enum, and a size that is a parameter of a function (`fn dot<n>`, a later step of the roadmap in `README.md`).
+### Size parameters
+
+A function can be written for arrays of any size. `fn dot<n>(...)` declares a size `n` (any number of them: `fn grid<rows, columns>(...)`), which a call gives and which the types of the parameters use:
+
+```tersus
+fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int {
+    total = 0;
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        total = total + get(a, i) * get(b, i);
+        i = i + 1;
+    };
+    return total;
+};
+
+return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);   // 42
+```
+
+- **A call does not write the sizes.** The arguments decide them: `dot(#[1, 2, 3], ...)` makes `n` 3, every other use of `n` has to agree (`dot(#[1, 2], #[1, 2, 3])` is rejected: `argument 2 of dot: expected Array<Int, 2>, got Array<Int, 3>`), and a size that no argument decides is an error (`fn f<n>() -> Int` cannot be called). The sizes are the last parameters of the function, so a function value and a function of an impl cannot have them yet, and `h = dot` is an error (a function with sizes is called).
+- **A size is an `Int` in the function.** The body and the contracts read it as a variable (`i < n`, `affirm n > 0`), and `array(n, x)` makes an array of it, with the size `n` in its type (the result type can say so: `-> Array<Int, n>`). It cannot be assigned, and a size in a type takes no arithmetic: `array(n + 1, 0)` is an error, since a size is a constant or a size parameter, which also keeps the number of copies finite.
+- **It is validated once.** The validator knows of `n` that it is the size of every array whose type says `n` (`size(a) = n`), as it knows the constant of an array of a size, and nothing else: a caller proves what the contract asks of `n` for its own size. Callers know the function by its contract, as for any function.
+- **Native code is made for each size.** An array is held inline, so a program that runs has a copy of the function for each list of sizes it is called with (`dot<3>` and `dot<1>` above), with the sizes replaced by the constants (`MirMono`). A size that a function passes on to another it calls is one of its own sizes, which the copy of it has replaced.
+
+See `examples/array_sizes.tersus`.
+
+What an array cannot be yet: an element that is a list, a struct or an enum, and a size that is a parameter of a struct or an enum (the next step of the roadmap in `README.md`).
 
 ## Current Limitations
 

@@ -50,7 +50,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "array_data", "arrays", "basics", "booleans", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "array_data", "array_sizes", "arrays", "basics", "booleans", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "safe_access", "structs", "termination", "traits", "types", "update_list"
@@ -316,6 +316,16 @@ arrayPrograms =
     , ("a function takes and gives a struct with an array", "struct G { cells: Array<Int, 2> }; fn bump(g: G) -> G { return G { cells: set(g.cells, 0, get(g.cells, 0) + 1) }; }; return bump(bump(G { cells: #[1, 1] }));")
     , ("a function takes a list of arrays", "fn total(rows: List<Array<Int, 2>>) -> Int { s = 0; i = 0; while i < size(rows) [{ affirm i >= 0; affirm i <= size(rows); }] shrinks size(rows) - i { s = s + get(get(rows, i), 0) + get(get(rows, i), 1); i = i + 1; }; return s; }; return total(push(push([], #[1, 2]), #[3, 4]));")
     , ("a function gives a list of arrays", "fn make(n: Int) -> List<Array<Int, 2>> [{ affirm n >= 0; }] [{ }] { rows = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { rows = push(rows, array(2, i)); i = i + 1; }; return rows; }; return make(4);")
+    , ("a size parameter", "fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int { total = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { total = total + get(a, i) * get(b, i); i = i + 1; }; return total; }; return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);")
+    , ("a size parameter, once for each size", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) * 100 + count(array(4, 0)) * 10 + count(#[]);")
+    , ("a size parameter makes an array", "fn ones<n>(a: Array<Int, n>) -> Array<Int, n> { return array(n, 1); }; return ones(#[7, 8, 9]);")
+    , ("an array of the size of a parameter is set", "fn ones<n>(a: Array<Int, n>) -> Array<Int, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] { b = array(n, 1); b = set(b, 0, 5); return b; }; return ones(#[7, 8, 9]);")
+    , ("two size parameters", "fn grid<n, m>(a: Array<Array<Int, n>, m>) -> Int { return n * 10 + m; }; return grid(array(3, array(2, 0)));")
+    , ("a function passes on its size", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; fn outer<m>(a: Array<Int, m>) -> Int { return count(a) + count(#[1, 2]); }; return outer(#[1]) + outer(#[1, 2, 3]);")
+    , ("a function with a size calls itself", "fn count<n>(a: Array<Int, n>, k: Int) -> Int [{ define z = k; affirm z >= 0; }] [{ }] shrinks k { if k = 0 { return n; }; return count(a, k - 1); }; return count(#[1, 2, 3], 4);")
+    , ("a size parameter with a Box", "fn f<n>(a: Array<Int, n>, b: Box<Array<Int, n>>) -> Int { return size(b) + n; }; return f(#[1, 2], Box::new(#[3, 4]));")
+    , ("a size parameter and the unsizing conversion", "fn mk<n>(a: Array<Int, n>) -> Box<Array<Int>> { return Box::new(a); }; x = mk(#[1, 2, 3]); return size(x) * 2;")
+    , ("a size parameter and a struct", "struct S { a: Array<Int, 2> }; fn count<n>(a: Array<Int, n>) -> Int { return n; }; s = S { a: #[1, 2] }; return count(s.a);")
     , ("a Box of an Int", "b = Box::new(5); return Box::unbox(b) + 1;")
     , ("a Box of a Bool", "return Box::unbox(Box::new(true));")
     , ("a Box of a list", "b = Box::new(push([], 4)); l = Box::unbox(b); return size(l);")
