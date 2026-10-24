@@ -1,7 +1,7 @@
 // Functions that call functions defined before them.
 // A function is visible by its name to the functions defined after it, and a call is checked
-// against the callee's contract: `positive` needs n > 0 and promises return > 0.
-fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] {
+// against the callee's contract, and only against it: `positive` needs n > 0 and promises return > 0 and return = n.
+fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; affirm return = n; }] {
     return n;
 };
 

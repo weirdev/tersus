@@ -678,7 +678,7 @@ testEarlyReturn =
 testFunctionCalls :: Test
 testFunctionCalls =
     let inc = "fn inc(n: Int) -> Int [{ }] [{ affirm return = (n + 1); }] { return n + 1; };"
-        positive = "fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; };"
+        positive = "fn positive(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; affirm return = n; }] { return n; };"
      in testCaseSeq
             "testFunctionCalls"
             [ -- A function calls the functions defined before it

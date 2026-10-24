@@ -1,7 +1,7 @@
 // Multiplication, division and negative literals.
 // `*` and `/` bind tighter than `+`, `-` and the relations; division rounds down.
 // `/` requires a divisor the validator can show is non-zero.
-fn average(total: Int, count: Int) -> Int [{ affirm count > 0; }] [{ }] {
+fn average(total: Int, count: Int) -> Int [{ affirm count > 0; }] [{ affirm return = total / count; }] {
     return total / count;
 };
 

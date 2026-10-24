@@ -18,7 +18,7 @@ fn readZero(l: List<Int>, i: Int) -> Int [{
 };
 
 // keep returns its argument, and its output contract passes the forall on to the caller.
-fn keep(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; }] {
+fn keep(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 0; affirm size(return) = size(l); }] {
     return l;
 };
 

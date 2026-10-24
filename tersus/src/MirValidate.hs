@@ -304,11 +304,9 @@ validateFunction st name top = do
     exported <- case checked of
         [] -> return []
         _ -> do
-            -- (the output contract is what the paths are to be joined for: the join tries to keep what it asks)
-            let wanted joined' = [ip | vp <- assertedProofs (psRules joined') ensures, Ok ip <- [toIotaProof (withEnv returnEnv joined') vp]]
-            joined <- joinAllWanted wanted checked
-            let bindings = zip names entry ++ [("return", iota) | Just iota <- [Map.lookup (M.Local 0) (psLocals joined)]]
-            exportOutputs joined bindings requires ensures
+            -- (the result has no value of its own in the contracts' view: they only say things about it)
+            result <- fresh
+            exportContract started (zip names entry ++ [("return", result)]) requires ensures
     return (term'{fnExported = exported})
 
 -- A function that says what shrinks has it at least 0 for any arguments that meet the input contract, and keeps its value at the start

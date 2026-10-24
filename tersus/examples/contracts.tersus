@@ -13,6 +13,7 @@ fn firstWithSize(lst: List<Int>) -> Int [{
     affirm s > 0;
 }] [{
     affirm s > 0;
+    affirm return = first(lst);
 }] {
     return first(lst);
 };

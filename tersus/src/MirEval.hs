@@ -1,7 +1,6 @@
 module MirEval
     ( MirValue (..)
     , runProgram
-    , callWithFuel
     , renderMirValue
     , toMirValue
     , fromMirValue
@@ -29,40 +28,26 @@ data MirValue
 
 -- The value of _0 when the program returns, and Nothing when it ends without
 runProgram :: Program -> Result (Maybe MirValue) String
-runProgram program = mapResult fst (runE (runFunction program (progMain program) []) Nothing)
+runProgram program = runE (runFunction program (progMain program) [])
 
--- Calls a function of the program with a budget of steps (a statement or a jump each), and fails once it is spent. This is
--- how the validator learns the result of a call whose arguments it knows without depending on a long or endless computation.
-callWithFuel :: Int -> Program -> Name -> [MirValue] -> Result MirValue String
-callWithFuel fuel program name args =
-    mapResult fst (runE (callFunction program (MFn name) args) (Just fuel))
-
--- The evaluator keeps the steps that are left, when there is a limit
-newtype E a = E {runE :: Maybe Int -> Result (a, Maybe Int) String}
+-- The evaluator is the failure of a result
+newtype E a = E {runE :: Result a String}
 
 instance Functor E where
-    fmap f (E g) = E (\fuel -> mapResult (\(a, fuel') -> (f a, fuel')) (g fuel))
+    fmap f (E r) = E (mapResult f r)
 
 instance Applicative E where
-    pure a = E (\fuel -> Ok (a, fuel))
-    E f <*> E g = E (\fuel -> f fuel `bindResult` \(h, fuel') -> mapResult (\(a, fuel'') -> (h a, fuel'')) (g fuel'))
+    pure a = E (Ok a)
+    E f <*> E g = E (f `bindResult` \h -> mapResult h g)
 
 instance Monad E where
-    E g >>= f = E (\fuel -> g fuel `bindResult` \(a, fuel') -> runE (f a) fuel')
+    E g >>= f = E (g `bindResult` \a -> runE (f a))
 
 failE :: String -> E a
-failE e = E (\_ -> Error e)
+failE e = E (Error e)
 
 liftE :: Result a String -> E a
-liftE r = E (\fuel -> mapResult (\a -> (a, fuel)) r)
-
--- One step of the budget
-tick :: E ()
-tick = E (\fuel -> case fuel of
-    Nothing -> Ok ((), Nothing)
-    Just n
-        | n <= 0 -> Error "Evaluation ran out of fuel"
-        | otherwise -> Ok ((), Just (n - 1)))
+liftE = E
 
 runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue)
 runFunction program fn args
@@ -78,7 +63,6 @@ runBlock program fn block frame =
         Nothing -> failE ("Jump to a block that does not exist: " ++ show block)
         Just (BasicBlock stmts term) -> do
             frame' <- runStatements frame stmts
-            tick
             case term of
                 Goto next -> runBlock program fn next frame'
                 SwitchBool test yes no -> do
@@ -111,7 +95,6 @@ runStatements frame (Ghost{} : rest) = runStatements frame rest
 runStatements frame (Drop{} : rest) = runStatements frame rest
 runStatements frame (Peek dest rv : rest) = runStatements frame (Assign dest rv : rest)
 runStatements frame (Assign dest rv : rest) = do
-    tick
     v <- liftE (evalRvalue frame rv)
     runStatements (Map.insert dest v frame) rest
 

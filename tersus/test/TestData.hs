@@ -293,7 +293,7 @@ testEnums =
             , -- Enums in lists
               parseValidProgramHelper (opt ++ "l = push(push([], Opt::None), Opt::Some { value: 2 }); affirm get(l, 0) is Opt::None; affirm size(l) = 2;")
             , -- Recursive types
-              parseValidProgramHelper (tree ++ "fn sum(t: Tree) -> Int [{ }] [{ }] shrinks t { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; x = sum(Tree::Leaf); affirm x = 0;")
+              parseValidProgramHelper (tree ++ "fn sum(t: Tree) -> Int [{ }] [{ }] shrinks t { return match t { Tree::Leaf => 0, Tree::Branch { left: l, value: v, right: r } => v + sum(l) + sum(r) }; }; x = sum(Tree::Leaf);")
             ]
 
 testEnumCast :: Test

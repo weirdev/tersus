@@ -5,6 +5,7 @@ module Ghost
     , defineAxiom
     , defineProofRule
     , exportOutputs
+    , exportContract
     , applyCall
     , builtinInfo
     , rvalueCall
@@ -28,7 +29,6 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (mapMaybe)
 
-import MirEval (callWithFuel, fromMirValue, toMirValue)
 import qualified ProofEngine as Engine
 import Pretty (renderVarProof)
 import ProofHelpers
@@ -164,7 +164,7 @@ wrapperInfo st name = do
     [M.BasicBlock [M.Assign (M.Local 0) rv] M.Return] <- Just (Map.elems (M.fnBlocks fn))
     (builtin, _) <- rvalueCall rv
     let info = builtinInfo builtin
-    return info{fnTerm = ATerm (fnIota name), fnKind = KUser name}
+    return info{fnTerm = ATerm (fnIota name)}
 
 -- Calling a function: the arguments have to meet its input contract and the call has to end, and the call then gives
 -- the facts the function promises about its result, and the result itself when everything is known.
@@ -254,14 +254,8 @@ concreteResult st info args = do
         KBuiltin b -> case evalBuiltinFunct b values of
             Ok value -> Just value
             Error _ -> Nothing
-        KUser name -> do
-            mirArgs <- mapM toMirValue values
-            case callWithFuel validationFuel (psProgram st) name mirArgs of
-                Ok value -> Just (fromMirValue value)
-                Error _ -> Nothing
-
-validationFuel :: Int
-validationFuel = 100000
+        -- (what a function of the program does is not looked at: a caller knows its contracts and nothing else)
+        KUser _ -> Nothing
 
 -- The variant of a loop or function is an integer that has to be at least 0 where it starts, and smaller
 -- each time round. Its value at the start is kept in a variable that has a name no program can write, and
@@ -440,6 +434,20 @@ exportOutputs :: PState -> [(Variable, Iota)] -> [ValidationStatement] -> [Valid
 exportOutputs st bindings inputs outputs = do
     let named = st{psView = Map.fromList [(name, ATerm iota) | (name, iota) <- bindings]}
     checked <- if null outputs then return named else runStatements named outputs
+    exportFacts checked bindings inputs outputs
+
+-- What a function promises is what its contracts say, and nothing the body happens to establish: the contracts are
+-- assumed in a state that knows nothing else, and the facts about the parameters, the result and the names the contracts
+-- define are what callers get. A caller therefore depends on the contracts alone, and the body can change without
+-- changing which callers are valid.
+exportContract :: PState -> [(Variable, Iota)] -> [ValidationStatement] -> [ValidationStatement] -> V [VariableProof]
+exportContract st bindings inputs outputs = do
+    let named = (refreshCache st{psFacts = [], psVars = Map.empty}){psView = Map.fromList [(name, ATerm iota) | (name, iota) <- bindings]}
+    contract <- assumeStatements named (inputs ++ outputs)
+    exportFacts contract bindings inputs outputs
+
+exportFacts :: PState -> [(Variable, Iota)] -> [ValidationStatement] -> [ValidationStatement] -> V [VariableProof]
+exportFacts checked bindings inputs outputs = do
     let allowed = nubOrd (map fst bindings ++ concatMap valStmtDefinedVars inputs ++ concatMap valStmtDefinedVars outputs)
         nameIotas = [(name, iota) | name <- allowed, Just (ATerm iota) <- [lookupName checked name]]
         byIota = namedIotaMap (reverse nameIotas)

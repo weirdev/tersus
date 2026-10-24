@@ -24,7 +24,8 @@ impl Shape {
     fn unit() -> Self { return Self::Rect { width: 1, height: 1 }; };
 };
 
-// An impl may promise more than the trait does (the output contract is stronger here), and may ask for less
+// An impl may promise more than the trait does (the output contract of sides is stronger here, and start promises a value
+// the trait says nothing about), and may ask for less. A caller knows what the impl's contracts say and nothing else.
 impl Measure for Shape {
     fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; affirm return <= 4; }] {
         return match self {
@@ -36,7 +37,7 @@ impl Measure for Shape {
 };
 
 impl Step for Counter {
-    fn start() -> Self { return Self { value: 0 }; };
+    fn start() -> Self [{ }] [{ affirm return.value = 0; }] { return Self { value: 0 }; };
     // the trait only allows a positive step; this accepts 0 too, and says what the new value is
     fn advance(self: Self, by: Int) -> Self [{ affirm by >= 0; }] [{ affirm return.value = self.value + by; }] {
         return Self { value: self.value + by };
@@ -46,6 +47,7 @@ impl Step for Counter {
 s = Shape::unit();
 n = s.sides() + Measure::sides(Shape::Circle { radius: 5 }) + Shape::sides(Shape::Empty);
 c = Counter::start().advance(2).advance(3);
-affirm n = 5;
+affirm n >= 0;
+affirm n <= 12;
 affirm c.value = 5;
 return n * 10 + c.value;
