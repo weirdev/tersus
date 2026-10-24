@@ -27,7 +27,7 @@ Three constraints from the rest of the language shape every choice below:
 | Recursive types | Allowed. See Recursive types and compilation. |
 | Naming | PascalCase types and variants, camelCase variables, functions and fields. A convention, not a compiler rule. |
 | User generics | Deferred. `List<T>` is the only parameterized type. |
-| Associated functions and traits | `impl Type { fn f }` defines `Type::f`; a `trait` declares signatures with contracts, an `impl Trait for Type` must have them and meet the contracts (checked by the validator once), and `x.f()`, `Type::f(x)` and `Trait::f(x)` are resolved by the checker from the type of the argument. No generics over traits yet. |
+| Associated functions and traits | `impl Type { fn f }` defines `Type::f`; a `trait` declares signatures with contracts, an `impl Trait for Type` must have them and meet the contracts (checked by the validator once), and `x.f()`, `Type::f(x)` and `Trait::f(x)` are resolved by the checker from the type of the argument. A name that several impls of a type define must be called by a path: `Trait::f(x)`, `<Type as Trait>::f(x)` or `<Type>::f(x)`. No generics over traits yet. |
 | Field access that may not apply | A contract the caller proves (`x is Variant`), like `get` and `/`. |
 
 ## Syntax

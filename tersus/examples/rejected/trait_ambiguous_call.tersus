@@ -1,0 +1,12 @@
+// Two traits may give a type a function of the same name. Counter::label(c) and c.label() then do not say which one is
+// meant; the call names it with Name::label(c), or <Counter as Name>::label(c).
+struct Counter { value: Int };
+
+trait Name { fn label(self: Self) -> Int; };
+trait Code { fn label(self: Self) -> Int; };
+
+impl Name for Counter { fn label(self: Self) -> Int { return 1; }; };
+impl Code for Counter { fn label(self: Self) -> Int { return 2; }; };
+
+c = Counter { value: 0 };
+x = c.label();

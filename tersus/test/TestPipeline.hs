@@ -79,6 +79,7 @@ testExamples =
         , testExampleFile "examples/traits.tersus" (ExpectReturn (VInt 55))
         , testExampleFile "examples/rejected/trait_input_stronger.tersus" (ExpectRejected "impl Step for Counter: advance does not meet what Step declares")
         , testExampleFile "examples/rejected/trait_output_weaker.tersus" (ExpectRejected "impl Measure for Pair: measure does not meet what Measure declares")
+        , testExampleFile "examples/rejected/trait_ambiguous_call.tersus" (ExpectRejected "Counter::label is ambiguous")
         , testExampleFile "examples/rejected/trait_missing_function.tersus" (ExpectRejected "impl Step for Counter lacks the function total")
         , testExampleFile "examples/generic_lists.tersus" (ExpectReturn (VList [VList [VInt 1, VInt 2], VList [VInt 3, VInt 4], VList [VInt 1, VInt 2]]))
         , testExampleFile "examples/helper_functions.tersus" (ExpectReturn (VInt 11))
