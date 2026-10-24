@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module MirVerify (verifyProgram) where
 
 import Data.Maybe (fromMaybe)
@@ -7,7 +9,7 @@ import qualified Data.Map.Strict as Map
 import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
-import TersusTypes (Name, Rel (..), Type (..), Variable)
+import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray)
 import Utils (Result (..))
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and function

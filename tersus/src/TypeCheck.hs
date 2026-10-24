@@ -117,7 +117,7 @@ zonk t@(TVar n) = do
         Just t' -> zonk t'
         Nothing -> return t
 zonk (TList t) = TList <$> zonk t
-zonk (TArray t n) = (\t' -> TArray t' n) <$> zonk t
+zonk (TArrayOf t size) = (\t' -> TArrayOf t' size) <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
 zonk t = return t
 
@@ -129,7 +129,7 @@ bindVar n t = do
 occurs :: Int -> Type -> Bool
 occurs n (TVar m) = n == m
 occurs n (TList t) = occurs n t
-occurs n (TArray t _) = occurs n t
+occurs n (TArrayOf t _) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
 
@@ -151,7 +151,7 @@ unify a b = do
         (TNamed t, TVariant v) -> variantOf t v
         (TVariant _, TNamed _) -> return False
         (TList x, TList y) -> unify x y
-        (TArray x n, TArray y m) | n == m -> unify x y
+        (TArrayOf x n, TArrayOf y m) | n == m -> unify x y
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
         _ -> return False
@@ -304,7 +304,8 @@ checkType (TVariant name) = () <$ ctorInfo name
 checkType (TList t) = do
     checkType t
     when (containsArray t) $ failTc listOfArrays
-checkType ty@(TArray t _) = checkType t >> arrayOk ty
+checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
+checkType ty@(TArrayOf t _) = checkType t >> arrayOk ty
 checkType (TFn args ret) = mapM_ checkType (ret : args)
 checkType _ = return ()
 
@@ -386,7 +387,7 @@ maxArraySlots = 8192
 
 -- The 8-byte slots an array takes
 arraySlots :: Type -> Integer
-arraySlots (TArray t n) = n * arraySlots t
+arraySlots (TArrayOf t (SizeConst n)) = n * arraySlots t
 arraySlots _ = 1
 
 -- What an array can hold: an Int, a Bool, or an array of those. (A list, struct or enum lives on the heap, and a pointer to
@@ -395,14 +396,18 @@ arraySlots _ = 1
 plainElement :: Type -> Bool
 plainElement TInt = True
 plainElement TBool = True
-plainElement (TArray t _) = plainElement t
+plainElement (TArrayOf t _) = plainElement t
 plainElement (TVar _) = True
 plainElement _ = False
 
 containsArray :: Type -> Bool
-containsArray TArray{} = True
+containsArray TArrayOf{} = True
 containsArray (TList t) = containsArray t
 containsArray _ = False
+
+-- (the pointer that an unsized type goes behind comes with Box, which the language does not have yet)
+unsizedByValue :: String
+unsizedByValue = "Type error: an array with no size (Array<T> is Array<T, ?>) can only be used behind a pointer, which the language does not have yet: write the size, as in Array<Int, 3>"
 
 listOfArrays :: String
 listOfArrays = "Type error: a List or a struct cannot hold an Array yet: an array is held inline, in the frame of a function, and the values of the heap have a slot of one word"
@@ -788,7 +793,7 @@ checkTrait name functions = do
 substSelf :: Name -> Type -> Type
 substSelf owner (TNamed "Self") = TNamed owner
 substSelf owner (TList t) = TList (substSelf owner t)
-substSelf owner (TArray t n) = TArray (substSelf owner t) n
+substSelf owner (TArrayOf t size) = TArrayOf (substSelf owner t) size
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
 

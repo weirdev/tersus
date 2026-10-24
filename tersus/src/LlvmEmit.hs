@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module LlvmEmit
     ( emitProgram
     ) where
@@ -10,7 +12,7 @@ import Mir
 import MirOwnership (insertOwnership)
 import MirVerify (verifyProgram)
 import Pretty (renderType)
-import TersusTypes (Name, Rel (..), Type (..), Variable)
+import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray)
 import Utils
 
 -- Lowers the MIR to LLVM IR as text (a .ll file), which clang compiles together with the runtime of LlvmRuntime.

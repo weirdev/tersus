@@ -33,10 +33,20 @@ data BuiltinFunct
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
 -- look at them. TVar is the checker's own unknown and is never written by a program.
--- TArray element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
--- or an element of a bigger array), with no pointer to it. The size is a constant and part of the type.
-data Type = TInt | TBool | TList Type | TArray Type Integer | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
+-- TArrayOf element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
+-- or an element of a bigger array), with no pointer to it. The size is part of the type.
+data Type = TInt | TBool | TList Type | TArrayOf Type Size | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
     deriving (Show, Eq, Ord)
+
+-- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
+-- known only to something that holds a pointer to it and carries the size along (a Box, later), so it cannot be held by value.
+-- `Array<Int>` is `Array<Int, ?>`: a size that is left out is `?`.
+data Size = SizeConst Integer | SizeAny
+    deriving (Show, Eq, Ord)
+
+-- An array of a size that is a constant, which is every array there can be in a program that runs
+pattern TArray :: Type -> Integer -> Type
+pattern TArray t n = TArrayOf t (SizeConst n)
 
 -- The declared parameter types and return type of a user function
 data Signature = Signature [Type] Type deriving (Show, Eq, Ord)

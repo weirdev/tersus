@@ -1,0 +1,7 @@
+// An array with no size, written Array<Int> or Array<Int, ?>, is an array whose size only a pointer to it can carry, so it cannot be held
+// by value: a parameter, a result, a local or a field needs the size, as in Array<Int, 3>.
+fn first(a: Array<Int>) -> Int {
+    return 0;
+};
+
+return first(#[1, 2, 3]);
