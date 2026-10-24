@@ -175,7 +175,8 @@ ownFunction program fn0 =
     let fn = fuseCasts fn0
         outs = liveOuts fn
         statements = Map.map blockStatements (fnBlocks fn)
-        defsOf = Map.fromListWith (+) ([(d, 1 :: Int) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Just d <- map stmtDef stmts] ++ [(d, 1) | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn)])
+        -- (a parameter has a value from the start, so what is assigned to it is a second one)
+        defsOf = Map.fromListWith (+) ([(d, 1 :: Int) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Just d <- map stmtDef stmts] ++ [(d, 1) | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn)] ++ [(p, 1) | p <- fnParams fn])
         types = Map.map localType (fnLocals fn)
         projected =
             Set.fromList
@@ -231,7 +232,7 @@ fuseCasts :: Function -> Function
 fuseCasts fn = fn{fnBlocks = Map.map dropDeadCasts fused}
   where
     fused = Map.map fuseBlock (fnBlocks fn)
-    definitions = Map.fromListWith (+) ([(d, 1 :: Int) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign d _ <- stmts] ++ [(d, 1) | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn)])
+    definitions = Map.fromListWith (+) ([(d, 1 :: Int) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign d _ <- stmts] ++ [(d, 1) | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn)] ++ [(p, 1) | p <- fnParams fn])
     fuseBlock (BasicBlock stmts term) = BasicBlock (go Map.empty stmts) term
       where
         -- the cast locals met so far in the block, and what each is a cast of, for as long as neither changes

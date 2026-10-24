@@ -491,6 +491,8 @@ planTests =
         withOwned "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(l) + n(l);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
     , TestCase "a cast is read from the value itself" . pure $
         withOwned "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue (not (" as S::A;" `isInfixOf` t)))
+    , TestCase "a parameter that is assigned a part is freed first" . pure $
+        withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "clone" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
     , TestCase "a copy of a parameter is one copy" . pure $
         withOwned "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = a; out = set(out, 0, size(a)); return out; }; return f([5]);" (\t -> testAssertEq (count "clone" (functionText "f" t)) 1)
     ]
