@@ -1,0 +1,8 @@
+// A Box of an array of a size becomes a Box of an array of any size where one is wanted, but not the other way: the size of
+// an array made by Array::boxed is only known when the program runs, so it cannot be given where the type asks for 3.
+fn corner(a: Box<Array<Int, 3>>) -> Int {
+    return get(a, 2);
+};
+
+n = 3;
+return corner(Array::boxed(n, 7));

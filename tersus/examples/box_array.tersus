@@ -1,0 +1,30 @@
+// A Box holds any type that has a size: Box<Int>, Box<Array<Int, 3>>, Box<P> for a struct P. It has the value of what it holds,
+// and size, get, first, last and set look through a Box of an array to the array.
+//
+// Array<Int> (the same as Array<Int, ?>) has no size in its type, so it cannot be held by value. Behind a Box it can: the Box then
+// carries the size along with the address, and it is what Array::boxed(n, x) makes, with an n that the program works out. A
+// Box of an array of a size becomes a Box of an array of any size where one is wanted (the unsizing conversion), so one function
+// serves arrays of every size.
+fn total(a: Box<Array<Int>>) -> Int [{ define s = size(a); affirm s >= 0; }] [{ }] {
+    sum = 0;
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {
+        sum = sum + get(a, i);
+        i = i + 1;
+    };
+    return sum;
+};
+
+fn squares(n: Int) -> Box<Array<Int>> [{ define s = n; affirm s >= 0; }] [{ }] {
+    out = Array::boxed(n, 0);
+    i = 0;
+    while i < n [{ define s = n; affirm i >= 0; affirm i <= n; affirm size(out) = n; }] shrinks n - i {
+        out = set(out, i, i * i);
+        i = i + 1;
+    };
+    return out;
+};
+
+fixed = Box::new(#[1, 2, 3, 4]);   // Box<Array<Int, 4>>: the size is in the type
+five = Array::boxed(5, 2);         // Box<Array<Int>>: the size is in the Box
+return total(fixed) + total(five) + total(squares(4));

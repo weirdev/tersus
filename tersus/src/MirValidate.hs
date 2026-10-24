@@ -232,6 +232,7 @@ assign st dest rv =
         -- (a Box has the value of what it holds)
         M.MakeBox o -> assign st dest (M.Use o)
         M.Unbox o -> assign st dest (M.Use o)
+        M.Unsize o -> assign st dest (M.Use o)
         _ -> case rvalueCall rv of
             Nothing -> throwV "An operation the validator does not know"
             Just (builtin, operands) -> do
@@ -247,8 +248,11 @@ assign st dest rv =
 withTypeFacts :: M.Function -> M.Local -> PState -> PState
 withTypeFacts fn l st =
     case (M.localType <$> Map.lookup l (M.fnLocals fn), Map.lookup l (psLocals st)) of
-        (Just (TArray _ n), Just iota) -> addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], CTerm (VInt n)]]
+        (Just (TArray _ n), Just iota) -> sized n iota
+        (Just (TBox (TArray _ n)), Just iota) -> sized n iota
         _ -> st
+  where
+    sized n iota = addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], CTerm (VInt n)]]
 
 -- The term for the value of an operand
 operandTerm :: PState -> M.Operand -> V IotaProof
@@ -418,6 +422,7 @@ upcoming cx b rules = concatMap fromBlock reachable
         M.MakeList os -> os
         M.MakeBox o -> [o]
         M.Unbox o -> [o]
+        M.Unsize o -> [o]
     rvalueTerm rv = case rv of
         M.Use o -> Just (atom o)
         _ -> do

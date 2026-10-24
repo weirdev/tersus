@@ -35,6 +35,7 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `structs.tersus` | A `struct`, literals, field reads, `..base` updates with a contract proving the other fields are unchanged, and updating one element of a list of structs | returns `11` |
 | `enums.tersus` | An `enum` with variants, `match` as an expression, a contract that demands a variant, and a recursive tree that holds its subtrees in a `Box` | returns `27` |
 | `arrays.tersus` | `Array<T, N>`, `N` elements held inline with the size in the type: `array(5, 0)` and `#[7, 8, 9]`, `get`/`set` as for lists, `set` in a loop that stores into the array, a function that takes two arrays and returns one (`dot`, `squares`), and a grid of arrays inside an array | returns `42` |
+| `box_array.tersus` | `Box<Array<Int>>`: an array on the heap whose size the Box carries, made by `Array::boxed(n, x)` with a run-time `n`; a `Box<Array<Int, 4>>` given where any size is wanted; `size`, `get` and `set` looking through the Box | returns `34` |
 | `array_data.tersus` | An array as a field of a struct, as the fields of the variants of an enum (each as wide as its fields) and as the elements of a list; a function that builds a struct around a new array | returns `45` |
 | `traits.tersus` | A `trait` with contracts, `impl`s for an enum and a struct, `Self`, and the three ways to call a function of a type (`Shape::unit()`, `s.sides()` and `Measure::sides(s)`); an impl that asks for less and promises more than its trait | returns `55` |
 | `linked_list.tersus` | A doubly linked list stored in an array of structs: inserting a node keeps every link a valid index and keeps `prev` and `next` in agreement, and following links is memory safe | returns `9` |
@@ -117,7 +118,8 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/trait_missing_function.tersus` | An impl lacks one of the functions of its trait |
 | `rejected/array_size_mismatch.tersus` | `dot` takes an `Array<Int, 5>` and is given an `Array<Int, 4>`: the size is part of the type |
 | `rejected/array_runtime_size.tersus` | `array(n, 0)` with an `n` that is a variable: the size of an inline array is a constant |
-| `rejected/array_unsized.tersus` | A parameter of type `Array<Int>`: with the size left out (it is `?`) the array can only be used behind a pointer, and there are none yet |
+| `rejected/array_unsized.tersus` | A parameter of type `Array<Int>`: with the size left out (it is `?`) the array can only be used behind a `Box` |
+| `rejected/box_array_size.tersus` | A `Box<Array<Int>>` made by `Array::boxed` given where a `Box<Array<Int, 3>>` is wanted: the unsizing conversion only goes from a size to no size |
 | `rejected/array_push.tersus` | An array has no `push`: its size never changes |
 | `rejected/type_return_mismatch.tersus` | A function declared to return an `Int` returns a list |
 | `rejected/type_argument_mismatch.tersus` | `size` is applied to an `Int` |

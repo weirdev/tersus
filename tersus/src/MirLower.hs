@@ -222,12 +222,12 @@ resolveFunction fn = do
   where
     universe ty = ty : case ty of
         TList t -> universe t
-        TArray t _ -> universe t
+        TArrayOf t _ -> universe t
         TBox t -> universe t
         TFn args ret -> concatMap universe (ret : args)
         _ -> []
     arrayHolds ty = case ty of
-        TArray t _ | not (plainElement t) -> failL ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType t)
+        TArrayOf t _ | not (plainElement t) -> failL ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType t)
         _ -> return ()
 
 resolveType :: Type -> L Type
@@ -235,7 +235,7 @@ resolveType ty = defaultType <$> tc (zonk ty)
   where
     defaultType (TVar _) = TInt
     defaultType (TList t) = TList (defaultType t)
-    defaultType (TArray t n) = TArray (defaultType t) n
+    defaultType (TArrayOf t n) = TArrayOf (defaultType t) n
     defaultType (TBox t) = TBox (defaultType t)
     defaultType (TFn args ret) = TFn (map defaultType args) (defaultType ret)
     defaultType t = t
@@ -487,6 +487,10 @@ lowerBuiltin b args = do
         (NewArray, [(M.Const (M.CInt n), _), (_, elementTy)]) -> return (TArray elementTy n)
         (NewArray, _) -> failL "array was not given a constant size"
         (NewBox, [(_, held)]) -> return (TBox held)
+        (NewBoxedArray, [_, (_, elementTy)]) -> return (TBox (TArrayOf elementTy SizeAny))
+        (Unsize, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
+            TBox (TArrayOf elementTy _) -> return (TBox (TArrayOf elementTy SizeAny))
+            _ -> failL "unsize was given something that is not a Box of an array"
         (UnBox, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
             TBox held -> return held
             _ -> failL "Box::unbox was given something that is not a Box"
@@ -527,6 +531,8 @@ builtinRvalue b tys ops =
             return (M.ReadField o ctor field)
         (Project variant field, [o]) -> return (M.ReadField o variant field)
         (NewBox, [o]) -> return (M.MakeBox o)
+        (NewBoxedArray, [_, _]) -> return (M.ListOp M.NewBoxed ops)
+        (Unsize, [o]) -> return (M.Unsize o)
         (UnBox, [o]) -> return (M.Unbox o)
         (Is variant, [o]) -> return (M.IsVariant o variant)
         (Cast variant, [o]) -> return (M.AsVariant o variant)
@@ -608,6 +614,8 @@ builtinLabel b = case b of
     NewBox -> "box"
     UnBox -> "unbox"
     NewArray -> "array"
+    NewBoxedArray -> "boxed_array"
+    Unsize -> "unsize"
     ArrayFrom -> "array_from"
     Plus -> "add"
     Minus -> "sub"

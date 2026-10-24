@@ -50,7 +50,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "array_data", "arrays", "basics", "booleans", "branching", "build_list", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "array_data", "arrays", "basics", "booleans", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "safe_access", "structs", "termination", "traits", "types", "update_list"
@@ -316,6 +316,41 @@ arrayPrograms =
     , ("a function takes and gives a struct with an array", "struct G { cells: Array<Int, 2> }; fn bump(g: G) -> G { return G { cells: set(g.cells, 0, get(g.cells, 0) + 1) }; }; return bump(bump(G { cells: #[1, 1] }));")
     , ("a function takes a list of arrays", "fn total(rows: List<Array<Int, 2>>) -> Int { s = 0; i = 0; while i < size(rows) [{ affirm i >= 0; affirm i <= size(rows); }] shrinks size(rows) - i { s = s + get(get(rows, i), 0) + get(get(rows, i), 1); i = i + 1; }; return s; }; return total(push(push([], #[1, 2]), #[3, 4]));")
     , ("a function gives a list of arrays", "fn make(n: Int) -> List<Array<Int, 2>> [{ affirm n >= 0; }] [{ }] { rows = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { rows = push(rows, array(2, i)); i = i + 1; }; return rows; }; return make(4);")
+    , ("a Box of an Int", "b = Box::new(5); return Box::unbox(b) + 1;")
+    , ("a Box of a Bool", "return Box::unbox(Box::new(true));")
+    , ("a Box of a list", "b = Box::new(push([], 4)); l = Box::unbox(b); return size(l);")
+    , ("a Box of a Box", "b = Box::new(Box::new(3)); c = Box::unbox(b); return Box::unbox(c);")
+    , ("a Box of an array", "b = Box::new(#[1, 2, 3]); return b;")
+    , ("a Box of an array is read", "a = Box::new(#[1, 2, 3]); return last(a) + first(a) + get(a, 1) + size(a);")
+    , ("a Box of an array is set", "b = Box::new(#[1, 2, 3]); b = set(b, 0, 9); return b;")
+    , ("a Box of an array is copied", "b = Box::new(#[1, 2, 3]); c = b; b = set(b, 0, 9); return get(b, 0) * 10 + get(c, 0);")
+    , ("a Box of an array of arrays", "b = Box::new(array(2, #[1, 2])); return get(get(Box::unbox(b), 1), 0);")
+    , ("Array::boxed", "a = Array::boxed(3, 1); return a;")
+    , ("Array::boxed of no elements", "a = Array::boxed(0, 5); return size(a);")
+    , ("Array::boxed with a size the program computes", "n = 2 + 1; a = Array::boxed(n, 4); return a;")
+    , ("Array::boxed of arrays", "a = Array::boxed(3, #[1, 2]); a = set(a, 1, #[7, 8]); return get(get(a, 1), 0) + size(a);")
+    , ("Array::boxed of Bools", "a = Array::boxed(2, true); a = set(a, 0, false); return a;")
+    , ("Array::boxed of zeros", "n = 4; return Array::boxed(n, 0);")
+    , ("Array::boxed is set in place", "b = Array::boxed(5, 3); b = set(b, 2, 40); return get(b, 2) + get(b, 4) + size(b);")
+    , ("a Box with its size is a copy", "a = Array::boxed(3, 1); b = a; a = set(a, 0, 5); return get(a, 0) + get(b, 0);")
+    , ("last of a Box with its size", "a = Array::boxed(4, 1); a = set(a, 3, 8); return last(a);")
+    , ("equal Boxes with their size", "a = Array::boxed(2, 2); b = Array::boxed(2, 2); return a = b;")
+    , ("unequal Boxes with their size", "a = Array::boxed(2, 2); b = Array::boxed(3, 2); return a != b;")
+    , ("equal Boxes of a size and of any size", "fn same(a: Box<Array<Int>>, b: Box<Array<Int>>) -> Bool { return a = b; }; return same(Box::new(#[2, 2]), Array::boxed(2, 2));")
+    , ("a Box of a size is given as one of any size", "fn total(a: Box<Array<Int>>) -> Int { return size(a) * 2; }; t = Box::new(#[1, 2, 3]); return total(t) + size(t);")
+    , ("it is given more than once", "fn n(a: Box<Array<Int>>) -> Int { return size(a); }; return n(Box::new(#[1])) * 100 + n(Box::new(#[1, 2])) * 10 + n(Array::boxed(3, 0));")
+    , ("it is returned", "fn wide() -> Box<Array<Int>> { return Box::new(#[5, 6]); }; a = wide(); return a;")
+    , ("it is returned from a function that is given one", "fn id(a: Box<Array<Int>>) -> Box<Array<Int>> { return a; }; return id(Box::new(#[5, 6]));")
+    , ("it is assigned over one", "a = Array::boxed(2, 0); a = Box::new(#[1, 2, 3]); return size(a);")
+    , ("in a loop", "fn sum(a: Box<Array<Int>>) -> Int [{ define s = size(a); affirm s >= 0; }] [{ }] { t = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { t = t + get(a, i); i = i + 1; }; return t; }; return sum(Box::new(#[1, 2, 3, 4])) + sum(Array::boxed(5, 2));")
+    , ("in a struct", "struct S { a: Box<Array<Int>>, n: Int }; s = S { a: Array::boxed(3, 9), n: 1 }; return s;")
+    , ("in a struct, from a Box of a size", "struct S { a: Box<Array<Int>>, n: Int }; s = S { a: Box::new(#[1, 2, 3]), n: 1 }; return size(s.a) + s.n;")
+    , ("in an enum", "enum E { A { a: Box<Array<Int>> }, B }; e = E::A { a: Array::boxed(3, 4) }; return match e { E::A { a: a } => size(a), E::B => 0 };")
+    , ("in a list", "l = push(push([], Array::boxed(2, 5)), Array::boxed(3, 6)); return size(get(l, 1)) + size(l);")
+    , ("a list of them is copied", "l = push([], Array::boxed(2, 5)); m = l; l = push(l, Array::boxed(1, 1)); return m;")
+    , ("a struct with one is copied", "struct S { a: Box<Array<Int>> }; s = S { a: Array::boxed(2, 5) }; t = s; return t.a = s.a;")
+    , ("a result that is one is printed", "struct S { a: Box<Array<Int>>, n: Int }; return S { a: Array::boxed(2, 5), n: 3 };")
+    , ("a Box of a struct that has one", "struct S { a: Box<Array<Int>> }; b = Box::new(S { a: Array::boxed(2, 5) }); return size(b.a);")
     ]
 
 controlPrograms :: [(String, String)]
@@ -401,6 +436,8 @@ memoryTests =
     , TestCase "arrays made, given and returned in a loop do not grow the frame" (underLimit "fn bump(a: Array<Int, 4>) -> Array<Int, 4> { return set(a, 0, get(a, 0) + 1); }; s = 0; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { a = bump(set(array(4, 0), 1, i)); s = s + get(a, 0) + get(#[1, 2], 1); i = i + 1; }; return s;" "3000000\n")
     , TestCase "a list of structs that own lists" (underLimit "struct S { n: Int, xs: List<Int> }; l = []; i = 0; while i < 50000 [{ affirm i >= 0; }] shrinks 50000 - i { l = push(l, S { n: i, xs: push([], i) }); i = i + 1; }; return size(l);" "50000\n")
     , TestCase "a struct with a list is made and dropped in a loop" (underLimit "struct S { n: Int, xs: List<Int> }; fn mk(i: Int) -> S { return S { n: i, xs: push([], i) }; }; t = 0; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { s = mk(i); t = t + size(s.xs); i = i + 1; }; return t;" "1000000\n")
+    , TestCase "boxed arrays made, set and dropped in a loop" (underLimit "n = 0; total = 0; while n < 200000 [{ affirm n >= 0; }] shrinks 200000 - n { a = Array::boxed(n % 7 + 1, n); a = set(a, 0, 1); total = total + size(a) + get(a, 0); n = n + 1; }; return total;" "999994\n")
+    , TestCase "boxes of arrays made and dropped in a loop" (underLimit "n = 0; total = 0; while n < 1000000 [{ affirm n >= 0; }] shrinks 1000000 - n { a = Box::new(array(2, n)); total = total + get(a, 0); n = n + 1; }; return total;" "499999500000\n")
     , TestCase "lists of lists" (underLimit "rows = []; i = 0; while i < 20000 [{ affirm i >= 0; }] shrinks 20000 - i { row = push(push([], i), i); rows = push(rows, row); i = i + 1; }; return size(rows);" "20000\n")
     , TestCase "values made and dropped in a loop" (underLimit "struct P { x: Int, ys: List<Int> }; s = 0; i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { p = P { x: i, ys: push(push([], i), 1) }; s = s + p.x; i = i + 1; }; return s;" "1999999000000\n")
     ]

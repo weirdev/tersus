@@ -620,7 +620,7 @@ windowTests =
 -- The programs that have arrays are not run on the model of the heap, which holds the values of the heap (a program with arrays and
 -- nothing else is checked structurally by the plan tests)
 usesArrays :: String -> Bool
-usesArrays source = any (`isInfixOf` source) ["Array<", "array(", "#["]
+usesArrays source = any (`isInfixOf` source) ["Array<", "Array::", "array(", "#["]
 
 testOwnership :: Test
 testOwnership =
