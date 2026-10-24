@@ -196,6 +196,9 @@ listPrograms =
     , ("a local against a nested empty list", "x = [[true]]; return x != [[]];")
     , ("deeper empty lists", "return [[[]]] = [[[]]];")
     , ("an empty list among others", "return [[], [1], []];")
+    , ("a parameter assigned a part", "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);")
+    , ("a parameter assigned a part that is kept", "fn f(row: List<Int>, rows: List<List<Int>>) -> List<Int> [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return row; }; return f([1], [[2, 3]]);")
+    , ("a parameter assigned a field", "struct P { xs: List<Int> }; fn f(xs: List<Int>, p: P) -> Int { xs = p.xs; return size(xs); }; return f([1], P { xs: [2, 3] });")
     , ("a list that is not returned", "x = [1, 2];")
     , ("returned in a branch only", "x = [1]; if size(x) > 5 { return x; };")
     ]
