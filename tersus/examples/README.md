@@ -7,7 +7,8 @@ Runnable programs showing what the language and standard library can do today. E
 Run one yourself from the `tersus/` directory:
 
 ```
-stack run -- run examples/safe_access.tersus     # validates, evaluates, prints 38
+stack run -- run examples/safe_access.tersus     # validates, builds natively (needs clang), runs, prints 38
+stack run -- eval examples/safe_access.tersus    # validates, evaluates the MIR with the interpreter, prints 38
 stack run -- check examples/rules.tersus         # validates only, prints OK
 stack run -- run examples/rejected/affirm.tersus # prints the validation error, exits 1
 ```

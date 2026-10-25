@@ -7,7 +7,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package. Cor
 Work from `tersus/` unless you are touching the Python prototype.
 
 - `stack build`: compile the Haskell package and surface warnings.
-- `stack run -- check <file>` / `stack run -- run <file>`: validate, or validate and run, a `.tersus` program via the CLI in `app/Main.hs` (logic in `src/Cli.hs`). `stack run -- llvm <file>` prints the LLVM IR of a validated program and `stack run -- build <file> -o <output>` compiles it with clang (which `testNative` also needs to run the executables; it passes without). `testNative` also runs some programs under `valgrind` when it is installed; the heap model of `testOwnership` needs neither.
+- `stack run -- check <file>` / `stack run -- run <file>`: validate, or validate, compile to native code and run (needs clang), a `.tersus` program via the CLI; `stack run -- eval <file>` runs the validated MIR with the reference interpreter instead (what `testNative` compares native code with) in `app/Main.hs` (logic in `src/Cli.hs`). `stack run -- llvm <file>` prints the LLVM IR of a validated program and `stack run -- build <file> -o <output>` compiles it with clang (which `testNative` also needs to run the executables; it passes without). `testNative` also runs some programs under `valgrind` when it is installed; the heap model of `testOwnership` needs neither.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`.
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in `tersus/README.md`.
 - `python python/tests.py`: run legacy Python prototype checks from the repository root.

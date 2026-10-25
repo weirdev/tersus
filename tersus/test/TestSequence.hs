@@ -157,7 +157,7 @@ testSequence =
     compiles source = case compileSource source of
         Ok _ -> Nothing
         Error e -> Just ("Failed: " ++ e)
-    runsAs source expected = case runSource Run source of
+    runsAs source expected = case runSource Interpret source of
         Ok output -> if output == expected then Nothing else Just ("Expected " ++ expected ++ ", got " ++ output)
         Error e -> Just ("Failed: " ++ e)
     errorHas source expected = case compileSource source of

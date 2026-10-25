@@ -6,7 +6,7 @@ import System.Exit (ExitCode (..), exitWith)
 import System.IO (hPutStr, hPutStrLn, stderr)
 
 import Cli
-import Native (buildExecutable)
+import Native (buildExecutable, runExecutable)
 import Utils
 
 main :: IO ()
@@ -24,6 +24,12 @@ main = do
                         case built of
                             Error e -> failWith e
                             Ok () -> return ()
+                    Run -> do
+                        ran <- runExecutable output
+                        case ran of
+                            Error e -> failWith e
+                            Ok ExitSuccess -> return ()
+                            Ok code -> exitWith code
                     _ -> unless (null output) (putStrLn output)
 
 failWith :: String -> IO ()

@@ -8,7 +8,7 @@ module TestNative
 import Control.Exception (IOException, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, listDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
@@ -18,14 +18,14 @@ import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
 import LlvmEmit (emitProgram)
-import Native (buildExecutable, buildExecutableWith)
+import Native (buildExecutable, buildExecutableWith, runExecutable)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestHarness
 import Utils
 
 -- Native code: the LLVM IR of a program, and the executable clang builds from it. The executable has to do what the
--- executor of the MIR does, so each program here is built, run, and compared with `tersus run`: the same output, the same
+-- executor of the MIR does, so each program here is built, run, and compared with `tersus eval`: the same output, the same
 -- error and the same exit status. The builds need clang, and pass without it.
 
 testNative :: Test
@@ -42,7 +42,7 @@ testNative =
         , TestList "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
-        , TestList "build" [testBuildKeepsFiles]
+        , TestList "build" [testBuildKeepsFiles, testEveryExampleIsBuilt, testRunExecutable]
         , TestList "memory" memoryTests
         , TestList "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
         ]
@@ -537,6 +537,29 @@ stopPrograms =
     , ("largest still fits", "return 9223372036854775806 + 1;")
     ]
 
+-- `tersus run` compiles and runs the program: the exit status of the program comes back, and what it prints goes to the output of this process
+testRunExecutable :: Test
+testRunExecutable = TestCase "run builds, runs and removes the executable" $ do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else do
+            ran <- case llvmSource "return 6 * 7;" of
+                Error e -> pure (Error e)
+                Ok ir -> runExecutable ir
+            failing <- case llvmSource "return 9223372036854775807 + 1;" of
+                Error e -> pure (Error e)
+                Ok ir -> runExecutable ir
+            pure (testAssertEq (ran, failing) (Ok ExitSuccess, Ok (ExitFailure 1)))
+
+-- Every example that validates is run natively: a new example has to be added to `nativeExamples`
+testEveryExampleIsBuilt :: Test
+testEveryExampleIsBuilt = TestCase "every example is in nativeExamples" $ do
+    files <- listDirectory "examples"
+    let examples = [f | f <- files, reverse (take 8 (reverse f)) == ".tersus"]
+        missing = [f | f <- examples, "examples/" ++ f `notElem` nativeExamples]
+    pure (testAssertEq missing [])
+
 -- Building to `<output>` must not touch an `<output>.build` that is already there
 testBuildKeepsFiles :: Test
 testBuildKeepsFiles = TestCase "an existing output.build directory is kept" $ do
@@ -569,7 +592,7 @@ sameAsMir name source = do
             Ok _ -> case llvmSource source of
                 Error e -> pure (Just e)
                 Ok ir -> do
-                    buildAndRun (map safeChar name) name ir (expected (runSource Run source))
+                    buildAndRun (map safeChar name) name ir (expected (runSource Interpret source))
   where
     expected (Ok output) = (ExitSuccess, if null output then "" else output ++ "\n", "")
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")

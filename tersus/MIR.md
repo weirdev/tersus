@@ -1,6 +1,6 @@
 # Tersus MIR (design)
 
-Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, `MirVerify.hs`, `MirValidate.hs`, `MirEval.hs`; `tersus run` validates and runs the MIR and `tersus mir` prints it) and the lowering to LLVM IR has begun (`LlvmEmit.hs`, `tersus llvm` and `tersus build`; see Native code). The later steps are listed under Phases so the data model is shaped for them.
+Status: steps 1 and 2 are implemented (`Mir.hs`, `MirLower.hs`, `MirVerify.hs`, `MirValidate.hs`, `MirEval.hs`; `tersus eval` validates and runs the MIR, `tersus run` validates, compiles and runs the native code, and `tersus mir` prints it) and the lowering to LLVM IR has begun (`LlvmEmit.hs`, `tersus llvm` and `tersus build`; see Native code). The later steps are listed under Phases so the data model is shaped for them.
 
 ```
 step 1:   source -> AST -> validation -> MIR -> execution of the MIR
@@ -167,7 +167,7 @@ The validator does not run the MIR: a caller knows a callee by its contracts. Th
 
 - `Cli.runSource`: parse, type check, **lower, validate the MIR, run the MIR** (step 1 validated the AST and then lowered it). A lowering error is an internal error (a program that type checks always lowers) and is reported as `Lowering failed: ...`.
 - A new command `tersus mir <file>` prints the MIR of a validated program (like `rustc --emit=mir`). It is how a lowering is read and tested.
-- `tersus check` parses, lowers and validates, as `run` does before it runs.
+- `tersus check` parses, lowers and validates, as `run` and `eval` do before they run.
 
 ## Tests
 
@@ -214,7 +214,7 @@ So an operation of the MIR either gives a value or traps. Two kinds of trap:
 - **Memory** is managed by ownership, decided on the MIR (see Ownership): nothing is counted at run time, and a value is freed when its owner lets go of it.
 - **Arithmetic.** `Add`, `Sub` and `Mul` are `llvm.s{add,sub,mul}.with.overflow.i64` followed by a branch to the function's `overflow` block, which calls `tersus_overflow` (the message `Evaluation failed: Integer overflow` and exit status 1 of `tersus run`). `Div` rounds down, where `sdiv` truncates, so it subtracts 1 from the quotient when the remainder is not 0 and has the other sign than the divisor, and the one quotient that does not fit (the smallest `Int` divided by -1) goes to the overflow block. `Mod` takes the sign of the divisor, with `srem` by 1 in place of -1, which `srem` leaves undefined for the smallest `Int`, and the result 0 that follows.
 - **Contracts are not checked.** A divisor that is not 0, an index in range, a list that is not empty are what validation proved, and the operations assume them as `unreachable` would (`sdiv` by 0 is undefined in LLVM). A bug in the validator is undefined behaviour in native code, where `tersus run` reports it. Overflow is the one trap, since nothing proves it cannot happen.
-- **Tests.** `TestNative` builds programs and compares what the executable prints, and its exit status, with `tersus run` (every example, structs, enums and lists and their operations, divisions of every sign, loops, recursion, and each overflow; calls of function values are lowered without validation, since the validator cannot follow them yet); the builds pass without clang.
+- **Tests.** `TestNative` builds programs and compares what the executable prints, and its exit status, with `tersus eval` (every example, structs, enums and lists and their operations, divisions of every sign, loops, recursion, and each overflow; calls of function values are lowered without validation, since the validator cannot follow them yet); the builds pass without clang.
 
 ## Ownership
 

@@ -187,6 +187,7 @@ testCliParseCommandLine =
         (map parseCommandLine [["check", "a.tersus"], ["run", "-"], ["run"], ["frob", "a.tersus"], []])
         [Just (Check, "a.tersus"), Just (Run, "-"), Nothing, Nothing, Nothing]
         `orElse` testAssertEq (parseCommandLine ["mir", "a.tersus"]) (Just (Mir, "a.tersus"))
+        `orElse` testAssertEq (parseCommandLine ["eval", "a.tersus"]) (Just (Interpret, "a.tersus"))
 
 testCliRenderValue :: TestResult
 testCliRenderValue =
@@ -197,7 +198,7 @@ testCliRenderValue =
 testCliRun :: TestResult
 testCliRun =
     testAssertEq
-        (map (runSource Run) ["x = [1, 2]; return size(x);", "return [3, 4];", "return 1 < 2;", "x = 5; affirm x = 5;", ""])
+        (map (runSource Interpret) ["x = [1, 2]; return size(x);", "return [3, 4];", "return 1 < 2;", "x = 5; affirm x = 5;", ""])
         [Ok "2", Ok "[3, 4]", Ok "true", Ok "", Ok ""]
 
 testCliCheck :: TestResult
@@ -211,11 +212,11 @@ testCli =
         , testCliRenderValue
         , testCliRun
         , testCliCheck
-        , testAssertErrorContains "Parse error" (runSource Run "x = ;")
-        , testAssertErrorContains "Validation failed" (runSource Run "x = 5; affirm x < 4;")
+        , testAssertErrorContains "Parse error" (runSource Interpret "x = ;")
+        , testAssertErrorContains "Validation failed" (runSource Interpret "x = 5; affirm x < 4;")
         , testAssertErrorContains "Validation failed" (runSource Check "x = 5; affirm x < 4;")
         , -- Validation must reject the program before it is evaluated
-          testAssertErrorContains "Validation failed" (runSource Run "return first([]);")
+          testAssertErrorContains "Validation failed" (runSource Interpret "return first([]);")
         ]
 
 -- MIR tests
@@ -486,7 +487,7 @@ testIntRange =
                     ]
                ]
             ++ [testAssertEq (runMir "x = 2; return x * 4611686018427387904;") (Error "Integer overflow")]
-            ++ [ testAssertErrorContains "Integer overflow" (runSource Run "return 9223372036854775807 + 1;")
+            ++ [ testAssertErrorContains "Integer overflow" (runSource Interpret "return 9223372036854775807 + 1;")
                , -- (validation reasons about unbounded integers, so a property it proves holds for the runs that do not stop)
                  testAssertEq (runSource Check "x = 9223372036854775807; y = x + 1; affirm y = x + 1;") (Ok "OK")
                ]
