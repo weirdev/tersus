@@ -208,6 +208,7 @@ evaluateCalls st0 proofs = go (200 :: Int) st0 (concatMap (callTerms st0) proofs
     go budget st (term : rest)
         | budget <= 0 || evaluated st term = go budget st rest
         | otherwise = case term of
+            FApp (ATerm (Iota "readByte")) _ -> throwV "A proof calls readByte, which reads the input: it has no value in a proof"
             FApp (ATerm iota) args | Just (name, info) <- calledFunction st iota -> do
                 st' <- evaluateCall st name info args term
                 -- (what it promises may call functions too)
@@ -224,6 +225,8 @@ calledFunction _ _ = Nothing
 -- The calls of functions of the program in a proof, those inside the arguments of another first
 callTerms :: PState -> IotaProof -> [IotaProof]
 callTerms st proof = case proof of
+    -- (readByte is a name of the standard library, which a program cannot declare again)
+    FApp (ATerm (Iota "readByte")) args -> concatMap (callTerms st) args ++ [proof]
     FApp (ATerm iota) args
         | Just _ <- calledFunction st iota -> concatMap (callTerms st) args ++ [proof]
         | otherwise -> concatMap (callTerms st) args
