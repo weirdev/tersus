@@ -58,4 +58,32 @@ testGenerics =
                 , testCase "a type is not in a nested function" (rejected "fn outer<T>(a: T) -> Int { fn inner(b: T) -> Int { return 0; }; return 0; }; return 0;" "unknown type T")
                 , testCase "the declaration is parsed with spaces" (runs "fn second < A , B > (a: A, b: B) -> B { return b; }; return second(3, true);" (VBool True))
                 ]
+            , TestList
+                "structs with types"
+                [ testCase "a struct for a type" (runs "struct Pair<T> { a: T, b: T };  p = Pair<Int> { a: 1, b: 2 }; return p.a + p.b;" (VInt 3))
+                , testCase "a value is printed as the struct" (runs "struct Pair<T> { a: T, b: T };  return Pair<Bool> { a: true, b: false };" (VData "Pair" [("a", VBool True), ("b", VBool False)]))
+                , testCase "structs of two types in one program" (runs "struct Pair<T> { a: T, b: T };  x = Pair<Int> { a: 1, b: 2 }; y = Pair<List<Int>> { a: push([], 5), b: [] }; return size(y.a) + x.b;" (VInt 3))
+                , testCase "a type is a type of its own" (rejected "struct Pair<T> { a: T, b: T };  fn f(p: Pair<Int>) -> Int { return p.a; }; return f(Pair<Bool> { a: true, b: false });" "argument 1 of f: expected Pair<Int>, got Pair<Bool>")
+                , testCase "the fields have the type" (rejected "struct Pair<T> { a: T, b: T };  x = Pair<Int> { a: 1, b: true }; return 0;" "field b of Pair<Int>: expected Int, got Bool")
+                , testCase "structs of one type are compared" (runs "struct Pair<T> { a: T, b: T };  return Pair<Int> { a: 1, b: 2 } = Pair<Int> { a: 1, b: 2 };" (VBool True))
+                , testCase "a function over any type of one" (runs "struct Pair<T> { a: T, b: T };  fn swap<U>(p: &Pair<U>) -> Pair<U> { return Pair<U> { a: p.b, b: p.a }; }; q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }); return q;" (VData "Pair" [("a", VList [VInt 2, VInt 3]), ("b", VList [VInt 1])]))
+                , testCase "its type is the type of the struct" (runs "struct Pair<T> { a: T, b: T };  fn first<U>(p: Pair<U>) -> U { return p.a; }; return first(Pair<Bool> { a: true, b: false });" (VBool True))
+                , testCase "an update keeps the type" (runs "struct Pair<T> { a: T, b: T };  a = Pair<Int> { a: 1, b: 2 }; b = Pair<Int> { b: 9, ..a }; return b.a + b.b;" (VInt 10))
+                , testCase "a struct that holds another of its type" (runs "struct Pair<T> { a: T, b: T };  struct Wrap<T> { inner: Pair<T>, tag: Int }; fn mk<T>(x: T, y: T) -> Wrap<T> { return Wrap<T> { inner: Pair<T> { a: x, b: y }, tag: 7 }; }; return mk(true, false).tag;" (VInt 7))
+                , testCase "in a list, an array and a Box" (runs "struct Pair<T> { a: T, b: T };  l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<Bool> { a: true, b: true }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return get(l, 0).b + b.a + size(a);" (VInt 9))
+                , testCase "a type and a size" (runs "struct Vec<T, n> { cells: Array<T, n>, used: Int }; fn capacity<T, m>(v: &Vec<T, m>) -> Int { return m + v.used; }; return capacity(Vec<Int, 3> { cells: #[1, 2, 3], used: 1 }) * 10 + capacity(Vec<Bool, 2> { cells: #[true, false], used: 0 });" (VInt 42))
+                , testCase "an array of the type and the size is known" (valid "struct Vec<T, n> { cells: Array<T, n>, used: Int }; v = Vec<Int, 3> { cells: #[1, 2, 3], used: 0 }; affirm size(v.cells) = 3; return get(v.cells, 2);")
+                , testCase "a Box of an array of the type" (runs "struct Holder<T> { items: Box<Array<T>>, len: Int }; h = Holder<List<Int>> { items: Array::boxed(2, push([], 1)), len: 2 }; return get(h.items, 1);" (VList [VInt 1]))
+                , testCase "a contract about it" (valid "struct Holder<T> { items: Box<Array<T>>, len: Int }; fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; affirm s > 0; }] [{ affirm size(return.items) = n; }] { return Holder<T> { items: Array::boxed(n, x), len: n }; }; fn at<T>(h: &Holder<T>, i: Int) -> T [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ }] { return get(h.items, i); }; h = holder(push([], 5), 3); return at(h, 2);")
+                , testCase "a struct that holds itself in a Box" (valid "struct L<T> { v: T, next: Box<L<T>> }; return 0;")
+                , testCase "or in a list" (runs "struct Chain<T> { value: T, rest: List<Chain<T>> }; c = Chain<Int> { value: 1, rest: push([], Chain<Int> { value: 2, rest: [] }) }; return get(c.rest, 0).value;" (VInt 2))
+                , testCase "but not by value" (rejected "struct L<T> { v: T, next: L<T> }; return 0;" "L holds itself, so it would have no size")
+                , testCase "its parameters are given" (rejected "struct Pair<T> { a: T, b: T };  fn f(p: Pair) -> Int { return 0; }; return 0;" "Pair has parameters <T>, which a type gives")
+                , testCase "as many as it has" (parseFails "struct Pair<T> { a: T, b: T };  x = Pair<Int, Int> { a: 1, b: 2 }; return 0;")
+                , testCase "a size where a type is wanted" (parseFails "struct Pair<T> { a: T, b: T };  x = Pair<3> { a: 1, b: 2 }; return 0;")
+                , testCase "a type is not a function" (rejected "struct Pair<T> { a: T, b: T };  fn inc(n: Int) -> Int { return n + 1; }; x = Pair<fn(Int) -> Int> { a: inc, b: inc }; return 0;" "a type parameter is not a function")
+                , testCase "a type has to be declared" (rejected "struct Q<T> { a: U }; return 0;" "unknown type U")
+                , testCase "a parameter is not named twice" (rejected "struct Q<T, T> { a: T }; return 0;" "names a parameter twice")
+                , testCase "the declaration is parsed with spaces" (runs "struct Q < T , n > { a: T, b: Array<T, n> }; q = Q < Int , 2 > { a: 1, b: #[2, 3] }; return q.a + get(q.b, 1);" (VInt 4))
+                ]
             ]

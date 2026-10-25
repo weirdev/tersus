@@ -1200,9 +1200,39 @@ return head(push([], 40)) + size(head(push([], push([], 1))));   // head of a Li
 - **A function that calls itself** gives each of its type parameters as it is, in any order, or a type that does not use them (`f(b, a, n - 1)`, `f(1, n - 1)`). `f(push([], a), n - 1)` is an error: native code has a copy of the function for each type, and a type that grows at each call would need one for each depth.
 - **Not a function.** A type parameter is a type of value: `id(inc)` for a function `inc` is an error, since native code has no copy of a function for it.
 - **Native code is made for each type.** A program that runs has a copy of the function for each list of types (and sizes) it is called with, `head<Int>` and `head<List<Int>>` (`MirMono` finds them by matching the types of the parameters with the types of the arguments and of the local that gets the result), and so a `T` that owns something (a list) is moved, copied and freed in the copy for it, and one that does not is a plain copy.
-- **Not yet**: type parameters of a struct (`struct Vec<T>`), of an enum, or of a function of an impl.
+- **Not yet**: type parameters of an enum, or of a function of an impl. A struct can have them (see below).
 
 See `examples/type_parameters.tersus`.
+
+### Structs with types
+
+A struct can have types as well as sizes: `struct Pair<T>` is a struct for each type, and `struct Vec<T, n>` one for each type and size. A parameter that starts with a capital letter is a type and any other is a size, as for a function; a type gives them in the order the struct declares them, and so does a literal.
+
+```tersus
+struct Pair<T> {
+    a: T,
+    b: T,
+};
+
+fn swap<U>(p: &Pair<U>) -> Pair<U> {
+    return Pair<U> { a: p.b, b: p.a };
+};
+
+struct Holder<T> {
+    items: Box<Array<T>>,
+    len: Int,
+};
+
+q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) });
+return size(q.a);   // 2
+```
+
+- **Each list of types and sizes is a struct of its own.** `Pair<Int>` and `Pair<Bool>` cannot be compared or given for each other (`argument 1 of f: expected Pair<Int>, got Pair<Bool>`), and the fields have the types (`field b of Pair<Int>: expected Int, got Bool`). A struct written with none (`fn f(p: Pair)`) is an error, as is a type that is a function.
+- **A function with type parameters takes any of them**: `swap(Pair<List<Int>> { ... })` makes `U` a `List<Int>`, as it does for a list (`MirMono` matches the types of the instance's arguments), and native code is made for each type, so a `Pair<List<Int>>` owns its lists and is moved, copied and freed as a struct with them.
+- **It is an ordinary struct otherwise**: held inline, read with `.`, updated with `..base`, held in a `Box`, a list or an array, compared, and printed as `Pair { a: ..., b: ... }`. It may hold itself in a `Box` or a list (`next: Box<Node<T>>`), not by value. A field can be a `Box<Array<T>>` and a contract can speak of it (`size(return.items) = n`), which is the shape of a list that is a library type.
+- **What it cannot be yet**: an enum with parameters, methods and traits for these structs (`impl Pair<Int>`), a size of `?`, and a literal that leaves the types out (`Pair { a: 1, b: 2 }`): the types are written.
+
+See `examples/generic_structs.tersus`.
 
 ### Structs with sizes
 

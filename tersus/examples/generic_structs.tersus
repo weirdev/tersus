@@ -1,0 +1,43 @@
+// A struct can have types as well as sizes: `struct Pair<T>` is a struct for each type, written Pair<Int>, and `struct Vec<T, n>` one for
+// each type and size. A parameter that starts with a capital letter is a type and any other is a size, as for a function. A literal
+// and a type write them (`Pair<Int> { a: 1, b: 2 }`), a function with type parameters takes any of them (`fn swap<U>(p: &Pair<U>)`),
+// and native code is made for each (Pair<Int> and Pair<List<Int>> are structs of their own, so a Pair<List<Int>> owns its lists).
+struct Pair<T> {
+    a: T,
+    b: T,
+};
+
+fn swap<U>(p: &Pair<U>) -> Pair<U> {
+    return Pair<U> { a: p.b, b: p.a };
+};
+
+// A field can be a Box of an array of the type: the start of a list that is a library type
+struct Holder<T> {
+    items: Box<Array<T>>,
+    len: Int,
+};
+
+fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; affirm s > 0; }] [{ affirm size(return.items) = n; }] {
+    return Holder<T> { items: Array::boxed(n, x), len: n };
+};
+
+fn at<T>(h: &Holder<T>, i: Int) -> T [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ }] {
+    return get(h.items, i);
+};
+
+// A type and a size together
+struct Vec<T, n> {
+    cells: Array<T, n>,
+    used: Int,
+};
+
+fn capacity<T, m>(v: &Vec<T, m>) -> Int {
+    return m;
+};
+
+lists = Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) };
+turned = swap(lists);                                   // a is [2, 3] now
+ints = swap(Pair<Int> { a: 10, b: 20 });                // a is 20
+h = holder(push(push([], 7), 8), 3);
+v = Vec<Bool, 4> { cells: array(4, false), used: 0 };
+return size(turned.a) * 1000 + ints.a + size(at(h, 2)) * 100 + capacity(v);    // 2000 + 20 + 200 + 4

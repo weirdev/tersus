@@ -158,7 +158,10 @@ zonk (TList t) = TList <$> zonk t
 zonk (TArrayOf t size) = TArrayOf <$> zonk t <*> zonkSize size
 zonk (TForall sizes types t) = TForall sizes types <$> zonk t
 -- (the sizes of an instance of a struct with sizes are in its name)
-zonk (TNamed name) | Just (base, sizes) <- instanceOf name = (\sizes' -> TNamed (instanceName base sizes')) <$> mapM zonkSize sizes
+zonk (TNamed name) | Just (base, args) <- instanceOf name = (\args' -> TNamed (instanceName base args')) <$> mapM zonkArg args
+  where
+    zonkArg (ArgSize size) = ArgSize <$> zonkSize size
+    zonkArg (ArgType t) = ArgType <$> zonk t
 zonk (TBox t) = TBox <$> zonk t
 zonk (TRef t) = TRef <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
@@ -193,7 +196,7 @@ unify a b = do
         (TNamed x, TNamed y)
             | x == y -> return True
             -- two instances of one struct with sizes are the same type if their sizes are
-            | Just (b, xs) <- instanceOf x, Just (c, ys) <- instanceOf y, b == c, length xs == length ys -> allM (uncurry unifySize) (zip xs ys)
+            | Just (b, xs) <- instanceOf x, Just (c, ys) <- instanceOf y, b == c, length xs == length ys -> allM (uncurry unifyArg) (zip xs ys)
             | otherwise -> return False
         (TVariant x, TVariant y) -> return (x == y)
         -- a value read as one variant is still a value of its enum
@@ -213,6 +216,12 @@ unify a b = do
     allM f (x : xs) = do
         ok <- f x
         if ok then allM f xs else return False
+
+-- Makes two arguments of an instance of a struct equal if possible
+unifyArg :: Arg -> Arg -> TC Bool
+unifyArg (ArgSize a) (ArgSize b) = unifySize a b
+unifyArg (ArgType a) (ArgType b) = unify a b
+unifyArg _ _ = return False
 
 variantOf :: Name -> Name -> TC Bool
 variantOf typeName variant = do
@@ -294,28 +303,34 @@ assignVar _ env var t =
 
 -- Structs
 
--- A struct with sizes is a struct for each list of sizes (Packet<4>), which is declared the first time it is looked at
+-- A struct with sizes and types is a struct for each list of them (Packet<4>, Vec<Int, 3>), which is declared the first time it is looked at
 ensureInstance :: Name -> TC ()
 ensureInstance name = do
     s <- getState
     unless (Map.member name (tcCtors s)) $
         case instanceOf name of
-            Just (base, sizes) | Just (params, fields) <- Map.lookup base (tcGenerics s) -> do
-                when (length sizes /= length params) $
-                    failTc ("Type error: " ++ base ++ " has " ++ show (length params) ++ " sizes (" ++ intercalate ", " params ++ "), got " ++ show (length sizes))
-                when (SizeAny `elem` sizes) $
+            Just (base, args) | Just (params, fields) <- Map.lookup base (tcGenerics s) -> do
+                when (length args /= length params) $
+                    failTc ("Type error: " ++ base ++ " has " ++ show (length params) ++ " parameters (" ++ intercalate ", " params ++ "), got " ++ show (length args))
+                when (ArgSize SizeAny `elem` args) $
                     failTc ("Type error: " ++ name ++ " has a size that is not given: a struct with a size of ? cannot be held yet")
-                mapM_ sizeKnown sizes
-                let fields' = [(f, substSizes (zip params sizes) t) | (f, t) <- fields]
-                s' <- getState
-                putState s'{tcTypes = Map.insert name [name] (tcTypes s'), tcCtors = Map.insert name (name, fields') (tcCtors s')}
+                mapM_ argKnown (zip params args)
+                case instanceFields params args fields of
+                    Nothing -> failTc ("Type error: " ++ name ++ " gives a size where " ++ base ++ " wants a type, or a type where it wants a size (" ++ intercalate ", " [p ++ (if isTypeName p then " is a type" else " is a size") | p <- params] ++ ")")
+                    Just fields' -> do
+                        s' <- getState
+                        putState s'{tcTypes = Map.insert name [name] (tcTypes s'), tcCtors = Map.insert name (name, fields') (tcCtors s')}
             _ -> return ()
   where
-    -- (a size can come to be an Int, as the size of a function that is given the struct, so it has to fit in one)
-    sizeKnown size = case size of
+    -- (a size can come to be an Int, as the size of a function that is given the struct, so it has to fit in one; a type is a type of value)
+    argKnown (_, ArgSize size) = case size of
         SizeParam _ -> sizeInScope size
         SizeConst c | not (inIntRange c) -> failTc ("Type error: the size " ++ show c ++ " in " ++ name ++ " is more than an Int can hold (an Int is 64 bits)")
         _ -> return ()
+    argKnown (p, ArgType ty) = do
+        ty' <- zonk ty
+        when (hasFunction ty') $ failTc ("Type error: the type " ++ p ++ " of " ++ name ++ " would be " ++ renderType ty' ++ ", and a type parameter is not a function")
+        checkType ty'
 
 ctorInfo :: Name -> TC (Name, [(Variable, Type)])
 ctorInfo name = do
@@ -333,7 +348,7 @@ typeCtors name = do
     case Map.lookup name (tcTypes s) of
         Just ctors -> return ctors
         Nothing -> case Map.lookup name (tcGenerics s) of
-            Just (params, _) -> failTc ("Type error: " ++ name ++ " has sizes <" ++ intercalate ", " params ++ ">, which a type gives: " ++ instanceName name (map SizeParam params))
+            Just (params, _) -> failTc ("Type error: " ++ name ++ " has parameters <" ++ intercalate ", " params ++ ">, which a type gives, as in " ++ name ++ "<" ++ intercalate ", " params ++ ">")
             Nothing -> failTc ("Type error: unknown type " ++ name)
 
 -- A struct built from values for its fields, which are given in declaration order
@@ -391,17 +406,17 @@ declareTypeWith name ctors = do
         then failTc ("Type already defined: " ++ name)
         else putState s{tcTypes = Map.insert name ctors (tcTypes s)}
 
--- A struct with sizes: the declaration, from which each Packet<4> is made
+-- A struct with sizes and types: the declaration, from which each Packet<4> and Vec<Int, 3> is made
 declareGeneric :: Name -> [Variable] -> [(Variable, Type)] -> TC ()
-declareGeneric name sizes fields = do
+declareGeneric name params fields = do
     s <- getState
     if Map.member name (tcTypes s) || Map.member name (tcTraits s) || Map.member name (tcGenerics s)
         then failTc ("Type already defined: " ++ name)
         else do
-            when (length sizes /= length (nubSizes sizes)) $ failTc ("Type error: " ++ name ++ " names a size twice")
-            putState s{tcGenerics = Map.insert name (sizes, fields) (tcGenerics s)}
-            -- (the fields are checked with the sizes in scope, and the struct may hold itself in a Box)
-            withSizes sizes (mapM_ (checkType . snd) fields)
+            when (length params /= length (nubSizes params)) $ failTc ("Type error: " ++ name ++ " names a parameter twice")
+            putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s)}
+            -- (the fields are checked with the sizes and types in scope, and the struct may hold itself in a Box)
+            withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkType . snd) fields)
             checkFinite name [fields]
   where
     nubSizes = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -794,7 +809,7 @@ checkStatement top ctx env stmt =
         ValidationStatement vs -> do
             (env', vs') <- checkValidation ctx env vs
             return (ctx, env', ValidationStatement vs')
-        StructDef name sizes fields | not (null sizes) -> declareGeneric name sizes fields >> return (ctx, env, stmt)
+        StructDef name params fields | not (null params) -> declareGeneric name params fields >> return (ctx, env, stmt)
         StructDef name _ fields -> do
             declareType name
             mapM_ (checkType . snd) fields

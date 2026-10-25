@@ -51,7 +51,7 @@ nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
-        , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
+        , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "safe_access", "sized_structs", "structs", "termination", "traits", "type_parameters", "types", "update_list"
         ]
@@ -378,6 +378,15 @@ arrayPrograms =
     , ("a type parameter that is an empty list", "fn same<T>(a: T, b: T) -> Bool { return a = b; }; return same([], []);")
     , ("a function with a type calls itself", "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(a, n - 1); }; return f(push([], 2), 3);")
     , ("a function with two types calls itself with them swapped", "fn f<A, B>(a: A, b: B, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(b, a, n - 1); }; return f(1, push([], 2), 3);")
+    , ("a struct for a type", "struct Pair<T> { a: T, b: T }; p = Pair<Int> { a: 1, b: 2 }; return p.a + p.b;")
+    , ("a struct for a type that owns", "struct Pair<T> { a: T, b: T }; return Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) };")
+    , ("a function over structs of any type", "struct Pair<T> { a: T, b: T }; fn swap<U>(p: &Pair<U>) -> Pair<U> { return Pair<U> { a: p.b, b: p.a }; }; q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }); r = swap(Pair<Bool> { a: true, b: false }); return q;")
+    , ("a struct of a struct, both with the type", "struct Pair<T> { a: T, b: T }; struct Wrap<T> { inner: Pair<T>, tag: Int }; fn mk<T>(x: T, y: T) -> Wrap<T> { return Wrap<T> { inner: Pair<T> { a: x, b: y }, tag: 7 }; }; return mk(push([], 1), push([], 2));")
+    , ("a struct with a type is copied and updated", "struct Pair<T> { a: T, b: T }; a = Pair<List<Int>> { a: push([], 1), b: [] }; b = Pair<List<Int>> { b: push([], 9), ..a }; return a;")
+    , ("a struct with a type in an array, a list and a Box", "struct Pair<T> { a: T, b: T }; l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<List<Int>> { a: push([], 4), b: [] }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return a;")
+    , ("a struct with a type and a size", "struct Vec<T, n> { cells: Array<T, n>, used: Int }; fn capacity<T, m>(v: &Vec<T, m>) -> Int { return m + v.used; }; return capacity(Vec<Int, 3> { cells: #[1, 2, 3], used: 1 }) * 10 + capacity(Vec<Bool, 2> { cells: #[true, false], used: 0 });")
+    , ("a struct with a Box of an array of its type", "struct Holder<T> { items: Box<Array<T>>, len: Int }; fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; affirm s > 0; }] [{ affirm size(return.items) = n; }] { return Holder<T> { items: Array::boxed(n, x), len: n }; }; fn at<T>(h: &Holder<T>, i: Int) -> T [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ }] { return get(h.items, i); }; h = holder(push([], 5), 3); g = holder(true, 2); return at(h, 2);")
+    , ("a struct with a type holds itself in a Box", "struct Node<T> { value: T, next: List<Node<T>> }; n = Node<List<Int>> { value: push([], 1), next: push([], Node<List<Int>> { value: [], next: [] }) }; return n;")
     , ("a type that nothing decides", "fn nil<T>() -> List<T> { return []; }; return size(nil());")
     , ("a size parameter", "fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int { total = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { total = total + get(a, i) * get(b, i); i = i + 1; }; return total; }; return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);")
     , ("a size parameter, once for each size", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) * 100 + count(array(4, 0)) * 10 + count(#[]);")
