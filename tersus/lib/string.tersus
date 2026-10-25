@@ -11,19 +11,27 @@ struct String {
 };
 
 impl String {
-    // The text of a then the text of b
-    fn concat(self: Self, other: &String) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + size(other.bytes); }] {
+    // The text of a then the text of b: the bytes of a, then the bytes of b
+    fn concat(self: Self, other: &String) -> Self [{ }] [{
+        affirm size(return.bytes) = size(self.bytes) + size(other.bytes);
+        affirm forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j);
+        affirm forall j in 0..size(other.bytes): get(return.bytes, size(self.bytes) + j) = get(other.bytes, j);
+    }] {
         bytes = self.bytes;
         i = 0;
-        while i < size(other.bytes) [{ affirm i >= 0; affirm i <= size(other.bytes); affirm size(bytes) = size(self.bytes) + i; }] shrinks size(other.bytes) - i {
+        while i < size(other.bytes) [{
+            affirm i >= 0;
+            affirm i <= size(other.bytes);
+            affirm size(bytes) = size(self.bytes) + i;
+            affirm forall j in 0..size(self.bytes): get(bytes, j) = get(self.bytes, j);
+            affirm forall j in 0..i: get(bytes, size(self.bytes) + j) = get(other.bytes, j);
+        }] shrinks size(other.bytes) - i {
             bytes = push(bytes, get(other.bytes, i));
             i = i + 1;
         };
         return Self { bytes: bytes };
     };
-};
 
-impl String {
     // The next bytes of the standard input, up to the end of the input or `limit` of them. The limit is how a loop that depends on what
     // is read still ends: it is not an error to reach it, and what is not read is left for the next call.
     fn read(limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
@@ -88,7 +96,7 @@ impl Sequence<Int> for String {
 };
 
 impl Growable<Int> for String {
-    fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + 1; affirm get(return.bytes, size(self.bytes)) = x; }] {
+    fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + 1; affirm get(return.bytes, size(self.bytes)) = x; affirm forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j); }] {
         return Self { bytes: push(self.bytes, x) };
     };
 };

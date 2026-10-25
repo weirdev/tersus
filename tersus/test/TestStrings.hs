@@ -54,6 +54,19 @@ testStrings =
                 , testCase "the size of a concat is the sum" (rejected "s = \"ab\".concat(\"cd\"); affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
                 ]
             , TestList
+                "facts about strings"
+                [ testCase "a string written in a proof" (valid "c = \"ab\"; affirm c = \"ab\"; return 0;")
+                , testCase "is the String of its bytes" (valid "c = \"ab\"; affirm c = String { bytes: [97, 98] }; return 0;")
+                , testCase "and a different string is refused" (rejected "c = \"ab\"; affirm c = \"ac\"; return 0;" "Could not prove: c = String { bytes: [97, 99] }")
+                , testCase "an escape in a proof" (valid "c = \"a\\n\"; affirm c = \"a\\n\"; return 0;")
+                , testCase "a string in the input contract of a function" (valid "fn f(s: String) -> Int [{ affirm s = \"hi\"; }] [{ affirm return = 2; }] { return size(s); }; return f(\"hi\");")
+                , testCase "that a caller has to meet" (rejected "fn f(s: String) -> Int [{ affirm s = \"hi\"; }] [{ }] { return size(s); }; return f(\"ho\");" "Could not prove: s = String { bytes: [104, 105] }")
+                , testCase "concat keeps the bytes of the first string" (valid "c = \"ab\".concat(\"cd\"); affirm get(c, 0) = 97; affirm get(c, 1) = 98; return 0;")
+                , testCase "and not any others" (rejected "c = \"ab\".concat(\"cd\"); affirm get(c, 0) = 98; return 0;" "Could not prove")
+                , testCase "the bytes of the second follow the first, at the index that is named" (valid "a = \"ab\"; b = \"cd\"; c = a.concat(b); affirm get(c.bytes, size(a.bytes) + 1) = get(b.bytes, 1); return 0;")
+                , testCase "push keeps the bytes and adds one" (valid "c = \"ab\".push(99); affirm get(c, 0) = 97; affirm get(c, 2) = 99; return 0;")
+                ]
+            , TestList
                 "output"
                 [ testCase "a byte is written, then the value" (runs "writeByte(104); writeByte(105); return 1;" "hi1")
                 , testCase "and is its own value" (runs "x = writeByte(65); return x;" "A65")
