@@ -33,16 +33,17 @@ From the `tersus/` directory:
 
 ```
 stack run -- check program.tersus   # parse and validate; prints OK
-stack run -- run program.tersus     # validate, then lower to the MIR, run that and print the return value
+stack run -- run program.tersus     # validate, compile to native code with clang, run that and print the return value
+stack run -- eval program.tersus    # validate, then run the MIR with the reference interpreter (no compiler)
 stack run -- mir program.tersus     # validate, then print the MIR
 stack run -- owned program.tersus   # validate, then print the MIR with who owns each value (moves, copies, frees)
 stack run -- llvm program.tersus    # validate, then print the LLVM IR
 stack run -- build program.tersus -o program   # validate, then compile to an executable with clang
 ```
 
-`run` never runs a program that fails validation. `mir` prints the program as the blocks the machine runs (see `MIR.md`). A program that does not `return` prints nothing. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
+`run` never runs a program that fails validation. It is `build` to a temporary executable that is run and removed, so it needs `clang`; `eval` runs the validated MIR with the interpreter of the MIR (`MirEval`) and needs nothing, and is the reference that native code is tested against. `mir` prints the program as the blocks the machine runs (see `MIR.md`). A program that does not `return` prints nothing. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
 
-`build` writes the IR and the C runtime to uniquely named files in the temporary directory, runs `clang -O2` on them, and removes those files; it needs `clang` on the path. The executable prints the return value as `run` does and stops on an `Integer overflow` with the same message and exit status. Native code handles every type of the language, and values print as `run` prints them. It does not check what validation proved (a divisor that is not 0, an index in range), so a program that validates cannot trip them, and a bug in the validator would be undefined behaviour here and an error in `run`.
+`build` writes the IR and the C runtime to uniquely named files in the temporary directory, runs `clang -O2` on them, and removes those files; it needs `clang` on the path. The executable prints the return value as `eval` does and stops on an `Integer overflow` with the same message and exit status. Native code handles every type of the language, and values print as `eval` prints them. It does not check what validation proved (a divisor that is not 0, an index in range), so a program that validates cannot trip them, and a bug in the validator would be undefined behaviour here and an error in `eval`.
 
 ## How Validation Works
 
@@ -1410,7 +1411,7 @@ return v.get(1) + size(v);                      // 8
 
 ### Lists In Native Code
 
-A `List<T>` is checked and validated as a list, and run by the executor (`tersus run`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of a Box of an array and a count, written in Tersus (`lib/lists.tersus`), and a program is changed to use it after it is validated.
+A `List<T>` is checked and validated as a list, and run by the interpreter (`tersus eval`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of a Box of an array and a count, written in Tersus (`lib/lists.tersus`), and a program is changed to use it after it is validated.
 
 ```
 struct StdList<T> {

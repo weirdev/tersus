@@ -19,7 +19,8 @@ The Haskell implementation parses to the AST, checks its types, lowers it to the
 The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cli.hs`):
 
 - `stack run -- check <file>` parses the program, lowers it to the MIR and validates that, printing `OK` on success.
-- `stack run -- run <file>` validates the program, and only if that succeeds runs its MIR and prints its return value (nothing is printed when the program does not `return`).
+- `stack run -- run <file>` validates the program, and only if that succeeds compiles it to native code (the lowering and LLVM path of `build`, so it needs `clang`), runs the executable and prints its return value (nothing is printed when the program does not `return`). The executable is removed afterwards and its exit status is the one of `run`.
+- `stack run -- eval <file>` validates the program and runs its MIR with the reference interpreter (`MirEval`), which needs no compiler. It is what native code is tested against, and not the way a program is run.
 - `stack run -- mir <file>` validates the program, and only if that succeeds prints its MIR.
 - `stack run -- owned <file>` validates the program, and only if that succeeds prints the MIR that native code is made from, with the moves, copies and frees (`MirOwnership`).
 - `stack run -- llvm <file>` validates the program, and only if that succeeds prints its LLVM IR (`LlvmEmit`); `stack run -- build <file> -o <output>` compiles that and the C runtime (`LlvmRuntime`) with clang (`Native`). Native code handles every type of the language.
@@ -79,13 +80,13 @@ Next steps, roughly in priority order:
     Validation walks the MIR (`MirValidate`), and the AST has no evaluator any more: the MIR executor runs programs. The MIR is lowered to LLVM IR (`LlvmEmit`, MIR.md, Native code) in steps, each checked against the executor by building and running programs:
     1. Done: `Int` and `Bool`, control flow, calls and recursion, the overflow traps, and the printing of the result
     2. Done: lists, with a runtime of C (`LlvmRuntime`): literals and operations, structural equality and printing by a descriptor of the type
-    3. Done: structs, enums and function values: every example builds natively and prints what `tersus run` prints
+    3. Done: structs, enums and function values: every example builds natively and prints what `tersus eval` prints
     4. Done: memory (`MirOwnership`, MIR.md, Ownership): every value of the heap has one owner, the last use of a local moves the value out of it, a value that is wanted twice is copied, values are freed when their owner lets go, and `push`/`set` change the list in place; a list built by pushing takes time and memory in proportion to its length
     5. Borrowing a value to a function that only reads it, so that a call does not copy an argument that is used afterwards
         Every parameter is owned today (MIR.md, Ownership), so `helper(l, i)` called again and again on a list that is used afterwards copies the list at each call, which makes a loop of such calls take time in proportion to the square of the length. The pass already decides move, copy or look per operand, so a borrowed argument is a fourth outcome, plus an inference of which parameters of a function it only reads (a fixpoint over the calls: a parameter is owned if some path moves it, or passes it where it is owned)
         What needs care: a function reached through a function value (its convention has to be one for every function, or a small wrapper made when a function is used as a value), a value passed both borrowed and owned in one call (the owned one has to be a copy), and the check of the result by the model of the heap (`TestOwnership`), which has to learn what a borrowed parameter may do
     6. Deep recursion and deep values
-        Native recursion uses the C stack, and freeing or copying a very long recursive value (a million-node list built of an enum) recurses too, so either could overflow it, where `tersus run` has no such limit. An iterative free and copy, and a bigger stack or a clear error when it runs out, would fix both
+        Native recursion uses the C stack, and freeing or copying a very long recursive value (a million-node list built of an enum) recurses too, so either could overflow it, where `tersus eval` has no such limit. An iterative free and copy, and a bigger stack or a clear error when it runs out, would fix both
     7. Contracts as hints to LLVM
         The code assumes what validation proved (a divisor that is not 0, an index in range, a list that is not empty) without checking, but LLVM does not know the proofs, so it cannot drop the work around them. Emitting `llvm.assume` for the facts that justify each `get`, division, `first` and `last` could let it. A mistake in the validator would then be wrong code that the optimiser has built on, so it needs the memory and answer checks of the tests to run with the hints on
     8. Cheaper ownership

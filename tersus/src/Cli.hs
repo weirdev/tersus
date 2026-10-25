@@ -14,11 +14,13 @@ import Pipeline
 import TersusTypes
 import Utils
 
--- `Check` parses a program, lowers it to the MIR and validates that. `Run` also runs it, but only after it validates, and
+-- `Check` parses a program, lowers it to the MIR and validates that. `Run` is how a program is run: it validates it, compiles it
+-- to native code (the same as `Build`, to an executable that is run and removed) and runs that. `Interpret` (`tersus eval`) runs the validated MIR with
+-- the executor of MirEval instead, which is the reference that the native code is tested against and needs no compiler.
 -- `Mir` prints the MIR instead, and `Owned` the MIR that native code is made from, with the owner of each value in it.
 -- `Llvm` prints the LLVM IR of the validated program, and `Build` compiles that to the
 -- executable at the path.
-data Command = Check | Run | Mir | Owned | Llvm | Build FilePath deriving (Show, Eq)
+data Command = Check | Run | Interpret | Mir | Owned | Llvm | Build FilePath deriving (Show, Eq)
 
 usage :: String
 usage =
@@ -27,7 +29,8 @@ usage =
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
-        , "  run <file>    Validate a program, then run it and print its return value"
+        , "  run <file>    Validate a program, compile it to native code (needs clang), run that and print its return value"
+        , "  eval <file>   Validate a program, then run its MIR with the reference interpreter (no compiler needed)"
         , "  mir <file>    Validate a program, then print its MIR"
         , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
@@ -41,6 +44,7 @@ usage =
 parseCommandLine :: [String] -> Maybe (Command, FilePath)
 parseCommandLine ["check", file] = Just (Check, file)
 parseCommandLine ["run", file] = Just (Run, file)
+parseCommandLine ["eval", file] = Just (Interpret, file)
 parseCommandLine ["mir", file] = Just (Mir, file)
 parseCommandLine ["owned", file] = Just (Owned, file)
 parseCommandLine ["llvm", file] = Just (Llvm, file)
@@ -51,7 +55,7 @@ parseCommandLine _ = Nothing
 -- empty when there is nothing to report; Error holds the message for a failure.
 runSource :: Command -> String -> Result String String
 runSource Check source = mapResult (const "OK") (compileSource source)
-runSource Run source =
+runSource Interpret source =
     compileSource source `bindResult` \program ->
         case runProgram program of
             Error e -> Error ("Evaluation failed: " ++ e)
@@ -59,7 +63,8 @@ runSource Run source =
 runSource Mir source = mapResult renderProgram (compileSource source)
 runSource Owned source = mapResult renderProgram (ownedSource source)
 runSource Llvm source = llvmSource source
--- (compiling the IR is left to the caller, since it runs clang)
+-- (compiling the IR, and running it for `Run`, is left to the caller, since it runs clang)
+runSource Run source = llvmSource source
 runSource (Build _) source = llvmSource source
 
 renderValue :: Value -> String
