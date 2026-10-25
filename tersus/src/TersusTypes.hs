@@ -3,7 +3,8 @@
 module TersusTypes where
 
 import qualified Data.IntMap.Strict as IntMap
-import Data.List (isPrefixOf)
+import Data.Char (isDigit)
+import Data.List (intercalate, isPrefixOf)
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as S
@@ -56,6 +57,49 @@ data Type = TInt | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Ty
 -- checker's own unknown, for the size a call gives a parameter, and is never written by a program.
 data Size = SizeConst Integer | SizeAny | SizeParam Name | SizeVar Int
     deriving (Show, Eq, Ord)
+
+-- The type that a struct with sizes is for a list of sizes (`Packet<4>`, `Packet<n>` in a function that has the size n) is a struct of
+-- its own, named by the sizes, with the fields of the declaration with the sizes in them. Everything after the checker sees an ordinary
+-- struct; the name is how the checker and MirMono find the declaration and the sizes again.
+instanceName :: Name -> [Size] -> Name
+instanceName base sizes = base ++ "<" ++ intercalate ", " (map sizeText sizes) ++ ">"
+
+sizeText :: Size -> String
+sizeText (SizeConst n) = show n
+sizeText SizeAny = "?"
+sizeText (SizeParam name) = name
+sizeText (SizeVar n) = "_" ++ show n
+
+-- The struct and the sizes that a name is the instance of
+instanceOf :: Name -> Maybe (Name, [Size])
+instanceOf name =
+    case break (== '<') name of
+        (base, '<' : rest) | not (null base), not (null rest), last rest == '>' -> Just (base, map readSize (splitSizes (init rest)))
+        _ -> Nothing
+  where
+    splitSizes text = case break (== ',') text of
+        (one, ',' : more) -> one : splitSizes (dropWhile (== ' ') more)
+        (one, _) -> [one]
+    readSize text
+        | text == "?" = SizeAny
+        | not (null text) && all isDigit text = SizeConst (read text)
+        | ('_' : digits) <- text, not (null digits), all isDigit digits = SizeVar (read digits)
+        | otherwise = SizeParam text
+
+-- The type with each size parameter of the list replaced by the size (also in the name of an instance of a struct with sizes)
+substSizes :: [(Variable, Size)] -> Type -> Type
+substSizes sizes = go
+  where
+    go ty = case ty of
+        TList t -> TList (go t)
+        TArrayOf t size -> TArrayOf (go t) (sized size)
+        TBox t -> TBox (go t)
+        TFn args ret -> TFn (map go args) (go ret)
+        TForall names t -> TForall names (substSizes [(n, s) | (n, s) <- sizes, n `notElem` names] t)
+        TNamed name | Just (base, args) <- instanceOf name -> TNamed (instanceName base (map sized args))
+        _ -> ty
+    sized (SizeParam n) | Just size <- lookup n sizes = size
+    sized size = size
 
 -- An array of a size that is a constant, which is every array there can be in a program that runs
 pattern TArray :: Type -> Integer -> Type
@@ -137,8 +181,9 @@ data Statement
       Let Variable Expression
     | Return Expression
     | ValidationStatement ValidationStatement
-    | -- struct Name { field: Type, ... }; it only matters to the type checker
-      StructDef Name [(Variable, Type)]
+    | -- struct Name<sizes> { field: Type, ... }; it only matters to the type checker. A struct with sizes (`struct Packet<n> { body:
+      -- Array<Int, n> }`) is a type for each list of sizes, `Packet<4>`: see instanceName.
+      StructDef Name [Variable] [(Variable, Type)]
     | -- enum Name { Variant { field: Type, ... }, ... } with the variants' full names (Name::Variant)
       EnumDef Name [(Name, [(Variable, Type)])]
     | AxiomDef Variable [Variable] [ValidationStatement] [ValidationStatement]

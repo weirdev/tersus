@@ -18,6 +18,7 @@ module Mir
     , FunctionSpec (..)
     , LoopSpec (..)
     , emptySpec
+    , completeInstances
     , successors
     , renderProgram
     , renderFunction
@@ -31,7 +32,8 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 
 import Pretty (renderType, renderVarProof)
-import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof)
+import qualified Data.Set as Set
+import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, substSizes)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -54,6 +56,7 @@ data Program = Program
     { progTypes :: Map Name TypeDecl
     , progFunctions :: Map Name Function -- every function but main, a nested one lifted to the top (outer::inner)
     , progMain :: Function -- the statements of the program; no parameters
+    , progGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields (see completeInstances)
     }
     deriving (Show, Eq)
 
@@ -184,6 +187,69 @@ data LoopSpec = LoopSpec
     , loopEnv :: Env
     }
     deriving (Show, Eq)
+
+-- A struct with sizes is a struct of its own for each list of sizes (`Packet<4>`, and `Packet<n>` in a function that has the size n),
+-- named by them. This declares every one the program mentions, from the declaration of the struct with the sizes put in.
+completeInstances :: Program -> Program
+completeInstances program
+    | Map.null (progGenerics program) = program
+    | otherwise = program{progTypes = go (progTypes program) (Set.toList mentioned)}
+  where
+    functions = progMain program : Map.elems (progFunctions program)
+    mentioned =
+        Set.fromList
+            ( concat [typeNames (localType d) | f <- functions, d <- Map.elems (fnLocals f)]
+                ++ concat [typeNames t | f <- functions, Just t <- [fnReturns f]]
+                ++ concat [rvalueNames rv | f <- functions, BasicBlock stmts _ <- Map.elems (fnBlocks f), s <- stmts, rv <- statementRvalues s]
+                ++ concat [operandNames o | f <- functions, BasicBlock _ term <- Map.elems (fnBlocks f), o <- terminatorOperands term]
+                ++ concat [typeNames t | StructDecl fields <- Map.elems (progTypes program), (_, t) <- fields]
+                ++ concat [typeNames t | EnumDecl variants <- Map.elems (progTypes program), (_, fields) <- variants, (_, t) <- fields]
+            )
+    go types [] = types
+    go types (name : rest) =
+        case (Map.member name types, instanceOf name) of
+            (False, Just (base, sizes))
+                | Just (params, fields) <- Map.lookup base (progGenerics program) ->
+                    let fields' = [(f, substSizes (zip params sizes) t) | (f, t) <- fields]
+                     in go (Map.insert name (StructDecl fields') types) (concatMap (typeNames . snd) fields' ++ rest)
+            _ -> go types rest
+    statementRvalues s = case s of
+        Assign _ rv -> [rv]
+        Peek _ rv -> [rv]
+        _ -> []
+    terminatorOperands t = case t of
+        SwitchBool o _ _ -> [o]
+        Call callee args _ _ -> callee : args
+        _ -> []
+    typeNames ty = case ty of
+        TNamed n -> [n]
+        TList t -> typeNames t
+        TArrayOf t _ -> typeNames t
+        TBox t -> typeNames t
+        TFn args ret -> concatMap typeNames (ret : args)
+        _ -> []
+    rvalueNames rv = case rv of
+        Use o -> operandNames o
+        BinaryOp _ a b -> operandNames a ++ operandNames b
+        ListOp _ os -> concatMap operandNames os
+        MakeList os -> concatMap operandNames os
+        MakeBox o -> operandNames o
+        Unbox o -> operandNames o
+        Unsize o -> operandNames o
+        MakeData name fields -> name : concatMap (operandNames . snd) fields
+        ReadField o name _ -> name : operandNames o
+        IsVariant o name -> name : operandNames o
+        AsVariant o name -> name : operandNames o
+        Clone o -> operandNames o
+        TakeField _ name _ -> [name]
+    operandNames o = case o of
+        Const c -> constantNames c
+        _ -> []
+    constantNames c = case c of
+        CData name fields -> name : concatMap (constantNames . snd) fields
+        CList cs -> concatMap constantNames cs
+        CArray cs -> concatMap constantNames cs
+        _ -> []
 
 emptySpec :: FunctionSpec
 emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty

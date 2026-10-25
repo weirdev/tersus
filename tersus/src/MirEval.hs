@@ -109,7 +109,7 @@ constantValue (CInt i) = MInt i
 constantValue (CBool b) = MBool b
 constantValue (CList cs) = MList (map constantValue cs)
 constantValue (CArray cs) = MList (map constantValue cs)
-constantValue (CData name fields) = MData name [(f, constantValue c) | (f, c) <- fields]
+constantValue (CData name fields) = MData (plain name) [(f, constantValue c) | (f, c) <- fields]
 constantValue (CFn name) = MFn name
 
 evalRvalue :: Frame -> Rvalue -> Result MirValue String
@@ -122,11 +122,11 @@ evalRvalue frame rv =
         MakeBox o -> operandValue frame o
         Unbox o -> operandValue frame o
         Unsize o -> operandValue frame o
-        MakeData name fields -> MData name <$$> mapResults (\(f, o) -> (,) f <$$> operandValue frame o) fields
+        MakeData name fields -> MData (plain name) <$$> mapResults (\(f, o) -> (,) f <$$> operandValue frame o) fields
         ReadField o name field ->
             operandValue frame o `bindResult` \v -> case v of
                 MData actual fields
-                    | actual /= name -> Error ("Expected a " ++ name ++ " but got a " ++ actual)
+                    | actual /= plain name -> Error ("Expected a " ++ name ++ " but got a " ++ actual)
                     | otherwise -> maybe (Error ("Variant " ++ name ++ " has no field " ++ field)) Ok (lookup field fields)
                 _ -> Error "A field can only be read from a struct"
         -- (a wrong cast is undefined behaviour, as in the evaluator of the AST: reading a field that is not there is the error)
@@ -135,7 +135,7 @@ evalRvalue frame rv =
         TakeField l name field -> evalRvalue frame (ReadField (Copy l) name field)
         IsVariant o name ->
             operandValue frame o `bindResult` \v -> case v of
-                MData actual _ -> Ok (MBool (actual == name))
+                MData actual _ -> Ok (MBool (actual == plain name))
                 _ -> Error "Is only tests the variant of an enum value"
   where
     f <$$> r = mapResult f r
@@ -188,6 +188,11 @@ listOp Set [MList l, MInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok (MList (before ++ x : drop 1 after))
 listOp op _ = Error (show op ++ " is not defined for these values")
+
+-- A struct with sizes is one struct to a program that runs: the sizes are in the name of each copy that native code makes, and
+-- not in a value (`Packet<n>` and `Packet<3>` are both a Packet)
+plain :: Name -> Name
+plain = takeWhile (/= '<')
 
 renderMirValue :: MirValue -> String
 renderMirValue (MInt i) = show i

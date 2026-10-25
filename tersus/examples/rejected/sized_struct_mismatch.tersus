@@ -1,0 +1,10 @@
+// Packet<3> and Packet<2> are different types: a function that takes a Packet<3> is not given a Packet<2>.
+struct Packet<n> {
+    body: Array<Int, n>,
+};
+
+fn first(p: Packet<3>) -> Int {
+    return get(p.body, 0);
+};
+
+return first(Packet<2> { body: #[1, 2] });

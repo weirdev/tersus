@@ -53,7 +53,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_sizes", "arrays", "basics", "booleans", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "safe_access", "structs", "termination", "traits", "types", "update_list"
+        , "safe_access", "sized_structs", "structs", "termination", "traits", "types", "update_list"
         ]
     ]
 
@@ -330,6 +330,14 @@ arrayPrograms =
     , ("a size parameter with a Box", "fn f<n>(a: Array<Int, n>, b: Box<Array<Int, n>>) -> Int { return size(b) + n; }; return f(#[1, 2], Box::new(#[3, 4]));")
     , ("a size parameter and the unsizing conversion", "fn mk<n>(a: Array<Int, n>) -> Box<Array<Int>> { return Box::new(a); }; x = mk(#[1, 2, 3]); return size(x) * 2;")
     , ("a function with a size whose name is assigned elsewhere", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; fn other() -> Int { count = 1; return count; }; return count(#[1]) + other();")
+    , ("a struct with a size", "struct P<n> { id: Int, body: Array<Int, n> }; p = P<3> { id: 7, body: #[1, 2, 3] }; return p.id + size(p.body) + get(p.body, 2);")
+    , ("a struct with a size is printed", "struct P<n> { id: Int, body: Array<Int, n> }; return P<2> { id: 1, body: #[5, 6] };")
+    , ("a function over structs of every size", "struct P<n> { id: Int, body: Array<Int, n> }; fn total<m>(p: P<m>) -> Int { s = p.id; i = 0; while i < m [{ affirm i >= 0; affirm i <= m; }] shrinks m - i { s = s + get(p.body, i); i = i + 1; }; return s; }; return total(P<3> { id: 7, body: #[1, 2, 3] }) + total(P<1> { id: 1, body: #[10] });")
+    , ("a struct made in a function that has the size", "struct P<n> { id: Int, body: Array<Int, n> }; fn blank<m>(a: Array<Int, m>) -> P<m> { return P<m> { id: m, body: array(m, 0) }; }; return blank(#[1, 2]);")
+    , ("a struct of a struct, both with the size", "struct I<n> { cells: Array<Int, n> }; struct O<n> { tag: Int, inner: I<n> }; fn w<m>(o: O<m>) -> Int { return m * 10 + o.tag; }; return w(O<2> { tag: 4, inner: I<2> { cells: #[1, 2] } });")
+    , ("a struct with a size is updated", "struct P<n> { id: Int, body: Array<Int, n> }; a = P<2> { id: 1, body: #[5, 6] }; b = P<2> { id: 9, ..a }; return b;")
+    , ("a struct with a size in a Box and a list", "struct P<n> { id: Int, body: Array<Int, n> }; b = Box::new(P<2> { id: 1, body: #[5, 6] }); l = push([], P<2> { id: 2, body: #[7, 8] }); return b.id + size(b.body) + get(l, 0).id;")
+    , ("structs with sizes are compared", "struct P<n> { id: Int, body: Array<Int, n> }; return P<2> { id: 1, body: #[1, 2] } = P<2> { id: 1, body: #[1, 2] };")
     , ("a size parameter and a struct", "struct S { a: Array<Int, 2> }; fn count<n>(a: Array<Int, n>) -> Int { return n; }; s = S { a: #[1, 2] }; return count(s.a);")
     , ("a Box of an Int", "b = Box::new(5); return Box::unbox(b) + 1;")
     , ("a Box of a Bool", "return Box::unbox(Box::new(true));")

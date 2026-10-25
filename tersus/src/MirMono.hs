@@ -7,8 +7,7 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 
 import Mir
-import TersusTypes (Name, Size (..), Type (..))
-import TypeCheck (substSizes)
+import TersusTypes (Name, Size (..), Type (..), instanceOf, substSizes)
 
 -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`) is validated once, with each size a parameter it can reason
 -- about, and its callers give the sizes as its last arguments. Native code holds an array inline, so it needs the size of every
@@ -20,11 +19,23 @@ monomorphize :: Program -> Program
 monomorphize program
     | not (any generic (Map.elems (progFunctions program))) = program
     | otherwise =
-        program
-            { progFunctions = Map.fromList [(fnName f, f) | f <- map unspecified (plain' ++ Map.elems instances)]
-            , progMain = unspecified main'
-            }
+        withInstances
+            program
+                { progFunctions = Map.fromList [(fnName f, f) | f <- map unspecified (plain' ++ Map.elems instances)]
+                , progMain = unspecified main'
+                }
   where
+    -- (the structs with sizes that the copies mention are declared, and those that only a function with sizes mentioned, whose sizes
+    -- were names, are not there any more)
+    withInstances p =
+        let complete = completeInstances p
+         in complete{progTypes = Map.filterWithKey (\name _ -> not (symbolic name)) (progTypes complete)}
+    symbolic name = case instanceOf name of
+        Just (_, sizes) -> any isParam sizes
+        Nothing -> False
+    isParam size = case size of
+        SizeParam _ -> True
+        _ -> False
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)
     unspecified f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
     isGhost s = case s of
@@ -67,10 +78,21 @@ instantiate fn sizes =
     keptParams = take (length (fnParams fn) - count) (fnParams fn)
     sizeLocals = drop (length keptParams) (fnParams fn)
     values = Map.fromList (zip sizeLocals sizes)
-    types = substSizes (zip (fnSizeParams fn) (map SizeConst sizes))
+    pairs = zip (fnSizeParams fn) (map SizeConst sizes)
+    types = substSizes pairs
+    -- (the name of a struct with sizes names them)
+    named name = case substSizes pairs (TNamed name) of
+        TNamed name' -> name'
+        _ -> name
+    constant c = case c of
+        CData name fields -> CData (named name) [(f, constant v) | (f, v) <- fields]
+        CList cs -> CList (map constant cs)
+        CArray cs -> CArray (map constant cs)
+        _ -> c
     operand o = case o of
         Copy l | Just c <- Map.lookup l values -> Const (CInt c)
         Move l | Just c <- Map.lookup l values -> Const (CInt c)
+        Const c -> Const (constant c)
         _ -> o
     env = Map.map operand
     block (BasicBlock stmts term) = BasicBlock (map statement stmts) (terminator term)
@@ -91,12 +113,12 @@ instantiate fn sizes =
         MakeBox o -> MakeBox (operand o)
         Unbox o -> Unbox (operand o)
         Unsize o -> Unsize (operand o)
-        MakeData name fields -> MakeData name [(f, operand o) | (f, o) <- fields]
-        ReadField o name field -> ReadField (operand o) name field
-        IsVariant o name -> IsVariant (operand o) name
-        AsVariant o name -> AsVariant (operand o) name
+        MakeData name fields -> MakeData (named name) [(f, operand o) | (f, o) <- fields]
+        ReadField o name field -> ReadField (operand o) (named name) field
+        IsVariant o name -> IsVariant (operand o) (named name)
+        AsVariant o name -> AsVariant (operand o) (named name)
         Clone o -> Clone (operand o)
-        TakeField l name field -> TakeField l name field
+        TakeField l name field -> TakeField l (named name) field
     spec s = s{specEnv = env (specEnv s), specLoops = Map.map (\l -> l{loopEnv = env (loopEnv l)}) (specLoops s)}
 
 -- The function with each call of a function with size parameters made a call of the copy for its sizes, and the copies that need

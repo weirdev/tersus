@@ -165,8 +165,9 @@ typeDescriptors program types =
         ++ [ global "array." (renderType ty) ++ " = private constant { i64, ptr } { i64 " ++ show n ++ ", ptr " ++ typeSymbol program t ++ " }"
            | ty@(TArray t n) <- types
            ]
-        ++ [ global "str." name ++ " = private constant [" ++ show (byteLength name + 1) ++ " x i8] c\"" ++ escaped name ++ "\\00\""
+        ++ [ global "str." name ++ " = private constant [" ++ show (byteLength shown + 1) ++ " x i8] c\"" ++ escaped shown ++ "\\00\""
            | name <- nub (concat [v : map fst fields | TNamed n <- types, (v, fields) <- variantsOf program n])
+           , let shown = takeWhile (/= '<') name -- (a struct with sizes prints as the struct)
            ]
         ++ [""]
   where

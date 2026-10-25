@@ -1,0 +1,41 @@
+// A struct can have sizes too: `struct Packet<n>` is a struct for each size, written Packet<4>. A field can use the size
+// (`body: Array<Int, n>`) or another struct of the same size (`inner: Inner<n>`), and a function with sizes takes any of them: the
+// size of its argument decides its own, as for an array.
+//
+// Packet<3> and Packet<2> are different types, so they cannot be compared or given for each other. A value is built with the sizes
+// written (`Packet<3> { ... }`), the fields are read as for any struct, and a struct is held inline whatever its size, so a
+// Packet<4> takes the words of its fields.
+struct Packet<n> {
+    id: Int,
+    body: Array<Int, n>,
+};
+
+struct Frame<n> {
+    kind: Int,
+    packet: Packet<n>,
+};
+
+fn total<m>(p: Packet<m>) -> Int {
+    sum = p.id;
+    i = 0;
+    while i < m [{ affirm i >= 0; affirm i <= m; }] shrinks m - i {
+        sum = sum + get(p.body, i);
+        i = i + 1;
+    };
+    return sum;
+};
+
+// The size is the size of the argument, and a result can have it
+fn frame<m>(kind: Int, p: Packet<m>) -> Frame<m> {
+    return Frame<m> { kind: kind, packet: p };
+};
+
+fn blank<m>(id: Int, shape: Array<Int, m>) -> Packet<m> {
+    return Packet<m> { id: id, body: array(m, 0) };
+};
+
+a = Packet<3> { id: 7, body: #[1, 2, 3] };
+b = Packet<2> { id: 1, body: #[10, 20] };
+f = frame(5, a);
+c = Packet<2> { id: 9, ..blank(1, #[0, 0]) };
+return total(a) + total(b) + f.kind + total(f.packet) + total(c);   // 13 + 31 + 5 + 13 + 9
