@@ -117,6 +117,7 @@ renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
 renderType (TBox t) = "Box<" ++ renderType t ++ ">"
 renderType (TArrayOf t size) = "Array<" ++ renderType t ++ ", " ++ renderSize size ++ ">"
+renderType (TRef t) = "&" ++ renderType t
 renderType (TForall names t) = "<" ++ intercalate ", " names ++ ">" ++ renderType t
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
 renderType (TNamed name) = name

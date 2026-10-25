@@ -601,10 +601,13 @@ parameter = do
 -- Int, Bool, List<T>, and fn(T, ...) -> T for a function value
 typeAnnotation :: Parser Type
 typeAnnotation = do
-    ty <- try functionType <|> namedType
+    ty <- borrowed <|> try functionType <|> namedType
     whitespace
     return ty
   where
+    -- &T: a parameter that is only read
+    borrowed = char '&' >> whitespace >> (TRef <$> namedOrFunction)
+    namedOrFunction = try functionType <|> namedType
     typeArgument = do
         whitespace
         void (char '<')

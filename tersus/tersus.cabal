@@ -90,6 +90,7 @@ test-suite tersus-test
       TestNative
       TestOwnership
       TestArrays
+      TestBorrow
       TestBox
       TestTraits
       TestPipeline

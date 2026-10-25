@@ -71,6 +71,7 @@ instantiate fn sizes =
         , fnLocals = Map.map (\d -> d{localType = types (localType d)}) (Map.filterWithKey (\l _ -> l `notElem` sizeLocals) (fnLocals fn))
         , fnBlocks = Map.map block (fnBlocks fn)
         , fnSizeParams = []
+        , fnBorrowed = [l | l <- fnBorrowed fn, l `notElem` sizeLocals]
         , fnSpec = spec (fnSpec fn)
         }
   where

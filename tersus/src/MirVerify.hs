@@ -39,7 +39,7 @@ environment program =
   where
     ctors (name, StructDecl fields) = [(name, (name, fields))]
     ctors (name, EnumDecl variants) = [(v, (name, fields)) | (v, fields) <- variants]
-    fnType f = functionType (fnSizeParams f) [maybe (TVar 0) localType (Map.lookup p (fnLocals f)) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
+    fnType f = functionType (fnSizeParams f) [(if p `elem` fnBorrowed f then TRef else id) (maybe (TVar 0) localType (Map.lookup p (fnLocals f))) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
 
 problems :: Program -> Function -> [String]
 problems program fn =
@@ -121,6 +121,7 @@ problems program fn =
     hasUnknown (TList t) = hasUnknown t
     hasUnknown (TArray t _) = hasUnknown t
     hasUnknown (TBox t) = hasUnknown t
+    hasUnknown (TRef t) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
     hasUnknown _ = False
 
@@ -259,6 +260,7 @@ fits env localTy wanted o = case o of
     Const c -> constantFits env wanted c
 
 constantFits :: Env -> Type -> Constant -> Bool
+constantFits env (TRef wanted) c = constantFits env wanted c
 constantFits env wanted c = case c of
     CInt _ -> wanted == TInt
     CBool _ -> wanted == TBool
@@ -285,6 +287,7 @@ sub env wanted actual = case (wanted, actual) of
     (TArray a n, TArray b m) -> n == m && sub env a b
     (TArrayOf a SizeAny, TArrayOf b SizeAny) -> sub env a b
     (TBox a, TBox b) -> sub env a b
+    (TRef a, b) -> sub env a b
     _ -> wanted == actual
 
 statementLocals :: Statement -> [Local]

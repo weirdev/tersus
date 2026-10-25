@@ -48,6 +48,9 @@ data Type = TInt | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Ty
     | -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`): the type of the function for any values of the sizes. A call
       -- gives each its value, so a use of one that is not a call has no type.
       TForall [Variable] Type
+    | -- A parameter that the function only reads, so a call does not give it a copy (`fn sum(a: &List<Int>)`). Only a parameter has one:
+      -- in the function it is its type, a value it cannot assign, and a call gives it the value as it is.
+      TRef Type
     deriving (Show, Eq, Ord)
 
 -- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
@@ -94,6 +97,7 @@ substSizes sizes = go
         TList t -> TList (go t)
         TArrayOf t size -> TArrayOf (go t) (sized size)
         TBox t -> TBox (go t)
+        TRef t -> TRef (go t)
         TFn args ret -> TFn (map go args) (go ret)
         TForall names t -> TForall names (substSizes [(n, s) | (n, s) <- sizes, n `notElem` names] t)
         TNamed name | Just (base, args) <- instanceOf name -> TNamed (instanceName base (map sized args))
