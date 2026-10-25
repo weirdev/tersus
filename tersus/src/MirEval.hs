@@ -213,6 +213,10 @@ listOp Pop [MList []] = Error "Pop requires a non-empty list"
 listOp Pop [MList l] = Ok (MList (init l))
 listOp NewBoxed args = listOp NewArray args
 listOp WriteByte _ = Error "writeByte is run by the statement that calls it"
+listOp ToByte [MInt x]
+    | x >= 0 && x < 256 = Ok (MInt x)
+    | otherwise = Error "toByte needs an Int from 0 to 255"
+listOp FromByte [MInt b] = Ok (MInt b)
 listOp ReadByte _ = Error "readByte is run by the statement that calls it"
 listOp NewEmptyBoxed [] = Ok (MList [])
 listOp NewArray [MInt n, x]

@@ -148,6 +148,8 @@ rvalueProblems env localTy d rv =
             _ -> ["array needs a result that is an array and a size that is a constant"]
         ListOp WriteByte [b] -> ints [b] ++ result TInt
         ListOp ReadByte [] -> result TInt
+        ListOp ToByte [x] -> ints [x] ++ result TByte
+        ListOp FromByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt
         ListOp NewEmptyBoxed [] -> case d of
             TBox (TArrayOf _ SizeAny) -> []
             _ -> ["Array::empty needs a result that is a Box of an array of any size"]
@@ -271,7 +273,7 @@ constantFits :: Env -> Type -> Constant -> Bool
 constantFits env (TRef wanted) c = constantFits env wanted c
 constantFits _ TParam{} _ = True
 constantFits env wanted c = case c of
-    CInt _ -> wanted == TInt
+    CInt n -> wanted == TInt || (wanted == TByte && n >= 0 && n < 256)
     CBool _ -> wanted == TBool
     CList cs -> case wanted of
         TList e -> all (constantFits env e) cs

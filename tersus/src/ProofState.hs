@@ -193,7 +193,10 @@ toIotaProof st (ATerm var) =
         Nothing -> Error ("Variable not found in proof map: " ++ var)
 toIotaProof st (FApp funct args) =
     toIotaProof st funct `bindResult` \functProof ->
-        flatResultMap (toIotaProof st) args `bindResult` \iotaProofs -> Ok (FApp functProof iotaProofs)
+        flatResultMap (toIotaProof st) args `bindResult` \iotaProofs -> case (functProof, iotaProofs) of
+            -- (toInt(b) is b: a Byte is the Int that it is, so a proof about toInt(b) is a proof about b, which has the facts of a Byte)
+            (ATerm (Iota "toInt"), [x]) -> Ok x
+            _ -> Ok (FApp functProof iotaProofs)
 
 -- The state where the names of the program mean what the environment says, with the values they have now
 withEnv :: M.Env -> PState -> PState

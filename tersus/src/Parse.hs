@@ -743,6 +743,7 @@ typeAnnotation = do
         case name of
             _ | name `elem` typeParams -> return (TParam name)
             "Int" -> return TInt
+            "Byte" -> return TByte
             "Bool" -> return TBool
             "List" -> TList <$> typeArgument
             "Box" -> TBox <$> typeArgument

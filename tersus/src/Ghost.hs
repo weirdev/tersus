@@ -172,6 +172,8 @@ rvalueCall rv =
         M.NewEmptyBoxed -> NewEmptyArray
         M.WriteByte -> WriteByte
         M.ReadByte -> ReadByte
+        M.ToByte -> ToByte
+        M.FromByte -> FromByte
 
 -- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
 wrapperInfo :: PState -> Name -> Maybe FnInfo

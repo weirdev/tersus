@@ -213,6 +213,7 @@ unify a b = do
         (TVar n, t) | not (occurs n t) -> bindVar n t >> return True
         (t, TVar n) | not (occurs n t) -> bindVar n t >> return True
         (TInt, TInt) -> return True
+        (TByte, TByte) -> return True
         (TBool, TBool) -> return True
         (TNamed x, TNamed y)
             | x == y -> return True
@@ -537,6 +538,8 @@ builtinType funct =
         NewEmptyArray -> failTc "Type error: Array::empty is called, as in Array::empty(), and cannot be used as a value"
         WriteByte -> return (TFn [TInt] TInt)
         ReadByte -> return (TFn [] TInt)
+        ToByte -> return (TFn [TInt] TByte)
+        FromByte -> return (TFn [TByte] TInt)
         Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
         Plus -> arith
         Minus -> arith
@@ -627,6 +630,7 @@ arrayElement ty = case ty of
 -- them, since it is a constant and a list or a struct would be made again each time it is wanted.
 plainElement :: Type -> Bool
 plainElement TInt = True
+plainElement TByte = True
 plainElement TBool = True
 plainElement (TArrayOf t _) = plainElement t
 plainElement (TVar _) = True

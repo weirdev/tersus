@@ -104,6 +104,7 @@ entryPoint program fn =
                 let result = resultStruct t
                     (convert, word) = case ty of
                         TInt -> ([], "%v")
+                        TByte -> ([], "%v")
                         TBool -> (["%w = zext i1 %v to i64"], "%w")
                         _ -> (["%w = ptrtoint ptr %v to i64"], "%w")
                  in Ok
@@ -167,6 +168,7 @@ typeDescriptors program types =
         ++ [""]
   where
     body TInt = "{ i64 0, ptr null }"
+    body TByte = "{ i64 0, ptr null }"
     body TBool = "{ i64 1, ptr null }"
     body ty@TArray{} = "{ i64 5, ptr " ++ global "array." (renderType ty) ++ " }"
     body (TBox (TArrayOf t SizeAny)) = "{ i64 7, ptr " ++ typeSymbol program t ++ " }"
@@ -431,6 +433,8 @@ rvalue fn destType rv =
             binary op ty x y
         MakeList _ -> failG "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"
         ListOp ReadByte [] -> ins "r" "call i64 @tersus_readByte()"
+        ListOp ToByte [x] -> operandAt fn TInt x
+        ListOp FromByte [b] -> operandAt fn TByte b
         ListOp WriteByte [b] -> operandAt fn TInt b >>= \x -> ins "w" ("call i64 @tersus_writeByte(i64 " ++ x ++ ")")
         ListOp op os@(first : _) | isArrayOperand fn first -> arrayRead fn destType op os
         ListOp op os -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " here")
@@ -954,6 +958,7 @@ storeAt :: Type -> String -> String -> G ()
 storeAt t p value =
     case t of
         TInt -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
+        TByte -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
         TBool -> do
             w <- ins "w" ("zext i1 " ++ value ++ " to i64")
             emit ("store i64 " ++ w ++ ", ptr " ++ p)
@@ -963,6 +968,7 @@ loadAt :: Type -> String -> G String
 loadAt t p =
     case t of
         TInt -> ins "v" ("load i64, ptr " ++ p)
+        TByte -> ins "v" ("load i64, ptr " ++ p)
         TBool -> do
             w <- ins "w" ("load i64, ptr " ++ p)
             ins "b" ("icmp ne i64 " ++ w ++ ", 0")
@@ -976,6 +982,7 @@ isPointer _ = False
 -- A value as the word the runtime takes: an Int as it is, a Bool as 0 or 1, a list as its address
 toWord :: Type -> String -> G String
 toWord TInt value = pure value
+toWord TByte value = pure value
 toWord TBool value = ins "w" ("zext i1 " ++ value ++ " to i64")
 toWord _ value = ins "w" ("ptrtoint ptr " ++ value ++ " to i64")
 
@@ -1219,6 +1226,7 @@ typeG ty = either failG pure (toEither (llvmType ty))
 
 llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
+llvmType TByte = Ok "i64"
 llvmType TBool = Ok "i1"
 llvmType (TRef t) = llvmType t
 -- (an array is passed and held as the address of its words)

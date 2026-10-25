@@ -95,6 +95,7 @@ Every value has a type, and programs are type checked before they are validated:
 - A declared struct or enum, such as `Node` or `Shape`,
 - `Int`, `Bool`, and `List<T>` for any element type `T`, such as `List<Int>`, `List<Bool>` or `List<List<Int>>`. All the elements of a list have the same type, and `[]` takes its element type from how it is used. A variable holding `[]` has one type for its whole life, so `e = []` cannot be pushed an `Int` once and a list later,
 - `Array<T, N>`, a sequence of `N` elements of `Int`, `Bool` or arrays, held inline, with the size part of the type: `Array<Int, 3>`, `Array<Bool, 8>` or `Array<Array<Int, 3>, 2>` (see Arrays). Two arrays are of one type only if they have the same size, and an array is never a `List`,
+- `Byte`, a whole number from 0 to 255 that is a type of its own (see Bytes), and
 - `fn(Int, Int) -> Int` for a function value.
 
 A function writes the type of each parameter and of its return value. A local variable takes the type of its first assignment, and assigning a different type to it later is an error. Types exist only for checking: validation and evaluation never look at them. Every `return` of the program itself (outside any function) must have the type of the first, as `if c { return 1; } else { return false; };` has none.
@@ -398,6 +399,7 @@ The standard library seeds these builtin functions:
 - `first(list)`: returns the first element of a non-empty list.
 - `last(list)`: returns the last element of a non-empty list.
 - `get(list, index)`: returns the element at `index`, counting from 0. The index must satisfy `0 <= index < size(list)`.
+- `toByte(x)` and `toInt(b)`: an `Int` from 0 to 255 as a `Byte`, and a `Byte` as an `Int` (see Bytes).
 - `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
 - `pop(list)`: returns a new list without the last element. The list must not be empty (`Relation does not hold` otherwise), the result is one shorter and keeps the others in their places. There is no `pop` of an array, whose size never changes.
 - **Methods.** The functions of a list can be written as methods: `l.push(x)`, `l.pop()`, `l.size()`, `l.get(i)`, `l.set(i, x)`, `l.first()`, `l.last()` are `push(l, x)` and so on, and `size`, `first`, `last`, `get` and `set` are methods of an array and of a Box of an array too (`examples/list_methods.tersus`). A list literal is not given a method (`[1, 2].size()` does not parse): name it first.
@@ -1408,6 +1410,19 @@ return v.get(1) + size(v);                      // 8
 
 `Vec` itself is not in the prelude: a `List` is the same thing (see Lists In Native Code), with the literals, the methods and the proof facts of a list, so a program uses a list. `examples/vec.tersus` writes the library out in full as a program of its own: it is what the features of this part of the guide are for.
 
+
+## Bytes
+
+A `Byte` is an `Int` that is from 0 to 255, and a different type, so that a function or a struct that says it holds one can be relied on to: an `Int` is not a `Byte` (`f(5)` for a `Byte` parameter is `expected Byte, got Int`), and nothing makes a `Byte` by accident. Two builtins go between them:
+
+```tersus
+b = toByte(200);          // x as a Byte: x has to be from 0 to 255, which the validator proves where the call is
+n = toInt(b) + 1;         // b as an Int: arithmetic and order (+, -, *, /, <, ...) are on Ints
+if b = toByte(200) { }    // Bytes are compared with = and != as they are
+bs = push([], b);         // a List<Byte>, a Byte in a struct, a parameter, a result ...
+```
+
+`toByte(x)` is refused unless `x` is known to be in range (`x = readByte(); b = toByte(x);` is not, `if x >= 0 { b = toByte(x); }` is, since `readByte()` is from -1 to 255), and `toInt(b)` is `b` (in a proof too: `affirm toInt(b) < 255;` is a fact about `b`). The validator knows that every `Byte` is from 0 to 255, wherever it came from (a parameter, a field, an element of a list, a result), and needs nothing in a contract for it: `fn sum(a: Byte, b: Byte) -> Int [{ }] [{ affirm return <= 510; }] { return toInt(a) + toInt(b); }` validates. A `Byte` is one word like an `Int` in native code and is written as a number. There is no literal for a `Byte` (`toByte(5)` is its constant); `String` is still made of `Int`s, and becomes a sequence of `Byte`s in a later change (`examples/bytes.tersus`).
 
 ## Strings
 

@@ -326,6 +326,8 @@ listOp op os =
         (NewEmptyBoxed, []) -> alloc (OList [])
         (WriteByte, [b]) -> VI . fromIntegral <$> intOperand b
         (ReadByte, []) -> pure (VI (-1))
+        (ToByte, [x]) -> VI . fromIntegral <$> intOperand x
+        (FromByte, [b]) -> VI . fromIntegral <$> intOperand b
         (First, [l]) -> item l (const 0)
         (Last, [l]) -> item l (\n -> n - 1)
         (Get, [l, i]) -> do
