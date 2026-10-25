@@ -99,11 +99,17 @@ typeText ty = case ty of
     TRef t -> "&" ++ typeText t
     TArrayOf t size -> "Array<" ++ typeText t ++ ", " ++ sizeText size ++ ">"
     TFn args ret -> "fn(" ++ intercalate ", " (map typeText args) ++ ") -> " ++ typeText ret
-    TNamed name -> name
+    -- (a name that starts with a small letter has a ` before it, so that it is not read as a size)
+    TNamed name -> if bareLower name then '`' : name else name
     TVariant name -> name
     TParam name -> '\'' : name
     TVar n -> '?' : show n
     TForall _ _ t -> typeText t
+
+bareLower :: Name -> Bool
+bareLower name = case name of
+    c : rest -> isLower c && all isAlphaNum rest
+    [] -> False
 
 -- The struct and the arguments that a name is the instance of
 instanceOf :: Name -> Maybe (Name, [Arg])
@@ -139,6 +145,7 @@ readType text =
     case text of
         '&' : rest -> (\(t, r) -> (TRef t, r)) <$> readType rest
         '\'' : rest -> let (name, r) = span isAlphaNum rest in if null name then Nothing else Just (TParam name, r)
+        '`' : rest -> let (name, r) = span isAlphaNum rest in if null name then Nothing else Just (TNamed name, r)
         '?' : rest -> let (digits, r) = span isDigit rest in if null digits then Nothing else Just (TVar (read digits), r)
         'f' : 'n' : '(' : rest -> do
             (args, afterArgs) <- readTypes rest

@@ -83,6 +83,11 @@ testGenerics =
                 , testCase "a size where a type is wanted" (parseFails "struct Pair<T> { a: T, b: T };  x = Pair<3> { a: 1, b: 2 }; return 0;")
                 , testCase "a type is not a function" (rejected "struct Pair<T> { a: T, b: T };  fn inc(n: Int) -> Int { return n + 1; }; x = Pair<fn(Int) -> Int> { a: inc, b: inc }; return 0;" "a type parameter is not a function")
                 , testCase "a type has to be declared" (rejected "struct Q<T> { a: U }; return 0;" "unknown type U")
+                , testCase "a function does not call itself with a struct of its type" (rejected "struct Wrap<T> { value: T }; fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return f(Wrap<T> { value: a }, n - 1); }; return f(1, 1);" "f calls itself with the type Wrap<'T> for T")
+                , testCase "a struct does not use itself with a type that grows" (rejected "struct Node<T> { next: List<Node<List<T>>> }; x = Node<Int> { next: [] }; return 0;" "Node uses itself with a type made of its own parameters")
+                , testCase "but with its own types, in any order" (valid "struct Pair<A, B> { first: A, rest: List<Pair<B, A>> }; return 0;")
+                , testCase "a struct with a name that starts with a small letter is a type" (runs "struct point { x: Int }; struct Holder<T> { value: T }; h = Holder<point> { value: point { x: 1 } }; return h.value.x;" (VInt 1))
+                , testCase "also in a list" (runs "struct point { x: Int }; struct Holder<T> { value: T }; h = Holder<List<point>> { value: push([], point { x: 4 }) }; return get(h.value, 0).x;" (VInt 4))
                 , testCase "a parameter is not named twice" (rejected "struct Q<T, T> { a: T }; return 0;" "names a parameter twice")
                 , testCase "the declaration is parsed with spaces" (runs "struct Q < T , n > { a: T, b: Array<T, n> }; q = Q < Int , 2 > { a: 1, b: #[2, 3] }; return q.a + get(q.b, 1);" (VInt 4))
                 ]

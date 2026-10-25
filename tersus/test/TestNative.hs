@@ -379,6 +379,7 @@ arrayPrograms =
     , ("a function with a type calls itself", "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(a, n - 1); }; return f(push([], 2), 3);")
     , ("a function with two types calls itself with them swapped", "fn f<A, B>(a: A, b: B, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(b, a, n - 1); }; return f(1, push([], 2), 3);")
     , ("a struct for a type", "struct Pair<T> { a: T, b: T }; p = Pair<Int> { a: 1, b: 2 }; return p.a + p.b;")
+    , ("a struct with a small letter as a type", "struct point { x: Int }; struct Holder<T> { value: T }; fn x<U>(h: &Holder<U>) -> Int { return 1; }; h = Holder<point> { value: point { x: 1 } }; return h.value.x + x(h);")
     , ("a struct for a type that owns", "struct Pair<T> { a: T, b: T }; return Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) };")
     , ("a function over structs of any type", "struct Pair<T> { a: T, b: T }; fn swap<U>(p: &Pair<U>) -> Pair<U> { return Pair<U> { a: p.b, b: p.a }; }; q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }); r = swap(Pair<Bool> { a: true, b: false }); return q;")
     , ("a struct of a struct, both with the type", "struct Pair<T> { a: T, b: T }; struct Wrap<T> { inner: Pair<T>, tag: Int }; fn mk<T>(x: T, y: T) -> Wrap<T> { return Wrap<T> { inner: Pair<T> { a: x, b: y }, tag: 7 }; }; return mk(push([], 1), push([], 2));")

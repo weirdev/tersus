@@ -121,6 +121,6 @@ renderType (TRef t) = "&" ++ renderType t
 renderType (TParam name) = name
 renderType (TForall sizes types t) = "<" ++ intercalate ", " (types ++ sizes) ++ ">" ++ renderType t
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
-renderType (TNamed name) = name
+renderType (TNamed name) = filter (/= '`') name
 renderType (TVariant name) = name
 renderType (TVar _) = "?"
