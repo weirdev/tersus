@@ -6,7 +6,11 @@ module TestPipeline
     , testPipeline
     ) where
 
+import Control.Exception (finally)
 import Data.List (isInfixOf)
+import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
+import System.Directory (getTemporaryDirectory, removeFile)
+import System.IO
 import qualified Data.Map as Map
 import Cli
 import qualified Mir as M
@@ -204,10 +208,27 @@ testCliRun =
 testCliCheck :: TestResult
 testCliCheck = testAssertEq (runSource Check "x = 5; affirm x = 5; return x;") (Ok "OK")
 
+-- A program with a letter that is not ASCII loads under a locale that is not UTF-8
+testCliReadsUtf8 :: Test
+testCliReadsUtf8 = TestCase "utf8 source" $ do
+    tmp <- getTemporaryDirectory
+    (path, handle) <- openTempFile tmp "tersus_utf8.tersus"
+    hSetEncoding handle utf8
+    hPutStr handle "\233t\233 = 6; return \233t\233 * 7; // caf\233\n"
+    hClose handle
+    saved <- getLocaleEncoding
+    (do setLocaleEncoding char8
+        source <- readSourceFile path
+        return (if runSource Interpret source == Ok "42" then Nothing else Just ("got " ++ show (runSource Interpret source))))
+        `finally` (setLocaleEncoding saved >> removeFile path)
+
 testCli :: Test
-testCli =
+testCli = TestList "testCli" [testCliReadsUtf8, testCliCases]
+
+testCliCases :: Test
+testCliCases =
     testCaseSeq
-        "testCli"
+        "testCliCases"
         [ testCliParseCommandLine
         , testCliRenderValue
         , testCliRun
