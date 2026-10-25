@@ -341,8 +341,9 @@ data Statement
     | Return Expression
     | ValidationStatement ValidationStatement
     | -- struct Name<sizes> { field: Type, ... }; it only matters to the type checker. A struct with sizes (`struct Packet<n> { body:
-      -- Array<Int, n> }`) is a type for each list of sizes, `Packet<4>`: see instanceName.
-      StructDef Name [Variable] [(Variable, Type)]
+      -- Array<Int, n> }`) is a type for each list of sizes, `Packet<4>`: see instanceName. The last field is the invariant, `struct Vec<T> {
+      -- data: Box<Array<T>>, len: Int } invariant [{ affirm len >= 0; }]`, which every value of the struct meets.
+      StructDef Name [Variable] [(Variable, Type)] [ValidationStatement]
     | -- enum Name { Variant { field: Type, ... }, ... } with the variants' full names (Name::Variant)
       EnumDef Name [(Name, [(Variable, Type)])]
     | AxiomDef Variable [Variable] [ValidationStatement] [ValidationStatement]
@@ -354,10 +355,12 @@ data Statement
       While Expression [ValidationStatement] (Maybe Termination) [Statement]
     | -- trait Name { fn f(...) -> T [{ in }] [{ out }]; ... }: the functions an impl must have. The type checker takes it
       -- apart; it does not reach the lowering.
-      TraitDef Name [TraitFn]
-    | -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions, which are named Type::f. The type checker
+      TraitDef Name [Variable] [TraitFn]
+    | -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions, which are named Type::f. The fields are the trait
+      -- (if any) and the types it is given (`impl<T> Sequence<T> for Vec<T>`), the struct or enum, and the name of its type with the
+      -- types and sizes of the impl (`Vec<'T>`, which `Self` stands for). The type checker
       -- checks them against the trait and hands them back as ordinary function definitions, so the lowering never sees it.
-      ImplDef (Maybe Name) Name [Statement]
+      ImplDef (Maybe Name) [Arg] Name Name [Statement]
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- A function a trait asks for: its name, the names of its parameters, the signature (Self stands for the type that

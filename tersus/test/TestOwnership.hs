@@ -605,6 +605,7 @@ mainProgram locals stmts =
                 , fnSpec = emptySpec
                 }
         , progGenerics = Map.empty
+        , progInvariants = Map.empty
         }
 
 -- Lowering never puts a change of a list between a part of it and the read of that part in one block, so the rule that a part

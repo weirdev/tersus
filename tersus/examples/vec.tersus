@@ -1,34 +1,53 @@
-// A growable list written in Tersus: a Box of an array that holds the elements, and how many of them are in use. The array is
-// the capacity, and a push into a full one makes an array twice as large and moves the elements over.
+// A growable list written in Tersus, and the trait that its functions are the functions of.
 //
-// The functions are those of `impl<T> Vec<T>`, so a call is written `v.push(x)`. Each says what it keeps true: 0 <= len <= size(data),
-// and a capacity of at least 1. A function over a Vec asks for it, and the ones that make a Vec promise it, so a caller that only builds
-// Vecs with these functions never has to prove it again.
+// `Sequence<E>` says what a sequence of E is: `size`, `get`, `set` and `push`, with contracts written with `size` and `get` themselves,
+// which a contract may call. `size(self)` is a function of the type that implements the trait, so what a contract says of `size(v)` is
+// what the impl's `size` promises: for a Vec, `size(v) = v.len`. Calls of `size`, `get`, `set` and `push` on a struct are calls of its
+// impl's, so `size(v)`, `v.size()` and `Sequence::size(v)` are the same call.
+//
+// A Vec is a Box of an array that holds the elements, and how many of them are in use. The array is the capacity, and a push into a full
+// one makes an array twice as large and moves the elements over. Its invariant is what every function of it relies on and keeps true:
+// 0 <= len <= size(data), and a capacity of at least 1. The program proves it where a Vec is made, and every Vec it is given has it.
+
+trait Sequence<E> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
+    fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];
+    fn set(self: Self, i: Int, x: E) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }];
+    fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }];
+};
+
+// (the elements 0 to len - 1 are in use; the rest of the array is spare room, filled with what the Vec was made with)
 struct Vec<T> {
     data: Box<Array<T>>,
     len: Int,
-};
+} invariant [{ affirm len >= 0; affirm len <= size(data); affirm size(data) >= 1; }];
 
 impl<T> Vec<T> {
     // An empty Vec. The array needs an element to fill it with, which is never read: nothing is in use until it is pushed.
-    fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; affirm size(return.data) = 4; }] {
+    fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; }] {
         return Self { data: Array::boxed(4, filler), len: 0 };
     };
 
-    fn len(self: &Self) -> Int [{ }] [{ affirm return = self.len; }] {
+    // Takes the last element out of use (it stays in the array, which holds it until it is written over or the Vec is freed)
+    fn pop(self: Self) -> Self [{ affirm self.len >= 1; }] [{ affirm return.len = self.len - 1; }] {
+        return Self { data: self.data, len: self.len - 1 };
+    };
+};
+
+impl<T> Sequence<T> for Vec<T> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return = self.len; }] {
         return self.len;
     };
 
-    // The element at an index in use
-    fn get(self: &Self, i: Int) -> T [{ define n = self.len; define cap = size(self.data); affirm i >= 0; affirm i < n; affirm n <= cap; }] [{ }] {
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = get(self.data, i); }] {
         return get(self.data, i);
     };
 
-    fn set(self: Self, i: Int, x: T) -> Self [{ define n = self.len; define cap = size(self.data); affirm i >= 0; affirm i < n; affirm n <= cap; }] [{ affirm return.len = self.len; affirm size(return.data) = size(self.data); }] {
+    fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return.len = self.len; affirm get(return.data, i) = x; }] {
         return Self { data: set(self.data, i, x), len: self.len };
     };
 
-    fn push(self: Self, x: T) -> Self [{ define n = self.len; define cap = size(self.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] [{ affirm return.len = self.len + 1; affirm return.len <= size(return.data); affirm size(return.data) >= 1; }] {
+    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm get(return.data, self.len) = x; }] {
         if self.len < size(self.data) {
             return Self { data: set(self.data, self.len, x), len: self.len + 1 };
         };
@@ -40,17 +59,12 @@ impl<T> Vec<T> {
         };
         return Self { data: set(big, self.len, x), len: self.len + 1 };
     };
-
-    // Takes the last element out of use (it stays in the array, which holds it until it is written over or the Vec is freed)
-    fn pop(self: Self) -> Self [{ define n = self.len; define cap = size(self.data); affirm n >= 1; affirm n <= cap; }] [{ affirm return.len = self.len - 1; affirm size(return.data) = size(self.data); }] {
-        return Self { data: self.data, len: self.len - 1 };
-    };
 };
 
-// A Vec of Ints: the first 20 squares
+// A Vec of Ints: the first 20 squares. The loop says what it keeps in terms of the size, and the invariant of Vec does the rest.
 squares = Vec::new(0);
 i = 0;
-while i < 20 [{ affirm i >= 0; affirm i <= 20; affirm squares.len = i; define n = squares.len; define cap = size(squares.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 20 - i {
+while i < 20 [{ affirm i >= 0; affirm i <= 20; affirm size(squares) = i; }] shrinks 20 - i {
     squares = squares.push(i * i);
     i = i + 1;
 };
@@ -68,4 +82,4 @@ grid = Vec::new(Vec::new(0)).push(Vec::new(0).push(7));
 flags = Vec::new(false).push(true).push(false).push(true);
 flags = flags.set(0, true).pop();
 
-return squares.get(19) + squares.len() + size(firstRow) * 1000 + grid.len() * 10000 + flags.len() * 100000;    // 361 + 20 + 2000 + 10000 + 200000
+return squares.get(19) + size(squares) + size(firstRow) * 1000 + size(grid) * 10000 + size(flags) * 100000;    // 361 + 20 + 2000 + 10000 + 200000

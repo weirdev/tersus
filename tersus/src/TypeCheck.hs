@@ -78,6 +78,8 @@ data TcState = TcState
     , tcReadOnly :: [Variable] -- the parameters of the function being checked that it borrows
     , tcTypeScope :: [Variable] -- the type parameters of the function being checked
     , tcCurrent :: Maybe Variable -- the function being checked, which may call itself
+    , tcTraitParams :: Map Name [Variable] -- the types of each trait that has any (`trait Sequence<E>`)
+    , tcTraitSelf :: Maybe [TraitFn] -- the functions of the trait being checked, which a contract of it may call on a value of type Self
     }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
@@ -86,7 +88,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -439,6 +441,13 @@ declareGeneric name params fields = do
   where
     nubSizes = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
+-- The invariant of a struct is written with the names of its fields, and a function of the program defined before the struct may be called
+checkInvariant :: Ctx -> [(Variable, Type)] -> [ValidationStatement] -> TC [ValidationStatement]
+checkInvariant _ _ [] = return []
+checkInvariant ctx fields invariant = do
+    (_, checked) <- checkValidations ctx [Map.fromList fields] invariant
+    return checked
+
 registerCtors :: Name -> [(Name, [(Variable, Type)])] -> TC ()
 registerCtors typeName ctors = do
     s <- getState
@@ -775,12 +784,12 @@ checkStatements top ctx env (stmt : rest) = do
 checkItem :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, [Statement])
 checkItem top ctx env stmt =
     case stmt of
-        TraitDef name functions
-            | top -> checkTrait name functions >> return (ctx, env, [])
+        TraitDef name params functions
+            | top -> checkTrait name params functions >> return (ctx, env, [])
             | otherwise -> failTc "Type error: a trait can only be defined at the top of the program"
-        ImplDef trait typeName functions
+        ImplDef trait traitArgs typeName selfName functions
             | top -> do
-                (ctx', env', functions') <- checkImpl ctx env trait typeName functions
+                (ctx', env', functions') <- checkImpl ctx env trait traitArgs typeName selfName functions
                 return (ctx', env', functions')
             | otherwise -> failTc "Type error: an impl can only be written at the top of the program"
         _ -> do
@@ -827,13 +836,18 @@ checkStatement top ctx env stmt =
         ValidationStatement vs -> do
             (env', vs') <- checkValidation ctx env vs
             return (ctx, env', ValidationStatement vs')
-        StructDef name params fields | not (null params) -> declareGeneric name params fields >> return (ctx, env, stmt)
-        StructDef name _ fields -> do
+        StructDef name params fields invariant
+            | not (null params) -> do
+                declareGeneric name params fields
+                invariant' <- withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (checkInvariant ctx fields invariant)
+                return (ctx, env, StructDef name params fields invariant')
+        StructDef name _ fields invariant -> do
             declareType name
             mapM_ (checkType . snd) fields
             registerCtors name [(name, fields)]
             checkFinite name [fields]
-            return (ctx, env, stmt)
+            invariant' <- checkInvariant ctx fields invariant
+            return (ctx, env, StructDef name [] fields invariant')
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
@@ -923,22 +937,22 @@ checkValidation :: Ctx -> Env -> ValidationStatement -> TC (Env, ValidationState
 checkValidation ctx env vs =
     case vs of
         ProofAssert proof -> do
-            t <- inferProof ctx env proof
+            (t, proof') <- inferProofR ctx env proof
             expect "affirmed proof" TBool t
-            return (env, vs)
+            return (env, ProofAssert proof')
         AssignProofVar var expr -> do
             (t, expr') <- inferExprR ctx env expr
             env' <- assignVar ctx env var t
             return (env', AssignProofVar var expr')
         Rewrite rule -> do
-            case rule of
-                Refl proof -> () <$ inferProof ctx env proof
-                Eval var -> () <$ lookupVar ctx env var
-                EvalAll -> return ()
-                CheckGtZero proof -> () <$ inferProof ctx env proof
-                CheckRel proof -> () <$ inferProof ctx env proof
-                UserRewrite _ proofs -> mapM_ (inferProof ctx env) proofs
-            return (env, vs)
+            rule' <- case rule of
+                Refl proof -> Refl . snd <$> inferProofR ctx env proof
+                Eval var -> Eval var <$ lookupVar ctx env var
+                EvalAll -> return rule
+                CheckGtZero proof -> CheckGtZero . snd <$> inferProofR ctx env proof
+                CheckRel proof -> CheckRel . snd <$> inferProofR ctx env proof
+                UserRewrite name proofs -> UserRewrite name <$> mapM (fmap snd . inferProofR ctx env) proofs
+            return (env, Rewrite rule')
 
 -- Expressions and proofs
 
@@ -1043,6 +1057,14 @@ inferExprR ctx env expr =
             _ -> ordinary funct funct' ft args
     ordinary funct funct' ft args = do
         inferred0 <- mapM (inferExprR ctx env) args
+        -- (size(v), get(v, i), ... on a value of a struct are the functions of its impl)
+        owner <- case (builtinHead ctx env funct, inferred0) of
+            (Just b, (xt, _) : _) | Just fname <- sequenceFunction b -> (,) fname <$> structOwner xt
+            _ -> return ("", Nothing)
+        case owner of
+            (fname, Just struct) -> resolveAssociated struct fname >>= \full -> callResolved full inferred0
+            _ -> ordinaryBuiltin funct funct' ft inferred0
+    ordinaryBuiltin funct funct' ft inferred0 = do
         -- (a builtin takes what it is given: it looks through a Box itself)
         inferred <- case builtinHead ctx env funct of
             Just _ -> return inferred0
@@ -1118,7 +1140,7 @@ ownerThroughTrait trait functions function ats =
                 path = trait ++ "::" ++ function
             when (length ptys /= length ats) $
                 failTc ("Type error: " ++ path ++ " takes " ++ show (length ptys) ++ " arguments, got " ++ show (length ats))
-            case [i | (i, TNamed "Self") <- zip [0 :: Int ..] ptys] of
+            case [i | (i, t) <- zip [0 :: Int ..] ptys, unref t == TNamed "Self"] of
                 [] -> failTc ("Type error: " ++ path ++ " has no Self parameter to tell the type by: call it on the type, as in Type::" ++ function ++ "(...)")
                 i : _ -> do
                     owner <- ownerOfValue path (ats !! i)
@@ -1130,12 +1152,13 @@ ownerThroughTrait trait functions function ats =
 
 -- The functions of a trait have their types and contracts checked with Self as a type that has no constructors, so a
 -- mistake in the trait is reported at the trait and not at its first impl
-checkTrait :: Name -> [TraitFn] -> TC ()
-checkTrait name functions = do
+checkTrait :: Name -> [Variable] -> [TraitFn] -> TC ()
+checkTrait name params functions = do
     s <- getState
     when (Map.member name (tcTraits s) || Map.member name (tcTypes s)) $ failTc ("Type error: " ++ name ++ " is already defined")
-    putState s{tcTypes = Map.insert "Self" [] (tcTypes s)}
-    forM_ functions $ \f -> do
+    putState s{tcTypes = Map.insert "Self" [] (tcTypes s), tcTraitSelf = Just functions}
+    -- (the types of the trait are types in its signatures and contracts)
+    withGenerics [] params $ forM_ functions $ \f -> do
         let Signature ptys rty _ _ = traitFnSignature f
             ctx = Ctx Map.empty (Just rty)
             paramEnv = [Map.fromList (zip (traitFnParams f) (map unref ptys))]
@@ -1144,7 +1167,11 @@ checkTrait name functions = do
         _ <- checkValidations ctx (Map.insert "return" rty (head inEnv) : tail inEnv) (traitFnEnsures f)
         return ()
     s' <- getState
-    putState s'{tcTypes = Map.delete "Self" (tcTypes s'), tcTraits = Map.insert name functions (tcTraits s')}
+    putState s'{tcTypes = Map.delete "Self" (tcTypes s'), tcTraits = Map.insert name functions (tcTraits s'), tcTraitParams = Map.insert name params (tcTraitParams s'), tcTraitSelf = Nothing}
+
+-- The types of a trait replaced by the types an impl gives it
+substTraitArgs :: [Variable] -> [Arg] -> Type -> Type
+substTraitArgs params args = substitute [] [(p, t) | (p, ArgType t) <- zip params args]
 
 substSelf :: Name -> Type -> Type
 substSelf owner (TNamed "Self") = TNamed owner
@@ -1166,25 +1193,24 @@ substSelf _ t = t
 -- The validator checks it like any function, and what it proves is that the impl may be used wherever the trait is: the
 -- trait's input contract must give the impl's (the call is checked against the impl's input contract), and the impl's
 -- output contract must give the trait's (the return is checked against it).
-checkImpl :: Ctx -> Env -> Maybe Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
-checkImpl ctx env trait typeName functions = do
+checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
+checkImpl ctx env trait traitArgs typeName selfName functions = do
     declared <- getState
     -- (a struct with parameters has them in the impl, `impl<T> Vec<T>`, and its type is a different one for each)
-    if Map.member typeName (tcGenerics declared)
-        then case trait of
-            Nothing -> return ()
-            Just traitName -> failTc ("Type error: impl " ++ traitName ++ " for " ++ typeName ++ ", which has parameters: a trait cannot be implemented for these yet")
-        else void (typeCtors typeName)
+    unless (Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
     -- (the type implements the trait from the first function on, so a function can call an earlier one through the trait; if the
     -- impl is not accepted the program is refused, so this is never seen)
-    required <- case trait of
-        Nothing -> return []
+    (required, traitParams) <- case trait of
+        Nothing -> return ([], [])
         Just traitName -> do
             s <- getState
             found <- maybe (failTc ("Type error: unknown trait " ++ traitName)) return (Map.lookup traitName (tcTraits s))
+            let params = Map.findWithDefault [] traitName (tcTraitParams s)
+            when (length params /= length traitArgs) $
+                failTc ("Type error: trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">, which impl " ++ traitName ++ " for " ++ typeName ++ " gives " ++ show (length traitArgs))
             when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
             putState s{tcImpls = Set.insert (traitName, typeName) (tcImpls s)}
-            return found
+            return (found, params)
     (ctx', env', checked) <- definitions True (ctx, env, []) functions
     case trait of
         Nothing -> return (ctx', env', checked)
@@ -1192,6 +1218,8 @@ checkImpl ctx env trait typeName functions = do
             let here = "impl " ++ traitName ++ " for " ++ typeName
                 defined = [(implFunctionPart name, (Signature ptys rty sizes types, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types) term _) _)) <- checked]
                 wanted = map traitFnName required
+                -- (what the trait asks for, with Self the type and the types of the trait the ones this impl gives)
+                inImpl = substTraitArgs traitParams traitArgs . substSelf selfName
             case map fst defined \\ wanted of
                 extra : _ -> failTc ("Type error: " ++ here ++ " has a function " ++ extra ++ ", which " ++ traitName ++ " does not declare")
                 [] -> return ()
@@ -1200,12 +1228,14 @@ checkImpl ctx env trait typeName functions = do
                 [] -> return ()
             wrappers <- forM required $ \f -> do
                 let Signature ptys rty _ _ = traitFnSignature f
-                    expected = Signature (map (substSelf typeName) ptys) (substSelf typeName rty) [] []
+                    expected = Signature (map inImpl ptys) (inImpl rty) [] []
                 case lookup (traitFnName f) defined of
-                    Just (actual, term) -> do
+                    Just (Signature aptys arty asizes atypes, term) -> do
+                        let actual = Signature aptys arty [] []
                         when (actual /= expected) $
                             failTc ("Type error: " ++ here ++ ": " ++ traitFnName f ++ " is " ++ renderSignature actual ++ ", but " ++ traitName ++ " declares " ++ renderSignature expected)
-                        return (wrapper traitName typeName f expected term)
+                        -- (an impl of a struct with types is for any of them, and the check of it is too)
+                        return (wrapper traitName typeName f (Signature aptys arty asizes atypes) term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
             (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
             return (ctx'', env'', checked ++ wrapped)
@@ -1214,11 +1244,6 @@ checkImpl ctx env trait typeName functions = do
     -- the impl against its trait cannot
     definitions _ state [] = return state
     definitions own (c, e, done) (stmt : rest) = do
-        case stmt of
-            Assign name (Val (VFunct _ _ _ (NativeFunct (Signature _ _ sizes types) _ _) _))
-                | trait /= Nothing && not (null sizes && null types) ->
-                    failTc ("Type error: " ++ name ++ " has size or type parameters, which a function of a trait's impl cannot have yet")
-            _ -> return ()
         case stmt of
             Assign name _ | own -> do
                 s <- getState
@@ -1241,22 +1266,32 @@ checkImpl ctx env trait typeName functions = do
             )
 
 inferProof :: Ctx -> Env -> VariableProof -> TC Type
-inferProof ctx env proof =
+inferProof ctx env proof = fst <$> inferProofR ctx env proof
+
+-- The type of a proof, and the proof with each call of a function of the program resolved: `Type::f(x)` and `Trait::f(x)` are calls of
+-- the impl's function for the type, and a function with sizes is given them as its last arguments, as a call is.
+inferProofR :: Ctx -> Env -> VariableProof -> TC (Type, VariableProof)
+inferProofR ctx env proof =
     case proof of
-        ATerm var -> lookupProofVar ctx env var
-        BVar var -> lookupVar ctx env var
-        CTerm value -> valueType value
-        FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] ->
-            inferProof ctx env struct >>= readField owner field
-        FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args ->
-            mapM (inferProof ctx env) args >>= checkConstruct name fields
-        FApp (CTerm (VFunct _ _ _ (BuiltinFunct NewArray) _)) [n, x] -> do
-            inferProof ctx env n >>= expect "argument 1 of array" TInt
-            xt <- inferProof ctx env x
+        ATerm var -> (\t -> (t, proof)) <$> lookupProofVar ctx env var
+        BVar var -> (\t -> (t, proof)) <$> lookupVar ctx env var
+        CTerm value -> (\t -> (t, proof)) <$> valueType value
+        FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
+            (structTy, struct') <- inferProofR ctx env struct
+            t <- readField owner field structTy
+            return (t, FApp funct [struct'])
+        FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
+            inferred <- mapM (inferProofR ctx env) args
+            t <- checkConstruct name fields (map fst inferred)
+            return (t, FApp funct (map snd inferred))
+        FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct NewArray) _)) [n, x] -> do
+            (nt, n') <- inferProofR ctx env n
+            expect "argument 1 of array" TInt nt
+            (xt, x') <- inferProofR ctx env x
             size <- proofSize (constantProofInt n) n
             let ty = TArrayOf xt size
             arrayOk ty
-            return ty
+            return (ty, FApp funct [n', x'])
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct NewArray) _)) args -> failTc ("Type error: array takes 2 arguments, got " ++ show (length args))
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct ArrayFrom) _)) [CTerm literal@(VList items)] -> do
             listTy <- valueType literal
@@ -1265,19 +1300,88 @@ inferProof ctx env proof =
                     let ty = TArray e (fromIntegral (length items))
                     arrayOk ty
                     literalOk e
-                    return ty
+                    return (ty, proof)
                 _ -> failTc "Type error: an array literal is made from a list"
+        -- a function of the program, named as a variable or by a path
+        FApp (ATerm name) args | not (shadowed name) -> do
+            inferred <- mapM (inferProofR ctx env) args
+            target <- ghostTarget name (map fst inferred)
+            case target of
+                Just full -> ghostCall full inferred
+                Nothing -> general (ATerm name) inferred
         FApp funct args -> do
-            ft <- inferProof ctx env funct
-            ats <- mapM (inferProof ctx env) args
-            result <- checkBuiltinCall (proofBuiltin funct) "call" ft ats
-            comparing (proofHead funct) ats
-            return result
+            (_, funct') <- inferProofR ctx env funct
+            inferred <- mapM (inferProofR ctx env) args
+            owner <- case (proofBuiltin funct', inferred) of
+                (Just b, (xt, _) : _) | Just fname <- sequenceFunction b -> (,) fname <$> structOwner xt
+                _ -> return ("", Nothing)
+            case owner of
+                -- size(v), get(v, i), ...: on a value of a struct they are the functions of its impl, and in a trait on a Self
+                (fname, Just "Self") -> do
+                    traitFns <- tcTraitSelf <$> getState
+                    case [f | Just fs <- [traitFns], f <- fs, traitFnName f == fname] of
+                        f : _ | length (fst (signatureTypes f)) == length inferred -> return (snd (signatureTypes f), FApp funct' (map snd inferred))
+                        _ -> failTc ("Type error: " ++ fname ++ " is called on a Self, which the trait has no function " ++ fname ++ " for")
+                (fname, Just struct) -> do
+                    full <- resolveAssociated struct fname
+                    ghostCall full inferred
+                _ -> general funct' inferred
         Forall index guards body -> do
             let env' = Map.singleton index TInt : env
-            mapM_ (\g -> inferProof ctx env' g >>= expect "guard of forall" TBool) guards
-            inferProof ctx env' body >>= expect "body of forall" TBool
-            return TBool
+            guards' <- mapM (\g -> inferProofR ctx env' g >>= \(t, g') -> expect "guard of forall" TBool t >> return g') guards
+            (bt, body') <- inferProofR ctx env' body
+            expect "body of forall" TBool bt
+            return (TBool, Forall index guards' body')
+  where
+    shadowed name = any (Map.member name) env
+    signatureTypes f = let Signature ptys rty _ _ = traitFnSignature f in (ptys, rty)
+    ghostCall full inferred = do
+        ft <- lookupVar ctx env full
+        ftz <- zonk ft
+        case ftz of
+            TForall sizes types inner -> do
+                (result, args') <- genericCall full sizes types inner [(t, Val (VInt 0)) | (t, _) <- inferred]
+                return (result, FApp (ATerm full) (map snd inferred ++ map exprToProof (drop (length inferred) args')))
+            _ -> do
+                result <- checkCall full ft (map fst inferred)
+                return (result, FApp (ATerm full) (map snd inferred))
+    general funct inferred = do
+        ft <- inferProof ctx env funct
+        result <- checkBuiltinCall (proofBuiltin funct) "call" ft (map fst inferred)
+        comparing (proofHead funct) (map fst inferred)
+        return (result, FApp funct (map snd inferred))
+    -- the function of the program that a name in a call stands for, if it stands for one
+    ghostTarget name argTypes
+        | take 1 name == "<" = return (Just name)
+        | Just (path, function) <- traitPath name = do
+            s <- getState
+            case (Map.lookup path (tcTraits s), Map.member path (tcTypes s) || Map.member path (tcGenerics s)) of
+                (Just functions, _) -> do
+                    owner <- ownerThroughTrait path functions function argTypes
+                    return (Just (implFunctionName owner (Just path) function))
+                (Nothing, True) -> Just <$> resolveAssociated path function
+                _ -> return Nothing
+        | Map.member name (ctxFns ctx) = return (Just name)
+        | otherwise = return Nothing
+
+-- The functions of a list that a struct can have of its own: `size(v)` is the function `size` of the impl of the type of `v`
+sequenceFunction :: BuiltinFunct -> Maybe Name
+sequenceFunction b = case b of
+    Size -> Just "size"
+    First -> Just "first"
+    Last -> Just "last"
+    Get -> Just "get"
+    Push -> Just "push"
+    Set -> Just "set"
+    _ -> Nothing
+
+-- The struct (without the types it is given) that a type is, or Self in a trait
+structOwner :: Type -> TC (Maybe Name)
+structOwner ty = do
+    t <- zonk ty
+    return $ case t of
+        TNamed name -> Just (maybe name fst (instanceOf name))
+        _ -> Nothing
 
 -- (a name in a proof is a variable of the program or the builtin of that name, as for an expression)
 proofBuiltin :: VariableProof -> Maybe BuiltinFunct

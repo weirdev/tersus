@@ -17,6 +17,7 @@ import TestArrays
 import TestBorrow
 import TestGenerics
 import TestBox
+import TestSequence
 
 main :: IO ()
 main = do
@@ -78,6 +79,7 @@ main = do
                 , testBox
                 , testBorrow
                 , testGenerics
+                , testSequence
                 ]
     putStrLn $
         "Summary: "
