@@ -15,6 +15,7 @@ module TypeCheck
     , maxArraySlots
     , withSizes
     , plainElement
+    , arrayElement
     , checkBuiltinCall
     , checkConstruct
     , readField
@@ -529,7 +530,7 @@ checkBuiltinCall (Just b) name ft (first : rest)
     isLookingAt _ = False
 checkBuiltinCall _ name ft ats = checkCall name ft ats
 
--- Arrays: held inline, so their size is a constant of the type and their elements are plain
+-- Arrays: held inline, so their size is a constant of the type
 
 -- The largest array there can be, in 8-byte slots (64 KB), since it is held in the frame of a function
 maxArraySlots :: Integer
@@ -540,9 +541,18 @@ arraySlots :: Type -> Integer
 arraySlots (TArrayOf t (SizeConst n)) = n * arraySlots t
 arraySlots _ = 1
 
--- What an array can hold: an Int, a Bool, or an array of those. (A list, struct or enum lives on the heap, and a pointer to
--- it would be an owner to free, which waits for the heap form of an array.) A type not known yet is accepted: the lowering
--- looks at the finished types.
+-- What an array can hold: any value that has a size and is not a function: an Int, a Bool, a list, a struct, an enum, a Box or an array.
+-- A type not known yet is accepted: the lowering looks at the finished types.
+arrayElement :: Type -> Bool
+arrayElement ty = case ty of
+    TFn{} -> False
+    TForall{} -> False
+    TRef{} -> False
+    TArrayOf t _ -> arrayElement t
+    _ -> True
+
+-- The values that have nothing to free, and are written out in a program: Int, Bool, or arrays of those. A literal `#[...]` is made of
+-- them, since it is a constant and a list or a struct would be made again each time it is wanted.
 plainElement :: Type -> Bool
 plainElement TInt = True
 plainElement TBool = True
@@ -558,15 +568,50 @@ arrayOk :: Type -> TC ()
 arrayOk ty@(TArray e n) = do
     e' <- zonk e
     when (n < 0) $ failTc ("Type error: the size of an array cannot be negative, got " ++ show n)
-    unless (plainElement e') $
-        failTc ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType e' ++ " (elements that live on the heap come with the heap form of an array)")
-    when (arraySlots ty > maxArraySlots) $
-        failTc ("Type error: " ++ renderType ty ++ " takes " ++ show (arraySlots ty) ++ " words, more than the " ++ show maxArraySlots ++ " that an array held in a frame can have")
+    unless (arrayElement e') $ failTc (notAnElement e')
+    words' <- typeWords ty
+    when (words' > maxArraySlots) $
+        failTc ("Type error: " ++ renderType ty ++ " takes " ++ show words' ++ " words, more than the " ++ show maxArraySlots ++ " that an array held in a frame can have")
 arrayOk (TArrayOf e _) = do
     e' <- zonk e
-    unless (plainElement e') $
-        failTc ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType e' ++ " (elements that live on the heap come with the heap form of an array)")
+    unless (arrayElement e') $ failTc (notAnElement e')
 arrayOk _ = return ()
+
+-- (an array that is written out is made of Int, Bool and arrays of them; the others are made with array(n, x) and changed with set)
+literalOk :: Type -> TC ()
+literalOk e = do
+    e' <- zonk e
+    unless (plainElement e') $
+        failTc ("Type error: an array literal holds Int, Bool or arrays of them, not " ++ renderType e' ++ " (make an array of other values with array(n, x) and set)")
+
+notAnElement :: Type -> String
+notAnElement ty = "Type error: an array holds values that have a size (Int, Bool, a list, a struct, an enum, a Box or an array), not " ++ renderType ty
+
+-- The 8-byte words a value of the type takes where it is held: a struct is its fields', an enum a word and the widest variant's, an array
+-- its elements', and anything else (a number, a list, a Box) one
+typeWords :: Type -> TC Integer
+typeWords ty = do
+    t <- zonk ty
+    s <- getState
+    case t of
+        TBox (TArrayOf _ SizeAny) -> return 2
+        TArrayOf e (SizeConst n) -> (n *) <$> typeWords e
+        TNamed name -> ensureInstance name >> ofType name
+        TVariant variant -> do
+            ensureInstance variant
+            case Map.lookup variant (tcCtors s) of
+                Just (owner, _) -> typeWords (TNamed owner)
+                Nothing -> return 1
+        _ -> return 1
+  where
+    ofType name = do
+        s <- getState
+        case Map.lookup name (tcTypes s) of
+            Just [ctor] | ctor == name, Just (_, fields) <- Map.lookup ctor (tcCtors s) -> sum <$> mapM (typeWords . snd) fields
+            Just ctors -> do
+                widths <- mapM (\c -> maybe (return 0) (\(_, fields) -> sum <$> mapM (typeWords . snd) fields) (Map.lookup c (tcCtors s))) ctors
+                return (1 + maximum (0 : widths))
+            Nothing -> return 1
 
 -- The value of an expression made of numbers and arithmetic, which is what a size can be. Nothing if it is anything else. The
 -- arithmetic is the program's: each step has to fit in an Int and a divisor cannot be 0, as when it runs, so an expression that
@@ -918,6 +963,7 @@ inferExprR ctx env expr =
                 TList e -> do
                     let ty = TArray e (fromIntegral (length items))
                     arrayOk ty
+                    literalOk e
                     return (ty, expr)
                 _ -> failTc "Type error: an array literal is made from a list"
         F (Var ('.' : method)) (receiver : args) -> do
@@ -1159,6 +1205,7 @@ inferProof ctx env proof =
                 TList e -> do
                     let ty = TArray e (fromIntegral (length items))
                     arrayOk ty
+                    literalOk e
                     return ty
                 _ -> failTc "Type error: an array literal is made from a list"
         FApp funct args -> do

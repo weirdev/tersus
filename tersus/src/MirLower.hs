@@ -232,7 +232,7 @@ resolveFunction fn = do
         TFn args ret -> concatMap universe (ret : args)
         _ -> []
     arrayHolds ty = case ty of
-        TArrayOf t _ | not (plainElement t) -> failL ("Type error: an array holds Int, Bool or arrays of them, not " ++ renderType t)
+        TArrayOf t _ | not (arrayElement t) -> failL ("Type error: an array holds values that have a size, not " ++ renderType t)
         _ -> return ()
 
 resolveType :: Type -> L Type

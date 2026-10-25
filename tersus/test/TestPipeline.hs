@@ -89,6 +89,7 @@ testExamples =
         , testExampleFile "examples/rejected/array_unsized.tersus" (ExpectRejected "an array with no size")
         , testExampleFile "examples/box_array.tersus" (ExpectReturn (VInt 34))
         , testExampleFile "examples/array_sizes.tersus" (ExpectReturn (VInt 42))
+        , testExampleFile "examples/array_owners.tersus" (ExpectReturn (VInt 207))
         , testExampleFile "examples/borrowing.tersus" (ExpectReturn (VInt 138))
         , testExampleFile "examples/sized_structs.tersus" (ExpectReturn (VInt 71))
         , testExampleFile "examples/rejected/sized_struct_mismatch.tersus" (ExpectRejected "argument 1 of first: expected Packet<3>, got Packet<2>")
