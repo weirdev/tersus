@@ -7,7 +7,7 @@ module TestNative
 
 import Control.Exception (IOException, try)
 import Data.Char (isAscii)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, tails)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -38,6 +38,7 @@ testNative =
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
+        , TestList "a list written in Tersus" (testVecExample : [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms])
         , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestList "build" [testBuildKeepsFiles]
@@ -53,7 +54,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "safe_access", "sized_structs", "structs", "termination", "traits", "type_parameters", "types", "update_list"
+        , "safe_access", "sized_structs", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec"
         ]
     ]
 
@@ -445,6 +446,37 @@ arrayPrograms =
     , ("a result that is one is printed", "struct S { a: Box<Array<Int>>, n: Int }; return S { a: Array::boxed(2, 5), n: 3 };")
     , ("a Box of a struct that has one", "struct S { a: Box<Array<Int>> }; b = Box::new(S { a: Array::boxed(2, 5) }); return size(b.a);")
     ]
+
+-- Programs over the library list (`vecLibrary`, as in examples/vec.tersus). Run with the checks of the runtime on, they show that
+-- the arrays it grows, the elements it moves and the Vecs it holds are each freed once.
+vecPrograms :: [(String, String)]
+vecPrograms =
+    [ ("pushed and read", "v = vecPush(vecPush(vecNew(0), 5), 6); return vecGet(v, 0) * 10 + vecGet(v, 1);")
+    , ("pushed past its capacity", loop 10 "0" "v = vecPush(v, i * i);" ++ "return vecLen(v) + vecGet(v, 9);")
+    , ("pushed past it again and again", loop 300 "0" "v = vecPush(v, i);" ++ "return vecLen(v) + vecGet(v, 299);")
+    , ("set and popped", "v = vecPop(vecSet(vecPush(vecPush(vecNew(false), true), false), 0, true)); return vecLen(v);")
+    , ("a copy is a Vec of its own", "a = vecPush(vecNew(0), 1); b = vecSet(a, 0, 7); return vecGet(a, 0) * 10 + vecGet(b, 0);")
+    , ("of lists", loop 9 "push([], 0)" "v = vecPush(v, push(push([], i), i));" ++ "return size(vecGet(v, 8)) + vecLen(v);")
+    , ("of lists, one taken out", "rows = vecPush(vecNew(push([], 0)), push(push([], 4), 5)); r = vecGet(rows, 0); return size(r) + size(rows.data);")
+    , ("of Vecs", "g = vecPush(vecNew(vecNew(0)), vecPush(vecPush(vecNew(0), 8), 9)); return vecLen(vecGet(g, 0));")
+    , ("of Vecs that grow", "g = vecNew(vecNew(0)); i = 0; while i < 9 [{ affirm i >= 0; affirm i <= 9; affirm g.len = i; define n = g.len; define cap = size(g.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 9 - i { g = vecPush(g, vecPush(vecNew(i), i)); i = i + 1; }; return vecLen(g) + vecLen(vecGet(g, 8));")
+    , ("of structs that own a list", "struct P { n: Int, xs: List<Int> }; ps = vecPush(vecNew(P { n: 0, xs: [] }), P { n: 3, xs: push([], 1) }); p = vecGet(ps, 0); return p.n + size(p.xs);")
+    , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: vecPush(vecNew(0), 4), tag: 2 }; return b.tag + vecLen(b.items);")
+    , ("in a list", "l = push(push([], vecPush(vecNew(0), 1)), vecNew(5)); return size(l);")
+    , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = vecPush(vecPush(vecNew(push([], i)), push([], i)), push([], 7)); t = t + vecLen(v); i = i + 1; }; return t;")
+    ]
+  where
+    -- A Vec made with the filler and pushed to by the statement `n` times
+    loop n filler step =
+        "v = vecNew(" ++ filler ++ "); i = 0; while i < " ++ show (n :: Int) ++ " [{ affirm i >= 0; affirm i <= " ++ show n ++ "; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks " ++ show n ++ " - i { " ++ step ++ " i = i + 1; }; "
+
+-- The example has the library that the tests use
+testVecExample :: Test
+testVecExample = TestCase "the example holds the library" $ do
+    text <- readFile "examples/vec.tersus"
+    let code = [l | l <- lines text, not (null (words l)), take 2 (dropWhile (== ' ') l) /= "//"]
+        library = lines vecLibrary
+    pure $ if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "examples/vec.tersus does not hold vecLibrary"
 
 controlPrograms :: [(String, String)]
 controlPrograms =

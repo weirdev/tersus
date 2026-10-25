@@ -1234,6 +1234,34 @@ return size(q.a);   // 2
 
 See `examples/generic_structs.tersus`.
 
+### A list written in Tersus
+
+The pieces above are enough to write a growable list as a library: a `Box` of an array that holds the elements, and the number in use.
+
+```
+struct Vec<T> {
+    data: Box<Array<T>>,
+    len: Int,
+};
+
+fn vecNew<T>(filler: T) -> Vec<T> [{ }] [{ affirm return.len = 0; affirm size(return.data) = 4; }] {
+    return Vec<T> { data: Array::boxed(4, filler), len: 0 };
+};
+
+fn vecGet<T>(v: &Vec<T>, i: Int) -> T [{ define n = v.len; define cap = size(v.data); affirm i >= 0; affirm i < n; affirm n <= cap; }] [{ }] {
+    return get(v.data, i);
+};
+```
+
+`vecPush` writes into the array while `len < size(data)`, and otherwise makes an array twice the size, copies the elements over in a loop and writes the new one, so a Vec is native code with no support from the runtime that a list does not have (`examples/vec.tersus` has all of `vecNew`, `vecLen`, `vecGet`, `vecSet`, `vecPush` and `vecPop`).
+
+- **The contracts keep `0 <= len <= size(data)`.** Each function asks for it (as `define n = v.len; define cap = size(v.data); affirm n <= cap`) and each that makes a Vec promises it, so `vecGet(v, 1)` on a Vec with one element is rejected (`Could not prove: i < n`) and `vecPop` of an empty one too (`Could not prove: n >= 1`).
+- **A loop that pushes says what it keeps**: `affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1;`, because the validator does not carry the facts of a struct through a loop on its own.
+- **The elements may own things.** The array clones the filler into every slot, `set` and the growth move and free what they replace, and a `Vec<List<Int>>`, a `Vec<Vec<Int>>` or a Vec of structs that own lists is freed once (the native tests run these with the checks of the runtime on).
+- **What it is not yet**: a list. There is no method syntax for a generic struct (`v.push(x)` is `vecPush(v, x)`), no trait with an element type that `size`, `first`, `get`, `set` and `push` could be functions of, no way to share the library between programs (it is pasted in), no list literal or `for` over it, and `=` compares the unused slots of the arrays too.
+
+See `examples/vec.tersus`.
+
 ### Structs with sizes
 
 A struct can have sizes too: `struct Packet<n>` is a struct for each size, and a type gives them, as `Packet<4>`. A field can use the size, or hold another struct of the same size:
