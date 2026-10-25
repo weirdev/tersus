@@ -910,7 +910,8 @@ bindIndex _ other = other
 
 nonInfixProof :: Parser VariableProof
 nonInfixProof =
-    concreteProof
+    stringLiteralOf proofApply CTerm
+        <|> concreteProof
         <|> withFields proofApply Nothing (parensProof <|> structLiteral proof proofApply <|> try functionProof <|> try abstractProof)
 
 infixProof :: Parser VariableProof
@@ -1003,14 +1004,18 @@ nonInfixExpression =
 
 -- "text": a String (lib/string.tersus) of the UTF-8 bytes of the text. `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` are the characters they name.
 stringLiteral :: Parser Expression
-stringLiteral = do
+stringLiteral = stringLiteralOf expressionApply Val
+
+-- (the same in a proof, where `affirm s = "ab";` says what the String is)
+stringLiteralOf :: (Value -> [a] -> a) -> (Value -> a) -> Parser a
+stringLiteralOf apply literal = do
     void (char '"')
     chars <- many (stringChar <?> "a character of the string")
     void (char '"' <?> "the end of the string")
     whitespace
     ctors <- declCtors <$> getState
     when (Map.lookup "String" ctors /= Just ["bytes"]) $ fail "a string literal needs the library String, which this program declares differently"
-    return (expressionApply (builtinFunct (Ctor "String" ["bytes"])) [Val (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))])
+    return (apply (builtinFunct (Ctor "String" ["bytes"])) [literal (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))])
   where
     stringChar = noneOf "\"\\\n" <|> (char '\\' >> escape)
     escape =
