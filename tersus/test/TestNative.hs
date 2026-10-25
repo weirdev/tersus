@@ -331,6 +331,7 @@ arrayPrograms =
     , ("a size parameter and the unsizing conversion", "fn mk<n>(a: Array<Int, n>) -> Box<Array<Int>> { return Box::new(a); }; x = mk(#[1, 2, 3]); return size(x) * 2;")
     , ("a function with a size whose name is assigned elsewhere", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; fn other() -> Int { count = 1; return count; }; return count(#[1]) + other();")
     , ("a struct with a size", "struct P<n> { id: Int, body: Array<Int, n> }; p = P<3> { id: 7, body: #[1, 2, 3] }; return p.id + size(p.body) + get(p.body, 2);")
+    , ("a size that no field uses is the size of an Int", "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775807> { x: 0 });")
     , ("a struct with a size is printed", "struct P<n> { id: Int, body: Array<Int, n> }; return P<2> { id: 1, body: #[5, 6] };")
     , ("a function over structs of every size", "struct P<n> { id: Int, body: Array<Int, n> }; fn total<m>(p: P<m>) -> Int { s = p.id; i = 0; while i < m [{ affirm i >= 0; affirm i <= m; }] shrinks m - i { s = s + get(p.body, i); i = i + 1; }; return s; }; return total(P<3> { id: 7, body: #[1, 2, 3] }) + total(P<1> { id: 1, body: #[10] });")
     , ("a struct made in a function that has the size", "struct P<n> { id: Int, body: Array<Int, n> }; fn blank<m>(a: Array<Int, m>) -> P<m> { return P<m> { id: m, body: array(m, 0) }; }; return blank(#[1, 2]);")

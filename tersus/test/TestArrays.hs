@@ -191,6 +191,8 @@ testArrays =
                 , testCase "but not by value" (rejected "struct L<n> { v: Array<Int, n>, next: L<n> }; return 0;" "L holds itself, so it would have no size")
                 , testCase "its sizes are given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P) -> Int { return 0; }; return 1;" "P has sizes <n>, which a type gives: P<n>")
                 , testCase "as many as it has" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  x = P<1, 2> { id: 1, body: #[5] }; return 1;" "P has 1 sizes (n), got 2")
+                , testCase "a size that no field uses still fits in an Int" (runs "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775807> { x: 0 });" (VInt 9223372036854775807))
+                , testCase "and not more" (rejected "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775808> { x: 0 });" "the size 9223372036854775808 in Tag<9223372036854775808> is more than an Int can hold")
                 , testCase "a size is a name that the struct declares" (rejected "struct Q<n> { body: Array<Int, k> }; return 1;" "k is not a size here")
                 , testCase "a size is not named twice" (rejected "struct Q<n, n> { body: Array<Int, n> }; return 1;" "names a size twice")
                 , testCase "a size that is not given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P<?>) -> Int { return 0; }; return 1;" "a size that is not given")
