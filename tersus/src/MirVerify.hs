@@ -9,7 +9,7 @@ import qualified Data.Map.Strict as Map
 import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
-import TypeCheck (functionType, substSizes)
+import TypeCheck (arraySlots, functionType, maxArraySlots, substSizes)
 import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray)
 import Utils (Result (..))
 
@@ -46,6 +46,13 @@ problems program fn =
     map (("In " ++ fnName fn ++ ": ") ++) $
         [ "no entry block bb0" | not (block (BlockId 0)) ]
             ++ [show l ++ " has no known type" | (l, d) <- Map.toList (fnLocals fn), hasUnknown (localType d)]
+            -- (the size of an array can come from a size parameter, so the limit of a frame is looked at once the sizes are constants)
+            ++ [ show l ++ " is " ++ renderType t ++ ", which takes " ++ show (arraySlots t) ++ " words, more than the " ++ show maxArraySlots ++ " that an array held in a frame can have"
+               | (l, d) <- Map.toList (fnLocals fn)
+               , let t = localType d
+               , isArrayType t
+               , arraySlots t > maxArraySlots
+               ]
             ++ ["parameter " ++ show l ++ " is not declared" | l <- fnParams fn, not (declared l)]
             ++ ["_0 is not declared" | Just _ <- [fnReturns fn], not (declared (Local 0))]
             ++ ["_0 is " ++ renderType t ++ " but the function returns " ++ renderType r | Just r <- [fnReturns fn], Just d <- [Map.lookup (Local 0) (fnLocals fn)], let t = localType d, t /= r]
@@ -107,6 +114,9 @@ problems program fn =
         Move l -> maybe SizeAny SizeParam (nameOf l)
         _ -> SizeAny
     nameOf l = Map.lookup l (fnLocals fn) >>= localName
+    isArrayType t = case t of
+        TArrayOf{} -> True
+        _ -> False
     hasUnknown (TVar _) = True
     hasUnknown (TList t) = hasUnknown t
     hasUnknown (TArray t _) = hasUnknown t

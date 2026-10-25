@@ -95,6 +95,10 @@ testNativeIr =
                 Right program -> case emitProgram program of
                     Error e -> Just e
                     Ok ir -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` ir && "call i64 %" `isInfixOf` ir)
+        , TestCase "a function with a size is made for each size it is called with" . pure $
+            withIr "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) + count(#[1]) + count(#[4, 5, 6]);" (\ir -> testAssertTrue ("@\"fn.count<3>\"" `isInfixOf` ir && "@\"fn.count<1>\"" `isInfixOf` ir && not ("@\"fn.count\"" `isInfixOf` ir)))
+        , TestCase "an array that a size makes too large for a frame is refused when the size is known" . pure $
+            testAssertErrorContains "In f<8192>: " (llvmSource "fn f<n>(a: Array<Int, n>) -> Int { b = array(n, a); return size(b); }; return f(array(8192, 0));")
         , TestCase "a program that does not validate is not lowered" . pure $
             testAssertErrorContains "Validation failed" (llvmSource "x = 5; affirm x < 4;")
         , TestCase "command line" . pure $
@@ -325,6 +329,7 @@ arrayPrograms =
     , ("a function with a size calls itself", "fn count<n>(a: Array<Int, n>, k: Int) -> Int [{ define z = k; affirm z >= 0; }] [{ }] shrinks k { if k = 0 { return n; }; return count(a, k - 1); }; return count(#[1, 2, 3], 4);")
     , ("a size parameter with a Box", "fn f<n>(a: Array<Int, n>, b: Box<Array<Int, n>>) -> Int { return size(b) + n; }; return f(#[1, 2], Box::new(#[3, 4]));")
     , ("a size parameter and the unsizing conversion", "fn mk<n>(a: Array<Int, n>) -> Box<Array<Int>> { return Box::new(a); }; x = mk(#[1, 2, 3]); return size(x) * 2;")
+    , ("a function with a size whose name is assigned elsewhere", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; fn other() -> Int { count = 1; return count; }; return count(#[1]) + other();")
     , ("a size parameter and a struct", "struct S { a: Array<Int, 2> }; fn count<n>(a: Array<Int, n>) -> Int { return n; }; s = S { a: #[1, 2] }; return count(s.a);")
     , ("a Box of an Int", "b = Box::new(5); return Box::unbox(b) + 1;")
     , ("a Box of a Bool", "return Box::unbox(Box::new(true));")

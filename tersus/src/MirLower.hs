@@ -398,7 +398,8 @@ defineFunction var params ins outs (Signature ptys rty sizes) term body = do
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
         fnTy = functionType sizes ptys rty
     name <- uniqueName (if atTop then var else bName enclosing ++ "::" ++ var)
-    assigned <- (Set.member var . lsAssigned) <$> getS
+    -- (a function with sizes is called by name, which its sizes are given to: it has no value to put in a local)
+    assigned <- (\s -> Set.member var (lsAssigned s) && null sizes) <$> getS
     -- (the bodies of the functions after it find a function at the top by name, whatever the program does to the variable)
     when atTop (modifyS (\s -> s{lsGlobals = Map.insert var (name, fnTy) (lsGlobals s)}))
     ghost (M.GhostFunction name var atTop)
