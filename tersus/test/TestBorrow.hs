@@ -30,6 +30,8 @@ testBorrow =
                 , testCase "a copy of it can be changed" (runs "fn more(a: &List<Int>) -> List<Int> { return push(a, 9); }; l = push([], 1); return more(l);" (VList [VInt 1, VInt 9]))
                 , testCase "an array that is lent can give a changed copy" (runs "fn bump(a: &Array<Int, 3>) -> Array<Int, 3> { return set(a, 0, get(a, 0) + 1); }; x = #[1, 2, 3]; x = bump(x); return bump(x);" (VList [VInt 3, VInt 2, VInt 3]))
                 , testCase "a lent parameter is also an owned one in one call" (runs "fn both(a: &List<Int>, b: List<Int>) -> Int { return size(a) + size(b); }; l = push([], 1); return both(l, l);" (VInt 2))
+                , testCase "a value that is lent and given in one call is not shared" (runs "fn both(a: &List<Int>, b: List<Int>) -> Int { b = push(b, 9); return size(a) * 10 + size(b); }; l = push([], 1); return both(l, l);" (VInt 12))
+                , testCase "an empty list is lent as the type of the parameter" (runs "fn count(a: &List<Bool>) -> Int { return size(a); }; return count([]) + count([true]);" (VInt 1))
                 , testCase "a function with sizes lends" (runs "fn count<n>(a: &Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]);" (VInt 3))
                 ]
             , TestList

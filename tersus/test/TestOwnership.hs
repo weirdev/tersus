@@ -406,9 +406,11 @@ execStatement stmt = do
 -- Runs a function from its entry; what it returns is what _0 holds, moved out
 callFunction :: Program -> Function -> [Val] -> M (Maybe Val)
 callFunction program fn args = do
-    s <- getSt
     -- (a parameter that is lent only looks at the value: the function owns nothing of it, and cannot move from it)
-    putSt s{stFrames = Frame fn (Map.fromList [(p, Slot v (if p `elem` fnBorrowed fn then Just [] else Nothing)) | (p, v) <- zip (fnParams fn) args]) : stFrames s}
+    -- (and remembers how it was, so that a change to it while it is lent is found)
+    looks <- mapM (\(p, v) -> if p `elem` fnBorrowed fn then mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf v) else return []) (zip (fnParams fn) args)
+    s' <- getSt
+    putSt s'{stFrames = Frame fn (Map.fromList [(p, Slot v (if p `elem` fnBorrowed fn then Just lk else Nothing)) | ((p, v), lk) <- zip (zip (fnParams fn) args) looks]) : stFrames s'}
     result <- runBlock program fn (BlockId 0)
     s' <- getSt
     case stFrames s' of
