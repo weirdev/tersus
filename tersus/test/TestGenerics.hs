@@ -32,6 +32,10 @@ testGenerics =
                 , testCase "a loop that builds a list of any type" (runs "fn mk<T>(x: T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ }] { out = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { out = push(out, x); i = i + 1; }; return out; }; return mk(push([], 4), 2);" (VList [VList [VInt 4], VList [VInt 4]]))
                 , testCase "a type and a size together" (runs "fn fill<T, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] { return set(a, 0, x); }; return fill(#[true, true], false);" (VList [VBool False, VBool True]))
                 , testCase "a function calls another with its type" (runs "fn count<T>(a: &List<T>) -> Int { return size(a); }; fn twice<T>(a: &List<T>) -> Int { return count(a) + count(a); }; return twice(push([], 1)) + twice(push([], true));" (VInt 4))
+                , testCase "a type that is an empty list" (runs "fn same<T>(a: T, b: T) -> Bool { return a = b; }; return same([], []);" (VBool True))
+                , testCase "a function calls itself with its type" (runs "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(a, n - 1); }; return f(push([], 2), 3);" (VInt 3))
+                , testCase "or with its types in another order" (runs "fn f<A, B>(a: A, b: B, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(b, a, n - 1); }; return f(1, true, 3);" (VInt 3))
+                , testCase "or with a type of its own" (runs "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(1, n - 1); }; return f(true, 2);" (VInt 2))
                 , testCase "a type that nothing decides is an Int" (runs "fn nil<T>() -> List<T> { return []; }; return size(nil());" (VInt 0))
                 , testCase "a lent parameter of a type" (runs "fn twice<T>(a: &T) -> Array<T, 2> { return array(2, a); }; return twice(push([], 5));" (VList [VList [VInt 5], VList [VInt 5]]))
                 ]
@@ -46,6 +50,7 @@ testGenerics =
                 [ testCase "a type is not an Int" (rejected "fn bad<T>(a: T) -> Int { return a + 1; }; return 0;" "expected Int, got T")
                 , testCase "the arguments agree on it" (rejected "fn same<T>(a: T, b: T) -> Bool { return a = b; }; return same(1, true);" "argument 2 of same: expected Int, got Bool")
                 , testCase "a type has to be declared" (rejected "fn bad(a: T) -> Int { return 0; }; return 0;" "unknown type T")
+                , testCase "a function does not call itself with a type made of its own" (rejected "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return f(push([], a), n - 1); }; return f(1, 1);" "f calls itself with the type List<T> for T, which is made of its own type parameters")
                 , testCase "a type is not a function" (rejected "fn id<T>(a: T) -> T { return a; }; fn inc(n: Int) -> Int { return n + 1; }; f = id(inc); return 0;" "a type parameter is not a function")
                 , testCase "the function is called, not named" (rejected "fn id<T>(a: T) -> T { return a; }; h = id; return 0;" "id has parameters <T>, so it is called")
                 , testCase "an impl has none" (rejected "struct S { x: Int }; impl S { fn f<T>(a: T) -> T { return a; }; }; return 0;" "type parameters, which a function of an impl cannot have yet")

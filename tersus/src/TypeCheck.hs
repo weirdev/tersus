@@ -77,6 +77,7 @@ data TcState = TcState
     , tcGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields, with the sizes in them
     , tcReadOnly :: [Variable] -- the parameters of the function being checked that it borrows
     , tcTypeScope :: [Variable] -- the type parameters of the function being checked
+    , tcCurrent :: Maybe Variable -- the function being checked, which may call itself
     }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
@@ -85,7 +86,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] []
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -833,7 +834,7 @@ checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -
 checkFunction ctx name params ptys rty sizes types ins outs term body = do
     outer <- getState
     -- the sizes and types the function declares are the names its types may use, and the sizes are the last parameters (Ints)
-    putState outer{tcSizeScope = sizes, tcTypeScope = types}
+    putState outer{tcSizeScope = sizes, tcTypeScope = types, tcCurrent = Just name}
     when (length sizes /= length (nub' sizes) || any (`elem` take (length params - length sizes) params) sizes) $
         failTc ("Type error: function " ++ name ++ " names a size twice, or the same as a parameter")
     mapM_ checkType (rty : map unref ptys)
@@ -851,7 +852,7 @@ checkFunction ctx name params ptys rty sizes types ins outs term body = do
     (_, body') <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     -- (the sizes of the function end with it)
     after <- getState
-    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer}
+    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcCurrent = tcCurrent outer}
     return (term', ins', outs', body')
   where
     nub' = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -1257,6 +1258,21 @@ instantiateGenerics sizeNames typeNames ty = do
     types <- mapM (const freshVar) typeNames
     return (substitute (zip sizeNames sizes) (zip typeNames types) ty, sizes, types)
 
+-- A type that is made of the type parameters of the function without being one of them
+isExpanding :: [Variable] -> Type -> Bool
+isExpanding scope ty = case ty of
+    TParam _ -> False
+    _ -> usesParam ty
+  where
+    usesParam t = case t of
+        TParam p -> p `elem` scope
+        TList u -> usesParam u
+        TBox u -> usesParam u
+        TRef u -> usesParam u
+        TArrayOf u _ -> usesParam u
+        TFn args ret -> any usesParam (ret : args)
+        _ -> False
+
 hasFunction :: Type -> Bool
 hasFunction ty = case ty of
     TFn{} -> True
@@ -1283,6 +1299,11 @@ genericCall name names types inner inferred = do
                 forM_ (zip types given') $ \(n, t) -> do
                     t' <- zonk t
                     when (hasFunction t') $ failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " would be " ++ renderType t' ++ ", and a type parameter is not a function")
+                    -- (a function that calls itself with a type made of its own, as f(push([], a), n - 1), would need a copy for each depth)
+                    current <- tcCurrent <$> getState
+                    scope <- tcTypeScope <$> getState
+                    when (current == Just name && isExpanding scope t') $
+                        failTc ("Type error: " ++ name ++ " calls itself with the type " ++ renderType t' ++ " for " ++ n ++ ", which is made of its own type parameters: a call of itself gives each type parameter as it is, or a type that does not use them, since a copy of the function is made for each type and would be needed for each depth")
                 result <- zonk rty
                 return (result, args ++ given)
         _ -> failTc ("Type error: " ++ name ++ " is not a function")
