@@ -4,7 +4,6 @@ import Data.List (isInfixOf, tails)
 
 import Cli (Command (..), runSource)
 import Pipeline (compileSource)
-import PreludeSource (preludeSource)
 import TersusTypes
 import TestHarness
 import Utils
@@ -85,23 +84,40 @@ testSequence =
                 , testCase "a function over any sequence of a Vec" (runs (vecLibrary ++ "fn firstOf<T>(v: &Vec<T>) -> T [{ affirm size(v) > 0; }] [{ }] { return v.get(0); }; return firstOf(Vec::new(3).push(8));") (VInt 8))
                 ]
             , TestList
+                "methods of lists"
+                [ testCase "a list has its functions as methods" (runs "l = [1, 2, 3]; return l.size() + l.get(1) + l.first() + l.last();" (VInt 9))
+                , testCase "push and set" (runs "l = [1]; l = l.push(5).push(6).set(0, 9); return l.get(0) * 100 + l.get(2) * 10 + l.size();" (VInt 963))
+                , testCase "pop" (runs "l = [1, 2, 3]; l = l.pop(); return l.size() * 10 + l.last();" (VInt 22))
+                , testCase "pop as a function" (runs "l = [1, 2, 3]; l = pop(pop(l)); return l.size() * 10 + l.last();" (VInt 11))
+                , testCase "pop keeps the others" (valid "l = [1, 2, 3]; m = pop(l); affirm size(m) = 2; affirm get(m, 1) = 2; return size(m);")
+                , testCase "a list that is empty is not popped" (rejected "l = push([], 1); l = pop(pop(l)); return 0;" "Relation does not hold")
+                , testCase "pop is not a function of an array" (rejected "a = #[1, 2]; return size(pop(a));" "argument 1 of pop: expected List")
+                , testCase "an array has them too" (runs "a = #[1, 2]; a = a.set(0, 9); return a.get(0) * 10 + a.size();" (VInt 92))
+                , testCase "and a Box of an array" (runs "b = Array::boxed(3, 7); return b.size() + b.get(0);" (VInt 10))
+                , testCase "a method that is not one" (rejected "l = [1]; return l.nothing();" "nothing is called on a List<Int>, which has no functions")
+                , testCase "pop is a name of the language" (rejected "fn pop(l: List<Int>) -> List<Int> { return l; }; return 0;" "Function already defined: pop")
+                ]
+            , TestList
                 "the prelude"
-                [ testCase "the tests build programs on the library of the prelude" $
-                    let code = [l | l <- lines preludeSource, not (null (words l)), take 2 (dropWhile (== ' ') l) /= "//"]
+                [ TestCase "the tests build programs on the library of the example" $ do
+                    exampleText <- readFile "examples/vec.tersus"
+                    let code = [l | l <- lines exampleText, not (null (words l)), take 2 (dropWhile (== ' ') l) /= "//"]
                         library = lines vecLibrary
-                     in if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "lib/prelude.tersus does not hold vecLibrary"
-                , testCase "a program that mentions Vec has it" (runsAs "v = Vec::new(2).push(5); return v.get(0) + size(v);" "6")
-                , testCase "also one that only mentions Sequence" (runsAs "fn total(v: &Vec<Int>) -> Int [{ affirm size(v) = 1; }] [{ }] { return Sequence::get(v, 0); }; return total(Vec::new(3).push(4));" "4")
-                , testCase "a program with a Vec of its own does not" (runsAs "struct Vec<T, n> { cells: Array<T, n> }; v = Vec<Int, 2> { cells: #[1, 2] }; return get(v.cells, 1);" "2")
-                , testCase "nor one with a Sequence of its own" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
+                    pure $ if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "examples/vec.tersus does not hold vecLibrary"
+                , testCase "a program that mentions Sequence has the trait" (runsAs (counter ++ "return Three { a: 4, n: 2 }.size() + get(Three { a: 4, n: 2 }, 0);") "6")
+                , testCase "the trait is the one in lib/prelude.tersus" (errorHas (counter ++ "return get(Three { a: 4, n: 2 }, 3);") "Could not prove: i < <Three as Sequence>::size(self)")
+                , testCase "a program with a Sequence of its own does not" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
                 , testCase "the names that native code makes a list of are not a program's" (errorHas "fn stdListNew() -> Int { return 7; }; return [1];" "stdListNew is reserved")
                 , testCase "nor is the struct" (errorHas "struct StdList { x: Int }; return 1;" "StdList is reserved")
                 , testCase "a program that mentions neither is as it was" (runsAs "return 4;" "4")
                 , testCase "the lines of an error are those of the program" (errorHas "\n\nreturn ( ;" "line 3")
-                , testCase "an error in the use of the library is the program's" (errorHas "v = Vec::new(1).push(2);\nreturn v.get(5);" "Could not prove: i < self.len")
+                , testCase "an error in the use of the library is the program's" (errorHas (counter ++ "x = Three { a: 1, n: 1 };\nreturn get(x, 5);") "Could not prove: i < <Three as Sequence>::size(self)")
                 ]
             ]
   where
+    -- A struct that implements the trait of the prelude: a number n of the same element a
+    counter =
+        "struct Three { a: Int, n: Int } invariant [{ affirm n >= 0; }]; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = self.a; }] { return self.a; }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { a: x, n: self.n }; }; fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { a: x, n: self.n + 1 }; }; }; "
     runsAs source expected = case runSource Run source of
         Ok output -> if output == expected then Nothing else Just ("Expected " ++ expected ++ ", got " ++ output)
         Error e -> Just ("Failed: " ++ e)

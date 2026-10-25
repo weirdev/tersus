@@ -93,6 +93,7 @@ roles rv =
         Use o -> [(o, Consume)]
         BinaryOp _ a b -> [(a, Read), (b, Read)]
         ListOp Push [l, x] -> [(l, Consume), (x, Consume)]
+        ListOp Pop [l] -> [(l, Consume)]
         ListOp Set [l, i, x] -> [(l, Consume), (i, Read), (x, Consume)]
         ListOp _ os -> [(o, Read) | o <- os]
         MakeList os -> [(o, Consume) | o <- os]

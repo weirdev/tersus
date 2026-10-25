@@ -180,6 +180,8 @@ listOp Get [MList l, MInt i]
     | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
     | otherwise = Ok (l !! fromIntegral i)
 listOp Push [MList l, x] = Ok (MList (l ++ [x]))
+listOp Pop [MList []] = Error "Pop requires a non-empty list"
+listOp Pop [MList l] = Ok (MList (init l))
 listOp NewBoxed args = listOp NewArray args
 listOp NewEmptyBoxed [] = Ok (MList [])
 listOp NewArray [MInt n, x]

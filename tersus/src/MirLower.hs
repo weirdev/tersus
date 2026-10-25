@@ -548,6 +548,7 @@ builtinRvalue b tys ops =
         (Last, [_]) -> return (M.ListOp M.Last ops)
         (Get, [_, _]) -> return (M.ListOp M.Get ops)
         (Push, [_, _]) -> return (M.ListOp M.Push ops)
+        (Pop, [_]) -> return (M.ListOp M.Pop ops)
         (Set, [_, _, _]) -> return (M.ListOp M.Set ops)
         (NewArray, [_, _]) -> return (M.ListOp M.NewArray ops)
         -- (the list of the literal, held as an array)
@@ -645,6 +646,7 @@ builtinLabel b = case b of
     Last -> "last"
     Get -> "get"
     Push -> "push"
+    Pop -> "pop"
     Set -> "set"
     NewBox -> "box"
     UnBox -> "unbox"

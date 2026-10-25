@@ -1,7 +1,66 @@
-// A growable list: `Vec<T>`, from the prelude (lib/prelude.tersus), which every program that mentions `Vec` or `Sequence` has. A Vec is a
-// Box of an array that holds the elements and how many are in use; `push` into a full one makes an array twice as large. It implements
-// `Sequence<E>` (`size`, `get`, `set`, `push`), so `size(v)`, `v.get(i)` and `v.push(x)` are the calls of its impl, and its invariant
-// (0 <= len <= size(data), a capacity of at least 1) is what lets a loop that pushes say only `size(v) = i`.
+// A growable list written in Tersus, and the trait that its functions are the functions of. A `List` is made of the same thing in native
+// code (lib/lists.tersus); this is the same list as a library type of a program's own, which is what the features below are for.
+//
+// `Sequence<E>` says what a sequence of E is: `size`, `get`, `set` and `push`, with contracts written with `size` and `get` themselves,
+// which a contract may call. `size(self)` is a function of the type that implements the trait, so what a contract says of `size(v)` is
+// what the impl's `size` promises: for a Vec, `size(v) = v.len`. Calls of `size`, `get`, `set` and `push` on a struct are calls of its
+// impl's, so `size(v)`, `v.size()` and `Sequence::size(v)` are the same call.
+//
+// A Vec is a Box of an array that holds the elements, and how many of them are in use. The array is the capacity, and a push into a full
+// one makes an array twice as large and moves the elements over. Its invariant is what every function of it relies on and keeps true:
+// 0 <= len <= size(data), and a capacity of at least 1. The program proves it where a Vec is made, and every Vec it is given has it.
+
+trait Sequence<E> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
+    fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];
+    fn set(self: Self, i: Int, x: E) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }];
+    fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }];
+};
+
+// (the elements 0 to len - 1 are in use; the rest of the array is spare room, filled with what the Vec was made with)
+struct Vec<T> {
+    data: Box<Array<T>>,
+    len: Int,
+} invariant [{ affirm len >= 0; affirm len <= size(data); affirm size(data) >= 1; }];
+
+impl<T> Vec<T> {
+    // An empty Vec. The array needs an element to fill it with, which is never read: nothing is in use until it is pushed.
+    fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; }] {
+        return Self { data: Array::boxed(4, filler), len: 0 };
+    };
+
+    // Takes the last element out of use (it stays in the array, which holds it until it is written over or the Vec is freed)
+    fn pop(self: Self) -> Self [{ affirm self.len >= 1; }] [{ affirm return.len = self.len - 1; }] {
+        return Self { data: self.data, len: self.len - 1 };
+    };
+};
+
+impl<T> Sequence<T> for Vec<T> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return = self.len; }] {
+        return self.len;
+    };
+
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = get(self.data, i); }] {
+        return get(self.data, i);
+    };
+
+    fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return.len = self.len; affirm get(return.data, i) = x; }] {
+        return Self { data: set(self.data, i, x), len: self.len };
+    };
+
+    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm get(return.data, self.len) = x; }] {
+        if self.len < size(self.data) {
+            return Self { data: set(self.data, self.len, x), len: self.len + 1 };
+        };
+        big = Array::boxed(size(self.data) * 2, x);
+        i = 0;
+        while i < self.len [{ affirm i >= 0; affirm i <= self.len; affirm size(big) = size(self.data) * 2; }] shrinks self.len - i {
+            big = set(big, i, get(self.data, i));
+            i = i + 1;
+        };
+        return Self { data: set(big, self.len, x), len: self.len + 1 };
+    };
+};
 
 // A Vec of Ints: the first 20 squares. The loop says what it keeps in terms of the size, and the invariant of Vec does the rest.
 squares = Vec::new(0);

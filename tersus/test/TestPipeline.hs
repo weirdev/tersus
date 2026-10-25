@@ -94,6 +94,7 @@ testExamples =
         , testExampleFile "examples/generic_structs.tersus" (ExpectReturn (VInt 2224))
         , testExampleFile "examples/vec.tersus" (ExpectReturn (VInt 212381))
         , testExampleFile "examples/spec_functions.tersus" (ExpectReturn (VInt 25070))
+        , testExampleFile "examples/list_methods.tersus" (ExpectReturn (VInt 508221))
         , testExampleFile "examples/array_owners.tersus" (ExpectReturn (VInt 207))
         , testExampleFile "examples/borrowing.tersus" (ExpectReturn (VInt 138))
         , testExampleFile "examples/sized_structs.tersus" (ExpectReturn (VInt 71))

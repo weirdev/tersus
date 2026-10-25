@@ -34,6 +34,11 @@ fn stdListLast<T>(l: &StdList<T>) -> T [{ affirm l.len > 0; }] [{ affirm return 
     return get(l.data, l.len - 1);
 };
 
+// The last element is taken out of use. It stays in the array until a push writes over it or the list is freed.
+fn stdListPop<T>(l: StdList<T>) -> StdList<T> [{ affirm l.len > 0; }] [{ affirm return.len = l.len - 1; affirm forall j in 0..return.len: get(return.data, j) = get(l.data, j); }] {
+    return StdList<T> { data: l.data, len: l.len - 1 };
+};
+
 fn stdListSet<T>(l: StdList<T>, i: Int, x: T) -> StdList<T> [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return.len = l.len; affirm get(return.data, i) = x; affirm forall j where j >= 0, j < l.len, j != i: get(return.data, j) = get(l.data, j); }] {
     return StdList<T> { data: set(l.data, i, x), len: l.len };
 };
