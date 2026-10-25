@@ -1039,7 +1039,11 @@ inferExprR ctx env expr =
             receiverTy <- zonk (fst (head inferred))
             case (listMethod method, receiverTy) of
                 -- l.push(x), l.size(), a.get(i): the function of that name on a list or an array
-                (Just b, ty) | sequenceType ty -> inferExprR ctx env (F (Val (builtinFunct b)) (receiver : args))
+                -- (with the arguments that are inferred already: a chain of them is inferred once)
+                (Just b, ty) | sequenceType ty -> do
+                    let funct = Val (builtinFunct b)
+                    (ft, funct') <- inferExprR ctx env funct
+                    ordinaryBuiltin funct funct' ft inferred
                 _ -> do
                     owner <- ownerOfValue method (fst (head inferred))
                     resolveAssociated owner method >>= \name -> callResolved name inferred

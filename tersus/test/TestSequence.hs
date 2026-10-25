@@ -88,6 +88,7 @@ testSequence =
                 [ testCase "a list has its functions as methods" (runs "l = [1, 2, 3]; return l.size() + l.get(1) + l.first() + l.last();" (VInt 9))
                 , testCase "push and set" (runs "l = [1]; l = l.push(5).push(6).set(0, 9); return l.get(0) * 100 + l.get(2) * 10 + l.size();" (VInt 963))
                 , testCase "pop" (runs "l = [1, 2, 3]; l = l.pop(); return l.size() * 10 + l.last();" (VInt 22))
+                , testCase "a long chain is checked once" (runs ("l = push([], 1)" ++ concat (replicate 30 ".push(1)") ++ "; return l.size();") (VInt 31))
                 , testCase "pop as a function" (runs "l = [1, 2, 3]; l = pop(pop(l)); return l.size() * 10 + l.last();" (VInt 11))
                 , testCase "pop keeps the others" (valid "l = [1, 2, 3]; m = pop(l); affirm size(m) = 2; affirm get(m, 1) = 2; return size(m);")
                 , testCase "a list that is empty is not popped" (rejected "l = push([], 1); l = pop(pop(l)); return 0;" "Relation does not hold")

@@ -244,6 +244,7 @@ listPrograms =
     , ("last of booleans", "x = [false, true]; return last(x);")
     , ("an empty list among constants has the type that is read", "fn f() -> List<Bool> { return first([[]]); }; return f();")
     , ("pop", "l = push(push(push([], 1), 2), 3); l = pop(l); return l;")
+    , ("pop of a constant whose first list is empty", "return pop([[], [true]]);")
     , ("pop and push again", "l = push(push([], [1]), [2]); l = pop(l); l = push(l, [3, 4]); return l;")
     , ("a list that was popped equals the shorter one", "a = push(push([], 1), 2); b = pop(a); return b = [1];")
     , ("pop in a loop", "l = []; i = 0; while i < 20 [{ affirm i >= 0; affirm i <= 20; affirm size(l) = i; }] shrinks 20 - i { l = push(l, i); i = i + 1; }; j = 0; while j < 15 [{ affirm j >= 0; affirm j <= 15; affirm size(l) = 20 - j; }] shrinks 15 - j { l = pop(l); j = j + 1; }; return l;")
