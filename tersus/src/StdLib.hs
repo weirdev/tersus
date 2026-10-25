@@ -160,6 +160,15 @@ builtinFunct NewBoxedArray =
     case builtinFunct NewArray of
         VFunct params ins outs _ proofs -> VFunct params ins outs (BuiltinFunct NewBoxedArray) proofs
         other -> other
+-- Array::empty() is the array of no elements
+builtinFunct NewEmptyArray =
+    VFunct
+        []
+        []
+        []
+        (BuiltinFunct NewEmptyArray)
+        [ relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (CTerm (VInt 0))
+        ]
 -- Unsize b is b: the Box has the same value, it carries the size
 builtinFunct Unsize = VFunct ["box"] [] [] (BuiltinFunct Unsize) []
 -- The array that a literal makes is the list of its elements, read as an array: the same value
@@ -254,6 +263,7 @@ evalBuiltinFunct NewArray [VInt n, x]
     | otherwise = Error "The array is not evaluated"
 evalBuiltinFunct NewArray _ = Error "array takes a size and an element"
 evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
+evalBuiltinFunct NewEmptyArray [] = Ok (VList [])
 evalBuiltinFunct Unsize [value] = Ok value
 evalBuiltinFunct Unsize _ = Error "unsize takes one Box"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l

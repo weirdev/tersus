@@ -168,6 +168,7 @@ rvalueCall rv =
         M.Set -> Set
         M.NewArray -> NewArray
         M.NewBoxed -> NewBoxedArray
+        M.NewEmptyBoxed -> NewEmptyArray
 
 -- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
 wrapperInfo :: PState -> Name -> Maybe FnInfo

@@ -149,8 +149,8 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
     deriving (Show, Eq)
 
 -- First and Last need a list that is not empty, Get and Set an index in range. These work on an array as on a list; NewArray n x
--- makes an array of n copies of x, with n not negative; NewBoxed n x does so for an n that is not a constant, in a Box.
-data ListOp = Length | First | Last | Get | Push | Set | NewArray | NewBoxed
+-- makes an array of n copies of x, with n not negative; NewBoxed n x does so for an n that is not a constant, in a Box. NewEmptyBoxed makes the Box of an array of no elements.
+data ListOp = Length | First | Last | Get | Push | Set | NewArray | NewBoxed | NewEmptyBoxed
     deriving (Show, Eq)
 
 -- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns

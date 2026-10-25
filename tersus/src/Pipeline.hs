@@ -3,6 +3,7 @@ module Pipeline
     , compileSource
     , ownedSource
     , llvmSource
+    , nativeProgram
     , validateStatements
     , runStatements
     ) where
@@ -16,7 +17,8 @@ import MirLower (lowerElaborated)
 import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, parseStatementBlock, parseStatementBlockWith)
-import PreludeSource (preludeSource)
+import MirLists (lowerLists)
+import PreludeSource (listsSource, preludeSource)
 import TersusTypes (Statement)
 import TypeCheck (elaborate)
 import Utils
@@ -68,12 +70,22 @@ compileSource source =
 ownedSource :: String -> Result M.Program String
 ownedSource source =
     compileSource source `bindResult` \program ->
-        let owned = insertOwnership program
+        let owned = insertOwnership (nativeProgram program)
          in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
 
 -- The LLVM IR of a program that passes every check
 llvmSource :: String -> Result String String
-llvmSource source = compileSource source `bindResult` \program -> stage "Native code failed: " (emitProgram program)
+llvmSource source = compileSource source `bindResult` \program -> stage "Native code failed: " (emitProgram (nativeProgram program))
+
+-- The program that native code is made of: a validated program with each list made of the library's struct (see MirLists)
+nativeProgram :: M.Program -> M.Program
+nativeProgram = lowerLists listLibrary
+
+-- The library, compiled and validated once
+listLibrary :: M.Program
+listLibrary = case compileSource listsSource of
+    Ok program -> program
+    Error e -> error ("lib/lists.tersus does not compile: " ++ e)
 
 -- Checks and validates a program given as statements
 validateStatements :: [Statement] -> Result Validated String

@@ -20,6 +20,8 @@ data BuiltinFunct
       NewArray | ArrayFrom
     | -- NewBoxedArray n x: Array::boxed(n, x), an array of n copies of x, n being any Int not negative, in a Box that carries the size
       NewBoxedArray
+    | -- NewEmptyArray: Array::empty(), an array of no elements in a Box that carries the size 0, of any element type (no element is needed)
+      NewEmptyArray
     | -- Unsize b: the Box of an array of a size, as a Box of an array of any size (the size goes into the Box, the value is the same)
       Unsize
     | -- NewBox x: x held in a Box. A Box has the value of what it holds (it is where that lives that differs), so in a value it is x.

@@ -181,6 +181,7 @@ listOp Get [MList l, MInt i]
     | otherwise = Ok (l !! fromIntegral i)
 listOp Push [MList l, x] = Ok (MList (l ++ [x]))
 listOp NewBoxed args = listOp NewArray args
+listOp NewEmptyBoxed [] = Ok (MList [])
 listOp NewArray [MInt n, x]
     | n < 0 = Error "array needs a size that is not negative"
     | otherwise = Ok (MList (replicate (fromIntegral n) x))

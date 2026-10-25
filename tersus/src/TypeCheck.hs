@@ -30,6 +30,7 @@ module TypeCheck
     , unify
     , expect
     , zonk
+    , freshVar
     ) where
 
 import Control.Monad (forM, forM_, unless, void, when)
@@ -514,6 +515,7 @@ builtinType funct =
         NewArray -> failTc "Type error: array needs a size that is a constant, so it is written array(3, x) and cannot be used as a value"
         ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
         NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
+        NewEmptyArray -> failTc "Type error: Array::empty is called, as in Array::empty(), and cannot be used as a value"
         Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
         Plus -> arith
         Minus -> arith
@@ -994,6 +996,13 @@ inferExprR ctx env expr =
                     TBox inner -> return (inner, F (Val (builtinFunct UnBox)) [b'])
                     _ -> failTc ("Type error: Box::unbox takes a Box, got " ++ renderType t)
             _ -> failTc ("Type error: Box::unbox takes 1 argument, got " ++ show (length args))
+        -- Array::empty(): an array of no elements, of the element type that the program decides
+        F (Var "Array::empty") args -> case args of
+            [] -> do
+                elementTy <- freshVar
+                let ty = TArrayOf elementTy SizeAny
+                return (TBox ty, F (Val (builtinFunct NewEmptyArray)) [])
+            _ -> failTc ("Type error: Array::empty takes no arguments, got " ++ show (length args))
         -- Array::boxed(n, x): n copies of x, n known only when the program runs, in a Box that carries the size
         F (Var "Array::boxed") args -> case args of
             [n, x] -> do
