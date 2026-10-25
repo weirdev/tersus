@@ -4,9 +4,12 @@ module Cli
     , runSource
     , renderValue
     , usage
+    , readSourceFile
+    , useUtf8
     ) where
 
 import Data.List (intercalate)
+import System.IO
 
 import Mir (renderProgram)
 import MirEval (renderMirValue, runProgram)
@@ -76,3 +79,14 @@ renderValue (VBool True) = "true"
 renderValue (VBool False) = "false"
 renderValue VFunct{} = "<function>"
 renderValue VFnRef{} = "<function>"
+
+-- Source text is UTF-8 whatever the locale is (the parser accepts any letter in a name), and so is what is printed
+readSourceFile :: FilePath -> IO String
+readSourceFile "-" = hSetEncoding stdin utf8 >> getContents
+readSourceFile file = do
+    handle <- openFile file ReadMode
+    hSetEncoding handle utf8
+    hGetContents handle
+
+useUtf8 :: IO ()
+useUtf8 = mapM_ (`hSetEncoding` utf8) [stdout, stderr]

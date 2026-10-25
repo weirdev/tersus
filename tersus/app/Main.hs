@@ -11,6 +11,7 @@ import Utils
 
 main :: IO ()
 main = do
+    useUtf8
     args <- getArgs
     case parseCommandLine args of
         Nothing -> hPutStr stderr usage >> exitWith (ExitFailure 2)
@@ -36,5 +37,4 @@ failWith :: String -> IO ()
 failWith e = hPutStrLn stderr e >> exitWith (ExitFailure 1)
 
 readSource :: FilePath -> IO String
-readSource "-" = getContents
-readSource file = readFile file
+readSource = readSourceFile
