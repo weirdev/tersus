@@ -118,7 +118,7 @@ testSequence =
   where
     -- A struct that implements the trait of the prelude: a number n of the same element a
     counter =
-        "struct Three { a: Int, n: Int } invariant [{ affirm n >= 0; }]; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = self.a; }] { return self.a; }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { a: x, n: self.n }; }; fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { a: x, n: self.n + 1 }; }; }; "
+        "struct Three { a: Int, n: Int } invariant [{ affirm n >= 0; }]; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = self.a; }] { return self.a; }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { a: x, n: self.n }; }; }; impl Growable<Int> for Three { fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { a: x, n: self.n + 1 }; }; }; "
     runsAs source expected = case runSource Run source of
         Ok output -> if output == expected then Nothing else Just ("Expected " ++ expected ++ ", got " ++ output)
         Error e -> Just ("Failed: " ++ e)

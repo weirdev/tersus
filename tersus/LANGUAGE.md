@@ -298,6 +298,9 @@ A trait can have types, which each impl gives, and a struct with types can imple
 trait Sequence<E> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
     fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];
+};
+
+trait Growable<E> {                             // a trait may call the functions of the traits before it
     fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }];
 };
 
@@ -309,6 +312,9 @@ impl<T> Sequence<T> for Two<T> {                // the types of the trait are gi
         if i = 0 { return self.a; };
         return self.b;
     };
+};
+
+impl<T> Growable<T> for Two<T> {
     fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] {
         return Self { a: self.a, b: x, n: self.n + 1 };
     };
@@ -1348,7 +1354,7 @@ impl<T> Vec<T> {
     };
 };
 
-impl<T> Sequence<T> for Vec<T> {                  // Sequence is the trait above, with size, get, set and push
+impl<T> Sequence<T> for Vec<T> {                  // Sequence is the trait above, with size, get and set (push is Growable's)
     fn size(self: &Self) -> Int [{ }] [{ affirm return = self.len; }] { return self.len; };
     fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = get(self.data, i); }] {
         return get(self.data, i);
@@ -1367,7 +1373,7 @@ return v.get(1) + size(v);                      // 8
 - **The elements may own things.** The array clones the filler into every slot, `set` and the growth move and free what they replace, and a `Vec<List<Int>>`, a `Vec<Vec<Int>>` or a Vec of structs that own lists is freed once (the native tests run these with the checks of the runtime on).
 - **What it is not yet**: a list. There is no list literal or `for` over it, no function over any `Sequence` (it takes a `Vec`), and `=` compares the unused slots of the arrays too.
 
-**The prelude.** The trait `Sequence` is in `lib/prelude.tersus`, and every program that mentions `Sequence` has it in front of it, so a struct that implements it needs nothing declared. A program that declares a `Sequence` of its own does not get the library, and a program that does not mention it is unchanged. The library is parsed before the program with the declarations it makes known to it, so the line numbers in an error are the program's own, and it is checked and validated with the program.
+**The prelude.** The traits `Sequence` (`size`, `get`, `set`) and `Growable` (`push`, for the sequences that can grow, which an array cannot) are in `lib/prelude.tersus`, and every program that mentions `Sequence` or `Growable` has them in front of it, so a struct that implements it needs nothing declared. A program that declares a `Sequence` or a `Growable` of its own does not get the library, and a program that does not mention it is unchanged. The library is parsed before the program with the declarations it makes known to it, so the line numbers in an error are the program's own, and it is checked and validated with the program.
 
 `Vec` itself is not in the prelude: a `List` is the same thing (see Lists In Native Code), with the literals, the methods and the proof facts of a list, so a program uses a list. `examples/vec.tersus` writes the library out in full as a program of its own: it is what the features of this part of the guide are for.
 

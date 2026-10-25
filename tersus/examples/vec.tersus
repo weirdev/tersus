@@ -1,7 +1,7 @@
 // A growable list written in Tersus, and the trait that its functions are the functions of. A `List` is made of the same thing in native
 // code (lib/lists.tersus); this is the same list as a library type of a program's own, which is what the features below are for.
 //
-// `Sequence<E>` says what a sequence of E is: `size`, `get`, `set` and `push`, with contracts written with `size` and `get` themselves,
+// `Sequence<E>` says what a sequence of E is: `size`, `get` and `set` (and `Growable<E>` adds `push`), with contracts written with `size` and `get` themselves,
 // which a contract may call. `size(self)` is a function of the type that implements the trait, so what a contract says of `size(v)` is
 // what the impl's `size` promises: for a Vec, `size(v) = v.len`. Calls of `size`, `get`, `set` and `push` on a struct are calls of its
 // impl's, so `size(v)`, `v.size()` and `Sequence::size(v)` are the same call.
@@ -14,6 +14,10 @@ trait Sequence<E> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
     fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];
     fn set(self: Self, i: Int, x: E) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }];
+};
+
+// What a sequence that can grow has, which an array has not
+trait Growable<E> {
     fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }];
 };
 
@@ -48,6 +52,9 @@ impl<T> Sequence<T> for Vec<T> {
         return Self { data: set(self.data, i, x), len: self.len };
     };
 
+};
+
+impl<T> Growable<T> for Vec<T> {
     fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm get(return.data, self.len) = x; }] {
         if self.len < size(self.data) {
             return Self { data: set(self.data, self.len, x), len: self.len + 1 };

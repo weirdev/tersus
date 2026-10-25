@@ -1,4 +1,4 @@
-// The library that every program has when it mentions `Sequence` and does not declare it itself (see Pipeline.parseSource): it is parsed
+// The library that every program has when it mentions `Sequence` or `Growable` and does not declare them itself (see Pipeline.parseSource): it is parsed
 // before the program, so the program's line numbers are its own.
 //
 // `Sequence<E>` says what a sequence of E is: `size`, `get`, `set` and `push`, with contracts written with `size` and `get` themselves,
@@ -10,5 +10,9 @@ trait Sequence<E> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
     fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];
     fn set(self: Self, i: Int, x: E) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }];
+};
+
+// What a sequence that can grow has: a push at the end, which an array has not (its size never changes)
+trait Growable<E> {
     fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }];
 };

@@ -1175,7 +1175,7 @@ checkTrait :: Name -> [Variable] -> [TraitFn] -> TC ()
 checkTrait name params functions = do
     s <- getState
     when (Map.member name (tcTraits s) || Map.member name (tcTypes s)) $ failTc ("Type error: " ++ name ++ " is already defined")
-    putState s{tcTypes = Map.insert "Self" [] (tcTypes s), tcTraitSelf = Just functions}
+    putState s{tcTypes = Map.insert "Self" [] (tcTypes s), tcTraitSelf = Just (functions ++ concat (Map.elems (tcTraits s)))}
     -- (the types of the trait are types in its signatures and contracts)
     withGenerics [] params $ forM_ functions $ \f -> do
         let Signature ptys rty _ _ = traitFnSignature f
