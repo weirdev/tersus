@@ -17,7 +17,9 @@ main = do
         Nothing -> hPutStr stderr usage >> exitWith (ExitFailure 2)
         Just (command, file) -> do
             source <- readSource file
-            case runSource command source of
+            -- (a program that is read from the standard input has none left to read)
+            input <- if command == Interpret && file /= "-" then readInputBytes else return ""
+            case runSourceWith input command source of
                 Error e -> failWith e
                 Ok output -> case command of
                     Build executable -> do

@@ -1,0 +1,21 @@
+// Input. `readByte()` is the next byte of the standard input, or -1 at its end, and `String::read(limit)` and `String::readLine(limit)` read a
+// String of up to `limit` bytes (a line without its new line). A value that is read is not known to the validator beyond its range (-1 to 255 for
+// a byte, at most `limit` bytes for a String), so what a program relies on it has to test. The limit is how a loop over input still ends.
+// This writes its input in capitals and returns how many bytes it had (0 when it is run with nothing to read).
+
+text = String::read(1000);
+n = size(text);
+
+i = 0;
+while i < n [{ affirm i >= 0; affirm i <= n; affirm size(text) = n; }] shrinks n - i {
+    c = get(text, i);
+    if c >= 97 {
+        if c <= 122 {
+            text = set(text, i, c - 32);
+        };
+    };
+    i = i + 1;
+};
+
+text.print();
+return n;

@@ -2,7 +2,7 @@ module TestStrings (testStrings) where
 
 import Data.List (intercalate)
 
-import Cli (Command (..), runSource)
+import Cli (Command (..), runSource, runSourceWith)
 import TestHarness
 import Utils
 
@@ -12,6 +12,7 @@ testStrings =
     let runs body expected = testAssertEq (runSource Interpret body) (Ok expected)
         rejected body expected = testAssertErrorContains expected (runSource Check body)
         valid body = testAssertEq (runSource Check body) (Ok "OK")
+        reads input body expected = testAssertEq (runSourceWith input Interpret body) (Ok expected)
         parseError body = testAssertErrorContains "Parse error" (runSource Check body)
         bytes xs = "String { bytes: [" ++ intercalate ", " (map show (xs :: [Int])) ++ "] }"
         true = "true"
@@ -73,6 +74,33 @@ testStrings =
                 , testCase "the bytes of a UTF-8 text decode" (testAssertEq (decodeUtf8 (map toEnum [104, 195, 169, 226, 130, 172, 240, 159, 152, 128])) "h\233\8364\128512")
                 , testCase "a byte that starts a character that is cut short is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [226, 130])) "\65533\65533")
                 , testCase "an overlong encoding is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [192, 128])) "\65533\65533")
+                ]
+            , TestList
+                "input"
+                [ testCase "a byte" (reads "A" "return readByte();" "65")
+                , testCase "-1 at the end of the input" (reads "" "return readByte();" "-1")
+                , testCase "and after it" (reads "A" "a = readByte(); b = readByte(); c = readByte(); return b * 10 + c;" "-11")
+                , testCase "the bytes in turn" (reads "\1\2\3" "a = readByte(); b = readByte(); return a * 10 + b;" "12")
+                , testCase "a line" (reads "ab\ncd" "l = String::readLine(10); return size(l);" "2")
+                , testCase "two lines, and what is written" (reads "ab\ncd" "a = String::readLine(10); b = String::readLine(10); b.print(); a.print(); return 0;" "cdab0")
+                , testCase "a line longer than the limit is cut" (reads "abcdef\n" "a = String::readLine(3); b = String::readLine(10); b.print(); return size(a);" "def3")
+                , testCase "everything" (reads "ab\ncd" "a = String::read(10); return size(a);" "5")
+                , testCase "no more than the limit" (reads "abcdef" "a = String::read(4); b = String::read(10); return size(a) * 10 + size(b);" "42")
+                , testCase "UTF-8 is read as bytes" (reads "caf\195\169" "a = String::read(10); return size(a);" "5")
+                , testCase "an input that is a stream is read as it is needed" (testAssertEq (runSourceWith (take 3 (cycle "ab")) Interpret "a = readByte(); return a;") (Ok "97"))
+                , testCase "a program has no input unless it is given some" (runs "return readByte();" "-1")
+                , testCase "a byte that is read is from -1 to 255 and no more is known" (valid "c = readByte(); affirm c >= 0 - 1; affirm c < 256; return c;")
+                , testCase "so a claim about it is refused" (rejected "c = readByte(); affirm c >= 0; return c;" "Could not prove: c >= 0")
+                , testCase "two reads are not the same value" (rejected "a = readByte(); b = readByte(); affirm a = b; return a;" "Could not prove: a = b")
+                , testCase "two reads of a function are not the same value either" (rejected "a = String::readLine(5); b = String::readLine(5); affirm a = b; return 0;" "Could not prove: a = b")
+                , testCase "so two reads cannot make an index valid" (rejected "c = readByte(); d = readByte(); x = [0]; return get(x, c - d);" "Funct input validation failed")
+                , testCase "nor are the sizes of two reads" (rejected "a = String::readLine(5); b = String::readLine(5); affirm size(a) = size(b); return 0;" "Could not prove")
+                , testCase "a function that calls one that reads does not give the same value twice" (rejected "fn next() -> Int [{ }] [{ }] { return readByte(); }; a = next(); b = next(); affirm a = b; return 0;" "Could not prove: a = b")
+                , testCase "a proof does not call a function that reads" (rejected "fn next() -> Int [{ }] [{ }] { return readByte(); }; fn f(x: Int) -> Int [{ affirm next() >= 0 - 1; }] [{ }] { return x; }; return f(1);" "reads the input")
+                , testCase "a function that does not read still gives the same value twice" (valid "fn double(x: Int) -> Int [{ }] [{ }] { return x + x; }; a = double(3); b = double(3); affirm a = b; return 0;")
+                , testCase "a limit that is negative is refused" (rejected "a = String::read(0 - 1); return 0;" "Could not prove: limit >= 0")
+                , testCase "and the size of what is read is at most the limit" (valid "a = String::readLine(5); affirm size(a) <= 5; return 0;")
+                , testCase "but not more than that" (rejected "a = String::readLine(5); affirm size(a) <= 4; return 0;" "Could not prove: <String as Sequence>::size(a) <= 4")
                 ]
             , TestList
                 "the library"

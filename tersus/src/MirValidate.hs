@@ -335,7 +335,7 @@ validateFunction st name top = do
         ensures = M.specEnsures spec
         params = M.fnParams fn
         names = [n | p <- params, Just d <- [Map.lookup p (M.fnLocals fn)], Just n <- [M.localName d]]
-        term' = FnInfo names requires [] term (ATerm (fnIota name)) top (KUser name)
+        term' = FnInfo names requires [] term (ATerm (fnIota name)) top (KUser name) (Set.member name (psReaders st))
         -- the function can call itself: it promises what its output contract says of its parameters and result, and the body is
         -- checked against that
         assumed = [p | ProofAssert p <- ensures, all (`elem` ("return" : names)) (proofVars p)]

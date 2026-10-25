@@ -24,6 +24,44 @@ impl String {
 };
 
 impl String {
+    // The next bytes of the standard input, up to the end of the input or `limit` of them. The limit is how a loop that depends on what
+    // is read still ends: it is not an error to reach it, and what is not read is left for the next call.
+    fn read(limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        bytes = [];
+        i = 0;
+        while i < limit [{ affirm i >= 0; affirm i <= limit; affirm size(bytes) <= i; }] shrinks limit - i {
+            c = readByte();
+            if c < 0 {
+                i = limit;
+            } else {
+                bytes = push(bytes, c);
+                i = i + 1;
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The next line of the standard input without its new line (a byte 10, which is read and dropped), up to the end of the input or `limit`
+    // bytes of the line. When the line is longer, the rest of it is left in the input.
+    fn readLine(limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        bytes = [];
+        i = 0;
+        while i < limit [{ affirm i >= 0; affirm i <= limit; affirm size(bytes) <= i; }] shrinks limit - i {
+            c = readByte();
+            if c < 0 {
+                i = limit;
+            } else {
+                if c = 10 {
+                    i = limit;
+                } else {
+                    bytes = push(bytes, c);
+                    i = i + 1;
+                };
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
     // Writes the bytes of the string to the standard output (what `writeByte` writes of each is its low eight bits), and gives the number of them
     fn print(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         i = 0;

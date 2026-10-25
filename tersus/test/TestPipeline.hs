@@ -98,6 +98,7 @@ testExamples =
         , testExampleFile "examples/generic_structs.tersus" (ExpectReturn (VInt 2224))
         , testExampleFile "examples/hello.tersus" (ExpectReturn (VInt 14))
         , testExampleFile "examples/strings.tersus" (ExpectReturn (VInt 980))
+        , testExampleFile "examples/upper.tersus" (ExpectReturn (VInt 0))
         , testExampleFile "examples/vec.tersus" (ExpectReturn (VInt 2491212381))
         , testExampleFile "examples/spec_functions.tersus" (ExpectReturn (VInt 25070))
         , testExampleFile "examples/list_methods.tersus" (ExpectReturn (VInt 508221))

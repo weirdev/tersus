@@ -196,6 +196,16 @@ builtinFunct WriteByte =
         []
         (BuiltinFunct WriteByte)
         [relProof Eq (ATerm "return") (ATerm "b")]
+-- readByte() is the next byte of the standard input, or -1 at its end: it is not known beyond that, so a program has to test what it relies on
+builtinFunct ReadByte =
+    VFunct
+        []
+        []
+        []
+        (BuiltinFunct ReadByte)
+        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
+        , relProof Lt (ATerm "return") (CTerm (VInt 256))
+        ]
 -- Unsize b is b: the Box has the same value, it carries the size
 builtinFunct Unsize = VFunct ["box"] [] [] (BuiltinFunct Unsize) []
 -- The array that a literal makes is the list of its elements, read as an array: the same value
@@ -253,6 +263,7 @@ stdLibCtx =
         , ("set", builtinFunct Set)
         , ("array", builtinFunct NewArray)
         , ("writeByte", builtinFunct WriteByte)
+        , ("readByte", builtinFunct ReadByte)
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
         , ("*", builtinFunct Times)
@@ -298,6 +309,9 @@ evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
 evalBuiltinFunct NewEmptyArray [] = Ok (VList [])
 evalBuiltinFunct WriteByte [VInt b] = Ok (VInt b)
 evalBuiltinFunct WriteByte _ = Error "writeByte takes one byte"
+-- (this evaluator has no input: a program that reads is run on the MIR)
+evalBuiltinFunct ReadByte [] = Ok (VInt (-1))
+evalBuiltinFunct ReadByte _ = Error "readByte takes nothing"
 evalBuiltinFunct Unsize [value] = Ok value
 evalBuiltinFunct Unsize _ = Error "unsize takes one Box"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l

@@ -21,6 +21,7 @@ module Mir
     , LoopSpec (..)
     , emptySpec
     , completeInstances
+    , readersOfInput
     , slotsOf
     , ownerOf
     , successors
@@ -150,7 +151,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 
 -- First and Last need a list that is not empty, Get and Set an index in range. These work on an array as on a list; NewArray n x
 -- makes an array of n copies of x, with n not negative; NewBoxed n x does so for an n that is not a constant, in a Box. NewEmptyBoxed makes the Box of an array of no elements.
-data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte
+data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | ReadByte
     deriving (Show, Eq)
 
 -- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns
@@ -428,3 +429,51 @@ renderTerminator (Call f args dest next) =
     renderCallee o = renderOperand o
 renderTerminator Return = "return;"
 renderTerminator Unreachable = "unreachable;"
+
+-- The functions of the program that read the standard input (`readByte`), or call or mention one that does. What such a function gives is not
+-- determined by its arguments, so a validator may not say that two calls with the same arguments give the same value.
+readersOfInput :: Program -> Set.Set Name
+readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, any reads (statementsOf fn)])
+  where
+    functions = Map.toList (progFunctions program)
+    reads s = case s of
+        Assign _ (ListOp ReadByte _) -> True
+        Peek _ (ListOp ReadByte _) -> True
+        _ -> False
+    statementsOf fn = concatMap blockStatements (Map.elems (fnBlocks fn))
+    -- (the functions that a function names, as the callee of a call or anywhere a value is used)
+    mentions fn = Set.fromList (concatMap (concatMap operandFns . operandsOfRvalue) (concatMap rvaluesOf (statementsOf fn)) ++ concatMap terminatorFns (map blockTerminator (Map.elems (fnBlocks fn))))
+    rvaluesOf s = case s of
+        Assign _ rv -> [rv]
+        Peek _ rv -> [rv]
+        _ -> []
+    terminatorFns t = case t of
+        Call callee args _ _ -> concatMap operandFns (callee : args)
+        SwitchBool o _ _ -> operandFns o
+        _ -> []
+    operandFns o = case o of
+        Const c -> constantFns c
+        _ -> []
+    constantFns c = case c of
+        CFn name -> [name]
+        CList cs -> concatMap constantFns cs
+        CArray cs -> concatMap constantFns cs
+        CData _ fields -> concatMap (constantFns . snd) fields
+        _ -> []
+    operandsOfRvalue rv = case rv of
+        Use o -> [o]
+        BinaryOp _ a b -> [a, b]
+        ListOp _ os -> os
+        MakeList os -> os
+        MakeBox o -> [o]
+        Unbox o -> [o]
+        Unsize o -> [o]
+        MakeData _ fields -> map snd fields
+        ReadField o _ _ -> [o]
+        IsVariant o _ -> [o]
+        AsVariant o _ -> [o]
+        Clone o -> [o]
+        TakeField{} -> []
+    grow known =
+        let more = Set.fromList [name | (name, fn) <- functions, not (Set.member name known), not (Set.null (Set.intersection (mentions fn) known))]
+         in if Set.null more then known else grow (Set.union known more)

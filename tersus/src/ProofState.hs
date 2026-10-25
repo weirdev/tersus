@@ -28,6 +28,7 @@ module ProofState
 import Data.Containers.ListUtils (nubOrd)
 import Data.Map (Map)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Data.Maybe (fromMaybe)
 
 import qualified Mir as M
@@ -84,6 +85,7 @@ data FnInfo = FnInfo
     , fnTerm :: IotaProof -- what the function is in a proof: the head of the applications that call it
     , fnGlobal :: Bool -- defined at the top of the program, where the functions after it can use it
     , fnKind :: FnKind
+    , fnReads :: Bool -- reads the standard input: what it gives is not determined by its arguments, so two calls are not the same value
     }
 
 data FnKind = KBuiltin BuiltinFunct | KUser Name
@@ -104,6 +106,7 @@ data PState = PState
     , psTerminates :: Bool -- in a function that is guaranteed to terminate
     , psCache :: Maybe FactCache
     , psProgram :: M.Program
+    , psReaders :: Set.Set Name -- the functions of the program that read the standard input
     }
 
 -- The name of a function of the program as a value in proofs
@@ -131,6 +134,7 @@ initialPState program =
             , psTerminates = False
             , psCache = Just (Engine.factCacheAdd Engine.emptyFactCache globalFacts)
             , psProgram = program
+            , psReaders = M.readersOfInput program
             }
 
 -- The state for the body of a function (or a rule) defined in this one: only what holds everywhere is known in it
