@@ -6,7 +6,8 @@ author:              "weirdev"
 maintainer:          "weirdev@outlook.com"
 copyright:           "2024"
 
-extra-source-files: []
+extra-source-files:
+- lib/prelude.tersus
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package
@@ -24,6 +25,7 @@ dependencies:
 - filepath
 - parsec
 - process
+- template-haskell
 
 ghc-options:
 - -Wall

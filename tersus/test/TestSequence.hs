@@ -1,7 +1,13 @@
 module TestSequence (testSequence) where
 
+import Data.List (isInfixOf, tails)
+
+import Cli (Command (..), runSource)
+import Pipeline (compileSource)
+import PreludeSource (preludeSource)
 import TersusTypes
 import TestHarness
+import Utils
 
 -- What a list written in the language needs: a contract that calls functions (`affirm i < size(v);`), an invariant that every value of a
 -- struct meets, a trait with types (`trait Sequence<E>`) that a struct with types implements, and `size`, `get`, `set` and `push` that
@@ -78,4 +84,25 @@ testSequence =
                 , testCase "so is a pop of an empty one" (rejected (vecLibrary ++ "v = Vec::new(0).pop(); return size(v);") "Could not prove: self.len >= 1")
                 , testCase "a function over any sequence of a Vec" (runs (vecLibrary ++ "fn firstOf<T>(v: &Vec<T>) -> T [{ affirm size(v) > 0; }] [{ }] { return v.get(0); }; return firstOf(Vec::new(3).push(8));") (VInt 8))
                 ]
+            , TestList
+                "the prelude"
+                [ testCase "the tests build programs on the library of the prelude" $
+                    let code = [l | l <- lines preludeSource, not (null (words l)), take 2 (dropWhile (== ' ') l) /= "//"]
+                        library = lines vecLibrary
+                     in if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "lib/prelude.tersus does not hold vecLibrary"
+                , testCase "a program that mentions Vec has it" (runsAs "v = Vec::new(2).push(5); return v.get(0) + size(v);" "6")
+                , testCase "also one that only mentions Sequence" (runsAs "fn total(v: &Vec<Int>) -> Int [{ affirm size(v) = 1; }] [{ }] { return Sequence::get(v, 0); }; return total(Vec::new(3).push(4));" "4")
+                , testCase "a program with a Vec of its own does not" (runsAs "struct Vec<T, n> { cells: Array<T, n> }; v = Vec<Int, 2> { cells: #[1, 2] }; return get(v.cells, 1);" "2")
+                , testCase "nor one with a Sequence of its own" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
+                , testCase "a program that mentions neither is as it was" (runsAs "return 4;" "4")
+                , testCase "the lines of an error are those of the program" (errorHas "\n\nreturn ( ;" "line 3")
+                , testCase "an error in the use of the library is the program's" (errorHas "v = Vec::new(1).push(2);\nreturn v.get(5);" "Could not prove: i < self.len")
+                ]
             ]
+  where
+    runsAs source expected = case runSource Run source of
+        Ok output -> if output == expected then Nothing else Just ("Expected " ++ expected ++ ", got " ++ output)
+        Error e -> Just ("Failed: " ++ e)
+    errorHas source expected = case compileSource source of
+        Error e -> if expected `isInfixOf` e then Nothing else Just ("Expected an error with " ++ expected ++ ", got: " ++ e)
+        Ok _ -> Just "Expected an error"

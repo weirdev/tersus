@@ -14,6 +14,8 @@ maintainer:     weirdev@outlook.com
 copyright:      2024
 license:        BSD-3-Clause
 build-type:     Simple
+extra-source-files:
+    lib/prelude.tersus
 
 source-repository head
   type: git
@@ -36,6 +38,7 @@ library
       Native
       Parse
       Pipeline
+      PreludeSource
       Pretty
       ProofEngine
       ProofHelpers
@@ -58,6 +61,7 @@ library
     , filepath
     , parsec
     , process
+    , template-haskell
   default-language: Haskell2010
 
 executable tersus-exe
@@ -76,6 +80,7 @@ executable tersus-exe
     , filepath
     , parsec
     , process
+    , template-haskell
     , tersus
   default-language: Haskell2010
 
@@ -92,6 +97,7 @@ test-suite tersus-test
       TestArrays
       TestBorrow
       TestGenerics
+      TestSequence
       TestBox
       TestTraits
       TestPipeline
@@ -110,5 +116,6 @@ test-suite tersus-test
     , filepath
     , parsec
     , process
+    , template-haskell
     , tersus
   default-language: Haskell2010

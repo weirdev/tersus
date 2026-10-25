@@ -5,6 +5,9 @@ module Parse
     , parseExpression
     , parseStatement
     , parseStatementBlock
+    , parseStatementBlockWith
+    , Decls
+    , emptyDecls
     , proof
     , semicolon
     , statement
@@ -1102,6 +1105,11 @@ parseStatement = runParser (topLevelWrap statement) emptyDecls ""
 -- Function to run the parser
 parseStatementBlock :: String -> Either ParseError [Statement]
 parseStatementBlock = runParser (topLevelWrap statementBlock) emptyDecls ""
+
+-- A block of statements that follows others (the prelude): it knows the structs, enums and traits they declared, and gives back
+-- what it declared too
+parseStatementBlockWith :: Decls -> String -> Either ParseError ([Statement], Decls)
+parseStatementBlockWith decls = runParser (topLevelWrap (do stmts <- statementBlock; declared <- getState; return (stmts, declared))) decls ""
 
 -- Function to run the parser
 parseExpression :: String -> Either ParseError Expression
