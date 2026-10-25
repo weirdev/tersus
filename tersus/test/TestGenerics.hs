@@ -13,6 +13,7 @@ testGenerics =
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
             _ -> Just ("Expected a parse error for: " ++ source)
+        pairBox = "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn first(self: &Self) -> T { return self.a; }; fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; }; "
         lead = "fn lead<T>(a: &List<T>) -> T [{ define s = size(a); rewrite eqToGtZero s; affirm s > 0; }] [{ }] { return get(a, 0); }; "
      in TestList
             "testGenerics"
@@ -53,7 +54,7 @@ testGenerics =
                 , testCase "a function does not call itself with a type made of its own" (rejected "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return f(push([], a), n - 1); }; return f(1, 1);" "f calls itself with the type List<T> for T, which is made of its own type parameters")
                 , testCase "a type is not a function" (rejected "fn id<T>(a: T) -> T { return a; }; fn inc(n: Int) -> Int { return n + 1; }; f = id(inc); return 0;" "a type parameter is not a function")
                 , testCase "the function is called, not named" (rejected "fn id<T>(a: T) -> T { return a; }; h = id; return 0;" "id has parameters <T>, so it is called")
-                , testCase "an impl has none" (rejected "struct S { x: Int }; impl S { fn f<T>(a: T) -> T { return a; }; }; return 0;" "type parameters, which a function of an impl cannot have yet")
+                , testCase "a function of an impl has them" (runs "struct S { x: Int }; impl S { fn f<T>(a: T) -> T { return a; }; }; return S::f(4);" (VInt 4))
                 , testCase "a name that is not a capital is a size" (rejected "fn f<t>(a: t) -> Int { return 0; }; return 0;" "unknown type t")
                 , testCase "a type is not in a nested function" (rejected "fn outer<T>(a: T) -> Int { fn inner(b: T) -> Int { return 0; }; return 0; }; return 0;" "unknown type T")
                 , testCase "the declaration is parsed with spaces" (runs "fn second < A , B > (a: A, b: B) -> B { return b; }; return second(3, true);" (VBool True))
@@ -92,17 +93,31 @@ testGenerics =
                 , testCase "the declaration is parsed with spaces" (runs "struct Q < T , n > { a: T, b: Array<T, n> }; q = Q < Int , 2 > { a: 1, b: #[2, 3] }; return q.a + get(q.b, 1);" (VInt 4))
                 ]
             , TestList
+                "impl for a struct with parameters"
+                [ testCase "a method" (runs (pairBox ++ "x = Box2<Int> { a: 1, b: 2 }.swap(); return x.first() * 10 + x.b;") (VInt 21))
+                , testCase "for any type" (runs (pairBox ++ "x = Box2<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }; return size(x.swap().first());") (VInt 2))
+                , testCase "its own names for the parameters" (runs "struct Box2<T> { a: T, b: T }; impl<U> Box2<U> { fn second(self: &Self) -> U { return self.b; }; }; return Box2<Int> { a: 1, b: 2 }.second();" (VInt 2))
+                , testCase "a function without self is called through the type" (runs "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn both(x: T) -> Self { return Self { a: x, b: x }; }; }; return Box2::both(4).b;" (VInt 4))
+                , testCase "a size of the impl is a value" (runs "struct Packet<n> { cells: Array<Int, n>, tag: Int }; impl<n> Packet<n> { fn count(self: &Self) -> Int { return n + self.tag; }; }; return Packet<3> { cells: #[1, 2, 3], tag: 10 }.count();" (VInt 13))
+                , testCase "a method calls another" (runs "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; fn back(self: Self) -> Self { return self.swap().swap(); }; }; return Box2<Int> { a: 1, b: 2 }.back().a;" (VInt 1))
+                , testCase "validated against its contract" (rejected "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn pick(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < 2; }] [{ }] { return self.a; }; }; return Box2<Int> { a: 1, b: 2 }.pick(5);" "Could not prove: i < 2")
+                , testCase "the parameters are written" (parseFails "struct Box2<T> { a: T, b: T }; impl Box2 { fn first(self: &Self) -> Int { return 0; }; }; return 0;")
+                , testCase "or none for a struct without any" (parseFails "struct S { a: Int }; impl<T> S { fn f(self: &Self) -> Int { return 0; }; }; return 0;")
+                , testCase "a trait is not implemented for these yet" (rejected "struct Box2<T> { a: T, b: T }; trait Sized2 { fn count(self: Self) -> Int; }; impl<T> Sized2 for Box2<T> { fn count(self: Self) -> Int { return 2; }; }; return 0;" "a trait cannot be implemented for these yet")
+                , testCase "the impl comes before its calls" (rejected "struct Box2<T> { a: T, b: T }; x = Box2<Int> { a: 1, b: 2 }; return x.first();" "is not defined before this call")
+                ]
+            , TestList
                 "a list written in Tersus"
-                [ testCase "pushed and read" (runs (vecLibrary ++ "v = vecPush(vecPush(vecNew(0), 5), 6); return vecGet(v, 0) * 10 + vecGet(v, 1);") (VInt 56))
-                , testCase "pushed past its capacity, in a loop" (runs (vecLibrary ++ "v = vecNew(0); i = 0; while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 10 - i { v = vecPush(v, i * i); i = i + 1; }; return vecLen(v) + vecGet(v, 9);") (VInt 91))
-                , testCase "set" (runs (vecLibrary ++ "v = vecSet(vecPush(vecPush(vecNew(1), 2), 3), 0, 9); return vecGet(v, 0) + vecGet(v, 1) * 10;") (VInt 39))
-                , testCase "popped" (runs (vecLibrary ++ "v = vecPop(vecPush(vecPush(vecNew(false), true), false)); return vecLen(v);") (VInt 1))
-                , testCase "a copy is a Vec of its own" (runs (vecLibrary ++ "a = vecPush(vecNew(0), 1); b = vecSet(a, 0, 7); return vecGet(a, 0) * 10 + vecGet(b, 0);") (VInt 17))
-                , testCase "of lists" (runs (vecLibrary ++ "rows = vecPush(vecNew(push([], 0)), push(push([], 4), 5)); return size(vecGet(rows, 0));") (VInt 2))
-                , testCase "of Vecs" (runs (vecLibrary ++ "g = vecPush(vecNew(vecNew(0)), vecPush(vecPush(vecNew(0), 8), 9)); return vecLen(vecGet(g, 0));") (VInt 2))
-                , testCase "of structs that own a list" (runs (vecLibrary ++ "struct P { n: Int, xs: List<Int> }; ps = vecPush(vecNew(P { n: 0, xs: [] }), P { n: 3, xs: push([], 1) }); p = vecGet(ps, 0); return p.n + size(p.xs);") (VInt 4))
+                [ testCase "pushed and read" (runs (vecLibrary ++ "v = Vec::new(0).push(5).push(6); return v.get(0) * 10 + v.get(1);") (VInt 56))
+                , testCase "pushed past its capacity, in a loop" (runs (vecLibrary ++ "v = Vec::new(0); i = 0; while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 10 - i { v = v.push(i * i); i = i + 1; }; return v.len() + v.get(9);") (VInt 91))
+                , testCase "set" (runs (vecLibrary ++ "v = Vec::new(1).push(2).push(3).set(0, 9); return v.get(0) + v.get(1) * 10;") (VInt 39))
+                , testCase "popped" (runs (vecLibrary ++ "v = Vec::new(false).push(true).push(false).pop(); return v.len();") (VInt 1))
+                , testCase "a copy is a Vec of its own" (runs (vecLibrary ++ "a = Vec::new(0).push(1); b = a.set(0, 7); return a.get(0) * 10 + b.get(0);") (VInt 17))
+                , testCase "of lists" (runs (vecLibrary ++ "rows = Vec::new(push([], 0)).push(push(push([], 4), 5)); return size(rows.get(0));") (VInt 2))
+                , testCase "of Vecs" (runs (vecLibrary ++ "g = Vec::new(Vec::new(0)).push(Vec::new(0).push(8).push(9)); return g.get(0).len();") (VInt 2))
+                , testCase "of structs that own a list" (runs (vecLibrary ++ "struct P { n: Int, xs: List<Int> }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);") (VInt 4))
                 , testCase "the library validates by itself" (valid vecLibrary)
-                , testCase "an index past the end is rejected" (rejected (vecLibrary ++ "v = vecPush(vecNew(0), 1); return vecGet(v, 1);") "Could not prove: i < n")
-                , testCase "so is a pop of an empty one" (rejected (vecLibrary ++ "v = vecPop(vecNew(0)); return vecLen(v);") "Could not prove: n >= 1")
+                , testCase "an index past the end is rejected" (rejected (vecLibrary ++ "v = Vec::new(0).push(1); return v.get(1);") "Could not prove: i < n")
+                , testCase "so is a pop of an empty one" (rejected (vecLibrary ++ "v = Vec::new(0).pop(); return v.len();") "Could not prove: n >= 1")
                 ]
             ]
