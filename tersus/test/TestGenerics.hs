@@ -91,4 +91,18 @@ testGenerics =
                 , testCase "a parameter is not named twice" (rejected "struct Q<T, T> { a: T }; return 0;" "names a parameter twice")
                 , testCase "the declaration is parsed with spaces" (runs "struct Q < T , n > { a: T, b: Array<T, n> }; q = Q < Int , 2 > { a: 1, b: #[2, 3] }; return q.a + get(q.b, 1);" (VInt 4))
                 ]
+            , TestList
+                "a list written in Tersus"
+                [ testCase "pushed and read" (runs (vecLibrary ++ "v = vecPush(vecPush(vecNew(0), 5), 6); return vecGet(v, 0) * 10 + vecGet(v, 1);") (VInt 56))
+                , testCase "pushed past its capacity, in a loop" (runs (vecLibrary ++ "v = vecNew(0); i = 0; while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 10 - i { v = vecPush(v, i * i); i = i + 1; }; return vecLen(v) + vecGet(v, 9);") (VInt 91))
+                , testCase "set" (runs (vecLibrary ++ "v = vecSet(vecPush(vecPush(vecNew(1), 2), 3), 0, 9); return vecGet(v, 0) + vecGet(v, 1) * 10;") (VInt 39))
+                , testCase "popped" (runs (vecLibrary ++ "v = vecPop(vecPush(vecPush(vecNew(false), true), false)); return vecLen(v);") (VInt 1))
+                , testCase "a copy is a Vec of its own" (runs (vecLibrary ++ "a = vecPush(vecNew(0), 1); b = vecSet(a, 0, 7); return vecGet(a, 0) * 10 + vecGet(b, 0);") (VInt 17))
+                , testCase "of lists" (runs (vecLibrary ++ "rows = vecPush(vecNew(push([], 0)), push(push([], 4), 5)); return size(vecGet(rows, 0));") (VInt 2))
+                , testCase "of Vecs" (runs (vecLibrary ++ "g = vecPush(vecNew(vecNew(0)), vecPush(vecPush(vecNew(0), 8), 9)); return vecLen(vecGet(g, 0));") (VInt 2))
+                , testCase "of structs that own a list" (runs (vecLibrary ++ "struct P { n: Int, xs: List<Int> }; ps = vecPush(vecNew(P { n: 0, xs: [] }), P { n: 3, xs: push([], 1) }); p = vecGet(ps, 0); return p.n + size(p.xs);") (VInt 4))
+                , testCase "the library validates by itself" (valid vecLibrary)
+                , testCase "an index past the end is rejected" (rejected (vecLibrary ++ "v = vecPush(vecNew(0), 1); return vecGet(v, 1);") "Could not prove: i < n")
+                , testCase "so is a pop of an empty one" (rejected (vecLibrary ++ "v = vecPop(vecNew(0)); return vecLen(v);") "Could not prove: n >= 1")
+                ]
             ]

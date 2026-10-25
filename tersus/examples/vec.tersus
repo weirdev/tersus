@@ -1,0 +1,68 @@
+// A growable list written in Tersus: a Box of an array that holds the elements, and how many of them are in use. The array is
+// the capacity, and a push into a full one makes an array twice as large and moves the elements over.
+//
+// Every function says what it keeps true: 0 <= len <= size(data), and a capacity of at least 1. A function over a Vec asks for it,
+// and the ones that make a Vec promise it, so a caller that only builds Vecs with these functions never has to prove it again.
+struct Vec<T> {
+    data: Box<Array<T>>,
+    len: Int,
+};
+
+// An empty Vec. The array needs an element to fill it with, which is never read: nothing is in use until it is pushed.
+fn vecNew<T>(filler: T) -> Vec<T> [{ }] [{ affirm return.len = 0; affirm size(return.data) = 4; }] {
+    return Vec<T> { data: Array::boxed(4, filler), len: 0 };
+};
+
+fn vecLen<T>(v: &Vec<T>) -> Int [{ }] [{ affirm return = v.len; }] {
+    return v.len;
+};
+
+// The element at an index in use
+fn vecGet<T>(v: &Vec<T>, i: Int) -> T [{ define n = v.len; define cap = size(v.data); affirm i >= 0; affirm i < n; affirm n <= cap; }] [{ }] {
+    return get(v.data, i);
+};
+
+fn vecSet<T>(v: Vec<T>, i: Int, x: T) -> Vec<T> [{ define n = v.len; define cap = size(v.data); affirm i >= 0; affirm i < n; affirm n <= cap; }] [{ affirm return.len = v.len; affirm size(return.data) = size(v.data); }] {
+    return Vec<T> { data: set(v.data, i, x), len: v.len };
+};
+
+fn vecPush<T>(v: Vec<T>, x: T) -> Vec<T> [{ define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] [{ affirm return.len = v.len + 1; affirm return.len <= size(return.data); affirm size(return.data) >= 1; }] {
+    if v.len < size(v.data) {
+        return Vec<T> { data: set(v.data, v.len, x), len: v.len + 1 };
+    };
+    big = Array::boxed(size(v.data) * 2, x);
+    i = 0;
+    while i < v.len [{ affirm i >= 0; affirm i <= v.len; affirm size(big) = size(v.data) * 2; }] shrinks v.len - i {
+        big = set(big, i, get(v.data, i));
+        i = i + 1;
+    };
+    return Vec<T> { data: set(big, v.len, x), len: v.len + 1 };
+};
+
+// Takes the last element out of use (it stays in the array, which holds it until it is written over or the Vec is freed)
+fn vecPop<T>(v: Vec<T>) -> Vec<T> [{ define n = v.len; define cap = size(v.data); affirm n >= 1; affirm n <= cap; }] [{ affirm return.len = v.len - 1; affirm size(return.data) = size(v.data); }] {
+    return Vec<T> { data: v.data, len: v.len - 1 };
+};
+
+// A Vec of Ints: the first 20 squares
+squares = vecNew(0);
+i = 0;
+while i < 20 [{ affirm i >= 0; affirm i <= 20; affirm squares.len = i; define n = squares.len; define cap = size(squares.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 20 - i {
+    squares = vecPush(squares, i * i);
+    i = i + 1;
+};
+
+// A Vec of values that own something: the lists are moved in, cloned out, and freed with the Vec
+rows = vecNew(push([], 0));
+rows = vecPush(rows, push(push([], 1), 2));
+rows = vecPush(rows, push([], 3));
+firstRow = vecGet(rows, 0);
+
+// A Vec of Vecs
+grid = vecPush(vecNew(vecNew(0)), vecPush(vecNew(0), 7));
+
+// Setting and popping
+flags = vecPush(vecPush(vecPush(vecNew(false), true), false), true);
+flags = vecPop(vecSet(flags, 0, true));
+
+return vecGet(squares, 19) + vecLen(squares) + size(firstRow) * 1000 + vecLen(grid) * 10000 + vecLen(flags) * 100000;    // 361 + 20 + 2000 + 10000 + 200000
