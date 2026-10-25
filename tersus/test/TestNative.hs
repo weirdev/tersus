@@ -7,7 +7,7 @@ module TestNative
 
 import Control.Exception (IOException, try)
 import Data.Char (isAscii)
-import Data.List (isInfixOf, tails)
+import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
@@ -38,7 +38,7 @@ testNative =
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
-        , TestList "a list written in Tersus" (testVecExample : [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms])
+        , TestList "a list written in Tersus" [TestCase name (sameAsMir name body) | (name, body) <- vecPrograms]
         , TestList "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
@@ -55,7 +55,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "safe_access", "sized_structs", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec"
+        , "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec"
         ]
     ]
 
@@ -460,7 +460,7 @@ genericImplPrograms =
     , ("a function without self, through Self", "struct Pair<A, B> { a: A, b: B }; impl<X, Y> Pair<X, Y> { fn make(x: X, y: Y) -> Self { return Self { a: x, b: y }; }; fn again(self: &Self) -> Self { return Self::make(self.a, self.b); }; fn flip(self: &Self) -> Pair<Y, X> { return Pair<Y, X> { a: self.b, b: self.a }; }; }; q = Pair::make(push([], 4), true).again().flip(); return size(q.b) + 10;")
     ]
 
--- Programs over the library list (`vecLibrary`, as in examples/vec.tersus). Run with the checks of the runtime on, they show that
+-- Programs over the library list of the prelude (lib/prelude.tersus), which a program that mentions `Vec` has. Run with the checks of the runtime on, they show that
 -- the arrays it grows, the elements it moves and the Vecs it holds are each freed once.
 vecPrograms :: [(String, String)]
 vecPrograms =
@@ -482,14 +482,6 @@ vecPrograms =
     -- A Vec made with the filler and pushed to by the statement `n` times
     loop n filler step =
         "v = Vec::new(" ++ filler ++ "); i = 0; while i < " ++ show (n :: Int) ++ " [{ affirm i >= 0; affirm i <= " ++ show n ++ "; affirm size(v) = i; }] shrinks " ++ show n ++ " - i { " ++ step ++ " i = i + 1; }; "
-
--- The example has the library that the tests use
-testVecExample :: Test
-testVecExample = TestCase "the example holds the library" $ do
-    text <- readFile "examples/vec.tersus"
-    let code = [l | l <- lines text, not (null (words l)), take 2 (dropWhile (== ' ') l) /= "//"]
-        library = lines vecLibrary
-    pure $ if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "examples/vec.tersus does not hold vecLibrary"
 
 controlPrograms :: [(String, String)]
 controlPrograms =

@@ -1,0 +1,35 @@
+// A contract can call the functions of the program, and a struct can promise something of every value of it.
+//
+// `width` and `inside` are ordinary functions. Their promises are what a contract knows of a call: `inside(r, x)` in the contract of `clamp`
+// is checked against the input contract of `inside` where it is written, and is known to be `x - r.lo` from its promise. The invariant of
+// `Range` is proved where a Range is made, and every Range a function is given has it, so `width` never asks for `lo <= hi`.
+struct Range { lo: Int, hi: Int } invariant [{ affirm lo <= hi; }];
+
+fn width(r: &Range) -> Int [{ }] [{ affirm return = r.hi - r.lo; affirm return >= 0; }] {
+    return r.hi - r.lo;
+};
+
+// How far a value is from the start of the range, which is only asked of a value in it
+fn offset(r: &Range, x: Int) -> Int [{ affirm x >= r.lo; affirm x <= r.hi; }] [{ affirm return = x - r.lo; affirm return <= width(r); }] {
+    return x - r.lo;
+};
+
+// A value moved into the range: the result is in it, and the contract says so with a call
+fn clamp(r: &Range, x: Int) -> Int [{ }] [{ affirm return >= r.lo; affirm return <= r.hi; affirm offset(r, return) <= width(r); }] {
+    if x < r.lo {
+        return r.lo;
+    };
+    if x > r.hi {
+        return r.hi;
+    };
+    return x;
+};
+
+// The range grown by n on both sides: the result is a Range, so it meets the invariant, which is proved from n >= 0
+fn grow(r: Range, n: Int) -> Range [{ affirm n >= 0; }] [{ affirm width(return) = width(r) + 2 * n; }] {
+    return Range { lo: r.lo - n, hi: r.hi + n };
+};
+
+r = Range { lo: 10, hi: 20 };
+big = grow(r, 5);
+return clamp(big, 100) * 1000 + clamp(big, 0) * 10 + width(big);    // 25 * 1000 + 5 * 10 + 20

@@ -35,11 +35,12 @@ data ExampleExpectation
 testExampleFile :: FilePath -> ExampleExpectation -> Test
 testExampleFile path expectation = TestCase path $ do
     source <- readFile path
-    pure $ case parseStatementBlock source of
-        Left err -> case expectation of
-            ExpectRejected expectedError -> testAssertErrorContains expectedError (Error (show err) :: Result () String)
-            _ -> Just $ "Parse failed: " ++ show err
-        Right stmts -> checkExample stmts expectation
+    -- (as the command line reads a program, so an example that uses the prelude has it)
+    pure $ case parseSource source of
+        Error err -> case expectation of
+            ExpectRejected expectedError -> testAssertErrorContains expectedError (Error err :: Result () String)
+            _ -> Just $ "Parse failed: " ++ err
+        Ok stmts -> checkExample stmts expectation
 
 checkExample :: [Statement] -> ExampleExpectation -> TestResult
 checkExample stmts (ExpectRejected expectedError) =
@@ -92,6 +93,7 @@ testExamples =
         , testExampleFile "examples/type_parameters.tersus" (ExpectReturn (VInt 2045))
         , testExampleFile "examples/generic_structs.tersus" (ExpectReturn (VInt 2224))
         , testExampleFile "examples/vec.tersus" (ExpectReturn (VInt 212381))
+        , testExampleFile "examples/spec_functions.tersus" (ExpectReturn (VInt 25070))
         , testExampleFile "examples/array_owners.tersus" (ExpectReturn (VInt 207))
         , testExampleFile "examples/borrowing.tersus" (ExpectReturn (VInt 138))
         , testExampleFile "examples/sized_structs.tersus" (ExpectReturn (VInt 71))

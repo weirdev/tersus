@@ -1362,9 +1362,11 @@ return v.get(1) + size(v);                      // 8
 - **The invariant keeps `0 <= len <= size(data)` and a capacity of at least 1.** It is proved where a Vec is made (the literals in `new`, `set`, `push` and `pop`) and assumed for every Vec a function is given, so no function asks for it. `get` asks for an index in use (`affirm i < self.len;`), so `v.get(1)` on a Vec with one element is refused (`Could not prove: i < self.len`), and so is `pop` of an empty one (`Could not prove: self.len >= 1`).
 - **A loop that pushes says what it keeps in terms of `size`**: `affirm size(v) = i;`, since `push` promises `size(return) = size(self) + 1` and the invariant says the rest.
 - **The elements may own things.** The array clones the filler into every slot, `set` and the growth move and free what they replace, and a `Vec<List<Int>>`, a `Vec<Vec<Int>>` or a Vec of structs that own lists is freed once (the native tests run these with the checks of the runtime on).
-- **What it is not yet**: a list. There is no way to share the library between programs (it is pasted in), no list literal or `for` over it, a function over any `Sequence` (it takes a `Vec`), and `=` compares the unused slots of the arrays too.
+- **What it is not yet**: a list. There is no list literal or `for` over it, no function over any `Sequence` (it takes a `Vec`), and `=` compares the unused slots of the arrays too.
 
-See `examples/vec.tersus`.
+**The prelude.** The library is `lib/prelude.tersus`, and every program that mentions `Vec` or `Sequence` has it in front of it, so the examples above run as they are written, and `tersus check` of a program that uses `Vec::new(0)` needs nothing else. A program that declares a `Vec` (or a `Sequence`) of its own does not get the library, so it keeps its own, and a program that mentions neither is unchanged. The library is parsed before the program with the declarations it makes known to it, so the line numbers in an error are the program's own, and the functions of the library are checked and validated with it (a few milliseconds). It is compiled into the program, so the executable of `tersus build` has what it uses and nothing else.
+
+See `examples/vec.tersus`, which is a program that uses the prelude, and `lib/prelude.tersus`.
 
 ### Structs with sizes
 
@@ -1437,7 +1439,7 @@ return a;                             // [[1], [2, 3], [1]]
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function cannot take "any type that implements `Measure`" (a type parameter has no bounds yet), so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
-- The CLI runs one file at a time and has no REPL or multi-file programs.
+- The CLI runs one file at a time and has no REPL or multi-file programs; the one library there is, the prelude with `Vec` and `Sequence`, is put in front of a program that mentions them.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - The source file is read in the encoding of the locale, so a program with a letter that is not ASCII in a name (the parser accepts any letter) needs a UTF-8 locale to load.
 - A program has no input or output: it computes and returns one value, which `run` and an executable print.

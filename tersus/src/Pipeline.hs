@@ -14,7 +14,9 @@ import MirVerify (verifyProgram)
 import MirEval (MirValue, runProgram)
 import MirLower (lowerElaborated)
 import MirValidate (Validated, validateProgram)
-import Parse (parseStatementBlock)
+import Data.Char (isAlphaNum)
+import Parse (emptyDecls, parseStatementBlock, parseStatementBlockWith)
+import PreludeSource (preludeSource)
 import TersusTypes (Statement)
 import TypeCheck (elaborate)
 import Utils
@@ -29,9 +31,29 @@ import Utils
 -- the stage that refused the program, as the command line prints them.
 
 parseSource :: String -> Result [Statement] String
-parseSource source = case parseStatementBlock source of
-    Left err -> Error ("Parse error: " ++ show err)
-    Right stmts -> Ok stmts
+parseSource source
+    | usesPrelude source = case parseStatementBlockWith emptyDecls preludeSource of
+        Left err -> Error ("Parse error in the prelude: " ++ show err)
+        Right (library, declared) -> case parseStatementBlockWith declared source of
+            Left err -> Error ("Parse error: " ++ show err)
+            Right (stmts, _) -> Ok (library ++ stmts)
+    | otherwise = case parseStatementBlock source of
+        Left err -> Error ("Parse error: " ++ show err)
+        Right stmts -> Ok stmts
+
+-- Every program has the library of lib/prelude.tersus (`Vec` and `Sequence`) in front of it if it mentions either name and does not
+-- declare them itself, so a program that has a `Vec` of its own is unchanged
+usesPrelude :: String -> Bool
+usesPrelude source = any (`elem` ws) ["Vec", "Sequence"] && not (any declared ws')
+  where
+    ws = words' source
+    ws' = zip ws (drop 1 ws)
+    declared (keyword, name) = keyword `elem` ["struct", "enum", "trait"] && name `elem` ["Vec", "Sequence"]
+    -- (the names in a text: runs of letters, digits and underscores)
+    words' text = case dropWhile (not . isNameChar) text of
+        "" -> []
+        rest -> let (w, more) = span isNameChar rest in w : words' more
+    isNameChar c = isAlphaNum c || c == '_'
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
