@@ -1409,6 +1409,22 @@ return v.get(1) + size(v);                      // 8
 `Vec` itself is not in the prelude: a `List` is the same thing (see Lists In Native Code), with the literals, the methods and the proof facts of a list, so a program uses a list. `examples/vec.tersus` writes the library out in full as a program of its own: it is what the features of this part of the guide are for.
 
 
+## Strings
+
+A string literal is written in double quotes and is a value of the struct `String`, which holds the UTF-8 bytes of its text as a list of Ints:
+
+```
+name = "caf\u{e9}";            // String { bytes: [99, 97, 102, 195, 169] }
+affirm size(name) = 5;         // the number of bytes, not of characters
+greeting = "hi, ".concat(name).push(33);
+affirm size(greeting) = 10;
+affirm get(greeting, 9) = 33;
+```
+
+The escapes are `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` (a character from U+0000 to U+10FFFF, not a surrogate). A literal cannot run over a line. `String` is a library type, in `lib/string.tersus`: a program that writes a literal or mentions `String` has it in front of it (after the prelude, which it needs), the way it has `Sequence`, and a program that declares a `String` (or a `Sequence`) of its own does not get it and cannot write a literal. It implements `Sequence<Int>` and `Growable<Int>` over its bytes, so `size`, `get`, `set` and `push` work on it with the contracts of the traits, a function over any `Sequence<Int>` takes one, and `a.concat(b)` joins two (`b` is borrowed; the size of the result is the sum). Two strings are equal when their bytes are, as for any struct. Nothing looks at the bytes as characters yet.
+
+What is not there: contracts about the bytes of a literal beyond what the validator can read off it (`concat` promises the size of the result and not what is in it), comparisons other than equality, slices, formatting, and input and output: a program still computes one value, and a returned string is printed as the struct, `String { bytes: [104, 105] }`. A string is not in a contract (`affirm s = "ab"` is not read).
+
 ### Lists In Native Code
 
 A `List<T>` is checked and validated as a list, and run by the interpreter (`tersus eval`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of a Box of an array and a count, written in Tersus (`lib/lists.tersus`), and a program is changed to use it after it is validated.
@@ -1492,7 +1508,7 @@ return a;                             // [[1], [2, 3], [1]]
 - An output contract cannot depend on which variant is returned, so "if `parse` returns `Parsed::Message`, its payload fits in the buffer" cannot be stated to a caller. The intended form is an implication in contracts, `affirm return is Parsed::Message => ...;`, proved for each way out of the function and assumed by a caller once it knows the variant.
 - No declarations separate from assignment.
 - `Array<T, N>` is a second sequence type beside `List<T>`: an array is held inline with its size in the type (or on the heap, in a Box), and `h = size;` is the function for lists, so `h` cannot be applied to an array. An array literal holds literals only (`#[1, 2]`); an array of variables is made with `array` and `set`. A list is what `push` makes, and in native code it is made of an array (see Lists In Native Code).
-- No strings or floats yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
+- Strings are a library struct of bytes (see Strings) with no input, output or text operations yet, and there are no floats (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
 - Arithmetic is linear (see Arithmetic): comparisons, sums and differences, multiples by a known constant and division by a known constant. A product of two unknowns, and a division by an unknown, are evaluated when their operands are known, but otherwise opaque. `x / c` is rounded down, so `x / c * c = x` is not known.
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.

@@ -1,0 +1,44 @@
+// The library of strings that a program has when it writes a string literal or mentions `String` and does not declare it itself (see
+// Pipeline.parseSource): it is parsed after lib/prelude.tersus and before the program.
+//
+// A String is a sequence of bytes, the UTF-8 encoding of the text, held as a list of Ints that are each between 0 and 255. The literal
+// "caf\u{e9}" is the String { bytes: [99, 97, 102, 195, 169] }, so `size` is the number of bytes and not of characters, `get(s, i)` is
+// the byte i, and nothing here looks at the bytes as characters. A String is a Sequence<Int> and Growable<Int> of its bytes, so it has
+// `size`, `get`, `set` and `push` with the contracts of the traits, and a function on a Sequence<Int> takes one.
+
+struct String {
+    bytes: List<Int>,
+};
+
+impl String {
+    // The text of a then the text of b
+    fn concat(self: Self, other: &String) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + size(other.bytes); }] {
+        bytes = self.bytes;
+        i = 0;
+        while i < size(other.bytes) [{ affirm i >= 0; affirm i <= size(other.bytes); affirm size(bytes) = size(self.bytes) + i; }] shrinks size(other.bytes) - i {
+            bytes = push(bytes, get(other.bytes, i));
+            i = i + 1;
+        };
+        return Self { bytes: bytes };
+    };
+};
+
+impl Sequence<Int> for String {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
+        return size(self.bytes);
+    };
+
+    fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm return = get(self.bytes, i); }] {
+        return get(self.bytes, i);
+    };
+
+    fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm size(return.bytes) = size(self.bytes); affirm get(return.bytes, i) = x; }] {
+        return Self { bytes: set(self.bytes, i, x) };
+    };
+};
+
+impl Growable<Int> for String {
+    fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + 1; affirm get(return.bytes, size(self.bytes)) = x; }] {
+        return Self { bytes: push(self.bytes, x) };
+    };
+};

@@ -3,6 +3,7 @@
 module PreludeSource
     ( preludeSource
     , listsSource
+    , stringSource
     ) where
 
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
@@ -22,5 +23,14 @@ listsSource =
     $( do
         addDependentFile "lib/lists.tersus"
         contents <- runIO (readFile "lib/lists.tersus")
+        lift contents
+     )
+
+-- The text of lib/string.tersus: the struct `String` that a string literal is a value of
+stringSource :: String
+stringSource =
+    $( do
+        addDependentFile "lib/string.tersus"
+        contents <- runIO (readFile "lib/string.tersus")
         lift contents
      )

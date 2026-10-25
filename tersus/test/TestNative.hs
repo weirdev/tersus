@@ -36,6 +36,7 @@ testNative =
         , TestList "examples" [testNativeProgram path | path <- nativeExamples]
         , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
+        , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestList "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
@@ -55,7 +56,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec"
+        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec", "strings"
         ]
     ]
 
@@ -222,6 +223,21 @@ functionPrograms =
     , ("a builtin on lists", "f = first; return f([7, 2, 3]);")
     , ("chosen by a branch", "fn inc(n: Int) -> Int { return n + 1; }; fn dec(n: Int) -> Int { return n - 1; }; f = inc; if 2 > 1 { f = dec; }; return f(10);")
     , ("a recursive function through a value", "fn count(n: Int) -> Int shrinks n { if n <= 0 { return 0; }; return 1 + count(n - 1); }; f = count; return f(5);")
+    ]
+
+-- Strings are the library struct String over a list of bytes (lib/string.tersus), so native code has nothing of its own for them
+stringPrograms :: [(String, String)]
+stringPrograms =
+    [ ("literal", "return \"hi\";")
+    , ("empty", "return \"\";")
+    , ("utf-8", "return \"caf\\u{e9}\\u{1f600}\";")
+    , ("concat", "s = \"ab\"; t = s.concat(\"cd\"); return t;")
+    , ("a string that is borrowed twice", "t = \"x\"; s = \"a\".concat(t).concat(t); return size(s) * 10 + size(t);")
+    , ("push and set", "s = \"ab\".push(99); return set(s, 0, 65);")
+    , ("equal", "return \"ab\" = \"a\".push(98);")
+    , ("not equal", "return \"ab\" = \"ac\";")
+    , ("in a struct and a list", "struct Named { name: String, n: Int }; xs = push(push([], Named { name: \"a\", n: 1 }), Named { name: \"bc\", n: 2 }); return xs;")
+    , ("in an enum", "enum E { S { s: String }, N }; fn f(e: E) -> Int [{ }] [{ }] { return match e { E::S { s: s } => size(s), E::N => 0 }; }; return f(E::S { s: \"abc\" });")
     ]
 
 listPrograms :: [(String, String)]

@@ -25,7 +25,7 @@ import Data.List (intercalate, isInfixOf, nub, (\\))
 import Data.Maybe (isJust)
 
 import StdLib
-import Utils (inIntRange)
+import Utils (inIntRange, utf8Bytes)
 import TersusTypes
 
 -- The parser remembers the structs and enums declared so far. A literal needs the fields of a constructor
@@ -981,10 +981,31 @@ nonInfixExpression :: Parser Expression
 nonInfixExpression =
     withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression <|> qualifiedCall)
         <|> arrayLiteral (\items -> F (Val (builtinFunct ArrayFrom)) [Val items])
+        <|> withFields expressionApply methods stringLiteral
         <|> (Val <$> value)
         <|> withFields expressionApply methods (varExpression <|> parensExpression)
   where
     methods = Just (expression, methodCall)
+
+-- "text": a String (lib/string.tersus) of the UTF-8 bytes of the text. `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` are the characters they name.
+stringLiteral :: Parser Expression
+stringLiteral = do
+    void (char '"')
+    chars <- many (stringChar <?> "a character of the string")
+    void (char '"' <?> "the end of the string")
+    whitespace
+    ctors <- declCtors <$> getState
+    when (Map.lookup "String" ctors /= Just ["bytes"]) $ fail "a string literal needs the library String, which this program declares differently"
+    return (expressionApply (builtinFunct (Ctor "String" ["bytes"])) [Val (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))])
+  where
+    stringChar = noneOf "\"\\\n" <|> (char '\\' >> escape)
+    escape =
+        (oneOf "nrt0\"\\" >>= \c -> return (case c of 'n' -> '\n'; 'r' -> '\r'; 't' -> '\t'; '0' -> '\0'; _ -> c))
+            <|> (char 'u' >> between (char '{') (char '}') (many1 hexDigit) >>= unicode)
+    unicode digits = do
+        let n = read ("0x" ++ digits) :: Integer
+        when (length digits > 6 || n > 0x10FFFF || (n >= 0xD800 && n < 0xE000)) $ fail "a \\u escape of a character that does not exist"
+        return (toEnum (fromInteger n))
 
 bracketsParse :: Parser o -> Parser c -> Parser a -> Parser a
 bracketsParse open close innerParser = do

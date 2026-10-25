@@ -215,7 +215,7 @@ Phases 1 to 3 are independent of 4 and could be reordered with it. Phase 5 needs
 - Mutation, references and aliasing. Everything is a value, and arena-style indexes replace pointers.
 - Termination checking, though recursive types prepare the ground for it.
 - Subtyping, and traits as types. (Traits that name the functions of a type, and impls that define them, are done: LANGUAGE.md, Traits And Impls. A function over "any type that implements a trait" needs generics, which stay out of scope.)
-- Strings, floats and user-defined generics.
+- Floats, and text operations on strings. (A string is the library struct `String` of UTF-8 bytes: LANGUAGE.md, Strings.)
 
 ## Sizes and Box
 

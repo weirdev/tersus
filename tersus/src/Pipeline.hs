@@ -18,7 +18,7 @@ import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, parseStatementBlock, parseStatementBlockWith)
 import MirLists (lowerLists)
-import PreludeSource (listsSource, preludeSource)
+import PreludeSource (listsSource, preludeSource, stringSource)
 import TersusTypes (Expression (..), Statement (..), Value (..))
 import TypeCheck (elaborate)
 import Utils
@@ -37,16 +37,20 @@ parseSource source = parseSourceWith True source
 
 -- (the library of lists is the one program that may use the names that a program may not)
 parseSourceWith :: Bool -> String -> Result [Statement] String
-parseSourceWith reserving source
-    | usesPrelude source = case parseStatementBlockWith emptyDecls preludeSource of
-        Left err -> Error ("Parse error in the prelude: " ++ show err)
+parseSourceWith reserving source = case libraries source of
+    [] -> case parseStatementBlock source of
+        Left err -> Error ("Parse error: " ++ show err)
+        Right stmts -> checked stmts
+    texts -> case readLibraries texts emptyDecls of
+        Left err -> Error err
         Right (library, declared) -> case parseStatementBlockWith declared source of
             Left err -> Error ("Parse error: " ++ show err)
             Right (stmts, _) -> checked stmts `bindResult` \stmts' -> Ok (library ++ stmts')
-    | otherwise = case parseStatementBlock source of
-        Left err -> Error ("Parse error: " ++ show err)
-        Right stmts -> checked stmts
   where
+    readLibraries [] declared = Right ([], declared)
+    readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
+        Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
+        Right (stmts, declared') -> fmap (\(rest, final) -> (stmts ++ rest, final)) (readLibraries more declared')
     checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
 
 -- A name the program declares that native code uses for lists (see MirLists)
@@ -64,19 +68,29 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         _ -> []
     reserved name = name == "StdList" || take 7 name == "stdList"
 
--- Every program has the library of lib/prelude.tersus (the traits `Sequence` and `Growable`) in front of it if it mentions either name and does not
--- declare them itself, so a program that has a `Vec` of its own is unchanged
-usesPrelude :: String -> Bool
-usesPrelude source = any (`elem` ws) ["Sequence", "Growable"] && not (any declared ws')
+-- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
+-- unchanged: lib/prelude.tersus (the traits `Sequence` and `Growable`) if it mentions either, and lib/string.tersus (the struct `String` that a string
+-- literal is a value of, which needs the traits) if it mentions `String` or has a literal
+libraries :: String -> [(String, String)]
+libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings]
   where
-    ws = words' source
+    ws = names source
     ws' = zip ws (drop 1 ws)
-    declared (keyword, name) = keyword `elem` ["struct", "enum", "trait"] && name `elem` ["Sequence", "Growable"]
+    declares candidates = any (\(keyword, name) -> keyword `elem` ["struct", "enum", "trait"] && name `elem` candidates) ws'
+    preludeFree = not (declares ["Sequence", "Growable"])
+    strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || hasLiteral source)
+    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable"])
     -- (the names in a text: runs of letters, digits and underscores)
-    words' text = case dropWhile (not . isNameChar) text of
+    names text = case dropWhile (not . isNameChar) text of
         "" -> []
-        rest -> let (w, more) = span isNameChar rest in w : words' more
+        rest -> let (w, more) = span isNameChar rest in w : names more
     isNameChar c = isAlphaNum c || c == '_'
+    -- (a quote outside a comment)
+    hasLiteral text = case text of
+        '/' : '/' : more -> hasLiteral (dropWhile (/= '\n') more)
+        '"' : _ -> True
+        _ : more -> hasLiteral more
+        [] -> False
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
