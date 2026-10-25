@@ -209,6 +209,8 @@ builtinFunct ToByte =
         (BuiltinFunct ToByte)
         [relProof Eq (ATerm "return") (ATerm "x")]
 builtinFunct FromByte = VFunct ["b"] [] [] (BuiltinFunct FromByte) [relProof Eq (ATerm "return") (ATerm "b")]
+-- The List<Byte> of a list of Ints that is written out: the same list
+builtinFunct BytesFrom = VFunct ["list"] [] [] (BuiltinFunct BytesFrom) []
 -- readByte() is the next byte of the standard input, or -1 at its end: it is not known beyond that, so a program has to test what it relies on
 builtinFunct ReadByte =
     VFunct
@@ -330,6 +332,12 @@ evalBuiltinFunct ToByte [VInt x]
 evalBuiltinFunct ToByte _ = Error "toByte takes one Int"
 evalBuiltinFunct FromByte [VInt b] = Ok (VInt b)
 evalBuiltinFunct FromByte _ = Error "toInt takes one Byte"
+evalBuiltinFunct BytesFrom [VList l]
+    | all isByte l = Ok (VList l)
+  where
+    isByte (VInt x) = x >= 0 && x < 256
+    isByte _ = False
+evalBuiltinFunct BytesFrom _ = Error "A list of bytes is written with numbers from 0 to 255"
 -- (not a value that can be worked out: what it gives is the input, which a proof does not have, so the proof engine may not fold a call to a constant)
 evalBuiltinFunct ReadByte _ = Error "readByte reads the input, so it has no value to evaluate"
 evalBuiltinFunct Unsize [value] = Ok value

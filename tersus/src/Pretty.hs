@@ -28,6 +28,8 @@ renderProof name = go 0
         | Just (op, level) <- infixOp b =
             let text = go (max level 1) l ++ " " ++ op ++ " " ++ go (if level == 0 then 1 else level + 1) r
              in if prec > level then "(" ++ text ++ ")" else text
+    -- (the bytes of a string written out are written as the list)
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct BytesFrom) _)) [bytes]) = go 0 bytes
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [struct]) = go 3 struct ++ "." ++ field
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Project _ field)) _)) [struct]) = go 3 struct ++ "." ++ field
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Cast variant)) _)) [value]) = "(" ++ go 1 value ++ " as " ++ variant ++ ")"
@@ -86,6 +88,7 @@ builtinName WriteByte = "writeByte"
 builtinName ReadByte = "readByte"
 builtinName ToByte = "toByte"
 builtinName FromByte = "toInt"
+builtinName BytesFrom = "bytes"
 builtinName NewBox = "Box::new"
 builtinName UnBox = "Box::unbox"
 builtinName Plus = "+"

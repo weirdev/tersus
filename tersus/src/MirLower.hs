@@ -573,6 +573,10 @@ builtinRvalue b tys ops =
         (ReadByte, []) -> return (M.ListOp M.ReadByte [])
         (ToByte, [_]) -> return (M.ListOp M.ToByte ops)
         (FromByte, [_]) -> return (M.ListOp M.FromByte ops)
+        -- (the list of the literal, as a list of Bytes: the numbers are the same)
+        (BytesFrom, [M.Const (M.CList items)])
+            | all (\i -> case i of M.CInt n -> n >= 0 && n < 256; _ -> False) items -> return (M.Use (M.Const (M.CList items)))
+        (BytesFrom, _) -> failL "A list of bytes is written with numbers from 0 to 255"
         (Unsize, [o]) -> return (M.Unsize o)
         (UnBox, [o]) -> return (M.Unbox o)
         (Is variant, [o]) -> return (M.IsVariant o variant)
@@ -663,6 +667,7 @@ builtinLabel b = case b of
     ReadByte -> "readByte"
     ToByte -> "toByte"
     FromByte -> "toInt"
+    BytesFrom -> "bytes_from"
     ArrayFrom -> "array_from"
     Plus -> "add"
     Minus -> "sub"

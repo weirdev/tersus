@@ -540,6 +540,7 @@ builtinType funct =
         ReadByte -> return (TFn [] TInt)
         ToByte -> return (TFn [TInt] TByte)
         FromByte -> return (TFn [TByte] TInt)
+        BytesFrom -> return (TFn [TList TInt] (TList TByte))
         Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
         Plus -> arith
         Minus -> arith

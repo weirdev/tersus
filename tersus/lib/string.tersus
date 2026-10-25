@@ -1,13 +1,13 @@
 // The library of strings that a program has when it writes a string literal or mentions `String` and does not declare it itself (see
 // Pipeline.parseSource): it is parsed after lib/prelude.tersus and before the program.
 //
-// A String is a sequence of bytes, the UTF-8 encoding of the text, held as a list of Ints that are each between 0 and 255. The literal
+// A String is a sequence of bytes, the UTF-8 encoding of the text, held as a list of Bytes (so each is known to be between 0 and 255). The literal
 // "caf\u{e9}" is the String { bytes: [99, 97, 102, 195, 169] }, so `size` is the number of bytes and not of characters, `get(s, i)` is
-// the byte i, and nothing here looks at the bytes as characters. A String is a Sequence<Int> and Growable<Int> of its bytes, so it has
-// `size`, `get`, `set` and `push` with the contracts of the traits, and a function on a Sequence<Int> takes one.
+// the Byte i, and nothing here looks at the bytes as characters. A String is a Sequence<Byte> and Growable<Byte> of its bytes, so it has
+// `size`, `get`, `set` and `push` with the contracts of the traits, and a function on a Sequence<Byte> takes one.
 
 struct String {
-    bytes: List<Int>,
+    bytes: List<Byte>,
 };
 
 impl String {
@@ -42,7 +42,7 @@ impl String {
             if c < 0 {
                 i = limit;
             } else {
-                bytes = push(bytes, c);
+                bytes = push(bytes, toByte(c));
                 i = i + 1;
             };
         };
@@ -62,7 +62,7 @@ impl String {
                 if c = 10 {
                     i = limit;
                 } else {
-                    bytes = push(bytes, c);
+                    bytes = push(bytes, toByte(c));
                     i = i + 1;
                 };
             };
@@ -74,29 +74,29 @@ impl String {
     fn print(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         i = 0;
         while i < size(self.bytes) [{ affirm i >= 0; affirm i <= size(self.bytes); }] shrinks size(self.bytes) - i {
-            writeByte(get(self.bytes, i));
+            writeByte(toInt(get(self.bytes, i)));
             i = i + 1;
         };
         return i;
     };
 };
 
-impl Sequence<Int> for String {
+impl Sequence<Byte> for String {
     fn size(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         return size(self.bytes);
     };
 
-    fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm return = get(self.bytes, i); }] {
+    fn get(self: &Self, i: Int) -> Byte [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm return = get(self.bytes, i); }] {
         return get(self.bytes, i);
     };
 
-    fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm size(return.bytes) = size(self.bytes); affirm get(return.bytes, i) = x; }] {
+    fn set(self: Self, i: Int, x: Byte) -> Self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm size(return.bytes) = size(self.bytes); affirm get(return.bytes, i) = x; }] {
         return Self { bytes: set(self.bytes, i, x) };
     };
 };
 
-impl Growable<Int> for String {
-    fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + 1; affirm get(return.bytes, size(self.bytes)) = x; affirm forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j); }] {
+impl Growable<Byte> for String {
+    fn push(self: Self, x: Byte) -> Self [{ }] [{ affirm size(return.bytes) = size(self.bytes) + 1; affirm get(return.bytes, size(self.bytes)) = x; affirm forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j); }] {
         return Self { bytes: push(self.bytes, x) };
     };
 };
