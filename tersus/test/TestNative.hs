@@ -53,7 +53,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "safe_access", "sized_structs", "structs", "termination", "traits", "types", "update_list"
+        , "safe_access", "sized_structs", "structs", "termination", "traits", "type_parameters", "types", "update_list"
         ]
     ]
 
@@ -367,6 +367,15 @@ arrayPrograms =
     , ("Array::boxed of lists is copied", "b = Array::boxed(2, push([], 1)); c = b; c = set(c, 0, []); return b;")
     , ("Array::boxed of structs", "struct P { xs: List<Int> }; a = Array::boxed(2, P { xs: push([], 1) }); return get(a, 1).xs;")
     , ("a size parameter and an array of lists", "fn count<n>(a: Array<List<Int>, n>) -> Int { return n; }; return count(array(3, [])) + count(array(2, push([], 1)));")
+    , ("a type parameter", "fn lead<T>(a: &List<T>) -> T [{ define s = size(a); rewrite eqToGtZero s; affirm s > 0; }] [{ }] { return get(a, 0); }; return lead(push([], 7)) + 1;")
+    , ("a type parameter, once for each type", "fn lead<T>(a: &List<T>) -> T [{ define s = size(a); rewrite eqToGtZero s; affirm s > 0; }] [{ }] { return get(a, 0); }; return lead(push([], 7)) + size(lead(push([], push([], 1)))) + size(lead(push([], push(push([], 2), 3))));")
+    , ("a type parameter of a Bool and of a list", "fn id<T>(a: T) -> T { return a; }; l = id(push([], 3)); return id(l) = id(push([], 3)) ;")
+    , ("a type parameter owned and lent", "fn twice<T>(a: &T) -> Array<T, 2> { return array(2, a); }; fn wrap<T>(a: T) -> Box<T> { return Box::new(a); }; return twice(wrap(push([], 5)));")
+    , ("two type parameters", "fn pick<A, B>(a: A, b: B) -> B { return b; }; return pick(1, push([], 3));")
+    , ("a function passes on its type", "fn count<T>(a: &List<T>) -> Int { return size(a); }; fn twice<T>(a: &List<T>) -> Int { return count(a) + count(a); }; return twice(push([], 1)) + twice(push([], true)) + twice([[1]]);")
+    , ("a type parameter makes a list of structs", "struct P { xs: List<Int> }; fn mk<T>(x: T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ }] { out = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { out = push(out, x); i = i + 1; }; return out; }; return mk(P { xs: push([], 4) }, 3);")
+    , ("a type and a size together", "fn fill<T, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] { return set(a, 0, x); }; l = fill(array(3, push([], 1)), push(push([], 7), 8)); b = fill(#[true, true], false); return l;")
+    , ("a type that nothing decides", "fn nil<T>() -> List<T> { return []; }; return size(nil());")
     , ("a size parameter", "fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int { total = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { total = total + get(a, i) * get(b, i); i = i + 1; }; return total; }; return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);")
     , ("a size parameter, once for each size", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) * 100 + count(array(4, 0)) * 10 + count(#[]);")
     , ("a size parameter makes an array", "fn ones<n>(a: Array<Int, n>) -> Array<Int, n> { return array(n, 1); }; return ones(#[7, 8, 9]);")

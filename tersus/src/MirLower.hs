@@ -69,6 +69,7 @@ data Builder = Builder
     { bName :: Name
     , bIsMain :: Bool
     , bSizes :: [Variable] -- the size parameters of the function
+    , bTypeParams :: [Variable] -- its type parameters
     , bBorrowed :: [M.Local] -- the parameters it borrows
     , bReturns :: Maybe Type
     , bParams :: [M.Local]
@@ -116,6 +117,7 @@ newBuilder name isMain returns =
         { bName = name
         , bIsMain = isMain
         , bSizes = []
+        , bTypeParams = []
         , bBorrowed = []
         , bReturns = returns
         , bParams = []
@@ -255,6 +257,7 @@ buildFunction requires ensures term env b =
         , M.fnReturns = bReturns b
         , M.fnLocals = bLocals b
         , M.fnSizeParams = bSizes b
+        , M.fnTypeParams = bTypeParams b
         , M.fnBorrowed = bBorrowed b
         , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
         , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env
@@ -401,10 +404,10 @@ lowerWhile cond invariant term body = do
 -- parameters and the functions at the top, so there is nothing to capture). One defined at the top of the program is
 -- found by name from the bodies of the functions after it, and from itself; any other is a name in its scope.
 defineFunction :: Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Signature -> Maybe Termination -> [Statement] -> L ()
-defineFunction var params ins outs (Signature ptys rty sizes) term body = do
+defineFunction var params ins outs (Signature ptys rty sizes types) term body = do
     enclosing <- builder
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
-        fnTy = functionType sizes ptys rty
+        fnTy = functionType sizes types ptys rty
     name <- uniqueName (if atTop then var else bName enclosing ++ "::" ++ var)
     -- (a function with sizes is called by name, which its sizes are given to: it has no value to put in a local)
     assigned <- (\s -> Set.member var (lsAssigned s) && null sizes) <$> getS
@@ -417,10 +420,10 @@ defineFunction var params ins outs (Signature ptys rty sizes) term body = do
             bindName var (BLocal l fnTy)
             emit (M.Assign l (M.Use (M.Const (M.CFn name))))
         else unless atTop (bindName var (BFn name fnTy))
-    tc (withSizes sizes (mapM_ checkType (rty : map unrefType ptys)))
+    tc (withGenerics sizes types (mapM_ checkType (rty : map unrefType ptys)))
     outer <- builder
     -- the body is lowered as a function of its own, then the outer one goes on
-    modifyB (const (newBuilder name False (Just rty)){bSizes = sizes})
+    modifyB (const (newBuilder name False (Just rty)){bSizes = sizes, bTypeParams = types})
     -- (a borrowed parameter is a local of its type, which the function only reads)
     paramLocals <- mapM (\(p, ty) -> (\l -> (p, l, unrefType ty)) <$> newLocal (Just p) (unrefType ty)) (zip params ptys)
     modifyB (\b -> b{bBorrowed = [l | ((_, l, _), TRef _) <- zip paramLocals ptys]})

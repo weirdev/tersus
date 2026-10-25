@@ -47,7 +47,9 @@ data BuiltinFunct
 data Type = TInt | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
     | -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`): the type of the function for any values of the sizes. A call
       -- gives each its value, so a use of one that is not a call has no type.
-      TForall [Variable] Type
+      TForall [Variable] [Variable] Type
+    | -- A type parameter of a function (`T` in `fn first<T>(a: &List<T>) -> T`): a type that the function knows nothing of, which a call gives
+      TParam Name
     | -- A parameter that the function only reads, so a call does not give it a copy (`fn sum(a: &List<Int>)`). Only a parameter has one:
       -- in the function it is its type, a value it cannot assign, and a call gives it the value as it is.
       TRef Type
@@ -91,7 +93,11 @@ instanceOf name =
 
 -- The type with each size parameter of the list replaced by the size (also in the name of an instance of a struct with sizes)
 substSizes :: [(Variable, Size)] -> Type -> Type
-substSizes sizes = go
+substSizes sizes = substitute sizes []
+
+-- The type with each size parameter and each type parameter of the lists replaced by what a call gave
+substitute :: [(Variable, Size)] -> [(Variable, Type)] -> Type -> Type
+substitute sizes types = go
   where
     go ty = case ty of
         TList t -> TList (go t)
@@ -99,7 +105,8 @@ substSizes sizes = go
         TBox t -> TBox (go t)
         TRef t -> TRef (go t)
         TFn args ret -> TFn (map go args) (go ret)
-        TForall names t -> TForall names (substSizes [(n, s) | (n, s) <- sizes, n `notElem` names] t)
+        TParam name | Just t <- lookup name types -> t
+        TForall ss ts t -> TForall ss ts (substitute [(n, s) | (n, s) <- sizes, n `notElem` ss] [(n, u) | (n, u) <- types, n `notElem` ts] t)
         TNamed name | Just (base, args) <- instanceOf name -> TNamed (instanceName base (map sized args))
         _ -> ty
     sized (SizeParam n) | Just size <- lookup n sizes = size
@@ -109,9 +116,9 @@ substSizes sizes = go
 pattern TArray :: Type -> Integer -> Type
 pattern TArray t n = TArrayOf t (SizeConst n)
 
--- The declared parameter types and return type of a user function, and its size parameters, which are the last parameters (of type Int),
--- given by the call and not written in it
-data Signature = Signature [Type] Type [Variable] deriving (Show, Eq, Ord)
+-- The declared parameter types and return type of a user function, its size parameters, which are the last parameters (of type Int),
+-- given by the call and not written in it, and its type parameters, which a call gives too
+data Signature = Signature [Type] Type [Variable] [Variable] deriving (Show, Eq, Ord)
 
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.

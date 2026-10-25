@@ -14,6 +14,7 @@ module TypeCheck
     , arraySlots
     , maxArraySlots
     , withSizes
+    , withGenerics
     , plainElement
     , arrayElement
     , checkBuiltinCall
@@ -75,6 +76,7 @@ data TcState = TcState
     , tcSizeScope :: [Variable] -- the size parameters of the function being checked
     , tcGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields, with the sizes in them
     , tcReadOnly :: [Variable] -- the parameters of the function being checked that it borrows
+    , tcTypeScope :: [Variable] -- the type parameters of the function being checked
     }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
@@ -83,7 +85,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty []
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] []
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -153,7 +155,7 @@ zonk t@(TVar n) = do
         Nothing -> return t
 zonk (TList t) = TList <$> zonk t
 zonk (TArrayOf t size) = TArrayOf <$> zonk t <*> zonkSize size
-zonk (TForall names t) = TForall names <$> zonk t
+zonk (TForall sizes types t) = TForall sizes types <$> zonk t
 -- (the sizes of an instance of a struct with sizes are in its name)
 zonk (TNamed name) | Just (base, sizes) <- instanceOf name = (\sizes' -> TNamed (instanceName base sizes')) <$> mapM zonkSize sizes
 zonk (TBox t) = TBox <$> zonk t
@@ -170,7 +172,7 @@ occurs :: Int -> Type -> Bool
 occurs n (TVar m) = n == m
 occurs n (TList t) = occurs n t
 occurs n (TArrayOf t _) = occurs n t
-occurs n (TForall _ t) = occurs n t
+occurs n (TForall _ _ t) = occurs n t
 occurs n (TBox t) = occurs n t
 occurs n (TRef t) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
@@ -201,6 +203,7 @@ unify a b = do
         (TArrayOf x n, TArrayOf y m) -> unifySize n m >>= \same -> if same then unify x y else return False
         (TBox x, TBox y) -> unify x y
         (TRef x, TRef y) -> unify x y
+        (TParam x, TParam y) -> return (x == y)
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
         _ -> return False
@@ -436,7 +439,10 @@ checkType (TBox t@(TArrayOf e SizeAny)) = checkType e >> arrayOk t
 checkType (TBox t) = checkType t
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
 checkType ty@(TArrayOf t size) = checkType t >> sizeInScope size >> arrayOk ty
-checkType (TForall _ t) = checkType t
+checkType (TForall _ _ t) = checkType t
+checkType (TParam name) = do
+    s <- getState
+    unless (name `elem` tcTypeScope s) $ failTc ("Type error: " ++ name ++ " is not a type here: a function declares a type parameter, as in fn f<" ++ name ++ ">(a: " ++ name ++ ")")
 checkType (TFn args ret) = mapM_ checkType (ret : map unref args)
 checkType (TRef _) = failTc "Type error: & is for the parameter of a function, as in fn f(a: &List<Int>), and a type is not a reference anywhere else"
 checkType _ = return ()
@@ -694,23 +700,27 @@ valueType (VList elements) = do
     mapM_ (expect "list element" element) types
     return (TList element)
 valueType (VFunct _ _ _ (BuiltinFunct funct) _) = builtinType funct
-valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes) _ _) _) = return (functionType sizes ptys rty)
+valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types) _ _) _) = return (functionType sizes types ptys rty)
 valueType (VFnRef name) = failTc ("Type error: " ++ name ++ " is a function of the MIR, which a program cannot write")
 
 -- Checks with the sizes that a function declares in scope
 withSizes :: [Variable] -> TC a -> TC a
-withSizes sizes action = do
+withSizes sizes = withGenerics sizes []
+
+-- Checks with the sizes and the types that a function declares in scope
+withGenerics :: [Variable] -> [Variable] -> TC a -> TC a
+withGenerics sizes types action = do
     outer <- getState
-    putState outer{tcSizeScope = sizes}
+    putState outer{tcSizeScope = sizes, tcTypeScope = types}
     a <- action
     after <- getState
-    putState after{tcSizeScope = tcSizeScope outer}
+    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer}
     return a
 
 -- The type of a function: one with size parameters is for any values of them
-functionType :: [Variable] -> [Type] -> Type -> Type
-functionType [] ptys rty = TFn ptys rty
-functionType sizes ptys rty = TForall sizes (TFn ptys rty)
+functionType :: [Variable] -> [Variable] -> [Type] -> Type -> Type
+functionType [] [] ptys rty = TFn ptys rty
+functionType sizes types ptys rty = TForall sizes types (TFn ptys rty)
 
 -- Programs
 
@@ -747,12 +757,12 @@ checkItem top ctx env stmt =
 checkStatement :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, Statement)
 checkStatement top ctx env stmt =
     case stmt of
-        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes) term body) proofs)) -> do
-            let fnTy = functionType sizes ptys rty
+        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types) term body) proofs)) -> do
+            let fnTy = functionType sizes types ptys rty
                 ctx' = if top then ctx{ctxFns = Map.insert var fnTy (ctxFns ctx)} else ctx
             env' <- assignVar ctx env var fnTy
-            (term', ins', outs', body') <- checkFunction ctx' var params ptys rty sizes ins outs term body
-            return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty sizes) term' body') proofs)))
+            (term', ins', outs', body') <- checkFunction ctx' var params ptys rty sizes types ins outs term body
+            return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty sizes types) term' body') proofs)))
         Assign var expr -> do
             notSize var
             inferred <- inferExprR ctx env expr
@@ -819,11 +829,11 @@ checkStatement top ctx env stmt =
             return (ctx, env, While cond' invariant' term' body')
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
-checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement])
-checkFunction ctx name params ptys rty sizes ins outs term body = do
+checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement])
+checkFunction ctx name params ptys rty sizes types ins outs term body = do
     outer <- getState
-    -- the sizes the function declares are the names its types may use, and are the last parameters (Ints)
-    putState outer{tcSizeScope = sizes}
+    -- the sizes and types the function declares are the names its types may use, and the sizes are the last parameters (Ints)
+    putState outer{tcSizeScope = sizes, tcTypeScope = types}
     when (length sizes /= length (nub' sizes) || any (`elem` take (length params - length sizes) params) sizes) $
         failTc ("Type error: function " ++ name ++ " names a size twice, or the same as a parameter")
     mapM_ checkType (rty : map unref ptys)
@@ -841,7 +851,7 @@ checkFunction ctx name params ptys rty sizes ins outs term body = do
     (_, body') <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     -- (the sizes of the function end with it)
     after <- getState
-    putState after{tcSizeScope = tcSizeScope outer, tcReadOnly = tcReadOnly outer}
+    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer}
     return (term', ins', outs', body')
   where
     nub' = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -908,7 +918,7 @@ inferExprR ctx env expr =
             t <- lookupVar ctx env var
             t' <- zonk t
             case t' of
-                TForall names _ -> failTc ("Type error: " ++ var ++ " has size parameters <" ++ intercalate ", " names ++ ">, so it is called, as in " ++ var ++ "(...), and cannot be used as a value")
+                TForall sizes types _ -> failTc ("Type error: " ++ var ++ " has parameters <" ++ intercalate ", " (types ++ sizes) ++ ">, so it is called, as in " ++ var ++ "(...), and cannot be used as a value")
                 _ -> return (t, expr)
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
             (structTy, struct') <- inferExprR ctx env struct
@@ -992,9 +1002,9 @@ inferExprR ctx env expr =
             _ -> inferExprR ctx env funct
         ftz <- zonk ft
         case ftz of
-            TForall names inner -> do
+            TForall sizes types inner -> do
                 inferredG <- mapM (inferExprR ctx env) args
-                (result, args') <- genericCall (describe funct) names inner inferredG
+                (result, args') <- genericCall (describe funct) sizes types inner inferredG
                 return (result, F funct' args')
             _ -> ordinary funct funct' ft args
     ordinary funct funct' ft args = do
@@ -1062,7 +1072,7 @@ ownerThroughTrait trait functions function ats =
     case [f | f <- functions, traitFnName f == function] of
         [] -> failTc ("Type error: trait " ++ trait ++ " has no function " ++ function)
         f : _ -> do
-            let Signature ptys _ _ = traitFnSignature f
+            let Signature ptys _ _ _ = traitFnSignature f
                 path = trait ++ "::" ++ function
             when (length ptys /= length ats) $
                 failTc ("Type error: " ++ path ++ " takes " ++ show (length ptys) ++ " arguments, got " ++ show (length ats))
@@ -1084,7 +1094,7 @@ checkTrait name functions = do
     when (Map.member name (tcTraits s) || Map.member name (tcTypes s)) $ failTc ("Type error: " ++ name ++ " is already defined")
     putState s{tcTypes = Map.insert "Self" [] (tcTypes s)}
     forM_ functions $ \f -> do
-        let Signature ptys rty _ = traitFnSignature f
+        let Signature ptys rty _ _ = traitFnSignature f
             ctx = Ctx Map.empty (Just rty)
             paramEnv = [Map.fromList (zip (traitFnParams f) (map unref ptys))]
         mapM_ checkType (rty : map unref ptys)
@@ -1132,7 +1142,7 @@ checkImpl ctx env trait typeName functions = do
         Nothing -> return (ctx', env', checked)
         Just traitName -> do
             let here = "impl " ++ traitName ++ " for " ++ typeName
-                defined = [(implFunctionPart name, (Signature ptys rty sizes, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes) term _) _)) <- checked]
+                defined = [(implFunctionPart name, (Signature ptys rty sizes types, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types) term _) _)) <- checked]
                 wanted = map traitFnName required
             case map fst defined \\ wanted of
                 extra : _ -> failTc ("Type error: " ++ here ++ " has a function " ++ extra ++ ", which " ++ traitName ++ " does not declare")
@@ -1141,8 +1151,8 @@ checkImpl ctx env trait typeName functions = do
                 missing : _ -> failTc ("Type error: " ++ here ++ " lacks the function " ++ missing)
                 [] -> return ()
             wrappers <- forM required $ \f -> do
-                let Signature ptys rty _ = traitFnSignature f
-                    expected = Signature (map (substSelf typeName) ptys) (substSelf typeName rty) []
+                let Signature ptys rty _ _ = traitFnSignature f
+                    expected = Signature (map (substSelf typeName) ptys) (substSelf typeName rty) [] []
                 case lookup (traitFnName f) defined of
                     Just (actual, term) -> do
                         when (actual /= expected) $
@@ -1157,8 +1167,9 @@ checkImpl ctx env trait typeName functions = do
     definitions _ state [] = return state
     definitions own (c, e, done) (stmt : rest) = do
         case stmt of
-            Assign name (Val (VFunct _ _ _ (NativeFunct (Signature _ _ (_ : _)) _ _) _)) ->
-                failTc ("Type error: " ++ name ++ " has size parameters, which a function of an impl cannot have yet")
+            Assign name (Val (VFunct _ _ _ (NativeFunct (Signature _ _ sizes types) _ _) _))
+                | not (null sizes && null types) ->
+                    failTc ("Type error: " ++ name ++ " has size or type parameters, which a function of an impl cannot have yet")
             _ -> return ()
         case stmt of
             Assign name _ | own -> do
@@ -1167,7 +1178,7 @@ checkImpl ctx env trait typeName functions = do
             _ -> return ()
         (c', e', stmt') <- checkStatement True c e stmt
         definitions own (c', e', done ++ [stmt']) rest
-    renderSignature (Signature ptys rty _) = renderType (TFn ptys rty)
+    renderSignature (Signature ptys rty _ _) = renderType (TFn ptys rty)
     wrapper traitName owner f signature term =
         Assign
             (implCheckName traitName owner (traitFnName f))
@@ -1239,18 +1250,28 @@ proofHead :: VariableProof -> Expression
 proofHead (CTerm value) = Val value
 proofHead _ = Var ""
 
--- A function with size parameters for sizes that are not known yet: each is a new unknown, which the arguments decide
-instantiateSizes :: [Variable] -> Type -> TC (Type, [Size])
-instantiateSizes names ty = do
-    sizes <- mapM (const freshSize) names
-    return (substSizes (zip names sizes) ty, sizes)
+-- A function with size and type parameters for sizes and types that are not known yet: each is a new unknown, which the arguments decide
+instantiateGenerics :: [Variable] -> [Variable] -> Type -> TC (Type, [Size], [Type])
+instantiateGenerics sizeNames typeNames ty = do
+    sizes <- mapM (const freshSize) sizeNames
+    types <- mapM (const freshVar) typeNames
+    return (substitute (zip sizeNames sizes) (zip typeNames types) ty, sizes, types)
+
+hasFunction :: Type -> Bool
+hasFunction ty = case ty of
+    TFn{} -> True
+    TList t -> hasFunction t
+    TBox t -> hasFunction t
+    TArrayOf t _ -> hasFunction t
+    TRef t -> hasFunction t
+    _ -> False
 
 -- A call of a function with size parameters, from the types of the arguments that are written: the type of the result, and the
 -- sizes the call gives, which the arguments decide and which come to be the last arguments of the call (a constant, or a size
 -- parameter of the function that calls)
-genericCall :: String -> [Variable] -> Type -> [(Type, Expression)] -> TC (Type, [Expression])
-genericCall name names inner inferred = do
-    (instantiated, sizes) <- instantiateSizes names inner
+genericCall :: String -> [Variable] -> [Variable] -> Type -> [(Type, Expression)] -> TC (Type, [Expression])
+genericCall name names types inner inferred = do
+    (instantiated, sizes, given') <- instantiateGenerics names types inner
     case instantiated of
         TFn pts rty
             | length pts - length names /= length inferred ->
@@ -1258,6 +1279,10 @@ genericCall name names inner inferred = do
             | otherwise -> do
                 args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at >> return arg') (zip3 [1 ..] pts inferred)
                 given <- mapM (\(n, size) -> zonkSize size >>= sizeArgument n) (zip names sizes)
+                -- (a type parameter is a type of value: not a function, which native code has no copy of the function for)
+                forM_ (zip types given') $ \(n, t) -> do
+                    t' <- zonk t
+                    when (hasFunction t') $ failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " would be " ++ renderType t' ++ ", and a type parameter is not a function")
                 result <- zonk rty
                 return (result, args ++ given)
         _ -> failTc ("Type error: " ++ name ++ " is not a function")
@@ -1273,8 +1298,8 @@ checkCall name ft ats = do
     ft' <- zonk ft
     case ft' of
         -- (the arguments here include the sizes, as a function of the MIR is given them: see genericCall)
-        TForall names inner -> do
-            (inner', _) <- instantiateSizes names inner
+        TForall sizes types inner -> do
+            (inner', _, _) <- instantiateGenerics sizes types inner
             checkCall name inner' ats
         TFn pts rty
             | length pts /= length ats ->

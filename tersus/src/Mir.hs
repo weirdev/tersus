@@ -76,6 +76,7 @@ data Function = Function
     , fnLocals :: Map Local LocalDecl -- the return slot (when there is one), the parameters, and the rest
     , fnBlocks :: Map BlockId BasicBlock
     , fnSizeParams :: [Variable] -- the names of the last parameters, which are the sizes that a call of the function gives (see Mono)
+    , fnTypeParams :: [Variable] -- the names of the type parameters, which a call gives and native code makes a copy of the function for (see MirMono)
     , fnBorrowed :: [Local] -- the parameters that the function only reads, which a call lends (see MirOwnership)
     , fnSpec :: FunctionSpec
     }

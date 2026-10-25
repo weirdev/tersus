@@ -3,12 +3,18 @@ module MirMono
     ) where
 
 import Data.List (intercalate)
+import Data.Maybe (fromMaybe)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 
 import Mir
-import TersusTypes (Name, Size (..), Type (..), instanceOf, substSizes)
+import Pretty (renderType)
+import TersusTypes (Name, Size (..), Type (..), Variable, instanceOf, substitute)
 
+-- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
+-- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
+-- result (`first` of a `List<Int>` that gives an `Int` is `first<Int>`), and one that nothing decides is an `Int`.
+--
 -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`) is validated once, with each size a parameter it can reason
 -- about, and its callers give the sizes as its last arguments. Native code holds an array inline, so it needs the size of every
 -- array when it is made: this makes a copy of the function for each list of sizes it is called with (`dot<3>`), with the size
@@ -41,36 +47,40 @@ monomorphize program
     isGhost s = case s of
         Ghost _ _ -> True
         _ -> False
-    generic = not . null . fnSizeParams
+    generic f = not (null (fnSizeParams f) && null (fnTypeParams f))
     (main', mainNeeds) = redirect program (progMain program)
     redirected = [redirect program f | f <- Map.elems (progFunctions program), not (generic f)]
     plain' = map fst redirected
     instances = build program (mainNeeds ++ concatMap snd redirected) Map.empty
 
 -- The copies to make, with those that the copies need
-build :: Program -> [(Name, [Integer])] -> Map (Name, [Integer]) Function -> Map (Name, [Integer]) Function
+-- (the types and the sizes that a copy is for)
+type Key = (Name, [Type], [Integer])
+
+build :: Program -> [Key] -> Map Key Function -> Map Key Function
 build _ [] done = done
-build program (key@(name, sizes) : rest) done
+build program (key@(name, tys, sizes) : rest) done
     | Map.member key done = build program rest done
     | otherwise = case Map.lookup name (progFunctions program) of
         Nothing -> build program rest done
         Just generic ->
-            let (copy, needs) = redirect program (instantiate generic sizes)
+            let (copy, needs) = redirect program (instantiate generic tys sizes)
              in build program (rest ++ needs) (Map.insert key copy done)
 
-instanceName :: Name -> [Integer] -> Name
-instanceName name sizes = name ++ "<" ++ intercalate ", " (map show sizes) ++ ">"
+instanceName :: Name -> [Type] -> [Integer] -> Name
+instanceName name tys sizes = name ++ "<" ++ intercalate ", " (map renderType tys ++ map show sizes) ++ ">"
 
--- The function with its size parameters replaced by the sizes
-instantiate :: Function -> [Integer] -> Function
-instantiate fn sizes =
+-- The function with its type and size parameters replaced by the types and the sizes
+instantiate :: Function -> [Type] -> [Integer] -> Function
+instantiate fn tys sizes =
     fn
-        { fnName = instanceName (fnName fn) sizes
+        { fnName = instanceName (fnName fn) tys sizes
         , fnParams = keptParams
         , fnReturns = fmap types (fnReturns fn)
         , fnLocals = Map.map (\d -> d{localType = types (localType d)}) (Map.filterWithKey (\l _ -> l `notElem` sizeLocals) (fnLocals fn))
         , fnBlocks = Map.map block (fnBlocks fn)
         , fnSizeParams = []
+        , fnTypeParams = []
         , fnBorrowed = [l | l <- fnBorrowed fn, l `notElem` sizeLocals]
         , fnSpec = spec (fnSpec fn)
         }
@@ -80,9 +90,9 @@ instantiate fn sizes =
     sizeLocals = drop (length keptParams) (fnParams fn)
     values = Map.fromList (zip sizeLocals sizes)
     pairs = zip (fnSizeParams fn) (map SizeConst sizes)
-    types = substSizes pairs
+    types = substitute pairs (zip (fnTypeParams fn) tys)
     -- (the name of a struct with sizes names them)
-    named name = case substSizes pairs (TNamed name) of
+    named name = case types (TNamed name) of
         TNamed name' -> name'
         _ -> name
     constant c = case c of
@@ -124,18 +134,52 @@ instantiate fn sizes =
 
 -- The function with each call of a function with size parameters made a call of the copy for its sizes, and the copies that need
 -- making. The sizes are the last arguments of the call, which are constants here.
-redirect :: Program -> Function -> (Function, [(Name, [Integer])])
+redirect :: Program -> Function -> (Function, [Key])
 redirect program fn = (fn{fnBlocks = Map.fromList (map fst blocks)}, concatMap snd blocks)
   where
     blocks = [((b, BasicBlock stmts term'), needs) | (b, BasicBlock stmts term) <- Map.toList (fnBlocks fn), let (term', needs) = call term]
     call term = case term of
         Call (Const (CFn callee)) args dest next
             | Just target <- Map.lookup callee (progFunctions program)
-            , not (null (fnSizeParams target))
+            , not (null (fnSizeParams target) && null (fnTypeParams target))
             , let (explicit, given) = splitAt (length args - length (fnSizeParams target)) args
-            , Just sizes <- mapM constantSize given ->
-                (Call (Const (CFn (instanceName callee sizes))) explicit dest next, [(callee, sizes)])
+            , Just sizes <- mapM constantSize given
+            , let tys = typeArguments fn target explicit dest ->
+                (Call (Const (CFn (instanceName callee tys sizes))) explicit dest next, [(callee, tys, sizes)])
         _ -> (term, [])
     constantSize o = case o of
         Const (CInt c) -> Just c
         _ -> Nothing
+
+-- The types that a call gives the type parameters of the function it calls: those that make the types of the parameters the types
+-- of the arguments, and the type of the result the type of the local that gets it
+typeArguments :: Function -> Function -> [Operand] -> Local -> [Type]
+typeArguments caller target args dest = [fromMaybe TInt (lookup t found) | t <- fnTypeParams target]
+  where
+    found =
+        concat [match p a | (param, arg) <- zip (fnParams target) args, Just p <- [declared param], Just a <- [argumentType arg]]
+            ++ concat [match r d | Just r <- [fnReturns target], Just d <- [localType <$> Map.lookup dest (fnLocals caller)]]
+    declared l = localType <$> Map.lookup l (fnLocals target)
+    argumentType o = case o of
+        Copy l -> localType <$> Map.lookup l (fnLocals caller)
+        Move l -> localType <$> Map.lookup l (fnLocals caller)
+        Const c -> constantType c
+    constantType c = case c of
+        CInt _ -> Just TInt
+        CBool _ -> Just TBool
+        CList (x : _) -> TList <$> constantType x
+        CArray cs@(x : _) -> (\t -> TArrayOf t (SizeConst (toInteger (length cs)))) <$> constantType x
+        CData name _ -> Just (TNamed name)
+        _ -> Nothing
+
+-- What the type parameters of a type are, given the type it stands for
+match :: Type -> Type -> [(Variable, Type)]
+match pattern actual = case (pattern, actual) of
+    (TParam name, a) -> [(name, a)]
+    (TList p, TList a) -> match p a
+    (TBox p, TBox a) -> match p a
+    (TRef p, a) -> match p a
+    (p, TRef a) -> match p a
+    (TArrayOf p _, TArrayOf a _) -> match p a
+    (TFn ps p, TFn as a) -> concat (zipWith match (p : ps) (a : as))
+    _ -> []

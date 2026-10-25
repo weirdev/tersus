@@ -1179,6 +1179,30 @@ The limit of an array held in a frame (8192 words) is checked for a size that is
 
 See `examples/array_sizes.tersus`.
 
+### Type parameters
+
+A function can also be written for any type. A name that starts with a capital letter between the `<>` is a type; any other is a size:
+
+```tersus
+fn head<T>(items: &List<T>) -> T [{ define s = size(items); rewrite eqToGtZero s; affirm s > 0; }] [{ }] {
+    return get(items, 0);
+};
+
+fn pair<T>(a: T, b: T) -> Array<T, 2> {
+    return set(array(2, a), 1, b);
+};
+
+return head(push([], 40)) + size(head(push([], push([], 1))));   // head of a List<Int>, and of a List<List<Int>>
+```
+
+- **The arguments decide the types.** `head(push([], 40))` makes `T` an `Int`, the other `T` a `List<Int>`; every use of `T` in the signature has to agree (`pair(1, true)` is `argument 2 of pair: expected Int, got Bool`). A type that nothing decides, as `nil()` for `fn nil<T>() -> List<T>`, is an `Int`, as the element of `[]` is when nothing decides it. A call does not write the types, and a function with type parameters is called, not named (`h = head` is an error).
+- **The function knows nothing of `T`.** It is validated once, with `T` a type of its own: a value of it can be passed around, kept in a list, an array or a `Box`, and compared with `=`, and `a + 1` for a `T` is an error. Contracts can speak of the values (`size(items)`, `get(items, 0)`) as usual.
+- **Not a function.** A type parameter is a type of value: `id(inc)` for a function `inc` is an error, since native code has no copy of a function for it.
+- **Native code is made for each type.** A program that runs has a copy of the function for each list of types (and sizes) it is called with, `head<Int>` and `head<List<Int>>` (`MirMono` finds them by matching the types of the parameters with the types of the arguments and of the local that gets the result), and so a `T` that owns something (a list) is moved, copied and freed in the copy for it, and one that does not is a plain copy.
+- **Not yet**: type parameters of a struct (`struct Vec<T>`), of an enum, or of a function of an impl.
+
+See `examples/type_parameters.tersus`.
+
 ### Structs with sizes
 
 A struct can have sizes too: `struct Packet<n>` is a struct for each size, and a type gives them, as `Packet<4>`. A field can use the size, or hold another struct of the same size:
