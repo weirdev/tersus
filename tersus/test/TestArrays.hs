@@ -171,4 +171,29 @@ testArrays =
                 , testCase "the declaration is parsed with spaces" (runs "fn count < n , m > (a: Array<Int, n>, b: Array<Int, m>) -> Int { return n * 10 + m; }; return count(#[1], #[1, 2]);" (VInt 12))
                 , testCase "an empty list of sizes" (parseFails "fn f<>(a: Int) -> Int { return 0; }; return 1;")
                 ]
+            , TestList
+                "structs with sizes"
+                [ testCase "a struct for a size" (runs "struct P<n> { id: Int, body: Array<Int, n> };  p = P<3> { id: 7, body: #[1, 2, 3] }; return p.id + size(p.body) + get(p.body, 2);" (VInt 13))
+                , testCase "a value is printed as the struct" (runs "struct P<n> { id: Int, body: Array<Int, n> };  return P<2> { id: 1, body: #[5, 6] };" (VData "P" [("id", VInt 1), ("body", VList [VInt 5, VInt 6])]))
+                , testCase "the size is known to the validator" (valid "struct P<n> { id: Int, body: Array<Int, n> };  p = P<3> { id: 7, body: #[1, 2, 3] }; affirm size(p.body) = 3; return get(p.body, 2);")
+                , testCase "a field is read past its size" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  p = P<3> { id: 7, body: #[1, 2, 3] }; return get(p.body, 3);" "Relation does not hold")
+                , testCase "a size is a type" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P<3>) -> Int { return 0; }; return f(P<2> { id: 1, body: #[1, 2] });" "argument 1 of f: expected P<3>, got P<2>")
+                , testCase "structs of two sizes are not compared" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  return P<3> { id: 1, body: #[1, 2, 3] } = P<2> { id: 1, body: #[1, 2] };" "expected P<3>, got P<2>")
+                , testCase "structs of one size are" (runs "struct P<n> { id: Int, body: Array<Int, n> };  return P<2> { id: 1, body: #[1, 2] } = P<2> { id: 1, body: #[1, 2] };" (VBool True))
+                , testCase "the body has the size" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  x = P<2> { id: 1, body: #[5] }; return 1;" "field body of P<2>: expected Array<Int, 2>, got Array<Int, 1>")
+                , testCase "a function over any size" (runs "struct P<n> { id: Int, body: Array<Int, n> };  fn total<m>(p: P<m>) -> Int { s = p.id; i = 0; while i < m [{ affirm i >= 0; affirm i <= m; }] shrinks m - i { s = s + get(p.body, i); i = i + 1; }; return s; }; return total(P<3> { id: 7, body: #[1, 2, 3] }) + total(P<1> { id: 1, body: #[10] });" (VInt 24))
+                , testCase "its size is the size of the struct" (runs "struct P<n> { id: Int, body: Array<Int, n> };  fn width<m>(p: P<m>) -> Int { return m; }; return width(P<4> { id: 0, body: array(4, 0) });" (VInt 4))
+                , testCase "a struct is made in a function that has the size" (runs "struct P<n> { id: Int, body: Array<Int, n> };  fn blank<m>(a: Array<Int, m>) -> P<m> { return P<m> { id: m, body: array(m, 0) }; }; return blank(#[1, 2]);" (VData "P" [("id", VInt 2), ("body", VList [VInt 0, VInt 0])]))
+                , testCase "a struct that holds another of its size" (runs "struct I<n> { cells: Array<Int, n> }; struct O<n> { tag: Int, inner: I<n> }; fn w<m>(o: O<m>) -> Int { return m * 10 + o.tag; }; return w(O<2> { tag: 4, inner: I<2> { cells: #[1, 2] } });" (VInt 24))
+                , testCase "an update keeps the size" (runs "struct P<n> { id: Int, body: Array<Int, n> };  a = P<2> { id: 1, body: #[5, 6] }; b = P<2> { id: 9, ..a }; return b.id + get(b.body, 1);" (VInt 15))
+                , testCase "a Box and a list of them" (runs "struct P<n> { id: Int, body: Array<Int, n> };  b = Box::new(P<2> { id: 1, body: #[5, 6] }); l = push([], P<2> { id: 2, body: #[7, 8] }); return b.id + size(b.body) + get(l, 0).id;" (VInt 5))
+                , testCase "a struct with sizes holds itself in a Box" (valid "struct L<n> { v: Array<Int, n>, next: Box<L<n>> }; return 0;")
+                , testCase "but not by value" (rejected "struct L<n> { v: Array<Int, n>, next: L<n> }; return 0;" "L holds itself, so it would have no size")
+                , testCase "its sizes are given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P) -> Int { return 0; }; return 1;" "P has sizes <n>, which a type gives: P<n>")
+                , testCase "as many as it has" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  x = P<1, 2> { id: 1, body: #[5] }; return 1;" "P has 1 sizes (n), got 2")
+                , testCase "a size is a name that the struct declares" (rejected "struct Q<n> { body: Array<Int, k> }; return 1;" "k is not a size here")
+                , testCase "a size is not named twice" (rejected "struct Q<n, n> { body: Array<Int, n> }; return 1;" "names a size twice")
+                , testCase "a size that is not given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P<?>) -> Int { return 0; }; return 1;" "a size that is not given")
+                , testCase "the declaration is parsed with spaces" (runs "struct Q < n , m > { a: Array<Int, n>, b: Array<Int, m> }; q = Q < 1 , 2 > { a: #[1], b: #[2, 3] }; return size(q.a) * 10 + size(q.b);" (VInt 12))
+                ]
             ]

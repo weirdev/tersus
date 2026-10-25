@@ -108,7 +108,7 @@ renderSize :: Size -> String
 renderSize (SizeConst n) = show n
 renderSize SizeAny = "?"
 renderSize (SizeParam name) = name
-renderSize (SizeVar _) = "_"
+renderSize (SizeVar n) = "_" ++ show n
 
 -- Renders a type in Tersus syntax
 renderType :: Type -> String

@@ -9,8 +9,8 @@ import qualified Data.Map.Strict as Map
 import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
-import TypeCheck (arraySlots, functionType, maxArraySlots, substSizes)
-import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray)
+import TypeCheck (arraySlots, functionType, maxArraySlots)
+import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray, substSizes)
 import Utils (Result (..))
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and function

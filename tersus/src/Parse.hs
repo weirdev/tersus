@@ -290,6 +290,8 @@ structStatement = do
     whitespace
     name <- variable
     whitespace
+    -- struct Name<n, m> { ... }: a struct for each list of sizes, written Name<4, 2> (see instanceName)
+    sizes <- option [] (try (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace))
     void (char '{')
     whitespace
     fields <- structField `sepEndBy` (char ',' >> whitespace)
@@ -298,7 +300,7 @@ structStatement = do
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
-    return (StructDef name fields)
+    return (StructDef name sizes fields)
   where
     nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
 
@@ -317,9 +319,12 @@ structField = do
 structLiteral :: Parser a -> (Value -> [a] -> a) -> Parser a
 structLiteral element apply = do
     (name, declared) <- try $ do
-        candidate <- qualifiedName
+        base <- qualifiedName
         ctors <- declCtors <$> getState
-        known <- maybe (fail "not a struct or variant") return (Map.lookup candidate ctors)
+        known <- maybe (fail "not a struct or variant") return (Map.lookup base ctors)
+        -- (a struct with sizes is written with them: Packet<4> { ... })
+        sizes <- if isVariant base then return Nothing else optionMaybe (try (whitespace >> sizeArguments))
+        let candidate = maybe base (instanceName base) sizes
         if null known && isVariant candidate
             then return (candidate, known)
             else do
@@ -631,13 +636,28 @@ typeAnnotation = do
                 whitespace
                 element <- typeAnnotation
                 -- a size is a number, `?`, or a size parameter of the function, and one that is left out is `?`
-                size <- option SizeAny (char ',' >> whitespace >> ((SizeConst . read <$> many1 digit) <|> (SizeAny <$ char '?') <|> (SizeParam <$> variable)))
+                size <- option SizeAny (char ',' >> whitespace >> sizeArgument)
                 whitespace
                 void (char '>')
                 return (TArrayOf element size)
             _ -> do
                 variant <- optionMaybe (try (string "::" >> variable))
-                return (maybe (TNamed name) (\v -> TVariant (name ++ "::" ++ v)) variant)
+                -- a struct with sizes is written with them, as Packet<4>
+                sizes <- if isJust variant then return Nothing else optionMaybe (try sizeArguments)
+                return (maybe (TNamed (maybe name (instanceName name) sizes)) (\v -> TVariant (name ++ "::" ++ v)) variant)
+
+-- A size is a number, `?`, or a size parameter of the function
+sizeArgument :: Parser Size
+sizeArgument = (SizeConst . read <$> many1 digit) <|> (SizeAny <$ char '?') <|> (SizeParam <$> variable)
+
+-- <4, n>: the sizes of a struct with sizes
+sizeArguments :: Parser [Size]
+sizeArguments = do
+    void (char '<')
+    whitespace
+    sizes <- (sizeArgument <* whitespace) `sepBy1` (char ',' >> whitespace)
+    void (char '>')
+    return sizes
 
 functContractReqs :: Parser [ValidationStatement]
 -- Function contracts are written as `[{ ... }]`: square brackets mark the presence

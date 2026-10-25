@@ -88,10 +88,11 @@ data LS = LS
     , lsGlobals :: Map Variable (Name, Type) -- the functions defined at the top of the program
     , lsAssigned :: Set.Set Variable -- the names the program assigns other than by defining a function
     , lsBuilder :: Builder
+    , lsGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes
     }
 
 initialState :: [Statement] -> LS
-initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing)
+initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty
 
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
@@ -207,7 +208,7 @@ program stmts = do
     let (resolvedMain, others) = case resolved of
             m : rest -> (m, rest)
             [] -> (main', [])
-        result = M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain
+        result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s))
     case verifyProgram result of
         Error e -> failL ("Lowering produced a malformed program: " ++ e)
         Ok () -> return result
@@ -295,7 +296,10 @@ lowerStatement stmt =
             finishInto dest pending
         Return expr -> lowerReturn expr
         ValidationStatement vs -> ghost (M.GhostValidation vs)
-        StructDef name fields -> do
+        StructDef name sizes fields | not (null sizes) -> do
+            tc (declareGeneric name sizes fields)
+            modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s)})
+        StructDef name _ fields -> do
             tc (declareType name >> mapM_ (checkType . snd) fields >> registerCtors name [(name, fields)])
             addType name (M.StructDecl fields)
         EnumDef name variants -> do

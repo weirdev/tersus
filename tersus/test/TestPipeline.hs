@@ -89,6 +89,8 @@ testExamples =
         , testExampleFile "examples/rejected/array_unsized.tersus" (ExpectRejected "an array with no size")
         , testExampleFile "examples/box_array.tersus" (ExpectReturn (VInt 34))
         , testExampleFile "examples/array_sizes.tersus" (ExpectReturn (VInt 42))
+        , testExampleFile "examples/sized_structs.tersus" (ExpectReturn (VInt 71))
+        , testExampleFile "examples/rejected/sized_struct_mismatch.tersus" (ExpectRejected "argument 1 of first: expected Packet<3>, got Packet<2>")
         , testExampleFile "examples/rejected/array_size_param_mismatch.tersus" (ExpectRejected "argument 2 of dot: expected Array<Int, 2>, got Array<Int, 3>")
         , testExampleFile "examples/rejected/box_array_size.tersus" (ExpectRejected "argument 1 of corner: expected Box<Array<Int, 3>>, got Box<Array<Int, ?>>")
         , testExampleFile "examples/rejected/array_push.tersus" (ExpectRejected "argument 1 of push: expected List<?>, got Array<Int, 2>")

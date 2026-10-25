@@ -323,7 +323,10 @@ validateFunction st name top = do
     entry <- freshN (length params)
     let started = inner{psLocals = Map.fromList (zip params entry)}
         env = M.specEnv spec
-    withRequires <- assumeStatements (withEnv env (foldr (withTypeFacts fn) started params)) requires
+    -- (a size is not negative)
+    let sizeLocals = drop (length params - length (M.fnSizeParams fn)) params
+        withSizes' = foldr (\l st' -> maybe st' (\iota -> addFacts st' [FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm iota, CTerm (VInt 0)]]) (Map.lookup l (psLocals st'))) started sizeLocals
+    withRequires <- assumeStatements (withEnv env (foldr (withTypeFacts fn) withSizes' params)) requires
     withVariant <- startFunctionVariant (withEnv env withRequires) term
     returned <- walkFunction withVariant fn
     let returnEnv = Map.insert "return" (M.Copy (M.Local 0)) env

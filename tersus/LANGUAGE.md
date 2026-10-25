@@ -1152,7 +1152,44 @@ The limit of an array held in a frame (8192 words) is checked for a size that is
 
 See `examples/array_sizes.tersus`.
 
-What an array cannot be yet: an element that is a list, a struct or an enum, and a size that is a parameter of a struct or an enum (the next step of the roadmap in `README.md`).
+### Structs with sizes
+
+A struct can have sizes too: `struct Packet<n>` is a struct for each size, and a type gives them, as `Packet<4>`. A field can use the size, or hold another struct of the same size:
+
+```tersus
+struct Packet<n> {
+    id: Int,
+    body: Array<Int, n>,
+};
+
+struct Frame<n> {
+    kind: Int,
+    packet: Packet<n>,
+};
+
+fn total<m>(p: Packet<m>) -> Int {
+    sum = p.id;
+    i = 0;
+    while i < m [{ affirm i >= 0; affirm i <= m; }] shrinks m - i {
+        sum = sum + get(p.body, i);
+        i = i + 1;
+    };
+    return sum;
+};
+
+a = Packet<3> { id: 7, body: #[1, 2, 3] };
+return total(a) + total(Packet<1> { id: 1, body: #[10] });   // 13 + 11
+```
+
+- **Each size is a type of its own.** `Packet<3>` and `Packet<2>` cannot be compared or given for each other (`argument 1 of first: expected Packet<3>, got Packet<2>`). The sizes are written in a type and in a literal (`Packet<3> { ... }`, `Packet<m> { ... }` in a function that has the size `m`), as many as the declaration has, each a number or a size of the function. A struct with sizes written with none (`fn f(p: Packet)`) or with `?` is an error.
+- **A function with sizes takes any of them.** `fn total<m>(p: Packet<m>)` is called with a `Packet<3>` and its `m` is 3, as it is for an array; the size is decided by the arguments.
+- **It is an ordinary struct otherwise**: held inline (a `Packet<4>` is the words of its fields), read with `.`, updated with `..base`, held in a `Box` or a list, compared, and printed as `Packet { id: 7, body: [1, 2, 3] }`. A struct with sizes may hold itself in a `Box` (`next: Box<L<n>>`), not by value.
+- **What it cannot be yet**: an enum with sizes, methods and traits for a struct with sizes (`impl Packet<4>`), a size of `?` (a struct whose last field has a size that a `Box` carries, as `Box<Array<T>>` does), and type parameters (`struct Packet<T, n>`).
+- **How it is made.** A struct with sizes is declared once and is a struct of its own, named by the sizes (`Packet<4>`), for each list that the program uses: the checker makes it the first time the name is looked at, the lowering declares the ones the program mentions (`completeInstances`), and a function with sizes is made for each size by `MirMono`, which renames the structs it uses with the sizes put in. The executor treats `Packet<n>` and `Packet<3>` as the one struct `Packet`.
+
+See `examples/sized_structs.tersus`.
+
+What an array cannot be yet: an element that is a list, a struct or an enum.
 
 ## Current Limitations
 
