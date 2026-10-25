@@ -293,16 +293,17 @@ termOperandLocals term = map fst (Set.toList (termUses term))
 
 -- Which parameters of the function that a call calls are lent: those that the function declares so, or for a function value the
 -- parameters that its type marks with &
-borrowedArguments :: Ctx -> Operand -> Int -> [Bool]
+-- and the type of each parameter
+borrowedArguments :: Ctx -> Operand -> Int -> [(Bool, Maybe Type)]
 borrowedArguments cx callee count =
     case callee of
-        Const (CFn name) | Just f <- Map.lookup name (progFunctions (cxProgram cx)) -> [p `elem` fnBorrowed f | p <- fnParams f]
-        Copy l | Just (TFn args _) <- Map.lookup l (cxTypes cx) -> map isRef args
-        Move l | Just (TFn args _) <- Map.lookup l (cxTypes cx) -> map isRef args
-        _ -> replicate count False
+        Const (CFn name) | Just f <- Map.lookup name (progFunctions (cxProgram cx)) -> [(p `elem` fnBorrowed f, localType <$> Map.lookup p (fnLocals f)) | p <- fnParams f]
+        Copy l | Just (TFn args _) <- Map.lookup l (cxTypes cx) -> map ref args
+        Move l | Just (TFn args _) <- Map.lookup l (cxTypes cx) -> map ref args
+        _ -> replicate count (False, Nothing)
   where
-    isRef (TRef _) = True
-    isRef _ = False
+    ref (TRef t) = (True, Just t)
+    ref t = (False, Just t)
 
 -- Whether the statement takes a field out of a value that is not used again, rather than copying it
 takesField :: Ctx -> Statement -> Live -> Bool
@@ -404,6 +405,8 @@ rewriteOperands cx after' operands = go consumed operands
   where
     -- (a parameter that is lent is always still wanted: whoever lent it gets it back)
     stillLive = localsOf after' `Set.union` cxBorrowed cx
+    -- (a local that the same operation reads, as a lent argument is, cannot be handed over: the one that takes it may change it)
+    readHere = Set.fromList [l | (o, Read) <- operands, Just l <- [operandLocal o]]
     -- how many operands give up each local, so that all but the last get a copy
     consumed = Map.fromListWith (+) [(l, 1 :: Int) | (o, Consume) <- operands, Just l <- [operandLocal o], heap cx (typeOf cx l)]
     siblingType = listToMaybe [typeOf cx l | (o, _) <- operands, Just l <- [operandLocal o], heap cx (typeOf cx l)]
@@ -417,7 +420,7 @@ rewriteOperands cx after' operands = go consumed operands
         , heap cx (typeOf cx l) = do
             let left = Map.findWithDefault 1 l remaining - 1
                 remaining' = Map.insert l left remaining
-            if left > 0 || l `Set.member` stillLive
+            if left > 0 || l `Set.member` stillLive || l `Set.member` readHere
                 then do
                     copy <- freshLocal (typeOf cx l)
                     pure ([Assign copy (Clone (Copy l))], [], Move copy, remaining')
@@ -477,6 +480,12 @@ rewriteTerminator cx out term =
         Call callee args dest next -> do
             -- (an argument for a parameter that is lent is only read: the callee neither frees nor changes it)
             let lent = borrowedArguments cx callee (length args)
-            (pre, _, args') <- rewriteOperands cx (forgetLocal dest out) [(a, if b then Read else Consume) | (a, b) <- zip args lent]
-            return (pre, Call callee args' dest next)
+                -- (a constant that owns something and is lent is made into a local of the type of the parameter that it is lent to)
+                prepare (a, (True, Just ty)) | Const c <- a, isHeapConstant c = do
+                    temp <- freshLocal ty
+                    pure (Copy temp, [Assign temp (Use a)])
+                prepare (a, _) = pure (a, [])
+            prepared <- mapM prepare (zip args lent)
+            (pre, _, args') <- rewriteOperands cx (forgetLocal dest out) [(a, if b then Read else Consume) | ((a, _), (b, _)) <- zip prepared lent]
+            return (concatMap snd prepared ++ pre, Call callee args' dest next)
         _ -> return ([], term)
