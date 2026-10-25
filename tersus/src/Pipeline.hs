@@ -63,14 +63,14 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         _ -> []
     reserved name = name == "StdList" || take 7 name == "stdList"
 
--- Every program has the library of lib/prelude.tersus (`Vec` and `Sequence`) in front of it if it mentions either name and does not
+-- Every program has the library of lib/prelude.tersus (the traits `Sequence` and `Growable`) in front of it if it mentions either name and does not
 -- declare them itself, so a program that has a `Vec` of its own is unchanged
 usesPrelude :: String -> Bool
-usesPrelude source = any (`elem` ws) ["Vec", "Sequence"] && not (any declared ws')
+usesPrelude source = any (`elem` ws) ["Sequence", "Growable"] && not (any declared ws')
   where
     ws = words' source
     ws' = zip ws (drop 1 ws)
-    declared (keyword, name) = keyword `elem` ["struct", "enum", "trait"] && name `elem` ["Vec", "Sequence"]
+    declared (keyword, name) = keyword `elem` ["struct", "enum", "trait"] && name `elem` ["Sequence", "Growable"]
     -- (the names in a text: runs of letters, digits and underscores)
     words' text = case dropWhile (not . isNameChar) text of
         "" -> []
