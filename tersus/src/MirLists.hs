@@ -258,6 +258,8 @@ lowerFunction original fn =
         let listTy = case (op, destTy, head os) of
                 (Push, TList _, _) -> destTy
                 (Set, TList _, _) -> destTy
+                -- (the list that is popped has the type of the result)
+                (Pop, TList _, _) -> destTy
                 -- (a constant list that is read from has elements of the type that is read, which an empty one among them does not say)
                 (_, _, Const _) | op `elem` [First, Last, Get] -> TList destTy
                 _ -> operandTy
