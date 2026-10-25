@@ -39,7 +39,7 @@ environment program =
   where
     ctors (name, StructDecl fields) = [(name, (name, fields))]
     ctors (name, EnumDecl variants) = [(v, (name, fields)) | (v, fields) <- variants]
-    fnType f = functionType (fnSizeParams f) [(if p `elem` fnBorrowed f then TRef else id) (maybe (TVar 0) localType (Map.lookup p (fnLocals f))) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
+    fnType f = functionType (fnSizeParams f) (fnTypeParams f) [(if p `elem` fnBorrowed f then TRef else id) (maybe (TVar 0) localType (Map.lookup p (fnLocals f))) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
 
 problems :: Program -> Function -> [String]
 problems program fn =
@@ -103,7 +103,7 @@ problems program fn =
     -- a function with size parameters is called with their values as its last arguments (a constant, or a size parameter of the
     -- function that calls), which the types of the other parameters are taken with
     instantiated args t = case t of
-        Just (TForall names inner)
+        Just (TForall names _ inner)
             | length args >= length names ->
                 let given = drop (length args - length names) args
                  in Just (substSizes (zip names (map sizeOf given)) inner)
@@ -261,6 +261,7 @@ fits env localTy wanted o = case o of
 
 constantFits :: Env -> Type -> Constant -> Bool
 constantFits env (TRef wanted) c = constantFits env wanted c
+constantFits _ TParam{} _ = True
 constantFits env wanted c = case c of
     CInt _ -> wanted == TInt
     CBool _ -> wanted == TBool
@@ -276,7 +277,7 @@ constantFits env wanted c = case c of
             sub env wanted (TNamed typeName)
                 && map fst declared == map fst fields
                 && and [constantFits env t v | ((_, t), (_, v)) <- zip declared fields]
-    CFn name -> maybe False (== wanted) (Map.lookup name (envFns env))
+    CFn name -> maybe False (sub env wanted) (Map.lookup name (envFns env))
 
 -- Whether a value of the second type can be used where the first is wanted: the same type, or a variant of an enum
 -- where the enum is wanted (but not the other way), also inside a list
@@ -288,6 +289,11 @@ sub env wanted actual = case (wanted, actual) of
     (TArrayOf a SizeAny, TArrayOf b SizeAny) -> sub env a b
     (TBox a, TBox b) -> sub env a b
     (TRef a, b) -> sub env a b
+    (a, TRef b) -> sub env a b
+    -- (a type parameter is any type to a call, which the checker has seen the types of)
+    (TFn xs x, TFn ys y) | length xs == length ys -> and (zipWith (sub env) (x : xs) (y : ys))
+    (TParam _, _) -> True
+    (_, TParam _) -> True
     _ -> wanted == actual
 
 statementLocals :: Statement -> [Local]

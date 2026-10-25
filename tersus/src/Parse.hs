@@ -17,7 +17,7 @@ import Text.Parsec
 import qualified Data.Map as Map
 
 import Control.Monad (void, when)
-import Data.Char (isDigit, isLetter)
+import Data.Char (isDigit, isLetter, isUpper)
 import Data.List (isInfixOf, nub, (\\))
 import Data.Maybe (isJust)
 
@@ -32,10 +32,11 @@ data Decls = Decls
     { declCtors :: Map.Map Name [Variable]
     , declTypes :: Map.Map Name [Name]
     , declSelf :: Maybe Name -- the type of the impl being read, which `Self` stands for
+    , declTypeParams :: [Name] -- the type parameters of the function being read: a name of these in a type is that parameter
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty Nothing
+emptyDecls = Decls Map.empty Map.empty Nothing []
 
 type Parser = Parsec String Decls
 
@@ -512,15 +513,25 @@ functStatement = do
     whitespace
     var <- variable
     whitespace
-    -- fn f<n, m>(...): the sizes that a call gives, which are the last parameters of the function (Ints that the body and the
-    -- contracts can read), and are not written in a call
-    sizes <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
+    -- fn f<T, n>(...): what a call gives. A name that starts with a capital letter is a type (`T`, which the function knows nothing of);
+    -- any other is a size, which is one of the last parameters of the function (an Int that the body and the contracts can read).
+    -- Neither is written in a call.
+    generics <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
+    let typeParams = filter isTypeParam generics
+        sizes = filter (not . isTypeParam) generics
+    outerParams <- declTypeParams <$> getState
+    modifyState (\d -> d{declTypeParams = typeParams})
     (params, returnType, inputReqs, outputReqs) <- functHeader
     termination <- terminationClause
     fnBody <- curlyBracesParse statementBlock
     whitespace
+    modifyState (\d -> d{declTypeParams = outerParams})
     let allParams = params ++ [(size, TInt) | size <- sizes]
-    return (Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType sizes) termination fnBody) [])))
+    return (Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType sizes typeParams) termination fnBody) [])))
+  where
+    isTypeParam name = case name of
+        c : _ -> isUpper c
+        [] -> False
 
 -- (parameters) -> Type [{ input contract }] [{ output contract }], the part of a function before its termination clause
 functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement])
@@ -560,7 +571,7 @@ traitStatement = do
         fname <- variable
         whitespace
         (params, returnType, inputReqs, outputReqs) <- functHeader
-        return (TraitFn fname (map fst params) (Signature (map snd params) returnType []) inputReqs outputReqs)
+        return (TraitFn fname (map fst params) (Signature (map snd params) returnType [] []) inputReqs outputReqs)
 
 -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are named <Type>::f and <Type as Trait>::f (see
 -- implFunctionName), and the checker resolves Type::f and x.f(...) to the one that is meant. Self stands for Type in them.
@@ -628,7 +639,9 @@ typeAnnotation = do
         TFn args <$> typeAnnotation
     namedType = do
         name <- variable >>= resolveSelf
+        typeParams <- declTypeParams <$> getState
         case name of
+            _ | name `elem` typeParams -> return (TParam name)
             "Int" -> return TInt
             "Bool" -> return TBool
             "List" -> TList <$> typeArgument

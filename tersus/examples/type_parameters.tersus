@@ -1,0 +1,44 @@
+// A function can be written for any type. `fn head<T>(...)` declares a type T (a name that starts with a capital letter between the
+// <>; one that does not is a size, as in array_sizes.tersus), and the types of the arguments decide it: head of a List<Int> is an Int,
+// and head of a List<List<Int>> is a List<Int>. A call does not write the types.
+//
+// The function is validated once, for a T it knows nothing of: it can pass a value of T around, keep it in a list, an array or a Box,
+// and compare two with =, and that is all, so `a + 1` for a T is an error. Native code is made for each type the program calls it with
+// (head<Int>, head<List<Int>>), which is also how it knows whether a T owns something to free.
+fn head<T>(items: &List<T>) -> T [{ define s = size(items); rewrite eqToGtZero s; affirm s > 0; }] [{ }] {
+    return get(items, 0);
+};
+
+// The type can be in the result, in a Box, and in an array of a size
+fn repeat<T>(x: T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ affirm size(return) = n; }] {
+    out = [];
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; }] shrinks n - i {
+        out = push(out, x);
+        i = i + 1;
+    };
+    return out;
+};
+
+fn boxed<T>(x: T) -> Box<T> {
+    return Box::new(x);
+};
+
+fn pair<T>(a: T, b: T) -> Array<T, 2> {
+    return set(array(2, a), 1, b);
+};
+
+// Two types, and a type with a size
+fn second<A, B>(a: A, b: B) -> B {
+    return b;
+};
+
+fn setFirst<T, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] {
+    return set(a, 0, x);
+};
+
+lists = repeat(push(push([], 1), 2), 3);                      // three copies of [1, 2]
+firstList = head(lists);                                         // a List<Int>
+flags = setFirst(pair(true, true), false);                    // [false, true]
+return head(push([], 40)) + size(firstList) + size(Box::unbox(boxed(lists))) + second(true, 0)
+    + size(flags) * 1000;                                      // 40 + 2 + 3 + 0 + 2000
