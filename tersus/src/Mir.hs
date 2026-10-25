@@ -38,7 +38,7 @@ import Data.Maybe (listToMaybe)
 
 import Pretty (renderType, renderVarProof)
 import qualified Data.Set as Set
-import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, substSizes, Size (..), pattern TArray)
+import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, instanceFields, Size (..), pattern TArray)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -215,10 +215,10 @@ completeInstances program
     go types [] = types
     go types (name : rest) =
         case (Map.member name types, instanceOf name) of
-            (False, Just (base, sizes))
-                | Just (params, fields) <- Map.lookup base (progGenerics program) ->
-                    let fields' = [(f, substSizes (zip params sizes) t) | (f, t) <- fields]
-                     in go (Map.insert name (StructDecl fields') types) (concatMap (typeNames . snd) fields' ++ rest)
+            (False, Just (base, args))
+                | Just (params, fields) <- Map.lookup base (progGenerics program)
+                , Just fields' <- instanceFields params args fields ->
+                    go (Map.insert name (StructDecl fields') types) (concatMap (typeNames . snd) fields' ++ rest)
             _ -> go types rest
     statementRvalues s = case s of
         Assign _ rv -> [rv]

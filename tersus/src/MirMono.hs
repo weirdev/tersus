@@ -9,7 +9,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Name, Size (..), Type (..), Variable, instanceOf, substitute)
+import TersusTypes (Arg (..), Name, Size (..), Type (..), Variable, instanceOf, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -36,12 +36,7 @@ monomorphize program
     withInstances p =
         let complete = completeInstances p
          in complete{progTypes = Map.filterWithKey (\name _ -> not (symbolic name)) (progTypes complete)}
-    symbolic name = case instanceOf name of
-        Just (_, sizes) -> any isParam sizes
-        Nothing -> False
-    isParam size = case size of
-        SizeParam _ -> True
-        _ -> False
+    symbolic name = mentionsParameter (TNamed name)
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)
     unspecified f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
     isGhost s = case s of
@@ -185,5 +180,12 @@ match pattern actual = case (pattern, actual) of
     (TRef p, a) -> match p a
     (p, TRef a) -> match p a
     (TArrayOf p _, TArrayOf a _) -> match p a
+    (TNamed p, TNamed a)
+        | Just (b, ps) <- instanceOf p, Just (c, as) <- instanceOf a, b == c, length ps == length as -> concat (zipWith matchArg ps as)
     (TFn ps p, TFn as a) -> concat (zipWith match (p : ps) (a : as))
     _ -> []
+
+-- What the type parameters are, given what an instance of a struct is given
+matchArg :: Arg -> Arg -> [(Variable, Type)]
+matchArg (ArgType p) (ArgType a) = match p a
+matchArg _ _ = []

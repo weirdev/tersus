@@ -3,7 +3,7 @@
 module TersusTypes where
 
 import qualified Data.IntMap.Strict as IntMap
-import Data.Char (isDigit)
+import Data.Char (isAlphaNum, isDigit, isLower, isUpper)
 import Data.List (intercalate, isPrefixOf)
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
@@ -63,11 +63,25 @@ data Type = TInt | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Ty
 data Size = SizeConst Integer | SizeAny | SizeParam Name | SizeVar Int
     deriving (Show, Eq, Ord)
 
--- The type that a struct with sizes is for a list of sizes (`Packet<4>`, `Packet<n>` in a function that has the size n) is a struct of
--- its own, named by the sizes, with the fields of the declaration with the sizes in them. Everything after the checker sees an ordinary
--- struct; the name is how the checker and MirMono find the declaration and the sizes again.
-instanceName :: Name -> [Size] -> Name
-instanceName base sizes = base ++ "<" ++ intercalate ", " (map sizeText sizes) ++ ">"
+-- What a struct with parameters is given: a size, or a type
+data Arg = ArgSize Size | ArgType Type
+    deriving (Show, Eq, Ord)
+
+-- A parameter that starts with a capital letter is a type, and any other is a size
+isTypeName :: Variable -> Bool
+isTypeName name = case name of
+    c : _ -> isUpper c
+    [] -> False
+
+-- The type that a struct with parameters is for a list of sizes and types (`Packet<4>`, `Vec<Int, 3>`, and `Vec<'T, n>` in a function that has
+-- the type T and the size n) is a struct of its own, named by them, with the fields of the declaration with them in. Everything after the
+-- checker sees an ordinary struct; the name is how the checker and MirMono find the declaration and the arguments again.
+instanceName :: Name -> [Arg] -> Name
+instanceName base args = base ++ "<" ++ intercalate ", " (map argText args) ++ ">"
+
+argText :: Arg -> String
+argText (ArgSize size) = sizeText size
+argText (ArgType ty) = typeText ty
 
 sizeText :: Size -> String
 sizeText (SizeConst n) = show n
@@ -75,21 +89,146 @@ sizeText SizeAny = "?"
 sizeText (SizeParam name) = name
 sizeText (SizeVar n) = "_" ++ show n
 
--- The struct and the sizes that a name is the instance of
-instanceOf :: Name -> Maybe (Name, [Size])
+-- A type as the name of an instance writes it (a type parameter has a ' before it, so that it is not a struct, and an unknown has a ?)
+typeText :: Type -> String
+typeText ty = case ty of
+    TInt -> "Int"
+    TBool -> "Bool"
+    TList t -> "List<" ++ typeText t ++ ">"
+    TBox t -> "Box<" ++ typeText t ++ ">"
+    TRef t -> "&" ++ typeText t
+    TArrayOf t size -> "Array<" ++ typeText t ++ ", " ++ sizeText size ++ ">"
+    TFn args ret -> "fn(" ++ intercalate ", " (map typeText args) ++ ") -> " ++ typeText ret
+    TNamed name -> name
+    TVariant name -> name
+    TParam name -> '\'' : name
+    TVar n -> '?' : show n
+    TForall _ _ t -> typeText t
+
+-- The struct and the arguments that a name is the instance of
+instanceOf :: Name -> Maybe (Name, [Arg])
 instanceOf name =
     case break (== '<') name of
-        (base, '<' : rest) | not (null base), not (null rest), last rest == '>' -> Just (base, map readSize (splitSizes (init rest)))
+        (base, '<' : rest) | not (null base), not (null rest), last rest == '>' -> mapM readArg (splitArgs (init rest)) >>= \args -> Just (base, args)
         _ -> Nothing
   where
-    splitSizes text = case break (== ',') text of
-        (one, ',' : more) -> one : splitSizes (dropWhile (== ' ') more)
-        (one, _) -> [one]
-    readSize text
-        | text == "?" = SizeAny
-        | not (null text) && all isDigit text = SizeConst (read text)
-        | ('_' : digits) <- text, not (null digits), all isDigit digits = SizeVar (read digits)
-        | otherwise = SizeParam text
+    readArg text
+        | text == "?" = Just (ArgSize SizeAny)
+        | not (null text) && all isDigit text = Just (ArgSize (SizeConst (read text)))
+        | ('_' : digits) <- text, not (null digits), all isDigit digits = Just (ArgSize (SizeVar (read digits)))
+        | all isAlphaNum text, c : _ <- text, isLower c = Just (ArgSize (SizeParam text))
+        | otherwise = case readType text of
+            Just (ty, "") -> Just (ArgType ty)
+            _ -> Nothing
+
+-- The pieces of the arguments of an instance, which a comma separates where no < > or ( ) is open
+splitArgs :: String -> [String]
+splitArgs = go (0 :: Int) ""
+  where
+    go _ acc [] = [reverse acc]
+    go depth acc ('-' : '>' : rest) = go depth ('>' : '-' : acc) rest
+    go depth acc (c : rest)
+        | c `elem` "<(" = go (depth + 1) (c : acc) rest
+        | c `elem` ">)" = go (depth - 1) (c : acc) rest
+        | c == ',' && depth == 0 = reverse acc : go depth "" (dropWhile (== ' ') rest)
+        | otherwise = go depth (c : acc) rest
+
+-- A type from the text that typeText wrote, and what follows it
+readType :: String -> Maybe (Type, String)
+readType text =
+    case text of
+        '&' : rest -> (\(t, r) -> (TRef t, r)) <$> readType rest
+        '\'' : rest -> let (name, r) = span isAlphaNum rest in if null name then Nothing else Just (TParam name, r)
+        '?' : rest -> let (digits, r) = span isDigit rest in if null digits then Nothing else Just (TVar (read digits), r)
+        'f' : 'n' : '(' : rest -> do
+            (args, afterArgs) <- readTypes rest
+            ret <- stripPrefix' ") -> " afterArgs
+            (t, r) <- readType ret
+            Just (TFn args t, r)
+        _ -> do
+            let (name, afterName) = span (\c -> isAlphaNum c || c == ':') text
+            if null name
+                then Nothing
+                else case afterName of
+                    '<' : _ -> do
+                        let (inner, afterInner) = bracketed afterName
+                        let full = name ++ inner
+                        case name of
+                            "List" -> readOne inner >>= \t -> Just (TList t, afterInner)
+                            "Box" -> readOne inner >>= \t -> Just (TBox t, afterInner)
+                            "Array" -> readArray inner >>= \t -> Just (t, afterInner)
+                            _ -> Just (TNamed full, afterInner)
+                    _ -> case name of
+                        "Int" -> Just (TInt, afterName)
+                        "Bool" -> Just (TBool, afterName)
+                        _ | "::" `isInfixOf'` name -> Just (TVariant name, afterName)
+                        _ -> Just (TNamed name, afterName)
+  where
+    isInfixOf' needle hay = any (isPrefixOf needle) (tails' hay)
+    tails' [] = [[]]
+    tails' s@(_ : t) = s : tails' t
+    stripPrefix' prefix s = if prefix `isPrefixOf` s then Just (drop (length prefix) s) else Nothing
+    -- the text of a < > group from its first < to its matching >, and what follows
+    bracketed s = go (0 :: Int) "" s
+      where
+        go _ acc [] = (reverse acc, [])
+        go depth acc ('-' : '>' : rest) = go depth ('>' : '-' : acc) rest
+        go depth acc (c : rest)
+            | c == '<' = go (depth + 1) (c : acc) rest
+            | c == '>' = if depth == 1 then (reverse (c : acc), rest) else go (depth - 1) (c : acc) rest
+            | otherwise = go depth (c : acc) rest
+    readOne inner = case readType (init (drop 1 inner)) of
+        Just (t, "") -> Just t
+        _ -> Nothing
+    readArray inner = case splitArgs (init (drop 1 inner)) of
+        [element, size] -> do
+            (t, rest) <- readType element
+            if null rest then Just (TArrayOf t (readSize size)) else Nothing
+        _ -> Nothing
+    readSize size
+        | size == "?" = SizeAny
+        | not (null size) && all isDigit size = SizeConst (read size)
+        | ('_' : digits) <- size, not (null digits), all isDigit digits = SizeVar (read digits)
+        | otherwise = SizeParam size
+    readTypes s = case s of
+        ')' : rest -> Just ([], ')' : rest)
+        _ -> do
+            (t, rest) <- readType s
+            case rest of
+                ',' : ' ' : more -> readTypes more >>= \(ts, r) -> Just (t : ts, r)
+                _ -> Just ([t], rest)
+
+-- The fields of a struct with parameters, for the arguments it is given: the sizes and the types are put where the parameters are.
+-- Nothing if there are not as many, or one is a size where a type is wanted.
+instanceFields :: [Variable] -> [Arg] -> [(Variable, Type)] -> Maybe [(Variable, Type)]
+instanceFields params args fields
+    | length params /= length args = Nothing
+    | otherwise = do
+        pairs <- mapM pair (zip params args)
+        let sizes = [(p, s) | (p, Left s) <- pairs]
+            types = [(p, t) | (p, Right t) <- pairs]
+        Just [(f, substitute sizes types t) | (f, t) <- fields]
+  where
+    pair (p, ArgSize s) | not (isTypeName p) = Just (p, Left s)
+    pair (p, ArgType t) | isTypeName p = Just (p, Right t)
+    pair _ = Nothing
+
+-- Whether a type mentions a size parameter or a type parameter, and so is a name that a function with them has
+mentionsParameter :: Type -> Bool
+mentionsParameter ty = case ty of
+    TParam _ -> True
+    TList t -> mentionsParameter t
+    TBox t -> mentionsParameter t
+    TRef t -> mentionsParameter t
+    TArrayOf t size -> mentionsParameter t || sizeParam size
+    TFn args ret -> any mentionsParameter (ret : args)
+    TNamed name | Just (_, args) <- instanceOf name -> any argParameter args
+    _ -> False
+  where
+    sizeParam (SizeParam _) = True
+    sizeParam _ = False
+    argParameter (ArgSize size) = sizeParam size
+    argParameter (ArgType t) = mentionsParameter t
 
 -- The type with each size parameter of the list replaced by the size (also in the name of an instance of a struct with sizes)
 substSizes :: [(Variable, Size)] -> Type -> Type
@@ -107,8 +246,10 @@ substitute sizes types = go
         TFn args ret -> TFn (map go args) (go ret)
         TParam name | Just t <- lookup name types -> t
         TForall ss ts t -> TForall ss ts (substitute [(n, s) | (n, s) <- sizes, n `notElem` ss] [(n, u) | (n, u) <- types, n `notElem` ts] t)
-        TNamed name | Just (base, args) <- instanceOf name -> TNamed (instanceName base (map sized args))
+        TNamed name | Just (base, args) <- instanceOf name -> TNamed (instanceName base (map arg args))
         _ -> ty
+    arg (ArgSize size) = ArgSize (sized size)
+    arg (ArgType t) = ArgType (go t)
     sized (SizeParam n) | Just size <- lookup n sizes = size
     sized size = size
 

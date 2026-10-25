@@ -32,11 +32,12 @@ data Decls = Decls
     { declCtors :: Map.Map Name [Variable]
     , declTypes :: Map.Map Name [Name]
     , declSelf :: Maybe Name -- the type of the impl being read, which `Self` stands for
-    , declTypeParams :: [Name] -- the type parameters of the function being read: a name of these in a type is that parameter
+    , declTypeParams :: [Name] -- the type parameters of the function or the struct being read: a name of these in a type is that parameter
+    , declGenerics :: Map.Map Name [Variable] -- the structs with sizes and types, and the parameters of each, in order
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty Nothing []
+emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty
 
 type Parser = Parsec String Decls
 
@@ -291,17 +292,22 @@ structStatement = do
     whitespace
     name <- variable
     whitespace
-    -- struct Name<n, m> { ... }: a struct for each list of sizes, written Name<4, 2> (see instanceName)
-    sizes <- option [] (try (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace))
+    -- struct Name<T, n> { ... }: a struct for each list of types and sizes, written Name<Int, 4> (see instanceName). A parameter that starts
+    -- with a capital letter is a type, and any other is a size.
+    params <- option [] (try (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace))
+    outerParams <- declTypeParams <$> getState
+    -- (the struct may hold itself, as Name<T, n>, in a Box)
+    modifyState (\d -> d{declTypeParams = filter isTypeParameter params, declGenerics = if null params then declGenerics d else Map.insert name params (declGenerics d)})
     void (char '{')
     whitespace
     fields <- structField `sepEndBy` (char ',' >> whitespace)
     void (char '}')
     whitespace
+    modifyState (\d -> d{declTypeParams = outerParams})
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
-    return (StructDef name sizes fields)
+    return (StructDef name params fields)
   where
     nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
 
@@ -323,9 +329,12 @@ structLiteral element apply = do
         base <- qualifiedName
         ctors <- declCtors <$> getState
         known <- maybe (fail "not a struct or variant") return (Map.lookup base ctors)
-        -- (a struct with sizes is written with them: Packet<4> { ... })
-        sizes <- if isVariant base then return Nothing else optionMaybe (try (whitespace >> sizeArguments))
-        let candidate = maybe base (instanceName base) sizes
+        -- (a struct with sizes and types is written with them: Packet<4> { ... }, Vec<Int, 3> { ... })
+        generics <- declGenerics <$> getState
+        args <- case Map.lookup base generics of
+            Just params | not (isVariant base) -> optionMaybe (try (whitespace >> genericArguments params))
+            _ -> return Nothing
+        let candidate = maybe base (instanceName base) args
         if null known && isVariant candidate
             then return (candidate, known)
             else do
@@ -658,22 +667,39 @@ typeAnnotation = do
                 return (TArrayOf element size)
             _ -> do
                 variant <- optionMaybe (try (string "::" >> variable))
-                -- a struct with sizes is written with them, as Packet<4>
-                sizes <- if isJust variant then return Nothing else optionMaybe (try sizeArguments)
-                return (maybe (TNamed (maybe name (instanceName name) sizes)) (\v -> TVariant (name ++ "::" ++ v)) variant)
+                -- a struct with sizes and types is written with them, as Packet<4> and Vec<Int, 3>
+                generics <- declGenerics <$> getState
+                args <- case Map.lookup name generics of
+                    Just params | not (isJust variant) -> optionMaybe (try (genericArguments params))
+                    _ -> return Nothing
+                return (maybe (TNamed (maybe name (instanceName name) args)) (\v -> TVariant (name ++ "::" ++ v)) variant)
 
 -- A size is a number, `?`, or a size parameter of the function
 sizeArgument :: Parser Size
 sizeArgument = (SizeConst . read <$> many1 digit) <|> (SizeAny <$ char '?') <|> (SizeParam <$> variable)
 
--- <4, n>: the sizes of a struct with sizes
-sizeArguments :: Parser [Size]
-sizeArguments = do
+-- <Int, 4, n>: what a struct with sizes and types is given, a type where it has a type and a size where it has a size
+genericArguments :: [Variable] -> Parser [Arg]
+genericArguments params = do
     void (char '<')
     whitespace
-    sizes <- (sizeArgument <* whitespace) `sepBy1` (char ',' >> whitespace)
+    args <- argumentsFor params
     void (char '>')
-    return sizes
+    return args
+  where
+    argumentsFor [] = return []
+    argumentsFor [p] = (: []) <$> argumentFor p
+    argumentsFor (p : rest) = do
+        a <- argumentFor p
+        void (char ',')
+        whitespace
+        (a :) <$> argumentsFor rest
+    argumentFor p
+        | isTypeParameter p = ArgType <$> typeAnnotation
+        | otherwise = (ArgSize <$> sizeArgument) <* whitespace
+
+isTypeParameter :: Variable -> Bool
+isTypeParameter = isTypeName
 
 functContractReqs :: Parser [ValidationStatement]
 -- Function contracts are written as `[{ ... }]`: square brackets mark the presence

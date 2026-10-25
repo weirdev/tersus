@@ -10,7 +10,7 @@ import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
 import TypeCheck (functionType, maxArraySlots)
-import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray, substSizes)
+import TersusTypes (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, instanceOf, pattern TArray, substSizes)
 import Utils (Result (..))
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and function
@@ -288,6 +288,10 @@ sub env wanted actual = case (wanted, actual) of
     (TArray a n, TArray b m) -> n == m && sub env a b
     (TArrayOf a SizeAny, TArrayOf b SizeAny) -> sub env a b
     (TBox a, TBox b) -> sub env a b
+    (TNamed a, TNamed b)
+        | a == b -> True
+        -- two instances of one struct with parameters: their types agree, and a size parameter of the one that is wanted stands for a size
+        | Just (c, as) <- instanceOf a, Just (d, bs) <- instanceOf b, c == d, length as == length bs -> and (zipWith argSub as bs)
     (TRef a, b) -> sub env a b
     (a, TRef b) -> sub env a b
     -- (a type parameter is any type to a call, which the checker has seen the types of)
@@ -295,6 +299,12 @@ sub env wanted actual = case (wanted, actual) of
     (TParam _, _) -> True
     (_, TParam _) -> True
     _ -> wanted == actual
+  where
+    argSub (ArgType x) (ArgType y) = sub env x y
+    argSub (ArgSize x) (ArgSize y) = x == y || isParameter x || isParameter y
+    argSub _ _ = False
+    isParameter (SizeParam _) = True
+    isParameter _ = False
 
 statementLocals :: Statement -> [Local]
 statementLocals (Assign dest rv) = dest : concatMap operandLocals (rvalueOperands rv)
@@ -354,3 +364,4 @@ constantFunctions (CList cs) = concatMap constantFunctions cs
 constantFunctions (CArray cs) = concatMap constantFunctions cs
 constantFunctions (CData _ fs) = concatMap (constantFunctions . snd) fs
 constantFunctions _ = []
+
