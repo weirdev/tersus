@@ -1,0 +1,14 @@
+// Output. `writeByte(b)` writes the low eight bits of b to the standard output and is b, and a String has `print()`, which writes its bytes and
+// is how many there are. A call that is made for what it does is a statement of its own and its result is not used (`greeting.print();`).
+// What the program writes comes first, then the value it returns, on a line of its own, which `tersus run` and `tersus eval` print the same.
+
+greeting = "Hello, ".concat("caf\u{e9}!\n");
+count = greeting.print();
+affirm count = size(greeting);
+
+// One byte at a time: the letters of "ok", then a new line
+writeByte(111);
+writeByte(107);
+writeByte(10);
+
+return count;

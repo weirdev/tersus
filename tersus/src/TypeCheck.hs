@@ -535,6 +535,7 @@ builtinType funct =
         ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
         NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
         NewEmptyArray -> failTc "Type error: Array::empty is called, as in Array::empty(), and cannot be used as a value"
+        WriteByte -> return (TFn [TInt] TInt)
         Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
         Plus -> arith
         Minus -> arith

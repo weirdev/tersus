@@ -130,6 +130,7 @@ statement =
         <|> traitStatement
         <|> implStatement
         <|> functStatement
+        <|> callStatement
         <|> assignStatement
         <|> blockStatement
 
@@ -142,6 +143,19 @@ assignStatement = do
     expr <- expression
     whitespace
     return (Assign var expr)
+
+-- `f(x);` and `v.f(x);`: a call that is made for what it does, whose result is not used. It is an assignment of the result to a name that
+-- no program can write (`$call L:C`, from the place of the call), as `for` makes the names of its bounds.
+callStatement :: Parser Statement
+callStatement = try $ do
+    position <- getPosition
+    notFollowedBy (try (variable >> whitespace >> char '='))
+    expr <- expression
+    case expr of
+        F (Var _) _ -> do
+            whitespace
+            return (Assign ("$call " ++ show (sourceLine position) ++ ":" ++ show (sourceColumn position)) expr)
+        _ -> fail "a statement that is a call, or an assignment"
 
 returnStatement :: Parser Statement
 returnStatement = do

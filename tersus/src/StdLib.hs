@@ -188,6 +188,14 @@ builtinFunct NewEmptyArray =
         (BuiltinFunct NewEmptyArray)
         [ relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (CTerm (VInt 0))
         ]
+-- writeByte(b) writes the low eight bits of b (b mod 256) to the standard output and is b. It asks nothing of b: there is no type of bytes yet
+builtinFunct WriteByte =
+    VFunct
+        ["b"]
+        []
+        []
+        (BuiltinFunct WriteByte)
+        [relProof Eq (ATerm "return") (ATerm "b")]
 -- Unsize b is b: the Box has the same value, it carries the size
 builtinFunct Unsize = VFunct ["box"] [] [] (BuiltinFunct Unsize) []
 -- The array that a literal makes is the list of its elements, read as an array: the same value
@@ -244,6 +252,7 @@ stdLibCtx =
         , ("pop", builtinFunct Pop)
         , ("set", builtinFunct Set)
         , ("array", builtinFunct NewArray)
+        , ("writeByte", builtinFunct WriteByte)
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
         , ("*", builtinFunct Times)
@@ -287,6 +296,8 @@ evalBuiltinFunct NewArray [VInt n, x]
 evalBuiltinFunct NewArray _ = Error "array takes a size and an element"
 evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
 evalBuiltinFunct NewEmptyArray [] = Ok (VList [])
+evalBuiltinFunct WriteByte [VInt b] = Ok (VInt b)
+evalBuiltinFunct WriteByte _ = Error "writeByte takes one byte"
 evalBuiltinFunct Unsize [value] = Ok value
 evalBuiltinFunct Unsize _ = Error "unsize takes one Box"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l

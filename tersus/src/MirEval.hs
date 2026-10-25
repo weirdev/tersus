@@ -1,11 +1,13 @@
 module MirEval
     ( MirValue (..)
     , runProgram
+    , runProgramOutput
     , renderMirValue
     , toMirValue
     , fromMirValue
     ) where
 
+import Data.Char (chr)
 import Data.List (intercalate)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -28,26 +30,33 @@ data MirValue
 
 -- The value of _0 when the program returns, and Nothing when it ends without
 runProgram :: Program -> Result (Maybe MirValue) String
-runProgram program = runE (runFunction program (progMain program) [])
+runProgram = mapResult snd . runProgramOutput
 
--- The evaluator is the failure of a result
-newtype E a = E {runE :: Result a String}
+-- The bytes that the program wrote with writeByte (as characters from 0 to 255), and the value it returns
+runProgramOutput :: Program -> Result (String, Maybe MirValue) String
+runProgramOutput program = mapResult (\(value, output) -> (output, value)) (runE (runFunction program (progMain program) []))
+
+-- The evaluator is the failure of a result, with the bytes written so far
+newtype E a = E {runE :: Result (a, String) String}
 
 instance Functor E where
-    fmap f (E r) = E (mapResult f r)
+    fmap f (E r) = E (mapResult (\(a, output) -> (f a, output)) r)
 
 instance Applicative E where
-    pure a = E (Ok a)
-    E f <*> E g = E (f `bindResult` \h -> mapResult h g)
+    pure a = E (Ok (a, ""))
+    E f <*> E g = E (f `bindResult` \(h, o1) -> mapResult (\(a, o2) -> (h a, o1 ++ o2)) g)
 
 instance Monad E where
-    E g >>= f = E (g `bindResult` \a -> runE (f a))
+    E g >>= f = E (g `bindResult` \(a, o1) -> runE (f a) `bindResult` \(b, o2) -> Ok (b, o1 ++ o2))
 
 failE :: String -> E a
 failE e = E (Error e)
 
 liftE :: Result a String -> E a
-liftE = E
+liftE r = E (mapResult (\a -> (a, "")) r)
+
+write :: Char -> E ()
+write c = E (Ok ((), [c]))
 
 runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue)
 runFunction program fn args
@@ -94,6 +103,11 @@ runStatements frame [] = return frame
 runStatements frame (Ghost{} : rest) = runStatements frame rest
 runStatements frame (Drop{} : rest) = runStatements frame rest
 runStatements frame (Peek dest rv : rest) = runStatements frame (Assign dest rv : rest)
+runStatements frame (Assign dest (ListOp WriteByte [o]) : rest) = do
+    v <- liftE (operandValue frame o)
+    case v of
+        MInt b -> write (chr (fromIntegral (b `mod` 256))) >> runStatements (Map.insert dest v frame) rest
+        _ -> failE "writeByte takes an Int"
 runStatements frame (Assign dest rv : rest) = do
     v <- liftE (evalRvalue frame rv)
     runStatements (Map.insert dest v frame) rest
@@ -183,6 +197,7 @@ listOp Push [MList l, x] = Ok (MList (l ++ [x]))
 listOp Pop [MList []] = Error "Pop requires a non-empty list"
 listOp Pop [MList l] = Ok (MList (init l))
 listOp NewBoxed args = listOp NewArray args
+listOp WriteByte _ = Error "writeByte is run by the statement that calls it"
 listOp NewEmptyBoxed [] = Ok (MList [])
 listOp NewArray [MInt n, x]
     | n < 0 = Error "array needs a size that is not negative"

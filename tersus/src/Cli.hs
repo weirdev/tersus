@@ -12,7 +12,7 @@ import Data.List (intercalate)
 import System.IO
 
 import Mir (renderProgram)
-import MirEval (renderMirValue, runProgram)
+import MirEval (renderMirValue, runProgramOutput)
 import Pipeline
 import TersusTypes
 import Utils
@@ -60,9 +60,10 @@ runSource :: Command -> String -> Result String String
 runSource Check source = mapResult (const "OK") (compileSource source)
 runSource Interpret source =
     compileSource source `bindResult` \program ->
-        case runProgram program of
+        case runProgramOutput program of
             Error e -> Error ("Evaluation failed: " ++ e)
-            Ok result -> Ok (maybe "" renderMirValue result)
+            -- (what the program wrote, then its value: the same text as an executable prints)
+            Ok (written, result) -> Ok (decodeUtf8 written ++ maybe "" renderMirValue result)
 runSource Mir source = mapResult renderProgram (compileSource source)
 runSource Owned source = mapResult renderProgram (ownedSource source)
 runSource Llvm source = llvmSource source

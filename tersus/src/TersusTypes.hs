@@ -22,6 +22,9 @@ data BuiltinFunct
       NewBoxedArray
     | -- NewEmptyArray: Array::empty(), an array of no elements in a Box that carries the size 0, of any element type (no element is needed)
       NewEmptyArray
+    | -- WriteByte b: writeByte(b), the low eight bits of b written to the standard output. Its value is b: the only effect of a program that the
+      -- language has, which the validator does not model beyond that.
+      WriteByte
     | -- Unsize b: the Box of an array of a size, as a Box of an array of any size (the size goes into the Box, the value is the same)
       Unsize
     | -- NewBox x: x held in a Box. A Box has the value of what it holds (it is where that lives that differs), so in a value it is x.
