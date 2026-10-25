@@ -164,11 +164,15 @@ typeArguments caller target args dest = [fromMaybe TInt (lookup t found) | t <- 
         Copy l -> localType <$> Map.lookup l (fnLocals caller)
         Move l -> localType <$> Map.lookup l (fnLocals caller)
         Const c -> constantType c
+    firstKnown cs = case [t | c <- cs, Just t <- [constantType c]] of
+        t : _ -> t
+        [] -> TInt
     constantType c = case c of
         CInt _ -> Just TInt
         CBool _ -> Just TBool
-        CList (x : _) -> TList <$> constantType x
-        CArray cs@(x : _) -> (\t -> TArrayOf t (SizeConst (toInteger (length cs)))) <$> constantType x
+        -- (an empty list or array has the shape, and the element type that nothing decides is an Int, as it is everywhere)
+        CList cs -> Just (TList (firstKnown cs))
+        CArray cs -> Just (TArrayOf (firstKnown cs) (SizeConst (toInteger (length cs))))
         CData name _ -> Just (TNamed name)
         _ -> Nothing
 
