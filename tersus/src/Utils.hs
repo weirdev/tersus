@@ -10,6 +10,17 @@ intMax = 2 ^ (63 :: Int) - 1
 inIntRange :: Integer -> Bool
 inIntRange n = intMin <= n && n <= intMax
 
+-- The bytes of the UTF-8 encoding of a character
+utf8Bytes :: Char -> [Int]
+utf8Bytes c
+    | n < 0x80 = [n]
+    | n < 0x800 = [0xC0 + n `div` 64, continuation n]
+    | n < 0x10000 = [0xE0 + n `div` 4096, continuation (n `div` 64), continuation n]
+    | otherwise = [0xF0 + n `div` 262144, continuation (n `div` 4096), continuation (n `div` 64), continuation n]
+  where
+    n = fromEnum c
+    continuation m = 0x80 + m `mod` 64
+
 data Result a e = Ok a | Error e deriving (Eq, Show)
 
 bindResult :: Result a e -> (a -> Result b e) -> Result b e

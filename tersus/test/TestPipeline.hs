@@ -96,6 +96,7 @@ testExamples =
         , testExampleFile "examples/array_sizes.tersus" (ExpectReturn (VInt 42))
         , testExampleFile "examples/type_parameters.tersus" (ExpectReturn (VInt 2045))
         , testExampleFile "examples/generic_structs.tersus" (ExpectReturn (VInt 2224))
+        , testExampleFile "examples/strings.tersus" (ExpectReturn (VInt 980))
         , testExampleFile "examples/vec.tersus" (ExpectReturn (VInt 2491212381))
         , testExampleFile "examples/spec_functions.tersus" (ExpectReturn (VInt 25070))
         , testExampleFile "examples/list_methods.tersus" (ExpectReturn (VInt 508221))

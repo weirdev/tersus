@@ -17,6 +17,7 @@ build-type:     Simple
 extra-source-files:
     lib/lists.tersus
     lib/prelude.tersus
+    lib/string.tersus
 
 source-repository head
   type: git
@@ -100,6 +101,7 @@ test-suite tersus-test
       TestBorrow
       TestGenerics
       TestSequence
+      TestStrings
       TestBox
       TestTraits
       TestPipeline
