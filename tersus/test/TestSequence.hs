@@ -94,6 +94,8 @@ testSequence =
                 , testCase "also one that only mentions Sequence" (runsAs "fn total(v: &Vec<Int>) -> Int [{ affirm size(v) = 1; }] [{ }] { return Sequence::get(v, 0); }; return total(Vec::new(3).push(4));" "4")
                 , testCase "a program with a Vec of its own does not" (runsAs "struct Vec<T, n> { cells: Array<T, n> }; v = Vec<Int, 2> { cells: #[1, 2] }; return get(v.cells, 1);" "2")
                 , testCase "nor one with a Sequence of its own" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
+                , testCase "the names that native code makes a list of are not a program's" (errorHas "fn stdListNew() -> Int { return 7; }; return [1];" "stdListNew is reserved")
+                , testCase "nor is the struct" (errorHas "struct StdList { x: Int }; return 1;" "StdList is reserved")
                 , testCase "a program that mentions neither is as it was" (runsAs "return 4;" "4")
                 , testCase "the lines of an error are those of the program" (errorHas "\n\nreturn ( ;" "line 3")
                 , testCase "an error in the use of the library is the program's" (errorHas "v = Vec::new(1).push(2);\nreturn v.get(5);" "Could not prove: i < self.len")

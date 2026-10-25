@@ -255,9 +255,11 @@ lowerFunction original fn =
     listCall dest destTy op os = do
         operandTy <- maybe (TList TInt) id <$> operandType (head os)
         -- (a list that is pushed to or set is the list that results, which says the type of a constant that is empty)
-        let listTy = case (op, destTy) of
-                (Push, TList _) -> destTy
-                (Set, TList _) -> destTy
+        let listTy = case (op, destTy, head os) of
+                (Push, TList _, _) -> destTy
+                (Set, TList _, _) -> destTy
+                -- (a constant list that is read from has elements of the type that is read, which an empty one among them does not say)
+                (_, _, Const _) | op `elem` [First, Last, Get] -> TList destTy
                 _ -> operandTy
             element = case listTy of
                 TList t -> t
@@ -295,7 +297,9 @@ lowerFunction original fn =
                     TArrayOf t _ -> t
                     TBox (TArrayOf t _) -> t
                     _ -> TInt
-            os' <- mapM (\(i, o) -> operandFor (if i == (1 :: Int) && op `elem` [NewArray, NewBoxed] then element else TInt) o) (zip [0 ..] os)
+            -- (the element that an array is made of, or that is put in it, has the type of the elements of the array)
+            let isElement i = (i == (1 :: Int) && op `elem` [NewArray, NewBoxed]) || (i == 2 && op == Set)
+            os' <- mapM (\(i, o) -> operandFor (if isElement i then element else TInt) o) (zip [0 ..] os)
             return (ListOp op os')
         MakeBox o -> MakeBox <$> operandFor (case destTy of TBox t -> t; t -> t) o
         Unbox o -> return (Unbox (renameOperand o))

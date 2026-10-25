@@ -19,7 +19,7 @@ import Data.Char (isAlphaNum)
 import Parse (emptyDecls, parseStatementBlock, parseStatementBlockWith)
 import MirLists (lowerLists)
 import PreludeSource (listsSource, preludeSource)
-import TersusTypes (Statement)
+import TersusTypes (Expression (..), Statement (..), Value (..))
 import TypeCheck (elaborate)
 import Utils
 
@@ -33,15 +33,35 @@ import Utils
 -- the stage that refused the program, as the command line prints them.
 
 parseSource :: String -> Result [Statement] String
-parseSource source
+parseSource source = parseSourceWith True source
+
+-- (the library of lists is the one program that may use the names that a program may not)
+parseSourceWith :: Bool -> String -> Result [Statement] String
+parseSourceWith reserving source
     | usesPrelude source = case parseStatementBlockWith emptyDecls preludeSource of
         Left err -> Error ("Parse error in the prelude: " ++ show err)
         Right (library, declared) -> case parseStatementBlockWith declared source of
             Left err -> Error ("Parse error: " ++ show err)
-            Right (stmts, _) -> Ok (library ++ stmts)
+            Right (stmts, _) -> checked stmts `bindResult` \stmts' -> Ok (library ++ stmts')
     | otherwise = case parseStatementBlock source of
         Left err -> Error ("Parse error: " ++ show err)
-        Right stmts -> Ok stmts
+        Right stmts -> checked stmts
+  where
+    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
+
+-- A name the program declares that native code uses for lists (see MirLists)
+reservedName :: [Statement] -> Maybe String
+reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved name] of
+    name : _ -> Just name
+    [] -> Nothing
+  where
+    declared stmt = case stmt of
+        Assign name (Val VFunct{}) -> [name]
+        StructDef name _ _ _ -> [name]
+        EnumDef name _ -> [name]
+        TraitDef name _ _ -> [name]
+        _ -> []
+    reserved name = name == "StdList" || take 7 name == "stdList"
 
 -- Every program has the library of lib/prelude.tersus (`Vec` and `Sequence`) in front of it if it mentions either name and does not
 -- declare them itself, so a program that has a `Vec` of its own is unchanged
@@ -59,8 +79,11 @@ usesPrelude source = any (`elem` ws) ["Vec", "Sequence"] && not (any declared ws
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
-compileSource source =
-    parseSource source `bindResult` \stmts ->
+compileSource = compileWith True
+
+compileWith :: Bool -> String -> Result M.Program String
+compileWith reserving source =
+    parseSourceWith reserving source `bindResult` \stmts ->
         stage "Validation failed: " (elaborate stmts) `bindResult` \elaborated ->
             stage "Lowering failed: " (lowerElaborated elaborated) `bindResult` \program ->
                 stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
@@ -83,7 +106,7 @@ nativeProgram = lowerLists listLibrary
 
 -- The library, compiled and validated once
 listLibrary :: M.Program
-listLibrary = case compileSource listsSource of
+listLibrary = case compileWith False listsSource of
     Ok program -> program
     Error e -> error ("lib/lists.tersus does not compile: " ++ e)
 
