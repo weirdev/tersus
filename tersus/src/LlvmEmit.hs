@@ -243,13 +243,6 @@ constructor program name =
         Just (StructDecl fields) -> Just (0, fields)
         _ -> listToMaybe [(i, fields) | EnumDecl variants <- Map.elems (progTypes program), (i, (v, fields)) <- zip [0 ..] variants, v == name]
 
--- The enum that has the variant
--- (a struct is its own constructor, and a cast to it, `p as P`, has the type of a variant of it)
-ownerOf :: Program -> Name -> Maybe Name
-ownerOf program v =
-    case Map.lookup v (progTypes program) of
-        Just StructDecl{} -> Just v
-        _ -> listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
 
 -- The type of a value that a struct or a variant builds
 constructedType :: Program -> Name -> Type
@@ -586,23 +579,6 @@ isFat :: Type -> Bool
 isFat (TBox (TArrayOf _ SizeAny)) = True
 isFat _ = False
 
--- The 8-byte words of a value held inline: an Int, a Bool or an address is one, and an array is its elements', a struct its fields' and
--- an enum a word and the widest of its variants'
-slotsOf :: Program -> Type -> Integer
-slotsOf program ty =
-    case ty of
-        _ | isFat ty -> 2
-        TArray t n -> n * slotsOf program t
-        TNamed n -> declaredWords n
-        TVariant v -> maybe 1 declaredWords (ownerOf program v)
-        _ -> 1
-  where
-    declaredWords n =
-        case Map.lookup n (progTypes program) of
-            Just (StructDecl fields) -> sum [slotsOf program t | (_, t) <- fields]
-            Just (EnumDecl variants) -> 1 + maximum (0 : [sum [slotsOf program t | (_, t) <- fields] | (_, fields) <- variants])
-            Nothing -> 1
-
 slotsG :: Type -> G Integer
 slotsG ty = (`slotsOf` ty) <$> programG
 
@@ -769,6 +745,18 @@ elementAddress base index bytes = do
 elementValue :: Function -> Type -> Operand -> G String
 elementValue fn elementTy o = if isAggregate elementTy then operandAddress fn elementTy o else operandAt fn elementTy o
 
+-- Frees what an element owns, before another is written over it
+dropElement :: Type -> String -> String -> G ()
+dropElement elementTy base index = do
+    program <- programG
+    if needsDrop program elementTy
+        then do
+            bytes <- bytesG elementTy
+            p <- elementAddress base index bytes
+            d <- descriptor elementTy
+            emit ("call void @tersus_drop(ptr " ++ d ++ ", ptr " ++ p ++ ")")
+        else pure ()
+
 writeElement :: Type -> String -> String -> String -> G ()
 writeElement elementTy base index value = do
     bytes <- bytesG elementTy
@@ -807,10 +795,13 @@ assignAggregate dropsOld fn dest ty rv = do
         Use o -> operandAddress fn ty o >>= \src -> fromPart src False
         ListOp NewArray [_, x] | TArray elementTy n <- ty -> fillArray fn target elementTy n x
         ListOp Set [a, i, x] | TArray elementTy _ <- ty -> do
-            src <- arrayPtr fn a
+            -- (an array that owns something is moved to room of its own first, and what the destination held is freed)
+            src <- operandAddress fn ty a
             index <- operandAt fn TInt i
             value <- elementValue fn elementTy x
+            freeOld
             copyWords target src bytes
+            dropElement elementTy target index
             writeElement elementTy target index value
         -- Array::boxed(n, x): room on the heap for n elements, filled with x; the Box holds where it is and n
         ListOp NewBoxed [n, x] | TBox (TArrayOf elementTy _) <- ty -> do
@@ -840,6 +831,7 @@ assignAggregate dropsOld fn dest ty rv = do
             block <- ins "a" ("load ptr, ptr " ++ src)
             index <- operandAt fn TInt i
             value <- elementValue fn elementTy x
+            dropElement elementTy block index
             writeElement elementTy block index value
             fromPart src False
         -- an element that is a value held inline, of an array or of a list
@@ -923,7 +915,17 @@ fillElements fn target elementTy count known x
         bytes <- maybe (ins "z" ("mul i64 " ++ count ++ ", 8")) (pure . show . (8 *)) known
         emit ("call void @llvm.memset.p0.i64(ptr " ++ target ++ ", i8 0, i64 " ++ bytes ++ ", i1 false)")
     | otherwise = do
-        value <- elementValue fn elementTy x
+        program <- programG
+        -- an element that owns something is not the same words n times: each is a copy of the one that is given, which stays its own
+        let owning = needsDrop program elementTy
+        value <- if owning then pure "" else elementValue fn elementTy x
+        source <- case x of
+            Copy l | owning -> pure (slot l)
+            Move l | owning -> pure (slot l)
+            _ | owning -> failG "An element that owns something is made from a constant"
+            _ -> pure ""
+        d <- if owning then descriptor elementTy else pure ""
+        bytes <- bytesG elementTy
         k <- freshLabel "fill"
         let before = k ++ ".before"
             header = k ++ ".header"
@@ -939,7 +941,9 @@ fillElements fn target elementTy count known x
         c <- ins "c" ("icmp slt i64 " ++ i ++ ", " ++ count)
         emit ("br i1 " ++ c ++ ", label %" ++ body ++ ", label %" ++ done)
         label body
-        writeElement elementTy target i value
+        if owning
+            then elementAddress target i bytes >>= \p -> emit ("call void @tersus_clone(ptr " ++ d ++ ", ptr " ++ p ++ ", ptr " ++ source ++ ")")
+            else writeElement elementTy target i value
         emit (next ++ " = add i64 " ++ i ++ ", 1")
         emit ("br label %" ++ header)
         label done
@@ -984,6 +988,7 @@ arrayRead fn destType op os =
             block <- operandAt fn destType a
             index <- operandAt fn TInt i
             value <- elementValue fn elementTy x
+            dropElement elementTy block index
             writeElement elementTy block index value
             pure block
         (Get, [a, i]) -> do

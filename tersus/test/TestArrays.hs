@@ -4,7 +4,7 @@ import TersusTypes
 import TestHarness
 
 -- Array<T, N>: N elements held inline, wherever the array is made. The size is a constant and part of the type; the validator
--- knows it from the type of every local, and the elements are Int, Bool or arrays of them.
+-- knows it from the type of every local, and the elements are any value that has a size.
 testArrays :: Test
 testArrays =
     let runs body expected = parseEvalProgramHelper body (Just expected)
@@ -95,8 +95,11 @@ testArrays =
                 , testCase "the size in a proof is checked the same way" (rejected "affirm size(array(9223372036854775807 + 1 - 9223372036854775807, 0)) = 1; return 0;" "integer overflow in the size of an array")
                 , testCase "an array that is too large for a frame" (rejected "return size(array(9000, 0));" "more than the 8192")
                 , testCase "arrays inside an array count" (rejected "fn f(a: Array<Array<Int, 100>, 100>) -> Int { return 0; }; return 0;" "takes 10000 words")
-                , testCase "an element on the heap is not plain" (rejected "return size(array(2, [1]));" "an array holds Int, Bool or arrays of them, not List<Int>")
-                , testCase "an element that is a struct" (rejected "struct P { x: Int }; return size(array(2, P { x: 1 }));" "an array holds Int, Bool or arrays of them, not P")
+                , testCase "an element that is a list" (runs "return array(2, [1]);" (VList [VList [VInt 1], VList [VInt 1]]))
+                , testCase "an element that is a struct" (runs "struct P { x: Int }; return size(array(2, P { x: 1 }));" (VInt 2))
+                , testCase "an element that is a function" (rejected "fn f() -> Int { return 1; }; return size(array(2, f));" "an array holds values that have a size (Int, Bool, a list, a struct, an enum, a Box or an array), not fn() -> Int")
+                , testCase "a literal is made of Int, Bool and arrays" (rejected "return size(#[[1], [2]]);" "an array literal holds Int, Bool or arrays of them, not List<Int>")
+                , testCase "an array of structs counts the words of the struct" (rejected "struct P { a: Int, b: Int, c: Int }; fn f(x: Array<P, 3000>) -> Int { return 0; }; return 0;" "takes 9000 words")
                 , testCase "array is not a value" (rejected "h = array; return 0;" "cannot be used as a value")
                 ]
             , TestList
@@ -197,5 +200,26 @@ testArrays =
                 , testCase "a size is not named twice" (rejected "struct Q<n, n> { body: Array<Int, n> }; return 1;" "names a size twice")
                 , testCase "a size that is not given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P<?>) -> Int { return 0; }; return 1;" "a size that is not given")
                 , testCase "the declaration is parsed with spaces" (runs "struct Q < n , m > { a: Array<Int, n>, b: Array<Int, m> }; q = Q < 1 , 2 > { a: #[1], b: #[2, 3] }; return size(q.a) * 10 + size(q.b);" (VInt 12))
+                ]
+            , TestList
+                "elements that own something"
+                [ testCase "n copies of a list" (runs "a = array(3, push([], 1)); return a;" (VList [VList [VInt 1], VList [VInt 1], VList [VInt 1]]))
+                , testCase "a copy is its own" (runs "a = array(2, push([], 1)); c = a; c = set(c, 0, push(push([], 8), 9)); return a;" (VList [VList [VInt 1], VList [VInt 1]]))
+                , testCase "an element is replaced" (runs "a = array(3, push([], 1)); a = set(a, 1, push(push([], 2), 3)); return a;" (VList [VList [VInt 1], VList [VInt 2, VInt 3], VList [VInt 1]]))
+                , testCase "an element is read" (runs "a = array(2, push(push([], 5), 6)); return size(get(a, 0)) + get(get(a, 1), 1);" (VInt 8))
+                , testCase "an element that is read and changed does not change the array" (runs "a = array(2, push([], 1)); l = get(a, 0); l = push(l, 7); return a;" (VList [VList [VInt 1], VList [VInt 1]]))
+                , testCase "an array of arrays of lists" (runs "a = array(2, array(2, push([], 5))); return get(get(a, 1), 0);" (VList [VInt 5]))
+                , testCase "an array of structs that own lists" (runs "struct P { xs: List<Int>, n: Int }; a = array(2, P { xs: push([], 1), n: 7 }); a = set(a, 0, P { xs: [], n: 9 }); return a;" (VList [VData "P" [("xs", VList []), ("n", VInt 9)], VData "P" [("xs", VList [VInt 1]), ("n", VInt 7)]]))
+                , testCase "an array of Boxes" (runs "a = array(2, Box::new(5)); return Box::unbox(get(a, 1));" (VInt 5))
+                , testCase "arrays of lists are compared" (runs "return array(2, push([], 1)) = array(2, push([], 1));" (VBool True))
+                , testCase "and told apart" (runs "return array(2, push([], 1)) != array(2, []);" (VBool True))
+                , testCase "a function takes and gives one" (runs "fn grow(a: Array<List<Int>, 2>) -> Array<List<Int>, 2> { return set(a, 1, push(get(a, 1), 9)); }; return grow(grow(array(2, [])));" (VList [VList [], VList [VInt 9, VInt 9]]))
+                , testCase "or lends it" (runs "fn total(a: &Array<List<Int>, 2>) -> Int { return size(get(a, 0)) + size(get(a, 1)); }; a = array(2, push([], 1)); return total(a) + total(a) + size(a);" (VInt 6))
+                , testCase "a struct has one" (runs "struct H { items: Array<List<Int>, 2>, n: Int }; h = H { items: array(2, push([], 3)), n: 1 }; g = H { n: 2, ..h }; return g;" (VData "H" [("items", VList [VList [VInt 3], VList [VInt 3]]), ("n", VInt 2)]))
+                , testCase "an enum has one" (runs "enum Shape { Pair { xs: Array<List<Int>, 2> }, None }; s = Shape::Pair { xs: array(2, push([], 4)) }; return match s { Shape::Pair { xs: xs } => size(get(xs, 1)), Shape::None => 0 };" (VInt 1))
+                , testCase "a list has one" (runs "l = push(push([], array(2, push([], 1))), array(2, [])); return get(l, 0);" (VList [VList [VInt 1], VList [VInt 1]]))
+                , testCase "the size of an element array is known" (valid "a = array(2, push([], 1)); affirm size(a) = 2; return size(get(a, 0));")
+                , testCase "an index past the end" (rejected "a = array(2, push([], 1)); return get(a, 2);" "Relation does not hold")
+                , testCase "a function with sizes takes one" (runs "fn count<n>(a: Array<List<Int>, n>) -> Int { return n; }; return count(array(3, []));" (VInt 3))
                 ]
             ]

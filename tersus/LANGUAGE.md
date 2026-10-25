@@ -1081,7 +1081,7 @@ A goal `x != y` is proved when `x < y` or `x > y` is, and a fact `x != y` is use
 
 ## Arrays
 
-`Array<T, N>` is the builtin for a sequence of `N` elements of one type. The size is a constant and part of the type, and the array is held inline, wherever it is made: in the frame of the function that has it, with no pointer to it, so making one costs no allocation and a copy is a copy of the words. The elements are `Int`, `Bool`, or arrays of them.
+`Array<T, N>` is the builtin for a sequence of `N` elements of one type. The size is a constant and part of the type, and the array is held inline, wherever it is made: in the frame of the function that has it, with no pointer to it, so making one costs no allocation and a copy is a copy of the words. The elements are any value that has a size: `Int`, `Bool`, a list, a struct, an enum, a `Box`, or another array (see Elements that own something).
 
 ```tersus
 a = array(4, 0);          // #[0, 0, 0, 0]: four copies of 0, an Array<Int, 4>
@@ -1148,7 +1148,7 @@ return total(five) + total(fixed);  // 20
 - **`Array::boxed(n, x)`** makes `n` copies of `x` on the heap, with an `n` that the program works out (`array(n, x)` needs a constant, since it is held inline). It has the contract of `array`: `n` must not be negative, the size is `n`, and every element is `x`. It is written as a call and cannot be used as a value.
 - **A Box of an array of a size is a Box of an array of any size where one is wanted** (`Box<Array<Int, 4>>` is given to a parameter of type `Box<Array<Int>>`): the unsizing conversion, which keeps the value and makes the size part of the Box. It is made where a value is given to something that has a type: an argument, a field of a struct or enum, a returned value, and a variable that already has the type. It does not go the other way (`Box<Array<Int>>` is not a `Box<Array<Int, 3>>`), since the size is then only known when the program runs.
 - **What the validator knows.** A `Box<Array<T, N>>` has the size `N` from its type, as an array has, and the size carried by a `Box<Array<T>>` is the `size` of it, so a function over any size says what it needs of it in a contract (`get(a, 0)` needs `size(a) > 0`) and the caller proves it.
-- **What it holds.** The elements are plain, as for any array: `Int`, `Bool` or arrays of them.
+- **What it holds.** The elements are any value that has a size, as for any array.
 
 An array is a value like a number, so it can be a field of a struct or an enum and an element of a list (`examples/array_data.tersus`): `struct Image { id: Int, pixels: Array<Int, 4> }`, `enum Tile { Row { cells: Array<Int, 2> }, Block { id: Int, cells: Array<Int, 4> } }`, `List<Array<Int, 2>>`. Reading a field or an element gives a copy of the array, which the program can change without changing the struct or the list (`set` gives a new array), and a struct is updated around a new one with `..base`. The array's words are in line, in the struct (the variants of an enum are as wide as their fields) or one after another in the list, so no array is allocated apart.
 
@@ -1216,7 +1216,23 @@ return total(a) + total(Packet<1> { id: 1, body: #[10] });   // 13 + 11
 
 See `examples/sized_structs.tersus`.
 
-What an array cannot be yet: an element that is a list, a struct or an enum.
+### Elements that own something
+
+An element can be a list, a struct, an enum, a `Box`, or an array of those. An array that holds one owns it as a struct owns its fields: it is moved with the array, copied with it (a copy shares nothing with the original), and freed with it, and replacing an element frees the one it held.
+
+```tersus
+a = array(3, push([], 1));            // Array<List<Int>, 3>: three lists, each [1]
+a = set(a, 1, push(push([], 2), 3));  // the second is replaced, and the list it held is freed
+l = get(a, 0);                        // a copy of the first
+l = push(l, 9);                       // does not change a
+return a;                             // [[1], [2, 3], [1]]
+```
+
+- **`array(n, x)` copies `x` into each slot** (a list or a struct that owns one is cloned `n` times); `set(a, i, x)` takes `x`. `get`, `first` and `last` give a copy of the element, as for a list. Equality and printing go through the elements.
+- **A literal is for Int, Bool and arrays of them**: `#[[1], [2]]` is an error (make the array with `array(n, x)` and `set`), since a literal is a constant that is written out.
+- **Not a function**: an array of functions is an error.
+- **Frame limit.** The 8192 words an array held in a frame can have are counted in words of the elements (`Array<P, 3000>` for a struct of 3 words takes 9000).
+- **On the heap.** `Array::boxed(n, x)` and a `Box<Array<T>>` hold elements of any of these types too; the Box frees them when it is freed.
 
 ## Current Limitations
 

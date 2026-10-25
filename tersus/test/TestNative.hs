@@ -50,7 +50,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "array_data", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "safe_access", "sized_structs", "structs", "termination", "traits", "types", "update_list"
@@ -346,6 +346,24 @@ arrayPrograms =
     , ("a lent list in a loop", "fn total(a: &List<Int>) -> Int { return size(a); }; l = push(push([], 1), 2); n = 0; s = 0; while n < 1000 [{ affirm n >= 0; }] shrinks 1000 - n { s = s + total(l); n = n + 1; }; return s;")
     , ("a lent array that the caller then changes", "fn lead(a: &Array<Int, 2>) -> Int { return get(a, 0); }; x = #[1, 2]; a = lead(x); x = set(x, 0, 9); return a * 10 + lead(x);")
     , ("a function with a size lends", "fn count<n>(a: &Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) + count(array(2, 0));")
+    , ("an array of lists", "a = array(3, push([], 1)); a = set(a, 1, push(push([], 2), 3)); return a;")
+    , ("an array of lists is read", "a = array(2, push(push([], 5), 6)); return size(get(a, 0)) + get(get(a, 1), 1);")
+    , ("an array of lists is copied", "a = array(2, push([], 5)); c = a; c = set(c, 0, push([], 9)); return a;")
+    , ("an element of an array of lists is changed and the array is not", "a = array(2, push([], 1)); l = get(a, 0); l = push(l, 7); return a;")
+    , ("an array of structs that own lists", "struct P { xs: List<Int>, n: Int }; a = array(2, P { xs: push([], 1), n: 7 }); a = set(a, 0, P { xs: [], n: 9 }); return a;")
+    , ("an array of Boxes", "a = array(2, Box::new(5)); return Box::unbox(get(a, 1));")
+    , ("an array of arrays of lists", "a = array(2, array(2, push([], 5))); return a;")
+    , ("arrays of lists are compared", "return array(2, push([], 1)) = array(2, push([], 1));")
+    , ("an array of lists is given and returned", "fn grow(a: Array<List<Int>, 2>) -> Array<List<Int>, 2> { return set(a, 1, push(get(a, 1), 9)); }; return grow(grow(array(2, [])));")
+    , ("an array of lists is lent", "fn total(a: &Array<List<Int>, 2>) -> Int { return size(get(a, 0)) + size(get(a, 1)); }; a = array(2, push([], 1)); return total(a) + total(a) + size(a);")
+    , ("a struct that has an array of lists", "struct H { items: Array<List<Int>, 2>, n: Int }; h = H { items: array(2, push([], 3)), n: 1 }; g = H { n: 2, ..h }; return g;")
+    , ("an enum that has an array of lists", "enum Shape { Pair { xs: Array<List<Int>, 2> }, None }; s = Shape::Pair { xs: array(2, push([], 4)) }; return match s { Shape::Pair { xs: xs } => size(get(xs, 1)), Shape::None => 0 };")
+    , ("a list of arrays of lists", "l = push(push([], array(2, push([], 1))), array(2, [])); return get(l, 0);")
+    , ("a Box of an array of lists", "b = Box::new(array(2, push([], 1))); return b;")
+    , ("Array::boxed of lists", "b = Array::boxed(3, push([], 1)); b = set(b, 2, push(push([], 4), 5)); return b;")
+    , ("Array::boxed of lists is copied", "b = Array::boxed(2, push([], 1)); c = b; c = set(c, 0, []); return b;")
+    , ("Array::boxed of structs", "struct P { xs: List<Int> }; a = Array::boxed(2, P { xs: push([], 1) }); return get(a, 1).xs;")
+    , ("a size parameter and an array of lists", "fn count<n>(a: Array<List<Int>, n>) -> Int { return n; }; return count(array(3, [])) + count(array(2, push([], 1)));")
     , ("a size parameter", "fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int { total = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { total = total + get(a, i) * get(b, i); i = i + 1; }; return total; }; return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);")
     , ("a size parameter, once for each size", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) * 100 + count(array(4, 0)) * 10 + count(#[]);")
     , ("a size parameter makes an array", "fn ones<n>(a: Array<Int, n>) -> Array<Int, n> { return array(n, 1); }; return ones(#[7, 8, 9]);")
@@ -488,6 +506,8 @@ memoryTests =
     , TestCase "a struct with a list is made and dropped in a loop" (underLimit "struct S { n: Int, xs: List<Int> }; fn mk(i: Int) -> S { return S { n: i, xs: push([], i) }; }; t = 0; i = 0; while i < 1000000 [{ affirm i >= 0; }] shrinks 1000000 - i { s = mk(i); t = t + size(s.xs); i = i + 1; }; return t;" "1000000\n")
     , TestCase "boxed arrays made, set and dropped in a loop" (underLimit "n = 0; total = 0; while n < 200000 [{ affirm n >= 0; }] shrinks 200000 - n { a = Array::boxed(n % 7 + 1, n); a = set(a, 0, 1); total = total + size(a) + get(a, 0); n = n + 1; }; return total;" "999994\n")
     , TestCase "boxes of arrays made and dropped in a loop" (underLimit "n = 0; total = 0; while n < 1000000 [{ affirm n >= 0; }] shrinks 1000000 - n { a = Box::new(array(2, n)); total = total + get(a, 0); n = n + 1; }; return total;" "499999500000\n")
+    , TestCase "arrays of lists made, changed and dropped in a loop" (underLimit "n = 0; total = 0; while n < 200000 [{ affirm n >= 0; }] shrinks 200000 - n { a = array(3, push(push([], n), n)); a = set(a, 1, push([], n)); total = total + size(get(a, 0)) + size(get(a, 1)); n = n + 1; }; return total;" "600000\n")
+    , TestCase "boxed arrays of lists made, changed and dropped in a loop" (underLimit "n = 0; total = 0; while n < 100000 [{ affirm n >= 0; }] shrinks 100000 - n { a = Array::boxed(n % 5 + 1, push([], n)); a = set(a, 0, []); total = total + size(a) + size(get(a, 0)); n = n + 1; }; return total;" "300000\n")
     , TestCase "lists of lists" (underLimit "rows = []; i = 0; while i < 20000 [{ affirm i >= 0; }] shrinks 20000 - i { row = push(push([], i), i); rows = push(rows, row); i = i + 1; }; return size(rows);" "20000\n")
     , TestCase "values made and dropped in a loop" (underLimit "struct P { x: Int, ys: List<Int> }; s = 0; i = 0; while i < 2000000 [{ affirm i >= 0; }] shrinks 2000000 - i { p = P { x: i, ys: push(push([], i), 1) }; s = s + p.x; i = i + 1; }; return s;" "1999999000000\n")
     ]

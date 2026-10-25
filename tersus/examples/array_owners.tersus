@@ -1,0 +1,32 @@
+// An array can hold values that own something: lists, structs that hold lists, Boxes, and arrays of those. The array owns them as a
+// struct owns its fields: a copy of the array shares nothing with it, replacing an element frees the one it held, and the array's
+// elements are freed with it.
+//
+// array(n, x) puts a copy of x in each slot; get gives a copy of an element, so changing it does not change the array.
+struct Player {
+    name: Int,
+    scores: List<Int>,
+};
+
+fn total(players: &Array<Player, 3>) -> Int {
+    sum = 0;
+    i = 0;
+    while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i {
+        sum = sum + size(get(players, i).scores);
+        i = i + 1;
+    };
+    return sum;
+};
+
+players = array(3, Player { name: 0, scores: push([], 10) });
+players = set(players, 1, Player { name: 1, scores: push(push([], 20), 30) });
+
+// get gives a copy: the player in the array has not changed
+copy = get(players, 0);
+copy = Player { scores: push(copy.scores, 99), ..copy };
+
+// and an array copies as a whole
+backup = players;
+players = set(players, 2, Player { name: 2, scores: [] });
+
+return total(players) + total(backup) + size(copy.scores) * 100;    // (1 + 2 + 0) + (1 + 2 + 1) + 200

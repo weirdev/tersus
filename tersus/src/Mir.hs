@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Mir
     ( Local (..)
     , BlockId (..)
@@ -19,6 +21,8 @@ module Mir
     , LoopSpec (..)
     , emptySpec
     , completeInstances
+    , slotsOf
+    , ownerOf
     , successors
     , renderProgram
     , renderFunction
@@ -30,10 +34,11 @@ module Mir
 import Data.List (intercalate)
 import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
+import Data.Maybe (listToMaybe)
 
 import Pretty (renderType, renderVarProof)
 import qualified Data.Set as Set
-import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, substSizes)
+import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, substSizes, Size (..), pattern TArray)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -251,6 +256,31 @@ completeInstances program
         CList cs -> concatMap constantNames cs
         CArray cs -> concatMap constantNames cs
         _ -> []
+
+-- The enum that has the variant
+-- (a struct is its own constructor, and a cast to it, `p as P`, has the type of a variant of it)
+ownerOf :: Program -> Name -> Maybe Name
+ownerOf program v =
+    case Map.lookup v (progTypes program) of
+        Just StructDecl{} -> Just v
+        _ -> listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
+
+-- The 8-byte words of a value held inline: an Int, a Bool or an address is one, and an array is its elements', a struct its fields' and
+-- an enum a word and the widest of its variants'. A Box of an array of no size is two (the address and the number of elements).
+slotsOf :: Program -> Type -> Integer
+slotsOf program ty =
+    case ty of
+        TBox (TArrayOf _ SizeAny) -> 2
+        TArray t n -> n * slotsOf program t
+        TNamed n -> declaredWords n
+        TVariant v -> maybe 1 declaredWords (ownerOf program v)
+        _ -> 1
+  where
+    declaredWords n =
+        case Map.lookup n (progTypes program) of
+            Just (StructDecl fields) -> sum [slotsOf program t | (_, t) <- fields]
+            Just (EnumDecl variants) -> 1 + maximum (0 : [sum [slotsOf program t | (_, t) <- fields] | (_, fields) <- variants])
+            Nothing -> 1
 
 emptySpec :: FunctionSpec
 emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty
