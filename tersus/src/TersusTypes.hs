@@ -32,6 +32,8 @@ data BuiltinFunct
       -- 0 to 255, and a different type, so nothing makes one by accident: these two are how a value goes from the one to the other.
       ToByte
     | FromByte
+    | -- BytesFrom list: the List<Byte> that a list of Ints from 0 to 255 written out is. Only the parser writes it, for the bytes of a string literal.
+      BytesFrom
     | -- Unsize b: the Box of an array of a size, as a Box of an array of any size (the size goes into the Box, the value is the same)
       Unsize
     | -- NewBox x: x held in a Box. A Box has the value of what it holds (it is where that lives that differs), so in a value it is x.

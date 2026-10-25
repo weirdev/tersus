@@ -1,12 +1,12 @@
 // Strings. A literal is a `String` of the UTF-8 bytes of its text (the library is lib/string.tersus, which a program that writes a literal or
-// mentions `String` has in front of it), so `size` counts bytes: "caf\u{e9}" is 5 long. A String is a Sequence<Int> and a Growable<Int> of its
-// bytes, so `size`, `get`, `set` and `push` work on it and a function on any Sequence<Int> takes one, and `concat` joins two.
+// mentions `String` has in front of it), so `size` counts bytes: "caf\u{e9}" is 5 long. A String is a Sequence<Byte> and a Growable<Byte> of its
+// bytes, so `size`, `get`, `set` and `push` work on it and a function on any Sequence<Byte> takes one, and `concat` joins two.
 
-fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] {
+fn total<S: Sequence<Byte>>(s: &S) -> Int [{ }] [{ }] {
     sum = 0;
     i = 0;
     while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i {
-        sum = sum + get(s, i);
+        sum = sum + toInt(get(s, i));
         i = i + 1;
     };
     return sum;
@@ -14,12 +14,12 @@ fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] {
 
 name = "caf\u{e9}";
 affirm size(name) = 5;
-affirm get(name, 3) = 195;
+affirm toInt(get(name, 3)) = 195;
 
-greeting = "hi, ".concat(name).push(33);
+greeting = "hi, ".concat(name).push(toByte(33));
 // (`concat` promises the size of the result and not yet what is in it)
 affirm size(greeting) = 10;
-affirm get(greeting, 9) = 33;
+affirm toInt(get(greeting, 9)) = 33;
 
 // Strings compare by their bytes
 if "ab".concat("c") = "abc" {

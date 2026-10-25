@@ -1016,7 +1016,7 @@ stringLiteralOf apply literal = do
     whitespace
     ctors <- declCtors <$> getState
     when (Map.lookup "String" ctors /= Just ["bytes"]) $ fail "a string literal needs the library String, which this program declares differently"
-    return (apply (builtinFunct (Ctor "String" ["bytes"])) [literal (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))])
+    return (apply (builtinFunct (Ctor "String" ["bytes"])) [apply (builtinFunct BytesFrom) [literal (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))]])
   where
     stringChar = noneOf "\"\\\n" <|> (char '\\' >> escape)
     escape =

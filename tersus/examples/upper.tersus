@@ -8,10 +8,10 @@ n = size(text);
 
 i = 0;
 while i < n [{ affirm i >= 0; affirm i <= n; affirm size(text) = n; }] shrinks n - i {
-    c = get(text, i);
+    c = toInt(get(text, i));
     if c >= 97 {
         if c <= 122 {
-            text = set(text, i, c - 32);
+            text = set(text, i, toByte(c - 32));
         };
     };
     i = i + 1;

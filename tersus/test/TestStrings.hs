@@ -36,19 +36,19 @@ testStrings =
                 ]
             , TestList
                 "the functions of a string"
-                [ testCase "size and get" (runs "s = \"abc\"; return size(s) * 1000 + get(s, 1);" "3098")
-                , testCase "push and set" (runs "s = \"ab\".push(99); return set(s, 0, 65);" (bytes [65, 98, 99]))
+                [ testCase "size and get" (runs "s = \"abc\"; return size(s) * 1000 + toInt(get(s, 1));" "3098")
+                , testCase "push and set" (runs "s = \"ab\".push(toByte(99)); return set(s, 0, toByte(65));" (bytes [65, 98, 99]))
                 , testCase "concat" (runs "return \"ab\".concat(\"cd\");" (bytes [97, 98, 99, 100]))
                 , testCase "concat borrows its second string" (runs "t = \"x\"; s = \"a\".concat(t).concat(t); return size(s) + size(t);" "4")
-                , testCase "strings are compared by their bytes" (runs "return \"ab\" = \"a\".push(98);" true)
+                , testCase "strings are compared by their bytes" (runs "return \"ab\" = \"a\".push(toByte(98));" true)
                 , testCase "and are not equal when the bytes differ" (runs "return \"ab\" = \"ac\";" false)
-                , testCase "a function on a Sequence<Int> takes one" (runs "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { sum = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { sum = sum + get(s, i); i = i + 1; }; return sum; }; return total(\"ab\");" "195")
+                , testCase "a function on a Sequence<Byte> takes one" (runs "fn total<S: Sequence<Byte>>(s: &S) -> Int [{ }] [{ }] { sum = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { sum = sum + toInt(get(s, i)); i = i + 1; }; return sum; }; return total(\"ab\");" "195")
                 , testCase "a string in a struct and a list" (runs "struct Named { name: String, n: Int }; xs = push(push([], Named { name: \"a\", n: 1 }), Named { name: \"bc\", n: 2 }); return size(get(xs, 1).name) + get(xs, 0).n;" "3")
                 ]
             , TestList
                 "validation"
                 [ testCase "a size is known from the literal" (valid "s = \"abc\"; affirm size(s) = 3; return 0;")
-                , testCase "and of a concat and a push" (valid "s = \"ab\".concat(\"c\").push(1); affirm size(s) = 4; affirm get(s, 3) = 1; return 0;")
+                , testCase "and of a concat and a push" (valid "s = \"ab\".concat(\"c\").push(toByte(1)); affirm size(s) = 4; affirm toInt(get(s, 3)) = 1; return 0;")
                 , testCase "an index out of range is refused" (rejected "s = \"ab\"; return get(s, 2);" "Could not prove: i < size(self.bytes)")
                 , testCase "a wrong size is refused" (rejected "s = \"ab\"; affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
                 , testCase "the size of a concat is the sum" (rejected "s = \"ab\".concat(\"cd\"); affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
@@ -56,15 +56,27 @@ testStrings =
             , TestList
                 "facts about strings"
                 [ testCase "a string written in a proof" (valid "c = \"ab\"; affirm c = \"ab\"; return 0;")
-                , testCase "is the String of its bytes" (valid "c = \"ab\"; affirm c = String { bytes: [97, 98] }; return 0;")
+                , testCase "is not written with a list of Ints" (rejected "c = \"ab\"; affirm c = String { bytes: [97, 98] }; return 0;" "expected List<Byte>, got List<Int>")
                 , testCase "and a different string is refused" (rejected "c = \"ab\"; affirm c = \"ac\"; return 0;" "Could not prove: c = String { bytes: [97, 99] }")
                 , testCase "an escape in a proof" (valid "c = \"a\\n\"; affirm c = \"a\\n\"; return 0;")
                 , testCase "a string in the input contract of a function" (valid "fn f(s: String) -> Int [{ affirm s = \"hi\"; }] [{ affirm return = 2; }] { return size(s); }; return f(\"hi\");")
                 , testCase "that a caller has to meet" (rejected "fn f(s: String) -> Int [{ affirm s = \"hi\"; }] [{ }] { return size(s); }; return f(\"ho\");" "Could not prove: s = String { bytes: [104, 105] }")
-                , testCase "concat keeps the bytes of the first string" (valid "c = \"ab\".concat(\"cd\"); affirm get(c, 0) = 97; affirm get(c, 1) = 98; return 0;")
-                , testCase "and not any others" (rejected "c = \"ab\".concat(\"cd\"); affirm get(c, 0) = 98; return 0;" "Could not prove")
+                , testCase "concat keeps the bytes of the first string" (valid "c = \"ab\".concat(\"cd\"); affirm toInt(get(c, 0)) = 97; affirm toInt(get(c, 1)) = 98; return 0;")
+                , testCase "and not any others" (rejected "c = \"ab\".concat(\"cd\"); affirm toInt(get(c, 0)) = 98; return 0;" "Could not prove")
                 , testCase "the bytes of the second follow the first, at the index that is named" (valid "a = \"ab\"; b = \"cd\"; c = a.concat(b); affirm get(c.bytes, size(a.bytes) + 1) = get(b.bytes, 1); return 0;")
-                , testCase "push keeps the bytes and adds one" (valid "c = \"ab\".push(99); affirm get(c, 0) = 97; affirm get(c, 2) = 99; return 0;")
+                , testCase "push keeps the bytes and adds one" (valid "c = \"ab\".push(toByte(99)); affirm toInt(get(c, 0)) = 97; affirm toInt(get(c, 2)) = 99; return 0;")
+                ]
+            , TestList
+                "the bytes of a string are Bytes"
+                [ testCase "get gives a Byte" (valid "s = \"ab\"; b = get(s, 0); affirm toInt(b) = 97; return 0;")
+                , testCase "every byte is from 0 to 255, with nothing said of it" (valid "fn f(s: String, i: Int) -> Int [{ affirm i >= 0; affirm i < size(s); }] [{ affirm return >= 0; affirm return < 256; }] { return toInt(get(s, i)); }; return f(\"ab\", 1);")
+                , testCase "also of what is read" (valid "fn f(i: Int) -> Int [{ affirm i >= 0; affirm i < 3; }] [{ affirm return >= 0; affirm return < 256; }] { s = String::read(3); if i < size(s) { return toInt(get(s, i)); }; return 0; }; return f(1);")
+                , testCase "an Int is not pushed" (rejected "s = \"ab\".push(99); return 0;" "expected Byte, got Int")
+                , testCase "nor set" (rejected "s = set(\"ab\", 0, 99); return 0;" "expected Byte, got Int")
+                , testCase "a Byte is pushed" (runs "s = \"ab\".push(toByte(99)); return size(s);" "3")
+                , testCase "a Byte that is made of an Int in range" (valid "n = 99; s = \"ab\".push(toByte(n)); return 0;")
+                , testCase "and not of one that is not" (rejected "fn f(n: Int) -> Int [{ }] [{ }] { s = \"ab\".push(toByte(n)); return size(s); }; return f(7);" "Funct input validation failed")
+                , testCase "a string is a Sequence<Byte>" (rejected "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(\"ab\");" "String implements Sequence<Byte>")
                 ]
             , TestList
                 "output"
