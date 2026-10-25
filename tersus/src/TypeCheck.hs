@@ -302,8 +302,10 @@ ensureInstance name = do
                 putState s'{tcTypes = Map.insert name [name] (tcTypes s'), tcCtors = Map.insert name (name, fields') (tcCtors s')}
             _ -> return ()
   where
+    -- (a size can come to be an Int, as the size of a function that is given the struct, so it has to fit in one)
     sizeKnown size = case size of
         SizeParam _ -> sizeInScope size
+        SizeConst c | not (inIntRange c) -> failTc ("Type error: the size " ++ show c ++ " in " ++ name ++ " is more than an Int can hold (an Int is 64 bits)")
         _ -> return ()
 
 ctorInfo :: Name -> TC (Name, [(Variable, Type)])
