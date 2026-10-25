@@ -85,6 +85,7 @@ data TcState = TcState
     , tcTemplates :: Map Name Template -- the functions with bounds on their types, each checked for the types it is called with
     , tcInstances :: Map Name Type -- the functions that a template has been made into so far, with their types
     , tcEmitted :: [Statement] -- the instances made since the last statement of the program, which come before it
+    , tcActive :: [Name] -- the templates that an instance is being checked of, which a call of one of them cannot make another instance of
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -106,7 +107,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty []
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] []
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -1573,10 +1574,10 @@ traitArguments trait ty = do
         own name args = case Map.lookup (trait, name) (tcImplArgs s) of
             Nothing -> Nothing
             Just (selfName, given) ->
-                let bound = case instanceOf selfName of
-                        Just (_, selfArgs) -> [(p, t) | (ArgType (TParam p), ArgType t) <- zip selfArgs args]
-                        Nothing -> []
-                in Just [substitute [] bound t | ArgType t <- given]
+                let (sizesBound, typesBound) = case instanceOf selfName of
+                        Just (_, selfArgs) -> ([(p, s) | (ArgSize (SizeParam p), ArgSize s) <- zip selfArgs args], [(p, t) | (ArgType (TParam p), ArgType t) <- zip selfArgs args])
+                        Nothing -> ([], [])
+                in Just [substitute sizesBound typesBound t | ArgType t <- given]
     case ty of
         TList e -> return (builtin e ["Sequence", "Growable"] >>= nonEmpty)
         TArrayOf e _ -> return (builtin e ["Sequence"] >>= nonEmpty)
@@ -1600,23 +1601,21 @@ templateCall name template inferred = do
             | otherwise -> do
                 args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at >> return arg') (zip3 [1 ..] pts inferred)
                 let given = zip types typeVars
-                    here = substitute [] given
-                forM_ (tmplBounds template) $ \(param, trait, wanted) -> do
-                    t <- maybe (return TInt) zonk (lookup param given)
-                    gives <- traitArguments trait t
-                    case gives of
-                        Nothing -> failTc ("Type error: " ++ name ++ " needs " ++ param ++ " to implement " ++ trait ++ ", and " ++ renderType t ++ " does not")
-                        Just actual -> do
-                            when (length actual /= length wanted) $
-                                failTc ("Type error: " ++ renderType t ++ " gives " ++ trait ++ " " ++ show (length actual) ++ " types, but the bound on " ++ param ++ " of " ++ name ++ " has " ++ show (length wanted))
-                            forM_ (zip actual wanted) $ \(have, want) -> do
-                                have' <- zonk have
-                                want' <- zonk (here want)
-                                ok <- unify have' want'
-                                unless ok $ do
-                                    h <- zonk have'
-                                    w <- zonk want'
-                                    failTc ("Type error: " ++ name ++ " needs " ++ param ++ " to implement " ++ trait ++ "<" ++ renderType w ++ ">, and " ++ renderType t ++ " implements " ++ trait ++ "<" ++ renderType h ++ ">")
+                -- (a bound on a type that another bound decides waits until that one has: the passes end when all are met, or none can be)
+                let attempt pending = do
+                        results <- forM pending $ \bound@(param, _, _) -> do
+                            t <- maybe (return TInt) zonk (lookup param given)
+                            case t of
+                                TVar _ -> return (Just bound)
+                                _ -> checkBound given bound t >> return Nothing
+                        let left = [bound | Just bound <- results]
+                        if null left
+                            then return ()
+                            else
+                                if length left == length pending
+                                    then failTc ("Type error: the type " ++ (\(param, _, _) -> param) (head left) ++ " of " ++ name ++ " cannot be worked out from its arguments")
+                                    else attempt left
+                attempt (tmplBounds template)
                 concrete <- mapM zonk typeVars
                 forM_ (zip types concrete) $ \(n, t) -> do
                     when (unknown t) $ failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " cannot be worked out from its arguments")
@@ -1624,12 +1623,33 @@ templateCall name template inferred = do
                         failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " would be " ++ renderType t ++ ", which is made of a type parameter of the function that calls: a function with bounds is made for types a call writes")
                 let instanceName' = name ++ "[" ++ intercalate ", " (map typeText concrete) ++ "]"
                 instances <- tcInstances <$> getState
-                unless (Map.member instanceName' instances) $ makeInstance instanceName' (zip types concrete)
+                active <- tcActive <$> getState
+                unless (Map.member instanceName' instances) $ do
+                    -- (a function that calls itself with a type that is not its own would be made for a new one at each depth)
+                    when (name `elem` active) $
+                        failTc ("Type error: " ++ name ++ " calls itself with the types " ++ intercalate ", " (map renderType concrete) ++ ", which are not those it is made for: a function with bounds is made for each type, and one that is made for a bigger type at each call would never end")
+                    makeInstance instanceName' (zip types concrete)
                 sizeGiven <- mapM (\(n, size) -> zonkSize size >>= sizeArgument name n) (zip sizes sizeVars)
                 resultTy <- zonk result
                 return (resultTy, instanceName', args, sizeGiven)
         _ -> failTc ("Type error: " ++ name ++ " is not a function")
   where
+    -- the type meets the bound: it implements the trait, with the types that the bound writes
+    checkBound given (param, trait, wanted) t = do
+        gives <- traitArguments trait t
+        case gives of
+            Nothing -> failTc ("Type error: " ++ name ++ " needs " ++ param ++ " to implement " ++ trait ++ ", and " ++ renderType t ++ " does not")
+            Just actual -> do
+                when (length actual /= length wanted) $
+                    failTc ("Type error: " ++ renderType t ++ " gives " ++ trait ++ " " ++ show (length actual) ++ " types, but the bound on " ++ param ++ " of " ++ name ++ " has " ++ show (length wanted))
+                forM_ (zip actual wanted) $ \(have, want) -> do
+                    have' <- zonk have
+                    want' <- zonk (substitute [] given want)
+                    ok <- unify have' want'
+                    unless ok $ do
+                        h <- zonk have'
+                        w <- zonk want'
+                        failTc ("Type error: " ++ name ++ " needs " ++ param ++ " to implement " ++ trait ++ "<" ++ renderType w ++ ">, and " ++ renderType t ++ " implements " ++ trait ++ "<" ++ renderType h ++ ">")
     unknown t = case t of
         TVar _ -> True
         TList u -> unknown u
@@ -1646,11 +1666,11 @@ templateCall name template inferred = do
             fnTy = functionType sizes [] ptys' rty'
             ctx = (tmplCtx template){ctxFns = Map.insert instanceName' fnTy (ctxFns (tmplCtx template))}
         s <- getState
-        putState s{tcInstances = Map.insert instanceName' fnTy (tcInstances s)}
+        putState s{tcInstances = Map.insert instanceName' fnTy (tcInstances s), tcActive = name : tcActive s}
         (term', ins', outs', body') <- checkFunction ctx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) (tmplTermination template) (tmplBody template)
         let function = Assign instanceName' (Val (VFunct (tmplParams template) ins' outs' (NativeFunct (Signature ptys' rty' sizes []) term' body') []))
         s' <- getState
-        putState s'{tcEmitted = tcEmitted s' ++ [function]}
+        putState s'{tcEmitted = tcEmitted s' ++ [function], tcActive = tcActive s}
 
 -- The result of applying a function type to argument types
 checkCall :: String -> Type -> [Type] -> TC Type
