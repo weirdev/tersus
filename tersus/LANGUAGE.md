@@ -1170,7 +1170,7 @@ fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int {
 return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);   // 42
 ```
 
-- **A call does not write the sizes.** The arguments decide them: `dot(#[1, 2, 3], ...)` makes `n` 3, every other use of `n` has to agree (`dot(#[1, 2], #[1, 2, 3])` is rejected: `argument 2 of dot: expected Array<Int, 2>, got Array<Int, 3>`), and a size that no argument decides is an error (`fn f<n>() -> Int` cannot be called). The sizes are the last parameters of the function, so a function value and a function of an impl cannot have them yet, and `h = dot` is an error (a function with sizes is called).
+- **A call does not write the sizes.** The arguments decide them: `dot(#[1, 2, 3], ...)` makes `n` 3, every other use of `n` has to agree (`dot(#[1, 2], #[1, 2, 3])` is rejected: `argument 2 of dot: expected Array<Int, 2>, got Array<Int, 3>`), and a size that no argument decides is an error (`fn f<n>() -> Int` cannot be called). The sizes are the last parameters of the function, so a function value cannot have them, and `h = dot` is an error (a function with sizes is called). A function of an impl can have them (`impl S { fn f<n>(a: Array<Int, n>) -> Int { ... } }`), after those of the impl, but not one of an impl of a trait yet.
 - **A size is an `Int` in the function.** The body and the contracts read it as a variable (`i < n`, `affirm n > 0`), and `array(n, x)` makes an array of it, with the size `n` in its type (the result type can say so: `-> Array<Int, n>`). It cannot be assigned, and a size in a type takes no arithmetic: `array(n + 1, 0)` is an error, since a size is a constant or a size parameter, which also keeps the number of copies finite.
 - **It is validated once.** The validator knows of `n` that it is the size of every array whose type says `n` (`size(a) = n`), as it knows the constant of an array of a size, and nothing else: a caller proves what the contract asks of `n` for its own size. Callers know the function by its contract, as for any function.
 - **Native code is made for each size.** An array is held inline, so a program that runs has a copy of the function for each list of sizes it is called with (`dot<3>` and `dot<1>` above), with the sizes replaced by the constants (`MirMono`). A size that a function passes on to another it calls is one of its own sizes, which the copy of it has replaced.
@@ -1200,7 +1200,7 @@ return head(push([], 40)) + size(head(push([], push([], 1))));   // head of a Li
 - **A function that calls itself** gives each of its type parameters as it is, in any order, or a type that does not use them (`f(b, a, n - 1)`, `f(1, n - 1)`). `f(push([], a), n - 1)` is an error: native code has a copy of the function for each type, and a type that grows at each call would need one for each depth.
 - **Not a function.** A type parameter is a type of value: `id(inc)` for a function `inc` is an error, since native code has no copy of a function for it.
 - **Native code is made for each type.** A program that runs has a copy of the function for each list of types (and sizes) it is called with, `head<Int>` and `head<List<Int>>` (`MirMono` finds them by matching the types of the parameters with the types of the arguments and of the local that gets the result), and so a `T` that owns something (a list) is moved, copied and freed in the copy for it, and one that does not is a plain copy.
-- **Not yet**: type parameters of an enum, or of a function of an impl. A struct can have them (see below).
+- **Not yet**: type parameters of an enum, or of a function of an impl of a trait. A struct can have them (see below), and so can a function of an impl that is not of a trait.
 
 See `examples/type_parameters.tersus`.
 
@@ -1230,9 +1230,32 @@ return size(q.a);   // 2
 - **Each list of types and sizes is a struct of its own.** `Pair<Int>` and `Pair<Bool>` cannot be compared or given for each other (`argument 1 of f: expected Pair<Int>, got Pair<Bool>`), and the fields have the types (`field b of Pair<Int>: expected Int, got Bool`). A struct written with none (`fn f(p: Pair)`) is an error, as is a type that is a function.
 - **A function with type parameters takes any of them**: `swap(Pair<List<Int>> { ... })` makes `U` a `List<Int>`, as it does for a list (`MirMono` matches the types of the instance's arguments), and native code is made for each type, so a `Pair<List<Int>>` owns its lists and is moved, copied and freed as a struct with them.
 - **It is an ordinary struct otherwise**: held inline, read with `.`, updated with `..base`, held in a `Box`, a list or an array, compared, and printed as `Pair { a: ..., b: ... }`. It may hold itself in a `Box` or a list (`next: Box<Node<T>>`), not by value. A field can be a `Box<Array<T>>` and a contract can speak of it (`size(return.items) = n`), which is the shape of a list that is a library type.
-- **What it cannot be yet**: an enum with parameters, methods and traits for these structs (`impl Pair<Int>`), a size of `?`, and a literal that leaves the types out (`Pair { a: 1, b: 2 }`): the types are written.
+- **What it cannot be yet**: an enum with parameters, a trait implemented for these structs, a size of `?`, and a literal that leaves the types out (`Pair { a: 1, b: 2 }`): the types are written. Their functions are written in an `impl<T>` (below).
 
 See `examples/generic_structs.tersus`.
+
+### Impl for a struct with parameters
+
+An `impl` for a struct with types and sizes names them after `impl`, and gives them to the struct the way a type does:
+
+```
+struct Pair<A, B> { a: A, b: B };
+
+impl<X, Y> Pair<X, Y> {
+    fn make(x: X, y: Y) -> Self { return Self { a: x, b: y }; };
+    fn first(self: &Self) -> X { return self.a; };
+    fn flip(self: &Self) -> Pair<Y, X> { return Pair<Y, X> { a: self.b, b: self.a }; };
+    fn again(self: &Self) -> Self { return Self::make(self.a, self.b); };
+};
+
+q = Pair::make(push([], 4), true).flip();     // Pair<Bool, List<Int>>
+return size(q.b);                             // 1
+```
+
+- **Each function has the parameters of the impl** after its own, so `first` is a function `fn first<X, Y>(...)` that the arguments decide, and a copy of it is made for each list of types and sizes it is called with (`Pair<List<Int>, Bool>` and `Pair<Int, Int>` each get theirs). The names of the parameters belong to the impl: `impl<U> Box2<U>` is as good as `impl<T> Box2<T>`.
+- **`Self` is the struct with the parameters of the impl** (`Pair<X, Y>` here): in the signatures, the literal `Self { ... }`, and `Self::make(...)`. A size of the impl (`impl<n> Packet<n>`) is a value in the body and the contracts, as it is for a function.
+- **A call is written as for any impl**: `x.first()`, `Pair::make(1, true)` and `Pair::first(x)`, with the types of the instance deciding which copy, and a struct that is not given the types of the impl is a type error. An impl for a struct that has parameters has to name them (`impl Pair { ... }` is a parse error), and an impl with parameters for a struct that has none is one too.
+- **Not yet**: a trait implemented for one of these structs (`impl<T> Trait for Pair<T>` is `a trait cannot be implemented for these yet`), and a bound on a parameter (`T: Trait`).
 
 ### A list written in Tersus
 
@@ -1244,21 +1267,26 @@ struct Vec<T> {
     len: Int,
 };
 
-fn vecNew<T>(filler: T) -> Vec<T> [{ }] [{ affirm return.len = 0; affirm size(return.data) = 4; }] {
-    return Vec<T> { data: Array::boxed(4, filler), len: 0 };
+impl<T> Vec<T> {
+    fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; affirm size(return.data) = 4; }] {
+        return Self { data: Array::boxed(4, filler), len: 0 };
+    };
+
+    fn get(self: &Self, i: Int) -> T [{ define n = self.len; define cap = size(self.data); affirm i >= 0; affirm i < n; affirm n <= cap; }] [{ }] {
+        return get(self.data, i);
+    };
 };
 
-fn vecGet<T>(v: &Vec<T>, i: Int) -> T [{ define n = v.len; define cap = size(v.data); affirm i >= 0; affirm i < n; affirm n <= cap; }] [{ }] {
-    return get(v.data, i);
-};
+v = Vec::new(0).push(5).push(6);
+return v.get(1) + v.len();                   // 8
 ```
 
-`vecPush` writes into the array while `len < size(data)`, and otherwise makes an array twice the size, copies the elements over in a loop and writes the new one, so a Vec is native code with no support from the runtime that a list does not have (`examples/vec.tersus` has all of `vecNew`, `vecLen`, `vecGet`, `vecSet`, `vecPush` and `vecPop`).
+`push` writes into the array while `len < size(data)`, and otherwise makes an array twice the size, copies the elements over in a loop and writes the new one, so a Vec is native code with no support from the runtime that a list does not have (`examples/vec.tersus` has all of `new`, `len`, `get`, `set`, `push` and `pop`).
 
-- **The contracts keep `0 <= len <= size(data)`.** Each function asks for it (as `define n = v.len; define cap = size(v.data); affirm n <= cap`) and each that makes a Vec promises it, so `vecGet(v, 1)` on a Vec with one element is rejected (`Could not prove: i < n`) and `vecPop` of an empty one too (`Could not prove: n >= 1`).
+- **The contracts keep `0 <= len <= size(data)`.** Each function asks for it (as `define n = self.len; define cap = size(self.data); affirm n <= cap`) and each that makes a Vec promises it, so `v.get(1)` on a Vec with one element is rejected (`Could not prove: i < n`) and `pop` of an empty one too (`Could not prove: n >= 1`).
 - **A loop that pushes says what it keeps**: `affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1;`, because the validator does not carry the facts of a struct through a loop on its own.
 - **The elements may own things.** The array clones the filler into every slot, `set` and the growth move and free what they replace, and a `Vec<List<Int>>`, a `Vec<Vec<Int>>` or a Vec of structs that own lists is freed once (the native tests run these with the checks of the runtime on).
-- **What it is not yet**: a list. There is no method syntax for a generic struct (`v.push(x)` is `vecPush(v, x)`), no trait with an element type that `size`, `first`, `get`, `set` and `push` could be functions of, no way to share the library between programs (it is pasted in), no list literal or `for` over it, and `=` compares the unused slots of the arrays too.
+- **What it is not yet**: a list. There is no trait with an element type that `size`, `first`, `get`, `set` and `push` could be functions of (`size(v)` is not `v.len()`), no way to share the library between programs (it is pasted in), no list literal or `for` over it, and `=` compares the unused slots of the arrays too.
 
 See `examples/vec.tersus`.
 

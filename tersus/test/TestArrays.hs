@@ -170,7 +170,7 @@ testArrays =
                 , testCase "a size is not also a parameter" (rejected "fn f<n>(n: Int, a: Array<Int, n>) -> Int { return 0; }; return 1;" "names a size twice, or the same as a parameter")
                 , testCase "the function is called, not named" (rejected "fn f<n>(a: Array<Int, n>) -> Int { return n; }; h = f; return 0;" "f has parameters <n>, so it is called")
                 , testCase "arithmetic on a size is not a size" (rejected "fn f<n>(a: Array<Int, n>) -> Int { return size(array(n + 1, 0)); }; return f(#[1]);" "the size of an array must be a constant")
-                , testCase "no size parameters in an impl" (rejected "struct S { x: Int }; impl S { fn f<n>(a: Array<Int, n>) -> Int { return n; }; }; return 0;" "size or type parameters, which a function of an impl cannot have yet")
+                , testCase "a function of an impl has sizes" (runs "struct S { x: Int }; impl S { fn f<n>(a: Array<Int, n>) -> Int { return n; }; }; return S::f(#[1, 2, 3]);" (VInt 3))
                 , testCase "the declaration is parsed with spaces" (runs "fn count < n , m > (a: Array<Int, n>, b: Array<Int, m>) -> Int { return n * 10 + m; }; return count(#[1], #[1, 2]);" (VInt 12))
                 , testCase "an empty list of sizes" (parseFails "fn f<>(a: Int) -> Int { return 0; }; return 1;")
                 ]

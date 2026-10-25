@@ -18,7 +18,7 @@ import qualified Data.Map as Map
 
 import Control.Monad (void, when)
 import Data.Char (isDigit, isLetter, isUpper)
-import Data.List (isInfixOf, nub, (\\))
+import Data.List (intercalate, isInfixOf, nub, (\\))
 import Data.Maybe (isJust)
 
 import StdLib
@@ -34,10 +34,11 @@ data Decls = Decls
     , declSelf :: Maybe Name -- the type of the impl being read, which `Self` stands for
     , declTypeParams :: [Name] -- the type parameters of the function or the struct being read: a name of these in a type is that parameter
     , declGenerics :: Map.Map Name [Variable] -- the structs with sizes and types, and the parameters of each, in order
+    , declImplParams :: [Variable] -- the type and size parameters of the impl being read (`impl<T> Vec<T>`), which each of its functions has
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty
+emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty []
 
 type Parser = Parsec String Decls
 
@@ -381,8 +382,16 @@ structFields element apply name declared = do
 -- Name or Enum::Variant
 qualifiedName :: Parser Name
 qualifiedName = do
-    first <- variable >>= resolveSelf
-    option first (try (string "::" >> variable) >>= \second -> return (first ++ "::" ++ second))
+    first <- variable
+    second <- optionMaybe (try (string "::" >> variable))
+    -- (`Self::f` and `Self::Variant` name the struct or enum itself, and `Self { ... }` the struct with the types of the impl)
+    case second of
+        Just name -> (\owner -> owner ++ "::" ++ name) . selfBase <$> resolveSelf first
+        Nothing -> resolveSelf first
+
+-- The struct or enum that a type names, without the types it is given: Vec for Vec<'T>
+selfBase :: Name -> Name
+selfBase name = maybe name fst (instanceOf name)
 
 -- A struct or variant that has been declared, with its fields
 declaredCtor :: Parser (Name, [Variable])
@@ -528,15 +537,19 @@ functStatement = do
     generics <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
     let typeParams = filter isTypeParam generics
         sizes = filter (not . isTypeParam) generics
+    -- (a function of `impl<T> Vec<T>` has the parameters of the impl after its own)
+    implParams <- declImplParams <$> getState
+    let allTypes = typeParams ++ filter isTypeParam implParams
+        allSizes = sizes ++ filter (not . isTypeParam) implParams
     outerParams <- declTypeParams <$> getState
-    modifyState (\d -> d{declTypeParams = typeParams})
+    modifyState (\d -> d{declTypeParams = allTypes})
     (params, returnType, inputReqs, outputReqs) <- functHeader
     termination <- terminationClause
     fnBody <- curlyBracesParse statementBlock
     whitespace
     modifyState (\d -> d{declTypeParams = outerParams})
-    let allParams = params ++ [(size, TInt) | size <- sizes]
-    return (Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType sizes typeParams) termination fnBody) [])))
+    let allParams = params ++ [(size, TInt) | size <- allSizes]
+    return (Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType allSizes allTypes) termination fnBody) [])))
   where
     isTypeParam name = case name of
         c : _ -> isUpper c
@@ -588,14 +601,32 @@ implStatement :: Parser Statement
 implStatement = do
     keyword "impl"
     whitespace
+    -- impl<T> Vec<T> { ... }: the functions are for any T. Each has the parameters of the impl, and Self is Vec<T>.
+    implParams <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
     first <- variable
     whitespace
     (trait, typeName) <- option (Nothing, first) (keyword "for" >> whitespace >> variable >>= \t -> whitespace >> return (Just first, t))
     types <- declTypes <$> getState
     when (not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
-    modifyState (\d -> d{declSelf = Just typeName})
+    generics <- declGenerics <$> getState
+    selfName <- case Map.lookup typeName generics of
+        Just params -> do
+            when (null implParams) $ fail ("impl for " ++ typeName ++ ", which has parameters <" ++ intercalate ", " params ++ ">: write impl<" ++ intercalate ", " params ++ "> " ++ typeName ++ "<" ++ intercalate ", " params ++ ">")
+            -- (the impl names the parameters its own way: impl<U> Vec<U>)
+            outerParams <- declTypeParams <$> getState
+            modifyState (\d -> d{declTypeParams = filter isTypeParameter implParams})
+            args <- genericArguments params
+            modifyState (\d -> d{declTypeParams = outerParams})
+            whitespace
+            return (instanceName typeName args)
+        Nothing -> do
+            when (not (null implParams)) $ fail ("impl<" ++ intercalate ", " implParams ++ "> for " ++ typeName ++ ", which has no parameters")
+            return typeName
+    ctors <- declCtors <$> getState
+    -- (`Self { ... }` is a literal of the struct with the types of the impl)
+    modifyState (\d -> d{declSelf = Just selfName, declImplParams = implParams, declCtors = maybe (declCtors d) (\fields -> Map.insert selfName fields (declCtors d)) (Map.lookup typeName ctors)})
     functions <- curlyBracesParse (genericStatementBlock (implFunction typeName trait))
-    modifyState (\d -> d{declSelf = Nothing})
+    modifyState (\d -> d{declSelf = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
     whitespace
     return (ImplDef trait typeName functions)
   where
@@ -968,7 +999,7 @@ qualifiedCall :: Parser Expression
 qualifiedCall = do
     void (char '<')
     whitespace
-    owner <- variable >>= resolveSelf
+    owner <- selfBase <$> (variable >>= resolveSelf)
     whitespace
     trait <- optionMaybe (keyword "as" >> whitespace >> variable <* whitespace)
     void (char '>')

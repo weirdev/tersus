@@ -32,7 +32,7 @@ module TypeCheck
     , zonk
     ) where
 
-import Control.Monad (forM, forM_, unless, when)
+import Control.Monad (forM, forM_, unless, void, when)
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.List (intercalate, (\\))
@@ -1019,7 +1019,7 @@ inferExprR ctx env expr =
         F (Var name) args
             | Just (path, function) <- traitPath name -> do
                 s <- getState
-                case (Map.lookup path (tcTraits s), Map.member path (tcTypes s)) of
+                case (Map.lookup path (tcTraits s), Map.member path (tcTypes s) || Map.member path (tcGenerics s)) of
                     (Just functions, _) -> do
                         inferred <- mapM (inferExprR ctx env) args
                         owner <- ownerThroughTrait path functions function (map fst inferred)
@@ -1058,9 +1058,16 @@ inferExprR ctx env expr =
         unless (Map.member name (ctxFns ctx)) $
             failTc ("Type error: " ++ name ++ " is not defined before this call (there is no such function, or its impl comes later)")
         ft <- lookupVar ctx env name
-        inferred <- coerceArguments ft inferred0
-        result <- checkCall name ft (map fst inferred)
-        return (result, F (Var name) (map snd inferred))
+        ftz <- zonk ft
+        case ftz of
+            -- (a function of `impl<T> Vec<T>` has the types and sizes of the impl: the arguments decide them)
+            TForall sizes types inner -> do
+                (result, args') <- genericCall name sizes types inner inferred0
+                return (result, F (Var name) args')
+            _ -> do
+                inferred <- coerceArguments ft inferred0
+                result <- checkCall name ft (map fst inferred)
+                return (result, F (Var name) (map snd inferred))
 
 -- The function that Type::f means: the one function of that name that the impls of Type define. If several do, the call has
 -- to say which, with Trait::f(x), <Type as Trait>::f(...) or <Type>::f(...).
@@ -1093,7 +1100,8 @@ ownerOfValue :: Name -> Type -> TC Name
 ownerOfValue function ty = do
     t <- zonk ty
     case t of
-        TNamed name -> return name
+        -- (a struct with types and sizes has the functions of its impl, whatever it is given)
+        TNamed name -> return (maybe name fst (instanceOf name))
         TVariant variant -> fst <$> ctorInfo variant
         TVar _ -> failTc ("Type error: the type of the value whose function " ++ function ++ " is called is not known yet; annotate it")
         other@TBox{} -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions: call it on the value inside, as in Box::unbox(b)." ++ function ++ "(...)")
@@ -1160,7 +1168,13 @@ substSelf _ t = t
 -- output contract must give the trait's (the return is checked against it).
 checkImpl :: Ctx -> Env -> Maybe Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
 checkImpl ctx env trait typeName functions = do
-    _ <- typeCtors typeName
+    declared <- getState
+    -- (a struct with parameters has them in the impl, `impl<T> Vec<T>`, and its type is a different one for each)
+    if Map.member typeName (tcGenerics declared)
+        then case trait of
+            Nothing -> return ()
+            Just traitName -> failTc ("Type error: impl " ++ traitName ++ " for " ++ typeName ++ ", which has parameters: a trait cannot be implemented for these yet")
+        else void (typeCtors typeName)
     -- (the type implements the trait from the first function on, so a function can call an earlier one through the trait; if the
     -- impl is not accepted the program is refused, so this is never seen)
     required <- case trait of
@@ -1202,8 +1216,8 @@ checkImpl ctx env trait typeName functions = do
     definitions own (c, e, done) (stmt : rest) = do
         case stmt of
             Assign name (Val (VFunct _ _ _ (NativeFunct (Signature _ _ sizes types) _ _) _))
-                | not (null sizes && null types) ->
-                    failTc ("Type error: " ++ name ++ " has size or type parameters, which a function of an impl cannot have yet")
+                | trait /= Nothing && not (null sizes && null types) ->
+                    failTc ("Type error: " ++ name ++ " has size or type parameters, which a function of a trait's impl cannot have yet")
             _ -> return ()
         case stmt of
             Assign name _ | own -> do

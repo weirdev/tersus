@@ -39,6 +39,7 @@ testNative =
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestList "a list written in Tersus" (testVecExample : [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms])
+        , TestList "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestList "build" [testBuildKeepsFiles]
@@ -447,28 +448,40 @@ arrayPrograms =
     , ("a Box of a struct that has one", "struct S { a: Box<Array<Int>> }; b = Box::new(S { a: Array::boxed(2, 5) }); return size(b.a);")
     ]
 
+-- `impl<T> Pair<T> { ... }`: a function of the impl is made for each list of types and sizes it is called with
+genericImplPrograms :: [(String, String)]
+genericImplPrograms =
+    [ ("a function of an impl with its own parameters", "struct S { x: Int }; impl S { fn f<n>(a: Array<Int, n>) -> Int { return n; }; fn id<T>(a: T) -> T { return a; }; }; return S::f(#[1, 2, 3]) * 10 + S::id(4);")
+    , ("a method of a struct with a type", "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn first(self: &Self) -> T { return self.a; }; fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; }; x = Box2<Int> { a: 1, b: 2 }.swap(); return x.first() * 10 + x.b;")
+    , ("for lists that own things", "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn first(self: &Self) -> T { return self.a; }; fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; }; x = Box2<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }; y = x.swap(); return size(x.first()) * 10 + size(y.first());")
+    , ("for two types at once", "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn first(self: &Self) -> T { return self.a; }; }; l = Box2<List<Int>> { a: push([], 1), b: [] }; i = Box2<Int> { a: 4, b: 5 }; return size(l.first()) + i.first();")
+    , ("a size of the impl", "struct Packet<n> { cells: Array<Int, n>, tag: Int }; impl<n> Packet<n> { fn count(self: &Self) -> Int { return n + self.tag; }; fn bump(self: Self) -> Self { return Self { tag: self.tag + 1, ..self }; }; fn twice(self: Self) -> Int { return self.bump().bump().count(); }; }; return Packet<3> { cells: #[1, 2, 3], tag: 10 }.twice() + Packet<2> { cells: #[1, 2], tag: 0 }.count();")
+    , ("a type and a size", "struct Row<T, n> { cells: Array<T, n> }; impl<T, n> Row<T, n> { fn width(self: &Self) -> Int { return n; }; fn head(self: &Self) -> T [{ affirm n > 0; }] [{ }] { return get(self.cells, 0); }; }; r = Row<Int, 3> { cells: #[7, 8, 9] }; return r.head() + r.width() * 10;")
+    , ("a function without self, through Self", "struct Pair<A, B> { a: A, b: B }; impl<X, Y> Pair<X, Y> { fn make(x: X, y: Y) -> Self { return Self { a: x, b: y }; }; fn again(self: &Self) -> Self { return Self::make(self.a, self.b); }; fn flip(self: &Self) -> Pair<Y, X> { return Pair<Y, X> { a: self.b, b: self.a }; }; }; q = Pair::make(push([], 4), true).again().flip(); return size(q.b) + 10;")
+    ]
+
 -- Programs over the library list (`vecLibrary`, as in examples/vec.tersus). Run with the checks of the runtime on, they show that
 -- the arrays it grows, the elements it moves and the Vecs it holds are each freed once.
 vecPrograms :: [(String, String)]
 vecPrograms =
-    [ ("pushed and read", "v = vecPush(vecPush(vecNew(0), 5), 6); return vecGet(v, 0) * 10 + vecGet(v, 1);")
-    , ("pushed past its capacity", loop 10 "0" "v = vecPush(v, i * i);" ++ "return vecLen(v) + vecGet(v, 9);")
-    , ("pushed past it again and again", loop 300 "0" "v = vecPush(v, i);" ++ "return vecLen(v) + vecGet(v, 299);")
-    , ("set and popped", "v = vecPop(vecSet(vecPush(vecPush(vecNew(false), true), false), 0, true)); return vecLen(v);")
-    , ("a copy is a Vec of its own", "a = vecPush(vecNew(0), 1); b = vecSet(a, 0, 7); return vecGet(a, 0) * 10 + vecGet(b, 0);")
-    , ("of lists", loop 9 "push([], 0)" "v = vecPush(v, push(push([], i), i));" ++ "return size(vecGet(v, 8)) + vecLen(v);")
-    , ("of lists, one taken out", "rows = vecPush(vecNew(push([], 0)), push(push([], 4), 5)); r = vecGet(rows, 0); return size(r) + size(rows.data);")
-    , ("of Vecs", "g = vecPush(vecNew(vecNew(0)), vecPush(vecPush(vecNew(0), 8), 9)); return vecLen(vecGet(g, 0));")
-    , ("of Vecs that grow", "g = vecNew(vecNew(0)); i = 0; while i < 9 [{ affirm i >= 0; affirm i <= 9; affirm g.len = i; define n = g.len; define cap = size(g.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 9 - i { g = vecPush(g, vecPush(vecNew(i), i)); i = i + 1; }; return vecLen(g) + vecLen(vecGet(g, 8));")
-    , ("of structs that own a list", "struct P { n: Int, xs: List<Int> }; ps = vecPush(vecNew(P { n: 0, xs: [] }), P { n: 3, xs: push([], 1) }); p = vecGet(ps, 0); return p.n + size(p.xs);")
-    , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: vecPush(vecNew(0), 4), tag: 2 }; return b.tag + vecLen(b.items);")
-    , ("in a list", "l = push(push([], vecPush(vecNew(0), 1)), vecNew(5)); return size(l);")
-    , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = vecPush(vecPush(vecNew(push([], i)), push([], i)), push([], 7)); t = t + vecLen(v); i = i + 1; }; return t;")
+    [ ("pushed and read", "v = Vec::new(0).push(5).push(6); return v.get(0) * 10 + v.get(1);")
+    , ("pushed past its capacity", loop 10 "0" "v = v.push(i * i);" ++ "return v.len() + v.get(9);")
+    , ("pushed past it again and again", loop 300 "0" "v = v.push(i);" ++ "return v.len() + v.get(299);")
+    , ("set and popped", "v = Vec::new(false).push(true).push(false).set(0, true).pop(); return v.len();")
+    , ("a copy is a Vec of its own", "a = Vec::new(0).push(1); b = a.set(0, 7); return a.get(0) * 10 + b.get(0);")
+    , ("of lists", loop 9 "push([], 0)" "v = v.push(push(push([], i), i));" ++ "return size(v.get(8)) + v.len();")
+    , ("of lists, one taken out", "rows = Vec::new(push([], 0)).push(push(push([], 4), 5)); r = rows.get(0); return size(r) + size(rows.data);")
+    , ("of Vecs", "g = Vec::new(Vec::new(0)).push(Vec::new(0).push(8).push(9)); return g.get(0).len();")
+    , ("of Vecs that grow", "g = Vec::new(Vec::new(0)); i = 0; while i < 9 [{ affirm i >= 0; affirm i <= 9; affirm g.len = i; define n = g.len; define cap = size(g.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 9 - i { g = g.push(Vec::new(i).push(i)); i = i + 1; }; return g.len() + g.get(8).len();")
+    , ("of structs that own a list", "struct P { n: Int, xs: List<Int> }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);")
+    , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: Vec::new(0).push(4), tag: 2 }; return b.tag + b.items.len();")
+    , ("in a list", "l = push(push([], Vec::new(0).push(1)), Vec::new(5)); return size(l);")
+    , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = Vec::new(push([], i)).push(push([], i)).push(push([], 7)); t = t + v.len(); i = i + 1; }; return t;")
     ]
   where
     -- A Vec made with the filler and pushed to by the statement `n` times
     loop n filler step =
-        "v = vecNew(" ++ filler ++ "); i = 0; while i < " ++ show (n :: Int) ++ " [{ affirm i >= 0; affirm i <= " ++ show n ++ "; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks " ++ show n ++ " - i { " ++ step ++ " i = i + 1; }; "
+        "v = Vec::new(" ++ filler ++ "); i = 0; while i < " ++ show (n :: Int) ++ " [{ affirm i >= 0; affirm i <= " ++ show n ++ "; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks " ++ show n ++ " - i { " ++ step ++ " i = i + 1; }; "
 
 -- The example has the library that the tests use
 testVecExample :: Test
