@@ -791,6 +791,33 @@ return size(xs) - n; // 3, because the caller's xs is unchanged
 
 A function body's scope has no parent scope, so assignments inside it never reach caller variables, unlike assignments in nested blocks. The number of arguments must match the number of parameters exactly, for both user-defined functions and builtins. A mismatch fails evaluation and validation.
 
+#### Lent parameters
+
+A parameter written `&T` is *lent*: the function only reads it, and a call does not copy it for the function. It is for a parameter only (a result, a field, a local or a `Box` is never a `&T`).
+
+```tersus
+fn total(a: &List<Int>) -> Int {
+    sum = 0;
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {
+        sum = sum + get(a, i);
+        i = i + 1;
+    };
+    return sum;
+};
+
+xs = [1, 2, 3];
+return total(xs) + total(xs) + size(xs);   // 6 + 6 + 3: xs is lent each time, and is still xs
+```
+
+- **The call does not say it.** `total(xs)` lends `xs` because the function says so; the arguments are checked against `T` (`argument 1 of f: expected List<Int>, got Int`).
+- **In the function the parameter is a `T`** that it cannot assign (`a = push(a, 1)` is an error: assign a copy to another variable). Everything that reads it works as usual, and the validator treats it as the value it is, so contracts and proofs are unchanged.
+- **What the function needs for itself it copies.** Returning the parameter, giving it to a parameter that is not lent, or using it where a value is taken (`push(a, 9)`) uses a copy, and the caller's value is as it was. A lent parameter given on to another lent one costs nothing.
+- **What it saves.** An argument for a parameter that is not lent is copied when the caller uses it again after the call (a list, or a struct or array that owns one) and, held inline, is copied into the function (an array of 1000 words, a struct). A lent one is neither: natively the function reads the caller's words where they are.
+- **A function that lends is a different type** from one that does not (`fn(&List<Int>) -> Int` and `fn(List<Int>) -> Int`), since a call is made differently.
+
+See `examples/borrowing.tersus`.
+
 During validation, arguments are symbolic values. Proofs the caller has established about an argument are visible to the callee's input contract, which is how a call such as `spread(x)` can rely on `size(x) > 0` proven at the call site.
 
 ## Validation Statements

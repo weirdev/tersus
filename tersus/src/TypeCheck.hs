@@ -73,6 +73,7 @@ data TcState = TcState
     , tcSizeSubst :: Map Int Size -- what the sizes that a call gave to size parameters have come to
     , tcSizeScope :: [Variable] -- the size parameters of the function being checked
     , tcGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields, with the sizes in them
+    , tcReadOnly :: [Variable] -- the parameters of the function being checked that it borrows
     }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
@@ -81,7 +82,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty []
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -155,6 +156,7 @@ zonk (TForall names t) = TForall names <$> zonk t
 -- (the sizes of an instance of a struct with sizes are in its name)
 zonk (TNamed name) | Just (base, sizes) <- instanceOf name = (\sizes' -> TNamed (instanceName base sizes')) <$> mapM zonkSize sizes
 zonk (TBox t) = TBox <$> zonk t
+zonk (TRef t) = TRef <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
 zonk t = return t
 
@@ -169,6 +171,7 @@ occurs n (TList t) = occurs n t
 occurs n (TArrayOf t _) = occurs n t
 occurs n (TForall _ t) = occurs n t
 occurs n (TBox t) = occurs n t
+occurs n (TRef t) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
 
@@ -196,6 +199,7 @@ unify a b = do
         (TList x, TList y) -> unify x y
         (TArrayOf x n, TArrayOf y m) -> unifySize n m >>= \same -> if same then unify x y else return False
         (TBox x, TBox y) -> unify x y
+        (TRef x, TRef y) -> unify x y
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
         _ -> return False
@@ -228,7 +232,7 @@ coerceArguments :: Type -> [(Type, Expression)] -> TC [(Type, Expression)]
 coerceArguments ft inferred = do
     ft' <- zonk ft
     case ft' of
-        TFn pts _ | length pts == length inferred -> mapM (uncurry coerce) (zip pts inferred)
+        TFn pts _ | length pts == length inferred -> mapM (uncurry coerce) (zip (map unref pts) inferred)
         _ -> return inferred
 
 -- Fails with the context if the types cannot be made equal
@@ -416,6 +420,11 @@ checkFinite root variants = do
     when (or [holds ty | fields <- variants, (_, ty) <- fields]) $
         failTc ("Type error: " ++ root ++ " holds itself, so it would have no size: hold the recursion in a Box, as in Box<" ++ root ++ ">")
 
+-- The type a parameter has in its function: what it is, without the & that says a call lends it
+unref :: Type -> Type
+unref (TRef t) = t
+unref t = t
+
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
@@ -427,7 +436,8 @@ checkType (TBox t) = checkType t
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
 checkType ty@(TArrayOf t size) = checkType t >> sizeInScope size >> arrayOk ty
 checkType (TForall _ t) = checkType t
-checkType (TFn args ret) = mapM_ checkType (ret : args)
+checkType (TFn args ret) = mapM_ checkType (ret : map unref args)
+checkType (TRef _) = failTc "Type error: & is for the parameter of a function, as in fn f(a: &List<Int>), and a type is not a reference anywhere else"
 checkType _ = return ()
 
 -- A size parameter is a name that the function declares, as in fn dot<n>
@@ -771,19 +781,22 @@ checkFunction ctx name params ptys rty sizes ins outs term body = do
     putState outer{tcSizeScope = sizes}
     when (length sizes /= length (nub' sizes) || any (`elem` take (length params - length sizes) params) sizes) $
         failTc ("Type error: function " ++ name ++ " names a size twice, or the same as a parameter")
-    mapM_ checkType (rty : ptys)
+    mapM_ checkType (rty : map unref ptys)
     if length params /= length ptys
         then failTc ("Type error: function " ++ name ++ " has " ++ show (length params) ++ " parameters but " ++ show (length ptys) ++ " types")
         else return ()
     let bodyCtx = ctx{ctxReturn = Just rty}
-        paramEnv = [Map.fromList (zip params ptys)]
+        paramEnv = [Map.fromList (zip params (map unref ptys))]
+    -- (a parameter that is borrowed is only read)
+    withBorrowed <- getState
+    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys]}
     (inEnv, ins') <- checkValidations bodyCtx paramEnv ins
     term' <- resolveTermination bodyCtx inEnv term
     (_, outs') <- checkValidations bodyCtx (Map.insert "return" rty (head inEnv) : tail inEnv) outs
     (_, body') <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     -- (the sizes of the function end with it)
     after <- getState
-    putState after{tcSizeScope = tcSizeScope outer}
+    putState after{tcSizeScope = tcSizeScope outer, tcReadOnly = tcReadOnly outer}
     return (term', ins', outs', body')
   where
     nub' = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -792,6 +805,8 @@ checkFunction ctx name params ptys rty sizes ins outs term body = do
 notSize :: Variable -> TC ()
 notSize var = do
     s <- getState
+    when (var `elem` tcReadOnly s) $
+        failTc ("Type error: " ++ var ++ " is borrowed (&), so it is only read: a copy of it can be assigned to another variable")
     when (var `elem` tcSizeScope s) $
         failTc ("Type error: " ++ var ++ " is a size parameter of the function, which a call gives, and it cannot be assigned")
 
@@ -1025,8 +1040,8 @@ checkTrait name functions = do
     forM_ functions $ \f -> do
         let Signature ptys rty _ = traitFnSignature f
             ctx = Ctx Map.empty (Just rty)
-            paramEnv = [Map.fromList (zip (traitFnParams f) ptys)]
-        mapM_ checkType (rty : ptys)
+            paramEnv = [Map.fromList (zip (traitFnParams f) (map unref ptys))]
+        mapM_ checkType (rty : map unref ptys)
         (inEnv, _) <- checkValidations ctx paramEnv (traitFnRequires f)
         _ <- checkValidations ctx (Map.insert "return" rty (head inEnv) : tail inEnv) (traitFnEnsures f)
         return ()
@@ -1038,6 +1053,7 @@ substSelf owner (TNamed "Self") = TNamed owner
 substSelf owner (TList t) = TList (substSelf owner t)
 substSelf owner (TArrayOf t size) = TArrayOf (substSelf owner t) size
 substSelf owner (TBox t) = TBox (substSelf owner t)
+substSelf owner (TRef t) = TRef (substSelf owner t)
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
 
@@ -1193,7 +1209,7 @@ genericCall name names inner inferred = do
             | length pts - length names /= length inferred ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts - length names) ++ " arguments, got " ++ show (length inferred))
             | otherwise -> do
-                args <- mapM (\(i, pt, arg) -> coerce pt arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) pt at >> return arg') (zip3 [1 ..] pts inferred)
+                args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at >> return arg') (zip3 [1 ..] pts inferred)
                 given <- mapM (\(n, size) -> zonkSize size >>= sizeArgument n) (zip names sizes)
                 result <- zonk rty
                 return (result, args ++ given)
@@ -1217,7 +1233,7 @@ checkCall name ft ats = do
             | length pts /= length ats ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts) ++ " arguments, got " ++ show (length ats))
             | otherwise -> do
-                mapM_ (\(i, pt, at) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) pt at) (zip3 [1 ..] pts ats)
+                mapM_ (\(i, pt, at) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at) (zip3 [1 ..] pts ats)
                 return rty
         TVar _ -> do
             rty <- freshVar

@@ -14,6 +14,7 @@ import TestNative
 import TestOwnership
 import TestTraits
 import TestArrays
+import TestBorrow
 import TestBox
 
 main :: IO ()
@@ -74,6 +75,7 @@ main = do
                 , testTraits
                 , testArrays
                 , testBox
+                , testBorrow
                 ]
     putStrLn $
         "Summary: "

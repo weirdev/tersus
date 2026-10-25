@@ -192,6 +192,7 @@ data Ctx = Ctx
     , cxUses :: Map Local [(BlockId, Int, Role)] -- the uses of a local by statements
     , cxUsedByTerminator :: Set Local
     , cxTakes :: Set (BlockId, Int) -- the statements that take a field out of a value
+    , cxBorrowed :: Set Local -- the parameters that are lent: the function does not own them, so it never frees or moves them
     }
 
 typeOf :: Ctx -> Local -> Type
@@ -234,6 +235,7 @@ ownFunction program fn0 =
                 , cxUses = usesOf
                 , cxUsedByTerminator = byTerminator
                 , cxTakes = Set.empty
+                , cxBorrowed = Set.fromList (fnBorrowed fn)
                 }
         takes =
             Set.fromList
@@ -248,7 +250,7 @@ ownFunction program fn0 =
         (blocks, finalState) =
             runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty)
         allLocals = Map.union (fnLocals fn) (rsNew finalState)
-        owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState]
+        owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState, l `Set.notMember` cxBorrowed cx]
         withDrops (b, BasicBlock stmts term) =
             (b, BasicBlock (if term == Return then stmts ++ map Drop owned else stmts) term)
      in fn{fnLocals = allLocals, fnBlocks = Map.fromList (map withDrops blocks)}
@@ -289,11 +291,25 @@ stmtOperandLocals _ = []
 termOperandLocals :: Terminator -> [Local]
 termOperandLocals term = map fst (Set.toList (termUses term))
 
+-- Which parameters of the function that a call calls are lent: those that the function declares so, or for a function value the
+-- parameters that its type marks with &
+borrowedArguments :: Ctx -> Operand -> Int -> [Bool]
+borrowedArguments cx callee count =
+    case callee of
+        Const (CFn name) | Just f <- Map.lookup name (progFunctions (cxProgram cx)) -> [p `elem` fnBorrowed f | p <- fnParams f]
+        Copy l | Just (TFn args _) <- Map.lookup l (cxTypes cx) -> map isRef args
+        Move l | Just (TFn args _) <- Map.lookup l (cxTypes cx) -> map isRef args
+        _ -> replicate count False
+  where
+    isRef (TRef _) = True
+    isRef _ = False
+
 -- Whether the statement takes a field out of a value that is not used again, rather than copying it
 takesField :: Ctx -> Statement -> Live -> Bool
 takesField cx (Assign d (ReadField (Copy s) name field)) after =
     maybe False (heap cx) (Map.lookup d (cxTypes cx))
         && s `Set.notMember` cxProjected cx
+        && s `Set.notMember` cxBorrowed cx
         && (s, Whole) `Set.notMember` after'
         && (s, Field name field) `Set.notMember` after'
   where
@@ -386,7 +402,8 @@ peekable cx b k t s =
 rewriteOperands :: Ctx -> Live -> [(Operand, Role)] -> R ([Statement], [Statement], [Operand])
 rewriteOperands cx after' operands = go consumed operands
   where
-    stillLive = localsOf after'
+    -- (a parameter that is lent is always still wanted: whoever lent it gets it back)
+    stillLive = localsOf after' `Set.union` cxBorrowed cx
     -- how many operands give up each local, so that all but the last get a copy
     consumed = Map.fromListWith (+) [(l, 1 :: Int) | (o, Consume) <- operands, Just l <- [operandLocal o], heap cx (typeOf cx l)]
     siblingType = listToMaybe [typeOf cx l | (o, _) <- operands, Just l <- [operandLocal o], heap cx (typeOf cx l)]
@@ -458,6 +475,8 @@ rewriteTerminator :: Ctx -> Live -> Terminator -> R ([Statement], Terminator)
 rewriteTerminator cx out term =
     case term of
         Call callee args dest next -> do
-            (pre, _, args') <- rewriteOperands cx (forgetLocal dest out) [(a, Consume) | a <- args]
+            -- (an argument for a parameter that is lent is only read: the callee neither frees nor changes it)
+            let lent = borrowedArguments cx callee (length args)
+            (pre, _, args') <- rewriteOperands cx (forgetLocal dest out) [(a, if b then Read else Consume) | (a, b) <- zip args lent]
             return (pre, Call callee args' dest next)
         _ -> return ([], term)

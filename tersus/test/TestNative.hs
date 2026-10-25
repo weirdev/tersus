@@ -50,7 +50,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "array_data", "array_sizes", "arrays", "basics", "booleans", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "array_data", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "safe_access", "sized_structs", "structs", "termination", "traits", "types", "update_list"
@@ -99,6 +99,14 @@ testNativeIr =
             withIr "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) + count(#[1]) + count(#[4, 5, 6]);" (\ir -> testAssertTrue ("@\"fn.count<3>\"" `isInfixOf` ir && "@\"fn.count<1>\"" `isInfixOf` ir && not ("@\"fn.count\"" `isInfixOf` ir)))
         , TestCase "an array that a size makes too large for a frame is refused when the size is known" . pure $
             testAssertErrorContains "In f<8192>: " (llvmSource "fn f<n>(a: Array<Int, n>) -> Int { b = array(n, a); return size(b); }; return f(array(8192, 0));")
+        , TestCase "a list that is lent is not copied for the call" . pure $
+            withIr "fn total(a: &List<Int>) -> Int { return size(a); }; l = push([], 1); return total(l) + total(l);" (\ir -> testAssertTrue (not ("call void @tersus_clone" `isInfixOf` ir)))
+        , TestCase "a list that is given is copied when it is used again" . pure $
+            withIr "fn total(a: List<Int>) -> Int { return size(a); }; l = push([], 1); return total(l) + total(l);" (\ir -> testAssertTrue ("call void @tersus_clone" `isInfixOf` ir))
+        , TestCase "an array that is lent is read where it is, and one that is given is copied into the function" . pure $
+            withIr "fn ends(a: &Array<Int, 4>) -> Int { return get(a, 0) + get(a, 3); }; x = #[1, 2, 3, 4]; return ends(x);" (\ir -> testAssertTrue ("define internal i64 @\"fn.ends\"(ptr %l.1)" `isInfixOf` ir))
+        , TestCase "an array that is given has room of its own in the function" . pure $
+            withIr "fn ends(a: Array<Int, 4>) -> Int { return get(a, 0) + get(a, 3); }; x = #[1, 2, 3, 4]; return ends(x);" (\ir -> testAssertTrue ("define internal i64 @\"fn.ends\"(ptr %p.1)" `isInfixOf` ir && "%l.1 = alloca [4 x i64]" `isInfixOf` ir))
         , TestCase "a program that does not validate is not lowered" . pure $
             testAssertErrorContains "Validation failed" (llvmSource "x = 5; affirm x < 4;")
         , TestCase "command line" . pure $
@@ -197,7 +205,9 @@ dataPrograms =
 -- validation (as the MIR tests are) and compared with the executor of the MIR.
 functionPrograms :: [(String, String)]
 functionPrograms =
-    [ ("a function as a result", "fn inc(n: Int) -> Int { return n + 1; }; return inc;")
+    [ ("a function that lends is a value", "fn total(a: &List<Int>) -> Int { return size(a); }; f = total; l = push([], 1); return f(l) + f(l) + size(l);")
+    , ("a function that lends is a parameter", "fn total(a: &List<Int>) -> Int { return size(a); }; fn apply(f: fn(&List<Int>) -> Int, l: List<Int>) -> Int { return f(l) + f(l); }; return apply(total, push([], 1));")
+    , ("a function as a result", "fn inc(n: Int) -> Int { return n + 1; }; return inc;")
     , ("call of a local", "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(5);")
     , ("a parameter", "fn inc(n: Int) -> Int { return n + 1; }; fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }; return apply(inc, 1);")
     , ("a function that takes two", "fn add(a: Int, b: Int) -> Int { return a + b; }; fn fold(g: fn(Int, Int) -> Int) -> Int { return g(g(1, 2), 3); }; return fold(add);")
@@ -320,6 +330,18 @@ arrayPrograms =
     , ("a function takes and gives a struct with an array", "struct G { cells: Array<Int, 2> }; fn bump(g: G) -> G { return G { cells: set(g.cells, 0, get(g.cells, 0) + 1) }; }; return bump(bump(G { cells: #[1, 1] }));")
     , ("a function takes a list of arrays", "fn total(rows: List<Array<Int, 2>>) -> Int { s = 0; i = 0; while i < size(rows) [{ affirm i >= 0; affirm i <= size(rows); }] shrinks size(rows) - i { s = s + get(get(rows, i), 0) + get(get(rows, i), 1); i = i + 1; }; return s; }; return total(push(push([], #[1, 2]), #[3, 4]));")
     , ("a function gives a list of arrays", "fn make(n: Int) -> List<Array<Int, 2>> [{ affirm n >= 0; }] [{ }] { rows = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { rows = push(rows, array(2, i)); i = i + 1; }; return rows; }; return make(4);")
+    , ("a list is lent", "fn total(a: &List<Int>) -> Int { t = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { t = t + get(a, i); i = i + 1; }; return t; }; l = push(push([], 3), 4); return total(l) + total(l) + size(l);")
+    , ("a value made for the call is lent", "fn total(a: &List<Int>) -> Int { return size(a); }; return total(push(push([], 1), 2)) + total([1]);")
+    , ("an array is lent", "fn ends(a: &Array<Int, 4>) -> Int { return get(a, 0) + get(a, 3); }; x = #[1, 2, 3, 4]; return ends(x) + ends(x) + get(x, 1);")
+    , ("an array is lent to a function that gives another", "fn bump(a: &Array<Int, 3>) -> Array<Int, 3> { return set(a, 0, get(a, 0) + 1); }; x = #[1, 2, 3]; x = bump(x); x = bump(x); return x;")
+    , ("a struct that owns a list is lent", "struct S { xs: List<Int>, n: Int }; fn count(s: &S) -> Int { return size(s.xs) + s.n; }; s = S { xs: push(push([], 1), 2), n: 10 }; return count(s) + count(s) + size(s.xs);")
+    , ("a lent struct gives a copy of a part", "struct S { xs: List<Int>, n: Int }; fn part(s: &S) -> List<Int> { return s.xs; }; s = S { xs: push([], 1), n: 10 }; l = part(s); l = push(l, 2); return s.xs;")
+    , ("a lent parameter is returned as a copy", "fn same(a: &List<Int>) -> List<Int> { return a; }; l = push([], 5); m = same(l); m = push(m, 6); return l;")
+    , ("a lent parameter is passed on, and to an owner", "fn inner(a: &List<Int>) -> Int { return size(a); }; fn outer(a: &List<Int>) -> Int { return inner(a) + inner(a) + size(a); }; fn owner(a: List<Int>) -> Int { return size(a); }; fn mixed(a: &List<Int>) -> Int { return owner(a) + size(a); }; l = push([], 1); return outer(l) + mixed(l);")
+    , ("a lent parameter and an owned one are the same list", "fn both(a: &List<Int>, b: List<Int>) -> Int { return size(a) + size(push(b, 1)); }; l = push([], 1); return both(l, l);")
+    , ("a lent list in a loop", "fn total(a: &List<Int>) -> Int { return size(a); }; l = push(push([], 1), 2); n = 0; s = 0; while n < 1000 [{ affirm n >= 0; }] shrinks 1000 - n { s = s + total(l); n = n + 1; }; return s;")
+    , ("a lent array that the caller then changes", "fn lead(a: &Array<Int, 2>) -> Int { return get(a, 0); }; x = #[1, 2]; a = lead(x); x = set(x, 0, 9); return a * 10 + lead(x);")
+    , ("a function with a size lends", "fn count<n>(a: &Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) + count(array(2, 0));")
     , ("a size parameter", "fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int { total = 0; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { total = total + get(a, i) * get(b, i); i = i + 1; }; return total; }; return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);")
     , ("a size parameter, once for each size", "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) * 100 + count(array(4, 0)) * 10 + count(#[]);")
     , ("a size parameter makes an array", "fn ones<n>(a: Array<Int, n>) -> Array<Int, n> { return array(n, 1); }; return ones(#[7, 8, 9]);")

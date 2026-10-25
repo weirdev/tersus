@@ -1,0 +1,34 @@
+// A parameter written `&T` is lent: the function only reads it, so a call does not copy it and the caller keeps it. The parameter has
+// the type T in the function, and a function cannot assign to it. Without the &, a list that the caller uses again is copied for the
+// call; with it, a million calls cost nothing for the list.
+//
+// A value that a function with a lent parameter needs for itself is a copy it makes where it uses it: returning the parameter, giving
+// it to a parameter that is not lent, or pushing to it all give the function a copy, and the caller's value is as it was.
+fn total(a: &List<Int>) -> Int [{ define s = size(a); affirm s >= 0; }] [{ }] {
+    sum = 0;
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {
+        sum = sum + get(a, i);
+        i = i + 1;
+    };
+    return sum;
+};
+
+// An array that is lent is read where the caller has it, and a new array comes back by value
+fn bumped(a: &Array<Int, 3>) -> Array<Int, 3> {
+    return set(a, 0, get(a, 0) + 1);
+};
+
+// A lent parameter can be given on to another that is lent, and to one that is not (which gets a copy)
+fn twice(a: &List<Int>) -> Int {
+    return total(a) + total(a);
+};
+
+fn longer(a: &List<Int>) -> List<Int> {
+    return push(a, 100);
+};
+
+xs = push(push(push([], 1), 2), 3);
+grid = bumped(#[10, 20, 30]);
+more = longer(xs);
+return total(xs) + twice(xs) + size(xs) + get(grid, 0) + total(more);    // 6 + 12 + 3 + 11 + 106

@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; and regression tests are in `tersus/test/` (`TestTersus.hs` runs the groups, which live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`, `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`, `TestArrays` and `TestBox`, with the shared harness in `TestHarness`). The `python/` directory contains older parser and proof prototypes plus `python/tests.py`. The `stack/tersus/` tree is a starter snapshot, not the main development target.
+The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; and regression tests are in `tersus/test/` (`TestTersus.hs` runs the groups, which live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`, `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`, `TestArrays`, `TestBox` and `TestBorrow`, with the shared harness in `TestHarness`). The `python/` directory contains older parser and proof prototypes plus `python/tests.py`. The `stack/tersus/` tree is a starter snapshot, not the main development target.
 
 ## Build, Test, and Development Commands
 Work from `tersus/` unless you are touching the Python prototype.

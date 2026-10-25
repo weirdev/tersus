@@ -407,7 +407,8 @@ execStatement stmt = do
 callFunction :: Program -> Function -> [Val] -> M (Maybe Val)
 callFunction program fn args = do
     s <- getSt
-    putSt s{stFrames = Frame fn (Map.fromList [(p, Slot v Nothing) | (p, v) <- zip (fnParams fn) args]) : stFrames s}
+    -- (a parameter that is lent only looks at the value: the function owns nothing of it, and cannot move from it)
+    putSt s{stFrames = Frame fn (Map.fromList [(p, Slot v (if p `elem` fnBorrowed fn then Just [] else Nothing)) | (p, v) <- zip (fnParams fn) args]) : stFrames s}
     result <- runBlock program fn (BlockId 0)
     s' <- getSt
     case stFrames s' of
@@ -597,8 +598,11 @@ mainProgram locals stmts =
                 , fnReturns = Nothing
                 , fnLocals = Map.fromList [(l, LocalDecl t Nothing) | (l, t) <- locals]
                 , fnBlocks = Map.singleton (BlockId 0) (BasicBlock stmts Return)
+                , fnSizeParams = []
+                , fnBorrowed = []
                 , fnSpec = emptySpec
                 }
+        , progGenerics = Map.empty
         }
 
 -- Lowering never puts a change of a list between a part of it and the read of that part in one block, so the rule that a part

@@ -314,11 +314,11 @@ emitFunction program entry symbol fn =
                     | entry && fnReturns fn /= Nothing = resultStruct valueType
                     | otherwise = valueType
              in inFunction (flatResultMap (\(l, d) -> mapResult ((,) l) (storageType program (localType d))) (Map.toList (fnLocals fn))) `bindResult` \localTypes ->
-                    let params = intercalate ", " (["ptr %ret" | returnsAggregate] ++ [t ++ " %p." ++ localNumber p | (p, t) <- zip (fnParams fn) paramTypes])
+                    let params = intercalate ", " (["ptr %ret" | returnsAggregate] ++ [t ++ " " ++ paramName p | (p, t) <- zip (fnParams fn) paramTypes])
                         header = "define internal " ++ returnType ++ " " ++ symbol ++ "(" ++ params ++ ") {"
                         prologue temps =
                             ["entry:"]
-                                ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes]
+                                ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes, not (lentInline l)]
                                 ++ temps
                                 -- (a local that owns something holds nothing until it is given a value, so that it can be dropped)
                                 ++ ["    store ptr null, ptr " ++ slot l | (l, d) <- Map.toList (fnLocals fn), isPointer (localType d), l `notElem` fnParams fn]
@@ -330,7 +330,8 @@ emitFunction program entry symbol fn =
                                    ]
                                 ++ concat
                                     [ case Map.lookup p (fnLocals fn) of
-                                        -- (a value held inline is given by its address, and the function works on its own copy)
+                                        -- (a value held inline is given by its address, and the function works on its own copy, unless it is lent)
+                                        Just _ | lentInline p -> []
                                         Just d | isAggregate (localType d) -> ["    " ++ memcpyText (slot p) ("%p." ++ localNumber p) (8 * slotsOf program (localType d))]
                                         _ -> ["    store " ++ t ++ " %p." ++ localNumber p ++ ", ptr " ++ slot p]
                                     | (p, t) <- zip (fnParams fn) paramTypes
@@ -346,6 +347,9 @@ emitFunction program entry symbol fn =
                             Ok (_, s) ->
                                 Ok (reverse (sGlobals s) ++ [header] ++ prologue (reverse (sTemps s)) ++ reverse (sLines s) ++ overflowBlock ++ ["}"], sTypes s)
   where
+    -- a parameter that is lent and held inline is the caller's words, which the function reads where they are: it has no room of its own
+    lentInline l = l `elem` fnBorrowed fn && maybe False (isAggregate . localType) (Map.lookup l (fnLocals fn))
+    paramName p = if lentInline p then slot p else "%p." ++ localNumber p
     inFunction r = case r of
         Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
         Ok a -> Ok a
@@ -1172,11 +1176,13 @@ call entry fn target argTypes returnType args dest next = do
             -- is one of the function's own and the local is given the value after what it held is freed; otherwise it is the slot
             -- of the local (the callee has copied its arguments by the time it writes, so the local may be one of them).
             owns <- ownsG returnType
-            if owns
+            -- (an argument that is lent is not copied by the callee, so the room for the result is not the local that is lent)
+            let lends = Copy dest `elem` args
+            if owns || lends
                 then do
                     room <- slotsG returnType >>= entryTemp
                     emit ("call void " ++ target ++ "(" ++ intercalate ", " (("ptr " ++ room) : arguments) ++ ")")
-                    dropSlot returnType dest
+                    if owns then dropSlot returnType dest else pure ()
                     bytesG returnType >>= copyWords (slot dest) room
                 else emit ("call void " ++ target ++ "(" ++ intercalate ", " (("ptr " ++ slot dest) : arguments) ++ ")")
             if entry && dest == Local 0 then emit "store i1 true, ptr %returned" else pure ()
@@ -1290,6 +1296,7 @@ typeG ty = either failG pure (toEither (llvmType ty))
 llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TBool = Ok "i1"
+llvmType (TRef t) = llvmType t
 llvmType (TList t) = llvmType t `bindResult` \_ -> Ok "ptr"
 -- (an array is passed and held as the address of its words)
 llvmType (TArray t _) = llvmType t `bindResult` \_ -> Ok "ptr"
