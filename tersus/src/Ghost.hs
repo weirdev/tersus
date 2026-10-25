@@ -165,6 +165,7 @@ rvalueCall rv =
         M.Last -> Last
         M.Get -> Get
         M.Push -> Push
+        M.Pop -> Pop
         M.Set -> Set
         M.NewArray -> NewArray
         M.NewBoxed -> NewBoxedArray

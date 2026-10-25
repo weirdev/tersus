@@ -282,6 +282,7 @@ lowerFunction original fn =
                 emit (Assign dest (ListOp Get [l, Copy index]))
             (Get, [i]) -> emit (Assign dest (ListOp Get [l, i]))
             (Push, [x]) -> operandFor element x >>= \x' -> callTo "stdListPush" [l, x'] dest
+            (Pop, []) -> callTo "stdListPop" [l] dest
             (Set, [i, x]) -> operandFor element x >>= \x' -> callTo "stdListSet" [l, i, x'] dest
             _ -> emit (Assign dest (ListOp op os))
 

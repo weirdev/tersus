@@ -38,7 +38,7 @@ testNative =
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
-        , TestList "a list written in Tersus" [TestCase name (sameAsMir name body) | (name, body) <- vecPrograms]
+        , TestList "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestList "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
@@ -55,7 +55,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec"
+        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec"
         ]
     ]
 
@@ -243,6 +243,11 @@ listPrograms =
     , ("booleans in a list", "x = push([true], false); return get(x, 1) = false;")
     , ("last of booleans", "x = [false, true]; return last(x);")
     , ("an empty list among constants has the type that is read", "fn f() -> List<Bool> { return first([[]]); }; return f();")
+    , ("pop", "l = push(push(push([], 1), 2), 3); l = pop(l); return l;")
+    , ("pop and push again", "l = push(push([], [1]), [2]); l = pop(l); l = push(l, [3, 4]); return l;")
+    , ("a list that was popped equals the shorter one", "a = push(push([], 1), 2); b = pop(a); return b = [1];")
+    , ("pop in a loop", "l = []; i = 0; while i < 20 [{ affirm i >= 0; affirm i <= 20; affirm size(l) = i; }] shrinks 20 - i { l = push(l, i); i = i + 1; }; j = 0; while j < 15 [{ affirm j >= 0; affirm j <= 15; affirm size(l) = 20 - j; }] shrinks 15 - j { l = pop(l); j = j + 1; }; return l;")
+    , ("methods", "l = []; l = l.push(3).push(4); return l.get(1) * 10 + l.size() + l.first() + l.last();")
     , ("lists with different room are equal", "a = push(push(push(push(push([], 1), 2), 3), 4), 5); b = push([], 1); b = push(b, 2); b = push(b, 3); b = push(b, 4); b = push(b, 5); return a = b;")
     , ("a list that grew is not a list that is longer", "a = push(push(push(push(push([], 1), 2), 3), 4), 5); b = push(a, 6); return a = b;")
     , ("a list that grew prints as a list", "l = []; i = 0; while i < 11 [{ affirm i >= 0; affirm i <= 11; affirm size(l) = i; }] shrinks 11 - i { l = push(l, i * i); i = i + 1; }; return l;")
@@ -468,7 +473,7 @@ genericImplPrograms =
     , ("a function without self, through Self", "struct Pair<A, B> { a: A, b: B }; impl<X, Y> Pair<X, Y> { fn make(x: X, y: Y) -> Self { return Self { a: x, b: y }; }; fn again(self: &Self) -> Self { return Self::make(self.a, self.b); }; fn flip(self: &Self) -> Pair<Y, X> { return Pair<Y, X> { a: self.b, b: self.a }; }; }; q = Pair::make(push([], 4), true).again().flip(); return size(q.b) + 10;")
     ]
 
--- Programs over the library list of the prelude (lib/prelude.tersus), which a program that mentions `Vec` has. Run with the checks of the runtime on, they show that
+-- Programs over the library list of examples/vec.tersus (`vecLibrary`, written out in the program). Run with the checks of the runtime on, they show that
 -- the arrays it grows, the elements it moves and the Vecs it holds are each freed once.
 vecPrograms :: [(String, String)]
 vecPrograms =

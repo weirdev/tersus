@@ -152,6 +152,7 @@ rvalueProblems env localTy d rv =
         ListOp NewBoxed [n, x] -> case d of
             TBox (TArrayOf e SizeAny) -> ints [n] ++ [expected e x | not (fits' e x)]
             _ -> ["Array::boxed needs a result that is a Box of an array of any size"]
+        ListOp Pop [l] -> [expected d l | not (fits' d l)]
         ListOp Push [l, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ [expected e x | not (fits' e x)])
         ListOp Set [l, i, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ ints [i] ++ [expected e x | not (fits' e x)])
         ListOp op os -> [show op ++ " is applied to " ++ show (length os) ++ " operands"]

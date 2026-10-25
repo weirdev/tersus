@@ -1,0 +1,26 @@
+// The functions of a list are written as methods too: `l.push(x)` is `push(l, x)`, `l.size()` is `size(l)`, and the same for `first`, `last`,
+// `get`, `set` and `pop`, on a list, an array and a Box of an array. `pop` takes the last element out, and the contract of it asks for
+// one to take: a list that is empty is refused where it is popped.
+//
+// The loop builds the squares by pushing, and says what it keeps with `size`. Native code makes each list of an array and a count
+// (lib/lists.tersus), which is why pushing is cheap.
+squares = [];
+i = 0;
+while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm size(squares) = i; }] shrinks 10 - i {
+    squares = squares.push(i * i);
+    i = i + 1;
+};
+
+top = squares.last();                    // 81
+squares = squares.pop().pop();           // eight squares are left
+total = 0;
+for x in squares {
+    total = total + x;                   // 0 + 1 + 4 + 9 + 16 + 25 + 36 + 49 = 140
+};
+
+grid = #[1, 2, 3];
+grid = grid.set(1, 20);
+rows = [[1, 2], [3]];
+rows = rows.set(1, [4, 5, 6]);
+
+return top + total + squares.size() * 1000 + grid.get(1) * 10000 + rows.get(1).size() * 100000;    // 81 + 140 + 8000 + 200000 + 300000

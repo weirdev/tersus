@@ -99,6 +99,25 @@ builtinFunct Push =
             ]
             (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
         ]
+-- pop takes the last element out, so the list must have one; the result is one shorter and keeps the others in their places. The
+-- result is also equal to the term pop(list).
+builtinFunct Pop =
+    VFunct
+        ["list"]
+        [ Rewrite (CheckRel (relProof Gt (FApp (CTerm (builtinFunct Size)) [ATerm "list"]) (CTerm (VInt 0))))
+        , ProofAssert (relProof Gt (FApp (CTerm (builtinFunct Size)) [ATerm "list"]) (CTerm (VInt 0)))
+        ]
+        []
+        (BuiltinFunct Pop)
+        [ relProof Eq (ATerm "return") (FApp (CTerm popSymbol) [ATerm "list"])
+        , relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (FApp (CTerm (builtinFunct Minus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)])
+        , Forall
+            "j"
+            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
+            , relProof Lt (BVar "j") (FApp (CTerm (builtinFunct Size)) [ATerm "return"])
+            ]
+            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
+        ]
 -- set replaces one element, so it needs a valid index like get, and the result has the same
 -- size as the input list, and x at that index. The list itself is not changed: the result is
 -- a new list. Every other element is unchanged. The result is also equal to the term
@@ -222,6 +241,7 @@ stdLibCtx =
         , ("last", builtinFunct Last)
         , ("get", builtinFunct Get)
         , ("push", builtinFunct Push)
+        , ("pop", builtinFunct Pop)
         , ("set", builtinFunct Set)
         , ("array", builtinFunct NewArray)
         , ("+", builtinFunct Plus)
@@ -253,6 +273,9 @@ evalBuiltinFunct Get [VList l, VInt i]
 evalBuiltinFunct Get _ = Error "Get only valid for a list and an int"
 evalBuiltinFunct Push [VList l, x] = Ok $ VList (l ++ [x])
 evalBuiltinFunct Push _ = Error "Push only valid for a list and an element"
+evalBuiltinFunct Pop [VList []] = Error "Pop requires a non-empty list"
+evalBuiltinFunct Pop [VList l] = Ok $ VList (init l)
+evalBuiltinFunct Pop _ = Error "Pop only valid for a list"
 evalBuiltinFunct Set [VList l, VInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok $ VList (before ++ x : drop 1 after)
@@ -358,6 +381,9 @@ stdLibRuleCtx =
 -- rules. They cannot be the full builtin values, which contain these very contracts.
 getSymbol :: Value
 getSymbol = VFunct ["list", "index"] [] [] (BuiltinFunct Get) []
+
+popSymbol :: Value
+popSymbol = VFunct ["list"] [] [] (BuiltinFunct Pop) []
 
 pushSymbol :: Value
 pushSymbol = VFunct ["list", "x"] [] [] (BuiltinFunct Push) []

@@ -509,6 +509,7 @@ builtinType funct =
         Last -> list (\a -> TFn [TList a] a)
         Get -> list (\a -> TFn [TList a, TInt] a)
         Push -> list (\a -> TFn [TList a, a] (TList a))
+        Pop -> list (\a -> TFn [TList a] (TList a))
         Set -> list (\a -> TFn [TList a, TInt, a] (TList a))
         UnBox -> failTc "Type error: Box::unbox is called, as in Box::unbox(b), and cannot be used as a value"
         NewBox -> failTc "Type error: Box::new is called, as in Box::new(x), and cannot be used as a value"
@@ -1035,8 +1036,13 @@ inferExprR ctx env expr =
                 _ -> failTc "Type error: an array literal is made from a list"
         F (Var ('.' : method)) (receiver : args) -> do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
-            owner <- ownerOfValue method (fst (head inferred))
-            resolveAssociated owner method >>= \name -> callResolved name inferred
+            receiverTy <- zonk (fst (head inferred))
+            case (listMethod method, receiverTy) of
+                -- l.push(x), l.size(), a.get(i): the function of that name on a list or an array
+                (Just b, ty) | sequenceType ty -> inferExprR ctx env (F (Val (builtinFunct b)) (receiver : args))
+                _ -> do
+                    owner <- ownerOfValue method (fst (head inferred))
+                    resolveAssociated owner method >>= \name -> callResolved name inferred
         -- <Type as Trait>::f, written in full
         F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
         F (Var name) args
@@ -1373,6 +1379,18 @@ inferProofR ctx env proof =
         | Map.member name (ctxFns ctx) = return (Just name)
         | otherwise = return Nothing
 
+-- The builtin that a method of a list or an array is
+listMethod :: Name -> Maybe BuiltinFunct
+listMethod method = lookup method [("size", Size), ("first", First), ("last", Last), ("get", Get), ("push", Push), ("pop", Pop), ("set", Set)]
+
+-- Whether a type is a list or an array, which have the functions of the builtins as methods
+sequenceType :: Type -> Bool
+sequenceType ty = case ty of
+    TList _ -> True
+    TArrayOf{} -> True
+    TBox TArrayOf{} -> True
+    _ -> False
+
 -- The functions of a list that a struct can have of its own: `size(v)` is the function `size` of the impl of the type of `v`
 sequenceFunction :: BuiltinFunct -> Maybe Name
 sequenceFunction b = case b of
@@ -1381,6 +1399,7 @@ sequenceFunction b = case b of
     Last -> Just "last"
     Get -> Just "get"
     Push -> Just "push"
+    Pop -> Just "pop"
     Set -> Just "set"
     _ -> Nothing
 

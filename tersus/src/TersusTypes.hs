@@ -15,7 +15,7 @@ type Name = String
 -- Ctor builds a struct from its fields, given in declaration order, and Field reads one by name. The Field of a `..base` update names the struct the base must be.
 -- A struct literal is the application of its Ctor, so the proof engine sees structs as ordinary terms.
 data BuiltinFunct
-    = Size | First | Last | Get | Push | Set | Plus | Minus | Times | Div | Mod
+    = Size | First | Last | Get | Push | Pop | Set | Plus | Minus | Times | Div | Mod
     | -- NewArray n x: an array of n copies of x, n being a constant. ArrayFrom is the array that a literal list of constants makes (`#[1, 2]`).
       NewArray | ArrayFrom
     | -- NewBoxedArray n x: Array::boxed(n, x), an array of n copies of x, n being any Int not negative, in a Box that carries the size

@@ -362,6 +362,8 @@ The standard library seeds these builtin functions:
 - `last(list)`: returns the last element of a non-empty list.
 - `get(list, index)`: returns the element at `index`, counting from 0. The index must satisfy `0 <= index < size(list)`.
 - `push(list, x)`: returns a new list with `x` added at the end. Lists are values, so the argument list is unchanged.
+- `pop(list)`: returns a new list without the last element. The list must not be empty (`Relation does not hold` otherwise), the result is one shorter and keeps the others in their places. There is no `pop` of an array, whose size never changes.
+- **Methods.** The functions of a list can be written as methods: `l.push(x)`, `l.pop()`, `l.size()`, `l.get(i)`, `l.set(i, x)`, `l.first()`, `l.last()` are `push(l, x)` and so on, and `size`, `first`, `last`, `get` and `set` are methods of an array and of a Box of an array too (`examples/list_methods.tersus`). A list literal is not given a method (`[1, 2].size()` does not parse): name it first.
 - `set(list, index, x)`: returns a new list with the element at `index` replaced by `x`. The index must satisfy `0 <= index < size(list)`, and the argument list is unchanged.
 - `array(n, x)`: returns an array of `n` copies of `x`, an `Array<T, n>`. The size is a constant that is not negative (see Arrays).
 - `#[1, 2, 3]`: an array written out, the elements being literals, an `Array<Int, 3>`.
@@ -1365,9 +1367,10 @@ return v.get(1) + size(v);                      // 8
 - **The elements may own things.** The array clones the filler into every slot, `set` and the growth move and free what they replace, and a `Vec<List<Int>>`, a `Vec<Vec<Int>>` or a Vec of structs that own lists is freed once (the native tests run these with the checks of the runtime on).
 - **What it is not yet**: a list. There is no list literal or `for` over it, no function over any `Sequence` (it takes a `Vec`), and `=` compares the unused slots of the arrays too.
 
-**The prelude.** The library is `lib/prelude.tersus`, and every program that mentions `Vec` or `Sequence` has it in front of it, so the examples above run as they are written, and `tersus check` of a program that uses `Vec::new(0)` needs nothing else. A program that declares a `Vec` (or a `Sequence`) of its own does not get the library, so it keeps its own, and a program that mentions neither is unchanged. The library is parsed before the program with the declarations it makes known to it, so the line numbers in an error are the program's own, and the functions of the library are checked and validated with it (a few milliseconds). It is compiled into the program, so the executable of `tersus build` has what it uses and nothing else.
+**The prelude.** The trait `Sequence` is in `lib/prelude.tersus`, and every program that mentions `Sequence` has it in front of it, so a struct that implements it needs nothing declared. A program that declares a `Sequence` of its own does not get the library, and a program that does not mention it is unchanged. The library is parsed before the program with the declarations it makes known to it, so the line numbers in an error are the program's own, and it is checked and validated with the program.
 
-See `examples/vec.tersus`, which is a program that uses the prelude, and `lib/prelude.tersus`.
+`Vec` itself is not in the prelude: a `List` is the same thing (see Lists In Native Code), with the literals, the methods and the proof facts of a list, so a program uses a list. `examples/vec.tersus` writes the library out in full as a program of its own: it is what the features of this part of the guide are for.
+
 
 ### Lists In Native Code
 
@@ -1460,7 +1463,7 @@ return a;                             // [[1], [2, 3], [1]]
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function cannot take "any type that implements `Measure`" (a type parameter has no bounds yet), so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
-- The CLI runs one file at a time and has no REPL or multi-file programs; the one library there is, the prelude with `Vec` and `Sequence`, is put in front of a program that mentions them.
+- The CLI runs one file at a time and has no REPL or multi-file programs; the one library there is, the prelude with the trait `Sequence`, is put in front of a program that mentions it.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - The source file is read in the encoding of the locale, so a program with a letter that is not ASCII in a name (the parser accepts any letter) needs a UTF-8 locale to load.
 - A program has no input or output: it computes and returns one value, which `run` and an executable print.
