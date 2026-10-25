@@ -1,0 +1,29 @@
+// Bytes. A `Byte` is a whole number from 0 to 255 and a type of its own, so one is never made by accident: `toByte(x)` is x as a Byte and asks
+// for a proof that x is from 0 to 255, and `toInt(b)` is b as an Int (a Byte is not added or compared with `<`: it is turned into an Int first).
+// The validator knows that every Byte, wherever it came from (a parameter, a field, an element of a list), is from 0 to 255.
+
+struct Pixel {
+    red: Byte,
+    green: Byte,
+    blue: Byte,
+};
+
+// A sum of Bytes has no contract to prove: each is known to be from 0 to 255, so the result is from 0 to 765
+fn brightness(p: Pixel) -> Int [{ }] [{ affirm return >= 0; affirm return <= 765; }] {
+    return toInt(p.red) + toInt(p.green) + toInt(p.blue);
+};
+
+// An Int that is read from somewhere is a Byte only where it has been tested
+fn clamp(x: Int) -> Byte [{ }] [{ }] {
+    if x < 0 {
+        return toByte(0);
+    };
+    if x > 255 {
+        return toByte(255);
+    };
+    return toByte(x);
+};
+
+pixel = Pixel { red: clamp(300), green: toByte(20), blue: clamp(0 - 5) };
+shades = push(push([], pixel.green), pixel.red);
+return brightness(pixel) * 1000 + toInt(first(shades));

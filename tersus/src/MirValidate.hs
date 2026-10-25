@@ -259,6 +259,8 @@ typeInvariants st ty value = case ty of
 withTypeFacts :: M.Function -> M.Local -> PState -> PState
 withTypeFacts fn l st =
     case (M.localType <$> Map.lookup l (M.fnLocals fn), Map.lookup l (psLocals st)) of
+        -- (a Byte is from 0 to 255, wherever it came from: it is only ever made from an Int that was proved to be, or read from a list of them)
+        (Just TByte, Just iota) -> addFacts st [FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm iota, CTerm (VInt 0)], FApp (CTerm (builtinFunct (Rel Lt))) [ATerm iota, CTerm (VInt 256)]]
         (Just (TArray _ n), Just iota) -> sized n iota
         (Just (TBox (TArray _ n)), Just iota) -> sized n iota
         (Just (TArrayOf _ (SizeParam p)), Just iota) -> sizedByParam p iota

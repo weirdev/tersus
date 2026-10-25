@@ -84,6 +84,8 @@ builtinName NewEmptyArray = "Array::empty"
 builtinName Unsize = "unsize"
 builtinName WriteByte = "writeByte"
 builtinName ReadByte = "readByte"
+builtinName ToByte = "toByte"
+builtinName FromByte = "toInt"
 builtinName NewBox = "Box::new"
 builtinName UnBox = "Box::unbox"
 builtinName Plus = "+"
@@ -117,6 +119,7 @@ renderSize (SizeVar n) = "_" ++ show n
 -- Renders a type in Tersus syntax
 renderType :: Type -> String
 renderType TInt = "Int"
+renderType TByte = "Byte"
 renderType TBool = "Bool"
 renderType (TList t) = "List<" ++ renderType t ++ ">"
 renderType (TBox t) = "Box<" ++ renderType t ++ ">"

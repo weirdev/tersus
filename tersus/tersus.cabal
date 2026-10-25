@@ -102,6 +102,7 @@ test-suite tersus-test
       TestGenerics
       TestSequence
       TestStrings
+      TestBytes
       TestBox
       TestTraits
       TestPipeline

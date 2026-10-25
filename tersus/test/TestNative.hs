@@ -38,6 +38,7 @@ testNative =
         , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
+        , TestList "bytes" [TestCase name (sameAsMir name source) | (name, source) <- bytePrograms]
         , TestList "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
         , TestList "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
@@ -56,7 +57,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "strings"
@@ -241,6 +242,22 @@ stringPrograms =
     , ("not equal", "return \"ab\" = \"ac\";")
     , ("in a struct and a list", "struct Named { name: String, n: Int }; xs = push(push([], Named { name: \"a\", n: 1 }), Named { name: \"bc\", n: 2 }); return xs;")
     , ("in an enum", "enum E { S { s: String }, N }; fn f(e: E) -> Int [{ }] [{ }] { return match e { E::S { s: s } => size(s), E::N => 0 }; }; return f(E::S { s: \"abc\" });")
+    ]
+
+-- A Byte is a word, like an Int: the same on the MIR and natively
+bytePrograms :: [(String, String)]
+bytePrograms =
+    [ ("a Byte as an Int", "b = toByte(200); return toInt(b) + 1;")
+    , ("the ends of the range", "return toInt(toByte(0)) * 1000 + toInt(toByte(255));")
+    , ("Bytes are equal", "b = toByte(9); c = toByte(4 + 5); if b = c { return 1; }; return 0;")
+    , ("a Byte in a struct", "struct P { r: Byte, g: Byte }; p = P { r: toByte(1), g: toByte(2) }; return p;")
+    , ("a list of Bytes", "bs = push(push(push([], toByte(1)), toByte(2)), toByte(255)); return bs;")
+    , ("a list of Bytes is read", "bs = push(push([], toByte(7)), toByte(9)); return toInt(get(bs, 1)) * 10 + toInt(first(bs));")
+    , ("a Byte is passed and returned", "fn next(b: Byte) -> Byte [{ affirm toInt(b) < 255; }] [{ }] { return toByte(toInt(b) + 1); }; return next(toByte(41));")
+    , ("a list of Bytes is passed", "fn total(a: &List<Byte>) -> Int [{ }] [{ }] { n = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { n = n + toInt(get(a, i)); i = i + 1; }; return n; }; return total(push(push([], toByte(100)), toByte(200)));")
+    , ("an array of Bytes", "a = #[1, 2, 3]; return toInt(toByte(get(a, 2)));")
+    , ("a Byte is written", "b = toByte(72); writeByte(toInt(b)); writeByte(105); return 0;")
+    , ("a Byte in an enum", "enum E { A { b: Byte }, N }; e = E::A { b: toByte(5) }; return e;")
     ]
 
 -- What a program reads is the same on the MIR and natively: they are given the same input

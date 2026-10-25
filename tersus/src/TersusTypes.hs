@@ -28,6 +28,10 @@ data BuiltinFunct
     | -- ReadByte: readByte(), the next byte of the standard input, or -1 when there is no more. Its value is not known to the validator beyond
       -- being from -1 to 255.
       ReadByte
+    | -- ToByte x: toByte(x), the Byte that the Int x is (x from 0 to 255). FromByte b: toInt(b), the Int that the Byte b is. A Byte is an Int that is from
+      -- 0 to 255, and a different type, so nothing makes one by accident: these two are how a value goes from the one to the other.
+      ToByte
+    | FromByte
     | -- Unsize b: the Box of an array of a size, as a Box of an array of any size (the size goes into the Box, the value is the same)
       Unsize
     | -- NewBox x: x held in a Box. A Box has the value of what it holds (it is where that lives that differs), so in a value it is x.
@@ -52,7 +56,7 @@ data BuiltinFunct
 -- look at them. TVar is the checker's own unknown and is never written by a program.
 -- TArrayOf element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
 -- or an element of a bigger array), with no pointer to it. The size is part of the type.
-data Type = TInt | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
+data Type = TInt | TByte | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
     | -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`): the type of the function for any values of the sizes. A call
       -- gives each its value, so a use of one that is not a call has no type.
       TForall [Variable] [Variable] Type
@@ -101,6 +105,7 @@ sizeText (SizeVar n) = "_" ++ show n
 typeText :: Type -> String
 typeText ty = case ty of
     TInt -> "Int"
+    TByte -> "Byte"
     TBool -> "Bool"
     TList t -> "List<" ++ typeText t ++ ">"
     TBox t -> "Box<" ++ typeText t ++ ">"
@@ -175,6 +180,7 @@ readType text =
                             _ -> Just (TNamed full, afterInner)
                     _ -> case name of
                         "Int" -> Just (TInt, afterName)
+                        "Byte" -> Just (TByte, afterName)
                         "Bool" -> Just (TBool, afterName)
                         _ | "::" `isInfixOf'` name -> Just (TVariant name, afterName)
                         _ -> Just (TNamed name, afterName)

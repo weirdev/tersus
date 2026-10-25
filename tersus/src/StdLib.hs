@@ -196,6 +196,19 @@ builtinFunct WriteByte =
         []
         (BuiltinFunct WriteByte)
         [relProof Eq (ATerm "return") (ATerm "b")]
+-- toByte(x) is x as a Byte: x has to be from 0 to 255. toInt(b) is b as an Int.
+builtinFunct ToByte =
+    VFunct
+        ["x"]
+        [ Rewrite (CheckRel (relProof GtEq (ATerm "x") (CTerm (VInt 0))))
+        , ProofAssert (relProof GtEq (ATerm "x") (CTerm (VInt 0)))
+        , Rewrite (CheckRel (relProof Lt (ATerm "x") (CTerm (VInt 256))))
+        , ProofAssert (relProof Lt (ATerm "x") (CTerm (VInt 256)))
+        ]
+        []
+        (BuiltinFunct ToByte)
+        [relProof Eq (ATerm "return") (ATerm "x")]
+builtinFunct FromByte = VFunct ["b"] [] [] (BuiltinFunct FromByte) [relProof Eq (ATerm "return") (ATerm "b")]
 -- readByte() is the next byte of the standard input, or -1 at its end: it is not known beyond that, so a program has to test what it relies on
 builtinFunct ReadByte =
     VFunct
@@ -264,6 +277,8 @@ stdLibCtx =
         , ("array", builtinFunct NewArray)
         , ("writeByte", builtinFunct WriteByte)
         , ("readByte", builtinFunct ReadByte)
+        , ("toByte", builtinFunct ToByte)
+        , ("toInt", builtinFunct FromByte)
         , ("+", builtinFunct Plus)
         , ("-", builtinFunct Minus)
         , ("*", builtinFunct Times)
@@ -309,6 +324,12 @@ evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
 evalBuiltinFunct NewEmptyArray [] = Ok (VList [])
 evalBuiltinFunct WriteByte [VInt b] = Ok (VInt b)
 evalBuiltinFunct WriteByte _ = Error "writeByte takes one byte"
+evalBuiltinFunct ToByte [VInt x]
+    | x >= 0 && x < 256 = Ok (VInt x)
+    | otherwise = Error "toByte needs an Int from 0 to 255"
+evalBuiltinFunct ToByte _ = Error "toByte takes one Int"
+evalBuiltinFunct FromByte [VInt b] = Ok (VInt b)
+evalBuiltinFunct FromByte _ = Error "toInt takes one Byte"
 -- (not a value that can be worked out: what it gives is the input, which a proof does not have, so the proof engine may not fold a call to a constant)
 evalBuiltinFunct ReadByte _ = Error "readByte reads the input, so it has no value to evaluate"
 evalBuiltinFunct Unsize [value] = Ok value

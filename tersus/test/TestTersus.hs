@@ -19,6 +19,7 @@ import TestGenerics
 import TestBox
 import TestSequence
 import TestStrings
+import TestBytes
 
 main :: IO ()
 main = do
@@ -82,6 +83,7 @@ main = do
                 , testGenerics
                 , testSequence
                 , testStrings
+                , testBytes
                 ]
     putStrLn $
         "Summary: "
