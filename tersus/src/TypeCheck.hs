@@ -12,6 +12,8 @@ module TypeCheck
     , checkCall
     , functionType
     , substSizes
+    , arraySlots
+    , maxArraySlots
     , withSizes
     , plainElement
     , checkBuiltinCall

@@ -1148,6 +1148,8 @@ return dot(#[1, 2, 3], #[4, 5, 6]) + dot(#[2], #[5]);   // 42
 - **It is validated once.** The validator knows of `n` that it is the size of every array whose type says `n` (`size(a) = n`), as it knows the constant of an array of a size, and nothing else: a caller proves what the contract asks of `n` for its own size. Callers know the function by its contract, as for any function.
 - **Native code is made for each size.** An array is held inline, so a program that runs has a copy of the function for each list of sizes it is called with (`dot<3>` and `dot<1>` above), with the sizes replaced by the constants (`MirMono`). A size that a function passes on to another it calls is one of its own sizes, which the copy of it has replaced.
 
+The limit of an array held in a frame (8192 words) is checked for a size that is a constant when the program is checked, and for one that comes from a size parameter when native code is made for that size (`tersus run` has no frame): `fn f<n>(a: Array<Int, n>) { b = array(n, a); ... }` called with `array(8192, 0)` builds an array of 8192 arrays of 8192 words, which `tersus build` refuses, naming the copy of the function (`f<8192>`).
+
 See `examples/array_sizes.tersus`.
 
 What an array cannot be yet: an element that is a list, a struct or an enum, and a size that is a parameter of a struct or an enum (the next step of the roadmap in `README.md`).
