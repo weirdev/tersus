@@ -74,23 +74,30 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
 libraries :: String -> [(String, String)]
 libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings]
   where
-    ws = names source
+    code = withoutText source
+    ws = names code
     ws' = zip ws (drop 1 ws)
     declares candidates = any (\(keyword, name) -> keyword `elem` ["struct", "enum", "trait"] && name `elem` candidates) ws'
     preludeFree = not (declares ["Sequence", "Growable"])
-    strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || hasLiteral source)
+    strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || '"' `elem` code)
     prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable"])
     -- (the names in a text: runs of letters, digits and underscores)
     names text = case dropWhile (not . isNameChar) text of
         "" -> []
         rest -> let (w, more) = span isNameChar rest in w : names more
     isNameChar c = isAlphaNum c || c == '_'
-    -- (a quote outside a comment)
-    hasLiteral text = case text of
-        '/' : '/' : more -> hasLiteral (dropWhile (/= '\n') more)
-        '"' : _ -> True
-        _ : more -> hasLiteral more
-        [] -> False
+    -- (the program without its comments and the text of its literals, which are `""`: what a name there says is not the program's)
+    withoutText text = case text of
+        '/' : '/' : more -> withoutText (dropWhile (/= '\n') more)
+        '"' : more -> '"' : '"' : withoutText (afterString more)
+        c : more -> c : withoutText more
+        [] -> []
+    afterString text = case text of
+        '\\' : _ : more -> afterString more
+        '"' : more -> more
+        '\n' : more -> '\n' : more
+        _ : more -> afterString more
+        [] -> []
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
