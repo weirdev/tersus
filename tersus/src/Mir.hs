@@ -62,6 +62,7 @@ data Program = Program
     , progFunctions :: Map Name Function -- every function but main, a nested one lifted to the top (outer::inner)
     , progMain :: Function -- the statements of the program; no parameters
     , progGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields (see completeInstances)
+    , progInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets, by the name of the struct (not of an instance of it)
     }
     deriving (Show, Eq)
 

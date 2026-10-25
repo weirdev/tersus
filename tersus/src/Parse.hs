@@ -304,11 +304,13 @@ structStatement = do
     fields <- structField `sepEndBy` (char ',' >> whitespace)
     void (char '}')
     whitespace
+    -- struct S { ... } invariant [{ affirm ...; }]: what every value of the struct meets, written with the names of the fields
+    invariant <- option [] (keyword "invariant" >> whitespace >> functContractReqs <* whitespace)
     modifyState (\d -> d{declTypeParams = outerParams})
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
-    return (StructDef name params fields)
+    return (StructDef name params fields invariant)
   where
     nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
 
@@ -574,18 +576,24 @@ functHeader = do
 
 -- trait Name { fn f(params) -> Type [{ input contract }] [{ output contract }]; ... }: what a type has to provide to
 -- implement the trait. Self is the implementing type. The contracts are met by every implementation: it may ask for less
--- and promise more, which the validator checks (see TypeCheck.implementation).
+-- and promise more, which the validator checks (see TypeCheck.implementation). A trait can have types, `trait Sequence<E>`,
+-- which each impl gives (`impl<T> Sequence<T> for Vec<T>`).
 traitStatement :: Parser Statement
 traitStatement = do
     keyword "trait"
     whitespace
     name <- variable
     whitespace
+    params <- option [] (try (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace))
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a trait name")
+    when (any (not . isTypeParameter) params) $ fail ("trait " ++ name ++ " has a size parameter: a trait has types only")
+    outerParams <- declTypeParams <$> getState
+    modifyState (\d -> d{declTypeParams = params, declGenerics = if null params then declGenerics d else Map.insert name params (declGenerics d)})
     functions <- curlyBracesParse (genericStatementBlock traitFunction)
+    modifyState (\d -> d{declTypeParams = outerParams})
     whitespace
     when (length (nub (map traitFnName functions)) /= length functions) $ fail ("Trait " ++ name ++ " repeats a function")
-    return (TraitDef name functions)
+    return (TraitDef name params functions)
   where
     traitFunction = do
         keyword "fn"
@@ -597,29 +605,42 @@ traitStatement = do
 
 -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are named <Type>::f and <Type as Trait>::f (see
 -- implFunctionName), and the checker resolves Type::f and x.f(...) to the one that is meant. Self stands for Type in them.
+-- impl<T> Vec<T> { ... } and impl<T> Sequence<T> for Vec<T> { ... } are for a struct with types and sizes (and a trait with types):
+-- each function has the parameters of the impl after its own, and Self is Vec<T>.
 implStatement :: Parser Statement
 implStatement = do
     keyword "impl"
     whitespace
-    -- impl<T> Vec<T> { ... }: the functions are for any T. Each has the parameters of the impl, and Self is Vec<T>.
     implParams <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
+    outerParams <- declTypeParams <$> getState
+    -- (the types of the impl are written in the header)
+    modifyState (\d -> d{declTypeParams = filter isTypeParameter implParams})
+    generics <- declGenerics <$> getState
+    let arguments name = case Map.lookup name generics of
+            Just params -> optionMaybe (try (genericArguments params <* whitespace))
+            Nothing -> return Nothing
     first <- variable
     whitespace
-    (trait, typeName) <- option (Nothing, first) (keyword "for" >> whitespace >> variable >>= \t -> whitespace >> return (Just first, t))
+    firstArgs <- arguments first
+    forType <- optionMaybe (keyword "for" >> whitespace >> variable <* whitespace)
+    (trait, traitArgs, typeName, typeArgs) <- case forType of
+        Just t -> do
+            targs <- arguments t
+            return (Just first, maybe [] id firstArgs, t, targs)
+        Nothing -> return (Nothing, [], first, firstArgs)
+    modifyState (\d -> d{declTypeParams = outerParams})
     types <- declTypes <$> getState
     when (not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
-    generics <- declGenerics <$> getState
-    selfName <- case Map.lookup typeName generics of
-        Just params -> do
-            when (null implParams) $ fail ("impl for " ++ typeName ++ ", which has parameters <" ++ intercalate ", " params ++ ">: write impl<" ++ intercalate ", " params ++ "> " ++ typeName ++ "<" ++ intercalate ", " params ++ ">")
-            -- (the impl names the parameters its own way: impl<U> Vec<U>)
-            outerParams <- declTypeParams <$> getState
-            modifyState (\d -> d{declTypeParams = filter isTypeParameter implParams})
-            args <- genericArguments params
-            modifyState (\d -> d{declTypeParams = outerParams})
-            whitespace
+    case (trait, Map.lookup first generics) of
+        (Just traitName, Just params) | firstArgs == Nothing -> fail ("trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">: write impl " ++ traitName ++ "<" ++ intercalate ", " params ++ "> for " ++ typeName)
+        (Just traitName, Nothing) | firstArgs /= Nothing -> fail ("trait " ++ traitName ++ " has no parameters")
+        _ -> return ()
+    selfName <- case (Map.lookup typeName generics, typeArgs) of
+        (Just params, Nothing) -> fail ("impl for " ++ typeName ++ ", which has parameters <" ++ intercalate ", " params ++ ">: write impl<" ++ intercalate ", " params ++ "> " ++ typeName ++ "<" ++ intercalate ", " params ++ ">")
+        (Just _, Just args) -> do
+            when (null implParams) $ fail ("impl for " ++ typeName ++ " names its types, so it is written impl<...>")
             return (instanceName typeName args)
-        Nothing -> do
+        (Nothing, _) -> do
             when (not (null implParams)) $ fail ("impl<" ++ intercalate ", " implParams ++ "> for " ++ typeName ++ ", which has no parameters")
             return typeName
     ctors <- declCtors <$> getState
@@ -628,7 +649,7 @@ implStatement = do
     functions <- curlyBracesParse (genericStatementBlock (implFunction typeName trait))
     modifyState (\d -> d{declSelf = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
     whitespace
-    return (ImplDef trait typeName functions)
+    return (ImplDef trait traitArgs typeName selfName functions)
   where
     implFunction typeName trait = do
         definition <- functStatement
@@ -859,25 +880,27 @@ infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (bui
 parensProof :: Parser VariableProof
 parensProof = parensParse proof
 
+-- f(args) in a proof: a builtin, or a function of the program, which the proof calls to speak of its result (`affirm i < size(v);`
+-- with a `size` that the program defines). The name may be a path, `Type::f` or `Trait::f`, which the checker resolves.
 functionProof :: Parser VariableProof
 functionProof = do
-    fname <- variable
-    funct <- case fname of
-        "size" -> return Size
-        "first" -> return First
-        "last" -> return Last
-        "get" -> return Get
-        "push" -> return Push
-        "set" -> return Set
-        "array" -> return NewArray
-        _ -> fail "Functions in proofs only support builtins for now"
+    fname <- qualifiedName
+    let funct = case fname of
+            "size" -> CTerm (builtinFunct Size)
+            "first" -> CTerm (builtinFunct First)
+            "last" -> CTerm (builtinFunct Last)
+            "get" -> CTerm (builtinFunct Get)
+            "push" -> CTerm (builtinFunct Push)
+            "set" -> CTerm (builtinFunct Set)
+            "array" -> CTerm (builtinFunct NewArray)
+            _ -> ATerm fname
     void (char '(')
     whitespace
     args <- proof `sepBy` skipWhitespace (char ',')
     whitespace
     void (char ')')
     whitespace
-    return (FApp (CTerm (builtinFunct funct)) args)
+    return (FApp funct args)
 
 abstractProof :: Parser VariableProof
 abstractProof = do

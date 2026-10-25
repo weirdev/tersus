@@ -465,23 +465,23 @@ genericImplPrograms =
 vecPrograms :: [(String, String)]
 vecPrograms =
     [ ("pushed and read", "v = Vec::new(0).push(5).push(6); return v.get(0) * 10 + v.get(1);")
-    , ("pushed past its capacity", loop 10 "0" "v = v.push(i * i);" ++ "return v.len() + v.get(9);")
-    , ("pushed past it again and again", loop 300 "0" "v = v.push(i);" ++ "return v.len() + v.get(299);")
-    , ("set and popped", "v = Vec::new(false).push(true).push(false).set(0, true).pop(); return v.len();")
+    , ("pushed past its capacity", loop 10 "0" "v = v.push(i * i);" ++ "return size(v) + v.get(9);")
+    , ("pushed past it again and again", loop 300 "0" "v = v.push(i);" ++ "return size(v) + v.get(299);")
+    , ("set and popped", "v = Vec::new(false).push(true).push(false).set(0, true).pop(); return size(v);")
     , ("a copy is a Vec of its own", "a = Vec::new(0).push(1); b = a.set(0, 7); return a.get(0) * 10 + b.get(0);")
-    , ("of lists", loop 9 "push([], 0)" "v = v.push(push(push([], i), i));" ++ "return size(v.get(8)) + v.len();")
+    , ("of lists", loop 9 "push([], 0)" "v = v.push(push(push([], i), i));" ++ "return size(v.get(8)) + size(v);")
     , ("of lists, one taken out", "rows = Vec::new(push([], 0)).push(push(push([], 4), 5)); r = rows.get(0); return size(r) + size(rows.data);")
-    , ("of Vecs", "g = Vec::new(Vec::new(0)).push(Vec::new(0).push(8).push(9)); return g.get(0).len();")
-    , ("of Vecs that grow", "g = Vec::new(Vec::new(0)); i = 0; while i < 9 [{ affirm i >= 0; affirm i <= 9; affirm g.len = i; define n = g.len; define cap = size(g.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 9 - i { g = g.push(Vec::new(i).push(i)); i = i + 1; }; return g.len() + g.get(8).len();")
+    , ("of Vecs", "g = Vec::new(Vec::new(0)).push(Vec::new(0).push(8).push(9)); return size(g.get(0));")
+    , ("of Vecs that grow", "g = Vec::new(Vec::new(0)); i = 0; while i < 9 [{ affirm i >= 0; affirm i <= 9; affirm size(g) = i; }] shrinks 9 - i { g = g.push(Vec::new(i).push(i)); i = i + 1; }; return size(g) + size(g.get(8));")
     , ("of structs that own a list", "struct P { n: Int, xs: List<Int> }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);")
-    , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: Vec::new(0).push(4), tag: 2 }; return b.tag + b.items.len();")
+    , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: Vec::new(0).push(4), tag: 2 }; return b.tag + size(b.items);")
     , ("in a list", "l = push(push([], Vec::new(0).push(1)), Vec::new(5)); return size(l);")
-    , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = Vec::new(push([], i)).push(push([], i)).push(push([], 7)); t = t + v.len(); i = i + 1; }; return t;")
+    , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = Vec::new(push([], i)).push(push([], i)).push(push([], 7)); t = t + size(v); i = i + 1; }; return t;")
     ]
   where
     -- A Vec made with the filler and pushed to by the statement `n` times
     loop n filler step =
-        "v = Vec::new(" ++ filler ++ "); i = 0; while i < " ++ show (n :: Int) ++ " [{ affirm i >= 0; affirm i <= " ++ show n ++ "; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks " ++ show n ++ " - i { " ++ step ++ " i = i + 1; }; "
+        "v = Vec::new(" ++ filler ++ "); i = 0; while i < " ++ show (n :: Int) ++ " [{ affirm i >= 0; affirm i <= " ++ show n ++ "; affirm size(v) = i; }] shrinks " ++ show n ++ " - i { " ++ step ++ " i = i + 1; }; "
 
 -- The example has the library that the tests use
 testVecExample :: Test

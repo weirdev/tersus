@@ -103,21 +103,7 @@ testGenerics =
                 , testCase "validated against its contract" (rejected "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn pick(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < 2; }] [{ }] { return self.a; }; }; return Box2<Int> { a: 1, b: 2 }.pick(5);" "Could not prove: i < 2")
                 , testCase "the parameters are written" (parseFails "struct Box2<T> { a: T, b: T }; impl Box2 { fn first(self: &Self) -> Int { return 0; }; }; return 0;")
                 , testCase "or none for a struct without any" (parseFails "struct S { a: Int }; impl<T> S { fn f(self: &Self) -> Int { return 0; }; }; return 0;")
-                , testCase "a trait is not implemented for these yet" (rejected "struct Box2<T> { a: T, b: T }; trait Sized2 { fn count(self: Self) -> Int; }; impl<T> Sized2 for Box2<T> { fn count(self: Self) -> Int { return 2; }; }; return 0;" "a trait cannot be implemented for these yet")
+                , testCase "a trait is implemented for these" (runs "struct Box2<T> { a: T, b: T }; trait Counted { fn count(self: &Self) -> Int; }; impl<T> Counted for Box2<T> { fn count(self: &Self) -> Int { return 2; }; }; return Box2<Int> { a: 1, b: 2 }.count();" (VInt 2))
                 , testCase "the impl comes before its calls" (rejected "struct Box2<T> { a: T, b: T }; x = Box2<Int> { a: 1, b: 2 }; return x.first();" "is not defined before this call")
-                ]
-            , TestList
-                "a list written in Tersus"
-                [ testCase "pushed and read" (runs (vecLibrary ++ "v = Vec::new(0).push(5).push(6); return v.get(0) * 10 + v.get(1);") (VInt 56))
-                , testCase "pushed past its capacity, in a loop" (runs (vecLibrary ++ "v = Vec::new(0); i = 0; while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm v.len = i; define n = v.len; define cap = size(v.data); affirm n >= 0; affirm n <= cap; affirm cap >= 1; }] shrinks 10 - i { v = v.push(i * i); i = i + 1; }; return v.len() + v.get(9);") (VInt 91))
-                , testCase "set" (runs (vecLibrary ++ "v = Vec::new(1).push(2).push(3).set(0, 9); return v.get(0) + v.get(1) * 10;") (VInt 39))
-                , testCase "popped" (runs (vecLibrary ++ "v = Vec::new(false).push(true).push(false).pop(); return v.len();") (VInt 1))
-                , testCase "a copy is a Vec of its own" (runs (vecLibrary ++ "a = Vec::new(0).push(1); b = a.set(0, 7); return a.get(0) * 10 + b.get(0);") (VInt 17))
-                , testCase "of lists" (runs (vecLibrary ++ "rows = Vec::new(push([], 0)).push(push(push([], 4), 5)); return size(rows.get(0));") (VInt 2))
-                , testCase "of Vecs" (runs (vecLibrary ++ "g = Vec::new(Vec::new(0)).push(Vec::new(0).push(8).push(9)); return g.get(0).len();") (VInt 2))
-                , testCase "of structs that own a list" (runs (vecLibrary ++ "struct P { n: Int, xs: List<Int> }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);") (VInt 4))
-                , testCase "the library validates by itself" (valid vecLibrary)
-                , testCase "an index past the end is rejected" (rejected (vecLibrary ++ "v = Vec::new(0).push(1); return v.get(1);") "Could not prove: i < n")
-                , testCase "so is a pop of an empty one" (rejected (vecLibrary ++ "v = Vec::new(0).pop(); return v.len();") "Could not prove: n >= 1")
                 ]
             ]

@@ -21,6 +21,8 @@ module Ghost
     , variantFailure
     , prefixError
     , maxJoinCandidates
+    , checkInvariant
+    , invariantFacts
     ) where
 
 import Control.Monad (foldM, when)
@@ -58,8 +60,10 @@ runStatement :: PState -> ValidationStatement -> V PState
 runStatement st (Rewrite rule) = rewrite st rule
 runStatement st (ProofAssert varProof) = do
     proof <- liftR (toIotaProof st varProof)
-    if Engine.entails proof (proofContext st)
-        then return (addFacts st [proof])
+    -- (a call of a function in the proof has to meet the function's contract, and gives what it promises)
+    st' <- evaluateCalls st [proof]
+    if Engine.entails proof (proofContext st')
+        then return (addFacts st' [proof])
         else throwV ("Could not prove: " ++ renderVarProof varProof)
 runStatement st (AssignProofVar var expr) = assignProofVar st var expr
 
@@ -70,7 +74,10 @@ assumeStatements = foldM assumeStatement
 assumeStatement :: PState -> ValidationStatement -> V PState
 -- (a rewrite is only a way to prove something)
 assumeStatement st (Rewrite _) = return st
-assumeStatement st (ProofAssert varProof) = (\proof -> addFacts st [proof]) <$> liftR (toIotaProof st varProof)
+assumeStatement st (ProofAssert varProof) = do
+    proof <- liftR (toIotaProof st varProof)
+    st' <- evaluateCalls st [proof]
+    return (addFacts st' [proof])
 assumeStatement st (AssignProofVar var expr) = assignProofVar st var expr
 
 -- A variable of a proof stands for the value of an expression
@@ -184,7 +191,59 @@ applyCall st info args result = do
         known = case concreteResult st info args of
             Just value -> [FApp eqProof [ATerm result, CTerm value]]
             Nothing -> []
-    return (addFacts st' (call : known ++ instantiated))
+    evaluateCalls (addFacts st' (call : known ++ instantiated)) instantiated
+
+-- Functions in proofs. `affirm i < size(v);` with a `size` that the program defines calls it: the call has to meet the input contract of
+-- the function, exactly as a call in the code does, and the term `size(v)` then has the facts the function promises about its result.
+-- A function that may not end promises nothing about a value it does not give, so a proof does not call one.
+evaluateCalls :: PState -> [IotaProof] -> V PState
+evaluateCalls st0 proofs = go (200 :: Int) st0 (concatMap (callTerms st0) proofs)
+  where
+    go _ st [] = return st
+    go budget st (term : rest)
+        | budget <= 0 || evaluated st term = go budget st rest
+        | otherwise = case term of
+            FApp (ATerm iota) args | Just (name, info) <- calledFunction st iota -> do
+                st' <- evaluateCall st name info args term
+                -- (what it promises may call functions too)
+                new <- return (concatMap (callTerms st') (newFacts st st'))
+                go (budget - 1) st' (rest ++ new)
+            _ -> go budget st rest
+    newFacts before after = filter (`notElem` psFacts before) (psFacts after)
+
+-- The function a term in a proof is the head of the calls of, if it is one of the program
+calledFunction :: PState -> Iota -> Maybe (Name, FnInfo)
+calledFunction st (Iota ('$' : name)) = (,) name <$> Map.lookup name (psFns st)
+calledFunction _ _ = Nothing
+
+-- The calls of functions of the program in a proof, those inside the arguments of another first
+callTerms :: PState -> IotaProof -> [IotaProof]
+callTerms st proof = case proof of
+    FApp (ATerm iota) args
+        | Just _ <- calledFunction st iota -> concatMap (callTerms st) args ++ [proof]
+        | otherwise -> concatMap (callTerms st) args
+    FApp funct args -> concatMap (callTerms st) (funct : args)
+    Forall _ guards body -> concatMap (callTerms st) (guards ++ [body])
+    _ -> []
+
+evaluated :: PState -> IotaProof -> Bool
+evaluated st term = evaluatedFact term `elem` allFacts st
+
+-- (the fact that says a call was looked at, so that it is only looked at once on a path)
+evaluatedFact :: IotaProof -> IotaProof
+evaluatedFact term = FApp (ATerm (Iota "$evaluated")) [term]
+
+evaluateCall :: PState -> Name -> FnInfo -> [IotaProof] -> IotaProof -> V PState
+evaluateCall st name info args term = do
+    let params = fnParamNames info
+    when (length params /= length args) (throwV ("Function " ++ name ++ " expected " ++ show (length params) ++ " arguments, got " ++ show (length args)))
+    case fnTermination info of
+        Just MayDiverge -> throwV ("A proof calls " ++ name ++ ", which is declared ~ and may not end")
+        Just (Recursing _) -> throwV ("A proof calls " ++ name ++ " from its own contract or body")
+        _ -> return ()
+    checkInputs st params args (fnRequires info)
+    (st', instantiated) <- instantiateOutputsWith st params args term (fnExported info)
+    return (addFacts st' (evaluatedFact term : instantiated))
 
 -- The contract is checked in a state of its own: the names it uses are the parameters
 checkInputs :: PState -> [Variable] -> [IotaProof] -> [ValidationStatement] -> V ()
@@ -233,12 +292,16 @@ unreachable st =
 
 -- What the function promises, for these arguments and this result. A name the promise defines gets a value of its own.
 instantiateOutputs :: PState -> [Variable] -> [IotaProof] -> Iota -> [VariableProof] -> V (PState, [IotaProof])
-instantiateOutputs st _ _ _ [] = return (st, [])
-instantiateOutputs st params args result exported = do
-    let defined = filter (\var -> var /= "return" && var `notElem` params) (nubOrd (concatMap proofVars exported))
+instantiateOutputs st params args result = instantiateOutputsWith st params args (ATerm result)
+
+-- (the result is a term: a value, or a call of the function that a proof makes)
+instantiateOutputsWith :: PState -> [Variable] -> [IotaProof] -> IotaProof -> [VariableProof] -> V (PState, [IotaProof])
+instantiateOutputsWith st _ _ _ [] = return (st, [])
+instantiateOutputsWith st params args result exported = do
+    let defined = filter (\var -> var /= "return" && var `notElem` params && Map.notMember var (psGlobals st)) (nubOrd (concatMap proofVars exported))
     iotas <- freshN (length defined)
     let bound = zip defined iotas
-        view = (calleeView st (zip params args ++ [("return", ATerm result)])){psVars = Map.fromList bound}
+        view = (calleeView st (zip params args ++ [("return", result)])){psVars = Map.fromList bound}
     proofs <- liftR (flatResultMap (toIotaProof view) exported)
     return (st{psVars = Map.union (Map.fromList bound) (psVars st)}, proofs)
 
@@ -445,9 +508,10 @@ exportOutputs st bindings inputs outputs = do
 -- assumed in a state that knows nothing else, and the facts about the parameters, the result and the names the contracts
 -- define are what callers get. A caller therefore depends on the contracts alone, and the body can change without
 -- changing which callers are valid.
-exportContract :: PState -> [(Variable, Iota)] -> [ValidationStatement] -> [ValidationStatement] -> V [VariableProof]
-exportContract st bindings inputs outputs = do
-    let named = (refreshCache st{psFacts = [], psVars = Map.empty}){psView = Map.fromList [(name, ATerm iota) | (name, iota) <- bindings]}
+exportContract :: PState -> [IotaProof] -> [(Variable, Iota)] -> [ValidationStatement] -> [ValidationStatement] -> V [VariableProof]
+exportContract st known bindings inputs outputs = do
+    -- (what the types of the values say, such as the invariant of a struct, holds for any caller's values: a contract may speak of it)
+    let named = addFacts ((refreshCache st{psFacts = [], psVars = Map.empty}){psView = Map.fromList [(name, ATerm iota) | (name, iota) <- bindings]}) known
     contract <- assumeStatements named (inputs ++ outputs)
     exportFacts contract bindings inputs outputs
 
@@ -455,8 +519,47 @@ exportFacts :: PState -> [(Variable, Iota)] -> [ValidationStatement] -> [Validat
 exportFacts checked bindings inputs outputs = do
     let allowed = nubOrd (map fst bindings ++ concatMap valStmtDefinedVars inputs ++ concatMap valStmtDefinedVars outputs)
         nameIotas = [(name, iota) | name <- allowed, Just (ATerm iota) <- [lookupName checked name]]
-        byIota = namedIotaMap (reverse nameIotas)
+        -- (the functions of the program are the same in every state)
+        functions = [(source, iota) | (source, iota@(Iota ('$' : fnName))) <- Map.toList (psGlobals checked), Just info <- [Map.lookup fnName (psFns checked)], fnGlobal info]
+        byIota = namedIotaMap (reverse nameIotas ++ functions)
         -- (names that are the same value are said to be equal, since a fact is said once about one of them)
         aliases = [FApp eqVarProof [ATerm canonical, ATerm name] | (name, iota) <- nameIotas, Just canonical <- [lookup iota [(i, n) | (n, i) <- nameIotas]], canonical /= name]
-        facts = filter (proofOnlyOfNamedIotasOrConst byIota) (allFacts checked)
+        -- (what holds everywhere is not part of a promise: the function iotas are named for the calls in the facts, not for these)
+        facts = filter (proofOnlyOfNamedIotasOrConst byIota) (filter (`notElem` psGlobalFacts checked) (allFacts checked))
     return (nubOrd (mapMaybe (iotaProofToVarProof byIota) facts ++ aliases))
+
+-- Invariants of structs
+
+-- What every value of a struct meets, if it says: the struct is the one the name is of, or an instance of it
+invariantOf :: PState -> Name -> Maybe (Name, [ValidationStatement])
+invariantOf st name =
+    let base = maybe name fst (instanceOf name)
+     in (,) base <$> Map.lookup base (M.progInvariants (psProgram st))
+
+-- The names of the fields of a struct
+fieldNames :: PState -> Name -> [Variable]
+fieldNames st base =
+    case (Map.lookup base (M.progGenerics (psProgram st)), Map.lookup base (M.progTypes (psProgram st))) of
+        (Just (_, fields), _) -> map fst fields
+        (_, Just (M.StructDecl fields)) -> map fst fields
+        _ -> []
+
+-- A value that is made has to meet the invariant of its struct, with the names of the fields standing for what it is made of
+checkInvariant :: PState -> Name -> [(Variable, IotaProof)] -> V ()
+checkInvariant st name fields =
+    case invariantOf st name of
+        Nothing -> return ()
+        Just (base, invariant) -> do
+            result <- tryV (checkStatements (calleeView st fields) invariant)
+            case result of
+                Error e -> throwV ("A " ++ base ++ " is made that does not meet its invariant: " ++ e)
+                Ok () -> return ()
+
+-- What the invariant says of a value of the struct, as facts about the value: the names of the fields stand for the fields of it
+invariantFacts :: PState -> Name -> IotaProof -> [IotaProof]
+invariantFacts st name value =
+    case invariantOf st name of
+        Nothing -> []
+        Just (base, invariant) ->
+            let view = calleeView st [(f, FApp (CTerm (builtinFunct (Field Nothing f))) [value]) | f <- fieldNames st base]
+             in [fact | ProofAssert proof <- invariant, Ok fact <- [toIotaProof view proof]]

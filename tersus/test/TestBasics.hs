@@ -73,12 +73,11 @@ testParseKeywordBoundaryIdentifiers =
             Right parsed -> testAssertEq parsed [Assign "defineVar" (Val (VInt 5))]
         ]
 
+-- A function in a proof is a function of the program: a name that is not one is refused when the program is validated
 testParseInvalidProofBuiltin :: Test
 testParseInvalidProofBuiltin =
     testCase "testParseInvalidProofBuiltin" $
-        case parseStatement "affirm bogus(x)" of
-            Left _ -> Nothing
-            Right parsed -> Just $ "Expected parse failure, got: " ++ show parsed
+        parseValidateFailProgramHelper "x = 1; affirm bogus(x); return 0;" "Variable not found in proof map: bogus"
 
 testParseInvalidRewriteRule :: Test
 testParseInvalidRewriteRule =

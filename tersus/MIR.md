@@ -33,6 +33,8 @@ data Program = Program
     { progTypes     :: Map Name TypeDecl    -- struct and enum declarations, for layout and for field lookup
     , progFunctions :: Map Name Function    -- every function, nested ones lifted (outer::inner, numbered on a clash)
     , progMain      :: Function             -- the top-level statements; no parameters
+    , progGenerics  :: Map Name ([Variable], [(Variable, Type)])   -- the structs with sizes and types: their parameters and fields (completeInstances declares the instances)
+    , progInvariants :: Map Name [ValidationStatement]   -- what every value of a struct meets, by the name of the struct: the validator proves it at every MakeData and assumes it for every value of the type
     }
 
 data TypeDecl = StructDecl [(Variable, Type)] | EnumDecl [(Name, [(Variable, Type)])]   -- a struct is a one-variant enum underneath, as in the checker

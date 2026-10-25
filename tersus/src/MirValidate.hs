@@ -237,11 +237,22 @@ assign st dest rv =
             Nothing -> throwV "An operation the validator does not know"
             Just (builtin, operands) -> do
                 terms <- mapM (operandTerm st) operands
+                -- (a struct that is made has to meet its invariant)
+                case builtin of
+                    Ctor name fields -> checkInvariant st name (zip fields terms)
+                    _ -> return ()
                 result <- fresh
                 st' <- applyCall st (builtinInfo builtin) terms result
                 return (bind st' result)
   where
     bind s iota = s{psLocals = Map.insert dest iota (psLocals s)}
+
+-- The invariant of the struct that a type is, or that a Box of the type holds, as facts about a value of the type
+typeInvariants :: PState -> Type -> IotaProof -> [IotaProof]
+typeInvariants st ty value = case ty of
+    TNamed name -> invariantFacts st name value
+    TBox inner -> typeInvariants st inner value
+    _ -> []
 
 -- What the type of a local says of its value: an array has the size of its type, wherever it came from, so a contract or a
 -- loop invariant need not say it
@@ -252,6 +263,8 @@ withTypeFacts fn l st =
         (Just (TBox (TArray _ n)), Just iota) -> sized n iota
         (Just (TArrayOf _ (SizeParam p)), Just iota) -> sizedByParam p iota
         (Just (TBox (TArrayOf _ (SizeParam p))), Just iota) -> sizedByParam p iota
+        -- (a struct meets its invariant, wherever it came from)
+        (Just ty, Just iota) | facts@(_ : _) <- typeInvariants st ty (ATerm iota) -> addFacts st facts
         _ -> st
   where
     sized n iota = addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], CTerm (VInt n)]]
@@ -272,7 +285,16 @@ operandTerm st (M.Const (M.CFn name))
     | otherwise = case wrapperInfo st name of
         Just _ -> return (ATerm (fnIota name))
         Nothing -> throwV ("Undefined variable: " ++ name ++ " (a function must be defined before the functions that call it)")
-operandTerm _ (M.Const c) = return (constantValue c)
+operandTerm st (M.Const c) = checkConstant c >> return (constantValue c)
+  where
+    -- (a struct written as a constant is made here, so it meets its invariant)
+    checkConstant constant = case constant of
+        M.CData name fields -> do
+            mapM_ (checkConstant . snd) fields
+            checkInvariant st name [(f, constantValue v) | (f, v) <- fields]
+        M.CList cs -> mapM_ checkConstant cs
+        M.CArray cs -> mapM_ checkConstant cs
+        _ -> return ()
 
 -- Ghost statements
 
@@ -336,7 +358,10 @@ validateFunction st name top = do
         _ -> do
             -- (the result has no value of its own in the contracts' view: they only say things about it)
             result <- fresh
-            exportContract started (zip names entry ++ [("return", result)]) requires ensures
+            let known =
+                    concat [typeInvariants st (M.localType d) (ATerm iota) | (p, iota) <- zip params entry, Just d <- [Map.lookup p (M.fnLocals fn)]]
+                        ++ maybe [] (\t -> typeInvariants st t (ATerm result)) (M.fnReturns fn)
+            exportContract started known (zip names entry ++ [("return", result)]) requires ensures
     return (term'{fnExported = exported})
 
 -- A function that says what shrinks has it at least 0 for any arguments that meet the input contract, and keeps its value at the start
