@@ -5,10 +5,11 @@ module TestNative
     , unvalidatedPrograms
     ) where
 
-import Control.Exception (IOException, try)
+import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, listDirectory)
+import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
@@ -37,6 +38,7 @@ testNative =
         , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
+        , TestList "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestList "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
@@ -54,7 +56,7 @@ nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
-        , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "helper_functions", "linear"
+        , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec", "strings"
         ]
@@ -238,6 +240,22 @@ stringPrograms =
     , ("not equal", "return \"ab\" = \"ac\";")
     , ("in a struct and a list", "struct Named { name: String, n: Int }; xs = push(push([], Named { name: \"a\", n: 1 }), Named { name: \"bc\", n: 2 }); return xs;")
     , ("in an enum", "enum E { S { s: String }, N }; fn f(e: E) -> Int [{ }] [{ }] { return match e { E::S { s: s } => size(s), E::N => 0 }; }; return f(E::S { s: \"abc\" });")
+    ]
+
+-- What a program writes is the same on the MIR and natively: the bytes, then the value on a line of its own
+outputPrograms :: [(String, String)]
+outputPrograms =
+    [ ("a byte", "writeByte(104); writeByte(105); return 1;")
+    , ("a byte is its value", "x = writeByte(65); return x;")
+    , ("the low eight bits", "writeByte(321); writeByte(0 - 191); return 0;")
+    , ("a string", "\"ab\\n\".print(); return 7;")
+    , ("UTF-8", "n = \"caf\\u{e9}\\u{1f600}\".print(); return n;")
+    , ("bytes that are not UTF-8", "writeByte(255); writeByte(65); writeByte(0); return 0;")
+    , ("in the order of the calls", "\"a\".print(); writeByte(98); \"c\".concat(\"d\").print(); return 0;")
+    , ("in a loop", "i = 0; while i < 5 [{ affirm i >= 0; affirm i <= 5; }] shrinks 5 - i { writeByte(48 + i); i = i + 1; }; return i;")
+    , ("in a function", "fn shout(s: String) -> Int [{ }] [{ }] { n = s.print(); writeByte(33); return n + 1; }; return shout(\"hey\");")
+    , ("a string that is printed twice", "s = \"ab\"; s.print(); s.print(); return size(s);")
+    , ("a long string", "s = \"0123456789\"; i = 0; while i < 20 [{ affirm i >= 0; affirm i <= 20; }] shrinks 20 - i { s = s.concat(s); i = i + 1; if i = 3 { return s.print(); }; }; return 0;")
     ]
 
 listPrograms :: [(String, String)]
@@ -696,7 +714,7 @@ buildAndRun file name ir expectation = do
     case checked of
         Error e -> pure (Just e)
         Ok () -> do
-            plain <- readProcessWithExitCode exe [] ""
+            plain <- runExecutableBytes exe []
             case testAssertEq plain expectation of
                 Just failure -> pure (Just failure)
                 Nothing -> do
@@ -708,8 +726,17 @@ buildAndRun file name ir expectation = do
                             case built of
                                 Error e -> pure (Just e)
                                 Ok () -> do
-                                    result <- readProcessWithExitCode "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"] ""
+                                    result <- runExecutableBytes "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"]
                                     pure (fmap ("under valgrind:\n" ++) (testAssertEq result expectation))
+
+-- Runs a program and gives what it wrote as the text it is the UTF-8 of, whatever the locale is: the bytes are read as they are (a locale that is
+-- not UTF-8 refuses some of them) and decoded
+runExecutableBytes :: FilePath -> [String] -> IO (ExitCode, String, String)
+runExecutableBytes exe args = do
+    saved <- getLocaleEncoding
+    setLocaleEncoding char8
+    (code, out, err) <- readProcessWithExitCode exe args "" `finally` setLocaleEncoding saved
+    pure (code, decodeUtf8 out, decodeUtf8 err)
 
 valgrindAvailable :: IO Bool
 valgrindAvailable = do

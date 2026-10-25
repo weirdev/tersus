@@ -53,6 +53,28 @@ testStrings =
                 , testCase "the size of a concat is the sum" (rejected "s = \"ab\".concat(\"cd\"); affirm size(s) = 3; return 0;" "Could not prove: <String as Sequence>::size(s) = 3")
                 ]
             , TestList
+                "output"
+                [ testCase "a byte is written, then the value" (runs "writeByte(104); writeByte(105); return 1;" "hi1")
+                , testCase "and is its own value" (runs "x = writeByte(65); return x;" "A65")
+                , testCase "only the low eight bits are written" (runs "writeByte(321); writeByte(0 - 191); return 0;" "AA0")
+                , testCase "a string is printed with its bytes" (runs "\"ab\\n\".print(); return 7;" "ab\n7")
+                , testCase "print is the number of bytes" (runs "n = \"caf\\u{e9}\".print(); return n;" ("caf\233" ++ "5"))
+                , testCase "bytes that are UTF-8 are the character" (runs "writeByte(226); writeByte(130); writeByte(172); return 0;" ("\8364" ++ "0"))
+                , testCase "and bytes that are not are U+FFFD" (runs "writeByte(255); writeByte(65); return 0;" "\65533A0")
+                , testCase "the output is in the order of the calls" (runs "\"a\".print(); writeByte(98); \"c\".print(); return 0;" "abc0")
+                , testCase "a call in a loop" (runs "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { writeByte(48 + i); i = i + 1; }; return i;" "0123")
+                , testCase "a call is a statement of its own" (runs "fn id(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; id(3); y = 4; id(y); return y;" "4")
+                , testCase "a method call too" (runs "s = \"a\"; s.concat(\"b\"); return 1;" "1")
+                , testCase "the input contract of the call still has to be met" (rejected "fn pos(x: Int) -> Int [{ affirm x > 0; }] [{ }] { return x; }; pos(0); return 1;" "Could not prove: x > 0")
+                , testCase "an expression that is not a call is not a statement" (parseError "x = 1; x + 2; return x;")
+                , testCase "nor is a name" (parseError "x = 1; x; return x;")
+                , testCase "the call is validated: print gives the size" (valid "n = \"ab\".print(); affirm n = 2; return n;")
+                , testCase "and a wrong claim is refused" (rejected "n = \"ab\".print(); affirm n = 3; return n;" "Could not prove: n = 3")
+                , testCase "the bytes of a UTF-8 text decode" (testAssertEq (decodeUtf8 (map toEnum [104, 195, 169, 226, 130, 172, 240, 159, 152, 128])) "h\233\8364\128512")
+                , testCase "a byte that starts a character that is cut short is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [226, 130])) "\65533\65533")
+                , testCase "an overlong encoding is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [192, 128])) "\65533\65533")
+                ]
+            , TestList
                 "the library"
                 [ testCase "a program without a string has no String" (rejected "return \"a\"; fn f(x: Int) -> Int [{ }] [{ }] { return y; };" "y")
                 , testCase "a String of its own is used, and a literal is then refused" (parseError "struct String { x: Int }; s = \"a\";")

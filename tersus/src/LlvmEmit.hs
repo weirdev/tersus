@@ -64,6 +64,7 @@ declarations =
     , "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)"
     , "declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)"
     , "declare void @tersus_overflow() noreturn"
+    , "declare i64 @tersus_writeByte(i64)"
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
     , "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
@@ -428,6 +429,7 @@ rvalue fn destType rv =
             y <- operandAt fn ty b
             binary op ty x y
         MakeList _ -> failG "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"
+        ListOp WriteByte [b] -> operandAt fn TInt b >>= \x -> ins "w" ("call i64 @tersus_writeByte(i64 " ++ x ++ ")")
         ListOp op os@(first : _) | isArrayOperand fn first -> arrayRead fn destType op os
         ListOp op os -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " here")
         ReadField o name field -> do

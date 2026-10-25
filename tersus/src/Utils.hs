@@ -21,6 +21,23 @@ utf8Bytes c
     n = fromEnum c
     continuation m = 0x80 + m `mod` 64
 
+-- The characters that bytes (as characters from 0 to 255) are the UTF-8 encoding of, with U+FFFD for bytes that are not
+decodeUtf8 :: String -> String
+decodeUtf8 [] = []
+decodeUtf8 (c : rest)
+    | n < 0x80 = c : decodeUtf8 rest
+    | n >= 0xC0 && n < 0xE0 = multi 1 (n - 0xC0) 0x80
+    | n >= 0xE0 && n < 0xF0 = multi 2 (n - 0xE0) 0x800
+    | n >= 0xF0 && n < 0xF5 = multi 3 (n - 0xF0) 0x10000
+    | otherwise = '\xFFFD' : decodeUtf8 rest
+  where
+    n = fromEnum c
+    multi count lead least =
+        let (continuation, more) = splitAt count rest
+            ok = length continuation == count && all (\b -> fromEnum b >= 0x80 && fromEnum b < 0xC0) continuation
+            point = foldl (\acc b -> acc * 64 + (fromEnum b - 0x80)) lead continuation
+         in if ok && point >= least && point <= 0x10FFFF && not (point >= 0xD800 && point < 0xE000) then toEnum point : decodeUtf8 more else '\xFFFD' : decodeUtf8 rest
+
 data Result a e = Ok a | Error e deriving (Eq, Show)
 
 bindResult :: Result a e -> (a -> Result b e) -> Result b e
