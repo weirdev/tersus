@@ -25,6 +25,9 @@ data BuiltinFunct
     | -- WriteByte b: writeByte(b), the low eight bits of b written to the standard output. Its value is b: the only effect of a program that the
       -- language has, which the validator does not model beyond that.
       WriteByte
+    | -- ReadByte: readByte(), the next byte of the standard input, or -1 when there is no more. Its value is not known to the validator beyond
+      -- being from -1 to 255.
+      ReadByte
     | -- Unsize b: the Box of an array of a size, as a Box of an array of any size (the size goes into the Box, the value is the same)
       Unsize
     | -- NewBox x: x held in a Box. A Box has the value of what it holds (it is where that lives that differs), so in a value it is x.

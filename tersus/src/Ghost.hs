@@ -133,8 +133,8 @@ resolveFunction st term =
 builtinInfo :: BuiltinFunct -> FnInfo
 builtinInfo b =
     case builtinFunct b of
-        VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b)
-        _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b)
+        VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (b == ReadByte)
+        _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (b == ReadByte)
 
 -- The builtin function that an operation is
 rvalueCall :: M.Rvalue -> Maybe (BuiltinFunct, [M.Operand])
@@ -171,6 +171,7 @@ rvalueCall rv =
         M.NewBoxed -> NewBoxedArray
         M.NewEmptyBoxed -> NewEmptyArray
         M.WriteByte -> WriteByte
+        M.ReadByte -> ReadByte
 
 -- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
 wrapperInfo :: PState -> Name -> Maybe FnInfo
@@ -190,11 +191,12 @@ applyCall st info args result = do
     checkInputs st params args (fnRequires info)
     callTermination st info args
     (st', instantiated) <- instantiateOutputs st params args result (fnExported info)
-    let call = FApp eqProof [ATerm result, FApp (fnTerm info) args]
+    -- (a function that reads the input is not a function of its arguments: its result is only what it promises)
+    let call = [FApp eqProof [ATerm result, FApp (fnTerm info) args] | not (fnReads info)]
         known = case concreteResult st info args of
-            Just value -> [FApp eqProof [ATerm result, CTerm value]]
-            Nothing -> []
-    evaluateCalls (addFacts st' (call : known ++ instantiated)) instantiated
+            Just value | not (fnReads info) -> [FApp eqProof [ATerm result, CTerm value]]
+            _ -> []
+    evaluateCalls (addFacts st' (call ++ known ++ instantiated)) instantiated
 
 -- Functions in proofs. `affirm i < size(v);` with a `size` that the program defines calls it: the call has to meet the input contract of
 -- the function, exactly as a call in the code does, and the term `size(v)` then has the facts the function promises about its result.
@@ -244,6 +246,7 @@ evaluateCall st name info args term = do
         Just MayDiverge -> throwV ("A proof calls " ++ name ++ ", which is declared ~ and may not end")
         Just (Recursing _) -> throwV ("A proof calls " ++ name ++ " from its own contract or body")
         _ -> return ()
+    when (fnReads info) (throwV ("A proof calls " ++ name ++ ", which reads the input: what it gives is not determined by its arguments"))
     checkInputs st params args (fnRequires info)
     (st', instantiated) <- instantiateOutputsWith st params args term (fnExported info)
     return (addFacts st' (evaluatedFact term : instantiated))

@@ -570,6 +570,7 @@ builtinRvalue b tys ops =
         (NewBoxedArray, [_, _]) -> return (M.ListOp M.NewBoxed ops)
         (NewEmptyArray, []) -> return (M.ListOp M.NewEmptyBoxed [])
         (WriteByte, [_]) -> return (M.ListOp M.WriteByte ops)
+        (ReadByte, []) -> return (M.ListOp M.ReadByte [])
         (Unsize, [o]) -> return (M.Unsize o)
         (UnBox, [o]) -> return (M.Unbox o)
         (Is variant, [o]) -> return (M.IsVariant o variant)
@@ -657,6 +658,7 @@ builtinLabel b = case b of
     NewEmptyArray -> "empty_array"
     Unsize -> "unsize"
     WriteByte -> "writeByte"
+    ReadByte -> "readByte"
     ArrayFrom -> "array_from"
     Plus -> "add"
     Minus -> "sub"

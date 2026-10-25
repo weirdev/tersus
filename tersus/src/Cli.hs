@@ -2,9 +2,11 @@ module Cli
     ( Command (..)
     , parseCommandLine
     , runSource
+    , runSourceWith
     , renderValue
     , usage
     , readSourceFile
+    , readInputBytes
     , useUtf8
     ) where
 
@@ -12,7 +14,7 @@ import Data.List (intercalate)
 import System.IO
 
 import Mir (renderProgram)
-import MirEval (renderMirValue, runProgramOutput)
+import MirEval (renderMirValue, runProgramWith)
 import Pipeline
 import TersusTypes
 import Utils
@@ -57,19 +59,24 @@ parseCommandLine _ = Nothing
 -- Runs a command over program source. Ok holds the text to print on success, which is
 -- empty when there is nothing to report; Error holds the message for a failure.
 runSource :: Command -> String -> Result String String
-runSource Check source = mapResult (const "OK") (compileSource source)
-runSource Interpret source =
+runSource = runSourceWith ""
+
+-- The same for a program that has input (the bytes of the standard input, as characters from 0 to 255), which `Interpret` gives to `readByte`;
+-- an executable reads its own
+runSourceWith :: String -> Command -> String -> Result String String
+runSourceWith _ Check source = mapResult (const "OK") (compileSource source)
+runSourceWith input Interpret source =
     compileSource source `bindResult` \program ->
-        case runProgramOutput program of
+        case runProgramWith input program of
             Error e -> Error ("Evaluation failed: " ++ e)
             -- (what the program wrote, then its value: the same text as an executable prints)
             Ok (written, result) -> Ok (decodeUtf8 written ++ maybe "" renderMirValue result)
-runSource Mir source = mapResult renderProgram (compileSource source)
-runSource Owned source = mapResult renderProgram (ownedSource source)
-runSource Llvm source = llvmSource source
+runSourceWith _ Mir source = mapResult renderProgram (compileSource source)
+runSourceWith _ Owned source = mapResult renderProgram (ownedSource source)
+runSourceWith _ Llvm source = llvmSource source
 -- (compiling the IR, and running it for `Run`, is left to the caller, since it runs clang)
-runSource Run source = llvmSource source
-runSource (Build _) source = llvmSource source
+runSourceWith _ Run source = llvmSource source
+runSourceWith _ (Build _) source = llvmSource source
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
@@ -88,6 +95,10 @@ readSourceFile file = do
     handle <- openFile file ReadMode
     hSetEncoding handle utf8
     hGetContents handle
+
+-- The standard input as bytes (characters from 0 to 255), read as the program asks for them
+readInputBytes :: IO String
+readInputBytes = hSetEncoding stdin char8 >> getContents
 
 useUtf8 :: IO ()
 useUtf8 = mapM_ (`hSetEncoding` utf8) [stdout, stderr]

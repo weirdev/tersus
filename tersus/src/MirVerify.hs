@@ -147,6 +147,7 @@ rvalueProblems env localTy d rv =
             (TArrayOf e (SizeParam _), Copy _) -> [expected e x | not (fits' e x)]
             _ -> ["array needs a result that is an array and a size that is a constant"]
         ListOp WriteByte [b] -> ints [b] ++ result TInt
+        ListOp ReadByte [] -> result TInt
         ListOp NewEmptyBoxed [] -> case d of
             TBox (TArrayOf _ SizeAny) -> []
             _ -> ["Array::empty needs a result that is a Box of an array of any size"]

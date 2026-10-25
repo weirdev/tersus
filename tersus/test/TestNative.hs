@@ -39,6 +39,7 @@ testNative =
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
         , TestList "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
+        , TestList "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
         , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestList "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
@@ -58,7 +59,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "vec", "strings"
+        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "strings"
         ]
     ]
 
@@ -240,6 +241,27 @@ stringPrograms =
     , ("not equal", "return \"ab\" = \"ac\";")
     , ("in a struct and a list", "struct Named { name: String, n: Int }; xs = push(push([], Named { name: \"a\", n: 1 }), Named { name: \"bc\", n: 2 }); return xs;")
     , ("in an enum", "enum E { S { s: String }, N }; fn f(e: E) -> Int [{ }] [{ }] { return match e { E::S { s: s } => size(s), E::N => 0 }; }; return f(E::S { s: \"abc\" });")
+    ]
+
+-- What a program reads is the same on the MIR and natively: they are given the same input
+inputPrograms :: [(String, String, String)]
+inputPrograms =
+    [ ("a byte", "A", "return readByte();")
+    , ("the end of the input", "", "return readByte();")
+    , ("a byte after the end", "A", "a = readByte(); b = readByte(); c = readByte(); return a * 1000000 + (b + 1) * 1000 + (c + 1);")
+    , ("a byte of 255", "\255", "return readByte();")
+    , ("echo", "abc", "a = readByte(); b = readByte(); c = readByte(); writeByte(a); writeByte(b); writeByte(c); return 0;")
+    , ("a loop until the end", "hello", "n = 0; c = readByte(); while c >= 0 [{ affirm n >= 0; affirm c >= 0 - 1; affirm c < 256; }] ~ { n = n + 1; c = readByte(); }; return n;")
+    , ("a line", "first\nsecond\n", "l = String::readLine(100); l.print(); return size(l);")
+    , ("two lines", "first\nsecond\nthird", "a = String::readLine(100); b = String::readLine(100); a.print(); writeByte(124); b.print(); return size(a) * 100 + size(b);")
+    , ("the last line has no new line", "last", "a = String::readLine(100); return size(a);")
+    , ("no input", "", "a = String::readLine(100); b = String::read(100); return size(a) + size(b);")
+    , ("a line longer than the limit", "abcdefgh\nxy", "a = String::readLine(3); b = String::readLine(100); a.print(); writeByte(124); b.print(); return size(a) * 100 + size(b);")
+    , ("all of the input", "one\ntwo\n", "a = String::read(1000); a.print(); return size(a);")
+    , ("a limit of 0 reads nothing", "abc", "a = String::read(0); b = String::read(10); b.print(); return size(a) * 10 + size(b);")
+    , ("UTF-8 passes through", "caf\195\169\n", "a = String::readLine(100); a.print(); return size(a);")
+    , ("bytes that are not UTF-8 pass through", "\255\254\n", "a = String::readLine(100); a.print(); return size(a);")
+    , ("the read is validated", "xyz", "a = String::read(2); affirm size(a) <= 2; return size(a);")
     ]
 
 -- What a program writes is the same on the MIR and natively: the bytes, then the value on a line of its own
@@ -617,7 +639,11 @@ testBuildKeepsFiles = TestCase "an existing output.build directory is kept" $ do
 
 -- Builds the program and runs it, and runs it on the MIR: both have to print the same, and fail the same
 sameAsMir :: String -> String -> IO TestResult
-sameAsMir name source = do
+sameAsMir name = sameAsMirWithInput name ""
+
+-- The same for a program that reads: both are given the input (bytes as characters from 0 to 255)
+sameAsMirWithInput :: String -> String -> String -> IO TestResult
+sameAsMirWithInput name input source = do
     available <- clangAvailable
     if not available
         then pure Nothing
@@ -626,7 +652,7 @@ sameAsMir name source = do
             Ok _ -> case llvmSource source of
                 Error e -> pure (Just e)
                 Ok ir -> do
-                    buildAndRun (map safeChar name) name ir (expected (runSource Interpret source))
+                    buildAndRun input (map safeChar name) name ir (expected (runSourceWith input Interpret source))
   where
     expected (Ok output) = (ExitSuccess, if null output then "" else output ++ "\n", "")
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
@@ -704,8 +730,8 @@ valgrindCases =
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to
 -- print what the executor prints, and have nothing to say to valgrind.
-buildAndRun :: String -> String -> String -> (ExitCode, String, String) -> IO TestResult
-buildAndRun file name ir expectation = do
+buildAndRun :: String -> String -> String -> String -> (ExitCode, String, String) -> IO TestResult
+buildAndRun input file name ir expectation = do
     tmp <- getTemporaryDirectory
     let dir = tmp </> "tersus-native-test"
         exe = dir </> file
@@ -714,7 +740,7 @@ buildAndRun file name ir expectation = do
     case checked of
         Error e -> pure (Just e)
         Ok () -> do
-            plain <- runExecutableBytes exe []
+            plain <- runExecutableBytes exe [] input
             case testAssertEq plain expectation of
                 Just failure -> pure (Just failure)
                 Nothing -> do
@@ -726,16 +752,16 @@ buildAndRun file name ir expectation = do
                             case built of
                                 Error e -> pure (Just e)
                                 Ok () -> do
-                                    result <- runExecutableBytes "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"]
+                                    result <- runExecutableBytes "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"] input
                                     pure (fmap ("under valgrind:\n" ++) (testAssertEq result expectation))
 
 -- Runs a program and gives what it wrote as the text it is the UTF-8 of, whatever the locale is: the bytes are read as they are (a locale that is
 -- not UTF-8 refuses some of them) and decoded
-runExecutableBytes :: FilePath -> [String] -> IO (ExitCode, String, String)
-runExecutableBytes exe args = do
+runExecutableBytes :: FilePath -> [String] -> String -> IO (ExitCode, String, String)
+runExecutableBytes exe args input = do
     saved <- getLocaleEncoding
     setLocaleEncoding char8
-    (code, out, err) <- readProcessWithExitCode exe args "" `finally` setLocaleEncoding saved
+    (code, out, err) <- readProcessWithExitCode exe args input `finally` setLocaleEncoding saved
     pure (code, decodeUtf8 out, decodeUtf8 err)
 
 valgrindAvailable :: IO Bool
@@ -756,7 +782,7 @@ sameAsUnvalidated name source = do
             Right program -> case emitProgram (nativeProgram program) of
                 Error e -> pure (Just e)
                 Ok ir -> do
-                    buildAndRun ("unvalidated_" ++ map safeChar name) name ir (expected (runProgram program))
+                    buildAndRun "" ("unvalidated_" ++ map safeChar name) name ir (expected (runProgram program))
   where
     expected (Ok result) = (ExitSuccess, maybe "" ((++ "\n") . renderMirValue) result, "")
     expected (Error e) = (ExitFailure 1, "", "Evaluation failed: " ++ e ++ "\n")
