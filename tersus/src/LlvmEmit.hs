@@ -793,7 +793,15 @@ assignAggregate dropsOld fn dest ty rv = do
                     if clear then zeroWords address bytes else pure ()
     case rv of
         Use o -> operandAddress fn ty o >>= \src -> fromPart src False
-        ListOp NewArray [_, x] | TArray elementTy n <- ty -> fillArray fn target elementTy n x
+        ListOp NewArray [_, x] | TArray elementTy n <- ty ->
+            -- (an array that owns something is made in room of its own, then what the destination held is freed and the elements move in)
+            if dropsOld && owns
+                then do
+                    room <- entryTemp (bytes `div` 8)
+                    fillArray fn room elementTy n x
+                    freeOld
+                    copyWords target room bytes
+                else fillArray fn target elementTy n x
         ListOp Set [a, i, x] | TArray elementTy _ <- ty -> do
             -- (an array that owns something is moved to room of its own first, and what the destination held is freed)
             src <- operandAddress fn ty a
