@@ -406,6 +406,22 @@ declareTypeWith name ctors = do
         then failTc ("Type already defined: " ++ name)
         else putState s{tcTypes = Map.insert name ctors (tcTypes s)}
 
+-- Whether a type uses the struct being declared with a type argument that is made of the parameters without being one of them
+selfExpands :: Name -> Type -> Bool
+selfExpands name ty = case ty of
+    TList t -> selfExpands name t
+    TBox t -> selfExpands name t
+    TRef t -> selfExpands name t
+    TArrayOf t _ -> selfExpands name t
+    TFn args ret -> any (selfExpands name) (ret : args)
+    TNamed n | Just (base, args) <- instanceOf n -> (base == name && any grows args) || or [selfExpands name t | ArgType t <- args]
+    _ -> False
+  where
+    grows (ArgType t) = case t of
+        TParam _ -> False
+        _ -> mentionsParameter t
+    grows (ArgSize _) = False
+
 -- A struct with sizes and types: the declaration, from which each Packet<4> and Vec<Int, 3> is made
 declareGeneric :: Name -> [Variable] -> [(Variable, Type)] -> TC ()
 declareGeneric name params fields = do
@@ -415,6 +431,8 @@ declareGeneric name params fields = do
         else do
             when (length params /= length (nubSizes params)) $ failTc ("Type error: " ++ name ++ " names a parameter twice")
             putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s)}
+            when (any (selfExpands name . snd) fields) $
+                failTc ("Type error: " ++ name ++ " uses itself with a type made of its own parameters, which would make a struct for each depth (Node<List<T>> inside Node<T>): a struct that holds itself gives its own parameters as they are")
             -- (the fields are checked with the sizes and types in scope, and the struct may hold itself in a Box)
             withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkType . snd) fields)
             checkFinite name [fields]
@@ -1286,6 +1304,8 @@ isExpanding scope ty = case ty of
         TRef u -> usesParam u
         TArrayOf u _ -> usesParam u
         TFn args ret -> any usesParam (ret : args)
+        -- (a struct that is given a type is made of it: Wrap<T>)
+        TNamed n | Just (_, args) <- instanceOf n -> or [usesParam u | ArgType u <- args]
         _ -> False
 
 hasFunction :: Type -> Bool
