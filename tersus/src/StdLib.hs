@@ -309,9 +309,8 @@ evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
 evalBuiltinFunct NewEmptyArray [] = Ok (VList [])
 evalBuiltinFunct WriteByte [VInt b] = Ok (VInt b)
 evalBuiltinFunct WriteByte _ = Error "writeByte takes one byte"
--- (this evaluator has no input: a program that reads is run on the MIR)
-evalBuiltinFunct ReadByte [] = Ok (VInt (-1))
-evalBuiltinFunct ReadByte _ = Error "readByte takes nothing"
+-- (not a value that can be worked out: what it gives is the input, which a proof does not have, so the proof engine may not fold a call to a constant)
+evalBuiltinFunct ReadByte _ = Error "readByte reads the input, so it has no value to evaluate"
 evalBuiltinFunct Unsize [value] = Ok value
 evalBuiltinFunct Unsize _ = Error "unsize takes one Box"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l
