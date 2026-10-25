@@ -19,6 +19,7 @@ testSequence =
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
             _ -> Just ("Expected a parse error for: " ++ source)
+        total = "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { sum = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { sum = sum + get(s, i); i = i + 1; }; return sum; }; "
         double = "fn double(x: Int) -> Int [{ }] [{ affirm return = x * 2; }] { return x * 2; }; "
         counted = "struct V<T> { x: T, len: Int }; "
         trait2 = "trait Seq<E> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }]; fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }]; }; "
@@ -84,6 +85,35 @@ testSequence =
                 , testCase "a function over any sequence of a Vec" (runs (vecLibrary ++ "fn firstOf<T>(v: &Vec<T>) -> T [{ affirm size(v) > 0; }] [{ }] { return v.get(0); }; return firstOf(Vec::new(3).push(8));") (VInt 8))
                 ]
             , TestList
+                "bounded types"
+                [ testCase "one function for a list, an array and a Vec" (runsAs (vecLibrary ++ total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 10000 + total(push(push([], 3), 4)) * 100 + total(array(3, 5));") "600715")
+                , testCase "its contracts are proved for each type" (compiles (total ++ "fn twice<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0) * 2; }] { return get(s, 0) * 2; }; return twice([4]) + twice(array(2, 1));"))
+                , testCase "and the body is checked for the type" (errorHas "fn bad<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return get(s, 0); }; return bad(push([], 1));" "Relation lacks a proof")
+                , testCase "a type of the bound is given by the argument" (runsAs "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; return head(push([], 7)) + head(array(2, 5));" "12")
+                , testCase "a bool one" (runsAs "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; if head(push([], true)) { return 1; }; return 0;" "1")
+                , testCase "a function with bounds calls another" (runsAs "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; fn twice<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ affirm return = head(s) * 2; }] { return head(s) * 2; }; return twice(push([], 4));" "8")
+                , testCase "in a contract" (compiles "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0); }] { return get(s, 0); }; fn f(l: &List<Int>) -> Int [{ affirm size(l) > 0; }] [{ affirm return = head(l); }] { return get(l, 0); }; return f(push([], 1));")
+                , testCase "Growable is for what grows" (runsAs "fn add<S: Growable<Int>>(s: S, x: Int) -> S [{ }] [{ affirm size(return) = size(s) + 1; affirm get(return, size(s)) = x; }] { return push(s, x); }; l = add(add([], 7), 8); return size(l) * 10 + get(l, 1);" "28")
+                , testCase "an array does not grow" (errorHas "fn add<S: Growable<Int>>(s: S, x: Int) -> S [{ }] [{ }] { return push(s, x); }; return size(add(array(2, 1), 3));" "needs S to implement Growable, and Array<Int, 2> does not")
+                , testCase "a Box of an array is a sequence" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(Array::boxed(3, 1));" "3")
+                , testCase "the types of the bound have to be the ones" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(push([], true));" "total needs S to implement Sequence<Int>, and List<Bool> implements Sequence<Bool>")
+                , testCase "a type that does not implement the trait" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(3);" "needs S to implement Sequence, and Int does not")
+                , testCase "a struct that implements it" (runsAs (counter ++ "fn total<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ }] { return size(s) * 10 + get(s, 0); }; return total(Three { a: 4, n: 2 });") "24")
+                , testCase "one that implements it for a type of its own" (runsAs (counter ++ "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(Three { a: 4, n: 2 }) + total([1]);") "3")
+                , testCase "a bound of several traits" (runsAs "fn both<S: Sequence<Int> + Growable<Int>>(s: S) -> Int [{ }] [{ }] { return size(push(s, 1)); }; return both(push([], 5));" "2")
+                , testCase "a trait that is not there" (errorHas "fn f<S: Missing>(s: &S) -> Int [{ }] [{ }] { return 0; }; return 0;" "unknown trait Missing")
+                , testCase "the types of the trait are as many as it has" (errorHas "fn f<S: Sequence>(s: &S) -> Int [{ }] [{ }] { return 0; }; return 0;" "has parameters <E>")
+                , testCase "a size has no bound" (parseFails "fn f<n: Sequence<Int>>(s: &List<Int>) -> Int { return 0; }; return 0;")
+                , testCase "a type that a call cannot work out" (errorHas "fn head<S: Sequence<E>, E>(s: &S) -> E [{ }] [{ }] { return get(s, 0); }; return head([]);" "cannot be worked out")
+                , testCase "a caller with a type of its own" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; fn h<T>(l: &List<T>) -> Int [{ }] [{ }] { return total(l); }; return 0;" "needs S to implement Sequence<Int>, and List<T> implements Sequence<T>")
+                , testCase "it has a name of its own" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; fn total(x: Int) -> Int { return x; }; return 0;" "is already defined")
+                , testCase "and is not a builtin's" (errorHas "fn size<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; return 0;" "size is already defined")
+                , testCase "it is a function of the program only at the top" (errorHas "fn f() -> Int [{ }] [{ }] { fn g<S: Sequence<Int>>(s: &S) -> Int { return 0; }; return 0; }; return f();" "only be defined at the top")
+                , testCase "an impl has none" (errorHas "struct A { n: Int }; impl A { fn f<S: Sequence<Int>>(self: &Self, s: &S) -> Int { return 0; }; }; return 0;" "cannot be written in an impl")
+                , testCase "it is not a value" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; f = total; return 0;" "Undefined variable: total")
+                , testCase "a call with the wrong number of arguments" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; return total([1], [2]);" "total takes 1 arguments, got 2")
+                ]
+            , TestList
                 "methods of lists"
                 [ testCase "a list has its functions as methods" (runs "l = [1, 2, 3]; return l.size() + l.get(1) + l.first() + l.last();" (VInt 9))
                 , testCase "push and set" (runs "l = [1]; l = l.push(5).push(6).set(0, 9); return l.get(0) * 100 + l.get(2) * 10 + l.size();" (VInt 963))
@@ -119,6 +149,9 @@ testSequence =
     -- A struct that implements the trait of the prelude: a number n of the same element a
     counter =
         "struct Three { a: Int, n: Int } invariant [{ affirm n >= 0; }]; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = self.a; }] { return self.a; }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { a: x, n: self.n }; }; }; impl Growable<Int> for Three { fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { a: x, n: self.n + 1 }; }; }; "
+    compiles source = case compileSource source of
+        Ok _ -> Nothing
+        Error e -> Just ("Failed: " ++ e)
     runsAs source expected = case runSource Run source of
         Ok output -> if output == expected then Nothing else Just ("Expected " ++ expected ++ ", got " ++ output)
         Error e -> Just ("Failed: " ++ e)

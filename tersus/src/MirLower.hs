@@ -317,6 +317,7 @@ lowerStatement stmt =
         -- (the checker takes a trait apart and hands an impl back as the functions it defines)
         TraitDef{} -> failL "A trait reached the lowering"
         ImplDef{} -> failL "An impl reached the lowering"
+        BoundedDef{} -> failL "A function with bounds reached the lowering"
         AxiomDef name args ins outs -> ghost (M.GhostAxiom name args ins outs)
         ProofDef name args ins outs body -> ghost (M.GhostProof name args ins outs body)
         Block stmts -> scoped (lowerStatements stmts)

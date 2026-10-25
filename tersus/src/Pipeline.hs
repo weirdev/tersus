@@ -60,6 +60,7 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         StructDef name _ _ _ -> [name]
         EnumDef name _ -> [name]
         TraitDef name _ _ -> [name]
+        BoundedDef _ (Assign name _) -> [name]
         _ -> []
     reserved name = name == "StdList" || take 7 name == "stdList"
 

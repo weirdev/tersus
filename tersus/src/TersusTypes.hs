@@ -363,7 +363,15 @@ data Statement
       -- types and sizes of the impl (`Vec<'T>`, which `Self` stands for). The type checker
       -- checks them against the trait and hands them back as ordinary function definitions, so the lowering never sees it.
       ImplDef (Maybe Name) [Arg] Name Name [Statement]
+    | -- fn f<S: Sequence<Int>, T>(...) ...: a function whose type parameters have bounds (`BoundedDef [(S, Sequence, [Int])] (the function)`),
+      -- which the type checker keeps as a template and makes a function of for each type it is called with (see TypeCheck.templateCall).
+      -- It does not reach the lowering.
+      BoundedDef [Bound] Statement
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
+
+-- A bound on a type parameter of a function: the parameter, the trait its type has to implement and the types it is given
+-- (`S: Sequence<Int>`)
+type Bound = (Variable, Name, [Type])
 
 -- A function a trait asks for: its name, the names of its parameters, the signature (Self stands for the type that
 -- implements the trait), and the contracts every implementation has to meet

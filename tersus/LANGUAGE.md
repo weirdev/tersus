@@ -325,7 +325,7 @@ impl<T> Growable<T> for Two<T> {
 - **A contract of a trait calls its functions on `Self`**: `size(self)` is the function `size` of the type that implements the trait, whichever it is. In an impl, and in the code that uses it, `size(self)` is that type's function, so a contract that is written with it means what the impl promises: `size(v) = self.n` here. The check that the impl meets the trait (the function the checker adds, see above) calls the impl and proves the trait's output contract from the impl's, with `size(return)` and the other calls resolved to the impl's functions.
 - **The invariant of the struct is what makes a promise like `affirm return >= 0` provable** for `size`: without `invariant [{ affirm n >= 0; }]` the impl's `size` could return a negative `n` and is refused (`impl Sequence for Two: size does not meet what Sequence declares ... Could not prove: return >= 0`).
 - **`size(v)`, `get(v, i)`, `set(v, i, x)`, `push(v, x)`, `first(v)` and `last(v)` on a struct are calls of its impl's function of that name**, in the code and in contracts, so a library type is used with the names of the lists. `v.size()` and `Sequence::size(v)` are the same call. A struct without the function is an error (`Plain::size is not defined before this call`).
-- **Not yet**: a function over any type that implements a trait (`fn total<S: Sequence<Int>>(s: &S)`), a trait with sizes, and a default body. A function that wants one type writes it (`fn firstOf<T>(v: &Vec<T>)`).
+- **A function over any type that implements a trait** has a bound on its type (see Bounded types below). Not yet: a trait with sizes, and a default body.
 
 A wrong call reads like this:
 
@@ -338,6 +338,35 @@ Type error: impl Step for Counter: start is fn() -> Int, but Step declares fn() 
 ```
 
 See `examples/traits.tersus`, and `examples/rejected/` for `trait_input_stronger`, `trait_output_weaker`, `trait_missing_function` and `trait_ambiguous_call`.
+
+### Bounded types
+
+A type parameter can name the traits its type has to implement, and the function is written once for all of them:
+
+```tersus
+fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] {
+    sum = 0;
+    i = 0;
+    while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i {
+        sum = sum + get(s, i);
+        i = i + 1;
+    };
+    return sum;
+};
+
+return total(push(push([], 3), 4)) + total(array(3, 5)) + total(Vec::new(0).push(10));    // a List, an Array and a Vec: 7 + 15 + 10
+```
+
+```tersus
+fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0); }] { return get(s, 0); };
+fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S { return push(s, x); };
+```
+
+- **A bound is written after the parameter**, `S: Sequence<Int>`, with the types it gives the trait (which may be other parameters of the function, `S: Sequence<E>, E`) and `+` between traits. The bound is on a type, not a size.
+- **A list implements `Sequence` and `Growable`, an array and a `Box` of an array implement `Sequence`, each of the type of its elements** (an array cannot grow, so `add(array(2, 1), 3)` is `add needs S to implement Growable, and Array<Int, 2> does not`). A struct or enum implements what its impls say, with the types they give.
+- **The arguments decide the types, as for any type parameter, and the call is checked against the bounds**: `total(push([], true))` is `total needs S to implement Sequence<Int>, and List<Bool> implements Sequence<Bool>`.
+- **A function with bounds is made for each list of types it is called with**, and checked for them: `total` above is `total[List<Int>]`, `total[Array<Int, 3>]` and `total[Vec<Int>]` (the names of the functions that the program is made of), each validated like any function, so inside it `size(s)` and `get(s, i)` are the functions of that type and a proof about `s` is the proof of that type. An error in the body is found at the first call that makes it, and a contract such as `affirm size(s) > 0;` is asked of each call. Other functions with bounds, and the contracts of any function, can call it.
+- **Not yet**: the types of the call have to be written by it, so a function with a type parameter of its own cannot call one with bounds with a type made of it (`fn h<T>(l: &List<T>) { return total(l); }` is `... would be List<T>, which is made of a type parameter of the function that calls`); a function with bounds is not a function of an impl, nor a value; and the body is not checked against the bounds alone (it can call any function that the type has, not only the traits').
 
 ## Expressions
 
@@ -1336,7 +1365,7 @@ return size(q.b);                             // 1
 - **Each function has the parameters of the impl** after its own, so `first` is a function `fn first<X, Y>(...)` that the arguments decide, and a copy of it is made for each list of types and sizes it is called with (`Pair<List<Int>, Bool>` and `Pair<Int, Int>` each get theirs). The names of the parameters belong to the impl: `impl<U> Box2<U>` is as good as `impl<T> Box2<T>`.
 - **`Self` is the struct with the parameters of the impl** (`Pair<X, Y>` here): in the signatures, the literal `Self { ... }`, and `Self::make(...)`. A size of the impl (`impl<n> Packet<n>`) is a value in the body and the contracts, as it is for a function.
 - **A call is written as for any impl**: `x.first()`, `Pair::make(1, true)` and `Pair::first(x)`, with the types of the instance deciding which copy, and a struct that is not given the types of the impl is a type error. An impl for a struct that has parameters has to name them (`impl Pair { ... }` is a parse error), and an impl with parameters for a struct that has none is one too.
-- **A trait can be implemented for one** (`impl<T> Sequence<T> for Vec<T>`, see Traits And Impls). Not yet: a bound on a parameter (`T: Trait`).
+- **A trait can be implemented for one** (`impl<T> Sequence<T> for Vec<T>`, see Traits And Impls). A bound on a parameter (`S: Trait`) is made for each type a call gives, see Bounded types.
 
 ### A list written in Tersus
 
@@ -1371,7 +1400,7 @@ return v.get(1) + size(v);                      // 8
 - **The invariant keeps `0 <= len <= size(data)` and a capacity of at least 1.** It is proved where a Vec is made (the literals in `new`, `set`, `push` and `pop`) and assumed for every Vec a function is given, so no function asks for it. `get` asks for an index in use (`affirm i < self.len;`), so `v.get(1)` on a Vec with one element is refused (`Could not prove: i < self.len`), and so is `pop` of an empty one (`Could not prove: self.len >= 1`).
 - **A loop that pushes says what it keeps in terms of `size`**: `affirm size(v) = i;`, since `push` promises `size(return) = size(self) + 1` and the invariant says the rest.
 - **The elements may own things.** The array clones the filler into every slot, `set` and the growth move and free what they replace, and a `Vec<List<Int>>`, a `Vec<Vec<Int>>` or a Vec of structs that own lists is freed once (the native tests run these with the checks of the runtime on).
-- **What it is not yet**: a list. There is no list literal or `for` over it, no function over any `Sequence` (it takes a `Vec`), and `=` compares the unused slots of the arrays too.
+- **What it is not yet**: a list. There is no list literal or `for` over it, and `=` compares the unused slots of the arrays too.
 
 **The prelude.** The traits `Sequence` (`size`, `get`, `set`) and `Growable` (`push`, for the sequences that can grow, which an array cannot) are in `lib/prelude.tersus`, and every program that mentions `Sequence` or `Growable` has them in front of it, so a struct that implements it needs nothing declared. A program that declares a `Sequence` or a `Growable` of its own does not get the library, and a program that does not mention it is unchanged. The library is parsed before the program with the declarations it makes known to it, so the line numbers in an error are the program's own, and it is checked and validated with the program.
 
@@ -1468,7 +1497,7 @@ return a;                             // [[1], [2, 3], [1]]
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
-- Traits are checked and called, not used as types: a function cannot take "any type that implements `Measure`" (a type parameter has no bounds yet), so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
+- Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
 - The CLI runs one file at a time and has no REPL or multi-file programs; the one library there is, the prelude with the trait `Sequence`, is put in front of a program that mentions it.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - The source file is read in the encoding of the locale, so a program with a letter that is not ASCII in a name (the parser accepts any letter) needs a UTF-8 locale to load.

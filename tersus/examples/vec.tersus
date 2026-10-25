@@ -90,4 +90,17 @@ grid = Vec::new(Vec::new(0)).push(Vec::new(0).push(7));
 flags = Vec::new(false).push(true).push(false).push(true);
 flags = flags.set(0, true).pop();
 
-return squares.get(19) + size(squares) + size(firstRow) * 1000 + size(grid) * 10000 + size(flags) * 100000;    // 361 + 20 + 2000 + 10000 + 200000
+// One function for every sequence of Ints: a Vec, a List and an Array. A type parameter with a bound is any type that implements the
+// trait, and the function is made for each type it is called with, so inside it size(s) and get(s, i) are the functions of that type.
+fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] {
+    sum = 0;
+    i = 0;
+    while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i {
+        sum = sum + get(s, i);
+        i = i + 1;
+    };
+    return sum;
+};
+sums = total(squares) + total([1, 2, 3]) + total(array(3, 5));    // 2470 + 6 + 15
+
+return squares.get(19) + size(squares) + size(firstRow) * 1000 + size(grid) * 10000 + size(flags) * 100000 + sums * 1000000;    // 361 + 20 + 2000 + 10000 + 200000 + 2491000000

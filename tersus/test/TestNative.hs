@@ -490,9 +490,13 @@ vecPrograms =
     , ("of structs that own a list", "struct P { n: Int, xs: List<Int> }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);")
     , ("in a struct", "struct Bag { items: Vec<Int>, tag: Int }; b = Bag { items: Vec::new(0).push(4), tag: 2 }; return b.tag + size(b.items);")
     , ("in a list", "l = push(push([], Vec::new(0).push(1)), Vec::new(5)); return size(l);")
+    , ("one function for a Vec, a List and an Array", total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 10000 + total(push(push([], 3), 4)) * 100 + total(array(3, 5));")
+    , ("for sequences of lists", "fn lens<S: Sequence<List<Int>>>(s: &S) -> Int [{ }] [{ }] { n = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { n = n + size(get(s, i)); i = i + 1; }; return n; }; v = Vec::new(push([], 0)).push(push(push([], 4), 5)); l = push(push([], push([], 1)), push(push([], 2), 3)); return lens(v) * 10 + lens(l);")
+    , ("for a sequence that grows", "fn add<S: Growable<Int>>(s: S, x: Int) -> S [{ }] [{ affirm size(return) = size(s) + 1; }] { return push(s, x); }; v = add(add(Vec::new(0), 4), 5); l = add(add([], 6), 7); return size(v) * 10 + size(l) + v.get(1) + get(l, 1);")
     , ("made and dropped in a loop", "t = 0; i = 0; while i < 1000 [{ affirm i >= 0; }] shrinks 1000 - i { v = Vec::new(push([], i)).push(push([], i)).push(push([], 7)); t = t + size(v); i = i + 1; }; return t;")
     ]
   where
+    total = "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { sum = 0; i = 0; while i < size(s) [{ affirm i >= 0; affirm i <= size(s); }] shrinks size(s) - i { sum = sum + get(s, i); i = i + 1; }; return sum; }; "
     -- A Vec made with the filler and pushed to by the statement `n` times
     loop n filler step =
         "v = Vec::new(" ++ filler ++ "); i = 0; while i < " ++ show (n :: Int) ++ " [{ affirm i >= 0; affirm i <= " ++ show n ++ "; affirm size(v) = i; }] shrinks " ++ show n ++ " - i { " ++ step ++ " i = i + 1; }; "

@@ -539,14 +539,20 @@ functStatement = do
     -- fn f<T, n>(...): what a call gives. A name that starts with a capital letter is a type (`T`, which the function knows nothing of);
     -- any other is a size, which is one of the last parameters of the function (an Int that the body and the contracts can read).
     -- Neither is written in a call.
-    generics <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
+    -- A type may be bounded by the traits it implements, `S: Sequence<Int> + Growable<Int>`, whose types may be any of the parameters
+    outerParams <- declTypeParams <$> getState
+    names <- option [] (lookAhead (char '<' >> whitespace >> (((variable <* whitespace) <* optional (char ':' >> balanced)) <* whitespace) `sepBy1` (char ',' >> whitespace)))
+    implParams <- declImplParams <$> getState
+    modifyState (\d -> d{declTypeParams = filter isTypeParam names ++ filter isTypeParam implParams})
+    declared <- option [] (char '<' >> whitespace >> (genericParameter <* whitespace) `sepBy1` (char ',' >> whitespace) <* char '>' <* whitespace)
+    let generics = map fst declared
+        bounds = [(name, trait, args) | (name, bs) <- declared, (trait, args) <- bs]
+    when (any (not . isTypeParam . (\(name, _, _) -> name)) bounds) $ unexpected "a bound on a size"
     let typeParams = filter isTypeParam generics
         sizes = filter (not . isTypeParam) generics
     -- (a function of `impl<T> Vec<T>` has the parameters of the impl after its own)
-    implParams <- declImplParams <$> getState
     let allTypes = typeParams ++ filter isTypeParam implParams
         allSizes = sizes ++ filter (not . isTypeParam) implParams
-    outerParams <- declTypeParams <$> getState
     modifyState (\d -> d{declTypeParams = allTypes})
     (params, returnType, inputReqs, outputReqs) <- functHeader
     termination <- terminationClause
@@ -554,11 +560,27 @@ functStatement = do
     whitespace
     modifyState (\d -> d{declTypeParams = outerParams})
     let allParams = params ++ [(size, TInt) | size <- allSizes]
-    return (Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType allSizes allTypes) termination fnBody) [])))
+    let function = Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType allSizes allTypes) termination fnBody) []))
+    return (if null bounds then function else BoundedDef bounds function)
   where
     isTypeParam name = case name of
         c : _ -> isUpper c
         [] -> False
+    -- T, or T: Trait<Types> + Trait
+    genericParameter = do
+        name <- variable
+        whitespace
+        bounds <- option [] (char ':' >> whitespace >> bound `sepBy1` (char '+' >> whitespace))
+        return (name, bounds)
+    bound = do
+        trait <- variable
+        whitespace
+        args <- option [] (char '<' >> whitespace >> (typeAnnotation `sepBy1` skipWhitespace (char ',')) <* char '>')
+        whitespace
+        return (trait, args)
+    -- the text of the bounds of a parameter, up to the comma or the > that ends it
+    balanced = skipMany (void (noneOf "<>,") <|> nested)
+    nested = void (char '<') >> skipMany (void (noneOf "<>") <|> nested) >> void (char '>')
 
 -- (parameters) -> Type [{ input contract }] [{ output contract }], the part of a function before its termination clause
 functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement])
