@@ -69,7 +69,6 @@ needsDrop :: Program -> Type -> Bool
 needsDrop program = owning
   where
     owning ty = case ty of
-        TList{} -> True
         TBox{} -> True
         TArrayOf t _ -> owning t
         TNamed n -> declared n
@@ -434,27 +433,18 @@ rewriteOperands cx after' operands = go consumed operands
 -- A constant that owns something, which is made again each time it is wanted: a list, or a struct or an enum that has one. A
 -- constant that owns nothing needs no care.
 isHeapConstant :: Constant -> Bool
-isHeapConstant CList{} = True
 isHeapConstant (CData _ fields) = any (isHeapConstant . snd) fields
 isHeapConstant _ = False
 
--- The type of a constant that is only read, from what it is read with when that says, and from what it holds otherwise
+-- The type of a constant that is only read, from what it holds
 constantType :: Program -> Maybe Type -> Constant -> Type
-constantType _ (Just ty) CList{} = ty
 constantType program _ c =
     case c of
         CBool _ -> TBool
-        CList cs -> TList (elementType cs)
         CData name _ -> case Map.lookup name (progTypes program) of
             Just StructDecl{} -> TNamed name
             _ -> TVariant name
         _ -> TInt
-  where
-    elementType cs = case [c' | c' <- cs, known c'] ++ cs of
-        c' : _ -> constantType program Nothing c'
-        [] -> TInt
-    known (CList cs) = any known cs
-    known _ = True
 
 -- The operands put back into the rvalue they came from, in the order `roles` gave them
 withOperands :: Rvalue -> [Operand] -> Rvalue

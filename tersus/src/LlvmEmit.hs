@@ -66,14 +66,8 @@ declarations =
     , "declare void @tersus_overflow() noreturn"
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
-    , "declare ptr @tersus_list_new(i64)"
-    , "declare ptr @tersus_list_new_words(i64, i64)"
-    , "declare ptr @tersus_list_push_words(ptr, ptr, i64)"
-    , "declare ptr @tersus_list_set_words(ptr, i64, ptr, ptr)"
     , "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
     , "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
-    , "declare ptr @tersus_list_push(ptr, i64)"
-    , "declare ptr @tersus_list_set(ptr, i64, i64, ptr)"
     , "declare void @tersus_clone(ptr, ptr, ptr)"
     , "declare void @tersus_drop(ptr, ptr)"
     , "declare ptr @tersus_box_new(i64)"
@@ -141,7 +135,6 @@ closeTypes program = go [] . map (canonical program)
     go seen (ty : rest)
         | ty `elem` seen = go seen rest
         | otherwise = go (ty : seen) (parts ty ++ rest)
-    parts (TList t) = [canonical program t]
     parts (TArray t _) = [canonical program t]
     parts (TBox (TArrayOf t SizeAny)) = [canonical program t]
     parts (TBox t) = [canonical program t]
@@ -153,9 +146,9 @@ canonical :: Program -> Type -> Type
 canonical program (TVariant v) = maybe (TVariant v) TNamed (ownerOf program v)
 canonical _ ty = ty
 
--- A constant global for each type: its kind (0 Int, 1 Bool, 2 List, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array
+-- A constant global for each type: its kind (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array
 -- of no size) and what the
--- runtime needs to walk a value: the descriptor of the elements of a list, an array, a Box of an array of no size, or of what a Box holds, or the variants of a struct or enum
+-- runtime needs to walk a value: the descriptor of the elements of an array, a Box of an array of no size, or of what a Box holds, or the variants of a struct or enum
 -- with the names and the descriptors of their fields, and whether the value starts with a word that says the variant (an enum)
 typeDescriptors :: Program -> [Type] -> [String]
 typeDescriptors program types =
@@ -173,7 +166,6 @@ typeDescriptors program types =
   where
     body TInt = "{ i64 0, ptr null }"
     body TBool = "{ i64 1, ptr null }"
-    body (TList t) = "{ i64 2, ptr " ++ typeSymbol program t ++ " }"
     body ty@TArray{} = "{ i64 5, ptr " ++ global "array." (renderType ty) ++ " }"
     body (TBox (TArrayOf t SizeAny)) = "{ i64 7, ptr " ++ typeSymbol program t ++ " }"
     body (TBox t) = "{ i64 6, ptr " ++ typeSymbol program t ++ " }"
@@ -182,7 +174,7 @@ typeDescriptors program types =
     body _ = "{ i64 -1, ptr null }"
     dataDescriptor n =
         let variants = variantsOf program n
-         in [ global "data." n ++ " = private constant { i64, ptr, i64 } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ ", i64 " ++ (if isEnum n then "1" else "0") ++ " }"
+         in [ global "data." n ++ " = private constant { i64, ptr, i64 } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ ", i64 " ++ (if isEnum n then "1" else if takeWhile (/= '<') n == "StdList" then "2" else "0") ++ " }"
             , global "variants." n ++ " = private constant [" ++ show (length variants) ++ " x { ptr, i64, ptr }] ["
                 ++ intercalate ", " ["{ ptr, i64, ptr } { ptr " ++ global "str." v ++ ", i64 " ++ show (length fields) ++ ", ptr " ++ (if null fields then "null" else global "fields." v) ++ " }" | (v, fields) <- variants]
                 ++ "]"
@@ -435,14 +427,9 @@ rvalue fn destType rv =
             x <- operandAt fn ty a
             y <- operandAt fn ty b
             binary op ty x y
-        MakeList os -> case destType of
-            TList t -> do
-                list <- slotsG t >>= newList (length os)
-                mapM_ (\(i, o) -> elementValue fn t o >>= storeElement t list (show i)) (zip [0 :: Int ..] os)
-                pure list
-            _ -> failG "A list literal must make a list"
+        MakeList _ -> failG "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"
         ListOp op os@(first : _) | isArrayOperand fn first -> arrayRead fn destType op os
-        ListOp op os -> listOperation fn destType op os
+        ListOp op os -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " here")
         ReadField o name field -> do
             program <- programG
             (_, declared) <- constructorG program name
@@ -477,11 +464,6 @@ rvalue fn destType rv =
                     pure taken
         _ -> failG ("Native code makes " ++ renderRvalue rv ++ " where it is held inline, not as a word")
 
--- A list of n elements that are stride words each, which the caller fills in
-newList :: Int -> Integer -> G String
-newList n 1 = ins "l" ("call ptr @tersus_list_new(i64 " ++ show n ++ ")")
-newList n stride = ins "l" ("call ptr @tersus_list_new_words(i64 " ++ show n ++ ", i64 " ++ show stride ++ ")")
-
 -- The words that a struct or an enum takes, and the byte offset of the field at a position of a constructor: an enum value starts
 -- with a word that says the variant, a struct with its first field. A field is a word, or the words of a value held inline.
 tagWords :: Program -> Name -> Integer
@@ -498,58 +480,7 @@ fieldOffsetG name declared i = do
 constructorG :: Program -> Name -> G (Int, [(Variable, Type)])
 constructorG program name = maybe (failG ("Unknown struct or variant: " ++ name)) pure (constructor program name)
 
--- A list operation, given the type of its result, which says what the list holds even when the operand is an empty constant.
--- The contracts (an index in range, a list that is not empty) are assumed.
-listOperation :: Function -> Type -> ListOp -> [Operand] -> G String
-listOperation fn destType op os =
-    case (op, os) of
-        (Length, [l]) -> listArg l >>= \(_, list) -> lengthOf list
-        (First, [l]) -> listArg l >>= \(t, list) -> elementPtr list "0" >>= loadElement t
-        (Last, [l]) -> do
-            (t, list) <- listArg l
-            n <- lengthOf list
-            i <- ins "i" ("sub i64 " ++ n ++ ", 1")
-            elementPtr list i >>= loadElement t
-        (Get, [l, i]) -> do
-            (t, list) <- listArg l
-            index <- operandAt fn TInt i
-            elementPtr list index >>= loadElement t
-        -- (an element held inline is moved in from where it is)
-        (Push, [l, x]) -> do
-            (t, list) <- listArg l
-            if isAggregate t
-                then do
-                    count <- slotsG t
-                    from <- operandAddress fn t x
-                    ins "l" ("call ptr @tersus_list_push_words(ptr " ++ list ++ ", ptr " ++ from ++ ", i64 " ++ show count ++ ")")
-                else do
-                    word <- operandAt fn t x >>= toWord t
-                    ins "l" ("call ptr @tersus_list_push(ptr " ++ list ++ ", i64 " ++ word ++ ")")
-        (Set, [l, i, x]) -> do
-            (t, list) <- listArg l
-            index <- operandAt fn TInt i
-            d <- descriptor t
-            if isAggregate t
-                then do
-                    from <- operandAddress fn t x
-                    ins "l" ("call ptr @tersus_list_set_words(ptr " ++ list ++ ", i64 " ++ index ++ ", ptr " ++ from ++ ", ptr " ++ d ++ ")")
-                else do
-                    word <- operandAt fn t x >>= toWord t
-                    ins "l" ("call ptr @tersus_list_set(ptr " ++ list ++ ", i64 " ++ index ++ ", i64 " ++ word ++ ", ptr " ++ d ++ ")")
-        _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " yet")
-  where
-    listArg o = do
-        ty <- case op of
-            Push -> pure destType
-            Set -> pure destType
-            Length -> sharedType fn [o]
-            _ -> pure (TList destType)
-        case ty of
-            TList t -> operandAt fn ty o >>= \list -> pure (t, list)
-            _ -> failG "A list operation needs a list"
-    lengthOf list = do
-        p <- ins "p" ("getelementptr i8, ptr " ++ list ++ ", i64 8")
-        ins "n" ("load i64, ptr " ++ p)
+
 
 -- Values held inline. An array, a struct and an enum are not values of the heap but their words, one after another in the slot of
 -- the local that has them (a field or an element that is held inline is its words, in line), and the value of one, wherever a value
@@ -566,6 +497,12 @@ isArray _ = False
 isBoxedArray :: Type -> Bool
 isBoxedArray (TBox TArrayOf{}) = True
 isBoxedArray _ = False
+
+-- A list of native code: the struct StdList of lib/lists.tersus, whose first field is the Box of the array that holds the elements, so
+-- that the address of the struct is the address of that Box and an element is read from it as from one
+isListStruct :: Type -> Bool
+isListStruct (TNamed name) = takeWhile (/= '<') name == "StdList"
+isListStruct _ = False
 
 isAggregate :: Type -> Bool
 isAggregate TArray{} = True
@@ -613,7 +550,7 @@ isArrayOperand fn o = case o of
     Const CArray{} -> True
     Const _ -> False
   where
-    arrayLocal l = maybe False (\d -> isArray (localType d) || isBoxedArray (localType d)) (Map.lookup l (fnLocals fn))
+    arrayLocal l = maybe False (\d -> isArray (localType d) || isBoxedArray (localType d) || isListStruct (localType d)) (Map.lookup l (fnLocals fn))
 
 -- The address of the words of an array operand: a local, or a constant that is a global
 arrayPtr :: Function -> Operand -> G String
@@ -625,7 +562,7 @@ arrayPtr fn o =
         _ -> failG ("Not an array: " ++ renderOperand' o)
   where
     -- (a Box of an array holds the address of the elements in its first word, whether it carries the size too or not)
-    ofLocal l = localTypeG fn l >>= \ty -> if isBoxedArray ty then ins "a" ("load ptr, ptr " ++ slot l) else pure (slot l)
+    ofLocal l = localTypeG fn l >>= \ty -> if isBoxedArray ty || isListStruct ty then ins "a" ("load ptr, ptr " ++ slot l) else pure (slot l)
 
 -- The address of the words of a value held inline that an operand is, ready for something to take: a value that is moved out of a
 -- local and owns something is copied to room of its own and the local is cleared, so that what takes it can copy it later with the
@@ -704,11 +641,7 @@ writeConstant ty at c =
         CInt i -> emit ("store i64 " ++ show i ++ ", ptr " ++ at)
         CBool b -> emit ("store i64 " ++ (if b then "1" else "0") ++ ", ptr " ++ at)
         CFn name -> emit ("store ptr " ++ functionSymbol name ++ ", ptr " ++ at)
-        CList cs -> case ty of
-            TList t -> do
-                list <- constantList t cs
-                emit ("store ptr " ++ list ++ ", ptr " ++ at)
-            _ -> failG ("A constant list is not a " ++ renderType ty)
+        CList _ -> failG ("Native code has no list constant: " ++ renderType ty)
         CArray cs -> do
             from <- constantWords cs
             bytes <- bytesG ty
@@ -726,14 +659,6 @@ writeConstant ty at c =
                     Nothing -> failG ("A field is missing: " ++ name ++ "." ++ f)
                 )
                 (zip [0 ..] declared)
-
--- A list made from constants
-constantList :: Type -> [Constant] -> G String
-constantList t cs = do
-    stride <- slotsG t
-    list <- newList (length cs) stride
-    mapM_ (\(i, c) -> elementSlot stride list (show (i :: Int)) >>= \p -> writeConstant t p c) (zip [0 ..] cs)
-    pure list
 
 -- The address of an element at an index, an element being so many bytes
 elementAddress :: String -> String -> Integer -> G String
@@ -773,11 +698,9 @@ assignAggregate dropsOld fn dest ty rv = do
     owns <- ownsG ty
     let target = slot dest
         freeOld = if dropsOld && owns then dropSlot ty dest else pure ()
-        -- the address of the element at an index of an array or of a list, the element being the value that is made
-        elementOf container index
-            | isArrayOperand fn container = arrayPtr fn container >>= \base -> elementAddress base index bytes
-            | otherwise = operandAt fn (TList ty) container >>= \list -> slotsG ty >>= \stride -> elementSlot stride list index
-        lengthOfList container = operandAt fn (TList ty) container >>= \list -> ins "p" ("getelementptr i8, ptr " ++ list ++ ", i64 8") >>= \p -> ins "n" ("load i64, ptr " ++ p)
+        -- the address of the element at an index of an array (or of a list of native code, whose address is that of its array), the element
+        -- being the value that is made
+        elementOf container index = arrayPtr fn container >>= \base -> elementAddress base index bytes
         -- a value that is a part of another is copied out of it, and the other is left as it was or with the part cleared. When the
         -- local owns something it is copied into room of its own first, since the part can be a part of what the local held.
         fromPart address clear =
@@ -822,6 +745,12 @@ assignAggregate dropsOld fn dest ty rv = do
             emit ("store ptr " ++ block ++ ", ptr " ++ target)
             lengthSlot <- ins "p" ("getelementptr i8, ptr " ++ target ++ ", i64 8")
             emit ("store i64 " ++ count ++ ", ptr " ++ lengthSlot)
+        -- Array::empty(): no room, and the size 0
+        ListOp NewEmptyBoxed [] | TBox (TArrayOf _ _) <- ty -> do
+            freeOld
+            emit ("store ptr null, ptr " ++ target)
+            lengthSlot <- ins "p" ("getelementptr i8, ptr " ++ target ++ ", i64 8")
+            emit ("store i64 0, ptr " ++ lengthSlot)
         -- a Box of an array of a size as a Box of an array of any size: the address, and the size the type had
         Unsize o -> do
             held <- operandLocalType fn o
@@ -848,10 +777,7 @@ assignAggregate dropsOld fn dest ty rv = do
             elementOf a index >>= \p -> fromPart p False
         ListOp First [a] -> elementOf a "0" >>= \p -> fromPart p False
         ListOp Last [a] -> do
-            index <-
-                if isArrayOperand fn a
-                    then arrayLength fn a >>= \count -> lastIndex count
-                    else lengthOfList a >>= \len -> ins "i" ("sub i64 " ++ len ++ ", 1")
+            index <- arrayLength fn a >>= \count -> lastIndex count
             elementOf a index >>= \p -> fromPart p False
         -- a field that is held inline
         ReadField o name field -> do
@@ -1005,23 +931,6 @@ arrayRead fn destType op os =
             elementAddress base index 8 >>= loadElement destType
         _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " for an array yet")
 
--- The address of an element: a list is 24 bytes of header (count, length, capacity) and then the elements, stride words apart (an
--- element is a word, or the words of a value held inline)
-elementSlot :: Integer -> String -> String -> G String
-elementSlot stride list index = do
-    elements <- ins "e" ("getelementptr i8, ptr " ++ list ++ ", i64 24")
-    at <- if stride == 1 then pure index else ins "o" ("mul i64 " ++ index ++ ", " ++ show stride)
-    ins "p" ("getelementptr i64, ptr " ++ elements ++ ", i64 " ++ at)
-
-elementPtr :: String -> String -> G String
-elementPtr = elementSlot 1
-
-storeElement :: Type -> String -> String -> String -> G ()
-storeElement t list index value = do
-    stride <- slotsG t
-    p <- elementSlot stride list index
-    if isAggregate t then copyWords p value (8 * stride) else storeAt t p value
-
 loadElement :: Type -> String -> G String
 loadElement = loadAt
 
@@ -1057,7 +966,6 @@ loadAt t p =
 
 -- Whether a value is the address of a value of the heap, which has one owner (a list, or a Box)
 isPointer :: Type -> Bool
-isPointer TList{} = True
 isPointer ty@TBox{} = not (isFat ty)
 isPointer _ = False
 
@@ -1231,7 +1139,6 @@ constantValue _ (CInt i) = pure (show i)
 constantValue _ (CBool b) = pure (if b then "true" else "false")
 constantValue ty c@CArray{} = constantAggregate ty c
 constantValue ty c@CData{} = constantAggregate ty c
-constantValue (TList t) (CList cs) = constantList t cs
 -- a function is its address
 constantValue _ (CFn name) = pure (functionSymbol name)
 constantValue ty c = failG ("A constant of the wrong type: " ++ renderRvalue (Use (Const c)) ++ " is not a " ++ renderType ty)
@@ -1244,7 +1151,7 @@ sharedType fn os = do
     program <- programG
     pure $ case [ty | Just ty <- map local os] ++ [constantShape program c | Const c <- os, constantKnown c] ++ [constantShape program c | Const c <- os] of
         ty : _ -> ty
-        [] -> TList TInt
+        [] -> TInt
   where
     local (Copy l) = localType <$> Map.lookup l (fnLocals fn)
     local (Move l) = localType <$> Map.lookup l (fnLocals fn)
@@ -1310,7 +1217,6 @@ llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TBool = Ok "i1"
 llvmType (TRef t) = llvmType t
-llvmType (TList t) = llvmType t `bindResult` \_ -> Ok "ptr"
 -- (an array is passed and held as the address of its words)
 llvmType (TArray t _) = llvmType t `bindResult` \_ -> Ok "ptr"
 llvmType TNamed{} = Ok "ptr"

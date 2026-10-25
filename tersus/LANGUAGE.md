@@ -1218,6 +1218,7 @@ return total(five) + total(fixed);  // 20
 ```
 
 - **`Array::boxed(n, x)`** makes `n` copies of `x` on the heap, with an `n` that the program works out (`array(n, x)` needs a constant, since it is held inline). It has the contract of `array`: `n` must not be negative, the size is `n`, and every element is `x`. It is written as a call and cannot be used as a value.
+- **`Array::empty()`** is the Box of an array of no elements (`size` 0), of the element type that the program decides: no element is needed, since there is none. It is how an empty list is made without a value of its type, and is written as a call.
 - **A Box of an array of a size is a Box of an array of any size where one is wanted** (`Box<Array<Int, 4>>` is given to a parameter of type `Box<Array<Int>>`): the unsizing conversion, which keeps the value and makes the size part of the Box. It is made where a value is given to something that has a type: an argument, a field of a struct or enum, a returned value, and a variable that already has the type. It does not go the other way (`Box<Array<Int>>` is not a `Box<Array<Int, 3>>`), since the size is then only known when the program runs.
 - **What the validator knows.** A `Box<Array<T, N>>` has the size `N` from its type, as an array has, and the size carried by a `Box<Array<T>>` is the `size` of it, so a function over any size says what it needs of it in a contract (`get(a, 0)` needs `size(a) > 0`) and the caller proves it.
 - **What it holds.** The elements are any value that has a size, as for any array.
@@ -1368,6 +1369,25 @@ return v.get(1) + size(v);                      // 8
 
 See `examples/vec.tersus`, which is a program that uses the prelude, and `lib/prelude.tersus`.
 
+### Lists In Native Code
+
+A `List<T>` is checked and validated as a list, and run by the executor (`tersus run`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of a Box of an array and a count, written in Tersus (`lib/lists.tersus`), and a program is changed to use it after it is validated.
+
+```
+struct StdList<T> {
+    data: Box<Array<T>>,
+    len: Int,
+} invariant [{ affirm len >= 0; affirm len <= size(data); }];
+
+fn stdListPush<T>(l: StdList<T>, x: T) -> StdList<T> [{ }] [{ affirm return.len = l.len + 1; affirm get(return.data, l.len) = x; affirm forall j in 0..l.len: get(return.data, j) = get(l.data, j); }] { ... };
+```
+
+- **What a list operation becomes** (`MirLists`): `size(l)` reads `len`; `get`, `first` and `last` read the element out of the array where it is, so a part that is only read is not copied; `push` and `set` are calls of `stdListPush` and `stdListSet`, which change the array where it is when nothing else holds the list; a list written as `[1, 2]` is a call of `stdListNew` and one of `stdListPush` for each element; an empty list holds an `Array::empty()` and allocates nothing. A `List<T>` in a type is a `StdList<T>`, in a struct, an enum, an array, a Box or another list. A push into a full array makes one of twice the room and four more and moves the elements over, so a list built by pushing is built in time and room in proportion to its length.
+- **Comparing and printing** a list are done as a list is: `=` compares the first `len` elements and not the room that is left, and the result of a program that is a list prints as `[1, 2, 3]`. (The runtime knows a `StdList` by its name.)
+- **What is proved, and where.** The proofs about a program's lists are those of lists: the validator never sees the struct. The library is validated on its own, with contracts that say what a list does (`get` gives what `set` put, `push` adds one at the end and leaves the others, and the size changes by the right amount), so the form that native code uses has been shown to do what a list does. That the change itself is right is checked by running: every test program that has a list is built and run, and its output has to be the executor's.
+- **See it** with `tersus owned <file>`, which prints the program after the change, with the moves, copies and frees: `l = push(l, i)` is `_1 = call stdListPush<Int>(move _1, _2)`.
+- **Not changed**: the executor runs the list as a list, and the checker, the validator and the proof engine know lists as they did. A struct with `size`, `get`, `set` and `push` of its own (`Vec`, see A list written in Tersus) is a program's own type, and is used the same way.
+
 ### Structs with sizes
 
 A struct can have sizes too: `struct Packet<n>` is a struct for each size, and a type gives them, as `Packet<4>`. A field can use the size, or hold another struct of the same size:
@@ -1430,7 +1450,7 @@ return a;                             // [[1], [2, 3], [1]]
 - A condition is one relation or boolean: there is no `&&` or `||`, so a guard with several parts is nested `if`s or sequential early returns (see `parse` in `examples/packet_parser.tersus`). The intended form is short-circuit sugar for nested `if`s, with a boolean value that a proof can mention left out.
 - An output contract cannot depend on which variant is returned, so "if `parse` returns `Parsed::Message`, its payload fits in the buffer" cannot be stated to a caller. The intended form is an implication in contracts, `affirm return is Parsed::Message => ...;`, proved for each way out of the function and assumed by a caller once it knows the variant.
 - No declarations separate from assignment.
-- `Array<T, N>` is a second sequence type beside `List<T>`, not yet a replacement for it: a list is what `push` makes and what can hold anything, and `h = size;` is the function for lists, so `h` cannot be applied to an array. An array literal holds literals only (`#[1, 2]`); an array of variables is made with `array` and `set`. A function over arrays names the size in each type, so one function cannot take arrays of any size until sizes can be parameters (`fn dot<n>(a: Array<Int, n>, ...)`, validated once and compiled once per size), and an array whose size is only known when the program runs waits for the heap form (see Arrays).
+- `Array<T, N>` is a second sequence type beside `List<T>`: an array is held inline with its size in the type (or on the heap, in a Box), and `h = size;` is the function for lists, so `h` cannot be applied to an array. An array literal holds literals only (`#[1, 2]`); an array of variables is made with `array` and `set`. A list is what `push` makes, and in native code it is made of an array (see Lists In Native Code).
 - No strings or floats yet (see DATA_MODEL.md). Lists can be read with `get`, extended with `push` and updated with `set`, which return new lists. List literals contain literals only, so a list of variables is built with `push`.
 - Arithmetic is linear (see Arithmetic): comparisons, sums and differences, multiples by a known constant and division by a known constant. A product of two unknowns, and a division by an unknown, are evaluated when their operands are known, but otherwise opaque. `x / c` is rounded down, so `x / c * c = x` is not known.
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.

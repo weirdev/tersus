@@ -146,6 +146,9 @@ rvalueProblems env localTy d rv =
             -- (the size of an array made from a size parameter is that parameter)
             (TArrayOf e (SizeParam _), Copy _) -> [expected e x | not (fits' e x)]
             _ -> ["array needs a result that is an array and a size that is a constant"]
+        ListOp NewEmptyBoxed [] -> case d of
+            TBox (TArrayOf _ SizeAny) -> []
+            _ -> ["Array::empty needs a result that is a Box of an array of any size"]
         ListOp NewBoxed [n, x] -> case d of
             TBox (TArrayOf e SizeAny) -> ints [n] ++ [expected e x | not (fits' e x)]
             _ -> ["Array::boxed needs a result that is a Box of an array of any size"]
@@ -195,6 +198,8 @@ rvalueProblems env localTy d rv =
     arrayOf l e = case operandType env localTy l of
         Just ty@(TArrayOf e' _) | sub env e e' -> Just ty
         Just ty@(TBox (TArrayOf e' _)) | sub env e e' -> Just ty
+        -- (a list of native code is read as the array it holds)
+        Just ty@(TNamed name) | Just ("StdList", [ArgType e']) <- instanceOf name, sub env e e' -> Just ty
         _ -> Nothing
     -- the result of set is the array it was given; the result of array(n, x) is an array
     arrayResult = case rv of

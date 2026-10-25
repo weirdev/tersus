@@ -521,6 +521,7 @@ lowerBuiltin b args = do
         (NewArray, _) -> failL "array was not given a constant size"
         (NewBox, [(_, held)]) -> return (TBox held)
         (NewBoxedArray, [_, (_, elementTy)]) -> return (TBox (TArrayOf elementTy SizeAny))
+        (NewEmptyArray, []) -> tc freshVar >>= \elementTy -> return (TBox (TArrayOf elementTy SizeAny))
         (Unsize, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
             TBox (TArrayOf elementTy _) -> return (TBox (TArrayOf elementTy SizeAny))
             _ -> failL "unsize was given something that is not a Box of an array"
@@ -565,6 +566,7 @@ builtinRvalue b tys ops =
         (Project variant field, [o]) -> return (M.ReadField o variant field)
         (NewBox, [o]) -> return (M.MakeBox o)
         (NewBoxedArray, [_, _]) -> return (M.ListOp M.NewBoxed ops)
+        (NewEmptyArray, []) -> return (M.ListOp M.NewEmptyBoxed [])
         (Unsize, [o]) -> return (M.Unsize o)
         (UnBox, [o]) -> return (M.Unbox o)
         (Is variant, [o]) -> return (M.IsVariant o variant)
@@ -648,6 +650,7 @@ builtinLabel b = case b of
     UnBox -> "unbox"
     NewArray -> "array"
     NewBoxedArray -> "boxed_array"
+    NewEmptyArray -> "empty_array"
     Unsize -> "unsize"
     ArrayFrom -> "array_from"
     Plus -> "add"

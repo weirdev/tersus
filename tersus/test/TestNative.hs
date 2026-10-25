@@ -76,8 +76,8 @@ testNativeIr =
             withIr "x = 1;" (\ir -> testAssertTrue ("define internal void @tersus_main()" `isInfixOf` ir))
         , TestCase "ghost statements are dropped" . pure $
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
-        , TestCase "a list is a runtime list with a descriptor" . pure $
-            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("call ptr @tersus_list_push" `isInfixOf` ir && "@\"type.List<Int>\" = private constant" `isInfixOf` ir))
+        , TestCase "a list is the struct of the library, which holds its elements in a Box of an array" . pure $
+            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.StdList<Int>\" = private constant" `isInfixOf` ir && "call ptr @tersus_box_new" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
         , TestCase "a struct is held in the frame, as its fields, with a descriptor" . pure $
             withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir && not ("tersus_data_new" `isInfixOf` ir)))
         , TestCase "an enum value is a tag and the widest of its variants, in the frame" . pure $
@@ -94,7 +94,7 @@ testNativeIr =
         , TestCase "a function value is the address of the function" . pure $
             case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
                 Left e -> Just e
-                Right program -> case emitProgram program of
+                Right program -> case emitProgram (nativeProgram program) of
                     Error e -> Just e
                     Ok ir -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` ir && "call i64 %" `isInfixOf` ir)
         , TestCase "a function with a size is made for each size it is called with" . pure $
@@ -242,6 +242,12 @@ listPrograms =
     , ("get a list from a list", "rows = [[1], [2, 3]]; return get(rows, 1);")
     , ("booleans in a list", "x = push([true], false); return get(x, 1) = false;")
     , ("last of booleans", "x = [false, true]; return last(x);")
+    , ("lists with different room are equal", "a = push(push(push(push(push([], 1), 2), 3), 4), 5); b = push([], 1); b = push(b, 2); b = push(b, 3); b = push(b, 4); b = push(b, 5); return a = b;")
+    , ("a list that grew is not a list that is longer", "a = push(push(push(push(push([], 1), 2), 3), 4), 5); b = push(a, 6); return a = b;")
+    , ("a list that grew prints as a list", "l = []; i = 0; while i < 11 [{ affirm i >= 0; affirm i <= 11; affirm size(l) = i; }] shrinks 11 - i { l = push(l, i * i); i = i + 1; }; return l;")
+    , ("a list of lists that grew prints as one", "l = []; i = 0; while i < 6 [{ affirm i >= 0; affirm i <= 6; affirm size(l) = i; }] shrinks 6 - i { l = push(l, push([], i)); i = i + 1; }; return l;")
+    , ("an empty list of lists", "l = []; l = push(l, []); l = push(l, [1]); return l;")
+    , ("an empty list is equal to an empty list", "a = push([], 1); b = set(a, 0, 2); c = []; return c = [];")
     , ("equality", "x = [1, 2]; return x = [1, 2];")
     , ("inequality", "x = [1, 2]; return x != [1, 3];")
     , ("equality of different lengths", "x = [1, 2]; return x = [1, 2, 3];")
@@ -669,7 +675,7 @@ sameAsUnvalidated name source = do
         then pure Nothing
         else case lowerSource source of
             Left e -> pure (Just e)
-            Right program -> case emitProgram program of
+            Right program -> case emitProgram (nativeProgram program) of
                 Error e -> pure (Just e)
                 Ok ir -> do
                     buildAndRun ("unvalidated_" ++ map safeChar name) name ir (expected (runProgram program))

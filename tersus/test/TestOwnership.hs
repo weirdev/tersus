@@ -15,7 +15,7 @@ import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import TersusTypes (Name, Rel (..), Type (..), Variable)
+import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable)
 import TestHarness
 import Utils
 
@@ -197,7 +197,12 @@ toPure (VP a) = do
     case cellObject c of
         OList vs -> PL <$> mapM toPure vs
         OBox v -> toPure v
-toPure (VS name fs) = PD name <$> mapM (\(f, v) -> (,) f <$> toPure v) fs
+-- (a list of native code is the elements in use of the array it holds)
+toPure (VS name fs)
+    | isListStruct name, Just elements <- lookup "data" fs, Just (VI used) <- lookup "len" fs = do
+        (_, obj) <- object elements
+        PL <$> mapM toPure (take (fromIntegral used) (children obj))
+    | otherwise = PD name <$> mapM (\(f, v) -> (,) f <$> toPure v) fs
 
 fromPure :: Pure -> MirValue
 fromPure (PI i) = MInt i
@@ -210,7 +215,12 @@ object :: Val -> M (Int, Obj)
 object (VP a) = do
     c <- cell a
     return (a, cellObject c)
+-- (a list of native code is read where its elements are: the first field of the struct StdList is the Box of the array that holds them)
+object (VS name ((_, elements@(VP _)) : _)) | isListStruct name = object elements
 object v = failM ("not a value of the heap: " ++ show v)
+
+isListStruct :: Name -> Bool
+isListStruct name = takeWhile (/= '<') name == "StdList"
 
 -- The fields of a struct or an enum value that a value is: held inline, or in a Box
 dataValue :: Val -> M (Name, [(Variable, Val)])
@@ -307,6 +317,13 @@ listOp op os =
         (Length, [l]) -> do
             (_, obj) <- readOperand l >>= object
             return (VI (fromIntegral (length (children obj))))
+        -- (n copies of the element, in room of their own on the heap, as an array in a Box)
+        (NewBoxed, [n, x]) -> do
+            count <- intOperand n
+            v <- readOperand x
+            copies <- mapM (const (cloneVal v)) [1 .. count]
+            alloc (OList copies)
+        (NewEmptyBoxed, []) -> alloc (OList [])
         (First, [l]) -> item l (const 0)
         (Last, [l]) -> item l (\n -> n - 1)
         (Get, [l, i]) -> do
@@ -479,7 +496,7 @@ runOwned program =
 -- The ownership pass runs on a program that is lowered, and the result checks out on the model with the answer of the executor
 sameOnModel :: String -> Program -> TestResult
 sameOnModel what program =
-    let owned = insertOwnership program
+    let owned = insertOwnership (nativeProgram program)
      in case verifyProgram owned of
             Error e -> Just (what ++ ": the owned MIR is ill formed: " ++ e)
             Ok () -> case (runOwned owned, runProgram program) of
@@ -523,21 +540,21 @@ functionText name text = unlines (takeWhile (/= "}") (dropWhile (not . isInfixOf
 planTests :: [Test]
 planTests =
     [ TestCase "a list pushed to in a loop is changed in place" . pure $
-        withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue ("Push(move _1" `isInfixOf` t))
+        withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue ("stdListPush<Int>(move _1" `isInfixOf` m))
     , -- an array is held inline and has nothing in it to free, so the pass leaves it alone (the model of the heap holds values of the
       -- heap, and the programs with arrays are not run on it)
       TestCase "an array is not owned: no copy, no move, nothing to free" . pure $
         withOwned "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);" (\t -> testAssertEq (count "clone" t, count "move" t, count "drop" t, count "peek" t) (0, 0, 0, 0))
     , TestCase "an array beside a list: only the list is freed" . pure $
-        withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> testAssertEq (count "clone" t, count "drop" t) (0, 1))
+        withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue (not ("drop _2" `isInfixOf` m) && "drop _1" `isInfixOf` m))
     , TestCase "a list that is used after a push is copied once" . pure $
-        withOwned "x = [1]; y = push(x, 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" t) 1)
+        withOwned "x = [1]; y = push(x, 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
     , TestCase "a match takes the fields out of the value" . pure $
         withOwned "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));" (\t -> let f = functionText "sum" t in testAssertEq (count "clone" f, count "take " f) (0, 2))
     , TestCase "a part that is only read is looked at" . pure $
-        withOwned "rows = [[1], [2, 3]]; return size(get(rows, 1));" (\t -> testAssertEq (count "clone" t, count "peek Get" t) (0, 1))
+        withOwned "rows = [[1], [2, 3]]; return size(get(rows, 1));" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m, count "peek Get" m) (0, 1))
     , TestCase "a part that is kept is copied" . pure $
-        withOwned "rows = [[1], [2, 3]]; row = get(rows, 1); rows = set(rows, 0, row); return size(row);" (\t -> testAssertTrue (count "clone" t >= 1))
+        withOwned "rows = [[1], [2, 3]]; row = get(rows, 1); rows = set(rows, 0, row); return size(row);" (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1))
     , TestCase "a call with an argument that is used after it copies the argument" . pure $
         withOwned "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(l) + n(l);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
     , TestCase "a cast is read from the value itself" . pure $
@@ -580,12 +597,14 @@ mistakeTests =
             Right _ -> Just "the model accepts it"
     handMade stmts =
         mainProgram
-            [ (Local 1, TList TInt)
-            , (Local 2, TList TInt)
+            [ (Local 1, onHeap)
+            , (Local 2, onHeap)
             , (Local 3, TInt)
-            , (Local 5, TList TInt)
+            , (Local 5, onHeap)
             ]
             stmts
+    -- (the values the mistakes are made with are on the heap: a Box of an array, which the model holds as a list)
+    onHeap = TBox (TArrayOf TInt SizeAny)
 
 -- A program of a main function that is these statements and then returns nothing
 mainProgram :: [(Local, Type)] -> [Statement] -> Program
@@ -608,26 +627,25 @@ mainProgram locals stmts =
         , progInvariants = Map.empty
         }
 
--- Lowering never puts a change of a list between a part of it and the read of that part in one block, so the rule that a part
--- is copied when it would be read after that is checked on MIR written by hand
+-- A part of a list that is read after the list changes is copied: the change of a list is a call, which ends the block, and a part that
+-- is looked at is only looked at by the statements that follow it in its block
 windowTests :: [Test]
 windowTests =
     [ TestCase "a part is copied when what it is part of changes before it is read" . pure $
-        let program = windowProgram [Assign (Local 1) (Use (Const (CList [CList [CInt 1, CInt 2], CList [CInt 3]]))), Assign (Local 2) (ListOp Get [Copy (Local 1), Const (CInt 0)]), Assign (Local 1) (ListOp Set [Copy (Local 1), Const (CInt 0), Const (CList [CInt 9])]), Assign (Local 3) (ListOp Length [Copy (Local 2)])]
-         in sameOnModel "the part" program `orElseT` testAssertTrue (count "clone" (renderProgram (insertOwnership program)) >= 1)
+        let source = "rows = [[1, 2], [3]]; part = get(rows, 0); rows = set(rows, 0, [9]); return size(part);"
+         in onSource "the part" source `orElseT` either Just (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1)) (ownedText source)
     , TestCase "a part is looked at when nothing changes before it is read" . pure $
-        let program = windowProgram [Assign (Local 1) (Use (Const (CList [CList [CInt 1, CInt 2], CList [CInt 3]]))), Assign (Local 2) (ListOp Get [Copy (Local 1), Const (CInt 0)]), Assign (Local 3) (ListOp Length [Copy (Local 2)]), Assign (Local 1) (ListOp Set [Copy (Local 1), Const (CInt 0), Const (CList [CInt 9])])]
-         in sameOnModel "the part" program `orElseT` testAssertEq (count "peek" (renderProgram (insertOwnership program)), count "clone" (renderProgram (insertOwnership program))) (1, 0)
+        let source = "rows = [[1, 2], [3]]; n = size(get(rows, 0)); rows = set(rows, 0, [9]); return n + size(rows);"
+         in onSource "the part" source `orElseT` either Just (\t -> let m = functionText "main" t in testAssertEq (count "peek Get" m, count "clone" m) (1, 0)) (ownedText source)
     ]
   where
-    windowProgram = mainProgram [(Local 1, TList (TList TInt)), (Local 2, TList TInt), (Local 3, TInt)]
     orElseT Nothing b = b
     orElseT a _ = a
 
 -- The programs that have arrays are not run on the model of the heap, which holds the values of the heap (a program with arrays and
 -- nothing else is checked structurally by the plan tests)
 usesArrays :: String -> Bool
-usesArrays source = any (`isInfixOf` source) ["Array<", "Array::", "array(", "#[", "Vec", "Sequence"]    -- (Vec is a Box of an array: see the prelude)
+usesArrays source = any (`isInfixOf` source) ["Array<", "Array::", "array(", "#["]
 
 testOwnership :: Test
 testOwnership =

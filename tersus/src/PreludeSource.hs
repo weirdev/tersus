@@ -2,6 +2,7 @@
 
 module PreludeSource
     ( preludeSource
+    , listsSource
     ) where
 
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
@@ -12,5 +13,14 @@ preludeSource =
     $( do
         addDependentFile "lib/prelude.tersus"
         contents <- runIO (readFile "lib/prelude.tersus")
+        lift contents
+     )
+
+-- The text of lib/lists.tersus: the list that native code is made of (see MirLists)
+listsSource :: String
+listsSource =
+    $( do
+        addDependentFile "lib/lists.tersus"
+        contents <- runIO (readFile "lib/lists.tersus")
         lift contents
      )

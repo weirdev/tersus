@@ -165,8 +165,7 @@ typeArguments caller target args dest = [fromMaybe TInt (lookup t found) | t <- 
     constantType c = case c of
         CInt _ -> Just TInt
         CBool _ -> Just TBool
-        -- (an empty list or array has the shape, and the element type that nothing decides is an Int, as it is everywhere)
-        CList cs -> Just (TList (firstKnown cs))
+        -- (an empty array has the shape, and the element type that nothing decides is an Int, as it is everywhere)
         CArray cs -> Just (TArrayOf (firstKnown cs) (SizeConst (toInteger (length cs))))
         CData name _ -> Just (TNamed name)
         _ -> Nothing
@@ -175,7 +174,6 @@ typeArguments caller target args dest = [fromMaybe TInt (lookup t found) | t <- 
 match :: Type -> Type -> [(Variable, Type)]
 match pattern actual = case (pattern, actual) of
     (TParam name, a) -> [(name, a)]
-    (TList p, TList a) -> match p a
     (TBox p, TBox a) -> match p a
     (TRef p, a) -> match p a
     (p, TRef a) -> match p a
