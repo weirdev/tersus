@@ -54,8 +54,25 @@ Each slice is a PR, and nothing changes the default `build` until slice 8.
    left test when it checks the right one; an `||` keeps only what both tests give), and in `lib/string.tersus` `String::fromInt`,
    `slice`, `find` and `startsWith` (equality of strings was there). Found while doing it: after an `||` the validator cannot use "this
    test or that one", which a loop condition with `||` has to live with.
-4. **The MIR types and the reader in Tersus.** It parses the format from standard input and prints it again; the test is that
-   the output equals the input.
+4. **The MIR types and the reader in Tersus.** Done: `examples/mir_reader.tersus` (about 1,200 lines, 69 functions) has the types of the MIR as enums and structs,
+   a tokenizer, a parser for each of them and a writer. It reads what `tersus mir --data` prints from the standard input and writes it
+   again; `TestMirReader` builds it once and checks that the output is the input for every example, every program of the native tests and
+   the reader's own data (22,000 lines, 440 KB), and that the texts that are not the data of a program are refused. It validates in 6 seconds,
+   and the executable reads 20 KB (`hello`) in 0.2 s and the 440 KB in 5 s, which is linear but slow for a native program: a token is copied
+   by every `get` of the list of tokens and a string literal is built for every word it is compared with, which the emitter should avoid
+   (borrow, and compare once). Found while writing it:
+   - Recursion over a tree whose children are in a list (`TFn { args: List<Type>, ... }`) cannot be shown to end: `shrinks` knows a field,
+     not an element of a list. The writer's functions are `~`; the parsers, which recurse on an index in the line, are not
+     (`shrinks size(ts) - pos`). A parser that needs a position in the line and gives one after it is the shape that works: it asks for
+     `0 <= pos < size(ts)`, promises `pos < return.pos <= size(ts)`, and a failure is `ok: false` with the position at the end of the line.
+   - An empty list `[]` as the argument of a generic function (`failed([], ts)`) is a `List<Int>` natively whatever the result is used for.
+     The checker accepts it and the verifier of the native code refuses it (`is ill typed`); a function that returns the empty list
+     gives it its type. Documented in LANGUAGE.md, not fixed: the type is not kept in the expression.
+   - A list literal cannot hold string literals or structs, so the tables of words are built with `push`.
+   - After a join of two branches the validator does not keep a bound on an index that each branch set (`p = t.pos` in one, `p = 3` in the
+     other); an `affirm p >= 0;` at the end of each branch keeps it.
+   - `match` as a statement can `return` from an arm, and an `if x is A { ... } else { (x as B) }` cannot show the else is `B`, so a
+     two-variant enum is taken apart with `match`.
 5. **Emitter part 1.** Types, slot sizes, descriptors, declarations and the entry point, compared with Haskell on their own.
 6. **Emitter part 2.** Operands, constants, word rvalues, arithmetic with overflow checks, terminators and calls.
 7. **Emitter part 3.** Aggregates, arrays, Box, clone and drop, then function assembly. From here the test is that the IR is
