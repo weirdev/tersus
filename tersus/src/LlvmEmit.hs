@@ -3,6 +3,7 @@
 module LlvmEmit
     ( emitProgram
     , emitOwned
+    , emitOutline
     ) where
 
 import Data.List (elemIndex, intercalate, nub)
@@ -61,6 +62,16 @@ emitOwned program =
                     let bodies = map fst functions ++ [fst mainFunction, entry]
                         types = closeTypes program (concatMap snd functions ++ snd mainFunction ++ entryTypes)
                      in Ok (unlines (concat (declarations : typeDescriptors program types : map (++ [""]) bodies)))
+
+-- The part of the IR that does not depend on the code of the functions, for a program whose code asks for the descriptors of the types of its locals: the
+-- declarations, the descriptors and the entry point. It is what the emitter in Tersus (examples/emit.tersus, STEP31.md) is compared with while it is being
+-- written, a part at a time (TestMirEmit); `emitOwned` is the same with the types that the code asks for.
+emitOutline :: Program -> Result String String
+emitOutline program =
+    entryPoint program (progMain program) `bindResult` \(entry, entryTypes) ->
+        let locals = [localType d | f <- Map.elems (progFunctions program) ++ [progMain program], d <- Map.elems (fnLocals f)]
+            types = closeTypes program (locals ++ entryTypes)
+         in Ok (unlines (concat [declarations, typeDescriptors program types, entry ++ [""]]))
 
 declarations :: [String]
 declarations =

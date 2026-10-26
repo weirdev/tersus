@@ -17,6 +17,8 @@
 // What it is made to read is the output of the writer: `tersus-mir 1`, the types, the functions and `main` (in that order), a record to a line, and a line
 // not longer than `lineLimit` bytes. An end of the input, or an empty line, is the end of the file.
 
+// ---- the reader: the text up to the line 'end of the reader' is the same in examples/emit.tersus (a program is one file; TestMirEmit checks that it is) ----
+
 struct Token { quoted: Bool, text: String };
 
 struct Parsed<T> { value: T, pos: Int, ok: Bool };
@@ -933,6 +935,8 @@ fn readLines() -> Parsed<List<List<Token>>> [{ }] [{ }] {
     };
     return done(lines, n);
 };
+
+// ---- end of the reader ----
 
 // Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
 
