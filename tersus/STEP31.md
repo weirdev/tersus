@@ -43,7 +43,7 @@ stays in Haskell.
 
 ## Slices
 
-Each slice is a PR, and nothing changes the default `build`: slice 8 adds a flag.
+Each slice is a PR, and nothing changes the default `build` until slice 8 adds a flag (and slice 9 makes it the default).
 
 1. **Validator scaling.** Done: see above. A 3,000-line program validates in about 8 seconds.
 2. **The MIR as data.** Done for Haskell: `tersus mir --data` prints a stable line-oriented format (`src/MirData.hs`, described in
@@ -115,21 +115,33 @@ Each slice is a PR, and nothing changes the default `build`: slice 8 adds a flag
      the words of each type, since walking the declarations for each field (and copying them to do it) was most of the time.
    - Mutual recursion is missing again: `operandValue` for a value moved from a local that holds an aggregate calls `operandAddress`, which has to come first, and the order of
      the functions follows what each needs.
-8. **Wire-in and bootstrap.** Done: `tersus --tersus-emitter build|llvm|run <file>` has the IR written by `examples/emit.tersus` instead of `LlvmEmit` (the flag comes before the
-   command, since the arguments after the file of `run` are the program's). `Bootstrap` has the two stages:
-   - **Stage 0** is the emitter built (`stageZero`) from the IR that `LlvmEmit` writes for `emit.tersus`. It is built the first time the flag is used (about 35 seconds, with a
-     line on the standard error that says so) and kept in the cache directory of the user (`$XDG_CACHE_HOME/tersus`, or `~/.cache/tersus`; with no fallback to a shared directory such as `/tmp`, where another user could plant a program under its name, so the flag fails when the
-     directory cannot be made) as `emitter-<hash>`, where the hash (FNV-1a, 64 bits) is of the text of the emitter, the runtime and the library every program has (`emitterHash`). It is
-     built under another name and moved, so that a build that is cut short leaves nothing that looks like the emitter. `stack build` needs no clang. The text of the emitter
-     is in the compiler (`PreludeSource.emitterSource`), so the cache is right for the compiler that is running.
-   - **Stage 1** is the emitter built (`stageOne`) from the IR that stage 0 writes for the emitter's own MIR.
-   `TestBootstrap` is the fixpoint: stage 0 writes for the emitter the IR it was built from, stage 1 writes for the emitter and for every example and native-test program the
-   text that `llvmSource` gives (and the IR is the same at both stages, so stage 1 is stage 0 again). It checks the flag, and that an emitter in the cache is used and not
-   written. Found while doing it:
-   - **The cache is not keyed by the Haskell emitter.** If `LlvmEmit` changes in a way that changes the IR, stage 0 in the cache is still the emitter built from the old IR; it
-     is the same program as long as the IR means the same, and `TestMirEmit` and the fixpoint are what say that the two emitters agree. Deleting the cache directory forces a rebuild.
-   - `testBootstrap` is among the longest groups (stage 0 and stage 1 are two builds with clang -O2, and the front end runs on the emitter and on every program; the programs are done in parallel, about five minutes unoptimized).
-   - `LlvmEmit` stays, as decision 2 says. Replacing the Haskell emitter as the default needs a checked-in seed.
+8. **Wire-in and bootstrap.** Done: `tersus --tersus-emitter build|llvm|run <file>` had the IR written by `examples/emit.tersus` instead of `LlvmEmit` (the flag came before the
+   command, since the arguments after the file of `run` are the program's), with the two stages in `Bootstrap`:
+   - **Stage 0** was the emitter built (`stageZero`) from the IR that `LlvmEmit` writes for `emit.tersus`, built the first time (about 35 seconds) and kept in the cache
+     directory of the user (`$XDG_CACHE_HOME/tersus`, or `~/.cache/tersus`; with no fallback to a shared directory such as `/tmp`, where another user could plant a program
+     under its name, so the flag fails when the directory cannot be made).
+   - **Stage 1** was the emitter built (`stageOne`) from the IR that stage 0 writes for the emitter's own MIR.
+   `TestBootstrap` was the fixpoint: stage 0 writes for the emitter the IR it was built from, stage 1 writes for the emitter and for every example and native-test program the
+   text that `llvmSource` gives (so the IR is the same at both stages, and stage 1 is stage 0 again). Found while doing it:
+   - **The cache was not keyed by the Haskell emitter.** If `LlvmEmit` changed the IR, the cached stage 0 was still the emitter built from the old IR.
+   - `testBootstrap` is among the longest groups (two builds with clang -O2, and the front end runs on the emitter and on every program; the programs are done in parallel,
+     about five minutes unoptimized).
+9. **The Tersus emitter is the default.** Done: `build`, `llvm` and `run` use it, and `--haskell-emitter` (before the command) has `LlvmEmit` write the IR, which needs no clang
+   to print it. What it needs to stand on its own is a seed in the repository, since the Haskell emitter is no longer what builds it:
+   - **`bootstrap/emitter.ll` is the seed**: the IR (8.7 MB of text, 600 KB compressed) that the emitter wrote for its own source. It is embedded in the compiler
+     (`PreludeSource.seedSource`; its hash is made when that is compiled). A release binary was the other way, and was not taken: it is for one platform, it cannot be read in a
+     diff, and what is run is whatever was uploaded; the IR is portable, can be checked (the fixpoint), and needs only the clang that `build` needs anyway. A release is for
+     when the front end is also in Tersus, and the seed would have to be all of the compiler.
+   - **The seed does not have to be the latest emitter.** Stage 0 is the seed built; stage 1 is the emitter as it is now, which stage 0 compiles (`stageOne`), and it is stage 1
+     that compiles programs, so a change to `emit.tersus` takes effect with no new seed. The seed only has to be able to read the data (`tersus-mir 1`), compile the emitter
+     as it is now (the language it is written in), and call the runtime as it is (`LlvmRuntime`). When one of those changes in a way it cannot follow, stage 0 fails or the
+     fixpoint test does, and the seed is made again with `tersus llvm examples/emit.tersus > bootstrap/emitter.ll` (from a build that works).
+   - **Two programs are in the cache**, `seed-<hash>` and `emitter-<hash>`: the hash of the first is of the seed and the runtime, and that of the second adds the emitter and
+     the library every program has. The first `build`, `run` or `llvm` takes about a minute and a half (two builds); the next ones are as fast as before.
+   - **`TestBootstrap`** is the fixpoint again: stage 0 and stage 1 write for the emitter the IR that `LlvmEmit` writes (so they are the same as each other, and the emitter
+     built from either is the same program), and stage 1 writes for every example and native-test program what `LlvmEmit` does. It checks the cache keeps both.
+   - `llvm` needs clang now (to build the emitter once); `--haskell-emitter llvm` does not. The tests use `LlvmEmit` through `llvmSource` as before: it is the oracle, and
+     deleting it is a step of its own (the tests that compile programs to compare them with the interpreter would go through the emitter in Tersus, which is slower).
 
 Slices 5 to 7 are the bulk of the work. Slice 1 is the one that may change the plan.
 
@@ -137,7 +149,7 @@ Slices 5 to 7 are the bulk of the work. Slice 1 is the one that may change the p
 
 1. **Port style**: a faithful, byte-identical port (same evaluation order and temp numbering), so that the Haskell emitter is
    the oracle. Tidying comes after.
-2. **`LlvmEmit.hs` is kept** for now as the bootstrap path and the oracle. Deleting it needs a checked-in seed (the IR of the
-   emitter, 1 to 2 MB, regenerated on every change); that decision waits for steps 30 and 31 to settle.
-3. **Where the Tersus emitter lives at run time**: built lazily on first use and cached under a hash of its source, so that
+2. **`LlvmEmit.hs` is kept** as the oracle of the tests (and `--haskell-emitter`). The Tersus emitter is the default since slice 9, with a checked-in seed
+   (`bootstrap/emitter.ll`); deleting `LlvmEmit` waits for the tests to stand without it.
+3. **Where the Tersus emitter lives at run time**: built lazily on first use from the seed and cached under a hash of what it is made of, so that
    `stack build` still does not need clang.

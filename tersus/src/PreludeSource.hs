@@ -5,8 +5,11 @@ module PreludeSource
     , listsSource
     , stringSource
     , emitterSource
+    , seedSource
+    , seedFingerprint
     ) where
 
+import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 
 -- The text of lib/prelude.tersus, read when this module is compiled
@@ -43,4 +46,22 @@ emitterSource =
         addDependentFile "examples/emit.tersus"
         contents <- runIO (readFile "examples/emit.tersus")
         lift contents
+     )
+
+-- The text of bootstrap/emitter.ll: the LLVM IR of an emitter written in Tersus (an old one: see Bootstrap), which is what the emitter is first built from
+seedSource :: String
+seedSource =
+    $( do
+        addDependentFile "bootstrap/emitter.ll"
+        contents <- runIO (readFile "bootstrap/emitter.ll")
+        lift contents
+     )
+
+-- A hash of the seed, made when this module is compiled, so that it is not made of 9 million characters each time the compiler runs
+seedFingerprint :: String
+seedFingerprint =
+    $( do
+        addDependentFile "bootstrap/emitter.ll"
+        contents <- runIO (readFile "bootstrap/emitter.ll")
+        lift (fingerprint [contents])
      )
