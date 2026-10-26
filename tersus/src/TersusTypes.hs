@@ -34,6 +34,13 @@ data BuiltinFunct
       -- is no such argument or byte. What they give is not known to the validator beyond its range.
       ArgCount
     | ArgByte
+    | -- The files: pathByte(b) adds a byte to a path, fileLoad() loads the file at the path (its size, or -1), fileByte(i) is a byte of the file that was loaded
+      -- (or -1), storeByte(b) adds a byte to the file to be stored, and fileStore() stores it in the file at the path (0, or -1).
+      PathByte
+    | FileLoad
+    | FileByte
+    | StoreByte
+    | FileStore
     | -- ToByte x: toByte(x), the Byte that the Int x is (x from 0 to 255). FromByte b: toInt(b), the Int that the Byte b is. A Byte is an Int that is from
       -- 0 to 255, and a different type, so nothing makes one by accident: these two are how a value goes from the one to the other.
       ToByte
@@ -63,7 +70,7 @@ data BuiltinFunct
 -- The builtins whose value is something outside the program (the input, the arguments): a call of one is not a function of its arguments,
 -- so a validator does not say that two calls are the same value, and a proof may not call one
 readsWorld :: BuiltinFunct -> Bool
-readsWorld b = b `elem` [ReadByte, ArgCount, ArgByte]
+readsWorld b = b `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore]
 
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never

@@ -8,11 +8,12 @@ module TestNative
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
-import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, listDirectory)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive)
 import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFileSystemEncoding, setLocaleEncoding)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.Process (readProcessWithExitCode)
+import System.IO (IOMode (..), hGetContents, hPutStr, withBinaryFile)
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 
 import Cli
 import qualified Mir as M
@@ -39,6 +40,7 @@ testNative =
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
         , TestList "bytes" [TestCase name (sameAsMir name source) | (name, source) <- bytePrograms]
+        , TestList "files" ([TestCase name (sameAsMirFiles name files source) | (name, files, source) <- filePrograms] ++ [testUnwritableFile])
         , TestList "arguments" [TestCase name (sameAsMirWorld name (noWorld{worldArgs = map encodeUtf8 args}) source) | (name, args, source) <- argumentPrograms]
         , TestList "error" [TestCase name (sameAsMir name source) | (name, source) <- errorPrograms]
         , TestList "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
@@ -60,7 +62,7 @@ nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "args", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
-        , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
+        , "enums", "files", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "strings"
         ]
@@ -260,6 +262,24 @@ bytePrograms =
     , ("an array of Bytes", "a = #[1, 2, 3]; return toInt(toByte(get(a, 2)));")
     , ("a Byte is written", "b = toByte(72); writeByte(b); writeByte(105); return 0;")
     , ("a Byte in an enum", "enum E { A { b: Byte }, N }; e = E::A { b: toByte(5) }; return e;")
+    ]
+
+-- What a program reads and writes of files is the same on the MIR and natively
+filePrograms :: [(String, [(FilePath, String)], String)]
+filePrograms =
+    [ ("read a file", [("in.txt", "hello file\nline 2\n")], "t = String::readFile(\"in.txt\", 1000); t.print(); return size(t);")
+    , ("a file that is not there", [], "t = String::readFile(\"nope.txt\", 1000); return size(t) * 10 + (0 - String::fileSize(\"nope.txt\"));")
+    , ("the size of a file", [("a.bin", "abcdefg")], "return String::fileSize(\"a.bin\");")
+    , ("cut at the limit", [("a.txt", "0123456789")], "t = String::readFile(\"a.txt\", 4); t.print(); return size(t);")
+    , ("write a file", [], "r = \"written\\n\".writeFile(\"out.txt\"); return r;")
+    , ("write over a file", [("out.txt", "a long old text\n")], "r = \"new\".writeFile(\"out.txt\"); return r;")
+    , ("copy a file", [("src.txt", "copy me\n")], "t = String::readFile(\"src.txt\", 1000); r = t.writeFile(\"dst.txt\"); return r;")
+    , ("read what was written", [], "r = \"abc\".writeFile(\"x.txt\"); t = String::readFile(\"x.txt\", 10); t.print(); return size(t) + r;")
+    , ("a file of all the bytes", [("all.bin", map toEnum [0 .. 255])], "t = String::readFile(\"all.bin\", 1000); r = t.writeFile(\"copy.bin\"); return size(t) * 10 + (0 - r);")
+    , ("an empty file", [("empty.txt", "")], "t = String::readFile(\"empty.txt\", 10); return String::fileSize(\"empty.txt\") * 100 + size(t);")
+    , ("UTF-8 in a name", [("caf\195\169.txt", "x")], "t = String::readFile(\"caf\\u{e9}.txt\", 10); return size(t);")
+    , ("no path", [], "r = \"x\".writeFile(\"\"); return 0 - r;")
+    , ("two files", [("a.txt", "AAA"), ("b.txt", "BB")], "a = String::readFile(\"a.txt\", 10); b = String::readFile(\"b.txt\", 10); r = a.concat(b).writeFile(\"ab.txt\"); return size(a) * 10 + size(b);")
     ]
 
 -- What a program is given as arguments is the same on the MIR and natively
@@ -804,6 +824,65 @@ buildAndRun input args file name ir expectation = do
                                 Ok () -> do
                                     result <- runExecutableBytes "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"] input
                                     pure (fmap ("under valgrind:\n" ++) (testAssertEq result expectation))
+
+-- The one thing the MIR run does not know: a file that cannot be written (it keeps the file to itself and the command line writes it when the program has
+-- ended). Natively the write says -1.
+testUnwritableFile :: Test
+testUnwritableFile = TestCase "a file that cannot be written (natively)" $ do
+    available <- clangAvailable
+    let source = "r = \"x\".writeFile(\"no/such/dir/x.txt\"); return 0 - r;"
+    if not available
+        then pure Nothing
+        else case llvmSource source of
+            Error e -> pure (Just e)
+            Ok ir -> buildAndRun "" [] "unwritable_file" "a file that cannot be written" ir (ExitSuccess, "1\n", "")
+
+-- A program that reads and writes files, run natively in a directory of its own that holds the files given (each path with the bytes of its contents) and on
+-- the MIR with the same files: the output and the standard error have to be the same, and so does each file that the MIR run wrote
+sameAsMirFiles :: String -> [(FilePath, String)] -> String -> IO TestResult
+sameAsMirFiles name initial source = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else case compileSource source of
+            Error e -> pure (Just ("Does not compile: " ++ e))
+            Ok _ -> case llvmSource source of
+                Error e -> pure (Just e)
+                Ok ir -> case runSourceFiles noWorld{worldFile = \path -> lookup path initial} Interpret source of
+                    Error e -> pure (Just ("The MIR run failed: " ++ e))
+                    Ok ((out, err), files) -> withByteNames $ do
+                        tmp <- getTemporaryDirectory
+                        let dir = tmp </> "tersus-native-files" </> map safeChar name
+                            exe = tmp </> "tersus-native-files" </> (map safeChar name ++ "_exe")
+                        exists <- doesDirectoryExist dir
+                        if exists then removeDirectoryRecursive dir else pure ()
+                        createDirectoryIfMissing True dir
+                        mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
+                        built <- buildExecutable exe ir
+                        case built of
+                            Error e -> pure (Just e)
+                            Ok () -> do
+                                saved <- getLocaleEncoding
+                                setLocaleEncoding char8
+                                (code, nativeOut, nativeErr) <- readCreateProcessWithExitCode (proc exe []){cwd = Just dir} "" `finally` setLocaleEncoding saved
+                                let expectedOut = if null out then "" else out ++ "\n"
+                                    sameStreams = testAssertEq (code, decodeUtf8 nativeOut, decodeUtf8 nativeErr) (ExitSuccess, expectedOut, err)
+                                written <- mapM (\(path, contents) -> readBytes (dir </> path) >>= \actual -> pure (path, actual, contents)) files
+                                let sameFiles = case [path ++ ": expected " ++ show contents ++ ", got " ++ show actual | (path, actual, contents) <- written, actual /= contents] of
+                                        [] -> Nothing
+                                        problems -> Just (unlines problems)
+                                pure (maybe sameFiles Just sameStreams)
+  where
+    -- (the names of files are bytes here too)
+    withByteNames action = do
+        savedFs <- getFileSystemEncoding
+        setFileSystemEncoding char8
+        action `finally` setFileSystemEncoding savedFs
+    readBytes path = do
+        saved <- getLocaleEncoding
+        setLocaleEncoding char8
+        (do contents <- withBinaryFile path ReadMode (\h -> hGetContents h >>= \c -> length c `seq` pure c)
+            pure contents) `finally` setLocaleEncoding saved
 
 -- Runs a program and gives what it wrote as the text it is the UTF-8 of, whatever the locale is: the bytes are read as they are (a locale that is
 -- not UTF-8 refuses some of them) and decoded

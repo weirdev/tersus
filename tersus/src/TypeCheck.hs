@@ -554,6 +554,11 @@ builtinType funct =
         ReadByte -> return (TFn [] TInt)
         ArgCount -> return (TFn [] TInt)
         ArgByte -> return (TFn [TInt, TInt] TInt)
+        PathByte -> return (TFn [TByte] TInt)
+        FileLoad -> return (TFn [] TInt)
+        FileByte -> return (TFn [TInt] TInt)
+        StoreByte -> return (TFn [TByte] TInt)
+        FileStore -> return (TFn [] TInt)
         ToByte -> return (TFn [TInt] TByte)
         FromByte -> return (TFn [TByte] TInt)
         BytesFrom -> return (TFn [TList TInt] (TList TByte))
@@ -1153,7 +1158,7 @@ inferExprR ctx env expr =
         -- (a builtin takes what it is given: it looks through a Box itself)
         inferred <- case builtinHead ctx env funct of
             -- (the builtins of bytes take a number written out as a Byte)
-            Just b | b `elem` [WriteByte, WriteError] -> coerceArguments ft inferred0
+            Just b | b `elem` [WriteByte, WriteError, PathByte, StoreByte] -> coerceArguments ft inferred0
             Just _ -> return inferred0
             Nothing -> coerceArguments ft inferred0
         let ats = map fst inferred

@@ -2,7 +2,7 @@ module TestStrings (testStrings) where
 
 import Data.List (intercalate)
 
-import Cli (Command (..), World (..), noWorld, runSource, runSourceIn, runSourceStreams, runSourceWith)
+import Cli (Command (..), World (..), noWorld, runSource, runSourceFiles, runSourceIn, runSourceStreams, runSourceWith)
 import TestHarness
 import Utils
 
@@ -12,6 +12,9 @@ testStrings =
     let runs body expected = testAssertEq (runSource Interpret body) (Ok expected)
         rejected body expected = testAssertErrorContains expected (runSource Check body)
         valid body = testAssertEq (runSource Check body) (Ok "OK")
+        filed files body expected written =
+            let world = noWorld{worldFile = \path -> lookup path files}
+             in testAssertEq (runSourceFiles world Interpret body) (Ok ((expected, ""), written))
         given args body expected = testAssertEq (mapResult fst (runSourceIn noWorld{worldArgs = map encodeUtf8 args} Interpret body)) (Ok expected)
         reads input body expected = testAssertEq (runSourceWith input Interpret body) (Ok expected)
         parseError body = testAssertErrorContains "Parse error" (runSource Check body)
@@ -107,6 +110,32 @@ testStrings =
                 , testCase "the bytes of a UTF-8 text decode" (testAssertEq (decodeUtf8 (map toEnum [104, 195, 169, 226, 130, 172, 240, 159, 152, 128])) "h\233\8364\128512")
                 , testCase "a byte that starts a character that is cut short is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [226, 130])) "\65533\65533")
                 , testCase "an overlong encoding is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [192, 128])) "\65533\65533")
+                ]
+            , TestList
+                "files"
+                [ testCase "a file is read" (filed [("in.txt", "hello\n")] "t = String::readFile(\"in.txt\", 100); t.print(); return size(t);" "hello\n6" [])
+                , testCase "one that is not there is empty" (filed [] "return size(String::readFile(\"no.txt\", 100));" "0" [])
+                , testCase "and has no size" (filed [] "return String::fileSize(\"no.txt\");" "-1" [])
+                , testCase "the size of one" (filed [("a", "12345")] "return String::fileSize(\"a\");" "5" [])
+                , testCase "a file is cut at the limit" (filed [("a", "12345")] "t = String::readFile(\"a\", 3); t.print(); return size(t);" "1233" [])
+                , testCase "a file is written" (filed [] "return \"hi\".writeFile(\"out\");" "0" [("out", "hi")])
+                , testCase "and replaced" (filed [("out", "long old text")] "return \"new\".writeFile(\"out\");" "0" [("out", "new")])
+                , testCase "what is written is read back" (filed [] "r = \"abc\".writeFile(\"x\"); t = String::readFile(\"x\", 10); t.print(); return size(t) + r;" "abc3" [("x", "abc")])
+                , testCase "a file is copied byte for byte" (filed [("src", map toEnum [0, 1, 200, 255])] "t = String::readFile(\"src\", 100); return t.writeFile(\"dst\");" "0" [("dst", map toEnum [0, 1, 200, 255])])
+                , testCase "the files written are in the order they were first written, once each" (filed [] "\"1\".writeFile(\"b\"); \"2\".writeFile(\"a\"); \"3\".writeFile(\"b\"); return 0;" "0" [("b", "3"), ("a", "2")])
+                , testCase "a name is bytes" (filed [("caf\195\169", "x")] "return size(String::readFile(\"caf\\u{e9}\", 10));" "1" [])
+                , testCase "an empty name is no file" (filed [] "return \"x\".writeFile(\"\");" "-1" [])
+                , testCase "a name stops at a byte that is 0" (filed [("a", "A")] "t = String::readFile(\"a\\0b\", 10); return size(t);" "1" [])
+                , testCase "a file that is not written is not read" (filed [("a", "A")] "return \"x\".writeFile(\"b\");" "0" [("b", "x")])
+                , testCase "the size of what is read is at most the limit" (valid "t = String::readFile(\"a\", 5); affirm size(t) <= 5; return 0;")
+                , testCase "but not less" (rejected "t = String::readFile(\"a\", 5); affirm size(t) <= 4; return 0;" "Could not prove")
+                , testCase "a limit that is negative is refused" (rejected "t = String::readFile(\"a\", 0 - 1); return 0;" "Could not prove: limit >= 0")
+                , testCase "writing gives 0 or -1" (valid "r = \"x\".writeFile(\"a\"); affirm r >= 0 - 1; affirm r <= 0; return r;")
+                , testCase "two loads are not the same value" (rejected "a = String::fileSize(\"a\"); b = String::fileSize(\"a\"); affirm a = b; return a;" "Could not prove: a = b")
+                , testCase "a proof does not call the file operations" (rejected "affirm fileLoad() >= 0 - 1; return 0;" "A proof calls fileLoad")
+                , testCase "nor fileByte" (rejected "affirm fileByte(0) >= 0 - 1; return 0;" "A proof calls fileByte")
+                , testCase "a path byte is a Byte" (rejected "n = 65; pathByte(n); return 0;" "expected Byte, got Int")
+                , testCase "a number written out is" (valid "pathByte(65); return 0;")
                 ]
             , TestList
                 "arguments"

@@ -230,6 +230,29 @@ builtinFunct ArgByte =
         [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
         , relProof Lt (ATerm "return") (CTerm (VInt 256))
         ]
+-- The files: a path is built a byte at a time (pathByte), and then the file at it is loaded (fileLoad: its size, or -1) and read a byte at a time
+-- (fileByte(i): the byte i, or -1), or a file is built a byte at a time (storeByte) and stored (fileStore: 0, or -1) in the file at the path
+builtinFunct PathByte = VFunct ["b"] [] [] (BuiltinFunct PathByte) [relProof GtEq (ATerm "return") (CTerm (VInt 0))]
+builtinFunct FileLoad = VFunct [] [] [] (BuiltinFunct FileLoad) [relProof GtEq (ATerm "return") (CTerm (VInt (-1)))]
+builtinFunct FileByte =
+    VFunct
+        ["i"]
+        []
+        []
+        (BuiltinFunct FileByte)
+        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
+        , relProof Lt (ATerm "return") (CTerm (VInt 256))
+        ]
+builtinFunct StoreByte = VFunct ["b"] [] [] (BuiltinFunct StoreByte) [relProof GtEq (ATerm "return") (CTerm (VInt 0))]
+builtinFunct FileStore =
+    VFunct
+        []
+        []
+        []
+        (BuiltinFunct FileStore)
+        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
+        , relProof LtEq (ATerm "return") (CTerm (VInt 0))
+        ]
 -- readByte() is the next byte of the standard input, or -1 at its end: it is not known beyond that, so a program has to test what it relies on
 builtinFunct ReadByte =
     VFunct
@@ -301,6 +324,11 @@ stdLibCtx =
         , ("readByte", builtinFunct ReadByte)
         , ("argCount", builtinFunct ArgCount)
         , ("argByte", builtinFunct ArgByte)
+        , ("pathByte", builtinFunct PathByte)
+        , ("fileLoad", builtinFunct FileLoad)
+        , ("fileByte", builtinFunct FileByte)
+        , ("storeByte", builtinFunct StoreByte)
+        , ("fileStore", builtinFunct FileStore)
         , ("toByte", builtinFunct ToByte)
         , ("toInt", builtinFunct FromByte)
         , ("+", builtinFunct Plus)
@@ -366,6 +394,7 @@ evalBuiltinFunct BytesFrom _ = Error "A list of bytes is written with numbers fr
 evalBuiltinFunct ReadByte _ = Error "readByte reads the input, so it has no value to evaluate"
 evalBuiltinFunct ArgCount _ = Error "argCount is the arguments of the program, so it has no value to evaluate"
 evalBuiltinFunct ArgByte _ = Error "argByte is the arguments of the program, so it has no value to evaluate"
+evalBuiltinFunct b _ | b `elem` [PathByte, FileLoad, FileByte, StoreByte, FileStore] = Error "a file operation is the files of the program, so it has no value to evaluate"
 evalBuiltinFunct Unsize [value] = Ok value
 evalBuiltinFunct Unsize _ = Error "unsize takes one Box"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l

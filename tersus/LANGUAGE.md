@@ -1484,6 +1484,23 @@ return n;
 
 The name of the program is not an argument, and there is no environment.
 
+### Files
+
+A whole file is read or written by name. `String::readFile(path, limit)` is the file at `path` (a `String`, the bytes of the name) as a `String` of up to `limit` bytes, and the empty string when there is no such file or it cannot be read; `String::fileSize(path)` is its size, or `-1` (which is how a program tells a file that is not there from one that is empty); and `s.writeFile(path)` makes the file hold the bytes of `s` and nothing else (it is made if it is not there) and gives `0`, or `-1` when it cannot be written (no such directory, no permission, an empty name):
+
+```tersus
+text = String::readFile("in.txt", 100000);
+affirm size(text) <= 100000;                // all the validator knows of what was read
+if "copy of in.txt\n".writeFile("out.txt") < 0 {
+    "could not write\n".printError();
+};
+return size(text);
+```
+
+A name is the UTF-8 bytes of the string, up to 4095 of them, and stops at a byte that is 0. The functions are made of five operations that a program can also use: `pathByte(b)` adds a byte to the name being built, `fileLoad()` loads the file at that name (its size, or `-1`) and clears the name, `fileByte(i)` is the byte `i` of the file that was loaded (or `-1`), `storeByte(b)` adds a byte to the file being built, and `fileStore()` stores it in the file at the name (`0`, or `-1`) and clears both. Like `readByte` they are not known to the validator beyond their range, a call is not the same value as another call with the same arguments, and a proof may not call one.
+
+`tersus run` and an executable read and write the files as they are. `tersus eval` reads them when the program asks, keeps what the program writes to itself (so a program reads its own writes), and writes each file that the program wrote when the program has ended (a file that cannot be written is reported on the standard error). So `eval` and an executable leave the same files, except that `eval` does not tell the program when a write failed. There are no directories, no appending, no streams (a file is read whole, up to the limit) and no deleting.
+
 ### Lists In Native Code
 
 A `List<T>` is checked and validated as a list, and run by the interpreter (`tersus eval`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of a Box of an array and a count, written in Tersus (`lib/lists.tersus`), and a program is changed to use it after it is validated.

@@ -1,0 +1,28 @@
+// Files. `String::readFile(path, limit)` is the file at `path` as a String of up to `limit` bytes (the empty string when there is no such file),
+// `String::fileSize(path)` is its size or -1, and `s.writeFile(path)` makes the file hold the bytes of `s` and gives 0, or -1 when it cannot be
+// written. Like the input and the arguments they are not known to the validator beyond their range, so a program tests what it relies on.
+// This copies `in.txt` to `out.txt` in capitals, and returns the size of the copy, or -1 if there is no `in.txt` (and then it writes nothing)
+// or `out.txt` could not be written. Run it in a directory that has an `in.txt`.
+
+if String::fileSize("in.txt") < 0 {
+    return 0 - 1;
+};
+
+text = String::readFile("in.txt", 100000);
+
+i = 0;
+n = size(text);
+while i < n [{ affirm i >= 0; affirm i <= n; affirm size(text) = n; }] shrinks n - i {
+    c = toInt(get(text, i));
+    if c >= 97 {
+        if c <= 122 {
+            text = set(text, i, toByte(c - 32));
+        };
+    };
+    i = i + 1;
+};
+
+if text.writeFile("out.txt") < 0 {
+    return 0 - 1;
+};
+return size(text);

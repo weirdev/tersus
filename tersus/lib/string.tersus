@@ -86,6 +86,53 @@ impl String {
         return Self { bytes: bytes };
     };
 
+    // The size of the file at `path`, or -1 when there is no such file (or it cannot be read)
+    fn fileSize(path: &String) -> Int [{ }] [{ affirm return >= 0 - 1; }] {
+        i = 0;
+        while i < size(path.bytes) [{ affirm i >= 0; affirm i <= size(path.bytes); }] shrinks size(path.bytes) - i {
+            pathByte(get(path.bytes, i));
+            i = i + 1;
+        };
+        return fileLoad();
+    };
+
+    // The file at `path`, up to `limit` bytes of it: the empty string when there is no such file (see fileSize)
+    fn readFile(path: &String, limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        i = 0;
+        while i < size(path.bytes) [{ affirm i >= 0; affirm i <= size(path.bytes); }] shrinks size(path.bytes) - i {
+            pathByte(get(path.bytes, i));
+            i = i + 1;
+        };
+        loaded = fileLoad();
+        bytes = [];
+        j = 0;
+        while j < limit [{ affirm j >= 0; affirm j <= limit; affirm size(bytes) <= j; }] shrinks limit - j {
+            c = fileByte(j);
+            if c < 0 {
+                j = limit;
+            } else {
+                bytes = push(bytes, toByte(c));
+                j = j + 1;
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
+    // Writes the bytes of the string in the file at `path`, which holds only them after (it is made if there is none): 0, or -1 when it cannot be written
+    fn writeFile(self: &Self, path: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return <= 0; }] {
+        i = 0;
+        while i < size(path.bytes) [{ affirm i >= 0; affirm i <= size(path.bytes); }] shrinks size(path.bytes) - i {
+            pathByte(get(path.bytes, i));
+            i = i + 1;
+        };
+        j = 0;
+        while j < size(self.bytes) [{ affirm j >= 0; affirm j <= size(self.bytes); }] shrinks size(self.bytes) - j {
+            storeByte(get(self.bytes, j));
+            j = j + 1;
+        };
+        return fileStore();
+    };
+
     // Writes the bytes of the string to the standard error, and gives the number of them
     fn printError(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         i = 0;

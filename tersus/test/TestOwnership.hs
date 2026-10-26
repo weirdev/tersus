@@ -329,6 +329,11 @@ listOp op os =
         (ReadByte, []) -> pure (VI (-1))
         (ArgCount, []) -> pure (VI 0)
         (ArgByte, [_, _]) -> pure (VI (-1))
+        (PathByte, [_]) -> pure (VI 0)
+        (FileLoad, []) -> pure (VI (-1))
+        (FileByte, [_]) -> pure (VI (-1))
+        (StoreByte, [_]) -> pure (VI 0)
+        (FileStore, []) -> pure (VI (-1))
         (ToByte, [x]) -> VI . fromIntegral <$> intOperand x
         (FromByte, [b]) -> VI . fromIntegral <$> intOperand b
         (First, [l]) -> item l (const 0)

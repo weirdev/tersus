@@ -22,9 +22,9 @@ main = do
             source <- readSource file
             -- (a program that is read from the standard input has none left to read)
             input <- if command == Interpret && file /= "-" then readInputBytes else return ""
-            case runSourceIn (World input programArgs) command source of
+            case runSourceFiles (World input programArgs readWorldFile) command source of
                 Error e -> failWith e
-                Ok (output, errors) -> case command of
+                Ok ((output, errors), files) -> case command of
                     Build executable -> do
                         built <- buildExecutable executable output
                         case built of
@@ -36,7 +36,11 @@ main = do
                             Error e -> failWith e
                             Ok ExitSuccess -> return ()
                             Ok code -> exitWith code
-                    _ -> hPutStr stderr errors >> unless (null output) (putStrLn output)
+                    _ -> do
+                        -- (the files that the program wrote are written when it has run, whatever it printed)
+                        failed <- writeWorldFiles files
+                        mapM_ (\path -> hPutStrLn stderr ("could not write " ++ path)) failed
+                        hPutStr stderr errors >> unless (null output) (putStrLn output)
 
 failWith :: String -> IO ()
 failWith e = hPutStrLn stderr e >> exitWith (ExitFailure 1)
