@@ -24,6 +24,7 @@ import System.IO
 import System.IO.Unsafe (unsafePerformIO)
 
 import Mir (renderProgram)
+import MirData (writeProgram)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
 import TersusTypes
@@ -32,10 +33,11 @@ import Utils
 -- `Check` parses a program, lowers it to the MIR and validates that. `Run` is how a program is run: it validates it, compiles it
 -- to native code (the same as `Build`, to an executable that is run and removed) and runs that. `Interpret` (`tersus eval`) runs the validated MIR with
 -- the executor of MirEval instead, which is the reference that the native code is tested against and needs no compiler.
--- `Mir` prints the MIR instead, and `Owned` the MIR that native code is made from, with the owner of each value in it.
+-- `Mir` prints the MIR instead, and `Owned` the MIR that native code is made from, with the owner of each value in it. `MirText` (`mir --data`)
+-- prints that as data for a program to read (MirData).
 -- `Llvm` prints the LLVM IR of the validated program, and `Build` compiles that to the
 -- executable at the path.
-data Command = Check | Run | Interpret | Mir | Owned | Llvm | Build FilePath deriving (Show, Eq)
+data Command = Check | Run | Interpret | Mir | MirText | Owned | Llvm | Build FilePath deriving (Show, Eq)
 
 usage :: String
 usage =
@@ -49,6 +51,8 @@ usage =
         , "  eval <file> [args]"
         , "                Validate a program, then run its MIR with the reference interpreter (no compiler needed)"
         , "  mir <file>    Validate a program, then print its MIR"
+        , "  mir --data <file>"
+        , "                Validate a program, then print the MIR that native code is made from as data (see MirData)"
         , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
         , "  build <file> -o <output>"
@@ -63,6 +67,7 @@ parseCommandLine ["check", file] = Just (Check, file)
 parseCommandLine ["run", file] = Just (Run, file)
 parseCommandLine ["eval", file] = Just (Interpret, file)
 parseCommandLine ["mir", file] = Just (Mir, file)
+parseCommandLine ["mir", "--data", file] = Just (MirText, file)
 parseCommandLine ["owned", file] = Just (Owned, file)
 parseCommandLine ["llvm", file] = Just (Llvm, file)
 parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
@@ -116,6 +121,7 @@ runSourceFiles world command source = mapResult (\text -> ((text, ""), [])) (run
 runOther :: String -> Command -> String -> Result String String
 runOther _ Mir source = mapResult renderProgram (compileSource source)
 runOther _ Owned source = mapResult renderProgram (ownedSource source)
+runOther _ MirText source = mapResult writeProgram (ownedSource source)
 runOther _ Llvm source = llvmSource source
 -- (compiling the IR, and running it for `Run`, is left to the caller, since it runs clang)
 runOther _ Run source = llvmSource source
