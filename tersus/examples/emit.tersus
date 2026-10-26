@@ -955,6 +955,10 @@ fn noTypes() -> List<Type> [{ }] [{ }] {
     return [];
 };
 
+fn noConstants() -> List<Constant> [{ }] [{ }] {
+    return [];
+};
+
 fn noStrings() -> List<String> [{ }] [{ }] {
     return [];
 };
@@ -1335,19 +1339,28 @@ fn closeTypes(types: &List<TypeDecl>, roots: &List<Type>) -> List<Type> ~ {
 
 // Descriptors
 
-fn descriptorBody(types: &List<TypeDecl>, t: &Type) -> String ~ {
-    if t is Type::TInt || t is Type::TByte { return "{ i64 0, ptr null }"; };
-    if t is Type::TBool { return "{ i64 1, ptr null }"; };
-    if isSizedArray(t) { return "{ i64 5, ptr ".then(global("array.", renderType(t))).then(" }"); };
+// The kind of a type for the runtime (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array of no size, -1 other) and what it points to
+fn descriptorShape(types: &List<TypeDecl>, t: &Type) -> Res ~ {
+    if t is Type::TInt || t is Type::TByte { return Res { ok: true, text: "0, ptr null" }; };
+    if t is Type::TBool { return Res { ok: true, text: "1, ptr null" }; };
+    if isSizedArray(t) { return Res { ok: true, text: "5, ptr ".then(global("array.", renderType(t))) }; };
     h = boxHolds(t);
     if h.ok {
         fat = unsizedArray(h.ty);
-        if fat.ok { return "{ i64 7, ptr ".then(typeSymbol(types, fat.elem)).then(" }"); };
-        return "{ i64 6, ptr ".then(typeSymbol(types, h.ty)).then(" }");
+        if fat.ok { return Res { ok: true, text: "7, ptr ".then(typeSymbol(types, fat.elem)) }; };
+        return Res { ok: true, text: "6, ptr ".then(typeSymbol(types, h.ty)) };
     };
-    if t is Type::TNamed { return "{ i64 3, ptr ".then(global("data.", (t as Type::TNamed).name)).then(" }"); };
-    if t is Type::TFn { return "{ i64 4, ptr null }"; };
-    return "{ i64 -1, ptr null }";
+    if t is Type::TNamed { return Res { ok: true, text: "3, ptr ".then(global("data.", (t as Type::TNamed).name)) }; };
+    if t is Type::TFn { return Res { ok: true, text: "4, ptr null" }; };
+    return Res { ok: true, text: "-1, ptr null" };
+};
+
+// The body of the descriptor of a type: its kind and what it points to, the words of a value held inline and whether it owns something (worked out here, once, and not by
+// the runtime at every drop and copy)
+fn descriptorBody(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    drops = "0";
+    if needsDrop(types, t) { drops = "1"; };
+    return "{ i64 ".then(descriptorShape(types, t).text).then(", i64 ").then(showInt(slotsOf(types, t))).then(", i64 ").then(drops).then(" }");
 };
 
 // The constants of a struct or an enum: how many variants, the variants with the names and descriptors of their fields, and whether the value starts with a word that
@@ -1388,7 +1401,7 @@ fn containsName(names: &List<String>, n: &String) -> Bool [{ }] [{ }] {
 // value (typeDescriptors)
 fn typeDescriptors(types: &List<TypeDecl>, closed: &List<Type>) -> List<String> ~ {
     out = noStrings();
-    out = push(out, "%tersus.type = type { i64, ptr }");
+    out = push(out, "%tersus.type = type { i64, ptr, i64, i64 }");
     for t in closed {
         out = push(out, typeSymbol(types, t).then(" = private constant %tersus.type ").then(descriptorBody(types, t)));
     };
@@ -1550,6 +1563,621 @@ fn printLines(lines: &List<String>) -> Int [{ }] [{ }] {
     return n;
 };
 
+// The code of a function (slice 6: what is a word)
+//
+// The Haskell emits a block in a state monad `G`: a counter for the names of temporaries and labels, the lines so far, the types whose descriptors the code asks for, the
+// globals it needs and the rooms in the frame for values it builds. Here the state is a `Gen` that each function takes and gives back. A function that also gives a value
+// leaves its text in `last` (the name of the value that an instruction made, a number, the type of a local): the caller reads it at once, with `g.last`. The state is never
+// in a struct with the value, since a field read from a struct that is used again afterwards is a copy, and a copy of the lines so far for each instruction would make the
+// time to emit a function grow with the square of its size. An error is the first message in `error`: what comes after it is not looked at.
+//
+// So far the functions whose locals are words (Int, Byte, Bool, a function) and whose statements make words: operands, constants, arithmetic with the checks for an overflow,
+// the operations of the runtime that give a number, the terminators and the calls. What is held inline, an array, a Box and a clone are for the next part, and a function
+// that has one gives `unsupported` (TestMirEmit compares the others with `LlvmEmit.emitBody`).
+
+struct Gen { count: Int, lines: List<String>, types: List<Type>, globals: List<String>, temps: List<String>, error: String, last: String };
+
+// What a call needs to know of a function of the program: the types of its parameters and of its result. (Looking a function up in the program itself copies it, and all
+// its blocks, so they are taken once.)
+struct Sig { name: String, params: List<Type>, paramsOk: Bool, hasReturn: Bool, returns: Type };
+
+// The types of the program and the signatures of its functions, and for each type what is asked of it again and again, worked out once: the names, to look one up without
+// copying the declarations, and whether a value of it owns something
+struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool> };
+
+fn newGen() -> Gen [{ }] [{ }] {
+    return Gen { count: 0, lines: noStrings(), types: noTypes(), globals: noStrings(), temps: noStrings(), error: "", last: "" };
+};
+
+// The first error is the one that is kept
+fn failG(g: Gen, message: &String) -> Gen [{ }] [{ }] {
+    if size(g.error.bytes) > 0 { return g; };
+    return Gen { error: message, ..g };
+};
+
+// The value of what was done: a text for the caller to take
+fn giving(g: Gen, text: &String) -> Gen [{ }] [{ }] {
+    return Gen { last: text, ..g };
+};
+
+// An instruction
+fn emit(g: Gen, line: &String) -> Gen [{ }] [{ }] {
+    return Gen { lines: push(g.lines, "    ".then(line)), ..g };
+};
+
+// The start of a block
+fn label(g: Gen, name: &String) -> Gen [{ }] [{ }] {
+    return Gen { lines: push(g.lines, name.then(":")), ..g };
+};
+
+// A name for a label that no other has
+fn freshLabel(g: Gen, base: &String) -> Gen [{ }] [{ }] {
+    return Gen { count: g.count + 1, last: base.then(showInt(g.count)), ..g };
+};
+
+// An instruction that gives a value, and the name of that value
+fn ins(g: Gen, base: &String, text: &String) -> Gen [{ }] [{ }] {
+    name = "%".then(base).then(showInt(g.count));
+    line = "    ".then(name).then(" = ").then(text);
+    return Gen { count: g.count + 1, lines: push(g.lines, line), last: name, ..g };
+};
+
+fn slot(l: Int) -> String [{ }] [{ }] {
+    return "%l.".then(showInt(l));
+};
+
+fn blockLabel(b: Int) -> String [{ }] [{ }] {
+    return "bb".then(showInt(b));
+};
+
+// The symbol of a function of the program. Quoted, since a lifted function is named outer::inner.
+fn functionSymbol(name: &String) -> String [{ }] [{ }] {
+    return global("fn.", name);
+};
+
+// The value a slot holds before anything is assigned to it
+fn zeroOf(t: &String) -> String [{ }] [{ }] {
+    if t = "i1" { return "false"; };
+    if t = "ptr" { return "null"; };
+    return "0";
+};
+
+struct LT { ok: Bool, ty: Type };
+
+// The type of a local of a function (the locals are numbered from 0 in order, and the search is for those that are not)
+fn localTypeOf(f: &Function, l: Int) -> LT [{ }] [{ }] {
+    if l >= 0 && l < size(f.locals) {
+        d = get(f.locals, l);
+        if d.id = l { return LT { ok: true, ty: d.ty }; };
+    };
+    for d in f.locals {
+        if d.id = l { return LT { ok: true, ty: d.ty }; };
+    };
+    return LT { ok: false, ty: Type::TInt };
+};
+
+fn sigOf(f: &Function) -> Sig [{ }] [{ }] {
+    params = noTypes();
+    ok = true;
+    for param in f.params {
+        r = localTypeOf(f, param);
+        if r.ok { params = push(params, r.ty); } else {
+            params = push(params, Type::TInt);
+            ok = false;
+        };
+    };
+    return Sig { name: f.name, params: params, paramsOk: ok, hasReturn: f.hasReturn, returns: f.returns };
+};
+
+fn contextOf(program: &Program) -> Ctx ~ {
+    sigs = [];
+    for f in program.functions { sigs = push(sigs, sigOf(f)); };
+    names = noStrings();
+    drops = [];
+    for d in program.types {
+        names = push(names, declName(d));
+        drops = push(drops, needsDrop(program.types, Type::TNamed { name: declName(d) }));
+    };
+    return Ctx { types: program.types, sigs: sigs, names: names, drops: drops };
+};
+
+// The index of the declaration of a struct or an enum, or -1 (the same as lookupDecl, without copying the declarations)
+fn declIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.names); }] {
+    i = 0;
+    while i < size(cx.names) [{ affirm i >= 0; affirm i <= size(cx.names); }] shrinks size(cx.names) - i {
+        if get(cx.names, i) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// Whether a value owns something to free (needsDrop, with the answer for a struct or an enum taken from the table)
+fn needsDropIn(cx: &Ctx, t: &Type) -> Bool ~ {
+    if t is Type::TBox { return true; };
+    if t is Type::TArray { return needsDropIn(cx, Box::unbox((t as Type::TArray).elem)); };
+    n = declaredName(cx.types, t);
+    if !n.ok { return false; };
+    i = declIndex(cx, n.text);
+    if i < 0 || i >= size(cx.drops) { return false; };
+    return get(cx.drops, i);
+};
+
+fn sigIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.sigs); }] {
+    i = 0;
+    while i < size(cx.sigs) [{ affirm i >= 0; affirm i <= size(cx.sigs); }] shrinks size(cx.sigs) - i {
+        if get(cx.sigs, i).name = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The type of a local, which is in `ty`; an error in the state when there is no such local
+struct LTG { g: Gen, ty: Type };
+
+// The LLVM type of a value that is a word, as text in `last`; the state has the error when there is none
+fn typeText(g: Gen, t: &Type) -> Gen ~ {
+    r = llvmType(t);
+    if !r.ok { return failG(g, r.text); };
+    return giving(g, r.text);
+};
+
+// A struct is its own constructor, and a variant has its enum's representation
+fn constructedType(cx: &Ctx, name: &String) -> Type [{ }] [{ }] {
+    i = declIndex(cx, name);
+    if i >= 0 && i < size(cx.types) {
+        d = get(cx.types, i);
+        if d is TypeDecl::DStruct { return Type::TNamed { name: name }; };
+    };
+    return Type::TVariant { name: name };
+};
+
+// Whether the contents of a constant say what it is made of: a number or a Bool does, and a list when one element does
+fn constantKnown(c: &Constant) -> Bool ~ {
+    if c is Constant::CList {
+        for x in (c as Constant::CList).items {
+            if constantKnown(x) { return true; };
+        };
+        return false;
+    };
+    if c is Constant::CArray {
+        for x in (c as Constant::CArray).items {
+            if constantKnown(x) { return true; };
+        };
+        return false;
+    };
+    return true;
+};
+
+// The type of a constant, as far as its contents say: an empty list of lists is a List<List<Int>>
+fn constantShape(cx: &Ctx, c: &Constant) -> Type ~ {
+    if c is Constant::CBool { return Type::TBool; };
+    if c is Constant::CList || c is Constant::CArray {
+        items = noConstants();
+        if c is Constant::CList { items = (c as Constant::CList).items; };
+        if c is Constant::CArray { items = (c as Constant::CArray).items; };
+        // the shape of the first element that shows what it is made of, or of the first
+        elem = Type::TInt;
+        found = false;
+        for x in items {
+            if !found && constantKnown(x) {
+                elem = constantShape(cx, x);
+                found = true;
+            };
+        };
+        if !found && size(items) > 0 { elem = constantShape(cx, get(items, 0)); };
+        if c is Constant::CList { return Type::TList { elem: Box::new(elem) }; };
+        return Type::TArray { elem: Box::new(elem), size: Size::SConst { n: size(items) } };
+    };
+    if c is Constant::CData { return constructedType(cx, (c as Constant::CData).name); };
+    if c is Constant::CFn {
+        i = sigIndex(cx, (c as Constant::CFn).name);
+        if i >= 0 {
+            sig = get(cx.sigs, i);
+            ret = Type::TInt;
+            if sig.hasReturn { ret = sig.returns; };
+            return Type::TFn { args: sig.params, ret: Box::new(ret) };
+        };
+        return Type::TInt;
+    };
+    return Type::TInt;
+};
+
+// The type that the operands of an operation share. A local has a type; a constant has one only where it holds a number or a Bool, and the nesting of an empty list is all it
+// says of its elements, so the type of a local comes first, then that of a constant that shows its leaves, then the shape of one that does not, with Int for the leaf.
+fn sharedType(cx: &Ctx, f: &Function, os: &List<Operand>) -> Type ~ {
+    for o in os {
+        if o is Operand::Copy {
+            r = localTypeOf(f, (o as Operand::Copy).local);
+            if r.ok { return r.ty; };
+        };
+        if o is Operand::Move {
+            r = localTypeOf(f, (o as Operand::Move).local);
+            if r.ok { return r.ty; };
+        };
+    };
+    for o in os {
+        if o is Operand::Const {
+            c = (o as Operand::Const).value;
+            if constantKnown(c) { return constantShape(cx, c); };
+        };
+    };
+    for o in os {
+        if o is Operand::Const { return constantShape(cx, (o as Operand::Const).value); };
+    };
+    return Type::TInt;
+};
+
+// The text of a constant, in `last`
+fn constantValue(g: Gen, ty: &Type, c: &Constant) -> Gen ~ {
+    if c is Constant::CInt { return giving(g, showInt((c as Constant::CInt).n)); };
+    if c is Constant::CBool {
+        if (c as Constant::CBool).b { return giving(g, "true"); };
+        return giving(g, "false");
+    };
+    // a function is its address
+    if c is Constant::CFn { return giving(g, functionSymbol((c as Constant::CFn).name)); };
+    if c is Constant::CArray || c is Constant::CData { return failG(g, "Native code makes a constant that is held inline in the next part"); };
+    return failG(g, "A constant of the wrong type is not a ".then(renderType(ty)));
+};
+
+// The text that stands for an operand where a value of the type is wanted, in `last`: the value loaded from the slot of a local, a number or a Bool
+fn operandValue(g: Gen, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
+    if o is Operand::Const { return constantValue(g, ty, (o as Operand::Const).value); };
+    l = 0;
+    moved = false;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move {
+        l = (o as Operand::Move).local;
+        moved = true;
+    };
+    lt = localTypeOf(f, l);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    if isAggregate(lt.ty) {
+        // (a value held inline is the address of the words it is made of)
+        if moved { return failG(g, "Native code moves a value that is held inline in the next part"); };
+        return giving(g, slot(l));
+    };
+    g1 = typeText(g, lt.ty);
+    t = g1.last;
+    g2 = ins(g1, "v", "load ".then(t).then(", ptr ").then(slot(l)));
+    if moved {
+        v = g2.last;
+        g3 = emit(g2, "store ".then(t).then(" ").then(zeroOf(t)).then(", ptr ").then(slot(l)));
+        return giving(g3, v);
+    };
+    return g2;
+};
+
+// Goes to the overflow block when the flag is set, and carries on in a new block otherwise
+fn stopOn(g: Gen, flag: &String) -> Gen [{ }] [{ }] {
+    g1 = freshLabel(g, "ok");
+    next = g1.last;
+    g2 = emit(g1, "br i1 ".then(flag).then(", label %overflow, label %").then(next));
+    return label(g2, next);
+};
+
+// Arithmetic that stops the program when the result does not fit in an Int; the value is in `last`
+fn checked(g: Gen, name: &String, x: &String, y: &String) -> Gen [{ }] [{ }] {
+    g1 = ins(g, "o", "call {i64, i1} @llvm.".then(name).then(".with.overflow.i64(i64 ").then(x).then(", i64 ").then(y).then(")"));
+    result = g1.last;
+    g2 = ins(g1, "r", "extractvalue {i64, i1} ".then(result).then(", 0"));
+    value = g2.last;
+    g3 = ins(g2, "f", "extractvalue {i64, i1} ".then(result).then(", 1"));
+    overflowed = g3.last;
+    return giving(stopOn(g3, overflowed), value);
+};
+
+// Whether a remainder and the divisor have opposite signs and the remainder is not 0, which is when truncating and rounding down differ
+fn roundsTheOtherWay(g: Gen, r: &String, divisor: &String) -> Gen [{ }] [{ }] {
+    g1 = ins(g, "c", "icmp ne i64 ".then(r).then(", 0"));
+    nonZero = g1.last;
+    g2 = ins(g1, "x", "xor i64 ".then(r).then(", ").then(divisor));
+    signs = g2.last;
+    g3 = ins(g2, "c", "icmp slt i64 ".then(signs).then(", 0"));
+    differ = g3.last;
+    return ins(g3, "c", "and i1 ".then(nonZero).then(", ").then(differ));
+};
+
+// The comparison of a relation: 5 eq, 6 noteq, 7 lt, 8 lteq, 9 gt, 10 gteq
+fn predicate(op: Int) -> String [{ }] [{ }] {
+    if op = 5 { return "eq"; };
+    if op = 6 { return "ne"; };
+    if op = 7 { return "slt"; };
+    if op = 9 { return "sgt"; };
+    if op = 8 { return "sle"; };
+    return "sge";
+};
+
+fn intMin() -> String [{ }] [{ }] {
+    return showInt(0 - 9223372036854775807 - 1);
+};
+
+// The binary operations: 0 add, 1 sub, 2 mul, 3 div, 4 mod, and the relations; the value is in `last`
+fn binary(g: Gen, op: Int, ty: &Type, x: &String, y: &String) -> Gen ~ {
+    if op = 0 { return checked(g, "sadd", x, y); };
+    if op = 1 { return checked(g, "ssub", x, y); };
+    if op = 2 { return checked(g, "smul", x, y); };
+    if op = 3 {
+        // the one quotient that does not fit, which sdiv does not define
+        g1 = ins(g, "c", "icmp eq i64 ".then(x).then(", ").then(intMin()));
+        isMin = g1.last;
+        g2 = ins(g1, "c", "icmp eq i64 ".then(y).then(", -1"));
+        isMinusOne = g2.last;
+        g3 = ins(g2, "c", "and i1 ".then(isMin).then(", ").then(isMinusOne));
+        overflows = g3.last;
+        g4 = stopOn(g3, overflows);
+        // sdiv rounds toward 0 and `/` rounds down
+        g5 = ins(g4, "q", "sdiv i64 ".then(x).then(", ").then(y));
+        q = g5.last;
+        g6 = ins(g5, "r", "srem i64 ".then(x).then(", ").then(y));
+        r = g6.last;
+        g7 = roundsTheOtherWay(g6, r, y);
+        adjust = g7.last;
+        g8 = ins(g7, "q", "sub i64 ".then(q).then(", 1"));
+        lower = g8.last;
+        return ins(g8, "q", "select i1 ".then(adjust).then(", i64 ").then(lower).then(", i64 ").then(q));
+    };
+    if op = 4 {
+        // x % -1 is 0, and srem does not define it for the smallest Int
+        g1 = ins(g, "c", "icmp eq i64 ".then(y).then(", -1"));
+        isMinusOne = g1.last;
+        g2 = ins(g1, "d", "select i1 ".then(isMinusOne).then(", i64 1, i64 ").then(y));
+        divisor = g2.last;
+        g3 = ins(g2, "r", "srem i64 ".then(x).then(", ").then(divisor));
+        r = g3.last;
+        // srem takes the sign of the dividend and `%` the sign of the divisor
+        g4 = roundsTheOtherWay(g3, r, y);
+        adjust = g4.last;
+        g5 = ins(g4, "r", "add i64 ".then(r).then(", ").then(y));
+        shifted = g5.last;
+        return ins(g5, "r", "select i1 ".then(adjust).then(", i64 ").then(shifted).then(", i64 ").then(r));
+    };
+    if isPointer(ty) || isAggregate(ty) {
+        return failG(g, "Native code compares a value that is not a word in the next part");
+    };
+    g1 = typeText(g, ty);
+    t = g1.last;
+    return ins(g1, "c", "icmp ".then(predicate(op)).then(" ").then(t).then(" ").then(x).then(", ").then(y));
+};
+
+// The value of an rvalue that is a word, in `last`
+fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~ {
+    if rv is Rvalue::Use { return operandValue(g, f, destType, (rv as Rvalue::Use).o); };
+    if rv is Rvalue::BinaryOp {
+        op = (rv as Rvalue::BinaryOp).op;
+        a = (rv as Rvalue::BinaryOp).a;
+        b = (rv as Rvalue::BinaryOp).b;
+        operands = push(push([], a), b);
+        ty = sharedType(cx, f, operands);
+        g1 = operandValue(g, f, ty, a);
+        x = g1.last;
+        g2 = operandValue(g1, f, ty, b);
+        y = g2.last;
+        return binary(g2, op, ty, x, y);
+    };
+    if rv is Rvalue::ListOp {
+        op = (rv as Rvalue::ListOp).op;
+        args = (rv as Rvalue::ListOp).args;
+        n = size(args);
+        // 10 writeByte, 11 writeError, 12 readByte, 13 argCount, 14 argByte, 15 pathByte, 16 fileLoad, 17 fileByte, 18 storeByte, 19 fileStore, 20 toByte, 21 fromByte
+        if op = 12 && n = 0 { return ins(g, "r", "call i64 @tersus_readByte()"); };
+        if op = 16 && n = 0 { return ins(g, "l", "call i64 @tersus_fileLoad()"); };
+        if op = 19 && n = 0 { return ins(g, "t", "call i64 @tersus_fileStore()"); };
+        if op = 13 && n = 0 { return ins(g, "n", "call i64 @tersus_argCount()"); };
+        if n = 1 {
+            a = get(args, 0);
+            if op = 15 || op = 18 || op = 11 || op = 10 || op = 21 {
+                g1 = operandValue(g, f, Type::TByte, a);
+                if op = 21 { return g1; };
+                x = g1.last;
+                call = "call i64 @tersus_pathByte(i64 ";
+                base = "p";
+                if op = 18 { call = "call i64 @tersus_storeByte(i64 "; base = "s"; };
+                if op = 11 { call = "call i64 @tersus_writeError(i64 "; base = "e"; };
+                if op = 10 { call = "call i64 @tersus_writeByte(i64 "; base = "w"; };
+                return ins(g1, base, call.then(x).then(")"));
+            };
+            if op = 17 {
+                g1 = operandValue(g, f, Type::TInt, a);
+                x = g1.last;
+                return ins(g1, "f", "call i64 @tersus_fileByte(i64 ".then(x).then(")"));
+            };
+            if op = 20 { return operandValue(g, f, Type::TInt, a); };
+        };
+        if op = 14 && n = 2 {
+            g1 = operandValue(g, f, Type::TInt, get(args, 0));
+            x = g1.last;
+            g2 = operandValue(g1, f, Type::TInt, get(args, 1));
+            y = g2.last;
+            return ins(g2, "a", "call i64 @tersus_argByte(i64 ".then(x).then(", i64 ").then(y).then(")"));
+        };
+    };
+    return failG(g, "Native code makes this rvalue in the next part");
+};
+
+// A local that owns a value frees the one it held when it is given another (in the next part); a word is stored
+fn store(g: Gen, f: &Function, dest: Int, value: &String) -> Gen ~ {
+    lt = localTypeOf(f, dest);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
+    g1 = typeText(g, lt.ty);
+    t = g1.last;
+    if isPointer(lt.ty) { return failG(g1, "Native code frees what a local owned in the next part"); };
+    return emit(g1, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
+};
+
+// Stores the result of a statement; in the entry, the return slot being assigned is what makes the program return a value
+fn storeResult(g: Gen, entry: Bool, f: &Function, dest: Int, value: &String) -> Gen ~ {
+    g1 = store(g, f, dest, value);
+    if entry && dest = 0 { return emit(g1, "store i1 true, ptr %returned"); };
+    return g1;
+};
+
+fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) -> Gen ~ {
+    if st is Statement::Drop {
+        lt = localTypeOf(f, (st as Statement::Drop).local);
+        if !lt.ok { return failG(g, "Undeclared local"); };
+        if isPointer(lt.ty) || (isAggregate(lt.ty) && needsDropIn(cx, lt.ty)) {
+            return failG(g, "Native code frees a value in the next part");
+        };
+        return g;
+    };
+    dest = 0;
+    rv = Rvalue::Use { o: noOperand() };
+    peek = false;
+    if st is Statement::Peek {
+        dest = (st as Statement::Peek).local;
+        rv = (st as Statement::Peek).rv;
+        peek = true;
+    };
+    if st is Statement::Assign {
+        dest = (st as Statement::Assign).local;
+        rv = (st as Statement::Assign).rv;
+    };
+    lt = localTypeOf(f, dest);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
+    if rv is Rvalue::Clone || isAggregate(lt.ty) { return failG(g, "Native code makes a value that is held inline in the next part"); };
+    g1 = rvalue(g, cx, f, lt.ty, rv);
+    value = g1.last;
+    if peek {
+        g2 = typeText(g1, lt.ty);
+        t = g2.last;
+        return emit(g2, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
+    };
+    return storeResult(g1, entry, f, dest, value);
+};
+
+// A call of a function, given its symbol or the address of it, the types of its parameters and of its result
+fn call(g: Gen, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int) -> Gen ~ {
+    values = noStrings();
+    g1 = g;
+    i = 0;
+    while i < size(argTypes) && i < size(args) [{ affirm i >= 0; affirm i <= size(argTypes); affirm i <= size(args); }] ~ {
+        g1 = operandValue(g1, f, get(argTypes, i), get(args, i));
+        values = push(values, g1.last);
+        i = i + 1;
+    };
+    arguments = noStrings();
+    j = 0;
+    while j < size(values) && j < size(argTypes) [{ affirm j >= 0; affirm j <= size(values); affirm j <= size(argTypes); }] ~ {
+        g1 = typeText(g1, get(argTypes, j));
+        arguments = push(arguments, g1.last.then(" ").then(get(values, j)));
+        j = j + 1;
+    };
+    g2 = typeText(g1, returnType);
+    result = g2.last;
+    if isAggregate(returnType) { return failG(g2, "Native code calls a function that makes a value held inline in the next part"); };
+    g3 = ins(g2, "c", "call ".then(result).then(" ").then(target).then("(").then(joinWith(", ", arguments)).then(")"));
+    value = g3.last;
+    g4 = storeResult(g3, entry, f, dest, value);
+    return emit(g4, "br label %".then(blockLabel(next)));
+};
+
+fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -> Gen ~ {
+    if t is Terminator::Goto { return emit(g, "br label %".then(blockLabel((t as Terminator::Goto).block))); };
+    if t is Terminator::Switch {
+        g1 = operandValue(g, f, Type::TBool, (t as Terminator::Switch).cond);
+        v = g1.last;
+        return emit(g1, "br i1 ".then(v).then(", label %").then(blockLabel((t as Terminator::Switch).yes)).then(", label %").then(blockLabel((t as Terminator::Switch).no)));
+    };
+    if t is Terminator::Unreachable { return emit(g, "unreachable"); };
+    if t is Terminator::Call {
+        callee = (t as Terminator::Call).callee;
+        args = (t as Terminator::Call).args;
+        dest = (t as Terminator::Call).dest;
+        next = (t as Terminator::Call).next;
+        if callee is Operand::Const {
+            c = (callee as Operand::Const).value;
+            if c is Constant::CFn {
+                name = (c as Constant::CFn).name;
+                i = sigIndex(cx, name);
+                if i < 0 { return failG(g, "Call of a function that does not exist: ".then(name)); };
+                target = get(cx.sigs, i);
+                if !target.paramsOk { return failG(g, "Undeclared local of ".then(name)); };
+                if !target.hasReturn { return failG(g, "Function without a result: ".then(name)); };
+                return call(g, entry, f, functionSymbol(name), target.params, target.returns, args, dest, next);
+            };
+        };
+        // a function value: the address of a function, with the types its type says
+        callees = push([], callee);
+        ty = sharedType(cx, f, callees);
+        if ty is Type::TFn {
+            g1 = operandValue(g, f, ty, callee);
+            address = g1.last;
+            return call(g1, entry, f, address, (ty as Type::TFn).args, Box::unbox((ty as Type::TFn).ret), args, dest, next);
+        };
+        return failG(g, "Call of something that is not a function");
+    };
+    // Return
+    if !f.hasReturn { return emit(g, "ret void"); };
+    ty = f.returns;
+    if isAggregate(ty) { return failG(g, "Native code returns a value that is held inline in the next part"); };
+    g1 = typeText(g, ty);
+    tt = g1.last;
+    g2 = ins(g1, "v", "load ".then(tt).then(", ptr ").then(slot(0)));
+    v = g2.last;
+    if entry {
+        g3 = ins(g2, "f", "load i1, ptr %returned");
+        returned = g3.last;
+        result = resultStruct(tt);
+        g4 = ins(g3, "w", "insertvalue ".then(result).then(" undef, ").then(tt).then(" ").then(v).then(", 0"));
+        withValue = g4.last;
+        g5 = ins(g4, "w", "insertvalue ".then(result).then(" ").then(withValue).then(", i1 ").then(returned).then(", 1"));
+        both = g5.last;
+        return emit(g5, "ret ".then(result).then(" ").then(both));
+    };
+    return emit(g2, "ret ".then(tt).then(" ").then(v));
+};
+
+fn emitBlock(g: Gen, cx: &Ctx, entry: Bool, f: &Function, b: &Block) -> Gen ~ {
+    g1 = label(g, blockLabel(b.id));
+    for st in b.stmts { g1 = emitStatement(g1, cx, entry, f, st); };
+    return emitTerminator(g1, cx, entry, f, b.term);
+};
+
+// The lines of the blocks of a function (LlvmEmit.emitBody)
+fn emitBody(cx: &Ctx, entry: Bool, f: &Function) -> Gen ~ {
+    g = newGen();
+    for b in f.blocks { g = emitBlock(g, cx, entry, f, b); };
+    return g;
+};
+
+// What `LlvmEmit.emitBody` gives, as lines: the globals the code needs, the rooms for the values it builds, the code, and the types whose descriptors it asks for (the
+// newest first); or that this part of the emitter has not the function
+fn bodyLines(index: Int, g: &Gen) -> List<String> ~ {
+    out = noStrings();
+    out = push(out, "; function ".then(showInt(index)));
+    if size(g.error.bytes) > 0 {
+        out = push(out, "; unsupported");
+        return out;
+    };
+    out = push(out, "; globals");
+    for l in g.globals { out = push(out, l); };
+    out = push(out, "; temps");
+    for l in g.temps { out = push(out, l); };
+    out = push(out, "; code");
+    for l in g.lines { out = push(out, l); };
+    out = push(out, "; types");
+    i = size(g.types);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(g.types); }] shrinks i {
+        i = i - 1;
+        out = push(out, renderType(get(g.types, i)));
+    };
+    return out;
+};
+
+// The code of every function, each with a line that says which it is (the functions in order, then main)
+fn bodies(program: &Program) -> List<String> ~ {
+    cx = contextOf(program);
+    out = noStrings();
+    index = 0;
+    for f in program.functions {
+        for l in bodyLines(index, emitBody(cx, false, f)) { out = push(out, l); };
+        index = index + 1;
+    };
+    for l in bodyLines(index, emitBody(cx, true, program.entry)) { out = push(out, l); };
+    return out;
+};
+
 // The IR so far: the declarations, the descriptors of the types of the locals and what they contain, and the entry point (LlvmEmit.emitOutline)
 fn outline(program: &Program) -> Entry ~ {
     entry = entryPoint(program.types, program.entry);
@@ -1568,7 +2196,9 @@ fn outline(program: &Program) -> Entry ~ {
     return Entry { ok: true, error: "", lines: lines, types: closed };
 };
 
-// The program is read from the standard input and its IR is written. What cannot be read or made is reported on the standard error.
+// The program is read from the standard input and its IR is written. The first argument says what: `outline` is the declarations, the descriptors and the entry point
+// (LlvmEmit.emitOutline), and `bodies` the code of each function (LlvmEmit.emitBody). What cannot be read or made is reported on the standard error.
+mode = String::arg(0, 100);
 read = readLines();
 if !read.ok {
     "the input is not the MIR as data: a bad name\n".printError();
@@ -1579,10 +2209,19 @@ if !program.ok {
     "the input is not the MIR as data\n".printError();
     return 1;
 };
-result = outline(program.value);
-if !result.ok {
-    result.error.printError();
-    "\n".printError();
-    return 1;
+if mode = "bodies" {
+    printLines(bodies(program.value));
+} else {
+    if mode = "outline" {
+        result = outline(program.value);
+        if !result.ok {
+            result.error.printError();
+            "\n".printError();
+            return 1;
+        };
+        printLines(result.lines);
+    } else {
+        "the first argument is outline or bodies\n".printError();
+        return 1;
+    };
 };
-printLines(result.lines);

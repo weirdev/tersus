@@ -4,6 +4,7 @@ module LlvmEmit
     ( emitProgram
     , emitOwned
     , emitOutline
+    , emitBody
     ) where
 
 import Data.List (elemIndex, intercalate, nub)
@@ -175,12 +176,12 @@ canonical program (TVariant v) = maybe (TVariant v) TNamed (ownerOf program v)
 canonical _ ty = ty
 
 -- A constant global for each type: its kind (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array
--- of no size) and what the
--- runtime needs to walk a value: the descriptor of the elements of an array, a Box of an array of no size, or of what a Box holds, or the variants of a struct or enum
+-- of no size), what the runtime needs to walk a value, the words of a value held inline and whether it owns something (so the runtime does not
+-- walk the type for them at every drop and copy, which was most of the time of a program that handles many values): the descriptor of the elements of an array, a Box of an array of no size, or of what a Box holds, or the variants of a struct or enum
 -- with the names and the descriptors of their fields, and whether the value starts with a word that says the variant (an enum)
 typeDescriptors :: Program -> [Type] -> [String]
 typeDescriptors program types =
-    ["%tersus.type = type { i64, ptr }"]
+    ["%tersus.type = type { i64, ptr, i64, i64 }"]
         ++ [typeSymbol program ty ++ " = private constant %tersus.type " ++ body ty | ty <- types]
         ++ concat [dataDescriptor n | TNamed n <- types]
         ++ [ global "array." (renderType ty) ++ " = private constant { i64, ptr } { i64 " ++ show n ++ ", ptr " ++ typeSymbol program t ++ " }"
@@ -192,15 +193,18 @@ typeDescriptors program types =
            ]
         ++ [""]
   where
-    body TInt = "{ i64 0, ptr null }"
-    body TByte = "{ i64 0, ptr null }"
-    body TBool = "{ i64 1, ptr null }"
-    body ty@TArray{} = "{ i64 5, ptr " ++ global "array." (renderType ty) ++ " }"
-    body (TBox (TArrayOf t SizeAny)) = "{ i64 7, ptr " ++ typeSymbol program t ++ " }"
-    body (TBox t) = "{ i64 6, ptr " ++ typeSymbol program t ++ " }"
-    body (TNamed n) = "{ i64 3, ptr " ++ global "data." n ++ " }"
-    body (TFn _ _) = "{ i64 4, ptr null }"
-    body _ = "{ i64 -1, ptr null }"
+    -- (the words of a value held inline and whether it owns something are worked out here, once, and not by the runtime at every drop and copy)
+    body ty = case shape ty of
+        (kind, aux) -> "{ i64 " ++ show kind ++ ", ptr " ++ aux ++ ", i64 " ++ show (slotsOf program ty) ++ ", i64 " ++ (if needsDrop program ty then "1" else "0") ++ " }"
+    shape TInt = (0 :: Int, "null")
+    shape TByte = (0, "null")
+    shape TBool = (1, "null")
+    shape ty@TArray{} = (5, global "array." (renderType ty))
+    shape (TBox (TArrayOf t SizeAny)) = (7, typeSymbol program t)
+    shape (TBox t) = (6, typeSymbol program t)
+    shape (TNamed n) = (3, global "data." n)
+    shape (TFn _ _) = (4, "null")
+    shape _ = (-1, "null")
     dataDescriptor n =
         let variants = variantsOf program n
          in [ global "data." n ++ " = private constant { i64, ptr, i64 } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ ", i64 " ++ (if isEnum n then "1" else if takeWhile (/= '<') n == "StdList" then "2" else "0") ++ " }"
@@ -316,6 +320,15 @@ descriptor ty = G (\s -> Ok (typeSymbol (sProgram s) ty, s{sTypes = ty : sTypes 
 programG :: G Program
 programG = G (\s -> Ok (sProgram s, s))
 
+-- The lines of the blocks of a function: the globals its code needs, the rooms in the frame for the values it builds, the code, and the types whose
+-- descriptors it asks for (the newest first). `emitFunction` puts the header and the prologue around them. The emitter in Tersus is compared with this a part at
+-- a time (TestMirEmit).
+emitBody :: Program -> Bool -> Function -> Result ([String], [String], [String], [Type]) String
+emitBody program entry fn =
+    case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) (S 0 [] [] program [] (fnName fn) []) of
+        Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
+        Ok (_, s) -> Ok (reverse (sGlobals s), reverse (sTemps s), reverse (sLines s), sTypes s)
+
 -- The function of `main` (the entry) also keeps whether the return slot was assigned
 emitFunction :: Program -> Bool -> String -> Function -> Result ([String], [Type]) String
 emitFunction program entry symbol fn =
@@ -356,10 +369,10 @@ emitFunction program entry symbol fn =
                             if entry && fnReturns fn /= Nothing
                                 then ["    %returned = alloca i1", "    store i1 false, ptr %returned"] ++ ["    store " ++ valueType ++ " " ++ zeroOf valueType ++ ", ptr " ++ slot (Local 0) | not returnsAggregate]
                                 else []
-                     in case runG (mapM_ (emitBlock program entry fn) (Map.toList (fnBlocks fn))) (S 0 [] [] program [] (fnName fn) []) of
-                            Error e -> Error ("In " ++ fnName fn ++ ": " ++ e)
-                            Ok (_, s) ->
-                                Ok (reverse (sGlobals s) ++ [header] ++ prologue (reverse (sTemps s)) ++ reverse (sLines s) ++ overflowBlock ++ ["}"], sTypes s)
+                     in case emitBody program entry fn of
+                            Error e -> Error e
+                            Ok (globals, temps, code, types) ->
+                                Ok (globals ++ [header] ++ prologue temps ++ code ++ overflowBlock ++ ["}"], types)
   where
     -- a parameter that is lent and held inline is the caller's words, which the function reads where they are: it has no room of its own
     lentInline l = l `elem` fnBorrowed fn && maybe False (isAggregate . localType) (Map.lookup l (fnLocals fn))

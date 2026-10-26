@@ -87,7 +87,21 @@ Each slice is a PR, and nothing changes the default `build` until slice 8.
      from many pieces, so it uses `then`; a `String` method that is added in a program of its own works.
    - Output is a `List<String>` of lines that the caller prints at the end (the descriptors come before the code that decides which are needed), not a string that is
      appended to: a `push` is cheap, and a `concat` of the whole output would copy it every time.
-6. **Emitter part 2.** Operands, constants, word rvalues, arithmetic with overflow checks, terminators and calls.
+6. **Emitter part 2.** Done: `examples/emit.tersus bodies` writes the code of each function whose locals and statements are words (Int, Byte, Bool, a function):
+   operands, constants, `sharedType`, arithmetic with the checks for an overflow (`checked`, `binary` for `/` and `%`), the operations of the runtime that give a number,
+   `store`, the terminators (`goto`, `switch`, `call` of a function and of a function value, `return`, with the entry's `%returned`) and `call`. A function that has
+   anything else gives `; unsupported` (slice 7 adds it). `LlvmEmit.emitBody` (new, the lines of the blocks of a function with its globals, temps and types; `emitFunction`
+   puts the header and prologue around it) is the oracle, and `TestMirEmit` compares the two for every function of every example and native-test program that makes only
+   words (`wordOnly`: the test fails if the emitter gives `unsupported` for one, or if fewer than 100 were compared). Found while doing it, all of them about the time it
+   takes, since the first version needed more than 200 seconds for the data of `mir_reader.tersus` (22,000 lines):
+   - **The runtime walked the type at every drop and copy.** `words` and `needs_drop` in `LlvmRuntime` recomputed from the descriptor each time (65% of the time of a
+     program that moves enums around). The descriptor now has `{ kind, aux, words, drops }`, worked out by `LlvmEmit.typeDescriptors` once. All native code gains by
+     it: the emitter takes 3.6 seconds for that data and the reader 0.6, from more than 200 and 5.
+   - **A field read from a struct that is used again afterwards is a copy**, so the state of the emission is never in a struct with the value (a `Named { g, name }` would copy the
+     lines so far for each instruction). A function gives the state and leaves the text of its value in `last`.
+   - **`get(functions, i)` copies the function and all its blocks**, so the calls look up the signatures taken once (`Sig`, `Ctx`), and the names of the types and whether each
+     owns something are in the `Ctx` too (`declIndex`, `needsDropIn`).
+   - **Names that are in two files clash**: the reader's `operandAt` and `isWord` are not available as the names of the emitter's own functions, which are `operandValue` and so on.
 7. **Emitter part 3.** Aggregates, arrays, Box, clone and drop, then function assembly. From here the test is that the IR is
    byte-identical to `LlvmEmit` for every example and every `TestNative` program.
 8. **Wire-in and bootstrap.** `build` can use the Tersus emitter behind a flag. Stage 0 is the emitter built from the
