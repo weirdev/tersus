@@ -283,6 +283,8 @@ A type is `int`, `byte`, `bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T
 
 ## Notes on the implementation
 
+- A condition (of an `if` or a `while`) made of `&&`, `||` and `!` is lowered to a test for each part that is evaluated, each a `SwitchBool` to the next test or to the block of the whole condition (`MirLower.lowerCondition`); a Bool wanted as a value (`ok = a && b;`) is a diamond that assigns a temporary. A `LoopSpec` therefore says which block is the first of the body (`loopBody`) and the validator starts an iteration (the variant is bounded below and kept) when that block is entered, once the ways in have met, and not on the true edge of a single test.
+
 - Lowering takes the types by replaying the checker over the program (`TypeCheck.TC`, exported for the purpose), so `x = []; x = push(x, 1)` gives `x` the type `List<Int>`. A type no use decided (a list that is only created) is `Int`.
 - A function defined at the top of the program is found by name from the functions after it and from itself. In the scope that defines it, a function is a name that stands for the lifted function and is called by name, unless the program assigns that name elsewhere (`f = size;`): then it is a local that holds the function, assigned like any variable (so the nearest binding changes), and a call of it is a call of a local. The bodies of the functions at the top still find the original by name.
 - A program has one return type, that of its first `return` (the checker rejects a later one of another type), so `_0` has one type.

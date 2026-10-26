@@ -195,6 +195,7 @@ data LoopSpec = LoopSpec
     { loopInvariant :: [ValidationStatement]
     , loopTermination :: Maybe Termination
     , loopEnv :: Env
+    , loopBody :: BlockId -- the first block of the body: an iteration starts on each edge into it (a condition made of && and || has several tests)
     }
     deriving (Show, Eq)
 
@@ -341,7 +342,7 @@ renderFunction fn =
             ++ ["        // loop: " ++ loopText ls | Just ls <- [Map.lookup b (specLoops spec)]]
             ++ map (("        " ++) . renderStatement) stmts
             ++ ["        " ++ renderTerminator term, "    }"]
-    loopText (LoopSpec inv term _) =
+    loopText (LoopSpec inv term _ _) =
         intercalate "; " (["invariant " ++ renderGhostList inv | not (null inv)] ++ ["terminates " ++ renderTermination t | Just t <- [term]])
 
 renderTermination :: Termination -> String

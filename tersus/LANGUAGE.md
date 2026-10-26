@@ -389,8 +389,25 @@ The current infix operators are:
 
 - Arithmetic: `*`, `/`, `%`, `+`, `-`
 - Relations: `=`, `!=`, `<`, `>`, `<=`, `>=`
+- Connectives of Bools: `&&` (and), `||` (or) and the prefix `!` (not)
 
-Infix operators bind in three levels, tightest first: `*`, `/` and `%`, then `+` and `-`, then the relations. Each level associates left, so `return = n + 1` reads as `return = (n + 1)` and `a + 1 < b * 2` as `(a + 1) < (b * 2)`. Use parentheses when the intended grouping is not clear.
+Infix operators bind in five levels, tightest first: `*`, `/` and `%`, then `+` and `-`, then the relations, then `&&`, then `||`. Each level associates left, so `return = n + 1` reads as `return = (n + 1)` and `a + 1 < b * 2` as `(a + 1) < (b * 2)`. `!` binds tighter than all of them (`!a && b` is `(!a) && b`, and `!(a = b)` needs its parentheses). Use parentheses when the intended grouping is not clear.
+
+### Connectives
+
+`a && b` and `a || b` take two Bools and `!a` one, and give a Bool. They are lazy: `b` is evaluated only when `a` does not decide the result (`a` is true for `&&`, false for `||`), so `n != 0 && 10 / n > 1` does not divide by 0 and a call on the right is not made. The validator knows what the left side gave when it checks the right one, so a test can guard what follows it:
+
+```tersus
+while i < size(l) && get(l, i) != 0 [{ affirm i >= 0; affirm i <= size(l); }] shrinks size(l) - i {
+    i = i + 1;
+};
+```
+
+`get(l, i)` is valid there because `i < size(l)` holds when it is evaluated, and `if i >= size(l) || get(l, i) = 0 { ... }` is valid for the same reason. Both sides must be Bools (`x && true` for an `Int` `x` is `expected Bool, got Int`).
+
+A condition is checked as the tests it is made of. After a `||` the validator knows only what both of the ways in have in common (it does not keep "this test or that one"), so inside `if a > 0 || b > 0 { ... }` nothing is known of `a` or `b` from the test, and a loop with `||` in its condition needs an invariant that does not depend on which test held. `&&` loses nothing: both tests hold in the body.
+
+In a proof there is `&&` and not `||` or `!`: `affirm a > 0 && b > 0;` is the two statements `affirm a > 0; affirm b > 0;` (in a contract, an invariant or in a program), and a proof with `||` or `!` is refused. A fact that is a choice is written as the `if` that decides it.
 
 ## Builtins
 
@@ -526,7 +543,7 @@ if x < 4 {
 return label;
 ```
 
-- The condition is any expression that evaluates to a boolean; anything else fails evaluation with `Condition must be a boolean`.
+- The condition is any expression that evaluates to a boolean, including one made with `&&`, `||` and `!` (see Connectives); anything else fails evaluation with `Condition must be a boolean`.
 - Like `fn` definitions and blocks, an `if` statement is ended with `;`.
 - Each branch is a block. Assignments to variables that already exist outside update them, and a variable first assigned inside a branch is local to it. Declare the variable before the `if` (`label = 0;` above) to use it afterwards.
 - `if`, `else` and `while` are reserved words; `iffy` and `elsewhere` are still ordinary names.
@@ -626,7 +643,7 @@ while i < 3 shrinks 3 - i {
 return n;
 ```
 
-The condition must evaluate to a boolean, the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. A loop has to say why it ends, here with `shrinks 3 - i`, see Termination below; evaluation ignores that, and a loop whose condition never becomes false runs forever. A `return` inside the body ends the function or program, and stops the loop.
+The condition must evaluate to a boolean (it can be made with `&&`, `||` and `!`; see Connectives), the body is a block with the same scoping as an `if` branch, and the statement ends with `;`. A loop has to say why it ends, here with `shrinks 3 - i`, see Termination below; evaluation ignores that, and a loop whose condition never becomes false runs forever. A `return` inside the body ends the function or program, and stops the loop.
 
 #### Loop invariants
 

@@ -24,6 +24,17 @@ renderProof name = go 0
     go _ (ATerm i) = name i
     go _ (BVar v) = v
     go _ (CTerm v) = renderValue v
+    -- (a && b and a || b are looser than a relation, and an || inside an && is parenthesized)
+    go prec (FApp (CTerm (VFunct _ _ _ (BuiltinFunct And) _)) [l, r]) =
+        let operand x = case x of
+                FApp (CTerm (VFunct _ _ _ (BuiltinFunct Or) _)) [_, _] -> "(" ++ go 0 x ++ ")"
+                _ -> go 0 x
+            text = operand l ++ " && " ++ operand r
+         in if prec > 0 then "(" ++ text ++ ")" else text
+    go prec (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Or) _)) [l, r]) =
+        let text = go 0 l ++ " || " ++ go 0 r
+         in if prec > 0 then "(" ++ text ++ ")" else text
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Not) _)) [x]) = "!" ++ go 3 x
     go prec (FApp (CTerm (VFunct _ _ _ (BuiltinFunct b) _)) [l, r])
         | Just (op, level) <- infixOp b =
             let text = go (max level 1) l ++ " " ++ op ++ " " ++ go (if level == 0 then 1 else level + 1) r
@@ -104,6 +115,9 @@ builtinName Minus = "-"
 builtinName Times = "*"
 builtinName Div = "/"
 builtinName Mod = "%"
+builtinName And = "&&"
+builtinName Or = "||"
+builtinName Not = "!"
 builtinName (Rel r) = relName r
 builtinName (Ctor name _) = name
 builtinName (Field _ field) = "." ++ field

@@ -104,6 +104,7 @@ test-suite tersus-test
       TestSequence
       TestStrings
       TestBytes
+      TestConnectives
       TestMirData
       TestBox
       TestTraits

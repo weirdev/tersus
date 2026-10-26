@@ -305,6 +305,9 @@ builtinFunct Mod =
         []
         (BuiltinFunct Mod)
         []
+builtinFunct And = VFunct ["a", "b"] [] [] (BuiltinFunct And) []
+builtinFunct Or = VFunct ["a", "b"] [] [] (BuiltinFunct Or) []
+builtinFunct Not = VFunct ["a"] [] [] (BuiltinFunct Not) []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
 builtinFunct Within = VFunct ["a", "b"] [] [] (BuiltinFunct Within) []
 
@@ -438,6 +441,12 @@ evalBuiltinFunct Div _ = Error "Div only valid for two ints"
 evalBuiltinFunct Mod [VInt _, VInt 0] = Error "Modulo by zero"
 evalBuiltinFunct Mod [VInt v1, VInt v2] = Ok $ VInt (v1 `mod` v2)
 evalBuiltinFunct Mod _ = Error "Mod only valid for two ints"
+evalBuiltinFunct And [VBool a, VBool b] = Ok (VBool (a && b))
+evalBuiltinFunct And _ = Error "&& only valid for two Bools"
+evalBuiltinFunct Or [VBool a, VBool b] = Ok (VBool (a || b))
+evalBuiltinFunct Or _ = Error "|| only valid for two Bools"
+evalBuiltinFunct Not [VBool a] = Ok (VBool (not a))
+evalBuiltinFunct Not _ = Error "! only valid for a Bool"
 evalBuiltinFunct (Rel Eq) [v1, v2] | comparable v1 v2 = Ok $ VBool (v1 == v2)
 evalBuiltinFunct (Rel Eq) _ = Error "Eq only valid for two values of the same kind that are not functions"
 evalBuiltinFunct (Rel NotEq) [v1, v2] | comparable v1 v2 = Ok $ VBool (v1 /= v2)

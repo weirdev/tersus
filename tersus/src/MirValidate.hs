@@ -104,7 +104,7 @@ noWalk = Walked [] [] []
 -- What a loop being walked needs besides its blocks: its header, its invariant, its environment, and what shrinks
 data LoopRun = LoopRun
     { lrHeader :: M.BlockId
-    , lrTest :: M.BlockId -- the block that ends in the test of the loop condition: the header, or a block after the calls it makes
+    , lrBody :: M.BlockId -- the first block of the body, which an iteration starts on entering (a condition of several tests has an edge to it from each that can decide it)
     , lrEnv :: M.Env
     , lrVariant :: Maybe (Variable, Termination, Expression)
     }
@@ -149,23 +149,22 @@ walk cx run region entry start = go order (Map.singleton entry [start]) noWalk
 processBlock :: Ctx -> Maybe LoopRun -> M.BlockId -> PState -> V Walked
 processBlock cx run b st0 = do
     let M.BasicBlock stmts term = M.fnBlocks (cxFn cx) Map.! b
-    st <- foldM (execStatement cx) st0 stmts
+    -- (an iteration of a loop starts when its body is entered, once the ways in have met: a condition of several tests has several)
+    started <- case run of
+        Just r | lrBody r == b -> startIteration r st0
+        _ -> return st0
+    st <- foldM (execStatement cx) started stmts
     case term of
         M.Goto target -> return noWalk{wdExits = [(target, st)]}
         M.SwitchBool test yes no -> do
             cond <- operandTerm st test
-            -- (an iteration of a loop starts on the true edge of its test)
-            let starting stYes = case run of
-                    Just r | lrTest r == b -> startIteration r stYes
-                    _ -> return stYes
             case cond of
-                CTerm (VBool True) -> starting st >>= \stYes -> return noWalk{wdExits = [(yes, stYes)]}
+                CTerm (VBool True) -> return noWalk{wdExits = [(yes, st)]}
                 CTerm (VBool False) -> return noWalk{wdExits = [(no, st)]}
                 _ -> do
                     let stYes = addFacts st (branchFacts st cond True)
                         stNo = addFacts st (branchFacts st cond False)
-                    stYes' <- starting stYes
-                    return noWalk{wdExits = [(yes, stYes'), (no, stNo)]}
+                    return noWalk{wdExits = [(yes, stYes), (no, stNo)]}
         M.Call callee args dest next -> do
             calleeTerm <- operandTerm st callee
             argTerms <- mapM (operandTerm st) args
@@ -590,7 +589,7 @@ enterLoop cx header info incoming = do
     let variantName = loopVariantName header
         -- (the candidates are written for the locals the loop assigns, by names that no program can write)
         env' = Map.union env (Map.fromList [(pseudo l, M.Copy l) | l <- loopLocals])
-        run = LoopRun header (loopTest cx header) env' (do clause <- M.loopTermination spec; variant <- variantOf (Just clause); Just (variantName, clause, variant))
+        run = LoopRun header (M.loopBody spec) env' (do clause <- M.loopTermination spec; variant <- variantOf (Just clause); Just (variantName, clause, variant))
         attempt extra = loopFrom cx info run havocked (invariant ++ extra)
     inferred <- inferInvariants cx info run entry havocked loopLocals
     result <- tryV (attempt inferred)
@@ -599,18 +598,6 @@ enterLoop cx header info incoming = do
         Error e
             | namesInferred e inferred -> (\walked -> walked{wdBacks = []}) <$> attempt []
             | otherwise -> throwV e
-
--- The block that ends in the test of a loop's condition: a condition that calls a function ends the header in a call, and the
--- test is in the block the call goes on to
-loopTest :: Ctx -> M.BlockId -> M.BlockId
-loopTest cx = go (Set.empty :: Set M.BlockId)
-  where
-    go seen b
-        | Set.member b seen = b
-        | otherwise = case fmap M.blockTerminator (Map.lookup b (M.fnBlocks (cxFn cx))) of
-            Just (M.Call _ _ _ next) -> go (Set.insert b seen) next
-            Just (M.Goto next) -> go (Set.insert b seen) next
-            _ -> b
 
 -- The name of the proof variable that holds the value of the variant of a loop at the start of an iteration
 loopVariantName :: M.BlockId -> Variable
