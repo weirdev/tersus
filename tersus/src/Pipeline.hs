@@ -8,7 +8,7 @@ module Pipeline
     , runStatements
     ) where
 
-import LlvmEmit (emitProgram)
+import LlvmEmit (emitOwned)
 import qualified Mir as M
 import MirOwnership (insertOwnership)
 import MirVerify (verifyProgram)
@@ -27,7 +27,7 @@ import Utils
 --
 --   source -> AST (parseSource) -> checked AST (elaborate: types checked, each `shrinks` resolved)
 --          -> MIR (lowerElaborated) -> validated MIR (validateProgram) -> executed (runProgram)
---                                                                    or -> LLVM IR (emitProgram)
+--                                                                    or -> LLVM IR (emitOwned)
 --
 -- The program is type checked once, by `elaborate`; the lowering takes its result and the validator the MIR. Errors name
 -- the stage that refused the program, as the command line prints them.
@@ -120,7 +120,10 @@ ownedSource source =
 
 -- The LLVM IR of a program that passes every check
 llvmSource :: String -> Result String String
-llvmSource source = compileSource source `bindResult` \program -> stage "Native code failed: " (emitProgram (nativeProgram program))
+llvmSource source =
+    compileSource source `bindResult` \program ->
+        let owned = insertOwnership (nativeProgram program)
+         in stage "Native code failed: " (verifyProgram owned `bindResult` \_ -> emitOwned owned)
 
 -- The program that native code is made of: a validated program with each list made of the library's struct (see MirLists)
 nativeProgram :: M.Program -> M.Program

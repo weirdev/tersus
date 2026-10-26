@@ -6,7 +6,8 @@ import qualified Data.Map.Strict as Map
 import Cli (Command (..), runSource)
 import Mir
 import MirData
-import Pipeline (ownedSource)
+import LlvmEmit (emitOwned)
+import Pipeline (llvmSource, ownedSource)
 import TersusTypes (Type (..))
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
@@ -20,6 +21,9 @@ testMirData =
         "testMirData"
         [ TestList "examples" [TestCase path (roundTrips <$> readFile path) | path <- nativeExamples]
         , TestList "programs" [TestCase name (pure (roundTrips source)) | (name, source) <- validatedPrograms]
+        , -- The data is all that the code made needs: the IR of the program read back from it is the IR of the program
+          TestList "the same IR" [TestCase path (sameIr <$> readFile path) | path <- nativeExamples]
+        , TestList "the same IR for the native programs" [TestCase name (pure (sameIr source)) | (name, source) <- validatedPrograms]
         , TestList
             "format"
             [ testCase "the command prints it" $
@@ -70,6 +74,17 @@ roundTrips source = case ownedSource source of
                     | back /= forNative program -> Just "reads back as another program"
                     | writeProgram back /= text -> Just "is written differently after it was read"
                     | otherwise -> Nothing
+
+-- The IR of a program, and the IR of the program that its data is read back as
+sameIr :: String -> TestResult
+sameIr source = case (llvmSource source, ownedSource source) of
+    (Ok ir, Ok owned) -> case readProgram (writeProgram owned) of
+        Error e -> Just ("cannot be read back: " ++ e)
+        Ok back -> case emitOwned back of
+            Error e -> Just ("no IR from the data: " ++ e)
+            Ok ir' -> if ir' == ir then Nothing else Just "the IR differs"
+    (Error e, _) -> Just e
+    (_, Error e) -> Just e
 
 -- Names with a space, quotes, a backslash, a newline and letters of every width
 names :: Program -> TestResult
