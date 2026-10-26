@@ -436,8 +436,8 @@ rvalue fn destType rv =
         ListOp ReadByte [] -> ins "r" "call i64 @tersus_readByte()"
         ListOp ToByte [x] -> operandAt fn TInt x
         ListOp FromByte [b] -> operandAt fn TByte b
-        ListOp WriteError [b] -> operandAt fn TInt b >>= \x -> ins "e" ("call i64 @tersus_writeError(i64 " ++ x ++ ")")
-        ListOp WriteByte [b] -> operandAt fn TInt b >>= \x -> ins "w" ("call i64 @tersus_writeByte(i64 " ++ x ++ ")")
+        ListOp WriteError [b] -> operandAt fn TByte b >>= \x -> ins "e" ("call i64 @tersus_writeError(i64 " ++ x ++ ")")
+        ListOp WriteByte [b] -> operandAt fn TByte b >>= \x -> ins "w" ("call i64 @tersus_writeByte(i64 " ++ x ++ ")")
         ListOp op os@(first : _) | isArrayOperand fn first -> arrayRead fn destType op os
         ListOp op os -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " here")
         ReadField o name field -> do

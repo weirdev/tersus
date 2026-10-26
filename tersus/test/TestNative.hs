@@ -257,7 +257,7 @@ bytePrograms =
     , ("a Byte is passed and returned", "fn next(b: Byte) -> Byte [{ affirm toInt(b) < 255; }] [{ }] { return toByte(toInt(b) + 1); }; return next(toByte(41));")
     , ("a list of Bytes is passed", "fn total(a: &List<Byte>) -> Int [{ }] [{ }] { n = 0; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i { n = n + toInt(get(a, i)); i = i + 1; }; return n; }; return total(push(push([], toByte(100)), toByte(200)));")
     , ("an array of Bytes", "a = #[1, 2, 3]; return toInt(toByte(get(a, 2)));")
-    , ("a Byte is written", "b = toByte(72); writeByte(toInt(b)); writeByte(105); return 0;")
+    , ("a Byte is written", "b = toByte(72); writeByte(b); writeByte(105); return 0;")
     , ("a Byte in an enum", "enum E { A { b: Byte }, N }; e = E::A { b: toByte(5) }; return e;")
     ]
 
@@ -268,7 +268,7 @@ errorPrograms =
     , ("a string", "n = \"oops\\n\".printError(); return n;")
     , ("both streams", "\"out\".print(); \"err\".printError(); writeByte(33); writeError(33); return 0;")
     , ("UTF-8", "n = \"caf\\u{e9}\".printError(); return n;")
-    , ("in a loop", "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { writeError(48 + i); i = i + 1; }; return i;")
+    , ("in a loop", "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { writeError(toByte(48 + i)); i = i + 1; }; return i;")
     , ("nothing on the standard output", "\"to stderr\".printError(); return 7;")
     ]
 
@@ -279,7 +279,7 @@ inputPrograms =
     , ("the end of the input", "", "return readByte();")
     , ("a byte after the end", "A", "a = readByte(); b = readByte(); c = readByte(); return a * 1000000 + (b + 1) * 1000 + (c + 1);")
     , ("a byte of 255", "\255", "return readByte();")
-    , ("echo", "abc", "a = readByte(); b = readByte(); c = readByte(); writeByte(a); writeByte(b); writeByte(c); return 0;")
+    , ("echo", "abc", "a = readByte(); b = readByte(); c = readByte(); if a >= 0 { writeByte(toByte(a)); }; if b >= 0 { writeByte(toByte(b)); }; if c >= 0 { writeByte(toByte(c)); }; return 0;")
     , ("a loop until the end", "hello", "n = 0; c = readByte(); while c >= 0 [{ affirm n >= 0; affirm c >= 0 - 1; affirm c < 256; }] ~ { n = n + 1; c = readByte(); }; return n;")
     , ("a line", "first\nsecond\n", "l = String::readLine(100); l.print(); return size(l);")
     , ("two lines", "first\nsecond\nthird", "a = String::readLine(100); b = String::readLine(100); a.print(); writeByte(124); b.print(); return size(a) * 100 + size(b);")
@@ -298,12 +298,12 @@ outputPrograms :: [(String, String)]
 outputPrograms =
     [ ("a byte", "writeByte(104); writeByte(105); return 1;")
     , ("a byte is its value", "x = writeByte(65); return x;")
-    , ("the low eight bits", "writeByte(321); writeByte(0 - 191); return 0;")
+    , ("the ends of the range", "writeByte(0); writeByte(255); writeByte(toByte(65)); return 0;")
     , ("a string", "\"ab\\n\".print(); return 7;")
     , ("UTF-8", "n = \"caf\\u{e9}\\u{1f600}\".print(); return n;")
     , ("bytes that are not UTF-8", "writeByte(255); writeByte(65); writeByte(0); return 0;")
     , ("in the order of the calls", "\"a\".print(); writeByte(98); \"c\".concat(\"d\").print(); return 0;")
-    , ("in a loop", "i = 0; while i < 5 [{ affirm i >= 0; affirm i <= 5; }] shrinks 5 - i { writeByte(48 + i); i = i + 1; }; return i;")
+    , ("in a loop", "i = 0; while i < 5 [{ affirm i >= 0; affirm i <= 5; }] shrinks 5 - i { writeByte(toByte(48 + i)); i = i + 1; }; return i;")
     , ("in a function", "fn shout(s: String) -> Int [{ }] [{ }] { n = s.print(); writeByte(33); return n + 1; }; return shout(\"hey\");")
     , ("a string that is printed twice", "s = \"ab\"; s.print(); s.print(); return size(s);")
     , ("a long string", "s = \"0123456789\"; i = 0; while i < 20 [{ affirm i >= 0; affirm i <= 20; }] shrinks 20 - i { s = s.concat(s); i = i + 1; if i = 3 { return s.print(); }; }; return 0;")

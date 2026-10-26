@@ -196,7 +196,7 @@ builtinFunct WriteError =
         []
         (BuiltinFunct WriteError)
         [relProof Eq (ATerm "return") (ATerm "b")]
--- writeByte(b) writes the low eight bits of b (b mod 256) to the standard output and is b. It asks nothing of b: there is no type of bytes yet
+-- writeByte(b) writes the Byte b to the standard output and is b
 builtinFunct WriteByte =
     VFunct
         ["b"]

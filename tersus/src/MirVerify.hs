@@ -146,8 +146,8 @@ rvalueProblems env localTy d rv =
             -- (the size of an array made from a size parameter is that parameter)
             (TArrayOf e (SizeParam _), Copy _) -> [expected e x | not (fits' e x)]
             _ -> ["array needs a result that is an array and a size that is a constant"]
-        ListOp WriteByte [b] -> ints [b] ++ result TInt
-        ListOp WriteError [b] -> ints [b] ++ result TInt
+        ListOp WriteByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TByte
+        ListOp WriteError [b] -> [expected TByte b | not (fits' TByte b)] ++ result TByte
         ListOp ReadByte [] -> result TInt
         ListOp ToByte [x] -> ints [x] ++ result TByte
         ListOp FromByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt

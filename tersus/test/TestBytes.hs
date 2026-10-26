@@ -26,13 +26,13 @@ testBytes =
                 ]
             , TestList
                 "types"
-                [ testCase "an Int is not a Byte" (rejected "fn f(b: Byte) -> Int [{ }] [{ }] { return toInt(b); }; return f(5);" "expected Byte, got Int")
+                [ testCase "an Int is not a Byte" (rejected "fn f(b: Byte) -> Int [{ }] [{ }] { return toInt(b); }; n = 5; return f(n);" "expected Byte, got Int")
                 , testCase "nor a Byte an Int" (rejected "b = toByte(5); c = b + 1; return 0;" "expected Int, got Byte")
                 , testCase "or compared with an order" (rejected "b = toByte(5); if b < 7 { return 1; }; return 0;" "expected Int, got Byte")
                 , testCase "Bytes are equal when they are the same number" (runs "b = toByte(9); c = toByte(4 + 5); if b = c { return 1; }; return 0;" "1")
                 , testCase "and are not when they differ" (runs "if toByte(9) = toByte(8) { return 1; }; return 0;" "0")
                 , testCase "a Byte in a struct" (runs "struct P { b: Byte }; p = P { b: toByte(9) }; return toInt(p.b);" "9")
-                , testCase "a field that is an Int is not a Byte" (rejected "struct P { b: Byte }; p = P { b: 9 }; return 0;" "expected Byte, got Int")
+                , testCase "a field that is an Int is not a Byte" (rejected "struct P { b: Byte }; n = 9; p = P { b: n }; return 0;" "expected Byte, got Int")
                 , testCase "a list of Bytes" (runs "bs = push(push([], toByte(1)), toByte(2)); return toInt(get(bs, 1)) * 10 + size(bs);" "22")
                 , testCase "an Int does not go into a list of them" (rejected "bs = push(push([], toByte(1)), 2); return 0;" "Byte")
                 , testCase "a list of Bytes is written as the numbers" (runs "return push(push([], toByte(1)), toByte(2));" "[1, 2]")
