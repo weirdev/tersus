@@ -77,7 +77,7 @@ data Outcome = Outcome
 runProgramEnv :: RunEnv -> Program -> Result Outcome String
 runProgramEnv env program =
     mapResult
-        (\(value, (out, err), s) -> Outcome out err [(path, Map.findWithDefault "" path (sFiles s)) | path <- sOrder s] value)
+        (\(value, (out, err), s) -> Outcome out err [(spelling, Map.findWithDefault "" key (sFiles s)) | (key, spelling) <- sOrder s] value)
         (runE (runFunction program (progMain program) []) env (startState (envInput env)))
 
 -- What a program has written to the standard output and to the standard error
@@ -93,8 +93,8 @@ data S = S
     , sPath :: String
     , sLoaded :: String
     , sStore :: String
-    , sFiles :: Map FilePath String
-    , sOrder :: [FilePath]
+    , sFiles :: Map FilePath String -- by the path with its dots taken out (see samePath)
+    , sOrder :: [(FilePath, FilePath)] -- the files written, by that path and the way the program first spelled it
     }
 
 startState :: String -> S
@@ -148,11 +148,31 @@ pathByte b = E (\_ s ->
 builtPath :: S -> FilePath
 builtPath = takeWhile (/= '\0') . sPath
 
+-- A path with what does not name another file taken out, so that two spellings of one file are one key: `x`, `./x` and `d/../x` (and `a//b`, `a/b/`),
+-- the way the system reads them (but for a link, which it follows, and a name in a file system that does not tell capitals apart, which the interpreter
+-- does not know of)
+samePath :: FilePath -> FilePath
+samePath path = (if absolute then "/" else "") ++ intercalate "/" (reverse kept)
+  where
+    absolute = take 1 path == "/"
+    kept = foldl step [] (segments path)
+    step acc segment = case segment of
+        "" -> acc
+        "." -> acc
+        ".." -> case acc of
+            previous : more | previous /= ".." -> more
+            [] | absolute -> []
+            _ -> ".." : acc
+        _ -> segment : acc
+    segments text = case break (== '/') text of
+        (segment, []) -> [segment]
+        (segment, _ : rest) -> segment : segments rest
+
 -- Loads the file at the path that has been built, and clears the path: its size, or -1 when there is no such file
 fileLoad :: E Integer
 fileLoad = E (\env s ->
     let path = builtPath s
-        contents = if null path then Nothing else maybe (envFile env path) Just (Map.lookup path (sFiles s))
+        contents = if null path then Nothing else maybe (envFile env path) Just (Map.lookup (samePath path) (sFiles s))
      in case contents of
             Just c -> Ok (toInteger (length c), none, s{sPath = "", sLoaded = c})
             Nothing -> Ok (-1, none, s{sPath = "", sLoaded = ""}))
@@ -179,8 +199,8 @@ fileStore = E (\_ s ->
                     , none
                     , s{ sPath = ""
                        , sStore = ""
-                       , sFiles = Map.insert path (sStore s) (sFiles s)
-                       , sOrder = if path `elem` sOrder s then sOrder s else sOrder s ++ [path]
+                       , sFiles = Map.insert (samePath path) (sStore s) (sFiles s)
+                       , sOrder = if samePath path `elem` map fst (sOrder s) then sOrder s else sOrder s ++ [(samePath path, path)]
                        }
                     ))
 

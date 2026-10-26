@@ -125,6 +125,8 @@ testStrings =
                 , testCase "the files written are in the order they were first written, once each" (filed [] "\"1\".writeFile(\"b\"); \"2\".writeFile(\"a\"); \"3\".writeFile(\"b\"); return 0;" "0" [("b", "3"), ("a", "2")])
                 , testCase "a name is bytes" (filed [("caf\195\169", "x")] "return size(String::readFile(\"caf\\u{e9}\", 10));" "1" [])
                 , testCase "an empty name is no file" (filed [] "return \"x\".writeFile(\"\");" "-1" [])
+                , testCase "two spellings of a path are one file" (filed [] "\"1\".writeFile(\"x\"); \"2\".writeFile(\"./x\"); \"3\".writeFile(\"x\"); return 0;" "0" [("x", "3")])
+                , testCase "also when it is read" (filed [] "\"1\".writeFile(\"d/x\"); t = String::readFile(\"d/../d//x\", 10); t.print(); return size(t);" "11" [("d/x", "1")])
                 , testCase "a name stops at a byte that is 0" (filed [("a", "A")] "t = String::readFile(\"a\\0b\", 10); return size(t);" "1" [])
                 , testCase "a file that is not written is not read" (filed [("a", "A")] "return \"x\".writeFile(\"b\");" "0" [("b", "x")])
                 , testCase "the size of what is read is at most the limit" (valid "t = String::readFile(\"a\", 5); affirm size(t) <= 5; return 0;")

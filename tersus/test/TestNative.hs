@@ -279,6 +279,7 @@ filePrograms =
     , ("an empty file", [("empty.txt", "")], "t = String::readFile(\"empty.txt\", 10); return String::fileSize(\"empty.txt\") * 100 + size(t);")
     , ("UTF-8 in a name", [("caf\195\169.txt", "x")], "t = String::readFile(\"caf\\u{e9}.txt\", 10); return size(t);")
     , ("no path", [], "r = \"x\".writeFile(\"\"); return 0 - r;")
+    , ("two spellings of one file", [], "\"1\".writeFile(\"x\"); \"2\".writeFile(\"./x\"); \"3\".writeFile(\"x\"); t = String::readFile(\".//x\", 10); t.print(); return size(t);")
     , ("two files", [("a.txt", "AAA"), ("b.txt", "BB")], "a = String::readFile(\"a.txt\", 10); b = String::readFile(\"b.txt\", 10); r = a.concat(b).writeFile(\"ab.txt\"); return size(a) * 10 + size(b);")
     ]
 
