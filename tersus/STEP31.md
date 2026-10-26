@@ -48,7 +48,7 @@ Each slice is a PR, and nothing changes the default `build` until slice 8.
 1. **Validator scaling.** Done: see above. A 3,000-line program validates in about 8 seconds.
 2. **The MIR as data.** Done for Haskell: `tersus mir --data` prints a stable line-oriented format (`src/MirData.hs`, described in
    MIR.md), with a reader and writer and a test that `read . print = id` for every example and every `TestNative` program
-   (`test/TestMirData.hs`). The boundary is the owned MIR without the validator's part (ghost statements, contracts, structs with sizes
+   (`test/TestMirData.hs`), and `LlvmEmit.emitOwned` gives the same IR for the program read back from the data as for the original, so nothing the emitter needs is left out. `llvm`, `build` and `run` still go straight from the owned MIR to `emitOwned`; the data is only on that path when the emitter in Tersus is (slice 8). The boundary is the owned MIR without the validator's part (ghost statements, contracts, structs with sizes
    and their invariants), in the order of the maps it was in, which is the order the emitter walks.
 3. **Gaps found on the way.** Probably boolean connectives, decimal printing of an `Int`, string search and compare helpers.
 4. **The MIR types and the reader in Tersus.** It parses the format from standard input and prints it again; the test is that

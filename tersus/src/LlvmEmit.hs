@@ -2,6 +2,7 @@
 
 module LlvmEmit
     ( emitProgram
+    , emitOwned
     ) where
 
 import Data.List (elemIndex, intercalate, nub)
@@ -46,8 +47,11 @@ import Utils
 -- frees values and changes lists in place on the strength of it
 emitProgram :: Program -> Result String String
 emitProgram validated =
-    verifyProgram (insertOwnership validated) `bindResult` \_ -> emitOwned (insertOwnership validated)
+    let owned = insertOwnership validated
+     in verifyProgram owned `bindResult` \_ -> emitOwned owned
 
+-- The IR of the owned MIR, which is all that the code made needs of the program: what the emitter written in Tersus is given as data
+-- (MirData), and so what this one can be given too
 emitOwned :: Program -> Result String String
 emitOwned program =
     flatResultMap (\(name, fn) -> emitFunction program False (functionSymbol name) fn) (Map.toList (progFunctions program))
