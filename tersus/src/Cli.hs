@@ -3,6 +3,7 @@ module Cli
     , parseCommandLine
     , runSource
     , runSourceWith
+    , runSourceStreams
     , renderValue
     , usage
     , readSourceFile
@@ -14,7 +15,7 @@ import Data.List (intercalate)
 import System.IO
 
 import Mir (renderProgram)
-import MirEval (renderMirValue, runProgramWith)
+import MirEval (renderMirValue, runProgramStreams)
 import Pipeline
 import TersusTypes
 import Utils
@@ -63,20 +64,27 @@ runSource = runSourceWith ""
 
 -- The same for a program that has input (the bytes of the standard input, as characters from 0 to 255), which `Interpret` gives to `readByte`;
 -- an executable reads its own
-runSourceWith :: String -> Command -> String -> Result String String
-runSourceWith _ Check source = mapResult (const "OK") (compileSource source)
-runSourceWith input Interpret source =
+runSourceWith input command source = mapResult fst (runSourceStreams input command source)
+
+-- The same with what a program wrote to the standard error too: the text for the standard output, and the text for the standard error
+runSourceStreams :: String -> Command -> String -> Result (String, String) String
+runSourceStreams _ Check source = mapResult (\_ -> ("OK", "")) (compileSource source)
+runSourceStreams input Interpret source =
     compileSource source `bindResult` \program ->
-        case runProgramWith input program of
+        case runProgramStreams input program of
             Error e -> Error ("Evaluation failed: " ++ e)
             -- (what the program wrote, then its value: the same text as an executable prints)
-            Ok (written, result) -> Ok (decodeUtf8 written ++ maybe "" renderMirValue result)
-runSourceWith _ Mir source = mapResult renderProgram (compileSource source)
-runSourceWith _ Owned source = mapResult renderProgram (ownedSource source)
-runSourceWith _ Llvm source = llvmSource source
+            Ok (written, errors, result) -> Ok (decodeUtf8 written ++ maybe "" renderMirValue result, decodeUtf8 errors)
+runSourceStreams input command source = mapResult (\text -> (text, "")) (runOther input command source)
+
+runOther :: String -> Command -> String -> Result String String
+runOther _ Mir source = mapResult renderProgram (compileSource source)
+runOther _ Owned source = mapResult renderProgram (ownedSource source)
+runOther _ Llvm source = llvmSource source
 -- (compiling the IR, and running it for `Run`, is left to the caller, since it runs clang)
-runSourceWith _ Run source = llvmSource source
-runSourceWith _ (Build _) source = llvmSource source
+runOther _ Run source = llvmSource source
+runOther _ (Build _) source = llvmSource source
+runOther _ _ _ = Error "not a command that is run on its own"
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i

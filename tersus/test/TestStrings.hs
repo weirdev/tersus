@@ -2,7 +2,7 @@ module TestStrings (testStrings) where
 
 import Data.List (intercalate)
 
-import Cli (Command (..), runSource, runSourceWith)
+import Cli (Command (..), runSource, runSourceStreams, runSourceWith)
 import TestHarness
 import Utils
 
@@ -99,6 +99,16 @@ testStrings =
                 , testCase "the bytes of a UTF-8 text decode" (testAssertEq (decodeUtf8 (map toEnum [104, 195, 169, 226, 130, 172, 240, 159, 152, 128])) "h\233\8364\128512")
                 , testCase "a byte that starts a character that is cut short is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [226, 130])) "\65533\65533")
                 , testCase "an overlong encoding is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [192, 128])) "\65533\65533")
+                ]
+            , TestList
+                "standard error"
+                [ testCase "a byte is written to the standard error, not to the output" (testAssertEq (runSourceStreams "" Interpret "writeError(69); writeByte(79); return 1;") (Ok ("O1", "E")))
+                , testCase "a string is printed to it" (testAssertEq (runSourceStreams "" Interpret "n = \"oops\\n\".printError(); return n;") (Ok ("5", "oops\n")))
+                , testCase "and the two do not mix" (testAssertEq (runSourceStreams "" Interpret "\"out\".print(); \"err\".printError(); return 0;") (Ok ("out0", "err")))
+                , testCase "UTF-8 is decoded" (testAssertEq (runSourceStreams "" Interpret "\"caf\\u{e9}\".printError(); return 0;") (Ok ("0", "caf\233")))
+                , testCase "printError gives the number of bytes" (valid "n = \"ab\".printError(); affirm n = 2; return n;")
+                , testCase "and a wrong claim is refused" (rejected "n = \"ab\".printError(); affirm n = 3; return n;" "Could not prove: n = 3")
+                , testCase "a program that writes nothing to it has nothing there" (testAssertEq (runSourceStreams "" Interpret "return 1;") (Ok ("1", "")))
                 ]
             , TestList
                 "input"

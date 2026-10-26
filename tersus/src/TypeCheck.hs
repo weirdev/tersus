@@ -537,6 +537,7 @@ builtinType funct =
         NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
         NewEmptyArray -> failTc "Type error: Array::empty is called, as in Array::empty(), and cannot be used as a value"
         WriteByte -> return (TFn [TInt] TInt)
+        WriteError -> return (TFn [TInt] TInt)
         ReadByte -> return (TFn [] TInt)
         ToByte -> return (TFn [TInt] TByte)
         FromByte -> return (TFn [TByte] TInt)

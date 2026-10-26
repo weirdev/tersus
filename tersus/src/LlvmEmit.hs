@@ -65,6 +65,7 @@ declarations =
     , "declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)"
     , "declare void @tersus_overflow() noreturn"
     , "declare i64 @tersus_writeByte(i64)"
+    , "declare i64 @tersus_writeError(i64)"
     , "declare i64 @tersus_readByte()"
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
@@ -435,6 +436,7 @@ rvalue fn destType rv =
         ListOp ReadByte [] -> ins "r" "call i64 @tersus_readByte()"
         ListOp ToByte [x] -> operandAt fn TInt x
         ListOp FromByte [b] -> operandAt fn TByte b
+        ListOp WriteError [b] -> operandAt fn TInt b >>= \x -> ins "e" ("call i64 @tersus_writeError(i64 " ++ x ++ ")")
         ListOp WriteByte [b] -> operandAt fn TInt b >>= \x -> ins "w" ("call i64 @tersus_writeByte(i64 " ++ x ++ ")")
         ListOp op os@(first : _) | isArrayOperand fn first -> arrayRead fn destType op os
         ListOp op os -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " here")

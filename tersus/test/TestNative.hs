@@ -39,6 +39,7 @@ testNative =
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
         , TestList "bytes" [TestCase name (sameAsMir name source) | (name, source) <- bytePrograms]
+        , TestList "error" [TestCase name (sameAsMir name source) | (name, source) <- errorPrograms]
         , TestList "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
         , TestList "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
         , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
@@ -258,6 +259,17 @@ bytePrograms =
     , ("an array of Bytes", "a = #[1, 2, 3]; return toInt(toByte(get(a, 2)));")
     , ("a Byte is written", "b = toByte(72); writeByte(toInt(b)); writeByte(105); return 0;")
     , ("a Byte in an enum", "enum E { A { b: Byte }, N }; e = E::A { b: toByte(5) }; return e;")
+    ]
+
+-- What a program writes to the standard error is the same too, and comes out on the other stream
+errorPrograms :: [(String, String)]
+errorPrograms =
+    [ ("a byte", "writeError(69); return 1;")
+    , ("a string", "n = \"oops\\n\".printError(); return n;")
+    , ("both streams", "\"out\".print(); \"err\".printError(); writeByte(33); writeError(33); return 0;")
+    , ("UTF-8", "n = \"caf\\u{e9}\".printError(); return n;")
+    , ("in a loop", "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { writeError(48 + i); i = i + 1; }; return i;")
+    , ("nothing on the standard output", "\"to stderr\".printError(); return 7;")
     ]
 
 -- What a program reads is the same on the MIR and natively: they are given the same input
@@ -669,9 +681,9 @@ sameAsMirWithInput name input source = do
             Ok _ -> case llvmSource source of
                 Error e -> pure (Just e)
                 Ok ir -> do
-                    buildAndRun input (map safeChar name) name ir (expected (runSourceWith input Interpret source))
+                    buildAndRun input (map safeChar name) name ir (expected (runSourceStreams input Interpret source))
   where
-    expected (Ok output) = (ExitSuccess, if null output then "" else output ++ "\n", "")
+    expected (Ok (output, errors)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
 
 -- A list built by pushing, and changed by setting, is built in place: it needs memory in proportion to its length and not to its
