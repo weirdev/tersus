@@ -552,6 +552,8 @@ builtinType funct =
         WriteByte -> return (TFn [TByte] TByte)
         WriteError -> return (TFn [TByte] TByte)
         ReadByte -> return (TFn [] TInt)
+        ArgCount -> return (TFn [] TInt)
+        ArgByte -> return (TFn [TInt, TInt] TInt)
         ToByte -> return (TFn [TInt] TByte)
         FromByte -> return (TFn [TByte] TInt)
         BytesFrom -> return (TFn [TList TInt] (TList TByte))

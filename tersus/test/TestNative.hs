@@ -9,7 +9,7 @@ import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, listDirectory)
-import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
+import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFileSystemEncoding, setLocaleEncoding)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.Process (readProcessWithExitCode)
@@ -39,6 +39,7 @@ testNative =
         , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
         , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
         , TestList "bytes" [TestCase name (sameAsMir name source) | (name, source) <- bytePrograms]
+        , TestList "arguments" [TestCase name (sameAsMirWorld name (noWorld{worldArgs = map encodeUtf8 args}) source) | (name, args, source) <- argumentPrograms]
         , TestList "error" [TestCase name (sameAsMir name source) | (name, source) <- errorPrograms]
         , TestList "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
         , TestList "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
@@ -58,7 +59,7 @@ nativeExamples :: [FilePath]
 nativeExamples =
     [ "examples/" ++ name ++ ".tersus"
     | name <-
-        [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
+        [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "args", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
         , "enums", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
         , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "strings"
@@ -259,6 +260,22 @@ bytePrograms =
     , ("an array of Bytes", "a = #[1, 2, 3]; return toInt(toByte(get(a, 2)));")
     , ("a Byte is written", "b = toByte(72); writeByte(b); writeByte(105); return 0;")
     , ("a Byte in an enum", "enum E { A { b: Byte }, N }; e = E::A { b: toByte(5) }; return e;")
+    ]
+
+-- What a program is given as arguments is the same on the MIR and natively
+argumentPrograms :: [(String, [String], String)]
+argumentPrograms =
+    [ ("none", [], "return argCount();")
+    , ("a count", ["a", "bc", "def"], "return argCount();")
+    , ("a byte", ["A"], "return argByte(0, 0);")
+    , ("no such byte", ["A"], "return argByte(0, 1);")
+    , ("no such argument", ["A"], "return argByte(1, 0);")
+    , ("a negative index", ["A"], "return argByte(0 - 1, 0) * 10 + argByte(0, 0 - 1);")
+    , ("an argument", ["hello"], "s = String::arg(0, 100); s.print(); return size(s);")
+    , ("all of them", ["a", "b c", "d"], "n = argCount(); i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] ~ { String::arg(i, 100).print(); writeByte(10); i = i + 1; }; return n;")
+    , ("an argument longer than the limit", ["abcdef"], "s = String::arg(0, 3); s.print(); return size(s);")
+    , ("UTF-8", ["caf\233 \8364"], "s = String::arg(0, 100); s.print(); return size(s);")
+    , ("an empty argument", [""], "s = String::arg(0, 100); return argCount() * 10 + size(s);")
     ]
 
 -- What a program writes to the standard error is the same too, and comes out on the other stream
@@ -631,10 +648,10 @@ testRunExecutable = TestCase "run builds, runs and removes the executable" $ do
         else do
             ran <- case llvmSource "return 6 * 7;" of
                 Error e -> pure (Error e)
-                Ok ir -> runExecutable ir
+                Ok ir -> runExecutable ir []
             failing <- case llvmSource "return 9223372036854775807 + 1;" of
                 Error e -> pure (Error e)
-                Ok ir -> runExecutable ir
+                Ok ir -> runExecutable ir []
             pure (testAssertEq (ran, failing) (Ok ExitSuccess, Ok (ExitFailure 1)))
 
 -- Every example that validates is run natively: a new example has to be added to `nativeExamples`
@@ -672,7 +689,11 @@ sameAsMir name = sameAsMirWithInput name ""
 
 -- The same for a program that reads: both are given the input (bytes as characters from 0 to 255)
 sameAsMirWithInput :: String -> String -> String -> IO TestResult
-sameAsMirWithInput name input source = do
+sameAsMirWithInput name input = sameAsMirWorld name noWorld{worldInput = input}
+
+-- The same for a program that has arguments too (each as its bytes)
+sameAsMirWorld :: String -> World -> String -> IO TestResult
+sameAsMirWorld name world source = do
     available <- clangAvailable
     if not available
         then pure Nothing
@@ -681,7 +702,7 @@ sameAsMirWithInput name input source = do
             Ok _ -> case llvmSource source of
                 Error e -> pure (Just e)
                 Ok ir -> do
-                    buildAndRun input (map safeChar name) name ir (expected (runSourceStreams input Interpret source))
+                    buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name ir (expected (runSourceIn world Interpret source))
   where
     expected (Ok (output, errors)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
@@ -759,8 +780,8 @@ valgrindCases =
 -- Builds the program with the memory checks of the runtime and runs it, and for some programs builds it again as it is
 -- built for use and runs that under valgrind, which finds the same mistakes without the help of the runtime. It has to
 -- print what the executor prints, and have nothing to say to valgrind.
-buildAndRun :: String -> String -> String -> String -> (ExitCode, String, String) -> IO TestResult
-buildAndRun input file name ir expectation = do
+buildAndRun :: String -> [String] -> String -> String -> String -> (ExitCode, String, String) -> IO TestResult
+buildAndRun input args file name ir expectation = do
     tmp <- getTemporaryDirectory
     let dir = tmp </> "tersus-native-test"
         exe = dir </> file
@@ -769,7 +790,7 @@ buildAndRun input file name ir expectation = do
     case checked of
         Error e -> pure (Just e)
         Ok () -> do
-            plain <- runExecutableBytes exe [] input
+            plain <- runExecutableBytes exe args input
             case testAssertEq plain expectation of
                 Just failure -> pure (Just failure)
                 Nothing -> do
@@ -789,8 +810,11 @@ buildAndRun input file name ir expectation = do
 runExecutableBytes :: FilePath -> [String] -> String -> IO (ExitCode, String, String)
 runExecutableBytes exe args input = do
     saved <- getLocaleEncoding
+    savedFs <- getFileSystemEncoding
     setLocaleEncoding char8
-    (code, out, err) <- readProcessWithExitCode exe args input `finally` setLocaleEncoding saved
+    -- (the arguments are bytes too)
+    setFileSystemEncoding char8
+    (code, out, err) <- readProcessWithExitCode exe args input `finally` (setLocaleEncoding saved >> setFileSystemEncoding savedFs)
     pure (code, decodeUtf8 out, decodeUtf8 err)
 
 valgrindAvailable :: IO Bool
@@ -811,7 +835,7 @@ sameAsUnvalidated name source = do
             Right program -> case emitProgram (nativeProgram program) of
                 Error e -> pure (Just e)
                 Ok ir -> do
-                    buildAndRun "" ("unvalidated_" ++ map safeChar name) name ir (expected (runProgram program))
+                    buildAndRun "" [] ("unvalidated_" ++ map safeChar name) name ir (expected (runProgram program))
   where
     expected (Ok result) = (ExitSuccess, maybe "" ((++ "\n") . renderMirValue) result, "")
     expected (Error e) = (ExitFailure 1, "", "Evaluation failed: " ++ e ++ "\n")

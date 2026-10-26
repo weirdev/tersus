@@ -67,6 +67,9 @@ declarations =
     , "declare i64 @tersus_writeByte(i64)"
     , "declare i64 @tersus_writeError(i64)"
     , "declare i64 @tersus_readByte()"
+    , "declare void @tersus_init(i32, ptr)"
+    , "declare i64 @tersus_argCount()"
+    , "declare i64 @tersus_argByte(i64, i64)"
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
     , "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
@@ -124,7 +127,8 @@ entryPoint program fn =
                         , [ty]
                         )
   where
-    wrap body = ["define i32 @main() {"] ++ map indent body ++ ["}"]
+    -- (the arguments of the program are given to the runtime first)
+    wrap body = ["define i32 @main(i32 %argc, ptr %argv) {", "    call void @tersus_init(i32 %argc, ptr %argv)"] ++ map indent body ++ ["}"]
     indent l = if last l == ':' then l else "    " ++ l
 
 -- What the function of `main` returns when the program can return a value: the value, and whether it was assigned
@@ -434,6 +438,11 @@ rvalue fn destType rv =
             binary op ty x y
         MakeList _ -> failG "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"
         ListOp ReadByte [] -> ins "r" "call i64 @tersus_readByte()"
+        ListOp ArgCount [] -> ins "n" "call i64 @tersus_argCount()"
+        ListOp ArgByte [i, j] -> do
+            x <- operandAt fn TInt i
+            y <- operandAt fn TInt j
+            ins "a" ("call i64 @tersus_argByte(i64 " ++ x ++ ", i64 " ++ y ++ ")")
         ListOp ToByte [x] -> operandAt fn TInt x
         ListOp FromByte [b] -> operandAt fn TByte b
         ListOp WriteError [b] -> operandAt fn TByte b >>= \x -> ins "e" ("call i64 @tersus_writeError(i64 " ++ x ++ ")")

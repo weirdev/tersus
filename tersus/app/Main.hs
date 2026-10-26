@@ -3,6 +3,7 @@ module Main (main) where
 import Control.Monad (unless)
 import System.Environment (getArgs)
 import System.Exit (ExitCode (..), exitWith)
+import GHC.IO.Encoding (char8, setFileSystemEncoding)
 import System.IO (hPutStr, hPutStrLn, stderr)
 
 import Cli
@@ -12,14 +13,16 @@ import Utils
 main :: IO ()
 main = do
     useUtf8
+    -- (the arguments are the bytes they were given as, whatever the locale is: they are the arguments of the program too)
+    setFileSystemEncoding char8
     args <- getArgs
-    case parseCommandLine args of
+    case parseProgramArguments args of
         Nothing -> hPutStr stderr usage >> exitWith (ExitFailure 2)
-        Just (command, file) -> do
+        Just (command, file, programArgs) -> do
             source <- readSource file
             -- (a program that is read from the standard input has none left to read)
             input <- if command == Interpret && file /= "-" then readInputBytes else return ""
-            case runSourceStreams input command source of
+            case runSourceIn (World input programArgs) command source of
                 Error e -> failWith e
                 Ok (output, errors) -> case command of
                     Build executable -> do
@@ -28,7 +31,7 @@ main = do
                             Error e -> failWith e
                             Ok () -> return ()
                     Run -> do
-                        ran <- runExecutable output
+                        ran <- runExecutable output programArgs
                         case ran of
                             Error e -> failWith e
                             Ok ExitSuccess -> return ()

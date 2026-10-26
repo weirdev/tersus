@@ -219,6 +219,17 @@ builtinFunct ToByte =
 builtinFunct FromByte = VFunct ["b"] [] [] (BuiltinFunct FromByte) [relProof Eq (ATerm "return") (ATerm "b")]
 -- The List<Byte> of a list of Ints that is written out: the same list
 builtinFunct BytesFrom = VFunct ["list"] [] [] (BuiltinFunct BytesFrom) []
+-- argCount() is the number of arguments of the program, argByte(i, j) the byte j of argument i, or -1 when there is no such argument or byte
+builtinFunct ArgCount = VFunct [] [] [] (BuiltinFunct ArgCount) [relProof GtEq (ATerm "return") (CTerm (VInt 0))]
+builtinFunct ArgByte =
+    VFunct
+        ["i", "j"]
+        []
+        []
+        (BuiltinFunct ArgByte)
+        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
+        , relProof Lt (ATerm "return") (CTerm (VInt 256))
+        ]
 -- readByte() is the next byte of the standard input, or -1 at its end: it is not known beyond that, so a program has to test what it relies on
 builtinFunct ReadByte =
     VFunct
@@ -288,6 +299,8 @@ stdLibCtx =
         , ("writeByte", builtinFunct WriteByte)
         , ("writeError", builtinFunct WriteError)
         , ("readByte", builtinFunct ReadByte)
+        , ("argCount", builtinFunct ArgCount)
+        , ("argByte", builtinFunct ArgByte)
         , ("toByte", builtinFunct ToByte)
         , ("toInt", builtinFunct FromByte)
         , ("+", builtinFunct Plus)
@@ -351,6 +364,8 @@ evalBuiltinFunct BytesFrom [VList l]
 evalBuiltinFunct BytesFrom _ = Error "A list of bytes is written with numbers from 0 to 255"
 -- (not a value that can be worked out: what it gives is the input, which a proof does not have, so the proof engine may not fold a call to a constant)
 evalBuiltinFunct ReadByte _ = Error "readByte reads the input, so it has no value to evaluate"
+evalBuiltinFunct ArgCount _ = Error "argCount is the arguments of the program, so it has no value to evaluate"
+evalBuiltinFunct ArgByte _ = Error "argByte is the arguments of the program, so it has no value to evaluate"
 evalBuiltinFunct Unsize [value] = Ok value
 evalBuiltinFunct Unsize _ = Error "unsize takes one Box"
 evalBuiltinFunct ArrayFrom [VList l] = Ok $ VList l

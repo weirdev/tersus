@@ -70,6 +70,22 @@ impl String {
         return Self { bytes: bytes };
     };
 
+    // The argument i of the program (counting from 0), up to `limit` bytes of it; an argument that there is not is the empty string
+    fn arg(i: Int, limit: Int) -> Self [{ affirm limit >= 0; }] [{ affirm size(return.bytes) <= limit; }] {
+        bytes = [];
+        j = 0;
+        while j < limit [{ affirm j >= 0; affirm j <= limit; affirm size(bytes) <= j; }] shrinks limit - j {
+            c = argByte(i, j);
+            if c < 0 {
+                j = limit;
+            } else {
+                bytes = push(bytes, toByte(c));
+                j = j + 1;
+            };
+        };
+        return Self { bytes: bytes };
+    };
+
     // Writes the bytes of the string to the standard error, and gives the number of them
     fn printError(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         i = 0;

@@ -1,0 +1,15 @@
+// Arguments. `tersus run args.tersus one two` gives the program `argCount()`, the number of arguments (2 here), and `argByte(i, j)`, the byte j of
+// argument i (counting from 0), or -1 when there is no such argument or byte. `String::arg(i, limit)` reads argument i as a String of up to
+// `limit` bytes. What they give is not known to the validator beyond its range (a count is not negative, a byte is from -1 to 255), so a program
+// tests what it relies on; the count is what lets a loop over the arguments end (`shrinks n - i`).
+// This writes the arguments, a line each, and returns how many there are (0 when it is run with none).
+
+n = argCount();
+i = 0;
+while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+    argument = String::arg(i, 1000);
+    argument.print();
+    writeByte(10);
+    i = i + 1;
+};
+return n;
