@@ -20,6 +20,7 @@ module ProofState
     , toIotaProof
     , withEnv
     , fnIota
+    , withFunctions
     , constantValue
     , bodyState
     , valueOfConstant
@@ -117,9 +118,9 @@ fnIota name = Iota ("$" ++ name)
 initialPState :: M.Program -> PState
 initialPState program =
     let (globals, stdFacts) = stdLibValCtx
-        functionNames = Map.keys (M.progFunctions program)
-        fnFacts = [FApp eqProof [ATerm (fnIota n), CTerm (VFnRef n)] | n <- functionNames]
-        globalFacts = stdFacts ++ fnFacts
+        -- (a function of the program is known by its iota, `fnIota`, and not by a fact for each: a fact in every proof of every function
+        -- makes the time to validate grow with the square of the number of functions)
+        globalFacts = stdFacts
      in PState
             { psLocals = Map.empty
             , psLocalNames = Map.empty
@@ -136,6 +137,16 @@ initialPState program =
             , psProgram = program
             , psReaders = M.readersOfInput program
             }
+
+-- The functions that a function names are known by their value too (`f = $f` is `VFnRef f`), so that what returns one can be
+-- proved to be it. These are the facts of the functions it names and not of every function of the program, since a fact in
+-- every proof makes the time to validate a program grow with the square of its functions.
+withFunctions :: M.Function -> PState -> PState
+withFunctions fn st
+    | null named = st
+    | otherwise = refreshCache st{psGlobalFacts = psGlobalFacts st ++ [fact | fact <- named, fact `notElem` psGlobalFacts st]}
+  where
+    named = [FApp eqProof [ATerm (fnIota n), CTerm (VFnRef n)] | n <- Set.toList (M.functionsNamed fn), Map.member n (M.progFunctions (psProgram st))]
 
 -- The state for the body of a function (or a rule) defined in this one: only what holds everywhere is known in it
 bodyState :: PState -> PState

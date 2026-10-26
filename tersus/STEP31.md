@@ -19,17 +19,20 @@ stays in Haskell.
 
 ## What was measured, and what is missing from the language
 
-- **Validation time grows faster than linearly with the number of functions.** A program of N functions of about 15 lines
-  each (a loop with an invariant and a few `is` tests on an enum), `check`:
+- **Validation time grew with the square of the number of functions (fixed in slice 1).** A program of N functions of about
+  15 lines each (a loop with an invariant and a few `is` tests on an enum), `check` on an `-O1` build:
 
-  | functions | `-O0` build | `-O1` build |
+  | functions | before | after |
   |---|---|---|
-  | 10 | 0.9 s | 0.4 s |
-  | 50 | 6 s | 3 s |
-  | 200 | 61 s | 33 s |
+  | 10 | 0.4 s | 0.4 s |
+  | 50 | 3 s | 1.9 s |
+  | 200 | 33 s | 8 s |
 
-  Going from 50 to 200 functions (4 times) takes 11 times as long. The cause is not known; the first guess is that each
-  function's proof state carries the contracts of every earlier function.
+  The cause was a fact `$f = f` for every function of the program in the global facts of every proof, which each query then
+  searched and the cache rebuilt for each function. A function is now known by its iota (`ProofState.fnIota`), and the fact is
+  added only for the functions a function names (`Mir.functionsNamed`, `ProofState.withFunctions`). The time is linear in the
+  functions now (about 0.04 s for one of this size); what is left is the cost of one proof, which re-interns the standard
+  library's facts for every query (`ProofEngine.proofContextFromCache`, `builtinsByClass`), a further gain if one is needed.
 - Conditions have no `&&`, `||` or `and` (a probe failed to parse all three): a compound condition is nested `if`s.
 - There is no mutual recursion (a function sees only the functions defined before it): the emit functions form a bottom-up
   order.
@@ -42,8 +45,7 @@ stays in Haskell.
 
 Each slice is a PR, and nothing changes the default `build` until slice 8.
 
-1. **Validator scaling.** Profile and fix it, or learn what size of program is practical (otherwise the emitter is split
-   into several programs of fewer than about 50 functions). This gates the rest.
+1. **Validator scaling.** Done: see above. A 3,000-line program validates in about 8 seconds.
 2. **The MIR as data.** `tersus mir --data` prints a stable line-oriented format, with a Haskell reader and writer and a test
    that `read . print = id` for every example.
 3. **Gaps found on the way.** Probably boolean connectives, decimal printing of an `Int`, string search and compare helpers.

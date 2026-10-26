@@ -116,11 +116,17 @@ resolveFunction st term =
         CTerm (VFunct _ _ _ (BuiltinFunct b) _) -> Ok (builtinInfo b)
         CTerm (VFnRef name) -> byName name
         CTerm _ -> Error "Non-function value called"
-        ATerm iota -> case functionFact iota of
-            Just value -> resolveFunction st (CTerm value)
-            Nothing -> Error ("Function object not validated. Function iota: " ++ show term)
+        ATerm iota
+            | Just name <- functionOfIota iota -> byName name
+            | otherwise -> case functionFact iota of
+                Just value -> resolveFunction st (CTerm value)
+                Nothing -> Error ("Function object not validated. Function iota: " ++ show term)
         _ -> Error "Object being called must be a function"
   where
+    -- (the iota of a function of the program, `fnIota`, is that function)
+    functionOfIota iota = case iota of
+        Iota ('$' : name) | Map.member name (M.progFunctions (psProgram st)) -> Just name
+        _ -> Nothing
     functionFact iota =
         case [value | FApp eq [ATerm lhs, CTerm value] <- allFacts st, eq == eqProof, lhs == iota, isFunction value] of
             value : _ -> Just value

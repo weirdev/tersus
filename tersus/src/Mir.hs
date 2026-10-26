@@ -22,6 +22,7 @@ module Mir
     , emptySpec
     , completeInstances
     , readersOfInput
+    , functionsNamed
     , slotsOf
     , ownerOf
     , successors
@@ -451,33 +452,56 @@ readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, any
         Assign _ rv -> [rv]
         Peek _ rv -> [rv]
         _ -> []
-    terminatorFns t = case t of
-        Call callee args _ _ -> concatMap operandFns (callee : args)
-        SwitchBool o _ _ -> operandFns o
-        _ -> []
-    operandFns o = case o of
-        Const c -> constantFns c
-        _ -> []
-    constantFns c = case c of
-        CFn name -> [name]
-        CList cs -> concatMap constantFns cs
-        CArray cs -> concatMap constantFns cs
-        CData _ fields -> concatMap (constantFns . snd) fields
-        _ -> []
-    operandsOfRvalue rv = case rv of
-        Use o -> [o]
-        BinaryOp _ a b -> [a, b]
-        ListOp _ os -> os
-        MakeList os -> os
-        MakeBox o -> [o]
-        Unbox o -> [o]
-        Unsize o -> [o]
-        MakeData _ fields -> map snd fields
-        ReadField o _ _ -> [o]
-        IsVariant o _ -> [o]
-        AsVariant o _ -> [o]
-        Clone o -> [o]
-        TakeField{} -> []
     grow known =
         let more = Set.fromList [name | (name, fn) <- functions, not (Set.member name known), not (Set.null (Set.intersection (mentions fn) known))]
          in if Set.null more then known else grow (Set.union known more)
+
+-- The functions of the program that a function names as values or callees in its statements (not those its contracts could name,
+-- which are all the functions before it): the validator knows each as the value it is (see ProofState.withFunctions)
+functionsNamed :: Function -> Set.Set Name
+functionsNamed fn =
+    Set.fromList
+        ( concatMap (concatMap operandFns . operandsOfRvalue) [rv | s <- statements, rv <- rvaluesOf s]
+            ++ concatMap (terminatorFns . blockTerminator) (Map.elems (fnBlocks fn))
+        )
+  where
+    statements = concatMap blockStatements (Map.elems (fnBlocks fn))
+    rvaluesOf s = case s of
+        Assign _ rv -> [rv]
+        Peek _ rv -> [rv]
+        _ -> []
+
+terminatorFns :: Terminator -> [Name]
+terminatorFns t = case t of
+    Call callee args _ _ -> concatMap operandFns (callee : args)
+    SwitchBool o _ _ -> operandFns o
+    _ -> []
+
+operandFns :: Operand -> [Name]
+operandFns o = case o of
+    Const c -> constantFns c
+    _ -> []
+
+constantFns :: Constant -> [Name]
+constantFns c = case c of
+    CFn name -> [name]
+    CList cs -> concatMap constantFns cs
+    CArray cs -> concatMap constantFns cs
+    CData _ fields -> concatMap (constantFns . snd) fields
+    _ -> []
+
+operandsOfRvalue :: Rvalue -> [Operand]
+operandsOfRvalue rv = case rv of
+    Use o -> [o]
+    BinaryOp _ a b -> [a, b]
+    ListOp _ os -> os
+    MakeList os -> os
+    MakeBox o -> [o]
+    Unbox o -> [o]
+    Unsize o -> [o]
+    MakeData _ fields -> map snd fields
+    ReadField o _ _ -> [o]
+    IsVariant o _ -> [o]
+    AsVariant o _ -> [o]
+    Clone o -> [o]
+    TakeField{} -> []
