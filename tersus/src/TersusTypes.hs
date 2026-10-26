@@ -54,6 +54,11 @@ data BuiltinFunct
     | -- UnBox b: the value that b holds, taken out of it
       UnBox
     | Rel Rel
+    | -- a && b, a || b and !a: the connectives of a condition. The lowering turns them into the jumps they stand for (a && b does not
+      -- evaluate b when a is false), so only the checker, the evaluation of a constant and the printer see them.
+      And
+    | Or
+    | Not
     | -- Within a b: a is a field of b, or a field of a field, and so on. Never parsed: it is how the validator checks
       -- that what a loop or function says shrinks has done so.
       Within

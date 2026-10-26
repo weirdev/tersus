@@ -261,7 +261,7 @@ buildFunction requires ensures term env b =
         , M.fnTypeParams = bTypeParams b
         , M.fnBorrowed = bBorrowed b
         , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
-        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env
+        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env
         }
   where
     order = reverse (walk [] (M.BlockId 0))
@@ -372,12 +372,10 @@ lowerReturn expr = do
 
 lowerIf :: Expression -> [Statement] -> [Statement] -> L ()
 lowerIf cond thenStmts elseStmts = do
-    (test, ty) <- lowerOperand cond
-    tc (expect "condition of if" TBool ty)
     thenB <- newBlock
     elseB <- newBlock
     joinB <- newBlock
-    terminate (M.SwitchBool test thenB elseB)
+    lowerCondition "condition of if" cond thenB elseB
     openBlock thenB
     scoped (lowerStatements thenStmts)
     thenOpen <- isOpen
@@ -389,6 +387,32 @@ lowerIf cond thenStmts elseStmts = do
     -- when both branches returned nothing reaches the join, and nothing after the if runs
     when (thenOpen || elseOpen) (openBlock joinB)
 
+-- A condition ends the block it is lowered in with the jumps it stands for: to one block when it holds and to another when it does not. One made
+-- of `&&`, `||` and `!` is a test for each part that is evaluated (`a && b` does not evaluate b when a is false, and so the validator knows
+-- a when it checks b: `i < size(l) && get(l, i) = 0`), without the value of a Bool being made.
+lowerCondition :: String -> Expression -> M.BlockId -> M.BlockId -> L ()
+lowerCondition what cond yes no = case connective cond of
+    Just (And, [a, b]) -> do
+        middle <- newBlock
+        lowerCondition what a middle no
+        openBlock middle
+        lowerCondition what b yes no
+    Just (Or, [a, b]) -> do
+        middle <- newBlock
+        lowerCondition what a yes middle
+        openBlock middle
+        lowerCondition what b yes no
+    Just (Not, [a]) -> lowerCondition what a no yes
+    _ -> do
+        (test, ty) <- lowerOperand cond
+        tc (expect what TBool ty)
+        terminate (M.SwitchBool test yes no)
+
+-- The connective that an expression is the application of, and what it is applied to
+connective :: Expression -> Maybe (BuiltinFunct, [Expression])
+connective (F (Val (VFunct _ _ _ (BuiltinFunct b) _)) args) | b `elem` [And, Or, Not] = Just (b, args)
+connective _ = Nothing
+
 lowerWhile :: Expression -> [ValidationStatement] -> Maybe Termination -> [Statement] -> L ()
 lowerWhile cond invariant term body = do
     header <- newBlock
@@ -397,10 +421,8 @@ lowerWhile cond invariant term body = do
     terminate (M.Goto header)
     openBlock header
     env <- visibleEnv
-    modifyB (\b -> b{bLoops = Map.insert header (M.LoopSpec invariant term env) (bLoops b)})
-    (test, ty) <- lowerOperand cond
-    tc (expect "condition of while" TBool ty)
-    terminate (M.SwitchBool test bodyB exit)
+    modifyB (\b -> b{bLoops = Map.insert header (M.LoopSpec invariant term env bodyB) (bLoops b)})
+    lowerCondition "condition of while" cond bodyB exit
     openBlock bodyB
     scoped (lowerStatements body)
     open <- isOpen
@@ -479,6 +501,7 @@ lowerOperand expr = do
 lowerLast :: Expression -> L (Pending, Type)
 lowerLast (Val v) = (\(o, ty) -> (PRvalue (M.Use o), ty)) <$> valueOperand v
 lowerLast (Var name) = (\(o, ty) -> (PRvalue (M.Use o), ty)) <$> varOperand name
+lowerLast expr | Just (b, [x, y]) <- connective expr, b `elem` [And, Or] = lowerValueOfConnective b x y
 lowerLast (F funct args) = do
     target <- resolveHead funct
     case target of
@@ -487,6 +510,28 @@ lowerLast (F funct args) = do
             operands <- mapM lowerOperand args
             result <- tc (checkCall "call" ty (map snd operands))
             return (PCall callee (map fst operands), result)
+
+-- `a && b` and `a || b` where the Bool is wanted (`ok = a && b;`): b is evaluated only when a does not decide, and the local that holds the value is
+-- assigned in each of the two ways to get there
+lowerValueOfConnective :: BuiltinFunct -> Expression -> Expression -> L (Pending, Type)
+lowerValueOfConnective b x y = do
+    (first', tyX) <- lowerOperand x
+    tc (expect "operand of a connective" TBool tyX)
+    result <- newLocal Nothing TBool
+    rightB <- newBlock
+    decidedB <- newBlock
+    joinB <- newBlock
+    terminate (if b == And then M.SwitchBool first' rightB decidedB else M.SwitchBool first' decidedB rightB)
+    openBlock rightB
+    (second, tyY) <- lowerOperand y
+    tc (expect "operand of a connective" TBool tyY)
+    emit (M.Assign result (M.Use second))
+    terminate (M.Goto joinB)
+    openBlock decidedB
+    emit (M.Assign result (M.Use (M.Const (M.CBool (b == Or)))))
+    terminate (M.Goto joinB)
+    openBlock joinB
+    return (PRvalue (M.Use (M.Copy result)), TBool)
 
 -- What is being applied
 data Head = Builtin BuiltinFunct | Callable M.Operand Type
@@ -561,6 +606,7 @@ builtinRvalue b tys ops =
         (Div, [x, y]) -> return (M.BinaryOp M.Div x y)
         (Mod, [x, y]) -> return (M.BinaryOp M.Mod x y)
         (Rel rel, [x, y]) -> return (M.BinaryOp (M.Compare rel) x y)
+        (Not, [x]) -> return (M.BinaryOp (M.Compare Eq) x (M.Const (M.CBool False)))
         (Ctor name fields, _) | length fields == length ops -> return (M.MakeData name (zip fields ops))
         (Field owner field, [o]) -> do
             ctor <- maybe (structCtor (head tys)) return owner

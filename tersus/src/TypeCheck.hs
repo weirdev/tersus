@@ -568,6 +568,9 @@ builtinType funct =
         Times -> arith
         Div -> arith
         Mod -> arith
+        And -> return (TFn [TBool, TBool] TBool)
+        Or -> return (TFn [TBool, TBool] TBool)
+        Not -> return (TFn [TBool] TBool)
         Rel Eq -> list (\a -> TFn [a, a] TBool)
         Rel NotEq -> list (\a -> TFn [a, a] TBool)
         Rel _ -> return (TFn [TInt, TInt] TBool)

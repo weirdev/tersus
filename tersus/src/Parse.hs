@@ -110,10 +110,30 @@ statementBlock = concat <$> genericStatementBlock statements
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
-statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> (pure <$> statement)
+statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> affirmStatements <|> (pure <$> statement)
+
+-- (an affirm with && is several statements)
+affirmStatements :: Parser [Statement]
+affirmStatements = map ValidationStatement <$> (proofAssertStatement >>= splitAffirm)
 
 validationStatementBlock :: Parser [ValidationStatement]
-validationStatementBlock = genericStatementBlock validationStatement
+validationStatementBlock = concat <$> genericStatementBlock (validationStatement >>= splitAffirm)
+
+-- `affirm a && b;` says what `affirm a; affirm b;` does, so it is two statements. A proof has no `||` or `!`: they are of conditions of a program.
+splitAffirm :: ValidationStatement -> Parser [ValidationStatement]
+splitAffirm (ProofAssert p) = mapM check (conjuncts p)
+  where
+    conjuncts (FApp (CTerm (VFunct _ _ _ (BuiltinFunct And) _)) [a, b]) = conjuncts a ++ conjuncts b
+    conjuncts q = [q]
+    check q
+        | mentionsConnective q = fail "a proof is not made of || or !: `affirm a && b;` is two statements, and a condition that is not a conjunction is not provable by this validator"
+        | otherwise = return (ProofAssert q)
+    mentionsConnective q = case q of
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct b) _)) args -> b `elem` [And, Or, Not] || any mentionsConnective args
+        FApp f args -> mentionsConnective f || any mentionsConnective args
+        Forall _ guards body -> any mentionsConnective guards || mentionsConnective body
+        _ -> False
+splitAffirm other = return [other]
 
 statement :: Parser Statement
 statement =
@@ -995,13 +1015,22 @@ expression = try infixExpression <|> nonInfixExpression
 
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
-    withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression <|> qualifiedCall)
+    notExpression
+        <|> withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression <|> qualifiedCall)
         <|> arrayLiteral (\items -> F (Val (builtinFunct ArrayFrom)) [Val items])
         <|> withFields expressionApply methods stringLiteral
         <|> (Val <$> value)
         <|> withFields expressionApply methods (varExpression <|> parensExpression)
   where
     methods = Just (expression, methodCall)
+
+-- !a: the Bool that a is not. It binds tighter than any infix operator (`!a && b` is `(!a) && b`).
+notExpression :: Parser Expression
+notExpression = do
+    void (try (char '!' <* notFollowedBy (char '=')))
+    whitespace
+    operand <- nonInfixExpression
+    return (F (Val (builtinFunct Not)) [operand])
 
 -- "text": a String (lib/string.tersus) of the UTF-8 bytes of the text. `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` are the characters they name.
 stringLiteral :: Parser Expression
@@ -1117,10 +1146,10 @@ infixExpression :: Parser Expression
 -- TODO: Function should be Var expression like fExpression produces not Val
 infixExpression = infixLevels nonInfixExpression (\funct lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr]) (\funct expr -> F (Val (builtinFunct funct)) [expr])
 
--- Infix operators in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations.
+-- Infix operators in five levels, tightest first: `*` and `/`, then `+` and `-`, then the relations, then `&&`, then `||`.
 -- Each level associates left, so `a + 1 < b * 2` is `(a + 1) < (b * 2)`.
 infixLevels :: Parser a -> (BuiltinFunct -> a -> a -> a) -> (BuiltinFunct -> a -> a) -> Parser a
-infixLevels operand combine testVariant = relations
+infixLevels operand combine testVariant = disjunctions
   where
     level opParser next = chainl1 next (do funct <- opParser; whitespace; return (combine funct))
     multiplicative = level multiplicativeFunct operand
@@ -1128,6 +1157,8 @@ infixLevels operand combine testVariant = relations
     relations = do
         compared <- level relationFunct additive
         option compared (do keyword "is"; whitespace; (variant, _) <- declaredCtor; whitespace; return (testVariant (Is variant) compared))
+    conjunctions = level (try (string "&&") >> return And) relations
+    disjunctions = level (try (string "||") >> return Or) conjunctions
 
 arithmeticFunct :: Parser BuiltinFunct
 arithmeticFunct = do
