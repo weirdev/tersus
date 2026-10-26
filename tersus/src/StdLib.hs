@@ -188,6 +188,14 @@ builtinFunct NewEmptyArray =
         (BuiltinFunct NewEmptyArray)
         [ relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (CTerm (VInt 0))
         ]
+-- writeError(b) is writeByte(b) on the standard error
+builtinFunct WriteError =
+    VFunct
+        ["b"]
+        []
+        []
+        (BuiltinFunct WriteError)
+        [relProof Eq (ATerm "return") (ATerm "b")]
 -- writeByte(b) writes the low eight bits of b (b mod 256) to the standard output and is b. It asks nothing of b: there is no type of bytes yet
 builtinFunct WriteByte =
     VFunct
@@ -278,6 +286,7 @@ stdLibCtx =
         , ("set", builtinFunct Set)
         , ("array", builtinFunct NewArray)
         , ("writeByte", builtinFunct WriteByte)
+        , ("writeError", builtinFunct WriteError)
         , ("readByte", builtinFunct ReadByte)
         , ("toByte", builtinFunct ToByte)
         , ("toInt", builtinFunct FromByte)
@@ -326,6 +335,8 @@ evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
 evalBuiltinFunct NewEmptyArray [] = Ok (VList [])
 evalBuiltinFunct WriteByte [VInt b] = Ok (VInt b)
 evalBuiltinFunct WriteByte _ = Error "writeByte takes one byte"
+evalBuiltinFunct WriteError [VInt b] = Ok (VInt b)
+evalBuiltinFunct WriteError _ = Error "writeError takes one byte"
 evalBuiltinFunct ToByte [VInt x]
     | x >= 0 && x < 256 = Ok (VInt x)
     | otherwise = Error "toByte needs an Int from 0 to 255"

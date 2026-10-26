@@ -151,7 +151,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 
 -- First and Last need a list that is not empty, Get and Set an index in range. These work on an array as on a list; NewArray n x
 -- makes an array of n copies of x, with n not negative; NewBoxed n x does so for an n that is not a constant, in a Box. NewEmptyBoxed makes the Box of an array of no elements.
-data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | ReadByte | ToByte | FromByte
+data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | WriteError | ReadByte | ToByte | FromByte
     deriving (Show, Eq)
 
 -- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns

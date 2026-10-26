@@ -325,6 +325,7 @@ listOp op os =
             alloc (OList copies)
         (NewEmptyBoxed, []) -> alloc (OList [])
         (WriteByte, [b]) -> VI . fromIntegral <$> intOperand b
+        (WriteError, [b]) -> VI . fromIntegral <$> intOperand b
         (ReadByte, []) -> pure (VI (-1))
         (ToByte, [x]) -> VI . fromIntegral <$> intOperand x
         (FromByte, [b]) -> VI . fromIntegral <$> intOperand b

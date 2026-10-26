@@ -25,6 +25,8 @@ data BuiltinFunct
     | -- WriteByte b: writeByte(b), the low eight bits of b written to the standard output. Its value is b: the only effect of a program that the
       -- language has, which the validator does not model beyond that.
       WriteByte
+    | -- WriteError b: writeError(b), the same for the standard error
+      WriteError
     | -- ReadByte: readByte(), the next byte of the standard input, or -1 when there is no more. Its value is not known to the validator beyond
       -- being from -1 to 255.
       ReadByte

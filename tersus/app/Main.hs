@@ -19,9 +19,9 @@ main = do
             source <- readSource file
             -- (a program that is read from the standard input has none left to read)
             input <- if command == Interpret && file /= "-" then readInputBytes else return ""
-            case runSourceWith input command source of
+            case runSourceStreams input command source of
                 Error e -> failWith e
-                Ok output -> case command of
+                Ok (output, errors) -> case command of
                     Build executable -> do
                         built <- buildExecutable executable output
                         case built of
@@ -33,7 +33,7 @@ main = do
                             Error e -> failWith e
                             Ok ExitSuccess -> return ()
                             Ok code -> exitWith code
-                    _ -> unless (null output) (putStrLn output)
+                    _ -> hPutStr stderr errors >> unless (null output) (putStrLn output)
 
 failWith :: String -> IO ()
 failWith e = hPutStrLn stderr e >> exitWith (ExitFailure 1)

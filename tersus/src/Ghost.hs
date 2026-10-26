@@ -171,6 +171,7 @@ rvalueCall rv =
         M.NewBoxed -> NewBoxedArray
         M.NewEmptyBoxed -> NewEmptyArray
         M.WriteByte -> WriteByte
+        M.WriteError -> WriteError
         M.ReadByte -> ReadByte
         M.ToByte -> ToByte
         M.FromByte -> FromByte

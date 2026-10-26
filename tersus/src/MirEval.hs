@@ -3,6 +3,7 @@ module MirEval
     , runProgram
     , runProgramOutput
     , runProgramWith
+    , runProgramStreams
     , renderMirValue
     , toMirValue
     , fromMirValue
@@ -40,35 +41,51 @@ runProgramOutput = runProgramWith ""
 -- The same for a program given input, the bytes (as characters from 0 to 255) that readByte reads in turn. The input is read as the program
 -- asks for it, so it can be a stream that is not at its end.
 runProgramWith :: String -> Program -> Result (String, Maybe MirValue) String
-runProgramWith input program = mapResult (\(value, output, _) -> (output, value)) (runE (runFunction program (progMain program) []) input)
+runProgramWith input program = mapResult (\(out, _, value) -> (out, value)) (runProgramStreams input program)
+
+-- The same, with the bytes written to the standard error too (as characters from 0 to 255)
+runProgramStreams :: String -> Program -> Result (String, String, Maybe MirValue) String
+runProgramStreams input program = mapResult (\(value, (out, err), _) -> (out, err, value)) (runE (runFunction program (progMain program) []) input)
+
+-- What a program has written to the standard output and to the standard error
+type Written = (String, String)
+
+none :: Written
+none = ("", "")
 
 -- The evaluator is a function of the input that is left, and the failure of a result, with the bytes written so far and the input that is left
-newtype E a = E {runE :: String -> Result (a, String, String) String}
+newtype E a = E {runE :: String -> Result (a, Written, String) String}
 
 instance Functor E where
     fmap f (E r) = E (\input -> mapResult (\(a, output, rest) -> (f a, output, rest)) (r input))
 
 instance Applicative E where
-    pure a = E (\input -> Ok (a, "", input))
-    E f <*> E g = E (\input -> f input `bindResult` \(h, o1, rest) -> mapResult (\(a, o2, rest') -> (h a, o1 ++ o2, rest')) (g rest))
+    pure a = E (\input -> Ok (a, none, input))
+    E f <*> E g = E (\input -> f input `bindResult` \(h, o1, rest) -> mapResult (\(a, o2, rest') -> (h a, together o1 o2, rest')) (g rest))
 
 instance Monad E where
-    E g >>= f = E (\input -> g input `bindResult` \(a, o1, rest) -> runE (f a) rest `bindResult` \(b, o2, rest') -> Ok (b, o1 ++ o2, rest'))
+    E g >>= f = E (\input -> g input `bindResult` \(a, o1, rest) -> runE (f a) rest `bindResult` \(b, o2, rest') -> Ok (b, together o1 o2, rest'))
+
+together :: Written -> Written -> Written
+together (out1, err1) (out2, err2) = (out1 ++ out2, err1 ++ err2)
 
 failE :: String -> E a
 failE e = E (\_ -> Error e)
 
 liftE :: Result a String -> E a
-liftE r = E (\input -> mapResult (\a -> (a, "", input)) r)
+liftE r = E (\input -> mapResult (\a -> (a, none, input)) r)
 
 write :: Char -> E ()
-write c = E (\input -> Ok ((), [c], input))
+write c = E (\input -> Ok ((), ([c], ""), input))
+
+writeError :: Char -> E ()
+writeError c = E (\input -> Ok ((), ("", [c]), input))
 
 -- The next byte of the input, or -1 at its end
 readInput :: E Integer
 readInput = E (\input -> case input of
-    [] -> Ok (-1, "", [])
-    c : rest -> Ok (toInteger (fromEnum c `mod` 256), "", rest))
+    [] -> Ok (-1, none, [])
+    c : rest -> Ok (toInteger (fromEnum c `mod` 256), none, rest))
 
 runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue)
 runFunction program fn args
@@ -123,6 +140,11 @@ runStatements frame (Assign dest (ListOp WriteByte [o]) : rest) = do
     case v of
         MInt b -> write (chr (fromIntegral (b `mod` 256))) >> runStatements (Map.insert dest v frame) rest
         _ -> failE "writeByte takes an Int"
+runStatements frame (Assign dest (ListOp WriteError [o]) : rest) = do
+    v <- liftE (operandValue frame o)
+    case v of
+        MInt b -> writeError (chr (fromIntegral (b `mod` 256))) >> runStatements (Map.insert dest v frame) rest
+        _ -> failE "writeError takes an Int"
 runStatements frame (Assign dest rv : rest) = do
     v <- liftE (evalRvalue frame rv)
     runStatements (Map.insert dest v frame) rest
@@ -213,6 +235,7 @@ listOp Pop [MList []] = Error "Pop requires a non-empty list"
 listOp Pop [MList l] = Ok (MList (init l))
 listOp NewBoxed args = listOp NewArray args
 listOp WriteByte _ = Error "writeByte is run by the statement that calls it"
+listOp WriteError _ = Error "writeError is run by the statement that calls it"
 listOp ToByte [MInt x]
     | x >= 0 && x < 256 = Ok (MInt x)
     | otherwise = Error "toByte needs an Int from 0 to 255"

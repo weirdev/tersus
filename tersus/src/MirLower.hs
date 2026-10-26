@@ -570,6 +570,7 @@ builtinRvalue b tys ops =
         (NewBoxedArray, [_, _]) -> return (M.ListOp M.NewBoxed ops)
         (NewEmptyArray, []) -> return (M.ListOp M.NewEmptyBoxed [])
         (WriteByte, [_]) -> return (M.ListOp M.WriteByte ops)
+        (WriteError, [_]) -> return (M.ListOp M.WriteError ops)
         (ReadByte, []) -> return (M.ListOp M.ReadByte [])
         (ToByte, [_]) -> return (M.ListOp M.ToByte ops)
         (FromByte, [_]) -> return (M.ListOp M.FromByte ops)
@@ -664,6 +665,7 @@ builtinLabel b = case b of
     NewEmptyArray -> "empty_array"
     Unsize -> "unsize"
     WriteByte -> "writeByte"
+    WriteError -> "writeError"
     ReadByte -> "readByte"
     ToByte -> "toByte"
     FromByte -> "toInt"
