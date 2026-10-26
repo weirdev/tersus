@@ -6,6 +6,7 @@ import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, finally, mask, throwIO, try)
 import Control.Monad (forM)
 import Data.Char (isHexDigit)
+import Data.List (sort)
 import System.Directory (copyFile, createDirectoryIfMissing, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, doesDirectoryExist)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
@@ -20,30 +21,38 @@ import TestHarness
 import TestNative (clangAvailable, nativeExamples, validatedPrograms)
 import Utils
 
--- -- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (examples/emit.tersus) is built in two stages:
--- - stage 0 is made from the IR that the Haskell emitter (LlvmEmit) writes for it;
--- - stage 1 is made from the IR that stage 0 writes for it.
--- The fixpoint is that the IR is the same text at both stages, and that stage 1 writes for every example and every program what the Haskell writes. The flag that makes
--- the command line use the emitter in Tersus, and the cache that stage 0 is kept in, are tested too. Stage 0 writes the same IR as the Haskell for every program, which
--- `TestMirEmit` checks, so here it is only asked for the emitter's own. The stages need clang, and the tests pass without it.
+-- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (examples/emit.tersus) is built from a seed, the IR of an emitter that is
+-- kept in the repository (bootstrap/emitter.ll):
+-- - stage 0 is the seed built;
+-- - stage 1 is the emitter as it is now, made from the IR that stage 0 writes for it.
+-- The fixpoint is that stage 1 writes the same IR for the emitter as stage 0 does (so that the emitter built by stage 1 would be stage 1 again), and that both write what
+-- the Haskell emitter (LlvmEmit) writes for the emitter; stage 1 is the one that compiles programs, and writes for every example and every program what the Haskell
+-- writes. The flag that has the command line use the emitter in Haskell, and the cache that both stages are kept in, are tested too. Stage 0 writes the same IR as the
+-- Haskell for every program, which `TestMirEmit` checks of the emitter as it is now, so here it is only asked for the emitter's own. The stages need clang, and the
+-- tests pass without it.
 testBootstrap :: Test
 testBootstrap =
     TestList
         "testBootstrap"
-        [ TestCase "the hash of the sources of the emitter" hashShape
-        , TestCase "the flag of the emitter in Tersus" flag
-        , TestCase "stage 0 and stage 1 are a fixpoint, and the cache keeps stage 0" bootstrap
+        [ TestCase "the hashes of what the emitter is made of" hashShape
+        , TestCase "the flag of the emitter in Haskell" flag
+        , TestCase "the seed, stage 0 and stage 1 are a fixpoint, and the cache keeps them" bootstrap
         ]
 
 hashShape :: IO TestResult
-hashShape = pure $ if length emitterHash == 16 && all isHexDigit emitterHash then Nothing else Just ("the hash is " ++ show emitterHash)
+hashShape =
+    pure $
+        if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
+            then Nothing
+            else Just ("the hashes are " ++ show (seedHash, emitterHash))
 
 flag :: IO TestResult
 flag =
     pure $
         firstFailure
-            [ testAssertEq (splitEmitterFlag ["--tersus-emitter", "build", "a.tersus", "-o", "a"]) (True, ["build", "a.tersus", "-o", "a"])
-            , testAssertEq (splitEmitterFlag ["run", "a.tersus", "--tersus-emitter"]) (False, ["run", "a.tersus", "--tersus-emitter"])
+            [ testAssertEq (splitEmitterFlag ["--haskell-emitter", "build", "a.tersus", "-o", "a"]) (True, ["build", "a.tersus", "-o", "a"])
+            , testAssertEq (splitEmitterFlag ["run", "a.tersus", "--haskell-emitter"]) (False, ["run", "a.tersus", "--haskell-emitter"])
+            , testAssertEq (splitEmitterFlag ["--tersus-emitter", "llvm", "a.tersus"]) (False, ["--tersus-emitter", "llvm", "a.tersus"])
             , testAssertEq (map makesIr [Llvm, Run, Build "a"]) [True, True, True]
             , testAssertEq (map makesIr [Check, Interpret, Mir, MirText, Owned]) [False, False, False, False, False]
             ]
@@ -86,10 +95,10 @@ bootstrap = do
                         Error e -> pure (Just ("stage 1: " ++ e))
                         Ok () -> do
                             all' <- programs
-                            -- (stage 0 gives the IR that it was built from, and stage 1 what the Haskell gives for every program)
+                            -- (stage 0 gives what the Haskell gives for the emitter, and stage 1 for every program)
                             atZero <- check [("stage 0", zero)] ("the emitter", emitterSource)
                             atOne <- parallelFor (("the emitter", emitterSource) : all') (check [("stage 1", one)])
-                            kept <- cache zero
+                            kept <- cache zero one
                             pure $ case atZero ++ concat atOne of
                                 [] -> kept
                                 found -> Just (unlines (take 5 found))
@@ -125,26 +134,27 @@ firstDifference output text = case [(n, a, b) | (n, a, b) <- zip3 [1 :: Int ..] 
     (n, a, b) : _ -> "; line " ++ show n ++ ": " ++ show a ++ " for " ++ show b
     [] -> ""
 
--- The emitter that is in the cache is used, and not built again: a program is compiled with the cache that holds a copy of stage 0 and nothing else, and the
--- copy has not been written to
-cache :: FilePath -> IO TestResult
-cache zero = withDirectory "tersus-cache-test" $ \home -> do
+-- The emitters that are in the cache are used, and not built again: a program is compiled with the cache that holds a copy of each and nothing else, and the copies
+-- have not been written to
+cache :: FilePath -> FilePath -> IO TestResult
+cache zero one = withDirectory "tersus-cache-test" $ \home -> do
     saved <- lookupEnv "XDG_CACHE_HOME"
     let restore = maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME") saved
-        kept = home </> "tersus" </> ("emitter-" ++ emitterHash)
+        names = ["seed-" ++ seedHash, "emitter-" ++ emitterHash]
+        kept = [home </> "tersus" </> name | name <- names]
     (do
         createDirectoryIfMissing True (home </> "tersus")
-        copyFile zero kept
+        mapM_ (uncurry copyFile) (zip [zero, one] kept)
         setEnv "XDG_CACHE_HOME" home
-        before <- getModificationTime kept
+        before <- mapM getModificationTime kept
         let source = "x = 6 * 7; return x;"
         ir <- tersusLlvm source
-        after <- getModificationTime kept
+        after <- mapM getModificationTime kept
         entries <- listDirectory (home </> "tersus")
         pure $ case (ir, llvmSource source) of
             (Ok text, Ok expected)
                 | text /= expected -> Just "the IR is not what the Haskell writes"
-                | before /= after || entries /= ["emitter-" ++ emitterHash] -> Just ("the cache was written to: " ++ show entries)
+                | before /= after || sort entries /= sort names -> Just ("the cache was written to: " ++ show entries)
                 | otherwise -> Nothing
             (Error e, _) -> Just e
             (_, Error e) -> Just e)

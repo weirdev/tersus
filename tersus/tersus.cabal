@@ -19,6 +19,7 @@ extra-source-files:
     lib/prelude.tersus
     lib/string.tersus
     examples/emit.tersus
+    bootstrap/emitter.ll
 
 source-repository head
   type: git
@@ -29,6 +30,7 @@ library
       Bootstrap
       Cli
       Ghost
+      Hash
       Linear
       LlvmEmit
       LlvmRuntime

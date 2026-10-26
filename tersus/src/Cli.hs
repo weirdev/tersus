@@ -44,7 +44,7 @@ data Command = Check | Run | Interpret | Mir | MirText | Owned | Llvm | Build Fi
 usage :: String
 usage =
     unlines
-        [ "Usage: tersus [--tersus-emitter] <command> <file> [-o <output>]"
+        [ "Usage: tersus [--haskell-emitter] <command> <file> [-o <output>]"
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
@@ -62,8 +62,9 @@ usage =
         , ""
         , "Use - as the file to read the program from standard input."
         , ""
-        , "With --tersus-emitter first, llvm, build and run write the LLVM IR with the emitter that is written in Tersus (examples/emit.tersus; see Bootstrap)"
-        , "instead of the one in Haskell. It is built with clang the first time, and kept in the cache."
+        , "llvm, build and run write the LLVM IR with the emitter that is written in Tersus (examples/emit.tersus; see Bootstrap), which is built with clang the"
+        , "first time (from bootstrap/emitter.ll) and kept in the cache. With --haskell-emitter first they use the emitter in Haskell (LlvmEmit) instead, which needs no clang"
+        , "to print the IR."
         ]
 
 -- Splits the command line into a command and the file it applies to.
@@ -78,12 +79,12 @@ parseCommandLine ["llvm", file] = Just (Llvm, file)
 parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
 parseCommandLine _ = Nothing
 
--- Whether the command line starts with the flag that has the emitter in Tersus write the LLVM IR, and the rest of it
+-- Whether the command line starts with the flag that has the emitter in Haskell write the LLVM IR (it is the emitter in Tersus that does otherwise), and the rest of it
 splitEmitterFlag :: [String] -> (Bool, [String])
-splitEmitterFlag ("--tersus-emitter" : rest) = (True, rest)
+splitEmitterFlag ("--haskell-emitter" : rest) = (True, rest)
 splitEmitterFlag args = (False, args)
 
--- The commands that make LLVM IR, and so can have it written by the emitter in Tersus
+-- The commands that make LLVM IR, and so have it written by the emitter in Tersus
 makesIr :: Command -> Bool
 makesIr Llvm = True
 makesIr Run = True

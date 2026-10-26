@@ -1,55 +1,55 @@
 module Bootstrap
-    ( emitterHash
+    ( seedHash
+    , emitterHash
     , stageZero
     , stageOne
+    , cachedSeed
     , cachedEmitter
     , tersusLlvm
     , emitWith
     ) where
 
 import Control.Exception (IOException, finally, try)
-import Data.Bits (xor)
-import Data.Char (ord)
-import Data.List (foldl')
-import Data.Word (Word64)
 import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFileSystemEncoding, setLocaleEncoding)
-import Numeric (showHex)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.Process (readProcessWithExitCode)
 
+import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import MirData (writeProgram)
 import Native (buildExecutable)
-import Pipeline (llvmSource, ownedSource)
-import PreludeSource (emitterSource, listsSource, preludeSource, stringSource)
+import Pipeline (ownedSource)
+import PreludeSource (emitterSource, listsSource, preludeSource, seedFingerprint, seedSource, stringSource)
 import Utils
 
--- The lowering to LLVM IR that is written in Tersus (examples/emit.tersus, step 31 and STEP31.md) as the compiler's own emitter. An executable of it reads the MIR of a
--- program as data (MirData) and writes its LLVM IR, which is what `tersus --tersus-emitter` uses instead of LlvmEmit. It is made in two stages:
--- - stage 0 is the emitter built from the IR that LlvmEmit (Haskell) writes for it. It is built when it is first used, and kept in the cache under a hash of the
---   sources it is made of (`cachedEmitter`), so that building this package needs no clang;
--- - stage 1 is the emitter built from the IR that stage 0 writes for the emitter's own source (`stageOne`). The IR has to be the same text as stage 0 was built from,
---   and then stage 1 is stage 0 again; the tests check that, for the emitter and for every program.
+-- The lowering to LLVM IR that is written in Tersus (examples/emit.tersus, step 31 and STEP31.md) is the compiler's emitter. An executable of it reads the MIR of a
+-- program as data (MirData) and writes its LLVM IR; `tersus build`, `llvm` and `run` use it, and `--haskell-emitter` has LlvmEmit write the IR instead. It is a
+-- program of the language that needs a compiler, so it is made in stages from a seed:
+-- - the seed (bootstrap/emitter.ll) is the IR of an emitter, kept in the repository. It is the IR that the emitter wrote for its own source when the seed was made, and
+--   it does not have to be the latest: it only has to be able to compile the emitter as it is now, which it can as long as the data it reads and the runtime it calls
+--   are the same;
+-- - stage 0 is the seed built with clang (`stageZero`);
+-- - stage 1 is the emitter as it is now, built from the IR that stage 0 writes for its source (`stageOne`). This is the one that compiles programs;
+-- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it, and that the IR is
+--   what LlvmEmit writes). Making a new seed is `tersus llvm examples/emit.tersus > bootstrap/emitter.ll`.
+-- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang.
 
--- A hash (FNV-1a, 64 bits, as 16 hexadecimal digits) of the text that stage 0 is made of: the emitter, the runtime it is linked with, and the library every program
--- has. What LlvmEmit writes for them is not part of it.
+-- What stage 0 is made of: the seed and the runtime it is linked with
+seedHash :: String
+seedHash = fingerprint [seedFingerprint, runtimeSource]
+
+-- What stage 1 is made of: stage 0, the emitter, and the library every program has
 emitterHash :: String
-emitterHash = let digits = showHex (foldl' step 14695981039346656037 (concatMap (++ "\0") parts)) "" in replicate (16 - length digits) '0' ++ digits
-  where
-    parts = [emitterSource, runtimeSource, preludeSource, listsSource, stringSource]
-    step :: Word64 -> Char -> Word64
-    step h c = (h `xor` fromIntegral (ord c)) * 1099511628211
+emitterHash = fingerprint [seedHash, emitterSource, preludeSource, listsSource, stringSource]
 
--- Stage 0: the emitter built, at the path, from the IR of LlvmEmit
+-- Stage 0: the seed built, at the path
 stageZero :: FilePath -> IO (Result () String)
-stageZero output = case llvmSource emitterSource of
-    Error e -> pure (Error e)
-    Ok ir -> buildExecutable output ir
+stageZero output = buildExecutable output seedSource
 
--- Stage 1: the emitter built, at the path, from the IR that the emitter at the first path writes for it
+-- Stage 1: the emitter as it is now, built at the path from the IR that the emitter at the first path writes for it
 stageOne :: FilePath -> FilePath -> IO (Result () String)
 stageOne compiler output = case ownedSource emitterSource of
     Error e -> pure (Error e)
@@ -75,26 +75,38 @@ emitWith exe input = do
     dropWhileEnd' p = reverse . dropWhile p . reverse
 
 -- Stage 0 in the cache, built if it is not there yet
+cachedSeed :: IO (Result FilePath String)
+cachedSeed = cached "seed" seedHash "the seed of the emitter written in Tersus" stageZero
+
+-- Stage 1 in the cache, built (from stage 0, which is built too if it is not there) if it is not there yet
 cachedEmitter :: IO (Result FilePath String)
-cachedEmitter = do
+cachedEmitter = cached "emitter" emitterHash "the emitter written in Tersus" $ \output -> do
+    zero <- cachedSeed
+    case zero of
+        Error e -> pure (Error e)
+        Ok compiler -> stageOne compiler output
+
+-- A program in the cache, named for what it is made of: made by the action if it is not there. It is made under another name and moved, so that a build that is cut
+-- short leaves nothing that looks like the program.
+cached :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
+cached kind hash what build = do
     cache <- cacheDirectory
     case cache of
         Error e -> pure (Error e)
         Ok dir -> do
-            let exe = dir </> ("emitter-" ++ emitterHash)
+            let exe = dir </> (kind ++ "-" ++ hash)
             present <- doesFileExist exe
-            if present then pure (Ok exe) else build dir exe
-  where
-    build dir exe = do
-        hPutStrLn stderr "Building the emitter written in Tersus (once, it is kept in the cache)..."
-        -- (built where nothing else will be, and moved: a build that is cut short leaves nothing that looks like the emitter)
-        (partial, handle) <- openTempFile dir "emitter.tmp"
-        hClose handle
-        removeFile partial
-        built <- stageZero partial
-        case built of
-            Error e -> pure (Error e)
-            Ok () -> renameFile partial exe >> pure (Ok exe)
+            if present
+                then pure (Ok exe)
+                else do
+                    hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
+                    (partial, handle) <- openTempFile dir (kind ++ ".tmp")
+                    hClose handle
+                    removeFile partial
+                    built <- build partial
+                    case built of
+                        Error e -> pure (Error e)
+                        Ok () -> renameFile partial exe >> pure (Ok exe)
 
 -- Where the emitter is kept: the cache directory of the user. There is no fallback to a shared directory such as /tmp, where another user could have put a program
 -- of their own under the name of the emitter, which would be run as this user.
