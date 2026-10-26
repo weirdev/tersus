@@ -175,6 +175,11 @@ rvalueCall rv =
         M.ReadByte -> ReadByte
         M.ArgCount -> ArgCount
         M.ArgByte -> ArgByte
+        M.PathByte -> PathByte
+        M.FileLoad -> FileLoad
+        M.FileByte -> FileByte
+        M.StoreByte -> StoreByte
+        M.FileStore -> FileStore
         M.ToByte -> ToByte
         M.FromByte -> FromByte
 
@@ -229,7 +234,7 @@ calledFunction _ _ = Nothing
 
 -- The names of the standard library that read the input or the arguments (a program cannot declare them again)
 worldNames :: [String]
-worldNames = ["readByte", "argCount", "argByte"]
+worldNames = ["readByte", "argCount", "argByte", "pathByte", "fileLoad", "fileByte", "storeByte", "fileStore"]
 
 -- The calls of functions of the program in a proof, those inside the arguments of another first
 callTerms :: PState -> IotaProof -> [IotaProof]

@@ -151,7 +151,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 
 -- First and Last need a list that is not empty, Get and Set an index in range. These work on an array as on a list; NewArray n x
 -- makes an array of n copies of x, with n not negative; NewBoxed n x does so for an n that is not a constant, in a Box. NewEmptyBoxed makes the Box of an array of no elements.
-data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | ToByte | FromByte
+data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
     deriving (Show, Eq)
 
 -- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns
@@ -432,7 +432,7 @@ renderTerminator Unreachable = "unreachable;"
 
 -- The operations that give something outside the program: the input and the arguments
 readsWorldOp :: ListOp -> Bool
-readsWorldOp op = op `elem` [ReadByte, ArgCount, ArgByte]
+readsWorldOp op = op `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore]
 
 -- The functions of the program that read the standard input or the arguments (`readByte`, `argCount`, `argByte`), or call or mention one that does. What such a function gives is not
 -- determined by its arguments, so a validator may not say that two calls with the same arguments give the same value.

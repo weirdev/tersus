@@ -70,6 +70,11 @@ declarations =
     , "declare void @tersus_init(i32, ptr)"
     , "declare i64 @tersus_argCount()"
     , "declare i64 @tersus_argByte(i64, i64)"
+    , "declare i64 @tersus_pathByte(i64)"
+    , "declare i64 @tersus_fileLoad()"
+    , "declare i64 @tersus_fileByte(i64)"
+    , "declare i64 @tersus_storeByte(i64)"
+    , "declare i64 @tersus_fileStore()"
     , "declare void @tersus_print(ptr, i64)"
     , "declare i32 @tersus_equal(ptr, i64, i64)"
     , "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)"
@@ -438,6 +443,11 @@ rvalue fn destType rv =
             binary op ty x y
         MakeList _ -> failG "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"
         ListOp ReadByte [] -> ins "r" "call i64 @tersus_readByte()"
+        ListOp PathByte [b] -> operandAt fn TByte b >>= \x -> ins "p" ("call i64 @tersus_pathByte(i64 " ++ x ++ ")")
+        ListOp FileLoad [] -> ins "l" "call i64 @tersus_fileLoad()"
+        ListOp FileByte [i] -> operandAt fn TInt i >>= \x -> ins "f" ("call i64 @tersus_fileByte(i64 " ++ x ++ ")")
+        ListOp StoreByte [b] -> operandAt fn TByte b >>= \x -> ins "s" ("call i64 @tersus_storeByte(i64 " ++ x ++ ")")
+        ListOp FileStore [] -> ins "t" "call i64 @tersus_fileStore()"
         ListOp ArgCount [] -> ins "n" "call i64 @tersus_argCount()"
         ListOp ArgByte [i, j] -> do
             x <- operandAt fn TInt i

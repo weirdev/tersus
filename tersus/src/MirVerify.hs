@@ -151,6 +151,11 @@ rvalueProblems env localTy d rv =
         ListOp ReadByte [] -> result TInt
         ListOp ArgCount [] -> result TInt
         ListOp ArgByte [i, j] -> ints [i, j] ++ result TInt
+        ListOp PathByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt
+        ListOp FileLoad [] -> result TInt
+        ListOp FileByte [i] -> ints [i] ++ result TInt
+        ListOp StoreByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt
+        ListOp FileStore [] -> result TInt
         ListOp ToByte [x] -> ints [x] ++ result TByte
         ListOp FromByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt
         ListOp NewEmptyBoxed [] -> case d of

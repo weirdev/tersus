@@ -5,6 +5,9 @@ module Cli
     , World (..)
     , noWorld
     , runSourceIn
+    , runSourceFiles
+    , readWorldFile
+    , writeWorldFiles
     , runSource
     , runSourceWith
     , runSourceStreams
@@ -16,10 +19,12 @@ module Cli
     ) where
 
 import Data.List (intercalate)
+import Control.Exception (IOException, try)
 import System.IO
+import System.IO.Unsafe (unsafePerformIO)
 
 import Mir (renderProgram)
-import MirEval (renderMirValue, runProgramIn)
+import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
 import TersusTypes
 import Utils
@@ -74,10 +79,11 @@ parseProgramArguments args = (\(command, file) -> (command, file, [])) <$> parse
 data World = World
     { worldInput :: String
     , worldArgs :: [String]
+    , worldFile :: FilePath -> Maybe String -- the files it can read: the contents of the file at a path, or Nothing (both as bytes)
     }
 
 noWorld :: World
-noWorld = World "" []
+noWorld = World "" [] (const Nothing)
 
 -- Runs a command over program source. Ok holds the text to print on success, which is
 -- empty when there is nothing to report; Error holds the message for a failure.
@@ -94,14 +100,18 @@ runSourceStreams input = runSourceIn noWorld{worldInput = input}
 
 -- The same for a program that has a world
 runSourceIn :: World -> Command -> String -> Result (String, String) String
-runSourceIn _ Check source = mapResult (\_ -> ("OK", "")) (compileSource source)
-runSourceIn world Interpret source =
+runSourceIn world command source = mapResult fst (runSourceFiles world command source)
+
+-- The same with the files that the program wrote (each path once, with what the file holds at the end), which `Interpret` does not write itself
+runSourceFiles :: World -> Command -> String -> Result ((String, String), [(FilePath, String)]) String
+runSourceFiles _ Check source = mapResult (\_ -> (("OK", ""), [])) (compileSource source)
+runSourceFiles world Interpret source =
     compileSource source `bindResult` \program ->
-        case runProgramIn (worldArgs world) (worldInput world) program of
+        case runProgramEnv RunEnv{envArgs = worldArgs world, envInput = worldInput world, envFile = worldFile world} program of
             Error e -> Error ("Evaluation failed: " ++ e)
             -- (what the program wrote, then its value: the same text as an executable prints)
-            Ok (written, errors, result) -> Ok (decodeUtf8 written ++ maybe "" renderMirValue result, decodeUtf8 errors)
-runSourceIn world command source = mapResult (\text -> (text, "")) (runOther (worldInput world) command source)
+            Ok o -> Ok ((decodeUtf8 (outStdout o) ++ maybe "" renderMirValue (outValue o), decodeUtf8 (outStderr o)), outFiles o)
+runSourceFiles world command source = mapResult (\text -> ((text, ""), [])) (runOther (worldInput world) command source)
 
 runOther :: String -> Command -> String -> Result String String
 runOther _ Mir source = mapResult renderProgram (compileSource source)
@@ -129,6 +139,25 @@ readSourceFile file = do
     handle <- openFile file ReadMode
     hSetEncoding handle utf8
     hGetContents handle
+
+-- The file at a path (as the bytes of the path), as the bytes of its contents, or Nothing when it cannot be read. The path is looked at when the program
+-- asks, not before: the files a program may read are not known until it runs.
+readWorldFile :: FilePath -> Maybe String
+readWorldFile path = unsafePerformIO $ do
+    outcome <- try (do
+        handle <- openBinaryFile path ReadMode
+        contents <- hGetContents handle
+        length contents `seq` hClose handle
+        return contents)
+    return (either (\e -> const Nothing (e :: IOException)) Just outcome)
+
+-- Writes the files that a program wrote, and gives the paths that could not be written
+writeWorldFiles :: [(FilePath, String)] -> IO [FilePath]
+writeWorldFiles files = concat <$> mapM write files
+  where
+    write (path, contents) = do
+        outcome <- try (withBinaryFile path WriteMode (\handle -> hPutStr handle contents))
+        return (either (\e -> const [path] (e :: IOException)) (const []) outcome)
 
 -- The standard input as bytes (characters from 0 to 255), read as the program asks for them
 readInputBytes :: IO String

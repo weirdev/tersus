@@ -5,6 +5,9 @@ module MirEval
     , runProgramWith
     , runProgramStreams
     , runProgramIn
+    , RunEnv (..)
+    , Outcome (..)
+    , runProgramEnv
     , renderMirValue
     , toMirValue
     , fromMirValue
@@ -50,7 +53,32 @@ runProgramStreams input = runProgramIn [] input
 
 -- The same for a program that was given arguments: each is its bytes (as characters from 0 to 255), which argCount and argByte give
 runProgramIn :: [String] -> String -> Program -> Result (String, String, Maybe MirValue) String
-runProgramIn args input program = mapResult (\(value, (out, err), _) -> (out, err, value)) (runE (runFunction program (progMain program) []) args input)
+runProgramIn args input program =
+    mapResult (\o -> (outStdout o, outStderr o, outValue o)) (runProgramEnv RunEnv{envArgs = args, envInput = input, envFile = const Nothing} program)
+
+-- What a program is run in: its arguments, the bytes of the standard input, and the files it can read (a file by its path, as the bytes of the path, with
+-- the bytes of its contents, or Nothing when there is no such file). A program that writes a file does not change what this gives: it reads its own
+-- writes, and the files it wrote are in the outcome.
+data RunEnv = RunEnv
+    { envArgs :: [String]
+    , envInput :: String
+    , envFile :: FilePath -> Maybe String
+    }
+
+-- What a program did: the bytes it wrote to the standard output and to the standard error, the files it wrote (each path once, in the order of its first
+-- write, with what the file holds at the end), and the value it returns
+data Outcome = Outcome
+    { outStdout :: String
+    , outStderr :: String
+    , outFiles :: [(FilePath, String)]
+    , outValue :: Maybe MirValue
+    }
+
+runProgramEnv :: RunEnv -> Program -> Result Outcome String
+runProgramEnv env program =
+    mapResult
+        (\(value, (out, err), s) -> Outcome out err [(path, Map.findWithDefault "" path (sFiles s)) | path <- sOrder s] value)
+        (runE (runFunction program (progMain program) []) env (startState (envInput env)))
 
 -- What a program has written to the standard output and to the standard error
 type Written = (String, String)
@@ -58,18 +86,32 @@ type Written = (String, String)
 none :: Written
 none = ("", "")
 
--- The evaluator is a function of the input that is left, and the failure of a result, with the bytes written so far and the input that is left
-newtype E a = E {runE :: [String] -> String -> Result (a, Written, String) String}
+-- What changes while a program runs: the input that is left, the path being built and the file that was loaded last and the file being built
+-- (the bytes of each), and the files written so far
+data S = S
+    { sInput :: String
+    , sPath :: String
+    , sLoaded :: String
+    , sStore :: String
+    , sFiles :: Map FilePath String
+    , sOrder :: [FilePath]
+    }
+
+startState :: String -> S
+startState input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = []}
+
+-- The evaluator is a function of what the program is run in and of its state, and the failure of a result, with the bytes written so far
+newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
 
 instance Functor E where
-    fmap f (E r) = E (\args input -> mapResult (\(a, output, rest) -> (f a, output, rest)) (r args input))
+    fmap f (E r) = E (\env s -> mapResult (\(a, output, s') -> (f a, output, s')) (r env s))
 
 instance Applicative E where
-    pure a = E (\_ input -> Ok (a, none, input))
-    E f <*> E g = E (\args input -> f args input `bindResult` \(h, o1, rest) -> mapResult (\(a, o2, rest') -> (h a, together o1 o2, rest')) (g args rest))
+    pure a = E (\_ s -> Ok (a, none, s))
+    E f <*> E g = E (\env s -> f env s `bindResult` \(h, o1, s') -> mapResult (\(a, o2, s'') -> (h a, together o1 o2, s'')) (g env s'))
 
 instance Monad E where
-    E g >>= f = E (\args input -> g args input `bindResult` \(a, o1, rest) -> runE (f a) args rest `bindResult` \(b, o2, rest') -> Ok (b, together o1 o2, rest'))
+    E g >>= f = E (\env s -> g env s `bindResult` \(a, o1, s') -> runE (f a) env s' `bindResult` \(b, o2, s'') -> Ok (b, together o1 o2, s''))
 
 together :: Written -> Written -> Written
 together (out1, err1) (out2, err2) = (out1 ++ out2, err1 ++ err2)
@@ -78,23 +120,69 @@ failE :: String -> E a
 failE e = E (\_ _ -> Error e)
 
 liftE :: Result a String -> E a
-liftE r = E (\_ input -> mapResult (\a -> (a, none, input)) r)
+liftE r = E (\_ s -> mapResult (\a -> (a, none, s)) r)
 
 write :: Char -> E ()
-write c = E (\_ input -> Ok ((), ([c], ""), input))
+write c = E (\_ s -> Ok ((), ([c], ""), s))
 
 writeError :: Char -> E ()
-writeError c = E (\_ input -> Ok ((), ("", [c]), input))
+writeError c = E (\_ s -> Ok ((), ("", [c]), s))
 
 -- The next byte of the input, or -1 at its end
 readInput :: E Integer
-readInput = E (\_ input -> case input of
-    [] -> Ok (-1, none, [])
-    c : rest -> Ok (toInteger (fromEnum c `mod` 256), none, rest))
+readInput = E (\_ s -> case sInput s of
+    [] -> Ok (-1, none, s)
+    c : rest -> Ok (toInteger (fromEnum c `mod` 256), none, s{sInput = rest}))
 
 -- The arguments of the program
 arguments :: E [String]
-arguments = E (\args input -> Ok (args, none, input))
+arguments = E (\env s -> Ok (envArgs env, none, s))
+
+-- A byte more in the path of the file to be loaded or stored (as long as a path is, in the runtime); the length of the path
+pathByte :: Integer -> E Integer
+pathByte b = E (\_ s ->
+    let path = if length (sPath s) < 4095 then sPath s ++ [toEnum (fromInteger (b `mod` 256))] else sPath s
+     in Ok (toInteger (length path), none, s{sPath = path}))
+
+-- The path that has been built, up to a byte that is 0 as in the runtime
+builtPath :: S -> FilePath
+builtPath = takeWhile (/= '\0') . sPath
+
+-- Loads the file at the path that has been built, and clears the path: its size, or -1 when there is no such file
+fileLoad :: E Integer
+fileLoad = E (\env s ->
+    let path = builtPath s
+        contents = if null path then Nothing else maybe (envFile env path) Just (Map.lookup path (sFiles s))
+     in case contents of
+            Just c -> Ok (toInteger (length c), none, s{sPath = "", sLoaded = c})
+            Nothing -> Ok (-1, none, s{sPath = "", sLoaded = ""}))
+
+-- The byte i of the file that was loaded, or -1
+fileByteAt :: Integer -> E Integer
+fileByteAt i = E (\_ s ->
+    let c = sLoaded s
+     in Ok (if i >= 0 && i < toInteger (length c) then toInteger (fromEnum (c !! fromInteger i) `mod` 256) else -1, none, s))
+
+-- A byte more in the file to be stored; its length
+storeByte :: Integer -> E Integer
+storeByte b = E (\_ s -> let store = sStore s ++ [toEnum (fromInteger (b `mod` 256))] in Ok (toInteger (length store), none, s{sStore = store}))
+
+-- Stores the bytes that have been given in the file at the path that has been built, which holds only them after: 0, or -1 when there is no path
+fileStore :: E Integer
+fileStore = E (\_ s ->
+    let path = builtPath s
+     in if null path
+            then Ok (-1, none, s{sPath = "", sStore = ""})
+            else
+                Ok
+                    ( 0
+                    , none
+                    , s{ sPath = ""
+                       , sStore = ""
+                       , sFiles = Map.insert path (sStore s) (sFiles s)
+                       , sOrder = if path `elem` sOrder s then sOrder s else sOrder s ++ [path]
+                       }
+                    ))
 
 runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue)
 runFunction program fn args
@@ -141,6 +229,11 @@ runStatements frame [] = return frame
 runStatements frame (Ghost{} : rest) = runStatements frame rest
 runStatements frame (Drop{} : rest) = runStatements frame rest
 runStatements frame (Peek dest rv : rest) = runStatements frame (Assign dest rv : rest)
+runStatements frame (Assign dest (ListOp PathByte [b]) : rest) = intArgument frame b >>= \x -> pathByte x >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
+runStatements frame (Assign dest (ListOp FileLoad []) : rest) = fileLoad >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
+runStatements frame (Assign dest (ListOp FileByte [i]) : rest) = intArgument frame i >>= \x -> fileByteAt x >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
+runStatements frame (Assign dest (ListOp StoreByte [b]) : rest) = intArgument frame b >>= \x -> storeByte x >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
+runStatements frame (Assign dest (ListOp FileStore []) : rest) = fileStore >>= \n -> runStatements (Map.insert dest (MInt n) frame) rest
 runStatements frame (Assign dest (ListOp ArgCount []) : rest) = do
     args <- arguments
     runStatements (Map.insert dest (MInt (toInteger (length args))) frame) rest
@@ -169,6 +262,14 @@ runStatements frame (Assign dest (ListOp WriteError [o]) : rest) = do
 runStatements frame (Assign dest rv : rest) = do
     v <- liftE (evalRvalue frame rv)
     runStatements (Map.insert dest v frame) rest
+
+-- The Int that an operand is
+intArgument :: Frame -> Operand -> E Integer
+intArgument frame o = do
+    v <- liftE (operandValue frame o)
+    case v of
+        MInt n -> return n
+        _ -> failE "An Int was expected"
 
 operandValue :: Frame -> Operand -> Result MirValue String
 operandValue frame (Copy l) = maybe (Error ("Undefined variable: " ++ show l)) Ok (Map.lookup l frame)
@@ -264,6 +365,7 @@ listOp FromByte [MInt b] = Ok (MInt b)
 listOp ReadByte _ = Error "readByte is run by the statement that calls it"
 listOp ArgCount _ = Error "argCount is run by the statement that calls it"
 listOp ArgByte _ = Error "argByte is run by the statement that calls it"
+listOp op _ | op `elem` [PathByte, FileLoad, FileByte, StoreByte, FileStore] = Error "a file operation is run by the statement that calls it"
 listOp NewEmptyBoxed [] = Ok (MList [])
 listOp NewArray [MInt n, x]
     | n < 0 = Error "array needs a size that is not negative"
