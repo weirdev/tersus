@@ -31,6 +31,7 @@ library
       LlvmEmit
       LlvmRuntime
       Mir
+      MirData
       MirEval
       MirLists
       MirLower
@@ -103,6 +104,7 @@ test-suite tersus-test
       TestSequence
       TestStrings
       TestBytes
+      TestMirData
       TestBox
       TestTraits
       TestPipeline

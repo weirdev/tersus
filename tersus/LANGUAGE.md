@@ -37,6 +37,7 @@ stack run -- run program.tersus [args]    # validate, compile to native code wit
 stack run -- eval program.tersus [args]   # validate, then run the MIR with the reference interpreter (no compiler)
 stack run -- mir program.tersus     # validate, then print the MIR
 stack run -- owned program.tersus   # validate, then print the MIR with who owns each value (moves, copies, frees)
+stack run -- mir --data program.tersus   # the same MIR as data for a program to read (MIR.md, The MIR as data)
 stack run -- llvm program.tersus    # validate, then print the LLVM IR
 stack run -- build program.tersus -o program   # validate, then compile to an executable with clang
 ```

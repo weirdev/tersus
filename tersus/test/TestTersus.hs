@@ -20,6 +20,7 @@ import TestBox
 import TestSequence
 import TestStrings
 import TestBytes
+import TestMirData
 
 main :: IO ()
 main = do
@@ -84,6 +85,7 @@ main = do
                 , testSequence
                 , testStrings
                 , testBytes
+                , testMirData
                 ]
     putStrLn $
         "Summary: "

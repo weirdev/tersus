@@ -247,6 +247,25 @@ A local that is given a value frees the one it held (assigning null does nothing
 
 **How it is checked.** `TestOwnership` runs the owned MIR on a model of the heap that fails on a value used after it is moved from or freed, freed twice, looked at after it changed, changed in place while another place holds it, or left on the heap when the program ends, and compares the answer with the executor's. It runs every example and every program of the native tests, and the model is shown to catch the mistakes it exists for (MIR written by hand with each). `TestNative` builds every program with `-DTERSUS_CHECK`, which makes the runtime record each block (a block that is freed twice or left at the end is an error, and one that is freed is filled with 0xDD and kept so that a use of it reads that), and runs some of them under valgrind as well. When this was written, a generator of random programs over lists, nested lists, structs and enums (a script that is not in the repository) found no difference on the model or natively.
 
+## The MIR as data
+
+`tersus mir --data <file>` prints the MIR that native code is made from (the owned MIR of the Ownership section) as text that a program can read, and `MirData` reads and writes it (`readProgram (writeProgram p) = Ok (forNative p)`, for every example and every program of the native tests: `TestMirData`). It is what the lowering to LLVM IR written in Tersus is given (`STEP31.md`). Only what the emitter uses is in it: the ghost statements, the contracts and loop invariants, the structs with sizes and the invariants of structs are left out (`forNative`), since the validator is done with them and monomorphization has made their copies.
+
+The first line is `tersus-mir 1`. Every other line is a record of words and numbers separated by one space, with names in quotes (the UTF-8 bytes of the name; printable ASCII as it is, and the others, `"` and `\` as `\xHH`), so the text is ASCII and a reader needs only a line, its words and its numbers. The order of the records is that of the maps they were in, which the emitter keeps: the types (`struct` and `enum`) by name, the functions by name, then `main`. A function is its `function` (or `main`) line, a `local` line for each local, a `block` line for each block followed by its statements and the line of its terminator, and `end`:
+
+```
+enum "Shape" 3 "Shape::Circle" 1 "radius" int "Shape::Rect" 2 "width" int "height" int "Shape::Empty" 0
+function "double" params 1 1 returns some int sizeparams 0 typeparams 0 borrowed 0
+local 0 none int
+local 1 some "n" int
+block 0
+assign 0 binary add copy 1 copy 1
+return
+end
+```
+
+A type is `int`, `byte`, `bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`, `forall N "n"... N "n"... T`, `param "n"` or `ref T`, and a size is `c N`, `any`, `p "n"` or `v N`. An operand is `copy L`, `move L` or `const C`, and a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. A statement is `assign L RVALUE`, `peek L RVALUE` or `drop L`, and a terminator `goto B`, `switch O B B`, `call O N O... L B`, `return` or `unreachable`. An rvalue is `use O`, `binary OP O O` (`add sub mul div mod eq noteq lt lteq gt gteq`), `listop OP N O...` (the names of the `ListOp`s, as `get`, `newArray` and `writeByte`), `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`, `isvariant O "n"`, `asvariant O "n"`, `clone O` or `takefield L "n" "f"`.
+
 ## Verification
 
 `MirVerify.verifyProgram` checks a MIR for its shape (every block a jump names exists, every local and function used is declared, every local has a known type) and its types: each operation is applied to operands of the types it takes and gives the type of the local it is assigned to (`Add` takes two `Int`, `Get` takes a list of the result's type and an `Int`, `ReadField` reads a field that the constructor has, from a value of that constructor's type or one of its variants, a call has the callee's arity and parameter types, `SwitchBool` tests a `Bool`). Lowering gives the locals their types by replaying the checker, which is a second copy of its rules, and native code built on a wrong type is a wrong program, so every lowering goes through the verifier, and so should every pass over the MIR.
