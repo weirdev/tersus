@@ -73,7 +73,20 @@ Each slice is a PR, and nothing changes the default `build` until slice 8.
      other); an `affirm p >= 0;` at the end of each branch keeps it.
    - `match` as a statement can `return` from an arm, and an `if x is A { ... } else { (x as B) }` cannot show the else is `B`, so a
      two-variant enum is taken apart with `match`.
-5. **Emitter part 1.** Types, slot sizes, descriptors, declarations and the entry point, compared with Haskell on their own.
+5. **Emitter part 1.** Done: `examples/emit.tersus` (a program is one file, so it has the reader of `mir_reader.tersus` between two marker lines that
+   `TestMirEmit` checks are the same text in both) with `renderType`, `slotsOf`, `ownerOf`, `needsDrop`, `canonical`, `llvmType`, `escaped`, `closeTypes`,
+   `typeDescriptors`, `declarations` and `entryPoint`, written as the Haskell is. It writes what `LlvmEmit.emitOutline` writes (the declarations, the descriptors
+   of the types of the locals and what they contain, and the entry point), and `TestMirEmit` compares the two for every example and every program of the native
+   tests, with the Haskell as the oracle. Found while doing it:
+   - There is no mutual recursion, so `slotsOf` and `needsDrop`, which the Haskell writes as a function over types and one over declarations, are one function that
+     looks the declaration up and calls itself on the types of its fields.
+   - A cast is proved by the `is` test just before it in the same function, not by a helper that says it (`isSizedArray(t)` and then `t as Type::TArray` is refused), so the
+     tests that guard a cast are made where it is, in helpers that give what was cast (`sizedArray(t)` gives `ok`, the length and the element type).
+   - A chain of `concat` costs more than the rest of the program: `concat` promises the size and the bytes of its result, and the facts of ten of them in a function were
+     27 of the 48 seconds to validate the emitter. `impl String { fn then }` (a `concat` that promises nothing) brought the program to 16 seconds. The emitter makes text
+     from many pieces, so it uses `then`; a `String` method that is added in a program of its own works.
+   - Output is a `List<String>` of lines that the caller prints at the end (the descriptors come before the code that decides which are needed), not a string that is
+     appended to: a `push` is cheap, and a `concat` of the whole output would copy it every time.
 6. **Emitter part 2.** Operands, constants, word rvalues, arithmetic with overflow checks, terminators and calls.
 7. **Emitter part 3.** Aggregates, arrays, Box, clone and drop, then function assembly. From here the test is that the IR is
    byte-identical to `LlvmEmit` for every example and every `TestNative` program.

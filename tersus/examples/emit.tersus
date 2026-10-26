@@ -1,0 +1,1588 @@
+// The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): LlvmEmit.hs, function by function, with the Haskell emitter as the
+// oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
+//
+//     tersus mir --data examples/hello.tersus | tersus run examples/emit.tersus
+//
+// This is the first part (slice 5): the declarations, the descriptors of the types that the runtime walks, and the entry point, for the types of the locals of the
+// program. It writes the same text as `LlvmEmit.emitOutline` (TestMirEmit compares them for every example and every program of the native tests). The functions
+// themselves, which add the descriptors of the types their code asks for, come next, and then this writes all of `LlvmEmit.emitOwned`.
+//
+// A program is one file, so the reader of examples/mir_reader.tersus (its types, tokenizer and parsers) is repeated here, between the same two lines in both
+// (TestMirEmit checks that the text is the same). The rest is written as the Haskell is, in the same order and with the same names, so that the two can be read side
+// by side:
+// - There are no maps: the types of the program are a list in the order of the Haskell map, and a lookup is a scan of it.
+// - There is no state monad: a function gives its lines (a `List<String>`) and, where the Haskell also gives the types the code needs, those.
+// - A function that goes through the types of the program calls itself on parts that are not smaller as a value (a struct holds another by name), so these are `~`.
+// - An error is a result with `ok: false` and the message that the Haskell gives (`Native code does not support ... yet`).
+
+// ---- the reader: the text up to the line 'end of the reader' is the same in examples/emit.tersus (a program is one file; TestMirEmit checks that it is) ----
+
+struct Token { quoted: Bool, text: String };
+
+struct Parsed<T> { value: T, pos: Int, ok: Bool };
+
+enum Size { SConst { n: Int }, SAny, SParam { name: String }, SVar { n: Int } };
+
+enum Type {
+    TInt,
+    TByte,
+    TBool,
+    TList { elem: Box<Type> },
+    TArray { elem: Box<Type>, size: Size },
+    TBox { inner: Box<Type> },
+    TFn { args: List<Type>, ret: Box<Type> },
+    TNamed { name: String },
+    TVariant { name: String },
+    TVar { n: Int },
+    TForall { sizes: List<String>, types: List<String>, body: Box<Type> },
+    TParam { name: String },
+    TRef { inner: Box<Type> },
+};
+
+struct Field { name: String, ty: Type };
+
+struct Variant { name: String, fields: List<Field> };
+
+enum TypeDecl { DStruct { name: String, fields: List<Field> }, DEnum { name: String, variants: List<Variant> } };
+
+enum Constant {
+    CInt { n: Int },
+    CBool { b: Bool },
+    CList { items: List<Constant> },
+    CArray { items: List<Constant> },
+    CData { name: String, fields: List<String>, values: List<Constant> },
+    CFn { name: String },
+};
+
+enum Operand { Copy { local: Int }, Move { local: Int }, Const { value: Constant } };
+
+enum Rvalue {
+    Use { o: Operand },
+    BinaryOp { op: Int, a: Operand, b: Operand },
+    ListOp { op: Int, args: List<Operand> },
+    MakeList { items: List<Operand> },
+    MakeBox { o: Operand },
+    Unbox { o: Operand },
+    Unsize { o: Operand },
+    MakeData { name: String, fields: List<String>, values: List<Operand> },
+    ReadField { o: Operand, name: String, field: String },
+    IsVariant { o: Operand, name: String },
+    AsVariant { o: Operand, name: String },
+    Clone { o: Operand },
+    TakeField { local: Int, name: String, field: String },
+};
+
+enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int } };
+
+enum Terminator {
+    Goto { block: Int },
+    Switch { cond: Operand, yes: Int, no: Int },
+    Call { callee: Operand, args: List<Operand>, dest: Int, next: Int },
+    Return,
+    Unreachable,
+};
+
+struct Block { id: Int, stmts: List<Statement>, term: Terminator };
+
+struct LocalDecl { id: Int, named: Bool, name: String, ty: Type };
+
+struct Function {
+    name: String,
+    params: List<Int>,
+    hasReturn: Bool,
+    returns: Type,
+    sizeParams: List<String>,
+    typeParams: List<String>,
+    borrowed: List<Int>,
+    locals: List<LocalDecl>,
+    blocks: List<Block>,
+};
+
+struct Program { types: List<TypeDecl>, functions: List<Function>, entry: Function };
+
+// The words of the binary operations and of the list operations, whose index is the operation
+fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
+    w = push([], "add");
+    w = push(w, "sub");
+    w = push(w, "mul");
+    w = push(w, "div");
+    w = push(w, "mod");
+    w = push(w, "eq");
+    w = push(w, "noteq");
+    w = push(w, "lt");
+    w = push(w, "lteq");
+    w = push(w, "gt");
+    w = push(w, "gteq");
+    return w;
+};
+
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 22; }] {
+    w = push([], "length");
+    w = push(w, "first");
+    w = push(w, "last");
+    w = push(w, "get");
+    w = push(w, "push");
+    w = push(w, "pop");
+    w = push(w, "set");
+    w = push(w, "newArray");
+    w = push(w, "newBoxed");
+    w = push(w, "newEmptyBoxed");
+    w = push(w, "writeByte");
+    w = push(w, "writeError");
+    w = push(w, "readByte");
+    w = push(w, "argCount");
+    w = push(w, "argByte");
+    w = push(w, "pathByte");
+    w = push(w, "fileLoad");
+    w = push(w, "fileByte");
+    w = push(w, "storeByte");
+    w = push(w, "fileStore");
+    w = push(w, "toByte");
+    w = push(w, "fromByte");
+    return w;
+};
+
+// The index of a word in a table, or -1
+fn indexOf(table: &List<String>, word: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(table); }] {
+    i = 0;
+    while i < size(table) [{ affirm i >= 0; affirm i <= size(table); }] shrinks size(table) - i {
+        if get(table, i) = word { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The word at an index of a table (the empty string when there is none)
+fn wordOf(table: &List<String>, i: Int) -> String [{ }] [{ }] {
+    if i >= 0 && i < size(table) { return get(table, i); };
+    return "";
+};
+
+// What a parser gives when it could not read: the value it was given, which has no meaning, and the end of the line
+fn failed<T>(dummy: T, ts: &List<Token>) -> Parsed<T> [{ }] [{ affirm return.pos = size(ts); affirm return.ok = false; }] {
+    return Parsed<T> { value: dummy, pos: size(ts), ok: false };
+};
+
+fn done<T>(value: T, pos: Int) -> Parsed<T> [{ }] [{ affirm return.pos = pos; affirm return.ok = true; }] {
+    return Parsed<T> { value: value, pos: pos, ok: true };
+};
+
+fn noNames() -> List<String> [{ }] [{ }] {
+    return [];
+};
+
+fn noInts() -> List<Int> [{ }] [{ }] {
+    return [];
+};
+
+// (an empty list written as the argument of a generic function is a List<Int> in native code, whatever the result is used for: these give it its type)
+fn noFields() -> List<Field> [{ }] [{ }] {
+    return [];
+};
+
+fn noOperands() -> List<Operand> [{ }] [{ }] {
+    return [];
+};
+
+// Lines and tokens
+
+fn hexValue(c: Int) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return <= 15; }] {
+    if c >= 48 && c <= 57 { return c - 48; };
+    if c >= 65 && c <= 70 { return c - 55; };
+    return 0 - 1;
+};
+
+// The name that starts at the index `start` of a line, just after its opening quote: the bytes up to the closing quote, `\xHH` being the byte HH. The index
+// in the result is after the closing quote.
+fn quoted(line: &String, start: Int) -> Parsed<String> [{ affirm start >= 0; affirm start <= size(line.bytes); }] [{ affirm return.pos >= start; affirm return.pos <= size(line.bytes); }] {
+    bytes = [];
+    i = start;
+    while i < size(line.bytes) [{ affirm i >= start; affirm i <= size(line.bytes); }] shrinks size(line.bytes) - i {
+        c = toInt(get(line.bytes, i));
+        if c = 34 { return done(String { bytes: bytes }, i + 1); };
+        if c = 92 {
+            if i + 3 >= size(line.bytes) { return Parsed<String> { value: "", pos: size(line.bytes), ok: false }; };
+            h = hexValue(toInt(get(line.bytes, i + 2)));
+            l = hexValue(toInt(get(line.bytes, i + 3)));
+            if get(line.bytes, i + 1) != toByte(120) || h < 0 || l < 0 { return Parsed<String> { value: "", pos: size(line.bytes), ok: false }; };
+            bytes = push(bytes, toByte(16 * h + l));
+            i = i + 4;
+        } else {
+            bytes = push(bytes, toByte(c));
+            i = i + 1;
+        };
+    };
+    return Parsed<String> { value: "", pos: size(line.bytes), ok: false };
+};
+
+// The tokens of a line: words and names in quotes, separated by spaces
+fn tokenize(line: &String) -> Parsed<List<Token>> [{ }] [{ }] {
+    tokens = [];
+    i = 0;
+    while i < size(line.bytes) [{ affirm i >= 0; affirm i <= size(line.bytes); }] shrinks size(line.bytes) - i {
+        c = toInt(get(line.bytes, i));
+        if c = 32 {
+            i = i + 1;
+        } else {
+            if c = 34 {
+                q = quoted(line, i + 1);
+                if !q.ok { return Parsed<List<Token>> { value: [], pos: 0, ok: false }; };
+                tokens = push(tokens, Token { quoted: true, text: q.value });
+                i = q.pos;
+            } else {
+                // a word runs to the next space
+                j = i + 1;
+                while j < size(line.bytes) && get(line.bytes, j) != toByte(32) [{ affirm j >= i + 1; affirm j <= size(line.bytes); }] shrinks size(line.bytes) - j {
+                    j = j + 1;
+                };
+                tokens = push(tokens, Token { quoted: false, text: line.slice(i, j) });
+                i = j;
+            };
+        };
+    };
+    return Parsed<List<Token>> { value: tokens, pos: size(line.bytes), ok: true };
+};
+
+// Numbers, words and names of a line. The first four read one token at an index that is in the line, and give the index after it.
+
+// The Int that a word is: an optional minus and digits, the least Int too
+fn parseInt(text: &String) -> Parsed<Int> [{ }] [{ }] {
+    n = size(text.bytes);
+    negative = n > 0 && get(text.bytes, 0) = toByte(45);
+    i = 0;
+    if negative { i = 1; };
+    if i >= n { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+    // the digits are accumulated as a negative number, since the least Int has no positive
+    acc = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm acc <= 0; }] shrinks n - i {
+        c = toInt(get(text.bytes, i));
+        d = c - 48;
+        if d < 0 || d > 9 { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+        if acc < 0 - 922337203685477580 || (acc = 0 - 922337203685477580 && d > 8) { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+        acc = acc * 10 - d;
+        i = i + 1;
+    };
+    if negative { return Parsed<Int> { value: acc, pos: 0, ok: true }; };
+    if acc = 0 - 9223372036854775807 - 1 { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+    return Parsed<Int> { value: 0 - acc, pos: 0, ok: true };
+};
+
+fn wordAt(ts: &List<Token>, pos: Int) -> Parsed<String> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
+    t = get(ts, pos);
+    if t.quoted { return Parsed<String> { value: "", pos: pos + 1, ok: false }; };
+    return done(t.text, pos + 1);
+};
+
+fn nameAt(ts: &List<Token>, pos: Int) -> Parsed<String> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
+    t = get(ts, pos);
+    if !t.quoted { return Parsed<String> { value: "", pos: pos + 1, ok: false }; };
+    return done(t.text, pos + 1);
+};
+
+fn intAt(ts: &List<Token>, pos: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
+    w = wordAt(ts, pos);
+    if !w.ok { return Parsed<Int> { value: 0, pos: pos + 1, ok: false }; };
+    n = parseInt(w.value);
+    return Parsed<Int> { value: n.value, pos: pos + 1, ok: n.ok };
+};
+
+// A number of things that follow: not negative, and no more than there are tokens in the line (so a loop over them ends)
+fn countAt(ts: &List<Token>, pos: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; affirm return.value >= 0; affirm return.value <= size(ts); }] {
+    n = intAt(ts, pos);
+    if !n.ok || n.value < 0 || n.value > size(ts) { return Parsed<Int> { value: 0, pos: pos + 1, ok: false }; };
+    return Parsed<Int> { value: n.value, pos: pos + 1, ok: true };
+};
+
+// The n names from an index (that may be the end of the line, when n is 0)
+fn namesAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<String>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    names = noNames();
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noNames(), ts); };
+        s = nameAt(ts, p);
+        if !s.ok { return failed(noNames(), ts); };
+        names = push(names, s.value);
+        p = s.pos;
+    };
+    return done(names, p);
+};
+
+fn intsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<Int>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    ints = noInts();
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noInts(), ts); };
+        v = intAt(ts, p);
+        if !v.ok { return failed(noInts(), ts); };
+        ints = push(ints, v.value);
+        p = v.pos;
+    };
+    return done(ints, p);
+};
+
+fn sizeAt(ts: &List<Token>, pos: Int) -> Parsed<Size> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(Size::SAny, ts);
+    w = wordAt(ts, pos);
+    if !w.ok { return bad; };
+    next = w.pos;
+    if w.value = "any" { return done(Size::SAny, next); };
+    if next >= size(ts) { return bad; };
+    if w.value = "c" || w.value = "v" {
+        n = intAt(ts, next);
+        if !n.ok { return bad; };
+        if w.value = "c" { return done(Size::SConst { n: n.value }, n.pos); };
+        return done(Size::SVar { n: n.value }, n.pos);
+    };
+    if w.value = "p" {
+        s = nameAt(ts, next);
+        if !s.ok { return bad; };
+        return done(Size::SParam { name: s.value }, s.pos);
+    };
+    return bad;
+};
+
+// A type. The words are `int byte bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+// `forall N "n"... N "n"... T`, `param "n"` and `ref T`.
+fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
+    bad = failed(Type::TInt, ts);
+    w = wordAt(ts, pos);
+    if !w.ok { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "int" { return done(Type::TInt, next); };
+    if kw = "byte" { return done(Type::TByte, next); };
+    if kw = "bool" { return done(Type::TBool, next); };
+    if next >= size(ts) { return bad; };
+    if kw = "list" || kw = "box" || kw = "ref" {
+        e = typeAt(ts, next);
+        if !e.ok { return bad; };
+        if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
+        if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
+        return done(Type::TRef { inner: Box::new(e.value) }, e.pos);
+    };
+    if kw = "array" {
+        e = typeAt(ts, next);
+        if !e.ok || e.pos >= size(ts) { return bad; };
+        s = sizeAt(ts, e.pos);
+        if !s.ok { return bad; };
+        return done(Type::TArray { elem: Box::new(e.value), size: s.value }, s.pos);
+    };
+    if kw = "named" || kw = "variant" || kw = "param" {
+        s = nameAt(ts, next);
+        if !s.ok { return bad; };
+        if kw = "named" { return done(Type::TNamed { name: s.value }, s.pos); };
+        if kw = "variant" { return done(Type::TVariant { name: s.value }, s.pos); };
+        return done(Type::TParam { name: s.value }, s.pos);
+    };
+    if kw = "var" {
+        n = intAt(ts, next);
+        if !n.ok { return bad; };
+        return done(Type::TVar { n: n.value }, n.pos);
+    };
+    if kw = "fn" {
+        c = countAt(ts, next);
+        if !c.ok { return bad; };
+        args = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            a = typeAt(ts, p);
+            if !a.ok { return bad; };
+            args = push(args, a.value);
+            p = a.pos;
+        };
+        if p >= size(ts) { return bad; };
+        r = typeAt(ts, p);
+        if !r.ok { return bad; };
+        return done(Type::TFn { args: args, ret: Box::new(r.value) }, r.pos);
+    };
+    if kw = "forall" {
+        c1 = countAt(ts, next);
+        if !c1.ok { return bad; };
+        sizes = namesAt(ts, c1.pos, c1.value);
+        if !sizes.ok || sizes.pos >= size(ts) { return bad; };
+        c2 = countAt(ts, sizes.pos);
+        if !c2.ok { return bad; };
+        types = namesAt(ts, c2.pos, c2.value);
+        if !types.ok || types.pos >= size(ts) { return bad; };
+        body = typeAt(ts, types.pos);
+        if !body.ok { return bad; };
+        return done(Type::TForall { sizes: sizes.value, types: types.value, body: Box::new(body.value) }, body.pos);
+    };
+    return bad;
+};
+
+// Constants, operands and rvalues. A constant is `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`; an operand `copy L`, `move L`
+// or `const C`.
+
+fn noConstant() -> Constant [{ }] [{ }] {
+    return Constant::CInt { n: 0 };
+};
+
+fn noOperand() -> Operand [{ }] [{ }] {
+    return Operand::Move { local: 0 };
+};
+
+fn constantAt(ts: &List<Token>, pos: Int) -> Parsed<Constant> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
+    bad = failed(noConstant(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "int" {
+        n = intAt(ts, next);
+        if !n.ok { return bad; };
+        return done(Constant::CInt { n: n.value }, n.pos);
+    };
+    if kw = "bool" {
+        b = wordAt(ts, next);
+        if !b.ok { return bad; };
+        if b.value = "true" { return done(Constant::CBool { b: true }, b.pos); };
+        if b.value = "false" { return done(Constant::CBool { b: false }, b.pos); };
+        return bad;
+    };
+    if kw = "fn" {
+        s = nameAt(ts, next);
+        if !s.ok { return bad; };
+        return done(Constant::CFn { name: s.value }, s.pos);
+    };
+    if kw = "list" || kw = "array" {
+        c = countAt(ts, next);
+        if !c.ok { return bad; };
+        items = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            item = constantAt(ts, p);
+            if !item.ok { return bad; };
+            items = push(items, item.value);
+            p = item.pos;
+        };
+        if kw = "list" { return done(Constant::CList { items: items }, p); };
+        return done(Constant::CArray { items: items }, p);
+    };
+    if kw = "data" {
+        s = nameAt(ts, next);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        c = countAt(ts, s.pos);
+        if !c.ok { return bad; };
+        names = noNames();
+        values = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            f = nameAt(ts, p);
+            if !f.ok || f.pos >= size(ts) { return bad; };
+            v = constantAt(ts, f.pos);
+            if !v.ok { return bad; };
+            names = push(names, f.value);
+            values = push(values, v.value);
+            p = v.pos;
+        };
+        return done(Constant::CData { name: s.value, fields: names, values: values }, p);
+    };
+    return bad;
+};
+
+fn operandAt(ts: &List<Token>, pos: Int) -> Parsed<Operand> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(noOperand(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    if w.value = "const" {
+        c = constantAt(ts, w.pos);
+        if !c.ok { return bad; };
+        return done(Operand::Const { value: c.value }, c.pos);
+    };
+    if w.value = "copy" || w.value = "move" {
+        l = intAt(ts, w.pos);
+        if !l.ok { return bad; };
+        if w.value = "copy" { return done(Operand::Copy { local: l.value }, l.pos); };
+        return done(Operand::Move { local: l.value }, l.pos);
+    };
+    return bad;
+};
+
+fn operandsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<Operand>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    items = [];
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noOperands(), ts); };
+        o = operandAt(ts, p);
+        if !o.ok { return failed(noOperands(), ts); };
+        items = push(items, o.value);
+        p = o.pos;
+    };
+    return done(items, p);
+};
+
+fn noRvalue() -> Rvalue [{ }] [{ }] {
+    return Rvalue::Use { o: noOperand() };
+};
+
+// `use O`, `binary OP O O`, `listop OP N O...`, `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`,
+// `isvariant O "n"`, `asvariant O "n"`, `clone O` and `takefield L "n" "f"`
+fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(noRvalue(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "use" || kw = "makebox" || kw = "unbox" || kw = "unsize" || kw = "clone" {
+        o = operandAt(ts, next);
+        if !o.ok { return bad; };
+        if kw = "use" { return done(Rvalue::Use { o: o.value }, o.pos); };
+        if kw = "makebox" { return done(Rvalue::MakeBox { o: o.value }, o.pos); };
+        if kw = "unbox" { return done(Rvalue::Unbox { o: o.value }, o.pos); };
+        if kw = "unsize" { return done(Rvalue::Unsize { o: o.value }, o.pos); };
+        return done(Rvalue::Clone { o: o.value }, o.pos);
+    };
+    if kw = "binary" {
+        op = wordAt(ts, next);
+        if !op.ok || op.pos >= size(ts) { return bad; };
+        code = indexOf(binaryWords(), op.value);
+        a = operandAt(ts, op.pos);
+        if code < 0 || !a.ok || a.pos >= size(ts) { return bad; };
+        b = operandAt(ts, a.pos);
+        if !b.ok { return bad; };
+        return done(Rvalue::BinaryOp { op: code, a: a.value, b: b.value }, b.pos);
+    };
+    if kw = "listop" {
+        op = wordAt(ts, next);
+        if !op.ok || op.pos >= size(ts) { return bad; };
+        code = indexOf(listWords(), op.value);
+        c = countAt(ts, op.pos);
+        if code < 0 || !c.ok { return bad; };
+        args = operandsAt(ts, c.pos, c.value);
+        if !args.ok { return bad; };
+        return done(Rvalue::ListOp { op: code, args: args.value }, args.pos);
+    };
+    if kw = "makelist" {
+        c = countAt(ts, next);
+        if !c.ok { return bad; };
+        items = operandsAt(ts, c.pos, c.value);
+        if !items.ok { return bad; };
+        return done(Rvalue::MakeList { items: items.value }, items.pos);
+    };
+    if kw = "makedata" {
+        s = nameAt(ts, next);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        c = countAt(ts, s.pos);
+        if !c.ok { return bad; };
+        names = noNames();
+        values = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            f = nameAt(ts, p);
+            if !f.ok || f.pos >= size(ts) { return bad; };
+            v = operandAt(ts, f.pos);
+            if !v.ok { return bad; };
+            names = push(names, f.value);
+            values = push(values, v.value);
+            p = v.pos;
+        };
+        return done(Rvalue::MakeData { name: s.value, fields: names, values: values }, p);
+    };
+    if kw = "readfield" {
+        o = operandAt(ts, next);
+        if !o.ok || o.pos >= size(ts) { return bad; };
+        s = nameAt(ts, o.pos);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        f = nameAt(ts, s.pos);
+        if !f.ok { return bad; };
+        return done(Rvalue::ReadField { o: o.value, name: s.value, field: f.value }, f.pos);
+    };
+    if kw = "isvariant" || kw = "asvariant" {
+        o = operandAt(ts, next);
+        if !o.ok || o.pos >= size(ts) { return bad; };
+        s = nameAt(ts, o.pos);
+        if !s.ok { return bad; };
+        if kw = "isvariant" { return done(Rvalue::IsVariant { o: o.value, name: s.value }, s.pos); };
+        return done(Rvalue::AsVariant { o: o.value, name: s.value }, s.pos);
+    };
+    if kw = "takefield" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        s = nameAt(ts, l.pos);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        f = nameAt(ts, s.pos);
+        if !f.ok { return bad; };
+        return done(Rvalue::TakeField { local: l.value, name: s.value, field: f.value }, f.pos);
+    };
+    return bad;
+};
+
+// A line of a block: a statement (`assign L RVALUE`, `peek L RVALUE`, `drop L`) or the terminator that ends the block (`goto B`, `switch O B B`,
+// `call O N O... L B`, `return`, `unreachable`)
+enum Line { LStatement { s: Statement }, LTerminator { t: Terminator } };
+
+fn noLine() -> Line [{ }] [{ }] {
+    return Line::LTerminator { t: Terminator::Unreachable };
+};
+
+fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(noLine(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "return" { return done(Line::LTerminator { t: Terminator::Return }, next); };
+    if kw = "unreachable" { return done(Line::LTerminator { t: Terminator::Unreachable }, next); };
+    if next >= size(ts) { return bad; };
+    if kw = "assign" || kw = "peek" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        rv = rvalueAt(ts, l.pos);
+        if !rv.ok { return bad; };
+        if kw = "assign" { return done(Line::LStatement { s: Statement::Assign { local: l.value, rv: rv.value } }, rv.pos); };
+        return done(Line::LStatement { s: Statement::Peek { local: l.value, rv: rv.value } }, rv.pos);
+    };
+    if kw = "drop" {
+        l = intAt(ts, next);
+        if !l.ok { return bad; };
+        return done(Line::LStatement { s: Statement::Drop { local: l.value } }, l.pos);
+    };
+    if kw = "goto" {
+        b = intAt(ts, next);
+        if !b.ok { return bad; };
+        return done(Line::LTerminator { t: Terminator::Goto { block: b.value } }, b.pos);
+    };
+    if kw = "switch" {
+        o = operandAt(ts, next);
+        if !o.ok || o.pos >= size(ts) { return bad; };
+        yes = intAt(ts, o.pos);
+        if !yes.ok || yes.pos >= size(ts) { return bad; };
+        no = intAt(ts, yes.pos);
+        if !no.ok { return bad; };
+        return done(Line::LTerminator { t: Terminator::Switch { cond: o.value, yes: yes.value, no: no.value } }, no.pos);
+    };
+    if kw = "call" {
+        callee = operandAt(ts, next);
+        if !callee.ok || callee.pos >= size(ts) { return bad; };
+        c = countAt(ts, callee.pos);
+        if !c.ok { return bad; };
+        args = operandsAt(ts, c.pos, c.value);
+        if !args.ok || args.pos >= size(ts) { return bad; };
+        dest = intAt(ts, args.pos);
+        if !dest.ok || dest.pos >= size(ts) { return bad; };
+        after = intAt(ts, dest.pos);
+        if !after.ok { return bad; };
+        return done(Line::LTerminator { t: Terminator::Call { callee: callee.value, args: args.value, dest: dest.value, next: after.value } }, after.pos);
+    };
+    return bad;
+};
+
+// Records. A type declaration is `struct "n" N ("f" T)...` or `enum "n" N ("v" N ("f" T)...)...`, a function starts with `function "n" params N L... returns none|some T
+// sizeparams N "n"... typeparams N "n"... borrowed N L...` (`main` for the entry point), then `local L none|some "n" T` for each local, `block B`, its statements and its terminator
+// for each block, and `end`.
+
+// Whether the token at an index is the word w
+fn isWord(ts: &List<Token>, pos: Int, w: &String) -> Bool [{ }] [{ }] {
+    if pos < 0 || pos >= size(ts) { return false; };
+    t = get(ts, pos);
+    return !t.quoted && t.text = w;
+};
+
+// The word that a record starts with (the empty string when there is none)
+fn keywordOf(ts: &List<Token>) -> String [{ }] [{ }] {
+    if size(ts) > 0 {
+        t = get(ts, 0);
+        if !t.quoted { return t.text; };
+    };
+    return "";
+};
+
+fn fieldsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<Field>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    fields = [];
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noFields(), ts); };
+        f = nameAt(ts, p);
+        if !f.ok || f.pos >= size(ts) { return failed(noFields(), ts); };
+        t = typeAt(ts, f.pos);
+        if !t.ok { return failed(noFields(), ts); };
+        fields = push(fields, Field { name: f.value, ty: t.value });
+        p = t.pos;
+    };
+    return done(fields, p);
+};
+
+fn noDecl() -> TypeDecl [{ }] [{ }] {
+    return TypeDecl::DStruct { name: "", fields: [] };
+};
+
+// A struct or an enum, from a whole line
+fn declAt(ts: &List<Token>) -> Parsed<TypeDecl> [{ }] [{ }] {
+    bad = failed(noDecl(), ts);
+    if size(ts) < 3 { return bad; };
+    name = nameAt(ts, 1);
+    if !name.ok { return bad; };
+    c = countAt(ts, 2);
+    if !c.ok { return bad; };
+    if isWord(ts, 0, "struct") {
+        fields = fieldsAt(ts, 3, c.value);
+        if !fields.ok || fields.pos != size(ts) { return bad; };
+        return done(TypeDecl::DStruct { name: name.value, fields: fields.value }, fields.pos);
+    };
+    if isWord(ts, 0, "enum") {
+        variants = [];
+        p = 3;
+        count = c.value;
+        for i in 0..count [{ affirm p >= 3; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            v = nameAt(ts, p);
+            if !v.ok || v.pos >= size(ts) { return bad; };
+            n = countAt(ts, v.pos);
+            if !n.ok { return bad; };
+            fields = fieldsAt(ts, n.pos, n.value);
+            if !fields.ok { return bad; };
+            variants = push(variants, Variant { name: v.value, fields: fields.value });
+            p = fields.pos;
+        };
+        if p != size(ts) { return bad; };
+        return done(TypeDecl::DEnum { name: name.value, variants: variants }, p);
+    };
+    return bad;
+};
+
+fn noFunction() -> Function [{ }] [{ }] {
+    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], locals: [], blocks: [] };
+};
+
+// The header of a function, from a whole line (the locals and the blocks are filled in by the caller)
+fn headerAt(ts: &List<Token>) -> Parsed<Function> [{ }] [{ }] {
+    bad = failed(noFunction(), ts);
+    if size(ts) < 3 { return bad; };
+    name = nameAt(ts, 1);
+    if !name.ok || !isWord(ts, 2, "params") || 3 >= size(ts) { return bad; };
+    np = countAt(ts, 3);
+    if !np.ok { return bad; };
+    params = intsAt(ts, np.pos, np.value);
+    if !params.ok || !isWord(ts, params.pos, "returns") || params.pos + 1 >= size(ts) { return bad; };
+    hasReturn = isWord(ts, params.pos + 1, "some");
+    p = params.pos + 2;
+    returns = Type::TInt;
+    if hasReturn {
+        if p >= size(ts) { return bad; };
+        t = typeAt(ts, p);
+        if !t.ok { return bad; };
+        returns = t.value;
+        p = t.pos;
+        affirm p >= 0;
+    } else {
+        if !isWord(ts, params.pos + 1, "none") { return bad; };
+        affirm p >= 0;
+    };
+    if !isWord(ts, p, "sizeparams") || p + 1 >= size(ts) { return bad; };
+    ns = countAt(ts, p + 1);
+    if !ns.ok { return bad; };
+    sizeParams = namesAt(ts, ns.pos, ns.value);
+    if !sizeParams.ok || !isWord(ts, sizeParams.pos, "typeparams") || sizeParams.pos + 1 >= size(ts) { return bad; };
+    nt = countAt(ts, sizeParams.pos + 1);
+    if !nt.ok { return bad; };
+    typeParams = namesAt(ts, nt.pos, nt.value);
+    if !typeParams.ok || !isWord(ts, typeParams.pos, "borrowed") || typeParams.pos + 1 >= size(ts) { return bad; };
+    nb = countAt(ts, typeParams.pos + 1);
+    if !nb.ok { return bad; };
+    borrowed = intsAt(ts, nb.pos, nb.value);
+    if !borrowed.ok || borrowed.pos != size(ts) { return bad; };
+    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, locals: [], blocks: [] }, borrowed.pos);
+};
+
+fn noLocalDecl() -> LocalDecl [{ }] [{ }] {
+    return LocalDecl { id: 0, named: false, name: "", ty: Type::TInt };
+};
+
+// `local L none T` or `local L some "n" T`, from a whole line
+fn localDeclAt(ts: &List<Token>) -> Parsed<LocalDecl> [{ }] [{ }] {
+    bad = failed(noLocalDecl(), ts);
+    if size(ts) < 4 { return bad; };
+    l = intAt(ts, 1);
+    w = wordAt(ts, 2);
+    if !l.ok || !w.ok { return bad; };
+    named = w.value = "some";
+    name = "";
+    p = 3;
+    if named {
+        n = nameAt(ts, 3);
+        if !n.ok || n.pos >= size(ts) { return bad; };
+        name = n.value;
+        p = n.pos;
+        affirm p >= 0;
+        affirm p < size(ts);
+    } else {
+        if w.value != "none" { return bad; };
+        affirm p >= 0;
+        affirm p < size(ts);
+    };
+    t = typeAt(ts, p);
+    if !t.ok || t.pos != size(ts) { return bad; };
+    return done(LocalDecl { id: l.value, named: named, name: name, ty: t.value }, t.pos);
+};
+
+fn noBlock() -> Block [{ }] [{ }] {
+    return Block { id: 0, stmts: [], term: Terminator::Unreachable };
+};
+
+// The block that starts at the line li (`block B`): its statements and the terminator that ends it. The index in the result is the line after the terminator.
+fn blockAt(lines: &List<List<Token>>, li: Int) -> Parsed<Block> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
+    bad = Parsed<Block> { value: noBlock(), pos: size(lines), ok: false };
+    head = get(lines, li);
+    if size(head) != 2 { return bad; };
+    id = intAt(head, 1);
+    if !id.ok { return bad; };
+    stmts = [];
+    j = li + 1;
+    while j < size(lines) [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        ts = get(lines, j);
+        if size(ts) = 0 { return bad; };
+        l = lineAt(ts, 0);
+        if !l.ok || l.pos != size(ts) { return bad; };
+        match l.value {
+            Line::LStatement { s: st } => {
+                stmts = push(stmts, st);
+                j = j + 1;
+            },
+            Line::LTerminator { t: term } => {
+                return done(Block { id: id.value, stmts: stmts, term: term }, j + 1);
+            },
+        };
+    };
+    return bad;
+};
+
+fn functionKeyword(lines: &List<List<Token>>, li: Int) -> String [{ }] [{ }] {
+    if li >= 0 && li < size(lines) { return keywordOf(get(lines, li)); };
+    return "";
+};
+
+// The function that starts at the line li, up to its `end` line. The index in the result is the line after that.
+fn functionAt(lines: &List<List<Token>>, li: Int) -> Parsed<Function> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
+    bad = Parsed<Function> { value: noFunction(), pos: size(lines), ok: false };
+    h = headerAt(get(lines, li));
+    if !h.ok { return bad; };
+    j = li + 1;
+    locals = [];
+    while j < size(lines) && functionKeyword(lines, j) = "local" [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        d = localDeclAt(get(lines, j));
+        if !d.ok { return bad; };
+        locals = push(locals, d.value);
+        j = j + 1;
+    };
+    blocks = [];
+    while j < size(lines) && functionKeyword(lines, j) = "block" [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        b = blockAt(lines, j);
+        if !b.ok { return bad; };
+        blocks = push(blocks, b.value);
+        j = b.pos;
+    };
+    if j >= size(lines) || functionKeyword(lines, j) != "end" || size(get(lines, j)) != 1 { return bad; };
+    return done(Function { locals: locals, blocks: blocks, ..h.value }, j + 1);
+};
+
+fn noProgram() -> Program [{ }] [{ }] {
+    return Program { types: [], functions: [], entry: noFunction() };
+};
+
+// The program in the lines of a file: `tersus-mir 1`, the types, the functions and `main`
+fn programAt(lines: &List<List<Token>>) -> Parsed<Program> [{ }] [{ }] {
+    bad = Parsed<Program> { value: noProgram(), pos: size(lines), ok: false };
+    if size(lines) < 1 { return bad; };
+    first = get(lines, 0);
+    if size(first) != 2 || !isWord(first, 0, "tersus-mir") || !isWord(first, 1, "1") { return bad; };
+    j = 1;
+    types = [];
+    while j < size(lines) && (functionKeyword(lines, j) = "struct" || functionKeyword(lines, j) = "enum") [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        d = declAt(get(lines, j));
+        if !d.ok { return bad; };
+        types = push(types, d.value);
+        j = j + 1;
+    };
+    functions = [];
+    while j < size(lines) && functionKeyword(lines, j) = "function" [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        f = functionAt(lines, j);
+        if !f.ok { return bad; };
+        functions = push(functions, f.value);
+        j = f.pos;
+    };
+    if j >= size(lines) || functionKeyword(lines, j) != "main" { return bad; };
+    m = functionAt(lines, j);
+    if !m.ok || m.pos != size(lines) { return bad; };
+    return done(Program { types: types, functions: functions, entry: m.value }, m.pos);
+};
+
+// The lines of the standard input, as tokens, up to the end of the input or the first empty line. A line not longer than lineLimit.
+fn lineLimit() -> Int [{ }] [{ affirm return >= 0; }] {
+    return 1000000;
+};
+
+fn readLines() -> Parsed<List<List<Token>>> [{ }] [{ }] {
+    lines = [];
+    n = 0;
+    while n < 10000000 [{ affirm n >= 0; affirm n <= 10000000; }] shrinks 10000000 - n {
+        line = String::readLine(lineLimit());
+        if size(line.bytes) = 0 { return done(lines, n); };
+        t = tokenize(line);
+        if !t.ok { return Parsed<List<List<Token>>> { value: [], pos: n, ok: false }; };
+        lines = push(lines, t.value);
+        n = n + 1;
+    };
+    return done(lines, n);
+};
+
+// ---- end of the reader ----
+
+// ---- the emitter ----
+
+// Strings
+
+// `a.then(b)` is `a.concat(b)` that says nothing of its result. The text is put together from many pieces here (a line of the IR is ten of them), and what `concat` promises
+// of the size and the bytes of each is a set of facts that the proof of every later statement of the function has to carry: the time to validate a function with a few
+// of these chains was most of the time to validate the program.
+impl String {
+    fn then(self: Self, other: &String) -> Self [{ }] [{ }] {
+        return self.concat(other);
+    };
+};
+
+struct Res { ok: Bool, text: String };
+
+fn noTypes() -> List<Type> [{ }] [{ }] {
+    return [];
+};
+
+fn noStrings() -> List<String> [{ }] [{ }] {
+    return [];
+};
+
+fn showInt(n: Int) -> String [{ }] [{ }] {
+    return String::fromInt(n);
+};
+
+// The strings of a list with a string between them
+fn joinWith(sep: &String, parts: &List<String>) -> String [{ }] [{ }] {
+    out = "";
+    for i in 0..size(parts) {
+        if i > 0 { out = out.then(sep); };
+        out = out.then(get(parts, i));
+    };
+    return out;
+};
+
+// The text before the first `<` (a struct with sizes prints as the struct)
+fn beforeAngle(name: &String) -> String [{ }] [{ }] {
+    i = name.find(toByte(60), 0);
+    return name.slice(0, i);
+};
+
+fn withoutBackticks(name: &String) -> String [{ }] [{ }] {
+    out = "";
+    for i in 0..size(name.bytes) {
+        b = get(name.bytes, i);
+        if b != toByte(96) { out = push(out, b); };
+    };
+    return out;
+};
+
+fn hexUpper(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
+    if d < 10 { return toByte(48 + d); };
+    return toByte(55 + d);
+};
+
+// A name as LLVM writes it in quotes and in a string: the bytes that are printable ASCII as they are and the others (and `"` and `\`) as `\hh`
+fn escaped(name: &String) -> String [{ }] [{ }] {
+    out = "";
+    for i in 0..size(name.bytes) {
+        c = toInt(get(name.bytes, i));
+        if c >= 32 && c < 127 && c != 34 && c != 92 {
+            out = push(out, toByte(c));
+        } else {
+            out = push(out, toByte(92));
+            out = push(out, hexUpper(c / 16));
+            out = push(out, hexUpper(c % 16));
+        };
+    };
+    return out;
+};
+
+// The name of a global: quoted, so that any name will do
+fn global(prefix: &String, name: &String) -> String [{ }] [{ }] {
+    return "@\"".then(prefix).then(escaped(name)).then("\"");
+};
+
+// Types
+
+fn renderSize(s: &Size) -> String [{ }] [{ }] {
+    return match s {
+        Size::SConst { n: n } => showInt(n),
+        Size::SAny => "?",
+        Size::SParam { name: name } => name,
+        Size::SVar { n: n } => "_".then(showInt(n)),
+    };
+};
+
+// A type in Tersus syntax (Pretty.renderType)
+fn renderType(t: &Type) -> String ~ {
+    r = "";
+    match t {
+        Type::TInt => { r = "Int"; },
+        Type::TByte => { r = "Byte"; },
+        Type::TBool => { r = "Bool"; },
+        Type::TList { elem: e } => { r = "List<".then(renderType(Box::unbox(e))).then(">"); },
+        Type::TBox { inner: e } => { r = "Box<".then(renderType(Box::unbox(e))).then(">"); },
+        Type::TArray { elem: e, size: s } => { r = "Array<".then(renderType(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
+        Type::TRef { inner: e } => { r = "&".then(renderType(Box::unbox(e))); },
+        Type::TParam { name: name } => { r = name; },
+        Type::TForall { sizes: sizes, types: types, body: body } => {
+            names = noStrings();
+            for tn in types { names = push(names, tn); };
+            for sn in sizes { names = push(names, sn); };
+            r = "<".then(joinWith(", ", names)).then(">").then(renderType(Box::unbox(body)));
+        },
+        Type::TFn { args: args, ret: ret } => {
+            parts = noStrings();
+            for a in args { parts = push(parts, renderType(a)); };
+            r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(renderType(Box::unbox(ret)));
+        },
+        Type::TNamed { name: name } => { r = withoutBackticks(name); },
+        Type::TVariant { name: name } => { r = name; },
+        Type::TVar { n: n } => { r = "?"; },
+    };
+    return r;
+};
+
+fn declName(d: &TypeDecl) -> String [{ }] [{ }] {
+    return match d {
+        TypeDecl::DStruct { name: name, fields: fields } => name,
+        TypeDecl::DEnum { name: name, variants: variants } => name,
+    };
+};
+
+// The index of the declaration of a struct or an enum in the types of the program, or -1
+fn lookupDecl(types: &List<TypeDecl>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(types); }] {
+    i = 0;
+    while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
+        d = get(types, i);
+        if declName(d) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn variantNamed(variants: &List<Variant>, name: &String) -> Bool [{ }] [{ }] {
+    for v in variants {
+        if v.name = name { return true; };
+    };
+    return false;
+};
+
+// The enum that has the variant (a struct is its own constructor, and a cast to it has the type of a variant of it): Mir.ownerOf
+fn ownerOf(types: &List<TypeDecl>, v: &String) -> Res [{ }] [{ }] {
+    i = lookupDecl(types, v);
+    if i >= 0 {
+        d = get(types, i);
+        if d is TypeDecl::DStruct { return Res { ok: true, text: v }; };
+    };
+    for d in types {
+        match d {
+            TypeDecl::DStruct { name: name, fields: fields } => { },
+            TypeDecl::DEnum { name: name, variants: variants } => {
+                if variantNamed(variants, v) { return Res { ok: true, text: name }; };
+            },
+        };
+    };
+    return Res { ok: false, text: "" };
+};
+
+// A value of a variant has the representation of its enum, so one descriptor serves both
+fn canonical(types: &List<TypeDecl>, t: &Type) -> Type [{ }] [{ }] {
+    if t is Type::TVariant {
+        o = ownerOf(types, (t as Type::TVariant).name);
+        if o.ok { return Type::TNamed { name: o.text }; };
+    };
+    return t;
+};
+
+// The variants of a struct or an enum: a struct is one variant, named as it is
+fn variantsOf(types: &List<TypeDecl>, n: &String) -> List<Variant> [{ }] [{ }] {
+    out = [];
+    i = lookupDecl(types, n);
+    if i >= 0 {
+        d = get(types, i);
+        match d {
+            TypeDecl::DStruct { name: name, fields: fields } => { out = push(out, Variant { name: name, fields: fields }); },
+            TypeDecl::DEnum { name: name, variants: variants } => { out = variants; },
+        };
+    };
+    return out;
+};
+
+fn isEnum(types: &List<TypeDecl>, n: &String) -> Bool [{ }] [{ }] {
+    i = lookupDecl(types, n);
+    if i >= 0 {
+        d = get(types, i);
+        return d is TypeDecl::DEnum;
+    };
+    return false;
+};
+
+// What a type is when it is an array: whether it is one of the kind asked for, its length when it has one, and the type of its elements. (The cast of an enum is
+// proved by the test just before it, so the tests are made where the cast is.)
+struct ArrayInfo { ok: Bool, length: Int, elem: Type };
+
+fn notArray() -> ArrayInfo [{ }] [{ }] {
+    return ArrayInfo { ok: false, length: 0, elem: Type::TInt };
+};
+
+// An array of a size that is a constant (the TArray of Haskell)
+fn sizedArray(t: &Type) -> ArrayInfo [{ }] [{ }] {
+    if t is Type::TArray {
+        s = (t as Type::TArray).size;
+        if s is Size::SConst {
+            return ArrayInfo { ok: true, length: (s as Size::SConst).n, elem: Box::unbox((t as Type::TArray).elem) };
+        };
+    };
+    return notArray();
+};
+
+// An array of no size
+fn unsizedArray(t: &Type) -> ArrayInfo [{ }] [{ }] {
+    if t is Type::TArray {
+        s = (t as Type::TArray).size;
+        if s is Size::SAny {
+            return ArrayInfo { ok: true, length: 0, elem: Box::unbox((t as Type::TArray).elem) };
+        };
+    };
+    return notArray();
+};
+
+// What a Box holds
+struct Held { ok: Bool, ty: Type };
+
+fn boxHolds(t: &Type) -> Held [{ }] [{ }] {
+    if t is Type::TBox { return Held { ok: true, ty: Box::unbox((t as Type::TBox).inner) }; };
+    return Held { ok: false, ty: Type::TInt };
+};
+
+fn isSizedArray(t: &Type) -> Bool [{ }] [{ }] {
+    return sizedArray(t).ok;
+};
+
+// A Box of an array of no size is two words held inline: the address of the elements and how many there are. (A Box of anything that has a size is the one word.)
+fn isFat(t: &Type) -> Bool [{ }] [{ }] {
+    h = boxHolds(t);
+    return h.ok && unsizedArray(h.ty).ok;
+};
+
+fn isAggregate(t: &Type) -> Bool [{ }] [{ }] {
+    return isSizedArray(t) || t is Type::TNamed || t is Type::TVariant || isFat(t);
+};
+
+// Whether a value is the address of a value of the heap, which has one owner (a Box)
+fn isPointer(t: &Type) -> Bool [{ }] [{ }] {
+    return t is Type::TBox && !isFat(t);
+};
+
+// The struct or enum that a type is a value of: a struct or an enum itself, or a variant (whose enum is looked up)
+fn declaredName(types: &List<TypeDecl>, t: &Type) -> Res [{ }] [{ }] {
+    if t is Type::TNamed { return Res { ok: true, text: (t as Type::TNamed).name }; };
+    if t is Type::TVariant { return ownerOf(types, (t as Type::TVariant).name); };
+    return Res { ok: false, text: "" };
+};
+
+// The 8-byte words of a value held inline: an Int, a Bool or an address is one, and an array is its elements', a struct its fields' and an enum a word and the
+// widest of its variants'. A Box of an array of no size is two. (Mir.slotsOf)
+fn slotsOf(types: &List<TypeDecl>, t: &Type) -> Int ~ {
+    if isFat(t) { return 2; };
+    arr = sizedArray(t);
+    if arr.ok { return arr.length * slotsOf(types, arr.elem); };
+    n = declaredName(types, t);
+    if !n.ok { return 1; };
+    i = lookupDecl(types, n.text);
+    if i < 0 { return 1; };
+    d = get(types, i);
+    r = 1;
+    match d {
+        TypeDecl::DStruct { name: name, fields: fields } => {
+            total = 0;
+            for f in fields { total = total + slotsOf(types, f.ty); };
+            r = total;
+        },
+        TypeDecl::DEnum { name: name, variants: variants } => {
+            widest = 0;
+            for v in variants {
+                w = 0;
+                for f in v.fields { w = w + slotsOf(types, f.ty); };
+                if w > widest { widest = w; };
+            };
+            r = 1 + widest;
+        },
+    };
+    return r;
+};
+
+// Whether a value owns something to free: a Box, or an array, struct or enum that holds one (MirOwnership.needsDrop)
+fn needsDrop(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
+    if t is Type::TBox { return true; };
+    if t is Type::TArray { return needsDrop(types, Box::unbox((t as Type::TArray).elem)); };
+    n = declaredName(types, t);
+    if !n.ok { return false; };
+    i = lookupDecl(types, n.text);
+    if i < 0 { return false; };
+    d = get(types, i);
+    r = false;
+    match d {
+        TypeDecl::DStruct { name: name, fields: fields } => {
+            for f in fields {
+                if needsDrop(types, f.ty) { r = true; };
+            };
+        },
+        TypeDecl::DEnum { name: name, variants: variants } => {
+            for v in variants {
+                for f in v.fields {
+                    if needsDrop(types, f.ty) { r = true; };
+                };
+            };
+        },
+    };
+    return r;
+};
+
+// The LLVM type of a value that is a word, or why there is none
+fn llvmType(t: &Type) -> Res ~ {
+    unsupported = Res { ok: false, text: "Native code does not support ".then(renderType(t)).then(" yet") };
+    if t is Type::TInt || t is Type::TByte { return Res { ok: true, text: "i64" }; };
+    if t is Type::TBool { return Res { ok: true, text: "i1" }; };
+    if t is Type::TRef {
+        return llvmType(Box::unbox((t as Type::TRef).inner));
+    };
+    arr = sizedArray(t);
+    if arr.ok {
+        inner = llvmType(arr.elem);
+        if !inner.ok { return inner; };
+        return Res { ok: true, text: "ptr" };
+    };
+    if t is Type::TNamed || t is Type::TBox || t is Type::TVariant || t is Type::TFn { return Res { ok: true, text: "ptr" }; };
+    return unsupported;
+};
+
+// The symbol of the descriptor of a type
+fn typeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("type.", renderType(canonical(types, t)));
+};
+
+// The types the runtime needs a descriptor of, and the types inside them (a type that contains itself is there once)
+fn parts(types: &List<TypeDecl>, t: &Type) -> List<Type> ~ {
+    out = noTypes();
+    arr = sizedArray(t);
+    if arr.ok {
+        out = push(out, canonical(types, arr.elem));
+        return out;
+    };
+    h = boxHolds(t);
+    if h.ok {
+        fat = unsizedArray(h.ty);
+        if fat.ok {
+            out = push(out, canonical(types, fat.elem));
+        } else {
+            out = push(out, canonical(types, h.ty));
+        };
+        return out;
+    };
+    if t is Type::TNamed {
+        for v in variantsOf(types, (t as Type::TNamed).name) {
+            for f in v.fields { out = push(out, canonical(types, f.ty)); };
+        };
+    };
+    return out;
+};
+
+fn contains(seen: &List<Type>, t: &Type) -> Bool [{ }] [{ }] {
+    for s in seen {
+        if s = t { return true; };
+    };
+    return false;
+};
+
+fn closeTypes(types: &List<TypeDecl>, roots: &List<Type>) -> List<Type> ~ {
+    // the types still to see, the next one last
+    work = noTypes();
+    i = size(roots);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(roots); }] shrinks i {
+        i = i - 1;
+        work = push(work, canonical(types, get(roots, i)));
+    };
+    seen = noTypes();
+    while size(work) > 0 [{ }] ~ {
+        t = last(work);
+        work = pop(work);
+        if !contains(seen, t) {
+            seen = push(seen, t);
+            ps = parts(types, t);
+            j = size(ps);
+            while j > 0 [{ affirm j >= 0; affirm j <= size(ps); }] shrinks j {
+                j = j - 1;
+                work = push(work, get(ps, j));
+            };
+        };
+    };
+    return seen;
+};
+
+// Descriptors
+
+fn descriptorBody(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    if t is Type::TInt || t is Type::TByte { return "{ i64 0, ptr null }"; };
+    if t is Type::TBool { return "{ i64 1, ptr null }"; };
+    if isSizedArray(t) { return "{ i64 5, ptr ".then(global("array.", renderType(t))).then(" }"); };
+    h = boxHolds(t);
+    if h.ok {
+        fat = unsizedArray(h.ty);
+        if fat.ok { return "{ i64 7, ptr ".then(typeSymbol(types, fat.elem)).then(" }"); };
+        return "{ i64 6, ptr ".then(typeSymbol(types, h.ty)).then(" }");
+    };
+    if t is Type::TNamed { return "{ i64 3, ptr ".then(global("data.", (t as Type::TNamed).name)).then(" }"); };
+    if t is Type::TFn { return "{ i64 4, ptr null }"; };
+    return "{ i64 -1, ptr null }";
+};
+
+// The constants of a struct or an enum: how many variants, the variants with the names and descriptors of their fields, and whether the value starts with a word that
+// says the variant (1 for an enum, 2 for the list of native code)
+fn dataDescriptor(types: &List<TypeDecl>, n: &String) -> List<String> ~ {
+    variants = variantsOf(types, n);
+    kind = "0";
+    if isEnum(types, n) { kind = "1"; } else { if beforeAngle(n) = "StdList" { kind = "2"; }; };
+    out = noStrings();
+    out = push(out, global("data.", n).then(" = private constant { i64, ptr, i64 } { i64 ").then(showInt(size(variants))).then(", ptr ").then(global("variants.", n)).then(", i64 ").then(kind).then(" }"));
+    entries = noStrings();
+    for v in variants {
+        fieldsRef = "null";
+        if size(v.fields) > 0 { fieldsRef = global("fields.", v.name); };
+        entries = push(entries, "{ ptr, i64, ptr } { ptr ".then(global("str.", v.name)).then(", i64 ").then(showInt(size(v.fields))).then(", ptr ").then(fieldsRef).then(" }"));
+    };
+    out = push(out, global("variants.", n).then(" = private constant [").then(showInt(size(variants))).then(" x { ptr, i64, ptr }] [").then(joinWith(", ", entries)).then("]"));
+    for v in variants {
+        if size(v.fields) > 0 {
+            fs = noStrings();
+            for f in v.fields {
+                fs = push(fs, "{ ptr, ptr } { ptr ".then(global("str.", f.name)).then(", ptr ").then(typeSymbol(types, f.ty)).then(" }"));
+            };
+            out = push(out, global("fields.", v.name).then(" = private constant [").then(showInt(size(v.fields))).then(" x { ptr, ptr }] [").then(joinWith(", ", fs)).then("]"));
+        };
+    };
+    return out;
+};
+
+fn containsName(names: &List<String>, n: &String) -> Bool [{ }] [{ }] {
+    for s in names {
+        if s = n { return true; };
+    };
+    return false;
+};
+
+// A constant global for each type: its kind (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array of no size) and what the runtime needs to walk a
+// value (typeDescriptors)
+fn typeDescriptors(types: &List<TypeDecl>, closed: &List<Type>) -> List<String> ~ {
+    out = noStrings();
+    out = push(out, "%tersus.type = type { i64, ptr }");
+    for t in closed {
+        out = push(out, typeSymbol(types, t).then(" = private constant %tersus.type ").then(descriptorBody(types, t)));
+    };
+    for t in closed {
+        if t is Type::TNamed {
+            for line in dataDescriptor(types, (t as Type::TNamed).name) { out = push(out, line); };
+        };
+    };
+    for t in closed {
+        arr = sizedArray(t);
+        if arr.ok {
+            out = push(out, global("array.", renderType(t)).then(" = private constant { i64, ptr } { i64 ").then(showInt(arr.length)).then(", ptr ").then(typeSymbol(types, arr.elem)).then(" }"));
+        };
+    };
+    seen = noStrings();
+    for t in closed {
+        if t is Type::TNamed {
+            for v in variantsOf(types, (t as Type::TNamed).name) {
+                names = noStrings();
+                names = push(names, v.name);
+                for f in v.fields { names = push(names, f.name); };
+                for name in names {
+                    if !containsName(seen, name) {
+                        seen = push(seen, name);
+                        shown = beforeAngle(name);
+                        out = push(out, global("str.", name).then(" = private constant [").then(showInt(size(shown.bytes) + 1)).then(" x i8] c\"").then(escaped(shown)).then("\\00\""));
+                    };
+                };
+            };
+        };
+    };
+    out = push(out, "");
+    return out;
+};
+
+// The declarations of the runtime and of the intrinsics
+fn declarations() -> List<String> [{ }] [{ }] {
+    out = noStrings();
+    out = push(out, "declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)");
+    out = push(out, "declare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)");
+    out = push(out, "declare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)");
+    out = push(out, "declare void @tersus_overflow() noreturn");
+    out = push(out, "declare i64 @tersus_writeByte(i64)");
+    out = push(out, "declare i64 @tersus_writeError(i64)");
+    out = push(out, "declare i64 @tersus_readByte()");
+    out = push(out, "declare void @tersus_init(i32, ptr)");
+    out = push(out, "declare i64 @tersus_argCount()");
+    out = push(out, "declare i64 @tersus_argByte(i64, i64)");
+    out = push(out, "declare i64 @tersus_pathByte(i64)");
+    out = push(out, "declare i64 @tersus_fileLoad()");
+    out = push(out, "declare i64 @tersus_fileByte(i64)");
+    out = push(out, "declare i64 @tersus_storeByte(i64)");
+    out = push(out, "declare i64 @tersus_fileStore()");
+    out = push(out, "declare void @tersus_print(ptr, i64)");
+    out = push(out, "declare i32 @tersus_equal(ptr, i64, i64)");
+    out = push(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
+    out = push(out, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)");
+    out = push(out, "declare void @tersus_clone(ptr, ptr, ptr)");
+    out = push(out, "declare void @tersus_drop(ptr, ptr)");
+    out = push(out, "declare ptr @tersus_box_new(i64)");
+    out = push(out, "declare void @tersus_box_free(ptr)");
+    out = push(out, "");
+    return out;
+};
+
+// The C-level main: runs the program and prints its return value, if it returned one
+struct Entry { ok: Bool, error: String, lines: List<String>, types: List<Type> };
+
+fn failedEntry(message: &String) -> Entry [{ }] [{ }] {
+    return Entry { ok: false, error: message, lines: noStrings(), types: noTypes() };
+};
+
+// The lines of the body of `main`, with the indentation (a label has none)
+fn wrapMain(body: &List<String>) -> List<String> [{ }] [{ }] {
+    out = noStrings();
+    out = push(out, "define i32 @main(i32 %argc, ptr %argv) {");
+    out = push(out, "    call void @tersus_init(i32 %argc, ptr %argv)");
+    for l in body {
+        if size(l.bytes) > 0 && get(l.bytes, size(l.bytes) - 1) = toByte(58) {
+            out = push(out, l);
+        } else {
+            out = push(out, "    ".then(l));
+        };
+    };
+    out = push(out, "}");
+    return out;
+};
+
+fn resultStruct(t: &String) -> String [{ }] [{ }] {
+    return "{ ".then(t).then(", i1 }");
+};
+
+fn entryPoint(types: &List<TypeDecl>, main: &Function) -> Entry ~ {
+    if !main.hasReturn {
+        body = noStrings();
+        body = push(body, "call void @tersus_main()");
+        body = push(body, "ret i32 0");
+        return Entry { ok: true, error: "", lines: wrapMain(body), types: noTypes() };
+    };
+    ty = main.returns;
+    sym = typeSymbol(types, ty);
+    roots = noTypes();
+    roots = push(roots, ty);
+    body = noStrings();
+    // a value held inline (an array, a struct, an enum) is made in a frame, so the program is given room for it, and prints it (and frees what it owns) from there
+    if isAggregate(ty) {
+        body = push(body, "%out = alloca [".then(showInt(slotsOf(types, ty))).then(" x i64]"));
+        body = push(body, "%ok = call i1 @tersus_main(ptr %out)");
+        body = push(body, "br i1 %ok, label %print, label %done");
+        body = push(body, "print:");
+        body = push(body, "%w = ptrtoint ptr %out to i64");
+        body = push(body, "call void @tersus_print(ptr ".then(sym).then(", i64 %w)"));
+        if needsDrop(types, ty) {
+            body = push(body, "call void @tersus_drop(ptr ".then(sym).then(", ptr %out)"));
+        };
+        body = push(body, "br label %done");
+        body = push(body, "done:");
+        body = push(body, "ret i32 0");
+        return Entry { ok: true, error: "", lines: wrapMain(body), types: roots };
+    };
+    t = llvmType(ty);
+    if !t.ok { return failedEntry(t.text); };
+    result = resultStruct(t.text);
+    word = "%v";
+    convert = noStrings();
+    if ty is Type::TBool {
+        convert = push(convert, "%w = zext i1 %v to i64");
+        word = "%w";
+    };
+    if !(ty is Type::TInt || ty is Type::TByte || ty is Type::TBool) {
+        convert = push(convert, "%w = ptrtoint ptr %v to i64");
+        word = "%w";
+    };
+    body = push(body, "%r = call ".then(result).then(" @tersus_main()"));
+    body = push(body, "%ok = extractvalue ".then(result).then(" %r, 1"));
+    body = push(body, "br i1 %ok, label %print, label %done");
+    body = push(body, "print:");
+    body = push(body, "%v = extractvalue ".then(result).then(" %r, 0"));
+    for c in convert { body = push(body, c); };
+    body = push(body, "call void @tersus_print(ptr ".then(sym).then(", i64 ").then(word).then(")"));
+    if isPointer(ty) {
+        body = push(body, "%slot = alloca i64");
+        body = push(body, "store ptr %v, ptr %slot");
+        body = push(body, "call void @tersus_drop(ptr ".then(sym).then(", ptr %slot)"));
+    };
+    body = push(body, "br label %done");
+    body = push(body, "done:");
+    body = push(body, "ret i32 0");
+    return Entry { ok: true, error: "", lines: wrapMain(body), types: roots };
+};
+
+fn printLines(lines: &List<String>) -> Int [{ }] [{ }] {
+    n = 0;
+    for l in lines {
+        n = n + l.print();
+        writeByte(toByte(10));
+        n = n + 1;
+    };
+    return n;
+};
+
+// The IR so far: the declarations, the descriptors of the types of the locals and what they contain, and the entry point (LlvmEmit.emitOutline)
+fn outline(program: &Program) -> Entry ~ {
+    entry = entryPoint(program.types, program.entry);
+    if !entry.ok { return entry; };
+    roots = noTypes();
+    for f in program.functions {
+        for d in f.locals { roots = push(roots, d.ty); };
+    };
+    for d in program.entry.locals { roots = push(roots, d.ty); };
+    for t in entry.types { roots = push(roots, t); };
+    closed = closeTypes(program.types, roots);
+    lines = declarations();
+    for l in typeDescriptors(program.types, closed) { lines = push(lines, l); };
+    for l in entry.lines { lines = push(lines, l); };
+    lines = push(lines, "");
+    return Entry { ok: true, error: "", lines: lines, types: closed };
+};
+
+// The program is read from the standard input and its IR is written. What cannot be read or made is reported on the standard error.
+read = readLines();
+if !read.ok {
+    "the input is not the MIR as data: a bad name\n".printError();
+    return 1;
+};
+program = programAt(read.value);
+if !program.ok {
+    "the input is not the MIR as data\n".printError();
+    return 1;
+};
+result = outline(program.value);
+if !result.ok {
+    result.error.printError();
+    "\n".printError();
+    return 1;
+};
+printLines(result.lines);

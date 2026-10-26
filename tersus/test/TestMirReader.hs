@@ -1,4 +1,4 @@
-module TestMirReader (testMirReader) where
+module TestMirReader (testMirReader, withProgram, sameText) where
 
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
 import System.Exit (ExitCode (..))
@@ -54,25 +54,28 @@ interpreted source = do
                 | sameText output text -> Nothing
                 | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
 
--- The reader as an executable, built once for the tests that need it
-withReader :: (FilePath -> IO TestResult) -> IO TestResult
-withReader use = do
+-- A program of the examples as an executable, built once for the tests that need it (clang is needed, and the tests pass without it)
+withProgram :: FilePath -> String -> (FilePath -> IO TestResult) -> IO TestResult
+withProgram path name use = do
     available <- clangAvailable
     if not available
         then pure Nothing
         else do
-            reader <- readerSource
+            source <- readFile path
             tmp <- getTemporaryDirectory
-            let dir = tmp </> "tersus-mir-reader-test"
-                exe = dir </> "reader"
+            let dir = tmp </> ("tersus-" ++ name ++ "-test")
+                exe = dir </> name
             createDirectoryIfMissing True dir
-            case llvmSource reader of
+            case llvmSource source of
                 Error e -> pure (Just e)
                 Ok ir -> do
                     built <- buildExecutable exe ir
                     case built of
                         Error e -> pure (Just e)
                         Ok () -> use exe
+
+withReader :: (FilePath -> IO TestResult) -> IO TestResult
+withReader = withProgram "examples/mir_reader.tersus" "mir-reader"
 
 everyProgram :: IO TestResult
 everyProgram = withReader $ \exe -> do
