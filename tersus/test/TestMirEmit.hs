@@ -5,7 +5,7 @@ import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
 import Cli (Command (..), World (..), noWorld, runSourceIn)
-import LlvmEmit (emitBody, emitOutline)
+import LlvmEmit (emitBody, emitOutline, emitOwned)
 import Mir
 import MirData (forNative, writeProgram)
 import Pipeline (ownedSource)
@@ -16,12 +16,11 @@ import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The lowering to LLVM IR written in Tersus (examples/emit.tersus, step 31 of the roadmap and STEP31.md) while it is written a part at a time. It is given the MIR
--- as data, and what it writes is compared with the Haskell it replaces, for every example and every program that native code is tested with:
+-- The lowering to LLVM IR written in Tersus (examples/emit.tersus, step 31 of the roadmap and STEP31.md). It is given the MIR as data, and what it writes is compared with
+-- the Haskell it replaces, for every example and every program that native code is tested with:
+-- - with no argument: all of the IR, byte for byte, against `LlvmEmit.emitOwned`;
 -- - `outline`: the declarations, the descriptors of the types of the locals and the entry point, against `LlvmEmit.emitOutline`;
--- - `bodies`: the code of each function (operands, constants, arithmetic, the operations of the runtime, terminators and calls), against `LlvmEmit.emitBody`. The
---   emitter has so far the functions that make words; the others it reports as unsupported, and what is checked is that it has every one that makes only words
---   (`wordOnly`) and that what it writes for the others is what the Haskell writes.
+-- - `bodies`: the code of each function, against `LlvmEmit.emitBody` (a function that the Haskell cannot emit is `unsupported` in the Tersus too).
 -- The emitter is built once (it needs clang, and the tests pass without it); a smaller input is run by the interpreter.
 testMirEmit :: Test
 testMirEmit =
@@ -30,9 +29,8 @@ testMirEmit =
         [ TestCase "the reader is the same in the reader and in the emitter" sameReader
         , TestList
             "interpreted"
-            [ TestCase "the outline of a loop" (readFile "examples/loops.tersus" >>= interpretedOutline)
+            [ TestCase "the IR of a loop" (readFile "examples/loops.tersus" >>= interpretedIr)
             , TestCase "the outline of a struct and an enum" (readFile "examples/enums.tersus" >>= interpretedOutline)
-            , TestCase "the code of a loop" (readFile "examples/loops.tersus" >>= interpretedBodies)
             , TestCase "the code of arithmetic" (readFile "examples/arithmetic.tersus" >>= interpretedBodies)
             ]
         , TestCase "every example and program, natively" everyProgram
@@ -67,39 +65,18 @@ sectionsOf = go . lines
     go [] = []
     go (l : ls) = let (body, rest) = break ("; function " `isPrefixOf`) ls in (l : body) : go rest
 
--- Whether a function makes only words, which is what the emitter has so far
-wordOnly :: Function -> Bool
-wordOnly f = all (word . localType) (Map.elems (fnLocals f)) && all statementOk statements && all (terminatorOk . bTerm) blocks
-  where
-    blocks = Map.elems (fnBlocks f)
-    bTerm (BasicBlock _ t) = t
-    statements = concat [ss | BasicBlock ss _ <- blocks]
-    word t = case t of
-        TInt -> True
-        TByte -> True
-        TBool -> True
-        TFn{} -> True
-        _ -> False
-    statementOk s = case s of
-        Assign _ rv -> rvalueOk rv
-        Peek _ rv -> rvalueOk rv
-        Drop _ -> True
-        Ghost _ _ -> True
-    rvalueOk rv = case rv of
-        Use o -> operandOk o
-        BinaryOp _ a b -> operandOk a && operandOk b
-        ListOp op os -> all operandOk os && (op, length os) `elem` [(ReadByte, 0), (PathByte, 1), (FileLoad, 0), (FileByte, 1), (StoreByte, 1), (FileStore, 0), (ArgCount, 0), (ArgByte, 2), (ToByte, 1), (FromByte, 1), (WriteError, 1), (WriteByte, 1)]
-        _ -> False
-    terminatorOk t = case t of
-        SwitchBool o _ _ -> operandOk o
-        Call callee args _ _ -> all operandOk (callee : args)
-        _ -> True
-    operandOk o = case o of
-        Const (CInt _) -> True
-        Const (CBool _) -> True
-        Const (CFn _) -> True
-        Const _ -> False
-        _ -> True
+interpretedIr :: String -> IO TestResult
+interpretedIr source = do
+    emitter <- readFile "examples/emit.tersus"
+    pure $ case ownedSource source of
+        Error e -> Just e
+        Ok owned -> case (emitOwned (forNative owned), runSourceIn noWorld{worldInput = writeProgram owned} Interpret emitter) of
+            (Ok text, Ok (output, errors))
+                | not (null errors) -> Just ("reported: " ++ errors)
+                | sameText output text -> Nothing
+                | otherwise -> Just ("wrote\n" ++ take 2000 output ++ "\nfor\n" ++ take 2000 text)
+            (Error e, _) -> Just ("the Haskell gives no IR: " ++ e)
+            (_, Error e) -> Just e
 
 interpretedOutline :: String -> IO TestResult
 interpretedOutline source = do
@@ -128,7 +105,7 @@ interpretedBodies source = do
                     ([], _) -> Just "the emitter has no function of the program"
                     (bad, _) -> Just (unlines (take 3 bad))
 
--- What is wrong with the code the emitter wrote (the functions it has are those the Haskell writes, and it has all that make only words), and how many functions it had
+-- What is wrong with the code the emitter wrote (it has the functions that the Haskell writes, and no other), and how many functions it had
 compareBodies :: Program -> String -> ([String], Int)
 compareBodies program output = (concat problems, length (filter id supported))
   where
@@ -137,13 +114,13 @@ compareBodies program output = (concat problems, length (filter id supported))
     results = zipWith3 check [0 :: Int ..] expected (map Just written ++ repeat Nothing)
     problems = map fst results
     supported = map snd results
-    check i (f, haskell) w = case (haskell, w) of
+    check i (_, haskell) w = case (haskell, w) of
         (_, Nothing) -> ([show i ++ ": nothing was written"], False)
         (Nothing, Just section)
             | section == ["; function " ++ show i, "; unsupported"] -> ([], False)
             | otherwise -> ([show i ++ ": the Haskell gives no code, and the emitter wrote some"], True)
         (Just lines', Just section)
-            | section == ["; function " ++ show i, "; unsupported"] -> ([show i ++ ": unsupported but all words" | wordOnly f], False)
+            | section == ["; function " ++ show i, "; unsupported"] -> ([show i ++ ": unsupported, and the Haskell has code for it"], False)
             | section == lines' -> ([], True)
             | otherwise -> ([show i ++ ": wrote\n" ++ unlines (take 40 section) ++ "\nfor\n" ++ unlines (take 40 lines')], True)
 
@@ -162,6 +139,7 @@ everyProgram = withProgram "examples/emit.tersus" "emit" $ \exe -> do
         Ok owned -> do
             outline <- runExecutableBytes exe ["outline"] (writeProgram owned)
             bodies <- runExecutableBytes exe ["bodies"] (writeProgram owned)
+            everything <- runExecutableBytes exe [] (writeProgram owned)
             let program = forNative owned
                 (bodyProblems, count) = case bodies of
                     (ExitSuccess, output, "") -> compareBodies program output
@@ -171,7 +149,18 @@ everyProgram = withProgram "examples/emit.tersus" "emit" $ \exe -> do
                     ((_, output, errors), Ok text) -> ["the outline: wrote " ++ show (length output) ++ " bytes for " ++ show (length text) ++ ", " ++ take 200 errors]
                     -- (a program that has no entry point: the reason on the standard error, and the value 1)
                     ((_, output, errors), Error e) -> ["the outline: wrote " ++ show output ++ " with " ++ show errors ++ " and not " ++ show e | output /= "1\n" || errors /= e ++ "\n"]
-            pure ([name ++ ": " ++ p | p <- outlineProblems ++ bodyProblems], count)
+                irProblems = case (everything, emitOwned program) of
+                    ((ExitSuccess, output, ""), Ok text) | output == text -> []
+                    ((_, output, errors), Ok text) -> ["the IR: wrote " ++ show (length output) ++ " bytes for " ++ show (length text) ++ ", " ++ take 200 errors ++ firstDifference output text]
+                    -- (a program that cannot be made into code: the reason on the standard error, and the value 1)
+                    ((_, output, errors), Error e) -> ["the IR: wrote " ++ show (take 100 output) ++ " with " ++ show errors ++ " and not " ++ show e | output /= "1\n" || errors /= e ++ "\n"]
+            pure ([name ++ ": " ++ p | p <- outlineProblems ++ bodyProblems ++ irProblems], count)
+
+-- Where the first line that differs is
+firstDifference :: String -> String -> String
+firstDifference output text = case [(n, a, b) | (n, a, b) <- zip3 [1 :: Int ..] (lines output) (lines text), a /= b] of
+    (n, a, b) : _ -> "; line " ++ show n ++ ": " ++ show a ++ " for " ++ show b
+    [] -> ""
 
 refusal :: IO TestResult
 refusal = withProgram "examples/emit.tersus" "emit" $ \exe -> do

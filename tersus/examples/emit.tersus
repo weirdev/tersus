@@ -3,9 +3,9 @@
 //
 //     tersus mir --data examples/hello.tersus | tersus run examples/emit.tersus
 //
-// This is the first part (slice 5): the declarations, the descriptors of the types that the runtime walks, and the entry point, for the types of the locals of the
-// program. It writes the same text as `LlvmEmit.emitOutline` (TestMirEmit compares them for every example and every program of the native tests). The functions
-// themselves, which add the descriptors of the types their code asks for, come next, and then this writes all of `LlvmEmit.emitOwned`.
+// With no argument it writes all of the IR of the program, the same text as `LlvmEmit.emitOwned` (TestMirEmit compares them, byte for byte, for every example and every
+// program of the native tests). The argument `outline` writes the declarations, the descriptors of the types of the locals and the entry point (`LlvmEmit.emitOutline`),
+// and `bodies` the code of each function (`LlvmEmit.emitBody`): the parts it was written in.
 //
 // A program is one file, so the reader of examples/mir_reader.tersus (its types, tokenizer and parsers) is repeated here, between the same two lines in both
 // (TestMirEmit checks that the text is the same). The rest is written as the Haskell is, in the same order and with the same names, so that the two can be read side
@@ -1563,7 +1563,7 @@ fn printLines(lines: &List<String>) -> Int [{ }] [{ }] {
     return n;
 };
 
-// The code of a function (slice 6: what is a word)
+// The code of a function
 //
 // The Haskell emits a block in a state monad `G`: a counter for the names of temporaries and labels, the lines so far, the types whose descriptors the code asks for, the
 // globals it needs and the rooms in the frame for values it builds. Here the state is a `Gen` that each function takes and gives back. A function that also gives a value
@@ -1571,22 +1571,24 @@ fn printLines(lines: &List<String>) -> Int [{ }] [{ }] {
 // in a struct with the value, since a field read from a struct that is used again afterwards is a copy, and a copy of the lines so far for each instruction would make the
 // time to emit a function grow with the square of its size. An error is the first message in `error`: what comes after it is not looked at.
 //
-// So far the functions whose locals are words (Int, Byte, Bool, a function) and whose statements make words: operands, constants, arithmetic with the checks for an overflow,
-// the operations of the runtime that give a number, the terminators and the calls. What is held inline, an array, a Box and a clone are for the next part, and a function
-// that has one gives `unsupported` (TestMirEmit compares the others with `LlvmEmit.emitBody`).
+// Everything the Haskell emits is here: words, values held inline (arrays, structs and enums), Boxes, clones and drops, the calls and returns of each, and the function
+// around its blocks. `bodies` shows the blocks of each function (LlvmEmit.emitBody), `ir` is all of LlvmEmit.emitOwned.
 
-struct Gen { count: Int, lines: List<String>, types: List<Type>, globals: List<String>, temps: List<String>, error: String, last: String };
+struct Gen { count: Int, lines: List<String>, types: List<Type>, globals: List<String>, temps: List<String>, error: String, last: String, owner: String };
 
 // What a call needs to know of a function of the program: the types of its parameters and of its result. (Looking a function up in the program itself copies it, and all
 // its blocks, so they are taken once.)
 struct Sig { name: String, params: List<Type>, paramsOk: Bool, hasReturn: Bool, returns: Type };
 
-// The types of the program and the signatures of its functions, and for each type what is asked of it again and again, worked out once: the names, to look one up without
-// copying the declarations, and whether a value of it owns something
-struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool> };
+// What builds a value: a struct (tag 0, which has no word for it) or a variant of an enum (its position in the enum), the enum it is of, and its fields
+struct Ctor { name: String, owner: String, tag: Int, tagged: Bool, fields: List<Field> };
 
-fn newGen() -> Gen [{ }] [{ }] {
-    return Gen { count: 0, lines: noStrings(), types: noTypes(), globals: noStrings(), temps: noStrings(), error: "", last: "" };
+// The types of the program and the signatures of its functions, and for each type what is asked of it again and again, worked out once: the names, to look one up without
+// copying the declarations, whether a value of it owns something and the words it takes, and the constructors
+struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, words: List<Int>, ctors: List<Ctor>, ctorNames: List<String> };
+
+fn newGen(owner: &String) -> Gen [{ }] [{ }] {
+    return Gen { count: 0, lines: noStrings(), types: noTypes(), globals: noStrings(), temps: noStrings(), error: "", last: "", owner: owner };
 };
 
 // The first error is the one that is kept
@@ -1669,16 +1671,55 @@ fn sigOf(f: &Function) -> Sig [{ }] [{ }] {
     return Sig { name: f.name, params: params, paramsOk: ok, hasReturn: f.hasReturn, returns: f.returns };
 };
 
+fn noCtors() -> List<Ctor> [{ }] [{ }] {
+    return [];
+};
+
+fn noInts2() -> List<Int> [{ }] [{ }] {
+    return [];
+};
+
+fn noBools() -> List<Bool> [{ }] [{ }] {
+    return [];
+};
+
+// The constructors of the program: the structs first and then the variants of the enums, in order, so that the first with a name is what Mir.constructor finds
+fn ctorsOf(types: &List<TypeDecl>) -> List<Ctor> ~ {
+    out = noCtors();
+    for d in types {
+        if d is TypeDecl::DStruct {
+            out = push(out, Ctor { name: (d as TypeDecl::DStruct).name, owner: (d as TypeDecl::DStruct).name, tag: 0, tagged: false, fields: (d as TypeDecl::DStruct).fields });
+        };
+    };
+    for d in types {
+        if d is TypeDecl::DEnum {
+            variants = (d as TypeDecl::DEnum).variants;
+            i = 0;
+            while i < size(variants) [{ affirm i >= 0; affirm i <= size(variants); }] shrinks size(variants) - i {
+                v = get(variants, i);
+                out = push(out, Ctor { name: v.name, owner: (d as TypeDecl::DEnum).name, tag: i, tagged: true, fields: v.fields });
+                i = i + 1;
+            };
+        };
+    };
+    return out;
+};
+
 fn contextOf(program: &Program) -> Ctx ~ {
     sigs = [];
     for f in program.functions { sigs = push(sigs, sigOf(f)); };
     names = noStrings();
-    drops = [];
+    drops = noBools();
+    words = noInts2();
     for d in program.types {
         names = push(names, declName(d));
         drops = push(drops, needsDrop(program.types, Type::TNamed { name: declName(d) }));
+        words = push(words, slotsOf(program.types, Type::TNamed { name: declName(d) }));
     };
-    return Ctx { types: program.types, sigs: sigs, names: names, drops: drops };
+    ctors = ctorsOf(program.types);
+    ctorNames = noStrings();
+    for c in ctors { ctorNames = push(ctorNames, c.name); };
+    return Ctx { types: program.types, sigs: sigs, names: names, drops: drops, words: words, ctors: ctors, ctorNames: ctorNames };
 };
 
 // The index of the declaration of a struct or an enum, or -1 (the same as lookupDecl, without copying the declarations)
@@ -1691,17 +1732,6 @@ fn declIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; af
     return 0 - 1;
 };
 
-// Whether a value owns something to free (needsDrop, with the answer for a struct or an enum taken from the table)
-fn needsDropIn(cx: &Ctx, t: &Type) -> Bool ~ {
-    if t is Type::TBox { return true; };
-    if t is Type::TArray { return needsDropIn(cx, Box::unbox((t as Type::TArray).elem)); };
-    n = declaredName(cx.types, t);
-    if !n.ok { return false; };
-    i = declIndex(cx, n.text);
-    if i < 0 || i >= size(cx.drops) { return false; };
-    return get(cx.drops, i);
-};
-
 fn sigIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.sigs); }] {
     i = 0;
     while i < size(cx.sigs) [{ affirm i >= 0; affirm i <= size(cx.sigs); }] shrinks size(cx.sigs) - i {
@@ -1709,6 +1739,58 @@ fn sigIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; aff
         i = i + 1;
     };
     return 0 - 1;
+};
+
+// The index of the constructor with a name, or -1 (Mir.constructor)
+fn ctorIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.ctorNames); }] {
+    i = 0;
+    while i < size(cx.ctorNames) [{ affirm i >= 0; affirm i <= size(cx.ctorNames); }] shrinks size(cx.ctorNames) - i {
+        if get(cx.ctorNames, i) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The struct or enum that a type is a value of: a struct or an enum itself, or a variant (whose enum is looked up)
+fn declaredIn(cx: &Ctx, t: &Type) -> Res [{ }] [{ }] {
+    if t is Type::TNamed { return Res { ok: true, text: (t as Type::TNamed).name }; };
+    if t is Type::TVariant {
+        i = ctorIndex(cx, (t as Type::TVariant).name);
+        if i >= 0 && i < size(cx.ctors) { return Res { ok: true, text: get(cx.ctors, i).owner }; };
+    };
+    return Res { ok: false, text: "" };
+};
+
+// Whether a value owns something to free (needsDrop, with the answer for a struct or an enum taken from the table)
+fn needsDropIn(cx: &Ctx, t: &Type) -> Bool ~ {
+    if t is Type::TBox { return true; };
+    if t is Type::TArray { return needsDropIn(cx, Box::unbox((t as Type::TArray).elem)); };
+    n = declaredIn(cx, t);
+    if !n.ok { return false; };
+    i = declIndex(cx, n.text);
+    if i < 0 || i >= size(cx.drops) { return false; };
+    return get(cx.drops, i);
+};
+
+// The words of a value held inline (slotsOf, with the answer for a struct or an enum taken from the table)
+fn slotsIn(cx: &Ctx, t: &Type) -> Int ~ {
+    if isFat(t) { return 2; };
+    arr = sizedArray(t);
+    if arr.ok { return arr.length * slotsIn(cx, arr.elem); };
+    n = declaredIn(cx, t);
+    if !n.ok { return 1; };
+    i = declIndex(cx, n.text);
+    if i < 0 || i >= size(cx.words) { return 1; };
+    return get(cx.words, i);
+};
+
+fn bytesIn(cx: &Ctx, t: &Type) -> Int ~ {
+    return 8 * slotsIn(cx, t);
+};
+
+// Whether a local of the type has something to free: a word that is the address of a Box, or a value held inline that holds one
+fn ownsIn(cx: &Ctx, t: &Type) -> Bool ~ {
+    return isPointer(t) || (isAggregate(t) && needsDropIn(cx, t));
 };
 
 // The type of a local, which is in `ty`; an error in the state when there is no such local
@@ -1729,6 +1811,23 @@ fn constructedType(cx: &Ctx, name: &String) -> Type [{ }] [{ }] {
         if d is TypeDecl::DStruct { return Type::TNamed { name: name }; };
     };
     return Type::TVariant { name: name };
+};
+
+// An array of a size that is a constant or not, and a Box of an array of any size (the arrays that a Box holds are on the heap)
+fn isArray(t: &Type) -> Bool [{ }] [{ }] {
+    return isSizedArray(t);
+};
+
+fn isBoxedArray(t: &Type) -> Bool [{ }] [{ }] {
+    h = boxHolds(t);
+    return h.ok && h.ty is Type::TArray;
+};
+
+// A list of native code: the struct StdList of lib/lists.tersus, whose first field is the Box of the array that holds the elements, so that the address of the struct is the
+// address of that Box and an element is read from it as from one
+fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdList"; };
+    return false;
 };
 
 // Whether the contents of a constant say what it is made of: a number or a Bool does, and a list when one element does
@@ -1807,8 +1906,207 @@ fn sharedType(cx: &Ctx, f: &Function, os: &List<Operand>) -> Type ~ {
     return Type::TInt;
 };
 
+// The descriptor of a type, which the program will have: its symbol in `last`
+fn descriptor(g: Gen, cx: &Ctx, t: &Type) -> Gen ~ {
+    return Gen { types: push(g.types, t), last: typeSymbol(cx.types, t), ..g };
+};
+
+// Frees what the value a local holds owns (nothing, if it holds none), and leaves a Box it held holding nothing
+fn dropSlot(g: Gen, cx: &Ctx, t: &Type, l: Int) -> Gen ~ {
+    g1 = descriptor(g, cx, t);
+    d = g1.last;
+    return emit(g1, "call void @tersus_drop(ptr ".then(d).then(", ptr ").then(slot(l)).then(")"));
+};
+
+fn memcpyText(to: &String, from: &String, bytes: Int) -> String [{ }] [{ }] {
+    return "call void @llvm.memcpy.p0.p0.i64(ptr ".then(to).then(", ptr ").then(from).then(", i64 ").then(showInt(bytes)).then(", i1 false)");
+};
+
+// Copies the words of a value to where another is (nothing to do when it is where it is)
+fn copyWords(g: Gen, to: &String, from: &String, bytes: Int) -> Gen [{ }] [{ }] {
+    if to = from || bytes = 0 { return g; };
+    return emit(g, memcpyText(to, from, bytes));
+};
+
+// Clears the words of a value that has been moved out
+fn zeroWords(g: Gen, at: &String, bytes: Int) -> Gen [{ }] [{ }] {
+    if bytes = 0 { return g; };
+    return emit(g, "call void @llvm.memset.p0.i64(ptr ".then(at).then(", i8 0, i64 ").then(showInt(bytes)).then(", i1 false)"));
+};
+
+// Room in the frame of the function for a value it builds, made at its start; its name in `last`
+fn entryTemp(g: Gen, count: Int) -> Gen [{ }] [{ }] {
+    name = "%t.".then(showInt(g.count));
+    return Gen { count: g.count + 1, temps: push(g.temps, "    ".then(name).then(" = alloca [").then(showInt(count)).then(" x i64]")), last: name, ..g };
+};
+
+// The constructor with a name, as the index in the table of the context (the error is in the state)
+struct CtorAt { g: Gen, i: Int };
+
+fn constructorG(g: Gen, cx: &Ctx, name: &String) -> CtorAt [{ }] [{ }] {
+    i = ctorIndex(cx, name);
+    if i < 0 || i >= size(cx.ctors) { return CtorAt { g: failG(g, "Unknown struct or variant: ".then(name)), i: 0 }; };
+    return CtorAt { g: g, i: i };
+};
+
+// The constructor at an index of the table (a made-up one when there is none, which constructorG has said)
+fn ctorAt(cx: &Ctx, i: Int) -> Ctor [{ }] [{ }] {
+    if i >= 0 && i < size(cx.ctors) { return get(cx.ctors, i); };
+    return Ctor { name: "", owner: "", tag: 0, tagged: false, fields: [] };
+};
+
+// The index of a field in the fields of a constructor, or -1
+fn fieldIndex(fields: &List<Field>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(fields); }] {
+    i = 0;
+    while i < size(fields) [{ affirm i >= 0; affirm i <= size(fields); }] shrinks size(fields) - i {
+        if get(fields, i).name = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The byte offset of the field at a position of a constructor: an enum value starts with a word that says the variant, a struct with its first field. A field is a word, or
+// the words of a value held inline.
+fn fieldOffset(cx: &Ctx, c: &Ctor, i: Int) -> Int ~ {
+    words = 0;
+    if c.tagged { words = 1; };
+    j = 0;
+    while j < i && j < size(c.fields) [{ affirm j >= 0; affirm j <= size(c.fields); }] shrinks size(c.fields) - j {
+        words = words + slotsIn(cx, get(c.fields, j).ty);
+        j = j + 1;
+    };
+    return 8 * words;
+};
+
+// Every slot is 8 bytes: an Int, a Bool as 0 or 1, or a pointer
+fn storeAt(g: Gen, t: &Type, p: &String, value: &String) -> Gen [{ }] [{ }] {
+    if t is Type::TInt || t is Type::TByte { return emit(g, "store i64 ".then(value).then(", ptr ").then(p)); };
+    if t is Type::TBool {
+        g1 = ins(g, "w", "zext i1 ".then(value).then(" to i64"));
+        w = g1.last;
+        return emit(g1, "store i64 ".then(w).then(", ptr ").then(p));
+    };
+    return emit(g, "store ptr ".then(value).then(", ptr ").then(p));
+};
+
+fn loadAt(g: Gen, t: &Type, p: &String) -> Gen [{ }] [{ }] {
+    if t is Type::TInt || t is Type::TByte { return ins(g, "v", "load i64, ptr ".then(p)); };
+    if t is Type::TBool {
+        g1 = ins(g, "w", "load i64, ptr ".then(p));
+        w = g1.last;
+        return ins(g1, "b", "icmp ne i64 ".then(w).then(", 0"));
+    };
+    return ins(g, "v", "load ptr, ptr ".then(p));
+};
+
+// A slot of a struct or an enum value, at a byte offset
+fn storeSlot(g: Gen, cx: &Ctx, t: &Type, object: &String, offset: Int, value: &String) -> Gen ~ {
+    g1 = ins(g, "p", "getelementptr i8, ptr ".then(object).then(", i64 ").then(showInt(offset)));
+    p = g1.last;
+    if isAggregate(t) { return copyWords(g1, p, value, bytesIn(cx, t)); };
+    return storeAt(g1, t, p, value);
+};
+
+fn loadSlot(g: Gen, t: &Type, object: &String, offset: Int) -> Gen [{ }] [{ }] {
+    g1 = ins(g, "p", "getelementptr i8, ptr ".then(object).then(", i64 ").then(showInt(offset)));
+    p = g1.last;
+    return loadAt(g1, t, p);
+};
+
+// The address of an element at an index, an element being so many bytes
+fn elementAddress(g: Gen, base: &String, index: &String, bytes: Int) -> Gen [{ }] [{ }] {
+    g1 = ins(g, "o", "mul i64 ".then(index).then(", ").then(showInt(bytes)));
+    offset = g1.last;
+    return ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(offset));
+};
+
+// The numbers in a constant array, flattened
+fn flattenConstant(ws: List<String>, c: &Constant) -> List<String> ~ {
+    out = ws;
+    if c is Constant::CInt { out = push(out, showInt((c as Constant::CInt).n)); };
+    if c is Constant::CBool {
+        if (c as Constant::CBool).b { out = push(out, "1"); } else { out = push(out, "0"); };
+    };
+    if c is Constant::CArray {
+        for x in (c as Constant::CArray).items { out = flattenConstant(out, x); };
+    };
+    return out;
+};
+
+// The position of a name in a list of names, or -1
+fn fieldIndex2(names: &List<String>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(names); }] {
+    i = 0;
+    while i < size(names) [{ affirm i >= 0; affirm i <= size(names); }] shrinks size(names) - i {
+        if get(names, i) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The words of a constant array as a global that the code only reads: its name in `last`
+fn constantWords(g: Gen, cs: &List<Constant>) -> Gen ~ {
+    k = global("const.", g.owner.then("#").then(showInt(g.count)));
+    ws = noStrings();
+    for c in cs { ws = flattenConstant(ws, c); };
+    body = "zeroinitializer";
+    if size(ws) > 0 {
+        parts = noStrings();
+        for w in ws { parts = push(parts, "i64 ".then(w)); };
+        body = "[".then(joinWith(", ", parts)).then("]");
+    };
+    line = k.then(" = private constant [").then(showInt(size(ws))).then(" x i64] ").then(body);
+    return Gen { count: g.count + 1, globals: push(g.globals, line), last: k, ..g };
+};
+
+// Writes a constant into the words at an address, of the type that it is
+fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen ~ {
+    if c is Constant::CInt { return emit(g, "store i64 ".then(showInt((c as Constant::CInt).n)).then(", ptr ").then(at)); };
+    if c is Constant::CBool {
+        if (c as Constant::CBool).b { return emit(g, "store i64 1, ptr ".then(at)); };
+        return emit(g, "store i64 0, ptr ".then(at));
+    };
+    if c is Constant::CFn { return emit(g, "store ptr ".then(functionSymbol((c as Constant::CFn).name)).then(", ptr ").then(at)); };
+    if c is Constant::CList { return failG(g, "Native code has no list constant: ".then(renderType(ty))); };
+    if c is Constant::CArray {
+        g1 = constantWords(g, (c as Constant::CArray).items);
+        from = g1.last;
+        return copyWords(g1, at, from, bytesIn(cx, ty));
+    };
+    if !(c is Constant::CData) { return failG(g, "A constant of the wrong type"); };
+    name = (c as Constant::CData).name;
+    names = (c as Constant::CData).fields;
+    values = (c as Constant::CData).values;
+    k = constructorG(g, cx, name);
+    g1 = k.g;
+    if size(g1.error.bytes) > 0 { return g1; };
+    ctor = ctorAt(cx, k.i);
+    if ctor.tagged { g1 = emit(g1, "store i64 ".then(showInt(ctor.tag)).then(", ptr ").then(at)); };
+    i = 0;
+    while i < size(ctor.fields) [{ affirm i >= 0; affirm i <= size(ctor.fields); }] ~ {
+        field = get(ctor.fields, i);
+        j = fieldIndex2(names, field.name);
+        if j < 0 || j >= size(values) { return failG(g1, "A field is missing: ".then(name).then(".").then(field.name)); };
+        offset = fieldOffset(cx, ctor, i);
+        g2 = ins(g1, "p", "getelementptr i8, ptr ".then(at).then(", i64 ").then(showInt(offset)));
+        p = g2.last;
+        g1 = writeConstant(g2, cx, field.ty, p, get(values, j));
+        i = i + 1;
+    };
+    return g1;
+};
+
+// A constant that is held inline: an array literal is a global, and a struct or an enum is built in room of its own each time it is wanted (it can hold a list, which is
+// made then); its address in `last`
+fn constantAggregate(g: Gen, cx: &Ctx, ty: &Type, c: &Constant) -> Gen ~ {
+    if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
+    g1 = entryTemp(g, slotsIn(cx, ty));
+    room = g1.last;
+    g2 = writeConstant(g1, cx, ty, room, c);
+    return giving(g2, room);
+};
+
 // The text of a constant, in `last`
-fn constantValue(g: Gen, ty: &Type, c: &Constant) -> Gen ~ {
+fn constantValue(g: Gen, cx: &Ctx, ty: &Type, c: &Constant) -> Gen ~ {
     if c is Constant::CInt { return giving(g, showInt((c as Constant::CInt).n)); };
     if c is Constant::CBool {
         if (c as Constant::CBool).b { return giving(g, "true"); };
@@ -1816,13 +2114,36 @@ fn constantValue(g: Gen, ty: &Type, c: &Constant) -> Gen ~ {
     };
     // a function is its address
     if c is Constant::CFn { return giving(g, functionSymbol((c as Constant::CFn).name)); };
-    if c is Constant::CArray || c is Constant::CData { return failG(g, "Native code makes a constant that is held inline in the next part"); };
+    if c is Constant::CArray || c is Constant::CData { return constantAggregate(g, cx, ty, c); };
     return failG(g, "A constant of the wrong type is not a ".then(renderType(ty)));
 };
 
-// The text that stands for an operand where a value of the type is wanted, in `last`: the value loaded from the slot of a local, a number or a Bool
-fn operandValue(g: Gen, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
-    if o is Operand::Const { return constantValue(g, ty, (o as Operand::Const).value); };
+// The address of the words of a value held inline that an operand is, ready for something to take: a value that is moved out of a local and owns something is copied to room
+// of its own and the local is cleared, so that what takes it can copy it later with the local already empty. A constant is built in room of its own.
+fn operandAddress(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
+    if o is Operand::Const { return constantAggregate(g, cx, ty, (o as Operand::Const).value); };
+    if o is Operand::Copy { return giving(g, slot((o as Operand::Copy).local)); };
+    if o is Operand::Move {
+        l = (o as Operand::Move).local;
+        lt = localTypeOf(f, l);
+        if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+        if ownsIn(cx, lt.ty) {
+            bytes = bytesIn(cx, lt.ty);
+            g1 = entryTemp(g, bytes / 8);
+            room = g1.last;
+            g2 = copyWords(g1, room, slot(l), bytes);
+            g3 = zeroWords(g2, slot(l), bytes);
+            return giving(g3, room);
+        };
+        return giving(g, slot(l));
+    };
+    return g;
+};
+
+// The text that stands for an operand where a value of the type is wanted, in `last`: the value loaded from the slot of a local, a number or a Bool, or the address of a value
+// held inline
+fn operandValue(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
+    if o is Operand::Const { return constantValue(g, cx, ty, (o as Operand::Const).value); };
     l = 0;
     moved = false;
     if o is Operand::Copy { l = (o as Operand::Copy).local; };
@@ -1832,13 +2153,13 @@ fn operandValue(g: Gen, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
     };
     lt = localTypeOf(f, l);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
-    if isAggregate(lt.ty) {
-        // (a value held inline is the address of the words it is made of)
-        if moved { return failG(g, "Native code moves a value that is held inline in the next part"); };
-        return giving(g, slot(l));
-    };
     g1 = typeText(g, lt.ty);
     t = g1.last;
+    // (a value held inline is the address of the words it is made of)
+    if isAggregate(lt.ty) {
+        if moved { return operandAddress(g1, cx, f, lt.ty, o); };
+        return giving(g1, slot(l));
+    };
     g2 = ins(g1, "v", "load ".then(t).then(", ptr ").then(slot(l)));
     if moved {
         v = g2.last;
@@ -1846,6 +2167,108 @@ fn operandValue(g: Gen, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
         return giving(g3, v);
     };
     return g2;
+};
+
+// The type of a local that an operand is
+fn operandLocalType(f: &Function, o: &Operand) -> LT [{ }] [{ }] {
+    if o is Operand::Copy { return localTypeOf(f, (o as Operand::Copy).local); };
+    if o is Operand::Move { return localTypeOf(f, (o as Operand::Move).local); };
+    return LT { ok: false, ty: Type::TInt };
+};
+
+// The address of the words of a struct or an enum value that an operand is: a local holds them, and a Box holds a pointer to them; in `last`
+fn dataBase(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
+    if o is Operand::Const { return constantAggregate(g, cx, ty, (o as Operand::Const).value); };
+    l = 0;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move { l = (o as Operand::Move).local; };
+    lt = localTypeOf(f, l);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    if lt.ty is Type::TBox { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
+    return giving(g, slot(l));
+};
+
+// Whether an operand is an array
+fn isArrayOperand(f: &Function, o: &Operand) -> Bool [{ }] [{ }] {
+    if o is Operand::Const { return (o as Operand::Const).value is Constant::CArray; };
+    lt = operandLocalType(f, o);
+    return lt.ok && (isArray(lt.ty) || isBoxedArray(lt.ty) || isListStruct(lt.ty));
+};
+
+// The address of the words of an array operand: a local, or a constant that is a global; in `last`
+fn arrayPtr(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
+    if o is Operand::Const {
+        c = (o as Operand::Const).value;
+        if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
+        return failG(g, "Not an array");
+    };
+    lt = operandLocalType(f, o);
+    l = 0;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move { l = (o as Operand::Move).local; };
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    // (a Box of an array holds the address of the elements in its first word, whether it carries the size too or not)
+    if isBoxedArray(lt.ty) || isListStruct(lt.ty) { return ins(g, "a", "load ptr, ptr ".then(slot(l))); };
+    return giving(g, slot(l));
+};
+
+// What an element of a list or an array is, ready to be written: the word, or for a value held inline the address of its words
+fn elementValue(g: Gen, cx: &Ctx, f: &Function, elementTy: &Type, o: &Operand) -> Gen ~ {
+    if isAggregate(elementTy) { return operandAddress(g, cx, f, elementTy, o); };
+    return operandValue(g, cx, f, elementTy, o);
+};
+
+// Frees what an element owns, before another is written over it
+fn dropElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String) -> Gen ~ {
+    if !needsDropIn(cx, elementTy) { return g; };
+    bytes = bytesIn(cx, elementTy);
+    g1 = elementAddress(g, base, index, bytes);
+    p = g1.last;
+    g2 = descriptor(g1, cx, elementTy);
+    d = g2.last;
+    return emit(g2, "call void @tersus_drop(ptr ".then(d).then(", ptr ").then(p).then(")"));
+};
+
+fn writeElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String, value: &String) -> Gen ~ {
+    bytes = bytesIn(cx, elementTy);
+    g1 = elementAddress(g, base, index, bytes);
+    p = g1.last;
+    if isAggregate(elementTy) { return copyWords(g1, p, value, bytes); };
+    return storeAt(g1, elementTy, p, value);
+};
+
+// The number of elements of an array operand, as text in `last`: a constant when the size is in the type, and what a Box of an array of no size carries otherwise
+fn arrayLength(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
+    if o is Operand::Const {
+        c = (o as Operand::Const).value;
+        if c is Constant::CArray { return giving(g, showInt(size((c as Constant::CArray).items))); };
+        return failG(g, "Not an array");
+    };
+    lt = operandLocalType(f, o);
+    l = 0;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move { l = (o as Operand::Move).local; };
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    arr = sizedArray(lt.ty);
+    if arr.ok { return giving(g, showInt(arr.length)); };
+    h = boxHolds(lt.ty);
+    if h.ok {
+        inner = sizedArray(h.ty);
+        if inner.ok { return giving(g, showInt(inner.length)); };
+        if unsizedArray(h.ty).ok {
+            g1 = ins(g, "p", "getelementptr i8, ptr ".then(slot(l)).then(", i64 8"));
+            p = g1.last;
+            return ins(g1, "n", "load i64, ptr ".then(p));
+        };
+    };
+    return failG(g, "Not an array: Local ".then(showInt(l)));
+};
+
+// The text of the index of the last element, given the text of the length
+fn lastIndex(g: Gen, count: &String) -> Gen [{ }] [{ }] {
+    n = parseInt(count);
+    if n.ok { return giving(g, showInt(n.value - 1)); };
+    return ins(g, "i", "sub i64 ".then(count).then(", 1"));
 };
 
 // Goes to the overflow block when the flag is set, and carries on in a new block otherwise
@@ -1892,8 +2315,15 @@ fn intMin() -> String [{ }] [{ }] {
     return showInt(0 - 9223372036854775807 - 1);
 };
 
+// A value as the word the runtime takes: an Int as it is, a Bool as 0 or 1, a Box as its address; in `last`
+fn toWord(g: Gen, t: &Type, value: &String) -> Gen [{ }] [{ }] {
+    if t is Type::TInt || t is Type::TByte { return giving(g, value); };
+    if t is Type::TBool { return ins(g, "w", "zext i1 ".then(value).then(" to i64")); };
+    return ins(g, "w", "ptrtoint ptr ".then(value).then(" to i64"));
+};
+
 // The binary operations: 0 add, 1 sub, 2 mul, 3 div, 4 mod, and the relations; the value is in `last`
-fn binary(g: Gen, op: Int, ty: &Type, x: &String, y: &String) -> Gen ~ {
+fn binary(g: Gen, cx: &Ctx, op: Int, ty: &Type, x: &String, y: &String) -> Gen ~ {
     if op = 0 { return checked(g, "sadd", x, y); };
     if op = 1 { return checked(g, "ssub", x, y); };
     if op = 2 { return checked(g, "smul", x, y); };
@@ -1933,28 +2363,117 @@ fn binary(g: Gen, op: Int, ty: &Type, x: &String, y: &String) -> Gen ~ {
         return ins(g5, "r", "select i1 ".then(adjust).then(", i64 ").then(shifted).then(", i64 ").then(r));
     };
     if isPointer(ty) || isAggregate(ty) {
-        return failG(g, "Native code compares a value that is not a word in the next part");
+        // structural equality, which the runtime does by the descriptor of the type
+        g1 = descriptor(g, cx, ty);
+        d = g1.last;
+        g2 = toWord(g1, ty, x);
+        a = g2.last;
+        g3 = toWord(g2, ty, y);
+        b = g3.last;
+        g4 = ins(g3, "e", "call i32 @tersus_equal(ptr ".then(d).then(", i64 ").then(a).then(", i64 ").then(b).then(")"));
+        r = g4.last;
+        cmp = "ne";
+        if predicate(op) = "ne" { cmp = "eq"; };
+        return ins(g4, "c", "icmp ".then(cmp).then(" i32 ").then(r).then(", 0"));
     };
     g1 = typeText(g, ty);
     t = g1.last;
     return ins(g1, "c", "icmp ".then(predicate(op)).then(" ").then(t).then(" ").then(x).then(", ").then(y));
 };
 
+// An element of an array that is a word, or its length
+fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List<Operand>) -> Gen ~ {
+    n = size(os);
+    // 0 length, 1 first, 2 last, 3 get, 6 set
+    if op = 0 && n = 1 { return arrayLength(g, f, get(os, 0)); };
+    if op = 1 && n = 1 {
+        g1 = arrayPtr(g, f, get(os, 0));
+        base = g1.last;
+        return loadAt(g1, destType, base);
+    };
+    if op = 2 && n = 1 {
+        g1 = arrayLength(g, f, get(os, 0));
+        g2 = lastIndex(g1, g1.last);
+        index = g2.last;
+        g3 = arrayPtr(g2, f, get(os, 0));
+        base = g3.last;
+        g4 = elementAddress(g3, base, index, 8);
+        p = g4.last;
+        return loadAt(g4, destType, p);
+    };
+    // the elements of a Box of an array are changed where they are, and the Box is given back (it is moved in, so nothing else has it)
+    if op = 6 && n = 3 {
+        h = boxHolds(destType);
+        if h.ok && h.ty is Type::TArray {
+            elementTy = Box::unbox((h.ty as Type::TArray).elem);
+            g1 = operandValue(g, cx, f, destType, get(os, 0));
+            block = g1.last;
+            g2 = operandValue(g1, cx, f, Type::TInt, get(os, 1));
+            index = g2.last;
+            g3 = elementValue(g2, cx, f, elementTy, get(os, 2));
+            value = g3.last;
+            g4 = dropElement(g3, cx, elementTy, block, index);
+            g5 = writeElement(g4, cx, elementTy, block, index, value);
+            return giving(g5, block);
+        };
+    };
+    if op = 3 && n = 2 {
+        g1 = arrayPtr(g, f, get(os, 0));
+        base = g1.last;
+        g2 = operandValue(g1, cx, f, Type::TInt, get(os, 1));
+        index = g2.last;
+        g3 = elementAddress(g2, base, index, 8);
+        p = g3.last;
+        return loadAt(g3, destType, p);
+    };
+    return failG(g, "Native code does not support this operation for an array yet");
+};
+
 // The value of an rvalue that is a word, in `last`
 fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~ {
-    if rv is Rvalue::Use { return operandValue(g, f, destType, (rv as Rvalue::Use).o); };
+    if rv is Rvalue::Use { return operandValue(g, cx, f, destType, (rv as Rvalue::Use).o); };
+    // a Box has room of its own on the heap for what it holds, which is moved into it
+    if rv is Rvalue::MakeBox {
+        h = boxHolds(destType);
+        if !h.ok { return failG(g, "A Box is made into a Box"); };
+        count = slotsIn(cx, h.ty);
+        g1 = ins(g, "x", "call ptr @tersus_box_new(i64 ".then(showInt(count)).then(")"));
+        block = g1.last;
+        o = (rv as Rvalue::MakeBox).o;
+        if isAggregate(h.ty) {
+            g2 = operandAddress(g1, cx, f, h.ty, o);
+            from = g2.last;
+            return giving(copyWords(g2, block, from, 8 * count), block);
+        };
+        g2 = operandValue(g1, cx, f, h.ty, o);
+        value = g2.last;
+        return giving(storeAt(g2, h.ty, block, value), block);
+    };
+    // what a Box holds that is a word is read from its room, which is freed when the Box is moved
+    if rv is Rvalue::Unbox {
+        o = (rv as Rvalue::Unbox).o;
+        held = operandLocalType(f, o);
+        if !held.ok { return failG(g, "Box::unbox was given a constant"); };
+        g1 = operandValue(g, cx, f, held.ty, o);
+        block = g1.last;
+        g2 = loadAt(g1, destType, block);
+        value = g2.last;
+        if o is Operand::Move { return giving(emit(g2, "call void @tersus_box_free(ptr ".then(block).then(")")), value); };
+        return g2;
+    };
     if rv is Rvalue::BinaryOp {
         op = (rv as Rvalue::BinaryOp).op;
         a = (rv as Rvalue::BinaryOp).a;
         b = (rv as Rvalue::BinaryOp).b;
         operands = push(push([], a), b);
         ty = sharedType(cx, f, operands);
-        g1 = operandValue(g, f, ty, a);
+        g1 = operandValue(g, cx, f, ty, a);
         x = g1.last;
-        g2 = operandValue(g1, f, ty, b);
+        g2 = operandValue(g1, cx, f, ty, b);
         y = g2.last;
-        return binary(g2, op, ty, x, y);
+        return binary(g2, cx, op, ty, x, y);
     };
+    if rv is Rvalue::MakeList { return failG(g, "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"); };
     if rv is Rvalue::ListOp {
         op = (rv as Rvalue::ListOp).op;
         args = (rv as Rvalue::ListOp).args;
@@ -1967,58 +2486,444 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         if n = 1 {
             a = get(args, 0);
             if op = 15 || op = 18 || op = 11 || op = 10 || op = 21 {
-                g1 = operandValue(g, f, Type::TByte, a);
+                g1 = operandValue(g, cx, f, Type::TByte, a);
                 if op = 21 { return g1; };
                 x = g1.last;
-                call = "call i64 @tersus_pathByte(i64 ";
+                callText = "call i64 @tersus_pathByte(i64 ";
                 base = "p";
-                if op = 18 { call = "call i64 @tersus_storeByte(i64 "; base = "s"; };
-                if op = 11 { call = "call i64 @tersus_writeError(i64 "; base = "e"; };
-                if op = 10 { call = "call i64 @tersus_writeByte(i64 "; base = "w"; };
-                return ins(g1, base, call.then(x).then(")"));
+                if op = 18 { callText = "call i64 @tersus_storeByte(i64 "; base = "s"; };
+                if op = 11 { callText = "call i64 @tersus_writeError(i64 "; base = "e"; };
+                if op = 10 { callText = "call i64 @tersus_writeByte(i64 "; base = "w"; };
+                return ins(g1, base, callText.then(x).then(")"));
             };
             if op = 17 {
-                g1 = operandValue(g, f, Type::TInt, a);
+                g1 = operandValue(g, cx, f, Type::TInt, a);
                 x = g1.last;
                 return ins(g1, "f", "call i64 @tersus_fileByte(i64 ".then(x).then(")"));
             };
-            if op = 20 { return operandValue(g, f, Type::TInt, a); };
+            if op = 20 { return operandValue(g, cx, f, Type::TInt, a); };
         };
         if op = 14 && n = 2 {
-            g1 = operandValue(g, f, Type::TInt, get(args, 0));
+            g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
             x = g1.last;
-            g2 = operandValue(g1, f, Type::TInt, get(args, 1));
+            g2 = operandValue(g1, cx, f, Type::TInt, get(args, 1));
             y = g2.last;
             return ins(g2, "a", "call i64 @tersus_argByte(i64 ".then(x).then(", i64 ").then(y).then(")"));
         };
+        if n > 0 && isArrayOperand(f, get(args, 0)) { return arrayRead(g, cx, f, destType, op, args); };
+        return failG(g, "Native code does not support this operation here");
     };
-    return failG(g, "Native code makes this rvalue in the next part");
+    if rv is Rvalue::ReadField {
+        name = (rv as Rvalue::ReadField).name;
+        field = (rv as Rvalue::ReadField).field;
+        k = constructorG(g, cx, name);
+        if size(k.g.error.bytes) > 0 { return k.g; };
+        ctor = ctorAt(cx, k.i);
+        i = fieldIndex(ctor.fields, field);
+        if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
+        g1 = dataBase(k.g, cx, f, constructedType(cx, name), (rv as Rvalue::ReadField).o);
+        base = g1.last;
+        return loadSlot(g1, get(ctor.fields, i).ty, base, fieldOffset(cx, ctor, i));
+    };
+    if rv is Rvalue::IsVariant {
+        name = (rv as Rvalue::IsVariant).name;
+        k = constructorG(g, cx, name);
+        if size(k.g.error.bytes) > 0 { return k.g; };
+        ctor = ctorAt(cx, k.i);
+        // (a struct has no tag, and a value of its type is that struct)
+        if !ctor.tagged { return giving(k.g, "true"); };
+        g1 = dataBase(k.g, cx, f, constructedType(cx, name), (rv as Rvalue::IsVariant).o);
+        base = g1.last;
+        g2 = ins(g1, "t", "load i64, ptr ".then(base));
+        found = g2.last;
+        return ins(g2, "c", "icmp eq i64 ".then(found).then(", ").then(showInt(ctor.tag)));
+    };
+    // the field is moved out of the value: what it held is left holding nothing
+    if rv is Rvalue::TakeField {
+        name = (rv as Rvalue::TakeField).name;
+        field = (rv as Rvalue::TakeField).field;
+        k = constructorG(g, cx, name);
+        if size(k.g.error.bytes) > 0 { return k.g; };
+        ctor = ctorAt(cx, k.i);
+        i = fieldIndex(ctor.fields, field);
+        if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
+        g1 = dataBase(k.g, cx, f, constructedType(cx, name), Operand::Copy { local: (rv as Rvalue::TakeField).local });
+        base = g1.last;
+        offset = fieldOffset(cx, ctor, i);
+        g2 = loadSlot(g1, get(ctor.fields, i).ty, base, offset);
+        taken = g2.last;
+        g3 = ins(g2, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(offset)));
+        p = g3.last;
+        return giving(emit(g3, "store i64 0, ptr ".then(p)), taken);
+    };
+    return failG(g, "Native code makes this where it is held inline, not as a word");
 };
 
-// A local that owns a value frees the one it held when it is given another (in the next part); a word is stored
-fn store(g: Gen, f: &Function, dest: Int, value: &String) -> Gen ~ {
+// n copies of an element: one store of zeros when it is a zero, and a loop otherwise. `count` is the text of the number, known to be `n` when `isKnown`.
+fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Type, count: &String, isKnown: Bool, n: Int, x: &Operand) -> Gen ~ {
+    if isKnown && n = 0 { return g; };
+    isZero = false;
+    if x is Operand::Const {
+        c = (x as Operand::Const).value;
+        if c is Constant::CInt { isZero = (c as Constant::CInt).n = 0; };
+        if c is Constant::CBool { isZero = !(c as Constant::CBool).b; };
+    };
+    if isZero && !isAggregate(elementTy) {
+        g1 = g;
+        bytes = "";
+        if isKnown {
+            bytes = showInt(8 * n);
+        } else {
+            g1 = ins(g, "z", "mul i64 ".then(count).then(", 8"));
+            bytes = g1.last;
+        };
+        return emit(g1, "call void @llvm.memset.p0.i64(ptr ".then(target).then(", i8 0, i64 ").then(bytes).then(", i1 false)"));
+    };
+    // an element that owns something is not the same words n times: each is a copy of the one that is given, which stays its own
+    owning = needsDropIn(cx, elementTy);
+    g1 = g;
+    value = "";
+    if !owning {
+        g1 = elementValue(g, cx, f, elementTy, x);
+        value = g1.last;
+    };
+    source = "";
+    if owning {
+        if x is Operand::Copy { source = slot((x as Operand::Copy).local); };
+        if x is Operand::Move { source = slot((x as Operand::Move).local); };
+        if x is Operand::Const { return failG(g1, "An element that owns something is made from a constant"); };
+    };
+    d = "";
+    if owning {
+        g1 = descriptor(g1, cx, elementTy);
+        d = g1.last;
+    };
+    bytes = bytesIn(cx, elementTy);
+    g2 = freshLabel(g1, "fill");
+    k = g2.last;
+    before = k.then(".before");
+    header = k.then(".header");
+    body = k.then(".body");
+    finish = k.then(".done");
+    i = "%".then(k).then(".i");
+    next = "%".then(k).then(".next");
+    g3 = emit(g2, "br label %".then(before));
+    g4 = label(g3, before);
+    g5 = emit(g4, "br label %".then(header));
+    g6 = label(g5, header);
+    g7 = emit(g6, i.then(" = phi i64 [ 0, %").then(before).then(" ], [ ").then(next).then(", %").then(body).then(" ]"));
+    g8 = ins(g7, "c", "icmp slt i64 ".then(i).then(", ").then(count));
+    c = g8.last;
+    g9 = emit(g8, "br i1 ".then(c).then(", label %").then(body).then(", label %").then(finish));
+    g10 = label(g9, body);
+    g11 = g10;
+    if owning {
+        g11 = elementAddress(g10, target, i, bytes);
+        p = g11.last;
+        g11 = emit(g11, "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(p).then(", ptr ").then(source).then(")"));
+    } else {
+        g11 = writeElement(g10, cx, elementTy, target, i, value);
+    };
+    g12 = emit(g11, next.then(" = add i64 ").then(i).then(", 1"));
+    g13 = emit(g12, "br label %".then(header));
+    return label(g13, finish);
+};
+
+// Copies a value that is part of another into the destination (when the destination owns something, through room of its own first, since the part can be a part of what the
+// destination held); the part is cleared when it is moved out
+fn fromPart(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int, address: &String, clear: Bool) -> Gen ~ {
+    bytes = bytesIn(cx, ty);
+    owns = ownsIn(cx, ty);
+    target = slot(dest);
+    if dropsOld && owns {
+        g1 = entryTemp(g, bytes / 8);
+        room = g1.last;
+        g2 = copyWords(g1, room, address, bytes);
+        g3 = g2;
+        if clear { g3 = zeroWords(g2, address, bytes); };
+        g4 = dropSlot(g3, cx, ty, dest);
+        return copyWords(g4, target, room, bytes);
+    };
+    g1 = copyWords(g, target, address, bytes);
+    if clear { return zeroWords(g1, address, bytes); };
+    return g1;
+};
+
+// Frees what the destination held, if it owns something (unless it only looks at a value, as a Peek does)
+fn freeOld(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int) -> Gen ~ {
+    if dropsOld && ownsIn(cx, ty) { return dropSlot(g, cx, ty, dest); };
+    return g;
+};
+
+// The address of the element at an index of an array (or of a list of native code, whose address is that of its array), the element being the value that is made
+fn elementOf(g: Gen, cx: &Ctx, f: &Function, ty: &Type, container: &Operand, index: &String) -> Gen ~ {
+    g1 = arrayPtr(g, f, container);
+    base = g1.last;
+    return elementAddress(g1, base, index, bytesIn(cx, ty));
+};
+
+// The statement that gives a value held inline to a local, made where the local is, with no pointer to it. The value that the local held is freed first if it owns something
+// (unless the local only looks at a value, as a Peek does). The contracts (an index in range) are assumed.
+fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty: &Type, rv: &Rvalue) -> Gen ~ {
+    bytes = bytesIn(cx, ty);
+    owns = ownsIn(cx, ty);
+    target = slot(dest);
+    if rv is Rvalue::Use {
+        g1 = operandAddress(g, cx, f, ty, (rv as Rvalue::Use).o);
+        src = g1.last;
+        return fromPart(g1, cx, dropsOld, ty, dest, src, false);
+    };
+    if rv is Rvalue::ListOp {
+        op = (rv as Rvalue::ListOp).op;
+        args = (rv as Rvalue::ListOp).args;
+        n = size(args);
+        arr = sizedArray(ty);
+        h = boxHolds(ty);
+        // 7 newArray, 8 newBoxed, 9 newEmptyBoxed, 6 set, 3 get, 1 first, 2 last
+        if op = 7 && n = 2 && arr.ok {
+            // (an array that owns something is made in room of its own, then what the destination held is freed and the elements move in)
+            if dropsOld && owns {
+                g1 = entryTemp(g, bytes / 8);
+                room = g1.last;
+                g2 = fillElements(g1, cx, f, room, arr.elem, showInt(arr.length), true, arr.length, get(args, 1));
+                g3 = freeOld(g2, cx, dropsOld, ty, dest);
+                return copyWords(g3, target, room, bytes);
+            };
+            return fillElements(g, cx, f, target, arr.elem, showInt(arr.length), true, arr.length, get(args, 1));
+        };
+        if op = 6 && n = 3 && arr.ok {
+            // (an array that owns something is moved to room of its own first, and what the destination held is freed)
+            g1 = operandAddress(g, cx, f, ty, get(args, 0));
+            src = g1.last;
+            g2 = operandValue(g1, cx, f, Type::TInt, get(args, 1));
+            index = g2.last;
+            g3 = elementValue(g2, cx, f, arr.elem, get(args, 2));
+            value = g3.last;
+            g4 = freeOld(g3, cx, dropsOld, ty, dest);
+            g5 = copyWords(g4, target, src, bytes);
+            g6 = dropElement(g5, cx, arr.elem, target, index);
+            return writeElement(g6, cx, arr.elem, target, index, value);
+        };
+        // Array::boxed(n, x): room on the heap for n elements, filled with x; the Box holds where it is and n
+        if op = 8 && n = 2 && h.ok && h.ty is Type::TArray {
+            elementTy = Box::unbox((h.ty as Type::TArray).elem);
+            g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
+            count = g1.last;
+            stride = slotsIn(cx, elementTy);
+            g2 = g1;
+            total = count;
+            if stride != 1 {
+                g2 = checked(g1, "smul", count, showInt(stride));
+                total = g2.last;
+            };
+            g3 = ins(g2, "x", "call ptr @tersus_box_new(i64 ".then(total).then(")"));
+            block = g3.last;
+            g4 = fillElements(g3, cx, f, block, elementTy, count, false, 0, get(args, 1));
+            g5 = freeOld(g4, cx, dropsOld, ty, dest);
+            g6 = emit(g5, "store ptr ".then(block).then(", ptr ").then(target));
+            g7 = ins(g6, "p", "getelementptr i8, ptr ".then(target).then(", i64 8"));
+            lengthSlot = g7.last;
+            return emit(g7, "store i64 ".then(count).then(", ptr ").then(lengthSlot));
+        };
+        // Array::empty(): no room, and the size 0
+        if op = 9 && n = 0 && h.ok && h.ty is Type::TArray {
+            g1 = freeOld(g, cx, dropsOld, ty, dest);
+            g2 = emit(g1, "store ptr null, ptr ".then(target));
+            g3 = ins(g2, "p", "getelementptr i8, ptr ".then(target).then(", i64 8"));
+            lengthSlot = g3.last;
+            return emit(g3, "store i64 0, ptr ".then(lengthSlot));
+        };
+        // the elements of a Box that carries its size are changed where they are, and the Box is given back
+        if op = 6 && n = 3 && h.ok && h.ty is Type::TArray {
+            elementTy = Box::unbox((h.ty as Type::TArray).elem);
+            g1 = operandAddress(g, cx, f, ty, get(args, 0));
+            src = g1.last;
+            g2 = ins(g1, "a", "load ptr, ptr ".then(src));
+            block = g2.last;
+            g3 = operandValue(g2, cx, f, Type::TInt, get(args, 1));
+            index = g3.last;
+            g4 = elementValue(g3, cx, f, elementTy, get(args, 2));
+            value = g4.last;
+            g5 = dropElement(g4, cx, elementTy, block, index);
+            g6 = writeElement(g5, cx, elementTy, block, index, value);
+            return fromPart(g6, cx, dropsOld, ty, dest, src, false);
+        };
+        // an element that is a value held inline, of an array or of a list
+        if op = 3 && n = 2 {
+            g1 = operandValue(g, cx, f, Type::TInt, get(args, 1));
+            index = g1.last;
+            g2 = elementOf(g1, cx, f, ty, get(args, 0), index);
+            p = g2.last;
+            return fromPart(g2, cx, dropsOld, ty, dest, p, false);
+        };
+        if op = 1 && n = 1 {
+            g1 = elementOf(g, cx, f, ty, get(args, 0), "0");
+            p = g1.last;
+            return fromPart(g1, cx, dropsOld, ty, dest, p, false);
+        };
+        if op = 2 && n = 1 {
+            g1 = arrayLength(g, f, get(args, 0));
+            g2 = lastIndex(g1, g1.last);
+            index = g2.last;
+            g3 = elementOf(g2, cx, f, ty, get(args, 0), index);
+            p = g3.last;
+            return fromPart(g3, cx, dropsOld, ty, dest, p, false);
+        };
+    };
+    // a Box of an array of a size as a Box of an array of any size: the address, and the size the type had
+    if rv is Rvalue::Unsize {
+        o = (rv as Rvalue::Unsize).o;
+        held = operandLocalType(f, o);
+        if held.ok {
+            hh = boxHolds(held.ty);
+            if hh.ok {
+                inner = sizedArray(hh.ty);
+                if inner.ok {
+                    g1 = operandValue(g, cx, f, held.ty, o);
+                    block = g1.last;
+                    g2 = freeOld(g1, cx, dropsOld, ty, dest);
+                    g3 = emit(g2, "store ptr ".then(block).then(", ptr ").then(target));
+                    g4 = ins(g3, "p", "getelementptr i8, ptr ".then(target).then(", i64 8"));
+                    lengthSlot = g4.last;
+                    return emit(g4, "store i64 ".then(showInt(inner.length)).then(", ptr ").then(lengthSlot));
+                };
+            };
+        };
+        return failG(g, "unsize was given something that is not a Box of an array of a size");
+    };
+    // a field that is held inline
+    if rv is Rvalue::ReadField {
+        name = (rv as Rvalue::ReadField).name;
+        field = (rv as Rvalue::ReadField).field;
+        k = constructorG(g, cx, name);
+        if size(k.g.error.bytes) > 0 { return k.g; };
+        ctor = ctorAt(cx, k.i);
+        i = fieldIndex(ctor.fields, field);
+        if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
+        g1 = dataBase(k.g, cx, f, constructedType(cx, name), (rv as Rvalue::ReadField).o);
+        base = g1.last;
+        g2 = ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(fieldOffset(cx, ctor, i))));
+        p = g2.last;
+        return fromPart(g2, cx, dropsOld, ty, dest, p, false);
+    };
+    // the field is moved out of the value: what it held is left holding nothing
+    if rv is Rvalue::TakeField {
+        name = (rv as Rvalue::TakeField).name;
+        field = (rv as Rvalue::TakeField).field;
+        k = constructorG(g, cx, name);
+        if size(k.g.error.bytes) > 0 { return k.g; };
+        ctor = ctorAt(cx, k.i);
+        i = fieldIndex(ctor.fields, field);
+        if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
+        g1 = dataBase(k.g, cx, f, constructedType(cx, name), Operand::Copy { local: (rv as Rvalue::TakeField).local });
+        base = g1.last;
+        g2 = ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(fieldOffset(cx, ctor, i))));
+        p = g2.last;
+        return fromPart(g2, cx, dropsOld, ty, dest, p, true);
+    };
+    if rv is Rvalue::MakeData {
+        name = (rv as Rvalue::MakeData).name;
+        names = (rv as Rvalue::MakeData).fields;
+        values = (rv as Rvalue::MakeData).values;
+        k = constructorG(g, cx, name);
+        if size(k.g.error.bytes) > 0 { return k.g; };
+        ctor = ctorAt(cx, k.i);
+        g1 = k.g;
+        texts = noStrings();
+        i = 0;
+        while i < size(ctor.fields) [{ affirm i >= 0; affirm i <= size(ctor.fields); }] ~ {
+            field = get(ctor.fields, i);
+            j = fieldIndex2(names, field.name);
+            if j < 0 || j >= size(values) { return failG(g1, "A field is missing: ".then(name).then(".").then(field.name)); };
+            g1 = elementValue(g1, cx, f, field.ty, get(values, j));
+            texts = push(texts, g1.last);
+            i = i + 1;
+        };
+        g2 = freeOld(g1, cx, dropsOld, ty, dest);
+        if ctor.tagged { g2 = emit(g2, "store i64 ".then(showInt(ctor.tag)).then(", ptr ").then(target)); };
+        i = 0;
+        while i < size(ctor.fields) && i < size(texts) [{ affirm i >= 0; affirm i <= size(ctor.fields); affirm i <= size(texts); }] ~ {
+            g2 = storeSlot(g2, cx, get(ctor.fields, i).ty, target, fieldOffset(cx, ctor, i), get(texts, i));
+            i = i + 1;
+        };
+        return g2;
+    };
+    // the same value, known to be that variant (a Box that is cast is taken out of its room, which is freed)
+    if rv is Rvalue::AsVariant {
+        o = (rv as Rvalue::AsVariant).o;
+        held = operandLocalType(f, o);
+        if held.ok && held.ty is Type::TBox {
+            g1 = operandValue(g, cx, f, held.ty, o);
+            block = g1.last;
+            g2 = freeOld(g1, cx, dropsOld, ty, dest);
+            g3 = copyWords(g2, target, block, bytes);
+            if o is Operand::Move { return emit(g3, "call void @tersus_box_free(ptr ".then(block).then(")")); };
+            return g3;
+        };
+        g1 = operandAddress(g, cx, f, ty, o);
+        src = g1.last;
+        g2 = freeOld(g1, cx, dropsOld, ty, dest);
+        return copyWords(g2, target, src, bytes);
+    };
+    if rv is Rvalue::Unbox {
+        o = (rv as Rvalue::Unbox).o;
+        held = operandLocalType(f, o);
+        if !held.ok { return failG(g, "Box::unbox was given a constant"); };
+        g1 = operandValue(g, cx, f, held.ty, o);
+        block = g1.last;
+        g2 = freeOld(g1, cx, dropsOld, ty, dest);
+        g3 = copyWords(g2, target, block, bytes);
+        if o is Operand::Move { return emit(g3, "call void @tersus_box_free(ptr ".then(block).then(")")); };
+        return g3;
+    };
+    return failG(g, "Native code does not support this for a value held inline yet");
+};
+
+// A local that owns a value frees the one it held when it is given another
+fn store(g: Gen, cx: &Ctx, f: &Function, dest: Int, value: &String) -> Gen ~ {
     lt = localTypeOf(f, dest);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
     g1 = typeText(g, lt.ty);
     t = g1.last;
-    if isPointer(lt.ty) { return failG(g1, "Native code frees what a local owned in the next part"); };
-    return emit(g1, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
+    g2 = g1;
+    if isPointer(lt.ty) { g2 = dropSlot(g1, cx, lt.ty, dest); };
+    return emit(g2, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
 };
 
 // Stores the result of a statement; in the entry, the return slot being assigned is what makes the program return a value
-fn storeResult(g: Gen, entry: Bool, f: &Function, dest: Int, value: &String) -> Gen ~ {
-    g1 = store(g, f, dest, value);
+fn storeResult(g: Gen, cx: &Ctx, entry: Bool, f: &Function, dest: Int, value: &String) -> Gen ~ {
+    g1 = store(g, cx, f, dest, value);
     if entry && dest = 0 { return emit(g1, "store i1 true, ptr %returned"); };
     return g1;
 };
 
+// A copy of the value that a local owns, which shares nothing with it, given to another local (which frees the value it held)
+fn cloneInto(g: Gen, cx: &Ctx, dest: Int, destType: &Type, o: &Operand) -> Gen ~ {
+    source = "";
+    if o is Operand::Copy { source = slot((o as Operand::Copy).local); };
+    if o is Operand::Move { source = slot((o as Operand::Move).local); };
+    if o is Operand::Const { return failG(g, "Native code does not copy a constant"); };
+    owns = ownsIn(cx, destType);
+    g1 = descriptor(g, cx, destType);
+    d = g1.last;
+    if owns {
+        // the copy is made before what the local held is freed, since it can be a part of it (`t = clone of t.next`)
+        bytes = bytesIn(cx, destType);
+        g2 = entryTemp(g1, bytes / 8);
+        room = g2.last;
+        g3 = emit(g2, "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(room).then(", ptr ").then(source).then(")"));
+        g4 = dropSlot(g3, cx, destType, dest);
+        return copyWords(g4, slot(dest), room, bytes);
+    };
+    return emit(g1, "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(slot(dest)).then(", ptr ").then(source).then(")"));
+};
+
 fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) -> Gen ~ {
     if st is Statement::Drop {
-        lt = localTypeOf(f, (st as Statement::Drop).local);
-        if !lt.ok { return failG(g, "Undeclared local"); };
-        if isPointer(lt.ty) || (isAggregate(lt.ty) && needsDropIn(cx, lt.ty)) {
-            return failG(g, "Native code frees a value in the next part");
-        };
+        l = (st as Statement::Drop).local;
+        lt = localTypeOf(f, l);
+        if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+        if ownsIn(cx, lt.ty) { return dropSlot(g, cx, lt.ty, l); };
         return g;
     };
     dest = 0;
@@ -2035,24 +2940,37 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
     };
     lt = localTypeOf(f, dest);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
-    if rv is Rvalue::Clone || isAggregate(lt.ty) { return failG(g, "Native code makes a value that is held inline in the next part"); };
-    g1 = rvalue(g, cx, f, lt.ty, rv);
-    value = g1.last;
+    returned = entry && dest = 0 && !peek;
     if peek {
+        if isAggregate(lt.ty) { return assignAggregate(g, cx, f, false, dest, lt.ty, rv); };
+        g1 = rvalue(g, cx, f, lt.ty, rv);
+        value = g1.last;
         g2 = typeText(g1, lt.ty);
         t = g2.last;
         return emit(g2, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
     };
-    return storeResult(g1, entry, f, dest, value);
+    if rv is Rvalue::Clone {
+        g1 = cloneInto(g, cx, dest, lt.ty, (rv as Rvalue::Clone).o);
+        if returned { return emit(g1, "store i1 true, ptr %returned"); };
+        return g1;
+    };
+    if isAggregate(lt.ty) {
+        g1 = assignAggregate(g, cx, f, true, dest, lt.ty, rv);
+        if returned { return emit(g1, "store i1 true, ptr %returned"); };
+        return g1;
+    };
+    g1 = rvalue(g, cx, f, lt.ty, rv);
+    value = g1.last;
+    return storeResult(g1, cx, entry, f, dest, value);
 };
 
 // A call of a function, given its symbol or the address of it, the types of its parameters and of its result
-fn call(g: Gen, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int) -> Gen ~ {
+fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int) -> Gen ~ {
     values = noStrings();
     g1 = g;
     i = 0;
     while i < size(argTypes) && i < size(args) [{ affirm i >= 0; affirm i <= size(argTypes); affirm i <= size(args); }] ~ {
-        g1 = operandValue(g1, f, get(argTypes, i), get(args, i));
+        g1 = operandValue(g1, cx, f, get(argTypes, i), get(args, i));
         values = push(values, g1.last);
         i = i + 1;
     };
@@ -2065,17 +2983,46 @@ fn call(g: Gen, entry: Bool, f: &Function, target: &String, argTypes: &List<Type
     };
     g2 = typeText(g1, returnType);
     result = g2.last;
-    if isAggregate(returnType) { return failG(g2, "Native code calls a function that makes a value held inline in the next part"); };
+    if isAggregate(returnType) {
+        // the callee makes a value held inline in the room it is given. If the local that gets it owns something, the room is one of the function's own and the local is given
+        // the value after what it held is freed; otherwise it is the slot of the local (the callee has copied its arguments by the time it writes, so the local may be one of them).
+        owns = ownsIn(cx, returnType);
+        // (an argument that is lent is not copied by the callee, so the room for the result is not the local that is lent)
+        lends = false;
+        for a in args {
+            if a is Operand::Copy {
+                if (a as Operand::Copy).local = dest { lends = true; };
+            };
+        };
+        g3 = g2;
+        if owns || lends {
+            g3 = entryTemp(g2, slotsIn(cx, returnType));
+            room = g3.last;
+            all = noStrings();
+            all = push(all, "ptr ".then(room));
+            for a in arguments { all = push(all, a); };
+            g3 = emit(g3, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
+            if owns { g3 = dropSlot(g3, cx, returnType, dest); };
+            g3 = copyWords(g3, slot(dest), room, bytesIn(cx, returnType));
+        } else {
+            all = noStrings();
+            all = push(all, "ptr ".then(slot(dest)));
+            for a in arguments { all = push(all, a); };
+            g3 = emit(g2, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
+        };
+        if entry && dest = 0 { g3 = emit(g3, "store i1 true, ptr %returned"); };
+        return emit(g3, "br label %".then(blockLabel(next)));
+    };
     g3 = ins(g2, "c", "call ".then(result).then(" ").then(target).then("(").then(joinWith(", ", arguments)).then(")"));
     value = g3.last;
-    g4 = storeResult(g3, entry, f, dest, value);
+    g4 = storeResult(g3, cx, entry, f, dest, value);
     return emit(g4, "br label %".then(blockLabel(next)));
 };
 
 fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -> Gen ~ {
     if t is Terminator::Goto { return emit(g, "br label %".then(blockLabel((t as Terminator::Goto).block))); };
     if t is Terminator::Switch {
-        g1 = operandValue(g, f, Type::TBool, (t as Terminator::Switch).cond);
+        g1 = operandValue(g, cx, f, Type::TBool, (t as Terminator::Switch).cond);
         v = g1.last;
         return emit(g1, "br i1 ".then(v).then(", label %").then(blockLabel((t as Terminator::Switch).yes)).then(", label %").then(blockLabel((t as Terminator::Switch).no)));
     };
@@ -2094,23 +3041,31 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
                 target = get(cx.sigs, i);
                 if !target.paramsOk { return failG(g, "Undeclared local of ".then(name)); };
                 if !target.hasReturn { return failG(g, "Function without a result: ".then(name)); };
-                return call(g, entry, f, functionSymbol(name), target.params, target.returns, args, dest, next);
+                return call(g, cx, entry, f, functionSymbol(name), target.params, target.returns, args, dest, next);
             };
         };
         // a function value: the address of a function, with the types its type says
         callees = push([], callee);
         ty = sharedType(cx, f, callees);
         if ty is Type::TFn {
-            g1 = operandValue(g, f, ty, callee);
+            g1 = operandValue(g, cx, f, ty, callee);
             address = g1.last;
-            return call(g1, entry, f, address, (ty as Type::TFn).args, Box::unbox((ty as Type::TFn).ret), args, dest, next);
+            return call(g1, cx, entry, f, address, (ty as Type::TFn).args, Box::unbox((ty as Type::TFn).ret), args, dest, next);
         };
         return failG(g, "Call of something that is not a function");
     };
     // Return
     if !f.hasReturn { return emit(g, "ret void"); };
     ty = f.returns;
-    if isAggregate(ty) { return failG(g, "Native code returns a value that is held inline in the next part"); };
+    if isAggregate(ty) {
+        g1 = copyWords(g, "%ret", slot(0), bytesIn(cx, ty));
+        if entry {
+            g2 = ins(g1, "f", "load i1, ptr %returned");
+            returned = g2.last;
+            return emit(g2, "ret i1 ".then(returned));
+        };
+        return emit(g1, "ret void");
+    };
     g1 = typeText(g, ty);
     tt = g1.last;
     g2 = ins(g1, "v", "load ".then(tt).then(", ptr ").then(slot(0)));
@@ -2136,20 +3091,148 @@ fn emitBlock(g: Gen, cx: &Ctx, entry: Bool, f: &Function, b: &Block) -> Gen ~ {
 
 // The lines of the blocks of a function (LlvmEmit.emitBody)
 fn emitBody(cx: &Ctx, entry: Bool, f: &Function) -> Gen ~ {
-    g = newGen();
+    g = newGen(f.name);
     for b in f.blocks { g = emitBlock(g, cx, entry, f, b); };
     return g;
 };
 
+// The function around its blocks
+
+// What a function is as text: its lines, and the types whose descriptors its code asks for (the newest first), or why there is none
+struct FnOut { ok: Bool, error: String, lines: List<String>, types: List<Type> };
+
+fn failedFn(message: &String) -> FnOut [{ }] [{ }] {
+    return FnOut { ok: false, error: message, lines: noStrings(), types: noTypes() };
+};
+
+fn hasInt(l: &List<Int>, x: Int) -> Bool [{ }] [{ }] {
+    for y in l {
+        if y = x { return true; };
+    };
+    return false;
+};
+
+// What a local takes in the frame: a word, or for a value held inline all the words it is made of
+fn storageText(cx: &Ctx, t: &Type) -> Res ~ {
+    if isAggregate(t) { return Res { ok: true, text: "[".then(showInt(slotsIn(cx, t))).then(" x i64]") }; };
+    return llvmType(t);
+};
+
+// Whether a parameter is lent and held inline
+fn lentInline(f: &Function, l: Int) -> Bool ~ {
+    if !hasInt(f.borrowed, l) { return false; };
+    lt = localTypeOf(f, l);
+    return lt.ok && isAggregate(lt.ty);
+};
+
+// The IR of a function: `entry` is for main, which also keeps whether the return slot was assigned
+fn emitFunction(cx: &Ctx, entry: Bool, symbol: &String, f: &Function) -> FnOut ~ {
+    prefix = "In ".then(f.name).then(": ");
+    ptexts = noStrings();
+    for p in f.params {
+        lt = localTypeOf(f, p);
+        if !lt.ok { return failedFn(prefix.then("Undeclared local ").then(showInt(p))); };
+        r = llvmType(lt.ty);
+        if !r.ok { return failedFn(prefix.then(r.text)); };
+        ptexts = push(ptexts, r.text);
+    };
+    valueType = "void";
+    if f.hasReturn {
+        r = llvmType(f.returns);
+        if !r.ok { return failedFn(prefix.then(r.text)); };
+        valueType = r.text;
+    };
+    returnsAggregate = f.hasReturn && isAggregate(f.returns);
+    // (a value held inline comes back in room that the caller gives, as the first parameter)
+    returnType = valueType;
+    if returnsAggregate {
+        if entry { returnType = "i1"; } else { returnType = "void"; };
+    } else {
+        if entry && f.hasReturn { returnType = resultStruct(valueType); };
+    };
+    localTexts = noStrings();
+    for d in f.locals {
+        r = storageText(cx, d.ty);
+        if !r.ok { return failedFn(prefix.then(r.text)); };
+        localTexts = push(localTexts, r.text);
+    };
+    body = emitBody(cx, entry, f);
+    if size(body.error.bytes) > 0 { return failedFn(prefix.then(body.error)); };
+    // a parameter that is lent and held inline is the caller's words, which the function reads where they are: it has no room of its own
+    params = noStrings();
+    if returnsAggregate { params = push(params, "ptr %ret"); };
+    i = 0;
+    while i < size(f.params) && i < size(ptexts) [{ affirm i >= 0; affirm i <= size(f.params); affirm i <= size(ptexts); }] ~ {
+        p = get(f.params, i);
+        name = "%p.".then(showInt(p));
+        if lentInline(f, p) { name = slot(p); };
+        params = push(params, get(ptexts, i).then(" ").then(name));
+        i = i + 1;
+    };
+    header = "define internal ".then(returnType).then(" ").then(symbol).then("(").then(joinWith(", ", params)).then(") {");
+    lines = noStrings();
+    for l in body.globals { lines = push(lines, l); };
+    lines = push(lines, header);
+    lines = push(lines, "entry:");
+    j = 0;
+    while j < size(f.locals) && j < size(localTexts) [{ affirm j >= 0; affirm j <= size(f.locals); affirm j <= size(localTexts); }] ~ {
+        d = get(f.locals, j);
+        if !lentInline(f, d.id) { lines = push(lines, "    ".then(slot(d.id)).then(" = alloca ").then(get(localTexts, j))); };
+        j = j + 1;
+    };
+    for l in body.temps { lines = push(lines, l); };
+    // (a local that owns something holds nothing until it is given a value, so that it can be dropped)
+    for d in f.locals {
+        if isPointer(d.ty) && !hasInt(f.params, d.id) { lines = push(lines, "    store ptr null, ptr ".then(slot(d.id))); };
+    };
+    for d in f.locals {
+        if isAggregate(d.ty) && needsDropIn(cx, d.ty) && !hasInt(f.params, d.id) {
+            lines = push(lines, "    call void @llvm.memset.p0.i64(ptr ".then(slot(d.id)).then(", i8 0, i64 ").then(showInt(bytesIn(cx, d.ty))).then(", i1 false)"));
+        };
+    };
+    k = 0;
+    while k < size(f.params) && k < size(ptexts) [{ affirm k >= 0; affirm k <= size(f.params); affirm k <= size(ptexts); }] ~ {
+        p = get(f.params, k);
+        lt = localTypeOf(f, p);
+        // (a value held inline is given by its address, and the function works on its own copy, unless it is lent)
+        if lt.ok {
+            if !lentInline(f, p) {
+                if isAggregate(lt.ty) {
+                    lines = push(lines, "    ".then(memcpyText(slot(p), "%p.".then(showInt(p)), bytesIn(cx, lt.ty))));
+                } else {
+                    lines = push(lines, "    store ".then(get(ptexts, k)).then(" %p.").then(showInt(p)).then(", ptr ").then(slot(p)));
+                };
+            };
+        } else {
+            lines = push(lines, "    store ".then(get(ptexts, k)).then(" %p.").then(showInt(p)).then(", ptr ").then(slot(p)));
+        };
+        k = k + 1;
+    };
+    if entry && f.hasReturn {
+        lines = push(lines, "    %returned = alloca i1");
+        lines = push(lines, "    store i1 false, ptr %returned");
+        if !returnsAggregate { lines = push(lines, "    store ".then(valueType).then(" ").then(zeroOf(valueType)).then(", ptr ").then(slot(0))); };
+    };
+    lines = push(lines, "    br label %bb0");
+    for l in body.lines { lines = push(lines, l); };
+    lines = push(lines, "overflow:");
+    lines = push(lines, "    call void @tersus_overflow()");
+    lines = push(lines, "    unreachable");
+    lines = push(lines, "}");
+    newest = noTypes();
+    m = size(body.types);
+    while m > 0 [{ affirm m >= 0; affirm m <= size(body.types); }] shrinks m {
+        m = m - 1;
+        newest = push(newest, get(body.types, m));
+    };
+    return FnOut { ok: true, error: "", lines: lines, types: newest };
+};
+
 // What `LlvmEmit.emitBody` gives, as lines: the globals the code needs, the rooms for the values it builds, the code, and the types whose descriptors it asks for (the
-// newest first); or that this part of the emitter has not the function
+// newest first)
 fn bodyLines(index: Int, g: &Gen) -> List<String> ~ {
     out = noStrings();
     out = push(out, "; function ".then(showInt(index)));
-    if size(g.error.bytes) > 0 {
-        out = push(out, "; unsupported");
-        return out;
-    };
     out = push(out, "; globals");
     for l in g.globals { out = push(out, l); };
     out = push(out, "; temps");
@@ -2165,17 +3248,61 @@ fn bodyLines(index: Int, g: &Gen) -> List<String> ~ {
     return out;
 };
 
-// The code of every function, each with a line that says which it is (the functions in order, then main)
+// The code of every function, each with a line that says which it is (the functions in order, then main); a function the emitter cannot make is marked
 fn bodies(program: &Program) -> List<String> ~ {
     cx = contextOf(program);
     out = noStrings();
     index = 0;
     for f in program.functions {
-        for l in bodyLines(index, emitBody(cx, false, f)) { out = push(out, l); };
+        g = emitBody(cx, false, f);
+        if size(g.error.bytes) > 0 {
+            out = push(out, "; function ".then(showInt(index)));
+            out = push(out, "; unsupported");
+        } else {
+            for l in bodyLines(index, g) { out = push(out, l); };
+        };
         index = index + 1;
     };
-    for l in bodyLines(index, emitBody(cx, true, program.entry)) { out = push(out, l); };
+    g = emitBody(cx, true, program.entry);
+    if size(g.error.bytes) > 0 {
+        out = push(out, "; function ".then(showInt(index)));
+        out = push(out, "; unsupported");
+    } else {
+        for l in bodyLines(index, g) { out = push(out, l); };
+    };
     return out;
+};
+
+// The whole IR of the program (LlvmEmit.emitOwned): the declarations, the descriptors of the types that the code asks for and the types inside them, the functions in order,
+// main, and the entry point
+fn ir(program: &Program) -> Entry ~ {
+    cx = contextOf(program);
+    pieces = [];
+    roots = noTypes();
+    for f in program.functions {
+        r = emitFunction(cx, false, functionSymbol(f.name), f);
+        if !r.ok { return failedEntry(r.error); };
+        pieces = push(pieces, r.lines);
+        for t in r.types { roots = push(roots, t); };
+    };
+    m = emitFunction(cx, true, "@tersus_main", program.entry);
+    if !m.ok { return failedEntry(m.error); };
+    for t in m.types { roots = push(roots, t); };
+    e = entryPoint(program.types, program.entry);
+    if !e.ok { return e; };
+    for t in e.types { roots = push(roots, t); };
+    closed = closeTypes(program.types, roots);
+    lines = declarations();
+    for l in typeDescriptors(program.types, closed) { lines = push(lines, l); };
+    for b in pieces {
+        for l in b { lines = push(lines, l); };
+        lines = push(lines, "");
+    };
+    for l in m.lines { lines = push(lines, l); };
+    lines = push(lines, "");
+    for l in e.lines { lines = push(lines, l); };
+    lines = push(lines, "");
+    return Entry { ok: true, error: "", lines: lines, types: closed };
 };
 
 // The IR so far: the declarations, the descriptors of the types of the locals and what they contain, and the entry point (LlvmEmit.emitOutline)
@@ -2196,8 +3323,9 @@ fn outline(program: &Program) -> Entry ~ {
     return Entry { ok: true, error: "", lines: lines, types: closed };
 };
 
-// The program is read from the standard input and its IR is written. The first argument says what: `outline` is the declarations, the descriptors and the entry point
-// (LlvmEmit.emitOutline), and `bodies` the code of each function (LlvmEmit.emitBody). What cannot be read or made is reported on the standard error.
+// The program is read from the standard input and its IR is written. The first argument says what: `ir` (or none) is all of it (LlvmEmit.emitOwned), `outline` the
+// declarations, the descriptors and the entry point (LlvmEmit.emitOutline), and `bodies` the code of each function (LlvmEmit.emitBody). What cannot be read or made is
+// reported on the standard error.
 mode = String::arg(0, 100);
 read = readLines();
 if !read.ok {
@@ -2212,8 +3340,9 @@ if !program.ok {
 if mode = "bodies" {
     printLines(bodies(program.value));
 } else {
-    if mode = "outline" {
+    if mode = "outline" || mode = "ir" || mode = "" {
         result = outline(program.value);
+        if mode != "outline" { result = ir(program.value); };
         if !result.ok {
             result.error.printError();
             "\n".printError();
@@ -2221,7 +3350,7 @@ if mode = "bodies" {
         };
         printLines(result.lines);
     } else {
-        "the first argument is outline or bodies\n".printError();
+        "the first argument is ir, outline or bodies\n".printError();
         return 1;
     };
 };

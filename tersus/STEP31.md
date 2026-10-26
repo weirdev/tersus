@@ -102,8 +102,19 @@ Each slice is a PR, and nothing changes the default `build` until slice 8.
    - **`get(functions, i)` copies the function and all its blocks**, so the calls look up the signatures taken once (`Sig`, `Ctx`), and the names of the types and whether each
      owns something are in the `Ctx` too (`declIndex`, `needsDropIn`).
    - **Names that are in two files clash**: the reader's `operandAt` and `isWord` are not available as the names of the emitter's own functions, which are `operandValue` and so on.
-7. **Emitter part 3.** Aggregates, arrays, Box, clone and drop, then function assembly. From here the test is that the IR is
-   byte-identical to `LlvmEmit` for every example and every `TestNative` program.
+7. **Emitter part 3.** Done: `examples/emit.tersus` writes all of the IR, byte-identical to `LlvmEmit.emitOwned` for every example and every `TestNative` program (the
+   emitter's own data too: 44,000 lines of MIR, 10 seconds). It has now the values held inline (`assignAggregate`, `constantAggregate`, `writeConstant`, `operandAddress`,
+   `dataBase`, the constructors and their offsets), the arrays and lists (`fillElements`, `arrayRead`, `elementAddress`), Boxes, `cloneInto`, `dropSlot`, the calls and
+   returns of values held inline, and the function around its blocks (`emitFunction`: the header, the frame, the parameters, `%returned`). `TestMirEmit` runs it with no
+   argument against `emitOwned`, and with `outline` and `bodies` against the parts, for all of them, and fails if the emitter does not give the functions that the Haskell
+   gives. Found while doing it:
+   - **A local variable with the name of a generic function breaks the native build** (`done = n * 2;` in a function, with `fn done<T>` in the program: `Ownership failed: In
+     main: bb0 names the function done, which is not there`). The program is accepted by the checker and the validator. The emitter avoids the names (`finish`, `pieces`);
+     not fixed.
+   - **The constructors are a table**, in the order of `Mir.constructor` (structs first, then the variants of the enums, so the first with a name is what it finds), and so is
+     the words of each type, since walking the declarations for each field (and copying them to do it) was most of the time.
+   - Mutual recursion is missing again: `operandValue` for a value moved from a local that holds an aggregate calls `operandAddress`, which has to come first, and the order of
+     the functions follows what each needs.
 8. **Wire-in and bootstrap.** `build` can use the Tersus emitter behind a flag. Stage 0 is the emitter built from the
    Haskell-emitted IR; stage 1 is the emitter compiled by stage 0. The fixpoint test: stage 1 gives identical IR for the
    emitter and for the examples.
