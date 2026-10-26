@@ -34,8 +34,8 @@ buildExecutableWith flags output ir = do
 
 -- Compiles the IR to an executable in the temporary directory, runs it with the input and output of this process, and removes it.
 -- Ok holds the exit status of the program, and Error says that it could not be built.
-runExecutable :: String -> IO (Result ExitCode String)
-runExecutable ir = do
+runExecutable :: String -> [String] -> IO (Result ExitCode String)
+runExecutable ir args = do
     tmp <- getTemporaryDirectory
     exe <- writeTemporary tmp "tersus_run" ""
     -- (the file only names a place: the linker makes the executable there)
@@ -44,7 +44,7 @@ runExecutable ir = do
         built <- buildExecutable exe ir
         case built of
             Error e -> return (Error e)
-            Ok () -> Ok <$> rawSystem exe [])
+            Ok () -> Ok <$> rawSystem exe args)
         `finally` (try (removeFile exe) :: IO (Either IOException ()))
 
 -- A new file named after the template, with its extension kept, that holds the text

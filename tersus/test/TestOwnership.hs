@@ -327,6 +327,8 @@ listOp op os =
         (WriteByte, [b]) -> VI . fromIntegral <$> intOperand b
         (WriteError, [b]) -> VI . fromIntegral <$> intOperand b
         (ReadByte, []) -> pure (VI (-1))
+        (ArgCount, []) -> pure (VI 0)
+        (ArgByte, [_, _]) -> pure (VI (-1))
         (ToByte, [x]) -> VI . fromIntegral <$> intOperand x
         (FromByte, [b]) -> VI . fromIntegral <$> intOperand b
         (First, [l]) -> item l (const 0)

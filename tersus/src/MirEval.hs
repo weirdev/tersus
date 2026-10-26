@@ -4,6 +4,7 @@ module MirEval
     , runProgramOutput
     , runProgramWith
     , runProgramStreams
+    , runProgramIn
     , renderMirValue
     , toMirValue
     , fromMirValue
@@ -45,7 +46,11 @@ runProgramWith input program = mapResult (\(out, _, value) -> (out, value)) (run
 
 -- The same, with the bytes written to the standard error too (as characters from 0 to 255)
 runProgramStreams :: String -> Program -> Result (String, String, Maybe MirValue) String
-runProgramStreams input program = mapResult (\(value, (out, err), _) -> (out, err, value)) (runE (runFunction program (progMain program) []) input)
+runProgramStreams input = runProgramIn [] input
+
+-- The same for a program that was given arguments: each is its bytes (as characters from 0 to 255), which argCount and argByte give
+runProgramIn :: [String] -> String -> Program -> Result (String, String, Maybe MirValue) String
+runProgramIn args input program = mapResult (\(value, (out, err), _) -> (out, err, value)) (runE (runFunction program (progMain program) []) args input)
 
 -- What a program has written to the standard output and to the standard error
 type Written = (String, String)
@@ -54,38 +59,42 @@ none :: Written
 none = ("", "")
 
 -- The evaluator is a function of the input that is left, and the failure of a result, with the bytes written so far and the input that is left
-newtype E a = E {runE :: String -> Result (a, Written, String) String}
+newtype E a = E {runE :: [String] -> String -> Result (a, Written, String) String}
 
 instance Functor E where
-    fmap f (E r) = E (\input -> mapResult (\(a, output, rest) -> (f a, output, rest)) (r input))
+    fmap f (E r) = E (\args input -> mapResult (\(a, output, rest) -> (f a, output, rest)) (r args input))
 
 instance Applicative E where
-    pure a = E (\input -> Ok (a, none, input))
-    E f <*> E g = E (\input -> f input `bindResult` \(h, o1, rest) -> mapResult (\(a, o2, rest') -> (h a, together o1 o2, rest')) (g rest))
+    pure a = E (\_ input -> Ok (a, none, input))
+    E f <*> E g = E (\args input -> f args input `bindResult` \(h, o1, rest) -> mapResult (\(a, o2, rest') -> (h a, together o1 o2, rest')) (g args rest))
 
 instance Monad E where
-    E g >>= f = E (\input -> g input `bindResult` \(a, o1, rest) -> runE (f a) rest `bindResult` \(b, o2, rest') -> Ok (b, together o1 o2, rest'))
+    E g >>= f = E (\args input -> g args input `bindResult` \(a, o1, rest) -> runE (f a) args rest `bindResult` \(b, o2, rest') -> Ok (b, together o1 o2, rest'))
 
 together :: Written -> Written -> Written
 together (out1, err1) (out2, err2) = (out1 ++ out2, err1 ++ err2)
 
 failE :: String -> E a
-failE e = E (\_ -> Error e)
+failE e = E (\_ _ -> Error e)
 
 liftE :: Result a String -> E a
-liftE r = E (\input -> mapResult (\a -> (a, none, input)) r)
+liftE r = E (\_ input -> mapResult (\a -> (a, none, input)) r)
 
 write :: Char -> E ()
-write c = E (\input -> Ok ((), ([c], ""), input))
+write c = E (\_ input -> Ok ((), ([c], ""), input))
 
 writeError :: Char -> E ()
-writeError c = E (\input -> Ok ((), ("", [c]), input))
+writeError c = E (\_ input -> Ok ((), ("", [c]), input))
 
 -- The next byte of the input, or -1 at its end
 readInput :: E Integer
-readInput = E (\input -> case input of
+readInput = E (\_ input -> case input of
     [] -> Ok (-1, none, [])
     c : rest -> Ok (toInteger (fromEnum c `mod` 256), none, rest))
+
+-- The arguments of the program
+arguments :: E [String]
+arguments = E (\args input -> Ok (args, none, input))
 
 runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue)
 runFunction program fn args
@@ -132,6 +141,18 @@ runStatements frame [] = return frame
 runStatements frame (Ghost{} : rest) = runStatements frame rest
 runStatements frame (Drop{} : rest) = runStatements frame rest
 runStatements frame (Peek dest rv : rest) = runStatements frame (Assign dest rv : rest)
+runStatements frame (Assign dest (ListOp ArgCount []) : rest) = do
+    args <- arguments
+    runStatements (Map.insert dest (MInt (toInteger (length args))) frame) rest
+runStatements frame (Assign dest (ListOp ArgByte [i, j]) : rest) = do
+    args <- arguments
+    iv <- liftE (operandValue frame i)
+    jv <- liftE (operandValue frame j)
+    let byte = case (iv, jv) of
+            (MInt a, MInt b)
+                | a >= 0 && a < toInteger (length args) && b >= 0 && b < toInteger (length (args !! fromInteger a)) -> toInteger (fromEnum (args !! fromInteger a !! fromInteger b) `mod` 256)
+            _ -> -1
+    runStatements (Map.insert dest (MInt byte) frame) rest
 runStatements frame (Assign dest (ListOp ReadByte []) : rest) = do
     b <- readInput
     runStatements (Map.insert dest (MInt b) frame) rest
@@ -241,6 +262,8 @@ listOp ToByte [MInt x]
     | otherwise = Error "toByte needs an Int from 0 to 255"
 listOp FromByte [MInt b] = Ok (MInt b)
 listOp ReadByte _ = Error "readByte is run by the statement that calls it"
+listOp ArgCount _ = Error "argCount is run by the statement that calls it"
+listOp ArgByte _ = Error "argByte is run by the statement that calls it"
 listOp NewEmptyBoxed [] = Ok (MList [])
 listOp NewArray [MInt n, x]
     | n < 0 = Error "array needs a size that is not negative"

@@ -1,6 +1,10 @@
 module Cli
     ( Command (..)
     , parseCommandLine
+    , parseProgramArguments
+    , World (..)
+    , noWorld
+    , runSourceIn
     , runSource
     , runSourceWith
     , runSourceStreams
@@ -15,7 +19,7 @@ import Data.List (intercalate)
 import System.IO
 
 import Mir (renderProgram)
-import MirEval (renderMirValue, runProgramStreams)
+import MirEval (renderMirValue, runProgramIn)
 import Pipeline
 import TersusTypes
 import Utils
@@ -35,8 +39,10 @@ usage =
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
-        , "  run <file>    Validate a program, compile it to native code (needs clang), run that and print its return value"
-        , "  eval <file>   Validate a program, then run its MIR with the reference interpreter (no compiler needed)"
+        , "  run <file> [args]"
+        , "                Validate a program, compile it to native code (needs clang), run it with the arguments and print its return value"
+        , "  eval <file> [args]"
+        , "                Validate a program, then run its MIR with the reference interpreter (no compiler needed)"
         , "  mir <file>    Validate a program, then print its MIR"
         , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
@@ -57,6 +63,22 @@ parseCommandLine ["llvm", file] = Just (Llvm, file)
 parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
 parseCommandLine _ = Nothing
 
+-- The same, with the arguments that `run` and `eval` give to the program after its file
+parseProgramArguments :: [String] -> Maybe (Command, FilePath, [String])
+parseProgramArguments ("run" : file : args) = Just (Run, file, args)
+parseProgramArguments ("eval" : file : args) = Just (Interpret, file, args)
+parseProgramArguments args = (\(command, file) -> (command, file, [])) <$> parseCommandLine args
+
+-- What a program is run in, besides its source: the bytes of the standard input, and the bytes of each of its arguments (as characters from 0 to 255:
+-- `Utils.encodeUtf8` for a text). An executable has its own.
+data World = World
+    { worldInput :: String
+    , worldArgs :: [String]
+    }
+
+noWorld :: World
+noWorld = World "" []
+
 -- Runs a command over program source. Ok holds the text to print on success, which is
 -- empty when there is nothing to report; Error holds the message for a failure.
 runSource :: Command -> String -> Result String String
@@ -68,14 +90,18 @@ runSourceWith input command source = mapResult fst (runSourceStreams input comma
 
 -- The same with what a program wrote to the standard error too: the text for the standard output, and the text for the standard error
 runSourceStreams :: String -> Command -> String -> Result (String, String) String
-runSourceStreams _ Check source = mapResult (\_ -> ("OK", "")) (compileSource source)
-runSourceStreams input Interpret source =
+runSourceStreams input = runSourceIn noWorld{worldInput = input}
+
+-- The same for a program that has a world
+runSourceIn :: World -> Command -> String -> Result (String, String) String
+runSourceIn _ Check source = mapResult (\_ -> ("OK", "")) (compileSource source)
+runSourceIn world Interpret source =
     compileSource source `bindResult` \program ->
-        case runProgramStreams input program of
+        case runProgramIn (worldArgs world) (worldInput world) program of
             Error e -> Error ("Evaluation failed: " ++ e)
             -- (what the program wrote, then its value: the same text as an executable prints)
             Ok (written, errors, result) -> Ok (decodeUtf8 written ++ maybe "" renderMirValue result, decodeUtf8 errors)
-runSourceStreams input command source = mapResult (\text -> (text, "")) (runOther input command source)
+runSourceIn world command source = mapResult (\text -> (text, "")) (runOther (worldInput world) command source)
 
 runOther :: String -> Command -> String -> Result String String
 runOther _ Mir source = mapResult renderProgram (compileSource source)

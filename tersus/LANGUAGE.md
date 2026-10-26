@@ -33,8 +33,8 @@ From the `tersus/` directory:
 
 ```
 stack run -- check program.tersus   # parse and validate; prints OK
-stack run -- run program.tersus     # validate, compile to native code with clang, run that and print the return value
-stack run -- eval program.tersus    # validate, then run the MIR with the reference interpreter (no compiler)
+stack run -- run program.tersus [args]    # validate, compile to native code with clang, run that (with the arguments) and print the return value
+stack run -- eval program.tersus [args]   # validate, then run the MIR with the reference interpreter (no compiler)
 stack run -- mir program.tersus     # validate, then print the MIR
 stack run -- owned program.tersus   # validate, then print the MIR with who owns each value (moves, copies, frees)
 stack run -- llvm program.tersus    # validate, then print the LLVM IR
@@ -1466,6 +1466,23 @@ rest.print();
 ```
 
 A function that reads, or calls one that does (`String::read`, `readLine`, and the functions of the program that call them), is not a function of its arguments: the validator does not say that two calls with the same arguments give the same value (`a = String::readLine(5); b = String::readLine(5); affirm a = b;` is refused), only what the function promises about each result, and a contract or an `affirm` may not call one (`A proof calls next, which reads the input`). A line longer than the limit is cut there and the rest is left for the next read. A loop over the bytes of the input without a limit is written with `~` (`while c >= 0 [{ ... }] ~ { ... }`), since nothing says the input ends. In an executable the input is the standard input; `tersus run` passes its own on, and `tersus eval` reads it the same way, as the program asks for it (a program that is itself read from the standard input with `-` has none left). Only the standard input is read: there are no files, arguments or environment, and a read that fails is the end of the input.
+
+### Arguments
+
+`tersus run program.tersus one two` (and `eval`, and an executable that `build` made: `./program one two`) gives the program the words after its file. `argCount()` is how many there are, and `argByte(i, j)` the byte `j` of argument `i`, counting from 0, or `-1` when there is no such argument or byte (a negative index is none); the bytes are the UTF-8 of the argument, whatever the locale is. `String::arg(i, limit)` is argument `i` as a `String` of up to `limit` bytes (an argument that there is not is the empty string). Like `readByte`, they are not known to the validator beyond their range (a count is not negative, a byte is from -1 to 255), a call of one is not the same value as another call with the same arguments, and a proof may not call one (`A proof calls argCount`):
+
+```tersus
+n = argCount();
+i = 0;
+while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {   // it ends: the count is not negative
+    String::arg(i, 1000).print();
+    writeByte(10);
+    i = i + 1;
+};
+return n;
+```
+
+The name of the program is not an argument, and there is no environment.
 
 ### Lists In Native Code
 

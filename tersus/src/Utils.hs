@@ -21,6 +21,10 @@ utf8Bytes c
     n = fromEnum c
     continuation m = 0x80 + m `mod` 64
 
+-- The bytes of the UTF-8 encoding of a text, as characters from 0 to 255
+encodeUtf8 :: String -> String
+encodeUtf8 = concatMap (map toEnum . utf8Bytes)
+
 -- The characters that bytes (as characters from 0 to 255) are the UTF-8 encoding of, with U+FFFD for bytes that are not
 decodeUtf8 :: String -> String
 decodeUtf8 [] = []

@@ -2,7 +2,7 @@ module TestStrings (testStrings) where
 
 import Data.List (intercalate)
 
-import Cli (Command (..), runSource, runSourceStreams, runSourceWith)
+import Cli (Command (..), World (..), noWorld, runSource, runSourceIn, runSourceStreams, runSourceWith)
 import TestHarness
 import Utils
 
@@ -12,6 +12,7 @@ testStrings =
     let runs body expected = testAssertEq (runSource Interpret body) (Ok expected)
         rejected body expected = testAssertErrorContains expected (runSource Check body)
         valid body = testAssertEq (runSource Check body) (Ok "OK")
+        given args body expected = testAssertEq (mapResult fst (runSourceIn noWorld{worldArgs = map encodeUtf8 args} Interpret body)) (Ok expected)
         reads input body expected = testAssertEq (runSourceWith input Interpret body) (Ok expected)
         parseError body = testAssertErrorContains "Parse error" (runSource Check body)
         bytes xs = "String { bytes: [" ++ intercalate ", " (map show (xs :: [Int])) ++ "] }"
@@ -106,6 +107,26 @@ testStrings =
                 , testCase "the bytes of a UTF-8 text decode" (testAssertEq (decodeUtf8 (map toEnum [104, 195, 169, 226, 130, 172, 240, 159, 152, 128])) "h\233\8364\128512")
                 , testCase "a byte that starts a character that is cut short is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [226, 130])) "\65533\65533")
                 , testCase "an overlong encoding is U+FFFD" (testAssertEq (decodeUtf8 (map toEnum [192, 128])) "\65533\65533")
+                ]
+            , TestList
+                "arguments"
+                [ testCase "a program with none has none" (given [] "return argCount();" "0")
+                , testCase "the number of them" (given ["a", "bc", "def"] "return argCount();" "3")
+                , testCase "a byte of one" (given ["A", "xyz"] "return argByte(1, 2);" "122")
+                , testCase "-1 where there is none" (given ["A"] "return argByte(0, 1) * 100 + argByte(1, 0);" "-101")
+                , testCase "an argument as a string" (given ["hello"] "s = String::arg(0, 100); return size(s);" "5")
+                , testCase "cut at the limit" (given ["hello"] "s = String::arg(0, 3); s.print(); return size(s);" "hel3")
+                , testCase "one that is not there is empty" (given [] "return size(String::arg(0, 100));" "0")
+                , testCase "UTF-8 is its bytes" (given ["caf\233"] "return size(String::arg(0, 100));" "5")
+                , testCase "and is written back as it was" (given ["caf\233"] "String::arg(0, 100).print(); return 0;" ("caf\233" ++ "0"))
+                , testCase "the count is not negative" (valid "n = argCount(); affirm n >= 0; return n;")
+                , testCase "a byte is from -1 to 255" (valid "c = argByte(0, 0); affirm c >= 0 - 1; affirm c < 256; return c;")
+                , testCase "but is not known to be a byte" (rejected "c = argByte(0, 0); affirm c >= 0; return c;" "Could not prove: c >= 0")
+                , testCase "two of them are not the same value" (rejected "a = argCount(); b = argCount(); affirm a = b; return a;" "Could not prove: a = b")
+                , testCase "a proof does not call them" (rejected "affirm argCount() >= 0; return 0;" "A proof calls argCount")
+                , testCase "nor argByte" (rejected "affirm argByte(0, 0) >= 0 - 1; return 0;" "A proof calls argByte")
+                , testCase "a limit that is negative is refused" (rejected "s = String::arg(0, 0 - 1); return 0;" "Could not prove: limit >= 0")
+                , testCase "and the size is at most the limit" (valid "s = String::arg(0, 5); affirm size(s) <= 5; return 0;")
                 ]
             , TestList
                 "standard error"

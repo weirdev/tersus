@@ -30,6 +30,10 @@ data BuiltinFunct
     | -- ReadByte: readByte(), the next byte of the standard input, or -1 when there is no more. Its value is not known to the validator beyond
       -- being from -1 to 255.
       ReadByte
+    | -- ArgCount: argCount(), the number of arguments the program was given. ArgByte i j: argByte(i, j), the byte j of argument i, or -1 when there
+      -- is no such argument or byte. What they give is not known to the validator beyond its range.
+      ArgCount
+    | ArgByte
     | -- ToByte x: toByte(x), the Byte that the Int x is (x from 0 to 255). FromByte b: toInt(b), the Int that the Byte b is. A Byte is an Int that is from
       -- 0 to 255, and a different type, so nothing makes one by accident: these two are how a value goes from the one to the other.
       ToByte
@@ -55,6 +59,12 @@ data BuiltinFunct
       -- that the value is that variant; evaluation does nothing, and a wrong cast is undefined behaviour.
       Cast Name
     deriving (Show, Eq, Ord)
+
+-- The builtins whose value is something outside the program (the input, the arguments): a call of one is not a function of its arguments,
+-- so a validator does not say that two calls are the same value, and a proof may not call one
+readsWorld :: BuiltinFunct -> Bool
+readsWorld b = b `elem` [ReadByte, ArgCount, ArgByte]
+
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
 -- look at them. TVar is the checker's own unknown and is never written by a program.

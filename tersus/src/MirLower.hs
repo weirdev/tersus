@@ -572,6 +572,8 @@ builtinRvalue b tys ops =
         (WriteByte, [_]) -> return (M.ListOp M.WriteByte ops)
         (WriteError, [_]) -> return (M.ListOp M.WriteError ops)
         (ReadByte, []) -> return (M.ListOp M.ReadByte [])
+        (ArgCount, []) -> return (M.ListOp M.ArgCount [])
+        (ArgByte, [_, _]) -> return (M.ListOp M.ArgByte ops)
         (ToByte, [_]) -> return (M.ListOp M.ToByte ops)
         (FromByte, [_]) -> return (M.ListOp M.FromByte ops)
         -- (the list of the literal, as a list of Bytes: the numbers are the same)
@@ -667,6 +669,8 @@ builtinLabel b = case b of
     WriteByte -> "writeByte"
     WriteError -> "writeError"
     ReadByte -> "readByte"
+    ArgCount -> "argCount"
+    ArgByte -> "argByte"
     ToByte -> "toByte"
     FromByte -> "toInt"
     BytesFrom -> "bytes_from"

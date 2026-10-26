@@ -149,6 +149,8 @@ rvalueProblems env localTy d rv =
         ListOp WriteByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TByte
         ListOp WriteError [b] -> [expected TByte b | not (fits' TByte b)] ++ result TByte
         ListOp ReadByte [] -> result TInt
+        ListOp ArgCount [] -> result TInt
+        ListOp ArgByte [i, j] -> ints [i, j] ++ result TInt
         ListOp ToByte [x] -> ints [x] ++ result TByte
         ListOp FromByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt
         ListOp NewEmptyBoxed [] -> case d of

@@ -133,8 +133,8 @@ resolveFunction st term =
 builtinInfo :: BuiltinFunct -> FnInfo
 builtinInfo b =
     case builtinFunct b of
-        VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (b == ReadByte)
-        _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (b == ReadByte)
+        VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b)
+        _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b)
 
 -- The builtin function that an operation is
 rvalueCall :: M.Rvalue -> Maybe (BuiltinFunct, [M.Operand])
@@ -173,6 +173,8 @@ rvalueCall rv =
         M.WriteByte -> WriteByte
         M.WriteError -> WriteError
         M.ReadByte -> ReadByte
+        M.ArgCount -> ArgCount
+        M.ArgByte -> ArgByte
         M.ToByte -> ToByte
         M.FromByte -> FromByte
 
@@ -211,7 +213,7 @@ evaluateCalls st0 proofs = go (200 :: Int) st0 (concatMap (callTerms st0) proofs
     go budget st (term : rest)
         | budget <= 0 || evaluated st term = go budget st rest
         | otherwise = case term of
-            FApp (ATerm (Iota "readByte")) _ -> throwV "A proof calls readByte, which reads the input: it has no value in a proof"
+            FApp (ATerm (Iota name)) _ | name `elem` worldNames -> throwV ("A proof calls " ++ name ++ ", which reads the input or the arguments: it has no value in a proof")
             FApp (ATerm iota) args | Just (name, info) <- calledFunction st iota -> do
                 st' <- evaluateCall st name info args term
                 -- (what it promises may call functions too)
@@ -225,11 +227,15 @@ calledFunction :: PState -> Iota -> Maybe (Name, FnInfo)
 calledFunction st (Iota ('$' : name)) = (,) name <$> Map.lookup name (psFns st)
 calledFunction _ _ = Nothing
 
+-- The names of the standard library that read the input or the arguments (a program cannot declare them again)
+worldNames :: [String]
+worldNames = ["readByte", "argCount", "argByte"]
+
 -- The calls of functions of the program in a proof, those inside the arguments of another first
 callTerms :: PState -> IotaProof -> [IotaProof]
 callTerms st proof = case proof of
     -- (readByte is a name of the standard library, which a program cannot declare again)
-    FApp (ATerm (Iota "readByte")) args -> concatMap (callTerms st) args ++ [proof]
+    FApp (ATerm (Iota name)) args | name `elem` worldNames -> concatMap (callTerms st) args ++ [proof]
     FApp (ATerm iota) args
         | Just _ <- calledFunction st iota -> concatMap (callTerms st) args ++ [proof]
         | otherwise -> concatMap (callTerms st) args
