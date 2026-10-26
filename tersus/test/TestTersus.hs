@@ -24,6 +24,7 @@ import TestConnectives
 import TestMirData
 import TestMirReader
 import TestMirEmit
+import TestBootstrap
 
 main :: IO ()
 main = do
@@ -92,6 +93,7 @@ main = do
                 , testMirData
                 , testMirReader
                 , testMirEmit
+                , testBootstrap
                 ]
     putStrLn $
         "Summary: "

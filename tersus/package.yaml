@@ -9,6 +9,8 @@ copyright:           "2024"
 extra-source-files:
 - lib/lists.tersus
 - lib/prelude.tersus
+- lib/string.tersus
+- examples/emit.tersus
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package

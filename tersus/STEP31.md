@@ -43,7 +43,7 @@ stays in Haskell.
 
 ## Slices
 
-Each slice is a PR, and nothing changes the default `build` until slice 8.
+Each slice is a PR, and nothing changes the default `build`: slice 8 adds a flag.
 
 1. **Validator scaling.** Done: see above. A 3,000-line program validates in about 8 seconds.
 2. **The MIR as data.** Done for Haskell: `tersus mir --data` prints a stable line-oriented format (`src/MirData.hs`, described in
@@ -115,9 +115,21 @@ Each slice is a PR, and nothing changes the default `build` until slice 8.
      the words of each type, since walking the declarations for each field (and copying them to do it) was most of the time.
    - Mutual recursion is missing again: `operandValue` for a value moved from a local that holds an aggregate calls `operandAddress`, which has to come first, and the order of
      the functions follows what each needs.
-8. **Wire-in and bootstrap.** `build` can use the Tersus emitter behind a flag. Stage 0 is the emitter built from the
-   Haskell-emitted IR; stage 1 is the emitter compiled by stage 0. The fixpoint test: stage 1 gives identical IR for the
-   emitter and for the examples.
+8. **Wire-in and bootstrap.** Done: `tersus --tersus-emitter build|llvm|run <file>` has the IR written by `examples/emit.tersus` instead of `LlvmEmit` (the flag comes before the
+   command, since the arguments after the file of `run` are the program's). `Bootstrap` has the two stages:
+   - **Stage 0** is the emitter built (`stageZero`) from the IR that `LlvmEmit` writes for `emit.tersus`. It is built the first time the flag is used (about 35 seconds, with a
+     line on the standard error that says so) and kept in the cache directory of the user (`$XDG_CACHE_HOME/tersus`, or `~/.cache/tersus`, or the temporary directory when that
+     cannot be made) as `emitter-<hash>`, where the hash (FNV-1a, 64 bits) is of the text of the emitter, the runtime and the library every program has (`emitterHash`). It is
+     built under another name and moved, so that a build that is cut short leaves nothing that looks like the emitter. `stack build` needs no clang. The text of the emitter
+     is in the compiler (`PreludeSource.emitterSource`), so the cache is right for the compiler that is running.
+   - **Stage 1** is the emitter built (`stageOne`) from the IR that stage 0 writes for the emitter's own MIR.
+   `TestBootstrap` is the fixpoint: stage 0 writes for the emitter the IR it was built from, stage 1 writes for the emitter and for every example and native-test program the
+   text that `llvmSource` gives (and the IR is the same at both stages, so stage 1 is stage 0 again). It checks the flag, and that an emitter in the cache is used and not
+   written. Found while doing it:
+   - **The cache is not keyed by the Haskell emitter.** If `LlvmEmit` changes in a way that changes the IR, stage 0 in the cache is still the emitter built from the old IR; it
+     is the same program as long as the IR means the same, and `TestMirEmit` and the fixpoint are what say that the two emitters agree. Deleting the cache directory forces a rebuild.
+   - `testBootstrap` is among the longest groups (stage 0 and stage 1 are two builds with clang -O2, and the front end runs on the emitter and on every program; the programs are done in parallel, about five minutes unoptimized).
+   - `LlvmEmit` stays, as decision 2 says. Replacing the Haskell emitter as the default needs a checked-in seed.
 
 Slices 5 to 7 are the bulk of the work. Slice 1 is the one that may change the plan.
 
