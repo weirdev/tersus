@@ -501,7 +501,7 @@ lowerOperand expr = do
 lowerLast :: Expression -> L (Pending, Type)
 lowerLast (Val v) = (\(o, ty) -> (PRvalue (M.Use o), ty)) <$> valueOperand v
 lowerLast (Var name) = (\(o, ty) -> (PRvalue (M.Use o), ty)) <$> varOperand name
-lowerLast expr | Just (b, [x, y]) <- connective expr, b `elem` [And, Or] = lowerValueOfConnective b x y
+lowerLast expr | Just (b, [_, _]) <- connective expr, b `elem` [And, Or] = lowerValueOfConnective expr
 lowerLast (F funct args) = do
     target <- resolveHead funct
     case target of
@@ -511,24 +511,20 @@ lowerLast (F funct args) = do
             result <- tc (checkCall "call" ty (map snd operands))
             return (PCall callee (map fst operands), result)
 
--- `a && b` and `a || b` where the Bool is wanted (`ok = a && b;`): b is evaluated only when a does not decide, and the local that holds the value is
--- assigned in each of the two ways to get there
-lowerValueOfConnective :: BuiltinFunct -> Expression -> Expression -> L (Pending, Type)
-lowerValueOfConnective b x y = do
-    (first', tyX) <- lowerOperand x
-    tc (expect "operand of a connective" TBool tyX)
+-- A connective where the Bool is wanted (`ok = a && b;`): the whole expression is lowered as a condition, so every test is known to the ones after it (`i >= 0
+-- && i < size(l) && get(l, i) = 0`), and the local that holds the value is assigned in each of the two ways to get there
+lowerValueOfConnective :: Expression -> L (Pending, Type)
+lowerValueOfConnective expr = do
     result <- newLocal Nothing TBool
-    rightB <- newBlock
-    decidedB <- newBlock
+    yesB <- newBlock
+    noB <- newBlock
     joinB <- newBlock
-    terminate (if b == And then M.SwitchBool first' rightB decidedB else M.SwitchBool first' decidedB rightB)
-    openBlock rightB
-    (second, tyY) <- lowerOperand y
-    tc (expect "operand of a connective" TBool tyY)
-    emit (M.Assign result (M.Use second))
+    lowerCondition "operand of a connective" expr yesB noB
+    openBlock yesB
+    emit (M.Assign result (M.Use (M.Const (M.CBool True))))
     terminate (M.Goto joinB)
-    openBlock decidedB
-    emit (M.Assign result (M.Use (M.Const (M.CBool (b == Or)))))
+    openBlock noB
+    emit (M.Assign result (M.Use (M.Const (M.CBool False))))
     terminate (M.Goto joinB)
     openBlock joinB
     return (PRvalue (M.Use (M.Copy result)), TBool)
