@@ -261,7 +261,20 @@ coerce wanted (actual, expr) = do
         (TBox (TArrayOf x SizeAny), TBox (TArrayOf y size)) | size /= SizeAny -> do
             same <- unify x y
             return (if same then (w, F (Val (builtinFunct Unsize)) [expr]) else (actual, expr))
+        -- an integer written out where a Byte is wanted is that Byte, if it is from 0 to 255 (`writeByte(104)`)
+        (TByte, TInt) | Val (VInt n) <- expr ->
+            if n >= 0 && n < 256
+                then return (TByte, F (Val (builtinFunct ToByte)) [expr])
+                else failTc ("Type error: " ++ show n ++ " is not a Byte: a Byte is from 0 to 255")
+        -- and a list of them written out is a list of Bytes (`String { bytes: ... }` is not written so, but a field of a list of Bytes can be)
+        (TList TByte, TList TInt) | Val (VList items) <- expr, Just ns <- mapM literalInt items ->
+            if all (\n -> n >= 0 && n < 256) ns
+                then return (TList TByte, F (Val (builtinFunct BytesFrom)) [expr])
+                else failTc "Type error: a list of Bytes is written with numbers from 0 to 255"
         _ -> return (actual, expr)
+  where
+    literalInt (VInt n) = Just n
+    literalInt _ = Nothing
 
 -- The arguments of a call of a function of the program, given the unsizing conversions its parameters ask for
 coerceArguments :: Type -> [(Type, Expression)] -> TC [(Type, Expression)]
@@ -536,8 +549,8 @@ builtinType funct =
         ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
         NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
         NewEmptyArray -> failTc "Type error: Array::empty is called, as in Array::empty(), and cannot be used as a value"
-        WriteByte -> return (TFn [TInt] TInt)
-        WriteError -> return (TFn [TInt] TInt)
+        WriteByte -> return (TFn [TByte] TByte)
+        WriteError -> return (TFn [TByte] TByte)
         ReadByte -> return (TFn [] TInt)
         ToByte -> return (TFn [TInt] TByte)
         FromByte -> return (TFn [TByte] TInt)
@@ -1137,6 +1150,8 @@ inferExprR ctx env expr =
     ordinaryBuiltin funct funct' ft inferred0 = do
         -- (a builtin takes what it is given: it looks through a Box itself)
         inferred <- case builtinHead ctx env funct of
+            -- (the builtins of bytes take a number written out as a Byte)
+            Just b | b `elem` [WriteByte, WriteError] -> coerceArguments ft inferred0
             Just _ -> return inferred0
             Nothing -> coerceArguments ft inferred0
         let ats = map fst inferred

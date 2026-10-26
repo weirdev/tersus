@@ -1422,7 +1422,7 @@ if b = toByte(200) { }    // Bytes are compared with = and != as they are
 bs = push([], b);         // a List<Byte>, a Byte in a struct, a parameter, a result ...
 ```
 
-`toByte(x)` is refused unless `x` is known to be in range (`x = readByte(); b = toByte(x);` is not, `if x >= 0 { b = toByte(x); }` is, since `readByte()` is from -1 to 255), and `toInt(b)` is `b` (in a proof too: `affirm toInt(b) < 255;` is a fact about `b`). The validator knows that every `Byte` is from 0 to 255, wherever it came from (a parameter, a field, an element of a list, a result), and needs nothing in a contract for it: `fn sum(a: Byte, b: Byte) -> Int [{ }] [{ affirm return <= 510; }] { return toInt(a) + toInt(b); }` validates. A `Byte` is one word like an `Int` in native code and is written as a number. There is no literal for a `Byte` (`toByte(5)` is its constant), and a string literal is the one place a list of them is written out (`Parse.stringLiteral`, through the builtin `BytesFrom`, which only the parser writes). A `String` is made of `Byte`s (see Strings; `examples/bytes.tersus`).
+`toByte(x)` is refused unless `x` is known to be in range (`x = readByte(); b = toByte(x);` is not, `if x >= 0 { b = toByte(x); }` is, since `readByte()` is from -1 to 255), and `toInt(b)` is `b` (in a proof too: `affirm toInt(b) < 255;` is a fact about `b`). The validator knows that every `Byte` is from 0 to 255, wherever it came from (a parameter, a field, an element of a list, a result), and needs nothing in a contract for it: `fn sum(a: Byte, b: Byte) -> Int [{ }] [{ affirm return <= 510; }] { return toInt(a) + toInt(b); }` validates. A `Byte` is one word like an `Int` in native code and is written as a number. A number written out where a `Byte` is wanted is that `Byte`, if it is from 0 to 255, and is refused if it is not (`TypeCheck.coerce`, which writes `toByte(n)`): in the argument of a function whose parameter is a `Byte`, in a field of a struct, in a `return`, in `writeByte(104)`, and so is a list of numbers written out where a `List<Byte>` is wanted (`P { bs: [1, 2, 3] }`, through the builtin `BytesFrom`, which the parser also writes for a string literal). It is only where the type is known: a variable that holds a number is an `Int` (`n = 65; writeByte(n)` is `expected Byte, got Int`, and `writeByte(toByte(n))` is the way), and so is `100 + 100`, since only a number that is written out is converted. A `String` is made of `Byte`s (see Strings; `examples/bytes.tersus`).
 
 ## Strings
 
@@ -1444,7 +1444,7 @@ What is not there: contracts about every byte of a result (an invariant that eve
 
 ### Output
 
-`writeByte(b)` writes the low eight bits of `b` (`b mod 256`) to the standard output, and its value is `b`. `s.print()` writes the bytes of a `String` and gives how many there are (it promises `return = size(s.bytes)`, so `n = "ab".print(); affirm n = 2;` validates). Both are only for what they do, so a call whose result is not used is a statement of its own:
+`writeByte(b)` writes the `Byte` `b` to the standard output, and its value is `b` (`writeByte(104)` writes an `h`: see Bytes for a number written out as a `Byte`). `s.print()` writes the bytes of a `String` and gives how many there are (it promises `return = size(s.bytes)`, so `n = "ab".print(); affirm n = 2;` validates). Both are only for what they do, so a call whose result is not used is a statement of its own:
 
 ```tersus
 greeting = "Hello, ".concat("caf\u{e9}!\n");

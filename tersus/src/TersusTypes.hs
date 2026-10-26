@@ -22,7 +22,7 @@ data BuiltinFunct
       NewBoxedArray
     | -- NewEmptyArray: Array::empty(), an array of no elements in a Box that carries the size 0, of any element type (no element is needed)
       NewEmptyArray
-    | -- WriteByte b: writeByte(b), the low eight bits of b written to the standard output. Its value is b: the only effect of a program that the
+    | -- WriteByte b: writeByte(b), the Byte b written to the standard output. Its value is b: the only effect of a program that the
       -- language has, which the validator does not model beyond that.
       WriteByte
     | -- WriteError b: writeError(b), the same for the standard error

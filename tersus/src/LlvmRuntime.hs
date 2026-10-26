@@ -146,7 +146,7 @@ runtimeSource =
         , "    fail(\"Integer overflow\");"
         , "}"
         , ""
-        , "// writeByte(b): the low eight bits of b to the standard output, with what the program prints at the end. It is the value of the call."
+        , "// writeByte(b): the byte b to the standard output, with what the program prints at the end. It is the value of the call."
         , "int64_t tersus_writeByte(int64_t byte) {"
         , "    putchar((int)(byte & 255));"
         , "    return byte;"

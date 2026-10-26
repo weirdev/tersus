@@ -74,17 +74,17 @@ impl String {
     fn printError(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         i = 0;
         while i < size(self.bytes) [{ affirm i >= 0; affirm i <= size(self.bytes); }] shrinks size(self.bytes) - i {
-            writeError(toInt(get(self.bytes, i)));
+            writeError(get(self.bytes, i));
             i = i + 1;
         };
         return i;
     };
 
-    // Writes the bytes of the string to the standard output (what `writeByte` writes of each is its low eight bits), and gives the number of them
+    // Writes the bytes of the string to the standard output, and gives the number of them
     fn print(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         i = 0;
         while i < size(self.bytes) [{ affirm i >= 0; affirm i <= size(self.bytes); }] shrinks size(self.bytes) - i {
-            writeByte(toInt(get(self.bytes, i)));
+            writeByte(get(self.bytes, i));
             i = i + 1;
         };
         return i;
