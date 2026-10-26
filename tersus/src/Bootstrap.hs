@@ -14,7 +14,7 @@ import Data.List (foldl')
 import Data.Word (Word64)
 import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFileSystemEncoding, setLocaleEncoding)
 import Numeric (showHex)
-import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
+import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (hClose, hPutStrLn, openTempFile, stderr)
@@ -77,35 +77,34 @@ emitWith exe input = do
 -- Stage 0 in the cache, built if it is not there yet
 cachedEmitter :: IO (Result FilePath String)
 cachedEmitter = do
-    dir <- cacheDirectory
-    let exe = dir </> ("emitter-" ++ emitterHash)
-    present <- doesFileExist exe
-    if present
-        then pure (Ok exe)
-        else do
-            hPutStrLn stderr "Building the emitter written in Tersus (once, it is kept in the cache)..."
-            -- (built where nothing else will be, and moved: a build that is cut short leaves nothing that looks like the emitter)
-            (partial, handle) <- openTempFile dir "emitter.tmp"
-            hClose handle
-            removeFile partial
-            built <- stageZero partial
-            case built of
-                Error e -> pure (Error e)
-                Ok () -> renameFile partial exe >> pure (Ok exe)
+    cache <- cacheDirectory
+    case cache of
+        Error e -> pure (Error e)
+        Ok dir -> do
+            let exe = dir </> ("emitter-" ++ emitterHash)
+            present <- doesFileExist exe
+            if present then pure (Ok exe) else build dir exe
+  where
+    build dir exe = do
+        hPutStrLn stderr "Building the emitter written in Tersus (once, it is kept in the cache)..."
+        -- (built where nothing else will be, and moved: a build that is cut short leaves nothing that looks like the emitter)
+        (partial, handle) <- openTempFile dir "emitter.tmp"
+        hClose handle
+        removeFile partial
+        built <- stageZero partial
+        case built of
+            Error e -> pure (Error e)
+            Ok () -> renameFile partial exe >> pure (Ok exe)
 
--- Where the emitter is kept: the cache directory of the user, or the temporary directory when that cannot be made
-cacheDirectory :: IO FilePath
+-- Where the emitter is kept: the cache directory of the user. There is no fallback to a shared directory such as /tmp, where another user could have put a program
+-- of their own under the name of the emitter, which would be run as this user.
+cacheDirectory :: IO (Result FilePath String)
 cacheDirectory = do
     cache <- getXdgDirectory XdgCache "tersus"
     made <- try (createDirectoryIfMissing True cache)
-    case made of
-        Right () -> pure cache
-        Left e -> do
-            let _ = e :: IOException
-            tmp <- getTemporaryDirectory
-            let fallback = tmp </> "tersus-cache"
-            createDirectoryIfMissing True fallback
-            pure fallback
+    pure $ case made of
+        Right () -> Ok cache
+        Left e -> Error ("Could not make the cache directory " ++ cache ++ " for the emitter: " ++ show (e :: IOException))
 
 -- The LLVM IR of a program, by the emitter in Tersus
 tersusLlvm :: String -> IO (Result String String)

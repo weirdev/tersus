@@ -118,8 +118,8 @@ Each slice is a PR, and nothing changes the default `build`: slice 8 adds a flag
 8. **Wire-in and bootstrap.** Done: `tersus --tersus-emitter build|llvm|run <file>` has the IR written by `examples/emit.tersus` instead of `LlvmEmit` (the flag comes before the
    command, since the arguments after the file of `run` are the program's). `Bootstrap` has the two stages:
    - **Stage 0** is the emitter built (`stageZero`) from the IR that `LlvmEmit` writes for `emit.tersus`. It is built the first time the flag is used (about 35 seconds, with a
-     line on the standard error that says so) and kept in the cache directory of the user (`$XDG_CACHE_HOME/tersus`, or `~/.cache/tersus`, or the temporary directory when that
-     cannot be made) as `emitter-<hash>`, where the hash (FNV-1a, 64 bits) is of the text of the emitter, the runtime and the library every program has (`emitterHash`). It is
+     line on the standard error that says so) and kept in the cache directory of the user (`$XDG_CACHE_HOME/tersus`, or `~/.cache/tersus`; with no fallback to a shared directory such as `/tmp`, where another user could plant a program under its name, so the flag fails when the
+     directory cannot be made) as `emitter-<hash>`, where the hash (FNV-1a, 64 bits) is of the text of the emitter, the runtime and the library every program has (`emitterHash`). It is
      built under another name and moved, so that a build that is cut short leaves nothing that looks like the emitter. `stack build` needs no clang. The text of the emitter
      is in the compiler (`PreludeSource.emitterSource`), so the cache is right for the compiler that is running.
    - **Stage 1** is the emitter built (`stageOne`) from the IR that stage 0 writes for the emitter's own MIR.
