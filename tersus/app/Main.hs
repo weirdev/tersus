@@ -6,6 +6,7 @@ import System.Exit (ExitCode (..), exitWith)
 import GHC.IO.Encoding (char8, setFileSystemEncoding)
 import System.IO (hPutStr, hPutStrLn, stderr)
 
+import Bootstrap (tersusLlvm)
 import Cli
 import Native (buildExecutable, runExecutable)
 import Utils
@@ -15,14 +16,19 @@ main = do
     useUtf8
     -- (the arguments are the bytes they were given as, whatever the locale is: they are the arguments of the program too)
     setFileSystemEncoding char8
-    args <- getArgs
+    (tersusEmitter, args) <- splitEmitterFlag <$> getArgs
     case parseProgramArguments args of
         Nothing -> hPutStr stderr usage >> exitWith (ExitFailure 2)
         Just (command, file, programArgs) -> do
             source <- readSource file
             -- (a program that is read from the standard input has none left to read)
             input <- if command == Interpret && file /= "-" then readInputBytes else return ""
-            case runSourceFiles (World input programArgs readWorldFile) command source of
+            -- (the IR is written by the emitter in Tersus when the flag asks for it)
+            result <-
+                if tersusEmitter && makesIr command
+                    then mapResult (\ir -> ((ir, ""), [])) <$> tersusLlvm source
+                    else pure (runSourceFiles (World input programArgs readWorldFile) command source)
+            case result of
                 Error e -> failWith e
                 Ok ((output, errors), files) -> case command of
                     Build executable -> do

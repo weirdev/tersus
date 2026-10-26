@@ -4,6 +4,7 @@ module PreludeSource
     ( preludeSource
     , listsSource
     , stringSource
+    , emitterSource
     ) where
 
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
@@ -32,5 +33,14 @@ stringSource =
     $( do
         addDependentFile "lib/string.tersus"
         contents <- runIO (readFile "lib/string.tersus")
+        lift contents
+     )
+
+-- The text of examples/emit.tersus: the lowering to LLVM IR written in Tersus (see Bootstrap)
+emitterSource :: String
+emitterSource =
+    $( do
+        addDependentFile "examples/emit.tersus"
+        contents <- runIO (readFile "examples/emit.tersus")
         lift contents
      )
