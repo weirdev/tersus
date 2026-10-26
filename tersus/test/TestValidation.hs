@@ -12,7 +12,8 @@ module TestValidation
 import qualified Data.Map as Map
 import Parse
 import MirValidate (Validated (..))
-import Pipeline (validateStatements)
+import Pipeline (compileSource, validateStatements)
+import ProofState (allFacts, initialPState)
 import StdLib
 import TersusTypes
 import Utils
@@ -491,6 +492,12 @@ testCallsUseContracts =
               parseValidProgramHelper "fn f(l: List<Int>) -> Int [{ affirm size(l) > 3; affirm forall j in 0..size(l): get(l, j) = 0; }] [{ }] { define v = get(l, 1); affirm v = 0; return 1; };"
             , -- A callee that never ends does not stop validation
               parseValidProgramHelper "fn spin(n: Int) -> Int [{ }] [{ }] ~ { i = 0; while i >= 0 [{ affirm i >= 0; }] ~ { i = i + 1; }; return i; }; x = spin(1);"
+            , -- A function is known as the value it is, where it is named as one and not by a fact in every proof of every function
+              -- (which made the time to validate grow with the square of the number of functions; the proofs here are of 80 functions)
+              parseValidProgramHelper chainOfFunctions
+            , parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; g = id; x = g(3); affirm x = 3;"
+            , -- (what is known before anything is validated does not grow with the functions of the program)
+              factsAtStart "fn f0(n: Int) -> Int { return n; }; return f0(1);" chainOfFunctions
             ]
 
 testRecursion :: Test
@@ -519,3 +526,23 @@ testRecursion =
               parseValidProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { affirm i = size(l) - 1; return get(l, i); };"
             , parseValidateFailProgramHelper "fn g(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); affirm i + 1 >= size(l); }] [{ affirm return = get(l, size(l) - 1); }] { return get(l, i); };" "Could not prove: return = get(l, size(l) - 1)"
             ]
+
+-- 80 functions, each calling the one before it through a function value held in a local
+chainOfFunctions :: String
+chainOfFunctions =
+    "fn f0(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; };"
+        ++ concat
+            [ "fn f" ++ show k ++ "(n: Int) -> Int [{ }] [{ affirm return = n; }] { g = f" ++ show (k - 1) ++ "; return g(n); };"
+            | k <- [1 .. 79 :: Int]
+            ]
+        ++ "x = f79(3); affirm x = 3;"
+
+-- The facts at the start do not depend on how many functions the program has
+factsAtStart :: String -> String -> TestResult
+factsAtStart small large =
+    case (compileSource small, compileSource large) of
+        (Ok a, Ok b)
+            | length (allFacts (initialPState a)) == length (allFacts (initialPState b)) -> Nothing
+            | otherwise -> Just "the facts at the start grow with the number of functions"
+        (Error e, _) -> Just e
+        (_, Error e) -> Just e

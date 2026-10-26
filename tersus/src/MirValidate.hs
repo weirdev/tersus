@@ -37,8 +37,8 @@ data Validated = Validated
 
 validateProgram :: M.Program -> Result Validated String
 validateProgram program = runV $ do
-    let st0 = initialPState program
-        main' = M.progMain program
+    let main' = M.progMain program
+        st0 = withFunctions main' (initialPState program)
     returned <- walkFunction st0 main'
     case returned of
         [] -> return (Validated Map.empty (allFacts st0) Nothing)
@@ -342,7 +342,7 @@ validateFunction st name top = do
         -- checked against that
         assumed = [p | ProofAssert p <- ensures, all (`elem` ("return" : names)) (proofVars p)]
         selfInfo = term'{fnExported = assumed, fnTermination = Just (Recursing term)}
-        inner0 = bodyState st{psFns = if top then Map.insert name selfInfo (psFns st) else psFns st}
+        inner0 = withFunctions fn (bodyState st{psFns = if top then Map.insert name selfInfo (psFns st) else psFns st})
         inner = inner0{psTerminates = case term of Just MayDiverge -> False; _ -> True}
     entry <- freshN (length params)
     let started = inner{psLocals = Map.fromList (zip params entry)}
