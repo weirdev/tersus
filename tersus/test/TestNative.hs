@@ -64,7 +64,7 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "args", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
         , "enums", "files", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "strings"
+        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "strings", "text"
         ]
     ]
 
@@ -236,7 +236,13 @@ functionPrograms =
 -- Strings are the library struct String over a list of bytes (lib/string.tersus), so native code has nothing of its own for them
 stringPrograms :: [(String, String)]
 stringPrograms =
-    [ ("literal", "return \"hi\";")
+    [ ("an Int as text", "return String::fromInt(0 - 4072);")
+    , ("the least Int as text", "return String::fromInt(0 - 9223372036854775807 - 1);")
+    , ("0 as text", "return String::fromInt(0);")
+    , ("a slice", "return \"abcdef\".slice(1, 4);")
+    , ("find", "return \"hello world\".find(toByte(32), 0) * 10 + \"abc\".find(toByte(122), 0);")
+    , ("starts with", "return \"hello\".startsWith(\"he\") && !\"hello\".startsWith(\"hx\");")
+    , ("literal", "return \"hi\";")
     , ("empty", "return \"\";")
     , ("utf-8", "return \"caf\\u{e9}\\u{1f600}\";")
     , ("concat", "s = \"ab\"; t = s.concat(\"cd\"); return t;")
