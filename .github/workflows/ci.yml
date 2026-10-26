@@ -12,6 +12,8 @@ jobs:
   haskell:
     name: Haskell build and tests
     runs-on: ubuntu-latest
+    # (the tests that build the emitter written in Tersus, twice, and compile every program with it are the longest)
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: tersus
@@ -40,8 +42,23 @@ jobs:
       - name: Test
         run: stack test
 
+      # `build`, `llvm` and `run` write the IR with the emitter written in Tersus (examples/emit.tersus), which is built with clang the first time from the seed
+      # bootstrap/emitter.ll and kept in ~/.cache/tersus under a name made from what it is made of, so a cache entry that is out of date is only not used.
+      - name: Cache the emitter written in Tersus
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tersus
+          key: emitter-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/emitter.ll', 'tersus/examples/emit.tersus', 'tersus/lib/*.tersus', 'tersus/src/LlvmRuntime.hs') }}
+
       - name: Check an example through the CLI
         run: stack run -- run examples/frame_facts.tersus
+
+      # The command line itself (the tests call its parts): the emitter in Tersus, which is the default, and the one in Haskell write the same IR
+      - name: Check that both emitters write the same IR through the CLI
+        run: |
+          stack run -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
+          stack run -- --haskell-emitter llvm examples/loops.tersus > "$RUNNER_TEMP/haskell.ll"
+          cmp "$RUNNER_TEMP/tersus.ll" "$RUNNER_TEMP/haskell.ll"
 
   python:
     name: Python prototype tests
