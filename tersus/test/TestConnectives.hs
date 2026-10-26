@@ -31,6 +31,7 @@ testConnectives =
                 , testCase "nor for an or" (runs "a = 0; return a = 0 || 10 / a > 1;" "true")
                 , testCase "but is when it does not" (runs "a = 5; return a != 0 && 10 / a > 1;" "true")
                 , testCase "an argument" (runs "fn id(b: Bool) -> Bool [{ }] [{ }] { return b; }; return id(1 < 2 && 3 < 2);" "false")
+                , testCase "a nested group as a value" (runs "a = 1; b = 2; return (a = 1 && (b = 3 || b = 2)) && !(a = b);" "true")
                 , testCase "in a call that the right side makes" (runs "fn big(n: Int) -> Bool [{ }] [{ }] { return n > 5; }; return 1 < 2 && big(9);" "true")
                 ]
             , TestList
@@ -49,6 +50,11 @@ testConnectives =
                 [ testCase "the left side is known when the right is checked" (valid "fn f(l: &List<Int>, i: Int) -> Bool [{ affirm i >= 0; }] [{ }] { if i < size(l) && get(l, i) = 0 { return true; }; return false; };")
                 , testCase "without it the index is not known to be in range" (rejected "fn f(l: &List<Int>, i: Int) -> Bool [{ affirm i >= 0; }] [{ }] { if get(l, i) = 0 && i < size(l) { return true; }; return false; };" "Funct input validation failed")
                 , testCase "for an or, the left side is false when the right is checked" (valid "fn f(l: &List<Int>, i: Int) -> Bool [{ affirm i >= 0; }] [{ }] { if i >= size(l) || get(l, i) = 0 { return true; }; return false; };")
+                , testCase "chained guards in a returned value" (valid "fn f(l: &List<Int>, i: Int) -> Bool [{ }] [{ }] { return i >= 0 && i < size(l) && get(l, i) = 0; };")
+                , testCase "chained guards in the value of a variable" (valid "fn f(l: &List<Int>, i: Int) -> Bool [{ }] [{ }] { ok = i >= 0 && i < size(l) && get(l, i) = 0; return ok; };")
+                , testCase "chained guards in an argument" (valid "fn g(b: Bool) -> Bool [{ }] [{ }] { return b; }; fn f(l: &List<Int>, i: Int) -> Bool [{ }] [{ }] { return g(i >= 0 && i < size(l) && get(l, i) = 0); };")
+                , testCase "guards of an or in a value" (valid "fn f(l: &List<Int>, i: Int) -> Bool [{ affirm i >= 0; }] [{ }] { return i >= size(l) || get(l, i) = 0; };")
+                , testCase "a group in a value" (valid "fn f(l: &List<Int>, i: Int) -> Bool [{ affirm i >= 0; }] [{ }] { return i < size(l) && (get(l, i) = 0 || get(l, i) = 1); };")
                 , testCase "and in the value of a variable" (valid "fn f(a: Int, b: Int) -> Bool [{ }] [{ }] { ok = a > 0 && b > 0; return ok; };")
                 , testCase "a loop guarded by its first test" (valid "fn f(l: &List<Int>) -> Int [{ }] [{ affirm return >= 0; affirm return <= size(l); }] { i = 0; while i < size(l) && get(l, i) != 0 [{ affirm i >= 0; affirm i <= size(l); }] shrinks size(l) - i { i = i + 1; }; return i; };")
                 , testCase "the facts of both tests hold in the body" (valid "fn f(a: Int, b: Int) -> Int [{ }] [{ }] { i = 0; while i < a && i < b shrinks a - i { affirm i < a; affirm i < b; i = i + 1; }; return i; };")
