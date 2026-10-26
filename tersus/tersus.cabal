@@ -106,6 +106,7 @@ test-suite tersus-test
       TestBytes
       TestConnectives
       TestMirData
+      TestMirReader
       TestBox
       TestTraits
       TestPipeline

@@ -22,6 +22,7 @@ import TestStrings
 import TestBytes
 import TestConnectives
 import TestMirData
+import TestMirReader
 
 main :: IO ()
 main = do
@@ -88,6 +89,7 @@ main = do
                 , testBytes
                 , testConnectives
                 , testMirData
+                , testMirReader
                 ]
     putStrLn $
         "Summary: "
