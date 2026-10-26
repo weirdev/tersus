@@ -1,0 +1,19 @@
+// Text helpers (lib/string.tersus) and the connectives `&&`, `||` and `!`. `String::fromInt(n)` is the decimal text of an Int, `s.find(b, from)` the index of the first
+// Byte b at or after an index (the size of the string when there is none), `s.slice(from, to)` the bytes between two indexes and `s.startsWith(prefix)` whether it starts
+// with another string. `a && b` does not evaluate b when a is false, and the validator knows a when it checks b: the slices below are in range because the test
+// that `=` was found came first.
+
+line = "width=".concat(String::fromInt(0 - 120));
+equals = line.find(toByte(61), 0);
+affirm equals >= 0 && equals <= size(line);
+
+if equals < size(line) && line.startsWith("width") {
+    key = line.slice(0, equals);
+    value = line.slice(equals + 1, size(line));
+    key.print();
+    writeByte(10);
+    value.print();
+    writeByte(10);
+    return size(key) * 100 + size(value);
+};
+return 0;

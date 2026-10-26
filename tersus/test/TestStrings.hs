@@ -24,6 +24,34 @@ testStrings =
      in TestList
             "testStrings"
             [ TestList
+                "numbers and search"
+                [ testCase "0" (runs "return String::fromInt(0);" (bytes [48]))
+                , testCase "a digit" (runs "return String::fromInt(7);" (bytes [55]))
+                , testCase "several" (runs "return String::fromInt(1203);" (bytes [49, 50, 48, 51]))
+                , testCase "a negative" (runs "return String::fromInt(0 - 45);" (bytes [45, 52, 53]))
+                , testCase "the greatest Int" (runs "return String::fromInt(9223372036854775807);" (bytes (map (fromEnum :: Char -> Int) "9223372036854775807")))
+                , testCase "the least Int" (runs "return String::fromInt(0 - 9223372036854775807 - 1);" (bytes (map (fromEnum :: Char -> Int) "-9223372036854775808")))
+                , testCase "it has a digit at least" (valid "n = readByte(); s = String::fromInt(n); affirm size(s) >= 1;")
+                , testCase "it is written" (runs "String::fromInt(0 - 12).print(); return 0;" "-120")
+                , testCase "a slice" (runs "return \"abcdef\".slice(1, 4);" (bytes [98, 99, 100]))
+                , testCase "an empty slice" (runs "return \"abc\".slice(2, 2);" (bytes []))
+                , testCase "the whole string" (runs "return \"abc\".slice(0, 3) = \"abc\";" true)
+                , testCase "a slice has the size of its range" (valid "s = \"abcdef\"; t = s.slice(1, 4); affirm size(t) = 3;")
+                , testCase "and the bytes of it" (valid "s = \"abcdef\"; t = s.slice(1, 4); define b = get(t, 0); affirm b = get(s, 1);")
+                , testCase "a range out of the string is refused" (rejected "s = \"abc\"; t = s.slice(1, 9); return 0;" "Funct input validation failed")
+                , testCase "and one that ends before it starts" (rejected "s = \"abc\"; t = s.slice(2, 1); return 0;" "Funct input validation failed")
+                , testCase "find" (runs "return \"hello world\".find(toByte(32), 0);" "5")
+                , testCase "find from an index" (runs "return \"abcabc\".find(toByte(97), 1);" "3")
+                , testCase "find with none" (runs "return \"abc\".find(toByte(122), 0);" "3")
+                , testCase "find in the empty string" (runs "return \"\".find(toByte(97), 0);" "0")
+                , testCase "what find skips is not the byte" (valid "s = \"abc\"; i = s.find(toByte(99), 0); if i > 0 { define b = get(s, 0); affirm b != toByte(99); };")
+                , testCase "starts with" (runs "return \"hello\".startsWith(\"he\");" true)
+                , testCase "does not" (runs "return \"hello\".startsWith(\"hx\");" false)
+                , testCase "a prefix that is longer" (runs "return \"he\".startsWith(\"hello\");" false)
+                , testCase "the empty prefix" (runs "return \"he\".startsWith(\"\");" true)
+                , testCase "a header and its value" (runs "line = \"id=\".concat(String::fromInt(42)); i = line.find(toByte(61), 0); if i < size(line) && line.startsWith(\"id\") { return line.slice(i + 1, size(line)); }; return \"\";" (bytes [52, 50]))
+                ]
+            , TestList
                 "literals"
                 [ testCase "a string is the bytes of its text" (runs "return \"hi\";" (bytes [104, 105]))
                 , testCase "the empty string" (runs "return \"\";" (bytes []))

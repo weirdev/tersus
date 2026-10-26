@@ -1458,7 +1458,18 @@ The escapes are `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` (a character fr
 
 `push` promises the size, the new byte at the end and the bytes before it unchanged, and `concat` promises the size of the result, the bytes of the first string at the same indexes (`forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j)`, so `toInt(get("ab".concat("cd"), 0)) = 97` is proved), and the bytes of the second after them (`forall j in 0..size(other.bytes): get(return.bytes, size(self.bytes) + j) = get(other.bytes, j)`), which a proof uses at the element it names (`affirm get(c.bytes, size(a.bytes) + 1) = get(b.bytes, 1);`, since a `forall` is only used at the elements that appear in the proof, and the index `2 + 1` is not the same term as `3`).
 
-What is not there: contracts about every byte of a result (an invariant that every byte is from 0 to 255, which needs a `forall` in a struct invariant), comparisons other than equality, slices, formatting, and input beyond the standard input: a returned string is printed as the struct, `String { bytes: [104, 105] }`, and `print()` (see Output) is how a string is written as text. A string literal can be written in a proof, where it is the `String` of its bytes: `affirm s = "ab";` says what `s` is, and a function can ask for one in its input contract (`[{ affirm s = "hi"; }]`); it is proved where the validator knows the bytes (a literal, a `push` or `set` of one), not of the result of `concat`, whose bytes are only known through its promises (see below).
+#### Numbers as text, slices and search
+
+```tersus
+String::fromInt(0 - 120)       // "-120": the decimal text of an Int (the least Int too)
+s.slice(from, to)              // the bytes from the index from up to, not including, the index to
+s.find(b, from)                // the index of the first Byte b at or after from, or size(s) when there is none
+s.startsWith("ab")             // whether the string starts with the bytes of another
+```
+
+`fromInt` promises at least one byte. `slice` needs `0 <= from <= to <= size(s)` (it is refused otherwise) and promises the size `to - from` and the bytes at the same places (`get(t, j) = get(s, from + j)`). `find` needs `0 <= from <= size(s)` and promises an index from `from` to `size(s)` with none of the bytes before it equal to `b` (`forall j in from..return: get(s, j) != b`). `startsWith` promises nothing about its Bool. See `examples/text.tersus`.
+
+What is not there: contracts about every byte of a result (an invariant that every byte is from 0 to 255, which needs a `forall` in a struct invariant), comparisons other than equality, formatting beyond `fromInt`, and input beyond the standard input: a returned string is printed as the struct, `String { bytes: [104, 105] }`, and `print()` (see Output) is how a string is written as text. A string literal can be written in a proof, where it is the `String` of its bytes: `affirm s = "ab";` says what `s` is, and a function can ask for one in its input contract (`[{ affirm s = "hi"; }]`); it is proved where the validator knows the bytes (a literal, a `push` or `set` of one), not of the result of `concat`, whose bytes are only known through its promises (see below).
 
 ### Output
 

@@ -133,6 +133,83 @@ impl String {
         return fileStore();
     };
 
+    // The decimal text of an Int: its digits, with a minus sign in front when it is negative ("0" for 0, and "-9223372036854775808" for the least Int, which has
+    // no positive of its own)
+    fn fromInt(n: Int) -> Self [{ }] [{ affirm size(return.bytes) >= 1; }] {
+        if n = 0 - 9223372036854775807 - 1 {
+            return Self { bytes: [45, 57, 50, 50, 51, 51, 55, 50, 48, 51, 54, 56, 53, 52, 55, 55, 53, 56, 48, 56] };
+        };
+        negative = n < 0;
+        m = n;
+        if negative { m = 0 - n; };
+        // the digits, the last first
+        digits = push([], toByte(48 + m % 10));
+        m = m / 10;
+        while m > 0 [{ affirm m >= 0; affirm size(digits) >= 1; }] shrinks m {
+            digits = push(digits, toByte(48 + m % 10));
+            m = m / 10;
+        };
+        bytes = [];
+        if negative { bytes = push(bytes, toByte(45)); };
+        j = size(digits);
+        while j > 0 [{ affirm j >= 0; affirm j <= size(digits); affirm size(bytes) >= size(digits) - j; }] shrinks j {
+            j = j - 1;
+            bytes = push(bytes, get(digits, j));
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The bytes from the index `from` up to (not including) the index `to`
+    fn slice(self: &Self, from: Int, to: Int) -> Self [{ affirm from >= 0; affirm from <= to; affirm to <= size(self.bytes); }] [{
+        affirm size(return.bytes) = to - from;
+        affirm forall j in 0..to - from: get(return.bytes, j) = get(self.bytes, from + j);
+    }] {
+        bytes = [];
+        i = from;
+        while i < to [{
+            affirm i >= from;
+            affirm i <= to;
+            affirm size(bytes) = i - from;
+            affirm forall j in 0..i - from: get(bytes, j) = get(self.bytes, from + j);
+        }] shrinks to - i {
+            // (the element that is pushed is at the index i - from, where the engine looks for from + (i - from))
+            define k = i - from;
+            affirm from + k = i;
+            define v = get(self.bytes, from + k);
+            affirm v = get(self.bytes, i);
+            bytes = push(bytes, get(self.bytes, i));
+            i = i + 1;
+        };
+        return Self { bytes: bytes };
+    };
+
+    // The index of the first byte from the index `from` that is `b`, or the size of the string when there is none (and none of the bytes before it is `b`)
+    fn find(self: &Self, b: Byte, from: Int) -> Int [{ affirm from >= 0; affirm from <= size(self.bytes); }] [{
+        affirm return >= from;
+        affirm return <= size(self.bytes);
+        affirm forall j in from..return: get(self.bytes, j) != b;
+    }] {
+        i = from;
+        while i < size(self.bytes) && get(self.bytes, i) != b [{
+            affirm i >= from;
+            affirm i <= size(self.bytes);
+            affirm forall j in from..i: get(self.bytes, j) != b;
+        }] shrinks size(self.bytes) - i {
+            i = i + 1;
+        };
+        return i;
+    };
+
+    // Whether the string starts with the bytes of `prefix`
+    fn startsWith(self: &Self, prefix: &String) -> Bool [{ }] [{ }] {
+        if size(prefix.bytes) > size(self.bytes) { return false; };
+        i = 0;
+        while i < size(prefix.bytes) && get(self.bytes, i) = get(prefix.bytes, i) [{ affirm i >= 0; affirm i <= size(prefix.bytes); }] shrinks size(prefix.bytes) - i {
+            i = i + 1;
+        };
+        return i = size(prefix.bytes);
+    };
+
     // Writes the bytes of the string to the standard error, and gives the number of them
     fn printError(self: &Self) -> Int [{ }] [{ affirm return = size(self.bytes); }] {
         i = 0;

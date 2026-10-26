@@ -33,7 +33,7 @@ stays in Haskell.
   added only for the functions a function names (`Mir.functionsNamed`, `ProofState.withFunctions`). The time is linear in the
   functions now (about 0.04 s for one of this size); what is left is the cost of one proof, which re-interns the standard
   library's facts for every query (`ProofEngine.proofContextFromCache`, `builtinsByClass`), a further gain if one is needed.
-- Conditions have no `&&`, `||` or `and` (a probe failed to parse all three): a compound condition is nested `if`s.
+- Conditions had no `&&`, `||` or `and` (a probe failed to parse all three): added in slice 3.
 - There is no mutual recursion (a function sees only the functions defined before it): the emit functions form a bottom-up
   order.
 - There are no generic enums (step 22), so no `Option` or `Result`: the emitter state holds an error flag and a message.
@@ -50,7 +50,10 @@ Each slice is a PR, and nothing changes the default `build` until slice 8.
    MIR.md), with a reader and writer and a test that `read . print = id` for every example and every `TestNative` program
    (`test/TestMirData.hs`), and `LlvmEmit.emitOwned` gives the same IR for the program read back from the data as for the original, so nothing the emitter needs is left out. `llvm`, `build` and `run` still go straight from the owned MIR to `emitOwned`; the data is only on that path when the emitter in Tersus is (slice 8). The boundary is the owned MIR without the validator's part (ghost statements, contracts, structs with sizes
    and their invariants), in the order of the maps it was in, which is the order the emitter walks.
-3. **Gaps found on the way.** Probably boolean connectives, decimal printing of an `Int`, string search and compare helpers.
+3. **Gaps found on the way.** Done: the connectives `&&`, `||` and `!` (lazy, lowered to the tests they stand for, so the validator knows the
+   left test when it checks the right one; an `||` keeps only what both tests give), and in `lib/string.tersus` `String::fromInt`,
+   `slice`, `find` and `startsWith` (equality of strings was there). Found while doing it: after an `||` the validator cannot use "this
+   test or that one", which a loop condition with `||` has to live with.
 4. **The MIR types and the reader in Tersus.** It parses the format from standard input and prints it again; the test is that
    the output equals the input.
 5. **Emitter part 1.** Types, slot sizes, descriptors, declarations and the entry point, compared with Haskell on their own.
