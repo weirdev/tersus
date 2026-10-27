@@ -44,7 +44,7 @@ struct BinaryTerm { id: Int, op: Int, left: Int, right: Int };
 // round adds equal applications whose operands were equal at the start of the
 // comparison. At most size(terms) rounds are needed to propagate equality
 // through a finite term graph. A malformed graph is the caller's responsibility.
-fn hasCongruence(facts: &List<EqualityFact>, terms: &List<BinaryTerm>, left: Int, right: Int) -> Bool {
+fn congruenceFacts(facts: &List<EqualityFact>, terms: &List<BinaryTerm>) -> List<EqualityFact> {
     known = facts;
     for round in 0..size(terms) {
         for a in terms {
@@ -61,5 +61,1258 @@ fn hasCongruence(facts: &List<EqualityFact>, terms: &List<BinaryTerm>, left: Int
             };
         };
     };
+    return known;
+};
+
+fn hasCongruence(facts: &List<EqualityFact>, terms: &List<BinaryTerm>, left: Int, right: Int) -> Bool {
+    return hasEquality(congruenceFacts(facts, terms), left, right);
+};
+
+// A strict comparison between symbolic value identifiers.
+struct StrictOrderFact { smaller: Int, greater: Int };
+
+fn containsEquivalent(facts: &List<EqualityFact>, values: &List<Int>, value: Int) -> Bool {
+    for item in values {
+        if hasEquality(facts, item, value) {
+            return true;
+        };
+    };
+    return false;
+};
+
+// Follow strict-order edges, allowing equality at either end of each edge.
+// Every discovered value has a path from left containing at least one strict
+// edge. A false answer means that these facts did not establish the goal.
+fn hasStrictOrder(equalities: &List<EqualityFact>, orders: &List<StrictOrderFact>, left: Int, right: Int) -> Bool {
+    reached = [];
+    for round in 0..size(orders) {
+        for edge in orders {
+            connected = hasEquality(equalities, left, edge.smaller);
+            if containsEquivalent(equalities, reached, edge.smaller) {
+                connected = true;
+            };
+            if connected {
+                if containsEquivalent(equalities, reached, edge.greater) = false {
+                    reached = push(reached, edge.greater);
+                };
+            };
+        };
+    };
+    return containsEquivalent(equalities, reached, right);
+};
+
+// A comparison smaller <= greater; strict means smaller < greater.
+struct OrderFact { smaller: Int, greater: Int, strict: Bool };
+
+// Reachability keeps separate sets for paths with and without a strict edge.
+// Equalities act as zero-length edges. A path of at most twice the number of
+// comparisons suffices in the two-state graph, so two complete scans per round
+// reach a fixed point without trusting a program-supplied termination bound.
+fn hasOrder(equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    weak = push([], left);
+    strong = [];
+    for round in 0..size(orders) {
+        for edge in orders {
+            fromWeak = containsEquivalent(equalities, weak, edge.smaller);
+            fromStrong = containsEquivalent(equalities, strong, edge.smaller);
+            if fromWeak {
+                if edge.strict {
+                    if containsEquivalent(equalities, strong, edge.greater) = false {
+                        strong = push(strong, edge.greater);
+                    };
+                } else {
+                    if containsEquivalent(equalities, weak, edge.greater) = false {
+                        weak = push(weak, edge.greater);
+                    };
+                };
+            };
+            if fromStrong {
+                if containsEquivalent(equalities, strong, edge.greater) = false {
+                    strong = push(strong, edge.greater);
+                };
+            };
+        };
+        for edge in orders {
+            fromWeak = containsEquivalent(equalities, weak, edge.smaller);
+            fromStrong = containsEquivalent(equalities, strong, edge.smaller);
+            if fromWeak {
+                if edge.strict {
+                    if containsEquivalent(equalities, strong, edge.greater) = false {
+                        strong = push(strong, edge.greater);
+                    };
+                } else {
+                    if containsEquivalent(equalities, weak, edge.greater) = false {
+                        weak = push(weak, edge.greater);
+                    };
+                };
+            };
+            if fromStrong {
+                if containsEquivalent(equalities, strong, edge.greater) = false {
+                    strong = push(strong, edge.greater);
+                };
+            };
+        };
+    };
+    if containsEquivalent(equalities, strong, right) {
+        return true;
+    };
+    if strict {
+        return false;
+    };
+    return containsEquivalent(equalities, weak, right);
+};
+
+// A comparison may mention applications as well as atomic identifiers.
+fn hasOrderWithTerms(equalities: &List<EqualityFact>, terms: &List<BinaryTerm>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    return hasOrder(congruenceFacts(equalities, terms), orders, left, right, strict);
+};
+
+// An application is identified separately from its function and arguments.
+// Function identifiers are terms too, so equal functions applied to equal
+// argument lists produce equal results. Zero-argument applications are valid.
+struct ApplicationTerm { id: Int, function: Int, arguments: List<Int> };
+
+fn equalArguments(equalities: &List<EqualityFact>, a: &List<Int>, b: &List<Int>) -> Bool {
+    if size(a) != size(b) {
+        return false;
+    };
+    for i in 0..size(a) {
+        if hasEquality(equalities, get(a, i), get(b, i)) = false {
+            return false;
+        };
+    };
+    return true;
+};
+
+// Saturation is bounded by the number of applications: every successful
+// addition merges two previously distinct classes containing applications.
+fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -> List<EqualityFact> {
+    known = facts;
+    for round in 0..size(terms) {
+        for a in terms {
+            for b in terms {
+                if hasEquality(known, a.function, b.function) {
+                    if equalArguments(known, a.arguments, b.arguments) {
+                        if hasEquality(known, a.id, b.id) = false {
+                            known = push(known, EqualityFact { left: a.id, right: b.id });
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return known;
+};
+
+fn hasApplicationEquality(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, left: Int, right: Int) -> Bool {
+    return hasEquality(applicationFacts(facts, terms), left, right);
+};
+
+fn hasApplicationOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    return hasOrder(applicationFacts(equalities, terms), orders, left, right, strict);
+};
+
+// A strict path from an identifier back to itself contradicts the premises.
+// Every such cycle passes through an endpoint of one of the comparisons.
+fn contradictoryOrders(equalities: &List<EqualityFact>, orders: &List<OrderFact>) -> Bool {
+    for edge in orders {
+        if hasOrder(equalities, orders, edge.smaller, edge.smaller, true) {
+            return true;
+        };
+    };
+    return false;
+};
+
+// In an inconsistent context every comparison follows. The contradiction
+// check is deliberately limited to equality and strict/non-strict order facts.
+fn entailsApplicationOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    closed = applicationFacts(equalities, terms);
+    if contradictoryOrders(closed, orders) {
+        return true;
+    };
+    return hasOrder(closed, orders, left, right, strict);
+};
+
+struct DisequalityFact { left: Int, right: Int };
+
+fn contradictoryDisequalities(equalities: &List<EqualityFact>, different: &List<DisequalityFact>) -> Bool {
+    for fact in different {
+        if hasEquality(equalities, fact.left, fact.right) {
+            return true;
+        };
+    };
+    return false;
+};
+
+// Disequalities are symmetric and may be transported through equality. A
+// strict ordering also establishes disequality. Contradictory explicit facts
+// or a strict cycle make every relation follow.
+fn entailsApplicationDisequality(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, left: Int, right: Int) -> Bool {
+    closed = applicationFacts(equalities, terms);
+    if contradictoryDisequalities(closed, different) {
+        return true;
+    };
+    if contradictoryOrders(closed, orders) {
+        return true;
+    };
+    if hasOrder(closed, orders, left, right, true) {
+        return true;
+    };
+    if hasOrder(closed, orders, right, left, true) {
+        return true;
+    };
+    for fact in different {
+        if hasEquality(closed, left, fact.left) {
+            if hasEquality(closed, right, fact.right) {
+                return true;
+            };
+        };
+        if hasEquality(closed, left, fact.right) {
+            if hasEquality(closed, right, fact.left) {
+                return true;
+            };
+        };
+    };
+    return false;
+};
+
+// A difference constraint left - right <= bound. It is an edge from right to
+// left whose weight is bound. Paths compose constraints by adding weights.
+struct DifferenceFact { left: Int, right: Int, bound: Int };
+struct Distance { node: Int, value: Int };
+enum DistanceResult { Missing, Found { value: Int } };
+enum SumResult { Overflow, Sum { value: Int } };
+
+fn findDistance(equalities: &List<EqualityFact>, distances: &List<Distance>, node: Int) -> DistanceResult {
+    for d in distances {
+        if hasEquality(equalities, d.node, node) {
+            return DistanceResult::Found { value: d.value };
+        };
+    };
+    return DistanceResult::Missing;
+};
+
+fn improveDistance(equalities: &List<EqualityFact>, distances: List<Distance>, node: Int, value: Int) -> List<Distance> {
+    for i in 0..size(distances) {
+        d = get(distances, i);
+        if hasEquality(equalities, d.node, node) {
+            if value < d.value {
+                return set(distances, i, Distance { node: d.node, value: value });
+            };
+            return distances;
+        };
+    };
+    return push(distances, Distance { node: node, value: value });
+};
+
+// The proof engine uses mathematical integers, while a running Tersus program
+// uses checked 64-bit integers. Reject an unrepresentable intermediate path
+// instead of overflowing or silently changing the bound.
+fn safeBoundSum(a: Int, b: Int) -> SumResult {
+    if b > 0 {
+        if a > 9223372036854775807 - b {
+            return SumResult::Overflow;
+        };
+    };
+    if b < 0 {
+        if a < -9223372036854775808 - b {
+            return SumResult::Overflow;
+        };
+    };
+    return SumResult::Sum { value: a + b };
+};
+
+// Search paths from right to left. A simple path has at most size(facts)
+// edges; omitting overflowed paths can lose a proof but cannot invent one.
+// Negative cycles are not yet used to prove unrelated goals.
+fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
+    if bound >= 0 {
+        if hasEquality(equalities, left, right) { return true; };
+    };
+    distances = push([], Distance { node: right, value: 0 });
+    for round in 0..size(facts) {
+        for edge in facts {
+            found = findDistance(equalities, distances, edge.right);
+            if found is DistanceResult::Found {
+                distance = (found as DistanceResult::Found).value;
+                sum = safeBoundSum(distance, edge.bound);
+                if sum is SumResult::Sum {
+                    candidate = (sum as SumResult::Sum).value;
+                    if candidate <= bound {
+                        if hasEquality(equalities, edge.left, left) { return true; };
+                    };
+                    distances = improveDistance(equalities, distances, edge.left, candidate);
+                };
+            };
+        };
+    };
+    found = findDistance(equalities, distances, left);
+    if found is DistanceResult::Found {
+        return (found as DistanceResult::Found).value <= bound;
+    };
+    return false;
+};
+
+fn hasApplicationDifference(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
+    return hasDifference(applicationFacts(equalities, terms), facts, left, right, bound);
+};
+
+// A non-strict bound between values known to differ is strict. This rule can
+// use an order path rather than requiring the bound to be a single input edge.
+fn refinedOrders(equalities: &List<EqualityFact>, orders: &List<OrderFact>, different: &List<DisequalityFact>) -> List<OrderFact> {
+    known = orders;
+    for fact in different {
+        if hasOrder(equalities, known, fact.left, fact.right, false) {
+            if hasOrder(equalities, known, fact.left, fact.right, true) = false {
+                known = push(known, OrderFact { smaller: fact.left, greater: fact.right, strict: true });
+            };
+        };
+        if hasOrder(equalities, known, fact.right, fact.left, false) {
+            if hasOrder(equalities, known, fact.right, fact.left, true) = false {
+                known = push(known, OrderFact { smaller: fact.right, greater: fact.left, strict: true });
+            };
+        };
+    };
+    return known;
+};
+
+fn entailsRefinedOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    closed = applicationFacts(equalities, terms);
+    if contradictoryDisequalities(closed, different) {
+        return true;
+    };
+    refined = refinedOrders(closed, orders, different);
+    if contradictoryOrders(closed, refined) {
+        return true;
+    };
+    return hasOrder(closed, refined, left, right, strict);
+};
+
+// Concrete terms use kind 0 for Int and kind 1 for Bool (value 0 or 1).
+// Identifiers refer to terms, so repeated literals are registered as equal.
+struct ConstantTerm { id: Int, kind: Int, value: Int };
+
+fn constantEqualities(equalities: &List<EqualityFact>, constants: &List<ConstantTerm>) -> List<EqualityFact> {
+    known = equalities;
+    for a in constants {
+        for b in constants {
+            if a.kind = b.kind {
+                if a.value = b.value {
+                    if hasEquality(known, a.id, b.id) = false {
+                        known = push(known, EqualityFact { left: a.id, right: b.id });
+                    };
+                };
+            };
+        };
+    };
+    return known;
+};
+
+// Two different literal values cannot occupy the same equality class.
+fn contradictoryConstants(equalities: &List<EqualityFact>, constants: &List<ConstantTerm>) -> Bool {
+    for a in constants {
+        for b in constants {
+            if hasEquality(equalities, a.id, b.id) {
+                if a.kind != b.kind {
+                    return true;
+                };
+                if a.value != b.value {
+                    return true;
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn semanticFacts(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>) -> List<EqualityFact> {
+    return applicationFacts(constantEqualities(equalities, constants), terms);
+};
+
+fn entailsSemanticEquality(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>, left: Int, right: Int) -> Bool {
+    known = semanticFacts(equalities, terms, constants);
+    if contradictoryConstants(known, constants) {
+        return true;
+    };
     return hasEquality(known, left, right);
+};
+
+// Concrete integer values also provide their exact order. Booleans do not
+// provide integer-order edges, even though their encoding uses an integer.
+fn constantOrders(orders: &List<OrderFact>, constants: &List<ConstantTerm>) -> List<OrderFact> {
+    known = orders;
+    for a in constants {
+        for b in constants {
+            if a.kind = 0 {
+                if b.kind = 0 {
+                    if a.value < b.value {
+                        known = push(known, OrderFact { smaller: a.id, greater: b.id, strict: true });
+                    };
+                };
+            };
+        };
+    };
+    return known;
+};
+
+fn entailsSemanticOrder(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    closed = semanticFacts(equalities, terms, constants);
+    if contradictoryConstants(closed, constants) {
+        return true;
+    };
+    if contradictoryDisequalities(closed, different) {
+        return true;
+    };
+    refined = refinedOrders(closed, constantOrders(orders, constants), different);
+    if contradictoryOrders(closed, refined) {
+        return true;
+    };
+    return hasOrder(closed, refined, left, right, strict);
+};
+
+// A checked difference, using bounds that do not themselves overflow.
+fn safeBoundDifference(a: Int, b: Int) -> SumResult {
+    if b > 0 {
+        if a < -9223372036854775808 + b {
+            return SumResult::Overflow;
+        };
+    };
+    if b < 0 {
+        if a > 9223372036854775807 + b {
+            return SumResult::Overflow;
+        };
+    };
+    return SumResult::Sum { value: a - b };
+};
+
+fn comparisonDifferences(orders: &List<OrderFact>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = facts;
+    for order in orders {
+        if order.strict {
+            result = push(result, DifferenceFact { left: order.smaller, right: order.greater, bound: -1 });
+        } else {
+            result = push(result, DifferenceFact { left: order.smaller, right: order.greater, bound: 0 });
+        };
+    };
+    return result;
+};
+
+fn constantDifferences(constants: &List<ConstantTerm>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = facts;
+    for a in constants {
+        for b in constants {
+            if a.kind = 0 {
+                if b.kind = 0 {
+                    d = safeBoundDifference(a.value, b.value);
+                    if d is SumResult::Sum {
+                        result = push(result, DifferenceFact { left: a.id, right: b.id, bound: (d as SumResult::Sum).value });
+                    };
+                };
+            };
+        };
+    };
+    return result;
+};
+
+// A representable negative cycle contradicts the premises. If a path needs an
+// unrepresentable intermediate, hasDifference declines it and this check may
+// miss the contradiction, but never reports one without a proof.
+fn contradictoryDifferences(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>) -> Bool {
+    for fact in facts {
+        if hasDifference(equalities, facts, fact.left, fact.left, -1) {
+            return true;
+        };
+    };
+    return false;
+};
+
+struct ValidatorContext {
+    equalities: List<EqualityFact>,
+    applications: List<ApplicationTerm>,
+    constants: List<ConstantTerm>,
+    orders: List<OrderFact>,
+    different: List<DisequalityFact>,
+    differences: List<DifferenceFact>,
+};
+
+fn addNode(nodes: List<Int>, node: Int) -> List<Int> {
+    if containsValue(nodes, node) {
+        return nodes;
+    };
+    return push(nodes, node);
+};
+
+// Any equality obtained from bounds relates endpoints of comparisons,
+// differences, constants or disequalities. Equalities to other identifiers
+// are already represented in the equality closure.
+fn contextNodes(context: &ValidatorContext) -> List<Int> {
+    nodes = [];
+    for order in context.orders {
+        nodes = addNode(nodes, order.smaller);
+        nodes = addNode(nodes, order.greater);
+    };
+    for fact in context.differences {
+        nodes = addNode(nodes, fact.left);
+        nodes = addNode(nodes, fact.right);
+    };
+    for fact in context.different {
+        nodes = addNode(nodes, fact.left);
+        nodes = addNode(nodes, fact.right);
+    };
+    for constant in context.constants {
+        nodes = addNode(nodes, constant.id);
+    };
+    return nodes;
+};
+
+fn boundEqualities(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
+    known = equalities;
+    for a in nodes {
+        for b in nodes {
+            if hasEquality(known, a, b) = false {
+                if hasDifference(equalities, differences, a, b, 0) {
+                    if hasDifference(equalities, differences, b, a, 0) {
+                        known = push(known, EqualityFact { left: a, right: b });
+                    };
+                };
+            };
+        };
+    };
+    return known;
+};
+
+// Repeat because an equality proved by bounds can make applications equal,
+// and those equal applications can in turn connect more bounds. Every round
+// that changes the result merges at least one of the finite candidate classes.
+fn closeContext(context: &ValidatorContext) -> List<EqualityFact> {
+    nodes = contextNodes(context);
+    known = semanticFacts(context.equalities, context.applications, context.constants);
+    finished = false;
+    for round in 0..size(nodes) {
+        if finished = false {
+            orders = refinedOrders(known, constantOrders(context.orders, context.constants), context.different);
+            differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
+            next = applicationFacts(boundEqualities(known, differences, nodes), context.applications);
+            if size(next) = size(known) {
+                finished = true;
+            };
+            known = next;
+        };
+    };
+    return known;
+};
+
+enum ValidatorGoal {
+    Equal { left: Int, right: Int },
+    Different { left: Int, right: Int },
+    Less { left: Int, right: Int },
+    AtMost { left: Int, right: Int },
+    Difference { left: Int, right: Int, bound: Int },
+};
+
+fn contextEqual(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, left: Int, right: Int) -> Bool {
+    if hasEquality(equalities, left, right) {
+        return true;
+    };
+    if hasDifference(equalities, differences, left, right, 0) {
+        return hasDifference(equalities, differences, right, left, 0);
+    };
+    return false;
+};
+
+fn contextDifferent(equalities: &List<EqualityFact>, applications: &List<ApplicationTerm>, orders: &List<OrderFact>, different: &List<DisequalityFact>, differences: &List<DifferenceFact>, left: Int, right: Int) -> Bool {
+    if hasDifference(equalities, differences, left, right, -1) {
+        return true;
+    };
+    if hasDifference(equalities, differences, right, left, -1) {
+        return true;
+    };
+    return entailsApplicationDisequality(equalities, applications, orders, different, left, right);
+};
+
+// False means not established, including when a search omitted an overflowed
+// path. The context must use distinct identifiers for distinct terms and the
+// documented constant kinds; the host is responsible for encoding it.
+fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
+    recognized = false;
+    if goal is ValidatorGoal::Equal { recognized = true; };
+    if goal is ValidatorGoal::Different { recognized = true; };
+    if goal is ValidatorGoal::Less { recognized = true; };
+    if goal is ValidatorGoal::AtMost { recognized = true; };
+    if goal is ValidatorGoal::Difference { recognized = true; };
+    if recognized = false { return false; };
+    equalities = closeContext(context);
+    if contradictoryConstants(equalities, context.constants) {
+        return true;
+    };
+    if contradictoryDisequalities(equalities, context.different) {
+        return true;
+    };
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
+    if contradictoryDifferences(equalities, differences) {
+        return true;
+    };
+    if goal is ValidatorGoal::Equal {
+        g = goal as ValidatorGoal::Equal;
+        return contextEqual(equalities, differences, g.left, g.right);
+    };
+    if goal is ValidatorGoal::Different {
+        g = goal as ValidatorGoal::Different;
+        return contextDifferent(equalities, context.applications, orders, context.different, differences, g.left, g.right);
+    };
+    if goal is ValidatorGoal::Less {
+        g = goal as ValidatorGoal::Less;
+        return hasDifference(equalities, differences, g.left, g.right, -1);
+    };
+    if goal is ValidatorGoal::AtMost {
+        g = goal as ValidatorGoal::AtMost;
+        return hasDifference(equalities, differences, g.left, g.right, 0);
+    };
+    if goal is ValidatorGoal::Difference {
+        g = goal as ValidatorGoal::Difference;
+        return hasDifference(equalities, differences, g.left, g.right, g.bound);
+    };
+    return false;
+};
+
+// A sequence of proof obligations. Known facts must come from a trusted
+// source such as a function's preconditions or a verified MIR operation;
+// source-level assertions must be encoded as Check, never as Known.
+enum ProofStep {
+    KnownEquality { left: Int, right: Int },
+    KnownDifferent { left: Int, right: Int },
+    KnownOrder { left: Int, right: Int, strict: Bool },
+    KnownDifference { left: Int, right: Int, bound: Int },
+    Check { goal: ValidatorGoal },
+};
+
+struct ProofResult { valid: Bool, failedAt: Int };
+struct ProofRun { valid: Bool, failedAt: Int, state: ValidatorContext };
+
+// Return the first unproved obligation; -1 means that every check succeeded.
+// Assumptions made later in the list cannot justify an earlier assertion.
+fn runProofSteps(initial: &ValidatorContext, steps: &List<ProofStep>) -> ProofRun {
+    state = initial;
+    for i in 0..size(steps) {
+        step = get(steps, i);
+        handled = false;
+        if step is ProofStep::KnownEquality {
+            handled = true;
+            f = step as ProofStep::KnownEquality;
+            facts = push(state.equalities, EqualityFact { left: f.left, right: f.right });
+            state = ValidatorContext { equalities: facts, ..state };
+        };
+        if step is ProofStep::KnownDifferent {
+            handled = true;
+            f = step as ProofStep::KnownDifferent;
+            facts = push(state.different, DisequalityFact { left: f.left, right: f.right });
+            state = ValidatorContext { different: facts, ..state };
+        };
+        if step is ProofStep::KnownOrder {
+            handled = true;
+            f = step as ProofStep::KnownOrder;
+            facts = push(state.orders, OrderFact { smaller: f.left, greater: f.right, strict: f.strict });
+            state = ValidatorContext { orders: facts, ..state };
+        };
+        if step is ProofStep::KnownDifference {
+            handled = true;
+            f = step as ProofStep::KnownDifference;
+            facts = push(state.differences, DifferenceFact { left: f.left, right: f.right, bound: f.bound });
+            state = ValidatorContext { differences: facts, ..state };
+        };
+        if step is ProofStep::Check {
+            handled = true;
+            f = step as ProofStep::Check;
+            if entailsGoal(state, f.goal) = false {
+                return ProofRun { valid: false, failedAt: i, state: state };
+            };
+        };
+        if handled = false {
+            return ProofRun { valid: false, failedAt: i, state: state };
+        };
+    };
+    return ProofRun { valid: true, failedAt: -1, state: state };
+};
+
+fn validateProofSteps(initial: &ValidatorContext, steps: &List<ProofStep>) -> ProofResult {
+    result = runProofSteps(initial, steps);
+    return ProofResult { valid: result.valid, failedAt: result.failedAt };
+};
+
+// A host translates verified MIR blocks to this form. Branch facts are trusted
+// consequences of taking that edge, not unchecked source assertions. A path
+// that contains an operation the bridge cannot encode ends in Unsupported.
+enum FlowEnd {
+    Done,
+    Jump { target: Int },
+    Branch { yes: Int, no: Int, yesFacts: List<ProofStep>, noFacts: List<ProofStep> },
+    Unsupported,
+};
+struct FlowBlock { id: Int, steps: List<ProofStep>, end: FlowEnd };
+enum FlowLookup { Missing, Found { block: FlowBlock } };
+// status 0: valid; 1: unproved obligation; 2: unsupported operation;
+// 3: invalid graph; 4: a cycle needs an invariant and has not been checked.
+struct FlowResult { status: Int, block: Int, step: Int };
+
+fn findFlowBlock(blocks: &List<FlowBlock>, id: Int) -> FlowLookup {
+    for block in blocks {
+        if block.id = id {
+            return FlowLookup::Found { block: block };
+        };
+    };
+    return FlowLookup::Missing;
+};
+
+fn uniqueFlowBlocks(blocks: &List<FlowBlock>) -> Bool {
+    for i in 0..size(blocks) {
+        for j in 0..size(blocks) {
+            if i != j {
+                if get(blocks, i).id = get(blocks, j).id {
+                    return false;
+                };
+            };
+        };
+    };
+    return true;
+};
+
+fn walkFlow(blocks: &List<FlowBlock>, id: Int, context: &ValidatorContext, fuel: Int) -> FlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+    found = findFlowBlock(blocks, id);
+    if found is FlowLookup::Found {
+        if fuel = 0 {
+            return FlowResult { status: 4, block: id, step: -1 };
+        };
+        block = (found as FlowLookup::Found).block;
+        run = runProofSteps(context, block.steps);
+        if run.valid = false {
+            return FlowResult { status: 1, block: id, step: run.failedAt };
+        };
+        end = block.end;
+        if end is FlowEnd::Done {
+            return FlowResult { status: 0, block: id, step: -1 };
+        };
+        if end is FlowEnd::Jump {
+            jump = end as FlowEnd::Jump;
+            return walkFlow(blocks, jump.target, run.state, fuel - 1);
+        };
+        if end is FlowEnd::Branch {
+            branch = end as FlowEnd::Branch;
+            yes = runProofSteps(run.state, branch.yesFacts);
+            if yes.valid = false {
+                return FlowResult { status: 1, block: id, step: yes.failedAt };
+            };
+            yesResult = walkFlow(blocks, branch.yes, yes.state, fuel - 1);
+            if yesResult.status != 0 {
+                return yesResult;
+            };
+            no = runProofSteps(run.state, branch.noFacts);
+            if no.valid = false {
+                return FlowResult { status: 1, block: id, step: no.failedAt };
+            };
+            return walkFlow(blocks, branch.no, no.state, fuel - 1);
+        };
+        return FlowResult { status: 2, block: id, step: -1 };
+    };
+    return FlowResult { status: 3, block: id, step: -1 };
+};
+
+// Each acyclic path visits at most size(blocks) blocks. Running out of fuel
+// never accepts a cycle: loops will need invariant and termination checking.
+fn validateFlow(blocks: &List<FlowBlock>, entry: Int, initial: &ValidatorContext) -> FlowResult {
+    if uniqueFlowBlocks(blocks) = false {
+        return FlowResult { status: 3, block: entry, step: -1 };
+    };
+    return walkFlow(blocks, entry, initial, size(blocks));
+};
+
+// Locals are names for immutable symbolic terms. A copy changes the binding,
+// not the term or the facts that describe it.
+struct LocalBinding { local: Int, term: Int };
+enum ValueRef { Local { local: Int }, Term { term: Int } };
+enum ValueLookup { Missing, Found { term: Int } };
+enum ArgumentsLookup { Missing, Found { terms: List<Int> } };
+struct ExecutionState { context: ValidatorContext, locals: List<LocalBinding> };
+
+fn lookupLocal(locals: &List<LocalBinding>, local: Int) -> ValueLookup {
+    for binding in locals {
+        if binding.local = local {
+            return ValueLookup::Found { term: binding.term };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+fn bindLocal(locals: List<LocalBinding>, local: Int, term: Int) -> List<LocalBinding> {
+    for i in 0..size(locals) {
+        if get(locals, i).local = local {
+            return set(locals, i, LocalBinding { local: local, term: term });
+        };
+    };
+    return push(locals, LocalBinding { local: local, term: term });
+};
+
+// Term references are supplied by the host's term interner; a Local reference
+// must already be bound on this path. Unknown variants and locals fail closed.
+fn resolveValue(state: &ExecutionState, value: ValueRef) -> ValueLookup {
+    if value is ValueRef::Local {
+        return lookupLocal(state.locals, (value as ValueRef::Local).local);
+    };
+    if value is ValueRef::Term {
+        return ValueLookup::Found { term: (value as ValueRef::Term).term };
+    };
+    return ValueLookup::Missing;
+};
+
+fn resolveArguments(state: &ExecutionState, values: &List<ValueRef>) -> ArgumentsLookup {
+    terms = [];
+    for value in values {
+        result = resolveValue(state, value);
+        if result is ValueLookup::Found {
+            terms = push(terms, (result as ValueLookup::Found).term);
+        } else {
+            return ArgumentsLookup::Missing;
+        };
+    };
+    return ArgumentsLookup::Found { terms: terms };
+};
+
+// A fresh result must not alias any term already present on this path.
+fn termInUse(state: &ExecutionState, term: Int) -> Bool {
+    for binding in state.locals { if binding.term = term { return true; }; };
+    for fact in state.context.equalities {
+        if fact.left = term { return true; }; if fact.right = term { return true; };
+    };
+    for fact in state.context.different {
+        if fact.left = term { return true; }; if fact.right = term { return true; };
+    };
+    for fact in state.context.orders {
+        if fact.smaller = term { return true; }; if fact.greater = term { return true; };
+    };
+    for fact in state.context.differences {
+        if fact.left = term { return true; }; if fact.right = term { return true; };
+    };
+    for constant in state.context.constants { if constant.id = term { return true; }; };
+    for app in state.context.applications {
+        if app.id = term { return true; };
+        if app.function = term { return true; };
+        if containsValue(app.arguments, term) { return true; };
+    };
+    return false;
+};
+
+// The MIR bridge reserves -1 through -11 for builtin functions and uses
+// non-negative IDs for input terms. A bounded search supplies path-local
+// symbols without aliasing any term still mentioned by the state. Exhaustion
+// is reported as unsupported rather than reusing a live identifier.
+fn freshValue(state: &ExecutionState) -> ValueLookup {
+    for i in 0..100000 {
+        candidate = -1000 - i;
+        if termInUse(state, candidate) = false {
+            return ValueLookup::Found { term: candidate };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+enum IntegerLookup { Missing, Found { value: Int } };
+
+fn integerValue(context: &ValidatorContext, term: Int) -> IntegerLookup {
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if hasEquality(equalities, constant.id, term) {
+                return IntegerLookup::Found { value: constant.value };
+            };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
+// The MIR bridge reserves function -1 for addition and -2 for subtraction.
+// For result = base + offset, record both difference bounds if their literal
+// weights fit. If negating the offset overflows, retaining one direction is
+// sound and merely incomplete.
+fn addOffsetFacts(context: &ValidatorContext, result: Int, base: Int, offset: Int) -> ValidatorContext {
+    facts = push(context.differences, DifferenceFact { left: result, right: base, bound: offset });
+    reverse = safeBoundDifference(0, offset);
+    if reverse is SumResult::Sum {
+        facts = push(facts, DifferenceFact { left: base, right: result, bound: (reverse as SumResult::Sum).value });
+    };
+    return ValidatorContext { differences: facts, ..context };
+};
+
+fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
+    if size(args) != 2 { return context; };
+    a = get(args, 0);
+    b = get(args, 1);
+    if function = -1 {
+        bv = integerValue(context, b);
+        if bv is IntegerLookup::Found {
+            return addOffsetFacts(context, result, a, (bv as IntegerLookup::Found).value);
+        };
+        av = integerValue(context, a);
+        if av is IntegerLookup::Found {
+            return addOffsetFacts(context, result, b, (av as IntegerLookup::Found).value);
+        };
+    };
+    if function = -2 {
+        bv = integerValue(context, b);
+        if bv is IntegerLookup::Found {
+            offset = safeBoundDifference(0, (bv as IntegerLookup::Found).value);
+            if offset is SumResult::Sum {
+                return addOffsetFacts(context, result, a, (offset as SumResult::Sum).value);
+            };
+            // result = a - minInt implies a - result <= minInt even though
+            // the opposite bound cannot be represented in an Int.
+            facts = push(context.differences, DifferenceFact { left: a, right: result, bound: (bv as IntegerLookup::Found).value });
+            return ValidatorContext { differences: facts, ..context };
+        };
+    };
+    return context;
+};
+
+// Apply is restricted to pure functions. The host must encode the operation's
+// preconditions as checks before the Apply; unknown or effectful operations
+// must be rejected by the host instead of encoded as a pure application.
+enum ExecutionStep {
+    Assign { local: Int, value: ValueRef },
+    Apply { local: Int, result: Int, function: Int, arguments: List<ValueRef> },
+    ApplyFresh { local: Int, function: Int, arguments: List<ValueRef> },
+    Havoc { local: Int },
+    RequireDefined { value: ValueRef },
+    Check { relation: Int, left: ValueRef, right: ValueRef },
+    Assume { relation: Int, left: ValueRef, right: ValueRef },
+    Proof { step: ProofStep },
+};
+// status 0 is success; 1 is an unproved check; 2 is malformed or unsupported.
+struct ExecutionResult { status: Int, failedAt: Int, state: ExecutionState };
+
+// relation: 0 is equality, 1 disequality, 2 strict less, 3 non-strict less.
+// Any other relation code is rejected rather than guessed.
+fn localGoal(relation: Int, left: Int, right: Int) -> ValidatorGoal {
+    if relation = 0 { return ValidatorGoal::Equal { left: left, right: right }; };
+    if relation = 1 { return ValidatorGoal::Different { left: left, right: right }; };
+    if relation = 2 { return ValidatorGoal::Less { left: left, right: right }; };
+    return ValidatorGoal::AtMost { left: left, right: right };
+};
+
+// Only the trusted MIR bridge may add an edge condition as an assumption.
+fn assumeRelation(context: &ValidatorContext, relation: Int, left: Int, right: Int) -> ValidatorContext {
+    if relation = 0 {
+        return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: left, right: right }), ..context };
+    };
+    if relation = 1 {
+        return ValidatorContext { different: push(context.different, DisequalityFact { left: left, right: right }), ..context };
+    };
+    if relation = 2 {
+        return ValidatorContext { orders: push(context.orders, OrderFact { smaller: left, greater: right, strict: true }), ..context };
+    };
+    return ValidatorContext { orders: push(context.orders, OrderFact { smaller: left, greater: right, strict: false }), ..context };
+};
+
+fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
+    state = initial;
+    for i in 0..size(steps) {
+        step = get(steps, i);
+        handled = false;
+        if step is ExecutionStep::Assign {
+            handled = true;
+            assign = step as ExecutionStep::Assign;
+            value = resolveValue(state, assign.value);
+            if value is ValueLookup::Found {
+                locals = bindLocal(state.locals, assign.local, (value as ValueLookup::Found).term);
+                state = ExecutionState { locals: locals, ..state };
+            } else {
+                return ExecutionResult { status: 2, failedAt: i, state: state };
+            };
+        };
+        if step is ExecutionStep::Apply {
+            handled = true;
+            apply = step as ExecutionStep::Apply;
+            args = resolveArguments(state, apply.arguments);
+            if args is ArgumentsLookup::Found {
+                terms = (args as ArgumentsLookup::Found).terms;
+                if termInUse(state, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                if apply.result = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                if containsValue(terms, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                apps = push(state.context.applications, ApplicationTerm { id: apply.result, function: apply.function, arguments: terms });
+                withApp = ValidatorContext { applications: apps, ..state.context };
+                context = builtinFacts(withApp, apply.function, apply.result, terms);
+                locals = bindLocal(state.locals, apply.local, apply.result);
+                state = ExecutionState { context: context, locals: locals };
+            } else {
+                return ExecutionResult { status: 2, failedAt: i, state: state };
+            };
+        };
+        if step is ExecutionStep::ApplyFresh {
+            handled = true;
+            apply = step as ExecutionStep::ApplyFresh;
+            args = resolveArguments(state, apply.arguments);
+            fresh = freshValue(state);
+            if args is ArgumentsLookup::Found {
+                if fresh is ValueLookup::Found {
+                    terms = (args as ArgumentsLookup::Found).terms;
+                    resultId = (fresh as ValueLookup::Found).term;
+                    if resultId = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                    if containsValue(terms, resultId) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                    apps = push(state.context.applications, ApplicationTerm { id: resultId, function: apply.function, arguments: terms });
+                    withApp = ValidatorContext { applications: apps, ..state.context };
+                    context = builtinFacts(withApp, apply.function, resultId, terms);
+                    locals = bindLocal(state.locals, apply.local, resultId);
+                    state = ExecutionState { context: context, locals: locals };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::Havoc {
+            handled = true;
+            havoc = step as ExecutionStep::Havoc;
+            fresh = freshValue(state);
+            if fresh is ValueLookup::Found {
+                locals = bindLocal(state.locals, havoc.local, (fresh as ValueLookup::Found).term);
+                state = ExecutionState { locals: locals, ..state };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::RequireDefined {
+            handled = true;
+            required = step as ExecutionStep::RequireDefined;
+            value = resolveValue(state, required.value);
+            if value is ValueLookup::Missing {
+                return ExecutionResult { status: 2, failedAt: i, state: state };
+            };
+        };
+        if step is ExecutionStep::Check {
+            handled = true;
+            check = step as ExecutionStep::Check;
+            if check.relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            if check.relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            left = resolveValue(state, check.left);
+            right = resolveValue(state, check.right);
+            if left is ValueLookup::Found {
+                if right is ValueLookup::Found {
+                    g = localGoal(check.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                    if entailsGoal(state.context, g) = false {
+                        return ExecutionResult { status: 1, failedAt: i, state: state };
+                    };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::Assume {
+            handled = true;
+            assumed = step as ExecutionStep::Assume;
+            if assumed.relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            if assumed.relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            left = resolveValue(state, assumed.left);
+            right = resolveValue(state, assumed.right);
+            if left is ValueLookup::Found {
+                if right is ValueLookup::Found {
+                    context = assumeRelation(state.context, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                    state = ExecutionState { context: context, ..state };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::Proof {
+            handled = true;
+            p = step as ExecutionStep::Proof;
+            result = runProofSteps(state.context, push([], p.step));
+            if result.valid = false { return ExecutionResult { status: 1, failedAt: i, state: state }; };
+            state = ExecutionState { context: result.state, ..state };
+        };
+        if handled = false { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+    };
+    return ExecutionResult { status: 0, failedAt: -1, state: state };
+};
+
+// An execution graph carries local bindings separately along every path. Its
+// edge steps are host-supplied consequences of the branch condition. An
+// unsupported MIR operation must be represented by ExecutionEnd::Unsupported.
+enum ExecutionEnd {
+    Done,
+    Jump { target: Int },
+    Branch { yes: Int, no: Int, yesSteps: List<ExecutionStep>, noSteps: List<ExecutionStep> },
+    Condition { yes: Int, no: Int, relation: Int, left: ValueRef, right: ValueRef },
+    Loop { exit: Int, body: List<ExecutionStep>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef },
+    Unsupported,
+};
+struct ExecutionBlock { id: Int, steps: List<ExecutionStep>, end: ExecutionEnd };
+enum ExecutionBlockLookup { Missing, Found { block: ExecutionBlock } };
+// status 0: valid; 1: unproved; 2: unsupported or malformed step;
+// 3: invalid graph; 4: cycle whose invariant has not yet been checked.
+struct ExecutionFlowResult { status: Int, block: Int, step: Int, state: ExecutionState };
+struct NegatedRelation { relation: Int, left: Int, right: Int };
+
+fn negateRelation(relation: Int, left: Int, right: Int) -> NegatedRelation {
+    if relation = 0 { return NegatedRelation { relation: 1, left: left, right: right }; };
+    if relation = 1 { return NegatedRelation { relation: 0, left: left, right: right }; };
+    if relation = 2 { return NegatedRelation { relation: 3, left: right, right: left }; };
+    return NegatedRelation { relation: 2, left: right, right: left };
+};
+
+fn findExecutionBlock(blocks: &List<ExecutionBlock>, id: Int) -> ExecutionBlockLookup {
+    for block in blocks {
+        if block.id = id { return ExecutionBlockLookup::Found { block: block }; };
+    };
+    return ExecutionBlockLookup::Missing;
+};
+
+fn uniqueExecutionBlocks(blocks: &List<ExecutionBlock>) -> Bool {
+    for i in 0..size(blocks) {
+        for j in 0..size(blocks) {
+            if i != j {
+                if get(blocks, i).id = get(blocks, j).id { return false; };
+            };
+        };
+    };
+    return true;
+};
+
+fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+    found = findExecutionBlock(blocks, id);
+    if found is ExecutionBlockLookup::Found {
+        if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: initial }; };
+        block = (found as ExecutionBlockLookup::Found).block;
+        if block.end is ExecutionEnd::Loop {
+            loop = block.end as ExecutionEnd::Loop;
+            entry = executeSteps(initial, loop.checks);
+            if entry.status != 0 { return ExecutionFlowResult { status: entry.status, block: id, step: entry.failedAt, state: entry.state }; };
+        };
+        run = executeSteps(initial, block.steps);
+        if run.status != 0 { return ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state }; };
+        end = block.end;
+        if end is ExecutionEnd::Done { return ExecutionFlowResult { status: 0, block: id, step: -1, state: run.state }; };
+        if end is ExecutionEnd::Jump {
+            jump = end as ExecutionEnd::Jump;
+            return walkExecution(blocks, jump.target, run.state, fuel - 1);
+        };
+        if end is ExecutionEnd::Loop {
+            loop = end as ExecutionEnd::Loop;
+            if loop.relation < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: initial }; };
+            if loop.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: initial }; };
+            if loop.variantMode < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: initial }; };
+            if loop.variantMode > 1 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: initial }; };
+            arbitrary = initial;
+            for local in loop.havoc {
+                changed = executeSteps(arbitrary, push([], ExecutionStep::Havoc { local: local }));
+                if changed.status != 0 { return ExecutionFlowResult { status: changed.status, block: id, step: -1, state: changed.state }; };
+                arbitrary = changed.state;
+            };
+            assumed = executeSteps(arbitrary, loop.assumptions);
+            if assumed.status != 0 { return ExecutionFlowResult { status: assumed.status, block: id, step: assumed.failedAt, state: assumed.state }; };
+            header = executeSteps(assumed.state, block.steps);
+            if header.status != 0 { return ExecutionFlowResult { status: header.status, block: id, step: header.failedAt, state: header.state }; };
+            left = resolveValue(header.state, loop.left);
+            right = resolveValue(header.state, loop.right);
+            old = resolveValue(header.state, loop.variant);
+            zero = resolveValue(header.state, loop.zero);
+            other = resolveValue(header.state, loop.variantOther);
+            if left is ValueLookup::Found {
+                if right is ValueLookup::Found {
+                    if old is ValueLookup::Found {
+                        if zero is ValueLookup::Found {
+                            if other is ValueLookup::Found {
+                                a = (left as ValueLookup::Found).term;
+                                b = (right as ValueLookup::Found).term;
+                                prior = (old as ValueLookup::Found).term;
+                                priorOther = (other as ValueLookup::Found).term;
+                                z = (zero as ValueLookup::Found).term;
+                                zeroValue = integerValue(header.state.context, z);
+                                if zeroValue is IntegerLookup::Found {
+                                    if (zeroValue as IntegerLookup::Found).value != 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
+                                } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
+                                yesContext = assumeRelation(header.state.context, loop.relation, a, b);
+                                if loop.variantMode = 0 {
+                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
+                                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
+                                    };
+                                } else {
+                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
+                                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
+                                    };
+                                };
+                                // Keep the prior variant live even if its local is overwritten.
+                                protectedFacts = push(yesContext.equalities, EqualityFact { left: prior, right: prior });
+                                protectedFacts = push(protectedFacts, EqualityFact { left: priorOther, right: priorOther });
+                                protected = ValidatorContext { equalities: protectedFacts, ..yesContext };
+                                yesState = ExecutionState { context: protected, ..header.state };
+                                body = executeSteps(yesState, loop.body);
+                                if body.status != 0 { return ExecutionFlowResult { status: body.status, block: id, step: body.failedAt, state: body.state }; };
+                                preserved = executeSteps(body.state, loop.checks);
+                                if preserved.status != 0 { return ExecutionFlowResult { status: preserved.status, block: id, step: preserved.failedAt, state: preserved.state }; };
+                                next = resolveValue(body.state, loop.variant);
+                                if next is ValueLookup::Found {
+                                    nextTerm = (next as ValueLookup::Found).term;
+                                    if loop.variantMode = 0 {
+                                        if entailsGoal(body.state.context, ValidatorGoal::Less { left: nextTerm, right: prior }) = false {
+                                            return ExecutionFlowResult { status: 1, block: id, step: -1, state: body.state };
+                                        };
+                                    } else {
+                                        otherAfter = resolveValue(body.state, loop.variantOther);
+                                        if otherAfter is ValueLookup::Found {
+                                            if entailsGoal(body.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: priorOther }) = false {
+                                                return ExecutionFlowResult { status: 1, block: id, step: -1, state: body.state };
+                                            };
+                                        } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: body.state }; };
+                                        if entailsGoal(body.state.context, ValidatorGoal::Less { left: prior, right: nextTerm }) = false {
+                                            return ExecutionFlowResult { status: 1, block: id, step: -1, state: body.state };
+                                        };
+                                    };
+                                    inverse = negateRelation(loop.relation, a, b);
+                                    noContext = assumeRelation(header.state.context, inverse.relation, inverse.left, inverse.right);
+                                    noState = ExecutionState { context: noContext, ..header.state };
+                                    return walkExecution(blocks, loop.exit, noState, fuel - 1);
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+            return ExecutionFlowResult { status: 2, block: id, step: -1, state: initial };
+        };
+        if end is ExecutionEnd::Condition {
+            condition = end as ExecutionEnd::Condition;
+            if condition.relation < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state }; };
+            if condition.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state }; };
+            left = resolveValue(run.state, condition.left);
+            right = resolveValue(run.state, condition.right);
+            if left is ValueLookup::Found {
+                if right is ValueLookup::Found {
+                    a = (left as ValueLookup::Found).term;
+                    b = (right as ValueLookup::Found).term;
+                    inverse = negateRelation(condition.relation, a, b);
+                    yesKnown = entailsGoal(run.state.context, localGoal(condition.relation, a, b));
+                    noKnown = entailsGoal(run.state.context, localGoal(inverse.relation, inverse.left, inverse.right));
+                    if noKnown = false {
+                        yesContext = assumeRelation(run.state.context, condition.relation, a, b);
+                        yesState = ExecutionState { context: yesContext, ..run.state };
+                        yesResult = walkExecution(blocks, condition.yes, yesState, fuel - 1);
+                        if yesResult.status != 0 { return yesResult; };
+                        if yesKnown { return yesResult; };
+                    };
+                    noContext = assumeRelation(run.state.context, inverse.relation, inverse.left, inverse.right);
+                    noState = ExecutionState { context: noContext, ..run.state };
+                    return walkExecution(blocks, condition.no, noState, fuel - 1);
+                };
+            };
+            return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
+        };
+        if end is ExecutionEnd::Branch {
+            branch = end as ExecutionEnd::Branch;
+            yes = executeSteps(run.state, branch.yesSteps);
+            if yes.status != 0 { return ExecutionFlowResult { status: yes.status, block: id, step: yes.failedAt, state: yes.state }; };
+            yesResult = walkExecution(blocks, branch.yes, yes.state, fuel - 1);
+            if yesResult.status != 0 { return yesResult; };
+            no = executeSteps(run.state, branch.noSteps);
+            if no.status != 0 { return ExecutionFlowResult { status: no.status, block: id, step: no.failedAt, state: no.state }; };
+            return walkExecution(blocks, branch.no, no.state, fuel - 1);
+        };
+        return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
+    };
+    return ExecutionFlowResult { status: 3, block: id, step: -1, state: initial };
+};
+
+fn validateExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &ExecutionState) -> ExecutionFlowResult {
+    if uniqueExecutionBlocks(blocks) = false {
+        return ExecutionFlowResult { status: 3, block: entry, step: -1, state: initial };
+    };
+    return walkExecution(blocks, entry, initial, size(blocks));
 };

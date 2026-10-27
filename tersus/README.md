@@ -10,10 +10,45 @@ query, `hasEquality`, treats integers as symbolic value identifiers and proves
 reflexive, symmetric and transitive consequences of the supplied equalities.
 `hasCongruence` additionally closes equalities over binary applications of
 uninterpreted operators, including nested applications. The host must give each
-term a unique identifier and distinguish different operators. A false answer
+term a unique identifier and distinguish different operators.
+`hasApplicationEquality` accepts applications of any arity and treats the
+function as a term, so equal functions applied to equal arguments are equal.
+`hasApplicationOrder` uses those equalities while following comparisons. A false answer
 means only that the query did not find a proof: it does not yet handle general
 proof terms or validate programs. It is not used by the
 production pipeline.
+
+`hasStrictOrder` follows strict comparisons transitively and substitutes
+equivalent identifiers at either end of a comparison. `hasOrder` also handles
+chains mixing strict and non-strict comparisons. Neither query handles
+general arithmetic expressions. `hasDifference` follows difference constraints
+with checked 64-bit intermediate bounds, giving up on a path if a bound would
+overflow; it does not detect negative cycles. `entailsApplicationOrder` detects contradictions
+formed by a cycle containing a strict comparison and treats those premises as
+inconsistent. `entailsApplicationDisequality` transports explicit disequalities
+through equality, uses strict comparisons, and detects an equality contradicting
+a disequality. `entailsRefinedOrder` also strengthens a non-strict bound to a
+strict one when its endpoints are known to differ. Other forms of contradiction
+are not yet covered.
+
+`entailsGoal` combines these facts in a proof context. `SelfHostedProof` interns
+Haskell proof terms and runs supported relation queries against that context;
+it declines unsupported goals and omits unsupported premises. It is a bridge
+for comparison with the Haskell engine, not the production validation path.
+The Tersus search is incomplete, so a negative answer does not establish that
+the goal is false.
+
+`validateProofSteps` checks a sequence of obligations in order. Its `Known`
+steps are reserved for trusted premises and facts established by an operation;
+an assertion must be a `Check`. The result identifies the first unproved check.
+`validateExecution` also tracks local bindings and checks acyclic paths
+independently. `SelfHostedMir.validateMirSubset` translates a limited subset of
+typed MIR (copies, pure binary operations, assertions, jumps and branches) to
+that representation. It also checks a canonical single-block loop by proving
+its declared invariant and an integer or fixed-limit countdown variant. Other
+loop shapes, calls and operations it cannot translate return unsupported. It
+is used for comparison, not for production validation;
+the returned flow state is one path's state and is not a joined postcondition.
 
 `MirEval.runNamedFunction` lets the host invoke a lowered Tersus function with
 explicit MIR values. It executes code without checking its input contract or

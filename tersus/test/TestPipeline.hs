@@ -16,9 +16,12 @@ import Cli
 import qualified Mir as M
 import MirEval
 import MirLower
+import qualified MirValidate as Reference
 import MirVerify
 import Pipeline
 import qualified ProofEngine as Engine
+import SelfHostedProof (querySelfHosted)
+import SelfHostedMir (validateMirSubset)
 import Parse
 import StdLib
 import TypeCheck (elaborate)
@@ -518,9 +521,193 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                     let expected = Engine.entails (FApp eqProof [expr a, expr b]) congruenceContext
                         actual = runNamedFunction program "hasCongruence" [MList [fact (0, 1)], MList (map term terms), MInt a, MInt b]
                      in testAssertEq actual (Ok (Just (MBool expected)))
+                lt :: Integer -> Integer -> IotaProof
+                lt a b = FApp (CTerm (builtinFunct (Rel Lt))) [ATerm (Iota (show a)), ATerm (Iota (show b))]
+                orders = [(3, 4), (2, 3), (1, 2)] :: [(Integer, Integer)]
+                orderFact (a, b) = MData "StrictOrderFact" [("smaller", MInt a), ("greater", MInt b)]
+                orderContext = Engine.proofContextFromFacts (eq 0 1 : [lt a b | (a, b) <- orders])
+                checkOrder a b =
+                    let expected = Engine.entails (lt a b) orderContext
+                        actual = runNamedFunction program "hasStrictOrder" [MList [fact (0, 1)], MList (map orderFact orders), MInt a, MInt b]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                le :: Integer -> Integer -> IotaProof
+                le a b = FApp (CTerm (builtinFunct (Rel LtEq))) [ATerm (Iota (show a)), ATerm (Iota (show b))]
+                mixed = [(3, 4, False), (2, 3, True), (1, 2, False)] :: [(Integer, Integer, Bool)]
+                mixedFact (a, b, s) = MData "OrderFact" [("smaller", MInt a), ("greater", MInt b), ("strict", MBool s)]
+                mixedContext = Engine.proofContextFromFacts (eq 0 1 : [if s then lt a b else le a b | (a, b, s) <- mixed])
+                checkMixed a b s =
+                    let expected = Engine.entails (if s then lt a b else le a b) mixedContext
+                        actual = runNamedFunction program "hasOrder" [MList [fact (0, 1)], MList (map mixedFact mixed), MInt a, MInt b, MBool s]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                termOrderContext = Engine.proofContextFromFacts [eq 0 1, FApp (CTerm (builtinFunct (Rel Lt))) [expr 10, expr 5]]
+                checkTermOrder a b =
+                    let expected = Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [expr a, expr b]) termOrderContext
+                        actual = runNamedFunction program "hasOrderWithTerms" [MList [fact (0, 1)], MList (map term terms), MList [mixedFact (10, 5, True)], MInt a, MInt b, MBool True]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                apps = [(10,20,[0,2]), (11,21,[1,2]), (12,20,[0]), (13,20,[]), (14,21,[])] :: [(Integer,Integer,[Integer])]
+                app (i, f, args) = MData "ApplicationTerm" [("id", MInt i), ("function", MInt f), ("arguments", MList (map MInt args))]
+                appExpr i = case [(f, args) | (j, f, args) <- apps, i == j] of
+                    (f, args) : _ -> FApp (ATerm (Iota (show f))) (map appExpr args)
+                    [] -> ATerm (Iota (show i))
+                appContext = Engine.proofContextFromFacts [eq 0 1, eq 20 21]
+                checkApp a b =
+                    let expected = Engine.entails (FApp eqProof [appExpr a, appExpr b]) appContext
+                        actual = runNamedFunction program "hasApplicationEquality" [MList (map fact [(0,1),(20,21)]), MList (map app apps), MInt a, MInt b]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                appOrderContext = Engine.proofContextFromFacts [eq 0 1, eq 20 21, FApp (CTerm (builtinFunct (Rel Lt))) [appExpr 10, appExpr 5]]
+                checkAppOrder a b =
+                    let expected = Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [appExpr a, appExpr b]) appOrderContext
+                        actual = runNamedFunction program "hasApplicationOrder" [MList (map fact [(0,1),(20,21)]), MList (map app apps), MList [mixedFact (10,5,True)], MInt a, MInt b, MBool True]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                impossible = [(1,2,True),(2,1,False)] :: [(Integer,Integer,Bool)]
+                impossibleContext = Engine.proofContextFromFacts [lt 1 2, le 2 1]
+                checkImpossible =
+                    let expected = Engine.entails (lt 7 8) impossibleContext
+                        actual = runNamedFunction program "entailsApplicationOrder" [MList [], MList [], MList (map mixedFact impossible), MInt 7, MInt 8, MBool True]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                ne :: Integer -> Integer -> IotaProof
+                ne a b = FApp (CTerm (builtinFunct (Rel NotEq))) [ATerm (Iota (show a)), ATerm (Iota (show b))]
+                differentFact (a, b) = MData "DisequalityFact" [("left", MInt a), ("right", MInt b)]
+                checkDifferent a b =
+                    let context = Engine.proofContextFromFacts [eq 0 1, ne 1 2, lt 2 3]
+                        expected = Engine.entails (ne a b) context
+                        actual = runNamedFunction program "entailsApplicationDisequality" [MList [fact (0,1)], MList [], MList [mixedFact (2,3,True)], MList [differentFact (1,2)], MInt a, MInt b]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                diffFact (a, b, k) = MData "DifferenceFact" [("left", MInt a), ("right", MInt b), ("bound", MInt k)]
+                differenceEdges = [(1,2,0),(2,3,-1),(3,4,0)] :: [(Integer,Integer,Integer)]
+                checkDifference a b s =
+                    let expected = Engine.entails (if s then lt a b else le a b) mixedContext
+                        actual = runNamedFunction program "hasDifference" [MList [fact (0,1)], MList (map diffFact differenceEdges), MInt a, MInt b, MInt (if s then -1 else 0)]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                overflowEdges = [(1,0,-9223372036854775808),(2,1,-1)] :: [(Integer,Integer,Integer)]
+                checkDifferenceOverflow = testAssertEq (runNamedFunction program "hasDifference" [MList [], MList (map diffFact overflowEdges), MInt 2, MInt 0, MInt (-9223372036854775808)]) (Ok (Just (MBool False)))
+                refinedContext = Engine.proofContextFromFacts [eq 0 1, le 1 2, le 2 3, ne 0 3]
+                checkRefined a b =
+                    let expected = Engine.entails (lt a b) refinedContext
+                        actual = runNamedFunction program "entailsRefinedOrder" [MList [fact (0,1)], MList [], MList (map mixedFact [(1,2,False),(2,3,False)]), MList [differentFact (0,3)], MInt a, MInt b, MBool True]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                constants = [(30,0,3),(31,0,3),(32,0,5),(33,0,0),(34,1,0)] :: [(Integer,Integer,Integer)]
+                constant (i, k, v) = MData "ConstantTerm" [("id", MInt i), ("kind", MInt k), ("value", MInt v)]
+                constantExpr i = case i of
+                    30 -> CTerm (VInt 3)
+                    31 -> CTerm (VInt 3)
+                    32 -> CTerm (VInt 5)
+                    33 -> CTerm (VInt 0)
+                    34 -> CTerm (VBool False)
+                    _ -> ATerm (Iota (show i))
+                checkConstantEquality a b =
+                    let expected = Engine.entails (FApp eqProof [constantExpr a, constantExpr b]) Engine.emptyProofContext
+                        actual = runNamedFunction program "entailsSemanticEquality" [MList [], MList [], MList (map constant constants), MInt a, MInt b]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                checkConstantOrder a b =
+                    let expected = Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [constantExpr a, constantExpr b]) Engine.emptyProofContext
+                        actual = runNamedFunction program "entailsSemanticOrder" [MList [], MList [], MList (map constant constants), MList [], MList [], MInt a, MInt b, MBool True]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+                validatorContext = MData "ValidatorContext" [("equalities", MList [fact (0,1)]), ("applications", MList []), ("constants", MList []), ("orders", MList (map mixedFact mixed)), ("different", MList []), ("differences", MList [])]
+                goal name a b = MData ("ValidatorGoal::" ++ name) [("left", MInt a), ("right", MInt b)]
+                checkContext name a b expected = testAssertEq (runNamedFunction program "entailsGoal" [validatorContext, goal name a b]) (Ok (Just (MBool expected)))
+                boundContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList (map app [(10,20,[0]),(11,20,[1])])), ("constants", MList []), ("orders", MList (map mixedFact [(0,1,False),(1,0,False)])), ("different", MList []), ("differences", MList [])]
+                checkBoundCongruence = testAssertEq (runNamedFunction program "entailsGoal" [boundContext, goal "Equal" 10 11]) (Ok (Just (MBool True)))
+                emptyContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+                knownOrder = MData "ProofStep::KnownOrder" [("left", MInt 1), ("right", MInt 2), ("strict", MBool True)]
+                checkStep = MData "ProofStep::Check" [("goal", goal "Less" 1 2)]
+                proofResult ok index = Ok (Just (MData "ProofResult" [("valid", MBool ok), ("failedAt", MInt index)]))
+                checkProofSteps = testAssertEq (runNamedFunction program "validateProofSteps" [emptyContext, MList [knownOrder, checkStep]]) (proofResult True (-1))
+                checkProofOrder = testAssertEq (runNamedFunction program "validateProofSteps" [emptyContext, MList [checkStep, knownOrder]]) (proofResult False 0)
+                checkUnknownStep = testAssertEq (runNamedFunction program "validateProofSteps" [emptyContext, MList [MData "ProofStep::Unknown" []]]) (proofResult False 0)
+                checkUnknownGoal = testAssertEq (runNamedFunction program "entailsGoal" [emptyContext, MData "ValidatorGoal::Unknown" []]) (Ok (Just (MBool False)))
+                block i steps end = MData "FlowBlock" [("id", MInt i), ("steps", MList steps), ("end", end)]
+                done = MData "FlowEnd::Done" []
+                jump i = MData "FlowEnd::Jump" [("target", MInt i)]
+                branch = MData "FlowEnd::Branch" [("yes", MInt 1), ("no", MInt 2), ("yesFacts", MList [knownOrder]), ("noFacts", MList [])]
+                flowResult status b step = Ok (Just (MData "FlowResult" [("status", MInt status), ("block", MInt b), ("step", MInt step)]))
+                runFlow blocks = runNamedFunction program "validateFlow" [MList blocks, MInt 0, emptyContext]
+                checkFlow = testAssertEq (runFlow [block 0 [] branch, block 1 [checkStep] done, block 2 [] done]) (flowResult 0 2 (-1))
+                checkFlowBadBranch = testAssertEq (runFlow [block 0 [] branch, block 1 [checkStep] done, block 2 [checkStep] done]) (flowResult 1 2 0)
+                checkFlowCycle = testAssertEq (runFlow [block 0 [] (jump 0)]) (flowResult 4 0 (-1))
+                checkFlowMissing = testAssertEq (runFlow [block 0 [] (jump 2)]) (flowResult 3 2 (-1))
+                checkFlowDuplicate = testAssertEq (runFlow [block 0 [] done, block 0 [] done]) (flowResult 3 0 (-1))
+                checkFlowUnsupported = testAssertEq (runFlow [block 0 [] (MData "FlowEnd::Unsupported" [])]) (flowResult 2 0 (-1))
+                initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", MList [])]
+                termRef i = MData "ValueRef::Term" [("term", MInt i)]
+                localRef i = MData "ValueRef::Local" [("local", MInt i)]
+                assignLocal i ref = MData "ExecutionStep::Assign" [("local", MInt i), ("value", ref)]
+                applyLocal local result = MData "ExecutionStep::Apply" [("local", MInt local), ("result", MInt result), ("function", MInt 10), ("arguments", MList [localRef 0])]
+                checkLocals = MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", localRef 2)]
+                executionSteps = [assignLocal 0 (termRef 1), applyLocal 1 2, applyLocal 2 3, checkLocals]
+                checkExecution steps status step = case runNamedFunction program "executeSteps" [initialExecution, MList steps] of
+                    Ok (Just (MData "ExecutionResult" fields)) -> testAssertEq (lookup "status" fields, lookup "failedAt" fields) (Just (MInt status), Just (MInt step))
+                    result -> Just ("Unexpected execution result: " ++ show result)
+                execEndDone = MData "ExecutionEnd::Done" []
+                execJump i = MData "ExecutionEnd::Jump" [("target", MInt i)]
+                execBranch = MData "ExecutionEnd::Branch" [("yes", MInt 1), ("no", MInt 2), ("yesSteps", MList []), ("noSteps", MList [])]
+                execBlock i steps end = MData "ExecutionBlock" [("id", MInt i), ("steps", MList steps), ("end", end)]
+                joinCheck = MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", localRef 0)]
+                execBlocks branchValue = [execBlock 0 [assignLocal 0 (termRef 1)] execBranch, execBlock 1 [assignLocal 1 (termRef 1)] (execJump 3), execBlock 2 [assignLocal 1 (termRef branchValue)] (execJump 3), execBlock 3 [joinCheck] execEndDone]
+                checkExecutionFlow blocks status blockId = case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initialExecution] of
+                    Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields, lookup "block" fields) (Just (MInt status), Just (MInt blockId))
+                    result -> Just ("Unexpected execution flow result: " ++ show result)
+                checkMirSubset input expected =
+                    let lowered = parseSource input `bindResult` elaborate `bindResult` lowerElaborated
+                     in case lowered of
+                            Error e -> Just ("Could not lower test program: " ++ e)
+                            Ok mir ->
+                                let result = validateMirSubset program mir
+                                    reference = case Reference.validateProgram mir of Ok _ -> True; Error _ -> False
+                                    agrees = case result of Ok (Just answer) -> answer == reference; _ -> True
+                                 in testAssertEq result (Ok expected) `orElse` testAssertTrue agrees
+                bridgeFacts = [eq 0 1, lt 1 2, le 2 3]
+                checkBridge query = testAssertEq (querySelfHosted program bridgeFacts query) (Ok (Just (Engine.entails query (Engine.proofContextFromFacts bridgeFacts))))
              in foldr orElse Nothing
                     ( [check graph a b | graph <- graphs, a <- [0..3], b <- [0..3]] ++
                       [ checkCongruence 10 11, checkCongruence 12 13, checkCongruence 10 14
+                      , checkOrder 0 4, checkOrder 1 3, checkOrder 4 0, checkOrder 0 0
+                      , checkMixed 0 4 True, checkMixed 0 4 False, checkMixed 0 2 True, checkMixed 0 2 False
+                      , checkMixed 4 0 False, checkMixed 0 0 False, checkMixed 0 0 True
+                      , checkTermOrder 11 5, checkTermOrder 5 11
+                      , checkApp 10 11, checkApp 10 12, checkApp 13 14, checkApp 12 10
+                      , checkAppOrder 11 5, checkAppOrder 5 11
+                      , checkImpossible
+                      , checkDifferent 0 2, checkDifferent 2 0, checkDifferent 2 3, checkDifferent 0 3, checkDifferent 0 0
+                      , checkDifference 0 4 True, checkDifference 0 2 True, checkDifference 0 2 False, checkDifference 4 0 False
+                      , checkDifferenceOverflow
+                      , checkRefined 1 3, checkRefined 1 2, checkRefined 3 1
+                      , checkConstantEquality 30 31, checkConstantEquality 30 32, checkConstantEquality 33 34
+                      , checkConstantOrder 30 32, checkConstantOrder 32 30
+                      , checkContext "Equal" 0 1 True, checkContext "Less" 0 4 True, checkContext "AtMost" 0 2 True
+                      , checkContext "Different" 0 4 True, checkContext "Less" 4 0 False
+                      , checkBoundCongruence
+                      , checkProofSteps, checkProofOrder, checkUnknownStep, checkUnknownGoal
+                      , checkFlow, checkFlowBadBranch, checkFlowCycle, checkFlowMissing, checkFlowDuplicate, checkFlowUnsupported
+                      , checkExecution executionSteps 0 (-1), checkExecution [assignLocal 0 (localRef 99)] 2 0
+                      , checkExecution (executionSteps ++ [applyLocal 3 2]) 2 4
+                      , checkExecutionFlow (execBlocks 1) 0 3, checkExecutionFlow (execBlocks 2) 1 3
+                      , checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)
+                      , checkMirSubset "x = 1; affirm x = 2; return x;" (Just False)
+                      , checkMirSubset "return 7 / 1;" (Just True)
+                      , checkMirSubset "return 7 / 0;" (Just False)
+                      , checkMirSubset "x = 1; y = x + 1; affirm y = 2; return y;" (Just True)
+                      , checkMirSubset "x = 1; y = x + 1; affirm y = 3; return y;" (Just False)
+                      , checkMirSubset "x = 3; y = x - 1; affirm y = 2; return y;" (Just True)
+                      , checkMirSubset "x = 1; affirm x + 1 = 2; return x;" (Just True)
+                      , checkMirSubset "x = 1; affirm x + 1 = 3; return x;" (Just False)
+                      , checkMirSubset "affirm 1 / 0 = 1; return 0;" (Just False)
+                      , checkMirSubset "x = 1; if x = 1 { return 1; } else { return 2; };" (Just True)
+                      , checkMirSubset "x = 1; y = 2; flag = x < y; x = 3; if flag { affirm x < y; }; return 0;" (Just False)
+                      , checkMirSubset "x = 1; if x != 0 { return 3 / x; } else { return 0; };" (Just True)
+                      , checkMirSubset "x = 0; if x != 0 { return 3 / x; } else { return 0; };" (Just True)
+                      , checkMirSubset "x = 1; flag = x != 0; x = 0; if flag { return 3 / x; } else { return 0; };" (Just False)
+                      , checkMirSubset "x = 1; y = 2; if x < y { x = 3; } else { x = 3; }; affirm x = 3; return x;" (Just True)
+                      , checkMirSubset "i = 2; while i > 0 [{ affirm i >= 0; }] shrinks i { i = i - 1; }; affirm i = 0; return i;" (Just True)
+                      , checkMirSubset "i = 2; while i > 0 [{ affirm i >= 1; }] shrinks i { i = i - 1; }; return i;" (Just False)
+                      , checkMirSubset "i = 2; while i > 0 shrinks i { i = i + 1; }; return i;" (Just False)
+                      , checkMirSubset "i = 0; while i < 2 shrinks 2 - i { i = i + 1; }; return i;" (Just True)
+                      , checkMirSubset "i = 0; while i < 2 [{ affirm i + 1 <= 3; }] shrinks 2 - i { i = i + 1; }; return i;" (Just True)
+                      , checkMirSubset "s = 0; for i in 0..3 { s = s + 1; }; return s;" (Just True)
+                      , checkMirSubset "i = 0; while i < 2 shrinks 2 - i { i = i - 1; }; return i;" (Just False)
+                      , checkMirSubset "n = 2; i = 0; while i < n shrinks n - i { i = i + 1; n = n + 1; }; return i;" Nothing
+                      , checkBridge (lt 0 3), checkBridge (lt 3 0), checkBridge (ne 0 3), checkBridge (eq 0 1)
+                      , testAssertEq (querySelfHosted program [] (BVar "i")) (Ok Nothing)
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
                       , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
                       ] )
