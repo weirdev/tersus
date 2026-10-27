@@ -761,6 +761,10 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "fn f(xs: List<Int>) -> Int [{ affirm size(xs) > 0; }] [{ affirm return = get(xs, 0); }] { return get(xs, 0); }; return f([5]);" Nothing
                       , checkMirSubset "fn f(x: Int) -> Int shrinks x { return x; }; return 0;" Nothing
                       , checkMirSubset "fn f(x: Int) -> Int { return x; }; return f(1);" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int { return x; }; a = f(1); b = f(1); affirm a = b; return 0;" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int { return x; }; a = f(1); b = f(2); affirm a = b; return 0;" (Just False)
+                      , checkMirSubset "fn f(x: Int) -> Int { return x; }; fn g(x: Int) -> Int { return x; }; a = f(1); b = g(1); affirm a = b; return 0;" (Just False)
+                      , checkMirSubset "fn f() -> Int { return readByte(); }; a = f(); b = f(); affirm a = b; return 0;" Nothing
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(1);" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(0);" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; x = 3; x = f(x); affirm x = 3; return x;" (Just True)
@@ -806,6 +810,10 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = #[4, 5]; return get(xs, 2);" (Just False)
                       , checkMirSubset "xs = Box::new(#[4, 5]); affirm get(xs, 0) = 4; return size(xs);" (Just True)
                       , checkMirSubset "a = array(3, 7); affirm size(a) = 3; affirm get(a, 1) = 7; return get(a, 2);" (Just True)
+                      , checkMirSubset "a = array(3, 7); affirm last(a) = 7; return 0;" (Just True)
+                      , checkMirSubset "a = array(3, 7); affirm last(a) = 8; return 0;" (Just False)
+                      , checkMirSubset "a = array(3, 7); a = set(a, 0, 9); affirm last(a) = 7; return 0;" (Just True)
+                      , checkMirSubset "a = array(3, 7); a = set(a, 2, 9); affirm last(a) = 9; return 0;" (Just True)
                       , checkMirSubset "a = array(3, 7); affirm get(a, 1) = 8; return 0;" (Just False)
                       , checkMirSubset "a = array(0, 7); return get(a, 0);" (Just False)
                       , checkMirSubset "a = Array::boxed(2, 7); affirm get(a, 1) = 7; return size(a);" (Just True)

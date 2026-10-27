@@ -1426,7 +1426,8 @@ fn lastSequence(initial: &ExecutionState, local: Int, list: Int, zero: Int) -> E
                 if fresh is ValueLookup::Found {
                     result = (fresh as ValueLookup::Found).term;
                     app = ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) };
-                    context = ValidatorContext { applications: push(state.context.applications, app), ..state.context };
+                    withApp = ValidatorContext { applications: push(state.context.applications, app), ..state.context };
+                    context = readThroughSequence(withApp, result, list, indexTerm);
                     locals = bindLocal(state.locals, local, result);
                     return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals } };
                 };
