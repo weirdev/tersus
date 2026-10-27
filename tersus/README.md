@@ -14,9 +14,8 @@ term a unique identifier and distinguish different operators.
 `hasApplicationEquality` accepts applications of any arity and treats the
 function as a term, so equal functions applied to equal arguments are equal.
 `hasApplicationOrder` uses those equalities while following comparisons. A false answer
-means only that the query did not find a proof: it does not yet handle general
-proof terms or validate programs. It is not used by the
-production pipeline.
+means only that the query did not find a proof. General proof terms and MIR
+validation remain incomplete, and the production pipeline still uses Haskell.
 
 `hasStrictOrder` follows strict comparisons transitively and substitutes
 equivalent identifiers at either end of a comparison. `hasOrder` also handles
@@ -43,12 +42,22 @@ steps are reserved for trusted premises and facts established by an operation;
 an assertion must be a `Check`. The result identifies the first unproved check.
 `validateExecution` also tracks local bindings and checks acyclic paths
 independently. `SelfHostedMir.validateMirSubset` translates a limited subset of
-typed MIR (copies, pure binary operations, assertions, jumps and branches) to
-that representation. It also checks a canonical single-block loop by proving
+typed MIR (copies, boxing, plain structs, pure binary operations, list and
+array literals, length, indexed reads, first, last with known length, list append,
+assertions, jumps and branches) to that
+representation. Reads require proof of their bounds, and literal sequence
+elements have their known values. Append records the new length and element and
+preserves previously checked reads. Programs using struct invariants or enums are
+unsupported. It also checks a canonical single-block loop by proving
 its declared invariant and an integer or fixed-limit countdown variant. Other
 loop shapes, calls and operations it cannot translate return unsupported. It
 is used for comparison, not for production validation;
 the returned flow state is one path's state and is not a joined postcondition.
+Branch facts include both the boolean result and, for a saved comparison, the
+relation between its operands at the time it was evaluated.
+The symbolic executor records multiplication by zero or one, division by one,
+and concrete products, quotients and remainders when they fit in a signed
+64-bit integer.
 
 `MirEval.runNamedFunction` lets the host invoke a lowered Tersus function with
 explicit MIR values. It executes code without checking its input contract or
