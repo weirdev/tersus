@@ -330,7 +330,10 @@ fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, 
         if hasEquality(equalities, left, right) { return true; };
     };
     distances = push([], Distance { node: right, value: 0 });
+    finished = false;
     for round in 0..size(facts) {
+      if finished = false {
+        changed = false;
         for edge in facts {
             found = findDistance(equalities, distances, edge.right);
             if found is DistanceResult::Found {
@@ -341,10 +344,21 @@ fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, 
                     if candidate <= bound {
                         if hasEquality(equalities, edge.left, left) { return true; };
                     };
-                    distances = improveDistance(equalities, distances, edge.left, candidate);
+                    previous = findDistance(equalities, distances, edge.left);
+                    if previous is DistanceResult::Found {
+                        if candidate < (previous as DistanceResult::Found).value {
+                            distances = improveDistance(equalities, distances, edge.left, candidate);
+                            changed = true;
+                        };
+                    } else {
+                        distances = improveDistance(equalities, distances, edge.left, candidate);
+                        changed = true;
+                    };
                 };
             };
         };
+        if changed = false { finished = true; };
+      };
     };
     found = findDistance(equalities, distances, left);
     if found is DistanceResult::Found {
@@ -503,9 +517,15 @@ fn constantDifferences(constants: &List<ConstantTerm>, facts: &List<DifferenceFa
         for b in constants {
             if a.kind = 0 {
                 if b.kind = 0 {
-                    d = safeBoundDifference(a.value, b.value);
-                    if d is SumResult::Sum {
-                        result = push(result, DifferenceFact { left: a.id, right: b.id, bound: (d as SumResult::Sum).value });
+                    redundant = false;
+                    if a.id = b.id {
+                        if a.value = b.value { redundant = true; };
+                    };
+                    if redundant = false {
+                        d = safeBoundDifference(a.value, b.value);
+                        if d is SumResult::Sum {
+                            result = push(result, DifferenceFact { left: a.id, right: b.id, bound: (d as SumResult::Sum).value });
+                        };
                     };
                 };
             };
@@ -518,6 +538,11 @@ fn constantDifferences(constants: &List<ConstantTerm>, facts: &List<DifferenceFa
 // unrepresentable intermediate, hasDifference declines it and this check may
 // miss the contradiction, but never reports one without a proof.
 fn contradictoryDifferences(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>) -> Bool {
+    negative = false;
+    for fact in facts {
+        if fact.bound < 0 { negative = true; };
+    };
+    if negative = false { return false; };
     for fact in facts {
         if hasDifference(equalities, facts, fact.left, fact.left, -1) {
             return true;
