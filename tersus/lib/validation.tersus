@@ -1,0 +1,65 @@
+// An equality proof query for the Tersus validator under development. The
+// integers are symbolic value identifiers, not the values they stand for.
+struct EqualityFact { left: Int, right: Int };
+
+fn containsValue(values: &List<Int>, value: Int) -> Bool {
+    for item in values {
+        if item = value {
+            return true;
+        };
+    };
+    return false;
+};
+
+// Equalities form an undirected graph. Starting at left, each pass visits every
+// edge and adds its other endpoint when one endpoint is already reachable.
+// A path never needs more edges than there are facts, so this many passes are
+// sufficient, including when the facts are ordered against the path. Duplicate
+// facts and cycles do not add duplicate values to the reachable set.
+fn hasEquality(facts: &List<EqualityFact>, left: Int, right: Int) -> Bool {
+    reachable = push([], left);
+    for round in 0..size(facts) {
+        for fact in facts {
+            if containsValue(reachable, fact.left) {
+                if containsValue(reachable, fact.right) = false {
+                    reachable = push(reachable, fact.right);
+                };
+            };
+            if containsValue(reachable, fact.right) {
+                if containsValue(reachable, fact.left) = false {
+                    reachable = push(reachable, fact.left);
+                };
+            };
+        };
+    };
+    return containsValue(reachable, right);
+};
+
+// A binary application of an uninterpreted operator to two term identifiers.
+// Every identifier must name one term, and operator identifiers must distinguish
+// different operators. Equalities may mention identifiers without an application.
+struct BinaryTerm { id: Int, op: Int, left: Int, right: Int };
+
+// Close equalities under congruence as well as symmetry and transitivity. Each
+// round adds equal applications whose operands were equal at the start of the
+// comparison. At most size(terms) rounds are needed to propagate equality
+// through a finite term graph. A malformed graph is the caller's responsibility.
+fn hasCongruence(facts: &List<EqualityFact>, terms: &List<BinaryTerm>, left: Int, right: Int) -> Bool {
+    known = facts;
+    for round in 0..size(terms) {
+        for a in terms {
+            for b in terms {
+                if a.op = b.op {
+                    if hasEquality(known, a.left, b.left) {
+                        if hasEquality(known, a.right, b.right) {
+                            if hasEquality(known, a.id, b.id) = false {
+                                known = push(known, EqualityFact { left: a.id, right: b.id });
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return hasEquality(known, left, right);
+};

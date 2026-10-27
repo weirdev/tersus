@@ -7,7 +7,7 @@ module TestPipeline
     ) where
 
 import Control.Exception (finally)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
@@ -18,6 +18,7 @@ import MirEval
 import MirLower
 import MirVerify
 import Pipeline
+import qualified ProofEngine as Engine
 import Parse
 import StdLib
 import TypeCheck (elaborate)
@@ -476,6 +477,7 @@ testMir =
         , testMirWellFormed
         , testMirTypes
         , testMirRun
+        , testSelfHostedEquality
         , testCaseSeq
             "testMirCli"
             [ -- `mir` prints the blocks
@@ -485,6 +487,43 @@ testMir =
               testAssertEq (runMir "return 1 / 0;") (Error "Division by zero")
             ]
         ]
+
+-- Compare the Tersus equality closure with the reference solver over all graphs
+-- of four vertices, including disconnected graphs, cycles and reverse queries.
+testSelfHostedEquality :: Test
+testSelfHostedEquality = TestCase "self-hosted equality query" $ do
+    source <- readFile "lib/validation.tersus"
+    pure $ case compileSource source of
+        Error e -> Just ("Could not validate the Tersus validator: " ++ e)
+        Ok program ->
+            let fact (a, b) = MData "EqualityFact" [("left", MInt a), ("right", MInt b)]
+                eq :: Integer -> Integer -> IotaProof
+                eq a b = FApp eqProof [ATerm (Iota (show a)), ATerm (Iota (show b))]
+                check pairs a b =
+                    let context = Engine.proofContextFromFacts [eq x y | (x, y) <- pairs]
+                        expected = Engine.entails (eq a b) context
+                        result = runNamedFunction program "hasEquality" [MList (map fact pairs), MInt a, MInt b]
+                     in case testAssertEq result (Ok (Just (MBool expected))) of
+                            Nothing -> Nothing
+                            Just e -> Just ("facts " ++ show pairs ++ ", query " ++ show (a, b) ++ ": " ++ e)
+                edges = [(a, b) | a <- [0..3], b <- [a + 1..3]] :: [(Integer, Integer)]
+                graphs = subsequences edges ++ [[(2, 3), (1, 2), (0, 1)], [(0, 1), (0, 1), (1, 1)]]
+                terms = [(12, 2, 10, 2), (13, 2, 11, 2), (10, 1, 0, 2), (11, 1, 1, 2), (14, 3, 1, 2)] :: [(Integer, Integer, Integer, Integer)]
+                term (i, op, a, b) = MData "BinaryTerm" [("id", MInt i), ("op", MInt op), ("left", MInt a), ("right", MInt b)]
+                expr i = case [(op, a, b) | (j, op, a, b) <- terms, i == j] of
+                    (op, a, b) : _ -> FApp (ATerm (Iota ("op" ++ show op))) [expr a, expr b]
+                    [] -> ATerm (Iota (show i))
+                congruenceContext = Engine.proofContextFromFacts [eq 0 1]
+                checkCongruence a b =
+                    let expected = Engine.entails (FApp eqProof [expr a, expr b]) congruenceContext
+                        actual = runNamedFunction program "hasCongruence" [MList [fact (0, 1)], MList (map term terms), MInt a, MInt b]
+                     in testAssertEq actual (Ok (Just (MBool expected)))
+             in foldr orElse Nothing
+                    ( [check graph a b | graph <- graphs, a <- [0..3], b <- [0..3]] ++
+                      [ checkCongruence 10 11, checkCongruence 12 13, checkCongruence 10 14
+                      , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
+                      , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
+                      ] )
 
 -- Int is 64 bits: literals must fit, and arithmetic that leaves the range stops the program
 testIntRange :: Test
