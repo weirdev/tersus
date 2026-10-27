@@ -2,6 +2,7 @@ module TestTersus (main) where
 
 import Control.Monad (when)
 import System.Exit (exitFailure)
+import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 
 import TestHarness
 import TestBasics
@@ -28,6 +29,7 @@ import TestBootstrap
 
 main :: IO ()
 main = do
+    hSetBuffering stdout LineBuffering
     summary <-
         foldr combineSummaries (testSummary 0 0)
             <$> mapM

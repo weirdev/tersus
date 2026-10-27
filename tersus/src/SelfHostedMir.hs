@@ -12,10 +12,10 @@ import MirVerify (verifyProgram)
 import TersusTypes
 import Utils (Result (..), bindResult, inIntRange)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue] }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)] }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] []
+emptyBuild = Build 0 [] [] [] []
 
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
@@ -23,9 +23,23 @@ record = MData
 fresh :: Build -> (Integer, Build)
 fresh b = (nextTerm b, b{nextTerm = nextTerm b + 1})
 
+namedFunction :: String -> Build -> (Integer, Build)
+namedFunction name b = case lookup name (namedFunctions b) of
+    Just i -> (i, b)
+    Nothing -> let (i, b') = fresh b in (i, b'{namedFunctions = (name, i) : namedFunctions b'})
+
 literal :: M.Constant -> Build -> Maybe (Integer, Build)
 literal c b = case lookup c (literalIds b) of
     Just i -> Just (i, b)
+    Nothing | Just (constructor, values) <- sequenceLiteral c -> do
+        (ids, b1) <- foldM addLiteral ([], b) values
+        (len, b2) <- literal (M.CInt (toInteger (length values))) b1
+        let (i, b3) = fresh b2
+            listApp = record "ApplicationTerm" [("id", MInt i), ("function", MInt constructor), ("arguments", MList (map MInt ids))]
+            sizeApp = record "ApplicationTerm" [("id", MInt len), ("function", MInt (-13)), ("arguments", MList [MInt i])]
+            b4 = b3{literalIds = (c, i) : literalIds b3, literalApps = listApp : sizeApp : literalApps b3}
+        b5 <- foldM (addElement i) b4 (zip [0..] ids)
+        pure (i, b5)
     Nothing -> do
         (kind, value) <- case c of
             M.CInt n | inIntRange n -> Just (0, n)
@@ -34,6 +48,17 @@ literal c b = case lookup c (literalIds b) of
         let (i, b') = fresh b
             entry = record "ConstantTerm" [("id", MInt i), ("kind", MInt kind), ("value", MInt value)]
         pure (i, b'{literalIds = (c, i) : literalIds b', literalTerms = entry : literalTerms b'})
+  where
+    sequenceLiteral (M.CList values) = Just (-12, values)
+    sequenceLiteral (M.CArray values) = Just (-15, values)
+    sequenceLiteral _ = Nothing
+    addLiteral (ids, current) value = do
+        (i, next) <- literal value current
+        pure (ids ++ [i], next)
+    addElement listId current (index, valueId) = do
+        (indexId, next) <- literal (M.CInt index) current
+        let app = record "ApplicationTerm" [("id", MInt valueId), ("function", MInt (-14)), ("arguments", MList [MInt listId, MInt indexId])]
+        pure next{literalApps = app : literalApps next}
 
 operand :: M.Operand -> Build -> Maybe (MirValue, Build)
 operand (M.Copy (M.Local n)) b = Just (record "ValueRef::Local" [("local", MInt (toInteger n))], b)
@@ -59,6 +84,57 @@ proofOperand _ (CTerm (VInt n)) b = do
 proofOperand _ (CTerm (VBool x)) b = do
     (v, b') <- operand (M.Const (M.CBool x)) b
     pure ([], v, b')
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Size) _)) [arg]) b0 = do
+    (prefix, value, b1) <- proofOperand env arg b0
+    let (i, b2) = fresh b1
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+        apply = step "ApplyFresh" [("local", MInt local), ("function", MInt (-13)), ("arguments", MList [value])]
+    pure (prefix ++ [apply], ref, b2)
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [arg]) b0 = do
+    (prefix, value, b1) <- proofOperand env arg b0
+    let (function, b2) = namedFunction ("field:" ++ field) b1
+        (i, b3) = fresh b2
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+        apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [value])]
+    pure (prefix ++ [apply], ref, b3)
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [list, index]) b0 = do
+    (listSteps, listRef, b1) <- proofOperand env list b0
+    (indexSteps, indexRef, b2) <- proofOperand env index b1
+    let (i, b3) = fresh b2
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+    (steps, b4) <- getSteps local listRef indexRef b3
+    pure (listSteps ++ indexSteps ++ steps, ref, b4)
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Push) _)) [list, value]) b0 = do
+    (listSteps, listRef, b1) <- proofOperand env list b0
+    (valueSteps, valueRef, b2) <- proofOperand env value b1
+    let (i, b3) = fresh b2
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+    (steps, b4) <- pushSteps local listRef valueRef b3
+    pure (listSteps ++ valueSteps ++ steps, ref, b4)
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Set) _)) [list, index, value]) b0 = do
+    (listSteps, listRef, b1) <- proofOperand env list b0
+    (indexSteps, indexRef, b2) <- proofOperand env index b1
+    (valueSteps, valueRef, b3) <- proofOperand env value b2
+    let (i, b4) = fresh b3
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+    (steps, b5) <- setSteps local listRef indexRef valueRef b4
+    pure (listSteps ++ indexSteps ++ valueSteps ++ steps, ref, b5)
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) [list]) b0
+    | f == First || f == Last = do
+        (prefix, listRef, b1) <- proofOperand env list b0
+        let (i, b2) = fresh b1
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+        (steps, b4) <- if f == First then do
+            (zero, b3) <- operand (M.Const (M.CInt 0)) b2
+            getSteps local listRef zero b3
+          else lastSteps local listRef b2
+        pure (prefix ++ steps, ref, b4)
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) [a, b]) b0 = do
     op <- case f of
         Plus -> Just M.Add
@@ -86,6 +162,35 @@ proofOperand _ _ _ = Nothing
 
 check :: Integer -> MirValue -> MirValue -> MirValue
 check relation a b = step "Check" [("relation", MInt relation), ("left", a), ("right", b)]
+
+-- The indexing preconditions must be proved before the pure application is
+-- introduced, including when get occurs inside a proof expression.
+getSteps :: Integer -> MirValue -> MirValue -> Build -> Maybe ([MirValue], Build)
+getSteps dest listRef indexRef b0 = do
+    (zero, b1) <- operand (M.Const (M.CInt 0)) b0
+    let (i, b2) = fresh b1
+        lengthLocal = negate i - 1
+        lengthRef = record "ValueRef::Local" [("local", MInt lengthLocal)]
+        size = step "ApplyFresh" [("local", MInt lengthLocal), ("function", MInt (-13)), ("arguments", MList [listRef])]
+        get = step "ApplyFresh" [("local", MInt dest), ("function", MInt (-14)), ("arguments", MList [listRef, indexRef])]
+    pure ([size, check 3 zero indexRef, check 2 indexRef lengthRef, get], b2)
+
+pushSteps :: Integer -> MirValue -> MirValue -> Build -> Maybe ([MirValue], Build)
+pushSteps dest listRef valueRef b0 = do
+    (zero, b1) <- operand (M.Const (M.CInt 0)) b0
+    pure ([step "Push" [("local", MInt dest), ("list", listRef), ("value", valueRef), ("zero", zero)]], b1)
+
+lastSteps :: Integer -> MirValue -> Build -> Maybe ([MirValue], Build)
+lastSteps dest listRef b0 = do
+    (zero, b1) <- operand (M.Const (M.CInt 0)) b0
+    pure ([step "Last" [("local", MInt dest), ("list", listRef), ("zero", zero)]], b1)
+
+setSteps :: Integer -> MirValue -> MirValue -> MirValue -> Build -> Maybe ([MirValue], Build)
+setSteps dest listRef indexRef valueRef b0 = do
+    let (i, b1) = fresh b0
+    (bounds, b2) <- getSteps (negate i - 1) listRef indexRef b1
+    let update = step "Set" [("local", MInt dest), ("list", listRef), ("index", indexRef), ("value", valueRef)]
+    pure (bounds ++ [update], b2)
 
 proofCheck :: M.Env -> VariableProof -> Build -> Maybe ([MirValue], MirValue, Build)
 proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel r)) _)) [a, b]) b0 = do
@@ -121,6 +226,61 @@ statement :: M.Statement -> Build -> Maybe ([MirValue], Build)
 statement (M.Assign (M.Local dest) (M.Use source)) b = do
     (v, b') <- operand source b
     pure ([step "Assign" [("local", MInt (toInteger dest)), ("value", v)]], b')
+-- Boxes and unsizing preserve the proof value, as in the reference MIR
+-- validator. Ownership and representation are handled by later passes.
+statement (M.Assign dest (M.MakeBox source)) b = statement (M.Assign dest (M.Use source)) b
+statement (M.Assign dest (M.Unbox source)) b = statement (M.Assign dest (M.Use source)) b
+statement (M.Assign dest (M.Unsize source)) b = statement (M.Assign dest (M.Use source)) b
+statement (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
+    (snapshots, b1) <- foldM snapshot ([], b0) fields
+    let (constructor, b2) = namedFunction ("ctor:" ++ name) b1
+        destination = record "ValueRef::Local" [("local", MInt (toInteger dest))]
+        create = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt constructor), ("arguments", MList [ref | (_, ref, _) <- snapshots])]
+    (projections, b3) <- foldM (project destination) ([], b2) snapshots
+    pure ([saved | (_, _, saved) <- snapshots] ++ [create] ++ projections, b3)
+  where
+    snapshot (acc, b) (field, source) = do
+        (value, b1) <- operand source b
+        let (i, b2) = fresh b1
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+            save = step "Assign" [("local", MInt local), ("value", value)]
+        pure (acc ++ [(field, ref, save)], b2)
+    project destination (acc, b) (field, original, _) = do
+        let (function, b1) = namedFunction ("field:" ++ field) b
+            (i, b2) = fresh b1
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+            readField = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [destination])]
+            known = step "Assume" [("relation", MInt 0), ("left", ref), ("right", original)]
+        pure (acc ++ [readField, known], b2)
+statement (M.Assign (M.Local dest) (M.ReadField source _ field)) b0 = do
+    (value, b1) <- operand source b0
+    let (function, b2) = namedFunction ("field:" ++ field) b1
+    pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [value])]], b2)
+statement (M.Assign (M.Local dest) (M.ListOp M.Length [source])) b = do
+    (value, b') <- operand source b
+    pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt (-13)), ("arguments", MList [value])]], b')
+statement (M.Assign (M.Local dest) (M.ListOp M.Get [source, index])) b0 = do
+    (listRef, b1) <- operand source b0
+    (indexRef, b2) <- operand index b1
+    getSteps (toInteger dest) listRef indexRef b2
+statement (M.Assign (M.Local dest) (M.ListOp M.Push [source, value])) b0 = do
+    (listRef, b1) <- operand source b0
+    (valueRef, b2) <- operand value b1
+    pushSteps (toInteger dest) listRef valueRef b2
+statement (M.Assign (M.Local dest) (M.ListOp M.Set [source, index, value])) b0 = do
+    (listRef, b1) <- operand source b0
+    (indexRef, b2) <- operand index b1
+    (valueRef, b3) <- operand value b2
+    setSteps (toInteger dest) listRef indexRef valueRef b3
+statement (M.Assign (M.Local dest) (M.ListOp operation [source])) b0
+    | operation == M.First || operation == M.Last = do
+        (listRef, b1) <- operand source b0
+        if operation == M.First then do
+            (zero, b2) <- operand (M.Const (M.CInt 0)) b1
+            getSteps (toInteger dest) listRef zero b2
+          else lastSteps (toInteger dest) listRef b1
 statement (M.Assign (M.Local dest) (M.BinaryOp op a b)) b0 = do
     (x, b1) <- operand a b0
     (y, b2) <- operand b b1
@@ -150,13 +310,15 @@ block fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0 = do
         (Nothing, M.Return) -> Just ([], record "ExecutionEnd::Done" [], b1)
         (Nothing, M.Goto target) -> Just ([], jump target, b1)
         (Nothing, M.SwitchBool (M.Const (M.CBool choice)) yes no) -> Just ([], jump (if choice then yes else no), b1)
-        (Nothing, M.SwitchBool (M.Copy local) yes no) ->
+        (Nothing, M.SwitchBool (M.Copy local) yes no) -> do
             let ref = localRef (localNumber local)
                 required = step "RequireDefined" [("value", ref)]
-                ending = case Map.lookup local conditions of
-                    Just (r, a, b) -> condition yes no r a b
-                    Nothing -> branch yes no [] []
-             in Just ([required], ending, b1)
+            (trueRef, b2) <- operand (M.Const (M.CBool True)) b1
+            (falseRef, b3) <- operand (M.Const (M.CBool False)) b2
+            let fact kind left right = step "Assume" [("relation", MInt kind), ("left", left), ("right", right)]
+                yesBoolean = fact 0 ref trueRef
+                noBoolean = fact 0 ref falseRef
+            Just ([required], branch yes no [yesBoolean] [noBoolean], b3)
         _ -> Nothing
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (steps ++ extra)), ("end", ending)], b2)
   where
@@ -243,10 +405,6 @@ block fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0 = do
     jump (M.BlockId target) = record "ExecutionEnd::Jump" [("target", MInt (toInteger target))]
     branch (M.BlockId yes) (M.BlockId no) yesSteps noSteps = record "ExecutionEnd::Branch"
         [("yes", MInt (toInteger yes)), ("no", MInt (toInteger no)), ("yesSteps", MList yesSteps), ("noSteps", MList noSteps)]
-    condition (M.BlockId yes) (M.BlockId no) r a b =
-        let (kind, left, right) = normal r a b
-         in record "ExecutionEnd::Condition" [("yes", MInt (toInteger yes)), ("no", MInt (toInteger no)),
-              ("relation", MInt kind), ("left", left), ("right", right)]
     normal r a b = case r of
                 Eq -> (0, a, b)
                 NotEq -> (1, a, b)
@@ -258,14 +416,18 @@ block fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0 = do
 encode :: M.Program -> Maybe (MirValue, MirValue)
 encode program
     | not (Map.null (M.progFunctions program)) = Nothing
+    | any (not . null) (Map.elems (M.progInvariants program)) = Nothing
+    | any isEnum (Map.elems (M.progTypes program)) = Nothing
     | not (null (M.fnParams mainFn)) = Nothing
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals mainFn)) = Nothing
     | not (null (M.specRequires spec) && null (M.specEnsures spec)) = Nothing
     | otherwise = do
         (blocks, b) <- foldM add ([], emptyBuild) (Map.toList (M.fnBlocks mainFn))
-        let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+        let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("differences", MList [])]
         pure (MList blocks, record "ExecutionState" [("context", context), ("locals", MList [])])
   where
+    isEnum M.EnumDecl{} = True
+    isEnum _ = False
     mainFn = M.progMain program
     spec = M.fnSpec mainFn
     add (blocks, b) entry = do
