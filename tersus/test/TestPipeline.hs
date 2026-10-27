@@ -582,7 +582,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                      in testAssertEq actual (Ok (Just (MBool expected)))
                 overflowEdges = [(1,0,-9223372036854775808),(2,1,-1)] :: [(Integer,Integer,Integer)]
                 checkDifferenceOverflow = testAssertEq (runNamedFunction program "hasDifference" [MList [], MList (map diffFact overflowEdges), MInt 2, MInt 0, MInt (-9223372036854775808)]) (Ok (Just (MBool False)))
-                checkDifferenceContradiction edges expected = testAssertEq (runNamedFunction program "contradictoryDifferences" [MList [], MList (map diffFact edges)]) (Ok (Just (MBool expected)))
+                checkDifferenceContradiction facts expected = testAssertEq (runNamedFunction program "contradictoryDifferences" [MList [], MList (map diffFact facts)]) (Ok (Just (MBool expected)))
                 checkProduct a b result = testAssertEq (runNamedFunction program "safeProduct" [MInt a, MInt b]) (Ok (Just result))
                 productValues = [-9223372036854775808, -9223372036854775807, -4611686018427387904, -3074457345618258603, -3, -2, -1, 0, 1, 2, 3, 3074457345618258602, 4611686018427387903, 9223372036854775806, 9223372036854775807]
                 productResult a b = let n = a * b in if n < -9223372036854775808 || n > 9223372036854775807 then MData "SumResult::Overflow" [] else MData "SumResult::Sum" [("value", MInt n)]
@@ -662,10 +662,10 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 checkExecutionFlow blocks status blockId = case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initialExecution] of
                     Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields, lookup "block" fields) (Just (MInt status), Just (MInt blockId))
                     result -> Just ("Unexpected execution flow result: " ++ show result)
-                checkBooleanBranch constants branch blocks expected =
-                    let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constants), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+                checkBooleanBranch constantTerms destinations blocks expected =
+                    let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("differences", MList [])]
                         initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
-                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst branch)), ("no", MInt (snd branch)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
+                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                      in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
                             result -> Just ("Unexpected boolean branch result: " ++ show result)
@@ -678,7 +678,25 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                                 let result = validateMirSubset program mir
                                     reference = case Reference.validateProgram mir of Ok _ -> True; Error _ -> False
                                     agrees = case result of Ok (Just answer) -> answer == reference; _ -> True
-                                 in testAssertEq result (Ok expected) `orElse` testAssertTrue agrees
+                                 in case testAssertEq result (Ok expected) `orElse` testAssertTrue agrees of
+                                        Just failure -> Just (input ++ ": " ++ failure)
+                                        Nothing -> Nothing
+                checkMalformedArrayLength =
+                    let input = "fn f<n>(a: Array<Int, n>, m: Int) -> Int { b = array(n, 0); return size(b); }; return 0;"
+                        lowered = parseSource input `bindResult` elaborate `bindResult` lowerElaborated
+                     in case lowered of
+                            Error e -> Just ("Could not lower malformed-MIR fixture: " ++ e)
+                            Ok mir -> case Map.lookup "f" (M.progFunctions mir) of
+                                Nothing -> Just "Fixture has no f function"
+                                Just fn -> case [local | (local, decl) <- Map.toList (M.fnLocals fn), M.localName decl == Just "m"] of
+                                    [wrong] ->
+                                        let alter (M.Assign dest (M.ListOp M.NewArray [_, fill])) = M.Assign dest (M.ListOp M.NewArray [M.Copy wrong, fill])
+                                            alter other = other
+                                            replace block' = block'{M.blockStatements = map alter (M.blockStatements block')}
+                                            broken = fn{M.fnBlocks = Map.map replace (M.fnBlocks fn)}
+                                            program' = mir{M.progFunctions = Map.insert "f" broken (M.progFunctions mir)}
+                                         in testAssertEq (verifyProgram program') (Ok ()) `orElse` testAssertEq (validateMirSubset program program') (Ok Nothing)
+                                    _ -> Just "Fixture has no unique m parameter"
                 bridgeFacts = [eq 0 1, lt 1 2, le 2 3]
                 checkBridge query = testAssertEq (querySelfHosted program bridgeFacts query) (Ok (Just (Engine.entails query (Engine.proofContextFromFacts bridgeFacts))))
              in foldr orElse Nothing
@@ -728,6 +746,31 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkBooleanBranch boolConstants (1,2) [execBlock 1 [] execEndDone, execBlock 2 [joinCheck] execEndDone] 2
                       , checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)
                       , checkMirSubset "x = 1; affirm x = 2; return x;" (Just False)
+                      , checkMirSubset "fn f(x: Int) -> Int { affirm x = x; return x; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int { affirm x = 0; return x; }; return 0;" (Just False)
+                      , checkMirSubset "fn f(x: Int) -> Int { return 1 / x; }; return 0;" (Just False)
+                      , checkMirSubset "fn f(x: Int, y: Int) -> Int { if x < y { affirm x < y; } else { affirm y <= x; }; return 0; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(x: Int, y: Int) -> Int { if x < y { return 0; } else { affirm x < y; }; return 0; }; return 0;" (Just False)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] { return x; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return >= 0; }] { return x; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return > 0; }] { return x; }; return 0;" (Just False)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return + 1 > 0; }] { return x; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x + 1 > 0; }] [{ affirm return = x + 1; }] { return x + 1; }; return f(1);" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x / 1 > 0; }] { return x; }; return f(1);" Nothing
+                      , checkMirSubset "fn f(x: Int, y: Int) -> Int [{ affirm x / y > 0; }] { return x; }; return 0;" Nothing
+                      , checkMirSubset "fn f(xs: List<Int>) -> Int [{ affirm size(xs) > 0; }] [{ affirm return = get(xs, 0); }] { return get(xs, 0); }; return f([5]);" Nothing
+                      , checkMirSubset "fn f(x: Int) -> Int shrinks x { return x; }; return 0;" Nothing
+                      , checkMirSubset "fn f(x: Int) -> Int { return x; }; return f(1);" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(1);" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return x; }; return f(0);" (Just False)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; x = 3; x = f(x); affirm x = 3; return x;" (Just True)
+                      , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { x = 2; return x; }; return f(1);" Nothing
+                      , checkMirSubset "fn g() -> Int [{ }] [{ affirm return = 2; }] { return 2; }; fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { x = g(); return x; }; return f(1);" Nothing
+                      , checkMirSubset "fn f(x: Int) -> Int [{ }] [{ affirm return > 0; }] { return x; }; return f(1);" (Just False)
+                      , checkMirSubset "fn yes() -> Bool [{ }] [{ affirm return = true; }] { return true; }; flag = yes(); if flag { return 1; } else { affirm 0 = 1; return 0; };" (Just True)
+                      , checkMirSubset "fn g(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { return g(x); }; return f(2);" (Just True)
+                      , checkMirSubset "fn g(x: Int) -> Int [{ affirm x > 0; }] { return x; }; fn f(x: Int) -> Int { return g(x); }; return f(1);" (Just False)
+                      , checkMirSubset "fn f(x: Int) -> Int { return f(x); }; return f(1);" Nothing
                       , checkMirSubset "return 7 / 1;" (Just True)
                       , checkMirSubset "return 7 / 0;" (Just False)
                       , checkMirSubset "x = 1; y = x + 1; affirm y = 2; return y;" (Just True)
@@ -762,6 +805,17 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = #[4, 5]; affirm size(xs) = 2; affirm get(xs, 1) = 5; return 0;" (Just True)
                       , checkMirSubset "xs = #[4, 5]; return get(xs, 2);" (Just False)
                       , checkMirSubset "xs = Box::new(#[4, 5]); affirm get(xs, 0) = 4; return size(xs);" (Just True)
+                      , checkMirSubset "a = array(3, 7); affirm size(a) = 3; affirm get(a, 1) = 7; return get(a, 2);" (Just True)
+                      , checkMirSubset "a = array(3, 7); affirm get(a, 1) = 8; return 0;" (Just False)
+                      , checkMirSubset "a = array(0, 7); return get(a, 0);" (Just False)
+                      , checkMirSubset "a = Array::boxed(2, 7); affirm get(a, 1) = 7; return size(a);" (Just True)
+                      , checkMirSubset "a = array(3, 7); a = set(a, 0, 9); affirm get(a, 1) = 7; return get(a, 0);" (Just True)
+                      , checkMirSubset "a = array(3, 7); a = set(a, 0, 9); affirm get(a, 1) = 9; return 0;" (Just False)
+                      , checkMirSubset "a = array(3, 7); a = set(a, 0, 9); a = set(a, 2, 8); affirm get(a, 0) = 9; affirm get(a, 1) = 7; affirm get(a, 2) = 8; return 0;" (Just True)
+                      , checkMirSubset "n = -1; a = Array::boxed(n, 7); return 0;" (Just False)
+                      , checkMirSubset "a = Array::empty(); affirm size(a) = 0; return size(a);" (Just True)
+                      , checkMirSubset "a = Array::empty(); return get(a, 0);" (Just False)
+                      , checkMirSubset "affirm get(array(2, 7), 0) = 7; return 0;" (Just True)
                       , checkMirSubset "xs = [4, 5]; affirm first(xs) = 4; return first(xs);" (Just True)
                       , checkMirSubset "xs = []; return first(xs);" (Just False)
                       , checkMirSubset "xs = [4, 5]; affirm last(xs) = 5; return last(xs);" (Just True)
@@ -773,8 +827,17 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "struct P { x: Int }; p = P { x: 4 }; p = P { x: p.x + 1 }; affirm p.x = 5; return p.x;" (Just True)
                       , checkMirSubset "struct P { x: Int }; p = P { x: 4 }; q = p; p = P { x: 5 }; affirm q.x = 4; return q.x;" (Just True)
                       , checkMirSubset "struct P { x: Int }; p = P { x: 4 }; q = P { x: 4 }; affirm p = q; return 0;" (Just True)
-                      , checkMirSubset "struct P { x: Int } invariant [{ affirm x >= 0; }]; p = P { x: 4 }; return p.x;" Nothing
-                      , checkMirSubset "struct P { x: Int } invariant [{ affirm x >= 0; }]; p = P { x: -1 }; return p.x;" Nothing
+                      , checkMirSubset "struct P { x: Int } invariant [{ affirm x >= 0; }]; p = P { x: 4 }; return p.x;" (Just True)
+                      , checkMirSubset "struct P { x: Int } invariant [{ affirm x >= 0; }]; p = P { x: -1 }; return p.x;" (Just False)
+                      , checkMirSubset "struct P { x: Int, y: Int } invariant [{ affirm x <= y; }]; p = P { x: 2, y: 3 }; return p.x;" (Just True)
+                      , checkMirSubset "struct P { x: Int, y: Int } invariant [{ affirm x <= y; }]; p = P { x: 3, y: 2 }; return p.x;" (Just False)
+                      , checkMirSubset "struct P { x: Int } invariant [{ affirm x >= 0; }]; fn f(p: P) -> Int [{ }] [{ affirm return >= 0; }] { return p.x; }; p = P { x: 4 }; return f(p);" (Just True)
+                      , checkMirSubset "struct P { x: Int } invariant [{ affirm x >= 0; }]; fn f(p: P) -> Int { affirm p.x < 0; return 0; }; return 0;" (Just False)
+                      , checkMirSubset "fn f(a: Array<Int, 2>) -> Int { affirm size(a) = 2; return get(a, 1); }; return 0;" (Just True)
+                      , checkMirSubset "fn f<n>(a: Array<Int, n>) -> Int { affirm size(a) = n; return n; }; return f(#[1, 2]);" (Just True)
+                      , checkMirSubset "fn f<n>(a: Array<Int, n>) -> Int [{ affirm n > 0; }] { return get(a, 0); }; return f(#[1]);" (Just True)
+                      , checkMirSubset "fn f<n>(a: Array<Int, n>) -> Int [{ affirm n > 0; }] { return get(a, 0); }; return f(#[]);" (Just False)
+                      , checkMalformedArrayLength
                       , checkMirSubset "enum E { A, B }; return E::A;" Nothing
                       , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm size(xs) = 2; affirm get(xs, 1) = 5; return 0;" (Just True)
                       , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm get(xs, 1) = 4; return 0;" (Just False)
@@ -783,6 +846,12 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = [4]; xs = push(push(xs, 5), 6); affirm get(xs, 0) = 4; affirm get(xs, 1) = 5; return 0;" (Just True)
                       , checkMirSubset "xs = [4]; affirm size(push(xs, 5)) = 2; affirm get(push(xs, 5), 1) = 5; return 0;" (Just True)
                       , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm last(xs) = 5; return 0;" (Just True)
+                      , checkMirSubset "xs = [4, 5]; xs = pop(xs); affirm size(xs) = 1; affirm get(xs, 0) = 4; return 0;" (Just True)
+                      , checkMirSubset "xs = [4, 5]; xs = pop(xs); affirm get(xs, 0) = 5; return 0;" (Just False)
+                      , checkMirSubset "xs = [4, 5]; xs = pop(xs); return get(xs, 1);" (Just False)
+                      , checkMirSubset "xs = []; xs = pop(xs); return 0;" (Just False)
+                      , checkMirSubset "xs = [4, 5]; affirm size(pop(xs)) = 1; return get(pop(xs), 0);" (Just True)
+                      , checkMirSubset "xs = [4]; xs = push(xs, 5); xs = pop(xs); affirm size(xs) = 1; affirm get(xs, 0) = 4; return 0;" (Just True)
                       , checkMirSubset "xs = [4, 5]; xs = set(xs, 1, 9); affirm size(xs) = 2; affirm get(xs, 0) = 4; affirm get(xs, 1) = 9; return 0;" (Just True)
                       , checkMirSubset "xs = [4, 5]; xs = set(xs, 1, 9); affirm get(xs, 1) = 5; return 0;" (Just False)
                       , checkMirSubset "xs = [4, 5]; xs = set(xs, 2, 9); return 0;" (Just False)

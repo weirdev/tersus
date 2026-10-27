@@ -43,14 +43,21 @@ an assertion must be a `Check`. The result identifies the first unproved check.
 `validateExecution` also tracks local bindings and checks acyclic paths
 independently. `SelfHostedMir.validateMirSubset` translates a limited subset of
 typed MIR (copies, boxing, plain structs, pure binary operations, list and
-array literals, length, indexed reads, first, last with known length, list append,
-assertions, jumps and branches) to that
-representation. Reads require proof of their bounds, and literal sequence
+array literals, empty and repeated-element arrays, length, indexed reads and updates,
+first, last and list removal with known length, list append, assertions, jumps
+and branches) to that representation. Reads require proof of their bounds, and literal sequence
 elements have their known values. Append records the new length and element and
-preserves previously checked reads. Programs using struct invariants or enums are
-unsupported. It also checks a canonical single-block loop by proving
+preserves previously checked reads; removal preserves known reads within the
+shortened length. Simple relational invariants on non-generic structs are
+checked at construction and assumed for typed values; enums are not yet
+supported. It also checks a canonical single-block loop by proving
 its declared invariant and an integer or fixed-limit countdown variant. Other
-loop shapes, calls and operations it cannot translate return unsupported. It
+loop shapes and operations it cannot translate return unsupported. Functions
+are checked with symbolic parameters and simple relational input and output
+contracts. Direct calls to previously defined functions check those contracts
+when the callee does not reassign its parameters. Contract assumptions support
+total expressions; assumptions with operations requiring safety checks, other
+calls and termination clauses remain unsupported. It
 is used for comparison, not for production validation;
 the returned flow state is one path's state and is not a joined postcondition.
 Branch facts include both the boolean result and, for a saved comparison, the
