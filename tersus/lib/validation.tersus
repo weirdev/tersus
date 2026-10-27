@@ -1566,6 +1566,7 @@ enum ExecutionEnd {
     Done,
     Jump { target: Int },
     Branch { yes: Int, no: Int, yesSteps: List<ExecutionStep>, noSteps: List<ExecutionStep> },
+    BooleanBranch { yes: Int, no: Int, value: ValueRef, trueValue: ValueRef, falseValue: ValueRef },
     Condition { yes: Int, no: Int, relation: Int, left: ValueRef, right: ValueRef },
     Loop { exit: Int, body: List<ExecutionStep>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef },
     Unsupported,
@@ -1582,6 +1583,38 @@ fn negateRelation(relation: Int, left: Int, right: Int) -> NegatedRelation {
     if relation = 1 { return NegatedRelation { relation: 0, left: left, right: right }; };
     if relation = 2 { return NegatedRelation { relation: 3, left: right, right: left }; };
     return NegatedRelation { relation: 2, left: right, right: left };
+};
+
+// Recognize a boolean directly or through the comparison that produced it.
+// The application keeps the operands from the time of the comparison.
+fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool) -> Bool {
+    for app in context.applications {
+        if app.id = term {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                relation = -1;
+                left = a;
+                right = b;
+                if app.function = -6 { relation = 0; };
+                if app.function = -7 { relation = 1; };
+                if app.function = -8 { relation = 2; };
+                if app.function = -9 { relation = 3; };
+                if app.function = -10 { relation = 2; left = b; right = a; };
+                if app.function = -11 { relation = 3; left = b; right = a; };
+                if relation >= 0 {
+                    if truth = false {
+                        opposite = negateRelation(relation, left, right);
+                        relation = opposite.relation;
+                        left = opposite.left;
+                        right = opposite.right;
+                    };
+                    if entailsGoal(context, localGoal(relation, left, right)) { return true; };
+                };
+            };
+        };
+    };
+    return entailsGoal(context, ValidatorGoal::Equal { left: term, right: literal });
 };
 
 fn findExecutionBlock(blocks: &List<ExecutionBlock>, id: Int) -> ExecutionBlockLookup {
@@ -1727,6 +1760,41 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                     noContext = assumeRelation(run.state.context, inverse.relation, inverse.left, inverse.right);
                     noState = ExecutionState { context: noContext, ..run.state };
                     return walkExecution(blocks, condition.no, noState, fuel - 1);
+                };
+            };
+            return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
+        };
+        if end is ExecutionEnd::BooleanBranch {
+            branch = end as ExecutionEnd::BooleanBranch;
+            value = resolveValue(run.state, branch.value);
+            trueValue = resolveValue(run.state, branch.trueValue);
+            falseValue = resolveValue(run.state, branch.falseValue);
+            if value is ValueLookup::Found {
+                if trueValue is ValueLookup::Found {
+                    if falseValue is ValueLookup::Found {
+                        term = (value as ValueLookup::Found).term;
+                        yesLiteral = (trueValue as ValueLookup::Found).term;
+                        noLiteral = (falseValue as ValueLookup::Found).term;
+                        yesKnown = booleanKnown(run.state.context, term, yesLiteral, true);
+                        if yesKnown {
+                            yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
+                            yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
+                            yesState = ExecutionState { context: yesContext, ..run.state };
+                            return walkExecution(blocks, branch.yes, yesState, fuel - 1);
+                        };
+                        noKnown = booleanKnown(run.state.context, term, noLiteral, false);
+                        if noKnown = false {
+                            yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
+                            yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
+                            yesState = ExecutionState { context: yesContext, ..run.state };
+                            yesResult = walkExecution(blocks, branch.yes, yesState, fuel - 1);
+                            if yesResult.status != 0 { return yesResult; };
+                        };
+                        noContext = assumeRelation(run.state.context, 0, term, noLiteral);
+                        noContext = assumeBooleanFact(noContext, term, noLiteral);
+                        noState = ExecutionState { context: noContext, ..run.state };
+                        return walkExecution(blocks, branch.no, noState, fuel - 1);
+                    };
                 };
             };
             return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };

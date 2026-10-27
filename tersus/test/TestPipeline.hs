@@ -662,6 +662,14 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 checkExecutionFlow blocks status blockId = case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initialExecution] of
                     Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields, lookup "block" fields) (Just (MInt status), Just (MInt blockId))
                     result -> Just ("Unexpected execution flow result: " ++ show result)
+                checkBooleanBranch constants branch blocks expected =
+                    let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constants), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
+                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst branch)), ("no", MInt (snd branch)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
+                     in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
+                            Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
+                            result -> Just ("Unexpected boolean branch result: " ++ show result)
+                boolConstants = [constant (20, 1, 1), constant (21, 1, 0)]
                 checkMirSubset input expected =
                     let lowered = parseSource input `bindResult` elaborate `bindResult` lowerElaborated
                      in case lowered of
@@ -715,6 +723,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkSavedComparison (-11) True 3 1 0, checkSavedComparison (-11) False 2 0 1
                       , checkExecution (executionSteps ++ [applyLocal 3 2]) 2 4
                       , checkExecutionFlow (execBlocks 1) 0 3, checkExecutionFlow (execBlocks 2) 1 3
+                      , checkBooleanBranch (boolConstants ++ [constant (0,0,1), constant (1,0,2)]) (1,99) [execBlock 1 [] execEndDone] 0
+                      , checkBooleanBranch (boolConstants ++ [constant (0,0,2), constant (1,0,1)]) (99,1) [execBlock 1 [] execEndDone] 0
+                      , checkBooleanBranch boolConstants (1,2) [execBlock 1 [] execEndDone, execBlock 2 [joinCheck] execEndDone] 2
                       , checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)
                       , checkMirSubset "x = 1; affirm x = 2; return x;" (Just False)
                       , checkMirSubset "return 7 / 1;" (Just True)
@@ -779,6 +790,8 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = [4, 5]; affirm get(set(xs, 1, 9), 1) = 9; return 0;" (Just True)
                       , checkMirSubset "affirm 1 / 0 = 1; return 0;" (Just False)
                       , checkMirSubset "x = 1; if x = 1 { return 1; } else { return 2; };" (Just True)
+                      , checkMirSubset ("x = 1; " ++ concat (replicate 8 "if x = 1 { x = 1; } else { x = 1; }; ") ++ "affirm x = 1; return x;") (Just True)
+                      , checkMirSubset "x = 1; if x = 1 { affirm x = 2; } else { return 0; }; return 1;" (Just False)
                       , checkMirSubset "flag = true; if flag { return 1; } else { affirm 0 = 1; return 0; };" (Just True)
                       , checkMirSubset "flag = false; if flag { affirm 0 = 1; return 0; } else { return 1; };" (Just True)
                       , checkMirSubset "flag = true; if flag { affirm 0 = 1; }; return 0;" (Just False)
