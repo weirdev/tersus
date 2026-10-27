@@ -188,17 +188,22 @@ fn equalArguments(equalities: &List<EqualityFact>, a: &List<Int>, b: &List<Int>)
 // addition merges two previously distinct classes containing applications.
 fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -> List<EqualityFact> {
     known = facts;
+    finished = false;
     for round in 0..size(terms) {
-        for a in terms {
-            for b in terms {
-                if hasEquality(known, a.function, b.function) {
-                    if equalArguments(known, a.arguments, b.arguments) {
-                        if hasEquality(known, a.id, b.id) = false {
-                            known = push(known, EqualityFact { left: a.id, right: b.id });
+        if finished = false {
+            before = size(known);
+            for a in terms {
+                for b in terms {
+                    if hasEquality(known, a.function, b.function) {
+                        if equalArguments(known, a.arguments, b.arguments) {
+                            if hasEquality(known, a.id, b.id) = false {
+                                known = push(known, EqualityFact { left: a.id, right: b.id });
+                            };
                         };
                     };
                 };
             };
+            if size(known) = before { finished = true; };
         };
     };
     return known;
@@ -970,7 +975,7 @@ fn termInUse(state: &ExecutionState, term: Int) -> Bool {
     return false;
 };
 
-// The MIR bridge reserves -1 through -17 for builtin functions and uses
+// The MIR bridge reserves -1 through -19 for builtin functions and uses
 // non-negative IDs for input terms. A bounded search supplies path-local
 // symbols without aliasing any term still mentioned by the state. Exhaustion
 // is reported as unsupported rather than reusing a live identifier.
@@ -1032,10 +1037,97 @@ fn safeProduct(a: Int, b: Int) -> SumResult {
     return SumResult::Sum { value: a * b };
 };
 
+// A checked read can be traced through a sequence operation when its index
+// is known to survive. The scan is bounded and omits any case it cannot
+// establish, rather than guessing about a symbolic index.
+fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index: Int) -> ValidatorContext {
+    state = context;
+    current = list;
+    visited = [];
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    for round in 0..size(context.applications) {
+        if containsValue(visited, current) { return state; };
+        visited = push(visited, current);
+        moved = false;
+        for app in context.applications {
+            if moved = false {
+                if hasEquality(equalities, app.id, current) {
+                    if app.function = -19 {
+                        if size(app.arguments) = 2 {
+                            fact = EqualityFact { left: result, right: get(app.arguments, 1) };
+                            return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                        };
+                    };
+                    if app.function = -17 {
+                        if size(app.arguments) = 3 {
+                            changed = get(app.arguments, 1);
+                            if hasEquality(equalities, index, changed) {
+                                fact = EqualityFact { left: result, right: get(app.arguments, 2) };
+                                return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                            };
+                            a = integerValue(context, index);
+                            b = integerValue(context, changed);
+                            if a is IntegerLookup::Found {
+                                if b is IntegerLookup::Found {
+                                    if (a as IntegerLookup::Found).value != (b as IntegerLookup::Found).value {
+                                        current = get(app.arguments, 0);
+                                        moved = true;
+                                    };
+                                };
+                            };
+                        };
+                    };
+                    if app.function = -18 {
+                        if size(app.arguments) = 1 {
+                            current = get(app.arguments, 0);
+                            moved = true;
+                        };
+                    };
+                    if app.function = -16 {
+                        if size(app.arguments) = 2 {
+                            original = get(app.arguments, 0);
+                            for lengthApp in context.applications {
+                                if lengthApp.function = -13 {
+                                    if size(lengthApp.arguments) = 1 {
+                                        if hasEquality(equalities, get(lengthApp.arguments, 0), original) {
+                                            length = integerValue(context, lengthApp.id);
+                                            position = integerValue(context, index);
+                                            if length is IntegerLookup::Found {
+                                                if position is IntegerLookup::Found {
+                                                    n = (length as IntegerLookup::Found).value;
+                                                    i = (position as IntegerLookup::Found).value;
+                                                    if i = n {
+                                                        fact = EqualityFact { left: result, right: get(app.arguments, 1) };
+                                                        return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                                                    };
+                                                    if i >= 0 {
+                                                        if i < n { current = original; moved = true; };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        if moved = false { return state; };
+        prior = ApplicationTerm { id: result, function: -14, arguments: push(push([], current), index) };
+        state = ValidatorContext { applications: push(state.applications, prior), ..state };
+    };
+    return state;
+};
+
 fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
     if size(args) != 2 { return context; };
     a = get(args, 0);
     b = get(args, 1);
+    if function = -14 {
+        return readThroughSequence(context, result, a, b);
+    };
     if function = -1 {
         bv = integerValue(context, b);
         if bv is IntegerLookup::Found {
@@ -1138,6 +1230,8 @@ enum ExecutionStep {
     Push { local: Int, list: ValueRef, value: ValueRef, zero: ValueRef },
     Last { local: Int, list: ValueRef, zero: ValueRef },
     Set { local: Int, list: ValueRef, index: ValueRef, value: ValueRef },
+    Pop { local: Int, list: ValueRef },
+    NewArray { local: Int, length: ValueRef, value: ValueRef },
     Havoc { local: Int },
     RequireDefined { value: ValueRef },
     Check { relation: Int, left: ValueRef, right: ValueRef },
@@ -1159,6 +1253,7 @@ fn localGoal(relation: Int, left: Int, right: Int) -> ValidatorGoal {
 // Only the trusted MIR bridge may add an edge condition as an assumption.
 fn assumeRelation(context: &ValidatorContext, relation: Int, left: Int, right: Int) -> ValidatorContext {
     if relation = 0 {
+        if hasEquality(context.equalities, left, right) { return context; };
         return ValidatorContext { equalities: push(context.equalities, EqualityFact { left: left, right: right }), ..context };
     };
     if relation = 1 {
@@ -1380,6 +1475,69 @@ fn setSequence(initial: &ExecutionState, local: Int, list: Int, index: Int, valu
     return ExecutionResult { status: 2, failedAt: -1, state: initial };
 };
 
+// The bridge checks nonemptiness first. For a known length, removing the
+// final element preserves every recorded read below the new length.
+fn popSequence(initial: &ExecutionState, local: Int, list: Int) -> ExecutionResult {
+    length = sequenceLength(initial, list);
+    if length is ValueLookup::Found {
+        oldLength = (length as ValueLookup::Found).term;
+        value = integerValue(initial.context, oldLength);
+        if value is IntegerLookup::Found {
+            shortened = safeBoundDifference((value as IntegerLookup::Found).value, 1);
+            if shortened is SumResult::Sum {
+                newLengthValue = (shortened as SumResult::Sum).value;
+                made = freshValue(initial);
+                if made is ValueLookup::Found {
+                    result = (made as ValueLookup::Found).term;
+                    popApp = ApplicationTerm { id: result, function: -18, arguments: push([], list) };
+                    context = ValidatorContext { applications: push(initial.context.applications, popApp), ..initial.context };
+                    state = ExecutionState { context: context, locals: bindLocal(initial.locals, local, result) };
+                    lengthTerm = oldLength;
+                    known = false;
+                    for constant in state.context.constants {
+                        if constant.kind = 0 {
+                            if constant.value = newLengthValue { lengthTerm = constant.id; known = true; };
+                        };
+                    };
+                    if known = false {
+                        symbol = freshValue(state);
+                        if symbol is ValueLookup::Found {
+                            lengthTerm = (symbol as ValueLookup::Found).term;
+                            constant = ConstantTerm { id: lengthTerm, kind: 0, value: newLengthValue };
+                            context = ValidatorContext { constants: push(state.context.constants, constant), ..state.context };
+                            state = ExecutionState { context: context, ..state };
+                        } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+                    };
+                    sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
+                    apps = push(state.context.applications, sizeApp);
+                    equalities = semanticFacts(initial.context.equalities, initial.context.applications, initial.context.constants);
+                    for previous in initial.context.applications {
+                        if previous.function = -14 {
+                            if size(previous.arguments) = 2 {
+                                if hasEquality(equalities, get(previous.arguments, 0), list) {
+                                    index = integerValue(initial.context, get(previous.arguments, 1));
+                                    if index is IntegerLookup::Found {
+                                        i = (index as IntegerLookup::Found).value;
+                                        if i >= 0 {
+                                            if i < newLengthValue {
+                                                kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
+                                                apps = push(apps, kept);
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                    context = ValidatorContext { applications: apps, ..state.context };
+                    return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, ..state } };
+                };
+            };
+        };
+    };
+    return ExecutionResult { status: 2, failedAt: -1, state: initial };
+};
+
 // Pure applications with the same function and exact arguments denote the
 // same value. Reusing that value avoids growing the context at every read.
 fn existingApplication(context: &ValidatorContext, function: Int, args: &List<Int>) -> ValueLookup {
@@ -1493,6 +1651,38 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                         result = setSequence(state, setStep.local, (list as ValueLookup::Found).term, (index as ValueLookup::Found).term, (value as ValueLookup::Found).term);
                         if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
                         state = result.state;
+                    } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::Pop {
+            handled = true;
+            popStep = step as ExecutionStep::Pop;
+            list = resolveValue(state, popStep.list);
+            if list is ValueLookup::Found {
+                result = popSequence(state, popStep.local, (list as ValueLookup::Found).term);
+                if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
+                state = result.state;
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::NewArray {
+            handled = true;
+            array = step as ExecutionStep::NewArray;
+            length = resolveValue(state, array.length);
+            value = resolveValue(state, array.value);
+            if length is ValueLookup::Found {
+                if value is ValueLookup::Found {
+                    fresh = freshValue(state);
+                    if fresh is ValueLookup::Found {
+                        result = (fresh as ValueLookup::Found).term;
+                        lengthTerm = (length as ValueLookup::Found).term;
+                        valueTerm = (value as ValueLookup::Found).term;
+                        make = ApplicationTerm { id: result, function: -19, arguments: push(push([], lengthTerm), valueTerm) };
+                        sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
+                        apps = push(push(state.context.applications, make), sizeApp);
+                        context = ValidatorContext { applications: apps, ..state.context };
+                        locals = bindLocal(state.locals, array.local, result);
+                        state = ExecutionState { context: context, locals: locals };
                     } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
