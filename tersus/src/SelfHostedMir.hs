@@ -315,10 +315,11 @@ block fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0 = do
                 required = step "RequireDefined" [("value", ref)]
             (trueRef, b2) <- operand (M.Const (M.CBool True)) b1
             (falseRef, b3) <- operand (M.Const (M.CBool False)) b2
-            let fact kind left right = step "Assume" [("relation", MInt kind), ("left", left), ("right", right)]
-                yesBoolean = fact 0 ref trueRef
-                noBoolean = fact 0 ref falseRef
-            Just ([required], branch yes no [yesBoolean] [noBoolean], b3)
+            let M.BlockId yesId = yes
+                M.BlockId noId = no
+                ending = record "ExecutionEnd::BooleanBranch"
+                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
+            Just ([required], ending, b3)
         _ -> Nothing
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (steps ++ extra)), ("end", ending)], b2)
   where
@@ -403,8 +404,6 @@ block fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0 = do
     localNumber (M.Local i) = toInteger i
     localRef i = record "ValueRef::Local" [("local", MInt i)]
     jump (M.BlockId target) = record "ExecutionEnd::Jump" [("target", MInt (toInteger target))]
-    branch (M.BlockId yes) (M.BlockId no) yesSteps noSteps = record "ExecutionEnd::Branch"
-        [("yes", MInt (toInteger yes)), ("no", MInt (toInteger no)), ("yesSteps", MList yesSteps), ("noSteps", MList noSteps)]
     normal r a b = case r of
                 Eq -> (0, a, b)
                 NotEq -> (1, a, b)
