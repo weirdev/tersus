@@ -6,6 +6,7 @@ module SelfHostedMir (validateMirSubset) where
 import Control.Monad (foldM)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
 import MirVerify (verifyProgram)
@@ -369,8 +370,8 @@ statement (M.Assign (M.Local dest) (M.BinaryOp op a b)) b0 = do
 statement (M.Ghost env (M.GhostValidation (ProofAssert proof))) b = do
     (prefix, s, b') <- proofCheck env proof b
     pure (prefix ++ [s], b')
--- Function bodies are checked independently before the main graph. Calls
--- and function-valued operands are still declined by this bridge.
+-- Function bodies are checked independently before the main graph. Function
+-- definitions have already been checked for uniqueness and placement.
 statement (M.Ghost _ M.GhostFunction{}) b = Just ([], b)
 statement _ _ = Nothing
 
@@ -394,8 +395,10 @@ directCall caller callee args (M.Local dest) b0 = do
     (checks, b2) <- contractSteps False env (M.specRequires (M.fnSpec callee)) withSizes
     let resultEnv = Map.insert "return" (M.Copy (M.Local dest)) env
     (assumptions, b3) <- contractSteps True resultEnv (M.specEnsures (M.fnSpec callee)) b2
-    let result = step "Havoc" [("local", MInt (toInteger dest))]
-    pure ([save | (_, save) <- snapshots] ++ sizeChecks ++ checks ++ [result] ++ assumptions, b3)
+    let (function, b4) = namedFunction ("call:" ++ M.fnName callee) b3
+        argumentRefs = [record "ValueRef::Local" [("local", MInt (toInteger n))] | (M.Local n, _) <- snapshots]
+        result = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList argumentRefs)]
+    pure ([save | (_, save) <- snapshots] ++ sizeChecks ++ checks ++ [result] ++ assumptions, b4)
   where
     params = M.fnParams callee
     callerSizeParams = drop (length (M.fnParams caller) - length (M.fnSizeParams caller)) (M.fnParams caller)
@@ -683,6 +686,8 @@ encodeFunction types invariants functions allowCalls fn
 encode :: M.Program -> Maybe [(MirValue, MirValue, Integer)]
 encode program
     | any isEnum (Map.elems (M.progTypes program)) = Nothing
+    -- Results of world-reading functions are not determined by arguments.
+    | not (Set.null (M.readersOfInput program)) = Nothing
     | not (null (M.fnParams (M.progMain program))) = Nothing
     | not (null (M.specRequires mainSpec) && null (M.specEnsures mainSpec)) = Nothing
     | any invalidDefinition definitions = Nothing
