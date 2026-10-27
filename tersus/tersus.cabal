@@ -52,6 +52,8 @@ library
       ProofEngine
       ProofHelpers
       ProofState
+      SelfHostedMir
+      SelfHostedProof
       StdLib
       TersusTypes
       TypeCheck
