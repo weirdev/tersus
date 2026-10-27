@@ -8,6 +8,7 @@ module MirEval
     , RunEnv (..)
     , Outcome (..)
     , runProgramEnv
+    , runNamedFunction
     , renderMirValue
     , toMirValue
     , fromMirValue
@@ -102,6 +103,13 @@ startState input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFil
 
 -- The evaluator is a function of what the program is run in and of its state, and the failure of a result, with the bytes written so far
 newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
+
+-- Execute a named MIR function in an empty host environment. The caller is
+-- responsible for the types, invariants and contracts of the arguments.
+runNamedFunction :: Program -> Name -> [MirValue] -> Result (Maybe MirValue) String
+runNamedFunction program name args = case Map.lookup name (progFunctions program) of
+    Nothing -> Error ("Function does not exist: " ++ name)
+    Just fn -> mapResult (\(value, _, _) -> value) (runE (runFunction program fn args) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState ""))
 
 instance Functor E where
     fmap f (E r) = E (\env s -> mapResult (\(a, output, s') -> (f a, output, s')) (r env s))

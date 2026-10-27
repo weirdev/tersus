@@ -12,6 +12,7 @@ extra-source-files:
 - lib/string.tersus
 - examples/emit.tersus
 - bootstrap/emitter.ll
+- lib/validation.tersus
 
 # Metadata used when publishing your package
 # synopsis:            Short description of your package

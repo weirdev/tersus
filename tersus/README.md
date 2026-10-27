@@ -2,6 +2,28 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 See [LANGUAGE.md](LANGUAGE.md) for the current syntax and language constructs.
 
+## Validator written in Tersus
+
+`lib/validation.tersus` starts a Tersus implementation of validation alongside the
+Haskell implementation, which remains the bootstrap and reference. Its first
+query, `hasEquality`, treats integers as symbolic value identifiers and proves
+reflexive, symmetric and transitive consequences of the supplied equalities.
+`hasCongruence` additionally closes equalities over binary applications of
+uninterpreted operators, including nested applications. The host must give each
+term a unique identifier and distinguish different operators. A false answer
+means only that the query did not find a proof: it does not yet handle general
+proof terms or validate programs. It is not used by the
+production pipeline.
+
+`MirEval.runNamedFunction` lets the host invoke a lowered Tersus function with
+explicit MIR values. It executes code without checking its input contract or
+the types and invariants of host-supplied values; the host must establish these
+before calling it. The regression test validates the Tersus implementation with
+the existing validator and compares its answers against `ProofEngine` for every
+undirected equality graph of four identifiers, plus reversed and duplicate facts.
+Future work needs an encoding of MIR and proof state, richer reasoning and
+differential tests before the new validator can replace `MirValidate`.
+
 ## Interpreter flow
 
 The Haskell implementation parses to the AST, checks its types, lowers it to the MIR, validates the MIR, and runs it (the stages are chained by `Pipeline`, which type checks the program once; steps 1 to 6 below):
