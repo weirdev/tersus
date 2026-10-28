@@ -3,10 +3,12 @@ module Main (main) where
 import Control.Exception (evaluate)
 import Control.Monad (forM)
 import Data.List (isSuffixOf, sort)
+import System.CPUTime (getCPUTime)
 import System.Directory (listDirectory)
 import System.FilePath ((</>))
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 import System.Timeout (timeout)
+import Text.Printf (printf)
 
 import qualified Mir as M
 import MirLower (lowerElaborated)
@@ -27,9 +29,12 @@ main = do
             results <- forM files $ \file -> do
                 putStrLn ("BEGIN " ++ file)
                 text <- readFile ("examples" </> file)
-                outcome <- timeout 10000000 (evaluate (run checker text))
+                t0 <- getCPUTime
+                outcome <- timeout 30000000 (evaluate (run checker text))
+                t1 <- getCPUTime
                 let result = maybe TimedOut id outcome
-                putStrLn (file ++ ": " ++ describe result)
+                    seconds = fromIntegral (t1 - t0) / 1e12 :: Double
+                putStrLn (file ++ ": " ++ describe result ++ printf " (%.2fs)" seconds)
                 pure (file, result)
             let outcomes = map snd results
                 count p = length (filter p outcomes)

@@ -558,6 +558,21 @@ fn comparisonDifferences(orders: &List<OrderFact>, facts: &List<DifferenceFact>)
     return result;
 };
 
+// A size is never negative, whether or not the program said so. The reference
+// validator adds the same constraint for every size term it sees; here it is
+// checked directly so that a goal like 0 <= size(l) does not need the full
+// difference graph to be rebuilt for every size term.
+fn isSizeTerm(applications: &List<ApplicationTerm>, term: Int) -> Bool {
+    for application in applications {
+        if application.id = term {
+            if application.function = -13 {
+                if size(application.arguments) = 1 { return true; };
+            };
+        };
+    };
+    return false;
+};
+
 fn constantDifferences(constants: &List<ConstantTerm>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
     result = clone(facts);
     for a in constants {
@@ -764,6 +779,10 @@ fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
         if a is IntegerLookup::Found {
             if b is IntegerLookup::Found {
                 if (a as IntegerLookup::Found).value <= (b as IntegerLookup::Found).value { return true; };
+            };
+            // A size is never negative, whether or not the program said so.
+            if (a as IntegerLookup::Found).value = 0 {
+                if isSizeTerm(context.applications, g.right) { return true; };
             };
         };
     };
@@ -1978,6 +1997,23 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
     return ExecutionResult { status: 0, failedAt: -1, state: state };
 };
 
+// A loop being walked: its header, the blocks that can get back to it, what
+// has to hold at each back edge, and the value of the variant when the
+// iteration started. A stack of frames keeps an exit from a nested loop inside
+// the loop that encloses it.
+struct LoopFrame {
+    header: Int,
+    region: List<Int>,
+    checks: List<ExecutionStep>,
+    variant: ValueRef,
+    variantMode: Int,
+    variantOther: ValueRef,
+    prior: Int,
+    priorOther: Int,
+};
+
+impl Clone for LoopFrame { };
+
 // An execution graph carries local bindings separately along every path. Its
 // edge steps are host-supplied consequences of the branch condition. An
 // unsupported MIR operation must be represented by ExecutionEnd::Unsupported.
@@ -1987,7 +2023,10 @@ enum ExecutionEnd {
     Branch { yes: Int, no: Int, yesSteps: List<ExecutionStep>, noSteps: List<ExecutionStep> },
     BooleanBranch { yes: Int, no: Int, value: ValueRef, trueValue: ValueRef, falseValue: ValueRef },
     Condition { yes: Int, no: Int, relation: Int, left: ValueRef, right: ValueRef },
-    Loop { exit: Int, body: List<ExecutionStep>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef },
+    // body is the block an iteration starts on, and region is the header and
+    // every block that can get back to it; a block outside the region leaves
+    // the loop and is walked after it.
+    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef },
     Unsupported,
 };
 
@@ -2025,10 +2064,61 @@ fn uniqueExecutionBlocks(blocks: &List<ExecutionBlock>) -> Bool {
     return true;
 };
 
-fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+fn containsBlock(blocks: &List<Int>, id: Int) -> Bool {
+    for block in blocks {
+        if block = id { return true; };
+    };
+    return false;
+};
+
+// An edge out of a loop leaves the frames whose region does not contain its
+// target, so a nested loop's exit is walked inside the loop that encloses it.
+fn popLoopFrames(loops: List<LoopFrame>, target: Int) -> List<LoopFrame> [{ }] [{ }] shrinks size(loops) {
+    if size(loops) = 0 { return loops; };
+    frame = last(loops);
+    if containsBlock(frame.region, target) { return loops; };
+    return popLoopFrames(pop(loops), target);
+};
+
+// What an edge back to a loop's header has to show: the invariant holds again,
+// and the variant is smaller than it was when the iteration started.
+fn checkLoopBackEdge(initial: &ExecutionState, frame: &LoopFrame, id: Int) -> ExecutionFlowResult {
+    preserved = executeSteps(initial, frame.checks);
+    if preserved.status != 0 { return ExecutionFlowResult { status: preserved.status, block: id, step: preserved.failedAt, state: preserved.state }; };
+    next = resolveValue(preserved.state, frame.variant);
+    if next is ValueLookup::Found {
+        nextTerm = (next as ValueLookup::Found).term;
+        if frame.variantMode = 0 {
+            if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: nextTerm, right: frame.prior }) = false {
+                return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+            };
+        } else {
+            otherAfter = resolveValue(preserved.state, frame.variantOther);
+            if otherAfter is ValueLookup::Found {
+                if entailsGoal(preserved.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+                };
+            } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state }; };
+            if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
+                return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+            };
+        };
+        return ExecutionFlowResult { status: 0, block: id, step: -1, state: preserved.state };
+    };
+    return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state };
+};
+
+fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+    if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: clone(initial) }; };
+    if size(loops) > 0 {
+        frame = last(loops);
+        if id = frame.header { return checkLoopBackEdge(initial, frame, id); };
+        if containsBlock(frame.region, id) = false {
+            return walkExecution(blocks, id, initial, fuel - 1, popLoopFrames(loops, id));
+        };
+    };
     found = findExecutionBlock(blocks, id);
     if found is ExecutionBlockLookup::Found {
-        if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: clone(initial) }; };
         block = (found as ExecutionBlockLookup::Found).block;
         if block.end is ExecutionEnd::Loop {
             loop = block.end as ExecutionEnd::Loop;
@@ -2041,7 +2131,7 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
         if end is ExecutionEnd::Done { return ExecutionFlowResult { status: 0, block: id, step: -1, state: run.state }; };
         if end is ExecutionEnd::Jump {
             jump = end as ExecutionEnd::Jump;
-            return walkExecution(blocks, jump.target, run.state, fuel - 1);
+            return walkExecution(blocks, jump.target, run.state, fuel - 1, loops);
         };
         if end is ExecutionEnd::Loop {
             loop = end as ExecutionEnd::Loop;
@@ -2093,33 +2183,13 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                                 protectedFacts = push(protectedFacts, EqualityFact { left: priorOther, right: priorOther });
                                 protected = ValidatorContext { equalities: protectedFacts, ..yesContext };
                                 yesState = ExecutionState { context: protected, ..clone(header.state) };
-                                body = executeSteps(yesState, loop.body);
-                                if body.status != 0 { return ExecutionFlowResult { status: body.status, block: id, step: body.failedAt, state: body.state }; };
-                                preserved = executeSteps(body.state, loop.checks);
-                                if preserved.status != 0 { return ExecutionFlowResult { status: preserved.status, block: id, step: preserved.failedAt, state: preserved.state }; };
-                                next = resolveValue(body.state, loop.variant);
-                                if next is ValueLookup::Found {
-                                    nextTerm = (next as ValueLookup::Found).term;
-                                    if loop.variantMode = 0 {
-                                        if entailsGoal(body.state.context, ValidatorGoal::Less { left: nextTerm, right: prior }) = false {
-                                            return ExecutionFlowResult { status: 1, block: id, step: -1, state: body.state };
-                                        };
-                                    } else {
-                                        otherAfter = resolveValue(body.state, loop.variantOther);
-                                        if otherAfter is ValueLookup::Found {
-                                            if entailsGoal(body.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: priorOther }) = false {
-                                                return ExecutionFlowResult { status: 1, block: id, step: -1, state: body.state };
-                                            };
-                                        } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: body.state }; };
-                                        if entailsGoal(body.state.context, ValidatorGoal::Less { left: prior, right: nextTerm }) = false {
-                                            return ExecutionFlowResult { status: 1, block: id, step: -1, state: body.state };
-                                        };
-                                    };
-                                    inverse = negateRelation(loop.relation, a, b);
-                                    noContext = assumeRelation(header.state.context, inverse.relation, inverse.left, inverse.right);
-                                    noState = ExecutionState { context: noContext, ..header.state };
-                                    return walkExecution(blocks, loop.exit, noState, fuel - 1);
-                                };
+                                frame = LoopFrame { header: id, region: clone(loop.region), checks: clone(loop.checks), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: prior, priorOther: priorOther };
+                                bodyResult = walkExecution(blocks, loop.body, yesState, fuel - 1, push(clone(loops), frame));
+                                if bodyResult.status != 0 { return bodyResult; };
+                                inverse = negateRelation(loop.relation, a, b);
+                                noContext = assumeRelation(header.state.context, inverse.relation, inverse.left, inverse.right);
+                                noState = ExecutionState { context: noContext, ..header.state };
+                                return walkExecution(blocks, loop.exit, noState, fuel - 1, loops);
                             };
                         };
                     };
@@ -2143,13 +2213,13 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                     if noKnown = false {
                         yesContext = assumeRelation(run.state.context, condition.relation, a, b);
                         yesState = ExecutionState { context: yesContext, ..clone(run.state) };
-                        yesResult = walkExecution(blocks, condition.yes, yesState, fuel - 1);
+                        yesResult = walkExecution(blocks, condition.yes, yesState, fuel - 1, clone(loops));
                         if yesResult.status != 0 { return yesResult; };
                         if yesKnown { return yesResult; };
                     };
                     noContext = assumeRelation(run.state.context, inverse.relation, inverse.left, inverse.right);
                     noState = ExecutionState { context: noContext, ..run.state };
-                    return walkExecution(blocks, condition.no, noState, fuel - 1);
+                    return walkExecution(blocks, condition.no, noState, fuel - 1, loops);
                 };
             };
             return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
@@ -2170,20 +2240,20 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                             yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..run.state };
-                            return walkExecution(blocks, branch.yes, yesState, fuel - 1);
+                            return walkExecution(blocks, branch.yes, yesState, fuel - 1, loops);
                         };
                         noKnown = booleanKnown(run.state.context, term, noLiteral, false);
                         if noKnown = false {
                             yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..clone(run.state) };
-                            yesResult = walkExecution(blocks, branch.yes, yesState, fuel - 1);
+                            yesResult = walkExecution(blocks, branch.yes, yesState, fuel - 1, clone(loops));
                             if yesResult.status != 0 { return yesResult; };
                         };
                         noContext = assumeRelation(run.state.context, 0, term, noLiteral);
                         noContext = assumeBooleanFact(noContext, term, noLiteral);
                         noState = ExecutionState { context: noContext, ..run.state };
-                        return walkExecution(blocks, branch.no, noState, fuel - 1);
+                        return walkExecution(blocks, branch.no, noState, fuel - 1, loops);
                     };
                 };
             };
@@ -2193,11 +2263,11 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
             branch = end as ExecutionEnd::Branch;
             yes = executeSteps(run.state, branch.yesSteps);
             if yes.status != 0 { return ExecutionFlowResult { status: yes.status, block: id, step: yes.failedAt, state: yes.state }; };
-            yesResult = walkExecution(blocks, branch.yes, yes.state, fuel - 1);
+            yesResult = walkExecution(blocks, branch.yes, yes.state, fuel - 1, clone(loops));
             if yesResult.status != 0 { return yesResult; };
             no = executeSteps(run.state, branch.noSteps);
             if no.status != 0 { return ExecutionFlowResult { status: no.status, block: id, step: no.failedAt, state: no.state }; };
-            return walkExecution(blocks, branch.no, no.state, fuel - 1);
+            return walkExecution(blocks, branch.no, no.state, fuel - 1, loops);
         };
         return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
     };
@@ -2208,5 +2278,5 @@ fn validateExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &Execut
     if uniqueExecutionBlocks(blocks) = false {
         return ExecutionFlowResult { status: 3, block: entry, step: -1, state: clone(initial) };
     };
-    return walkExecution(blocks, entry, initial, size(blocks));
+    return walkExecution(blocks, entry, initial, 2 * size(blocks) + 2, []);
 };
