@@ -1,166 +1,244 @@
 # Raw pointers (design)
 
-> **Draft.** This is a proposal for step 25 of the roadmap in `README.md`. It replaces Part 3 of `DROPS.md` and changes what step 25 says about `*T`; the reasons are under "Why not an address". Nothing here is built.
+> **Draft.** This is a proposal for step 25 of the roadmap in `README.md`, and for the part of step 29 that puts `Box` in the library. It replaces Part 3 of `DROPS.md`, and the `*T` that step 25 sketches. Nothing here is built.
 
-## The constraint that decides it
+## The constraint, and what follows from it
 
-The validator never models a heap. A local's value never changes, an assignment gives the local a new iota, and a fact stays true for the rest of the path (MIR.md, Validation). Every proof the language has, from the contracts of `set` to the invariant of `StdList`, relies on that. An ordinary raw pointer breaks it twice. Two pointers can name the same memory, so a store through one changes what a load through the other gives. And a store changes memory without assigning a local, so no new iota records it. Supporting both would need a heap in `ProofState`, plus a frame on every contract that says which memory a call may touch: separation logic, retrofitted onto every function.
+The validator never models a heap. A local's value never changes, an assignment gives the local a new iota, and a fact stays true for the rest of the path (MIR.md, Validation). Every proof the language has relies on that.
 
-The design below avoids that. **A pointer owns its block, and the block's contents are part of the pointer's value.** Nothing else can name the block, so there is no aliasing. A write moves the pointer in and gives a new pointer back, so it is an assignment with a new iota, as `set` is. The program does everything a raw pointer is for: it allocates, works with memory that holds nothing yet, writes, moves elements out and frees, all by hand, and the compiler inserts none of it. The validator proves, with the facts it already uses for arrays, that no slot is read before it is written, no index is out of range, and no element is lost. The move check proves that nothing is used after it is freed.
+A raw address breaks it. Two addresses can name the same memory, a store changes memory without assigning a local, and nothing about an address says whether its memory is still allocated. The properties that make an address safe to use, such as being the only name for a block, written before read, or freed once, are facts about the heap, and the validator cannot check them without a heap model and a frame on every contract. The language needs addresses anyway: `Box` and the allocator in Tersus (steps 29, 30b), system calls that take a buffer (step 30d), and structures that share memory.
 
-## The type
+So the design separates what can be proved from what has to be trusted, and makes the trusted part small and visible:
 
-`Ptr<T>` is a builtin type: room for a number of `T`s on the heap, owned by whoever holds the pointer.
+1. **`Addr<T>`: a raw address, not validated.** It can be dereferenced only in a `trusted fn`, a function whose body is compiled but not proved, and whose contract the validator assumes as it assumes an `axiom`'s.
+2. **`Box<T>`: the owning, exclusive pointer.** It stays a builtin until step 29, then becomes a library struct over an `Addr<T>`, written in trusted functions. Its claim is exclusivity, and that claim is what lets the validator keep treating a `Box` as the value it holds.
+3. **`Uninit<T>`: a slot that may hold nothing, validated.** `Vec`, `StdList` and `String`'s storage are built from `Box<Array<Uninit<T>>>` and are fully proved.
 
-- **One word natively**: the address. The capacity is not stored (see Ghost facts), so `struct Box<T> { ptr: Ptr<T> }` has the layout that `Box<T>` has today (step 29). A type that needs the capacity at run time keeps it in a field.
-- **Not Copy, not Clone.** A copy would be a second owner. `clone(p)` is an error (`Ptr<Int> is not Clone`). A struct that holds a `Ptr` can be Clone only through a `Clone` with a body of its own (DROPS.md, Part 1).
-- **No `=`.** Two live pointers never share an address, so comparing addresses would always be false, and comparing contents is what a type built on a pointer defines itself. A struct or enum that holds a `Ptr` gets no structural `=`.
-- **No implicit drop.** `MirOwnership` treats a `Ptr` as plain: it moves the word and never frees it. Freeing is `Ptr::free`, and a pointer that is dropped without it leaks its block. That is safe (nothing is used after it is freed) and becomes an error once `Ptr` is linear (see Ownership).
-- **What it can point at**: any type that has a size, as for an element of an array (`Ptr<Int>`, `Ptr<Node>`, `Ptr<List<Int>>`, `Ptr<Ptr<Int>>`). There is no `Ptr<Array<T>>`: a block of `n` is already the unsized array.
-- **Not printable.** `main` cannot return one (`a Ptr cannot be the result of a program`).
+The trusted base moves from C and Haskell into a short list of Tersus functions that a command can print. Everything above it stays proved.
 
-## Operations
+## Why not an owning `Ptr<T>`
 
-Eight builtins, written as calls like `Box::new` and `Array::boxed`, none of them usable as a value. `i` is an index into the block, not a byte offset. There is no pointer arithmetic, because an interior pointer would be a second name for the block.
+The first draft of this document proposed `Ptr<T>`, a validated pointer that owned its block and carried its contents as ghost arrays. Compared with `Box<Array<T>>`, which already owns its block exclusively and is caught by the move check after it is moved:
+
+| What `Ptr<T>` gave | Without `Ptr` |
+|---|---|
+| Exclusive ownership, and use after free caught by moves | `Box` has it |
+| An explicit `free` | Not needed: a `Box` is freed when it is dropped, and step 26 lets a type decide what that does |
+| `resize` (realloc) | `Box::resize` |
+| One word, with a ghost capacity | `Box<Array<T>>` is an address and a length, which a collection needs anyway |
+| Slots that hold nothing, with `filled` and `at` | `Uninit<T>`, below |
+
+Only the last row was new, and it is a property of a slot, not of a pointer. As a type of its own it works on the heap (`Box<Array<Uninit<T>>>`) and inline (`Array<Uninit<T>, 8>`, a buffer in a frame), which `Ptr` could not do.
+
+## Layer 1: `Addr<T>` and trusted code
+
+### The type
+
+`Addr<T>` is an address of room for a `T`, or null. It is one word, Copy, and `=` compares addresses. Nothing about it is known to the validator: it is an opaque value.
+
+- **Any code can hold one**: keep it in a local or a field, pass it, return it, compare it. Only trusted code can use one to read or write memory.
+- **`T` is any type that has a size**, as for an element of an array. `Addr<Array<T, N>>` is allowed, and an address of an unsized array is an `Addr<T>` and a length that the program keeps.
+- **Not printable.** `main` cannot return one (`an Addr cannot be the result of a program`).
+
+### Operations
+
+These are written as calls, as `Box::new` is, and are allowed only in the body of a trusted function (`Addr::read is a raw memory operation and needs a trusted fn`). Offsets are in units of `T`.
+
+| Operation | Does |
+|---|---|
+| `Addr::alloc(n)` | room for `n` values of `T`, uninitialized; the program ends with an error if the system refuses it or the size in bytes overflows |
+| `Addr::resize(a, n)` | `realloc`: room for `n`, with the first `min(old, n)` kept, and possibly a new address |
+| `Addr::free(a)` | frees the room `a` was allocated with; returns `0` |
+| `Addr::null()` | the null address |
+| `Addr::offset(a, i)` | the address `i` values of `T` past `a` |
+| `Addr::read(a)` | the words of the `T` at `a`, as a value: a bitwise copy, so a `T` that owns something now has two owners |
+| `Addr::write(a, x)` | moves `x` into the room at `a` without dropping what was there; returns `0` |
+| `Addr::cast(a)` | the same address as an `Addr<U>`, with `U` decided by the use, as for `Array::empty()` |
+
+`read` and `write` are Rust's `ptr::read` and `ptr::write`. Trusted code decides which copy of a value is the owner, and drops exactly one.
+
+### `trusted fn`
+
+```tersus
+trusted fn f(...) -> T [{ in }] [{ out }] { ... };
+```
+
+- **The body is checked for types and moves, and compiled. It is not validated.** `MirMoves` still runs, so a value moved twice in trusted code is still an error.
+- **Its contract is checked at every call and assumed afterwards.** A caller proves the input contract and gets the output contract, as for any function. The function also counts as ending unless it is marked `~`.
+- **Where it can be:** any function, an impl's function, and the `drop` of a `Drop` impl. A trusted function can call any function, and any function can call it.
+- **`trusted impl`.** A structural `impl Clone` or `impl Copy` for a type that holds an `Addr` copies the address, which would make a second owner of whatever the address owns, so it must be written `trusted impl Clone for T { };`. Without the mark it is refused (`Handle holds an Addr: a structural copy of it is trusted`).
+- **Making a value that holds an `Addr` is trusted.** Without field visibility, this is what stops other code from building a `Box { addr: a }` around an address that is not its own: a struct literal, an enum variant or an update (`..base`) that gives an `Addr` field a value is allowed only in trusted code. Reading such a field is not restricted, because a copy of an address does nothing outside trusted code.
+- **`extern fn`** (step 30d: `write`, `exit`, the allocator symbols) is trusted by definition: a declaration with no body that the emitter turns into an LLVM `declare`, whose contract is assumed.
+- **`tersus trusted <file>`** prints every trusted function and impl of a program and its prelude, with their contracts. That is the whole of what the program's proofs take on trust, apart from the builtins.
+
+### Ghost functions
+
+Trusted code needs to tell the validator what a value it built means, in terms the validator can carry around. A ghost function is a function with no body that only contracts and validation statements can call:
+
+```tersus
+ghost fn contents<T>(b: &Box<T>) -> T;
+```
+
+It is an uninterpreted symbol: `contents(b)` is a term with no facts of its own. The facts come from contracts, and only a trusted function or an `axiom` can promise a fact about it that it cannot derive. An ordinary function can only pass on what its callees promise. Calling one in code is an error (`contents is a ghost function: it has no body`).
+
+### What trusted code owes the validator
+
+These are the rules that a trusted function has to follow, and that nothing checks. Each one is a property the validator relies on and cannot see.
+
+1. **Its contract is true.** Whenever the input contract holds, the function ends (unless it is `~`) and the output contract holds.
+2. **Stability.** What a contract says of a value stays true while the value is alive, from the assignment that makes it until it is moved or its function returns, whatever code runs in between. In practice: trusted code writes the memory that a live value's meaning depends on only when it was given that value by value (moved in), and the value it returns is a new one. Through a lent `&T` it only reads.
+3. **Exclusivity.** Two live values never depend on the same memory, unless that memory is never written while either is alive. The exception allows sharing what does not change (a reference count over an immutable value).
+4. **Memory safety.** No read of memory that is freed or was never written, no double free, no access out of the room allocated, and of the copies `Addr::read` makes of an owning value, exactly one is used as the owner.
+5. **Drops.** A value's `drop` frees what the value owns, once.
+
+Rule 2 is the exact form of "the validator treats values as immutable" at the boundary with memory, and rule 3 is what makes it possible. The tests that stand in for a proof are the ones that exist now: the heap model of `TestOwnership`, `TERSUS_CHECK` and valgrind in `TestNative`, and the comparison of native code with `eval`.
+
+## Layer 2: `Box<T>` on `Addr<T>` (step 29)
+
+Until step 29 `Box` stays a builtin, and nothing below needs it to change. When it moves to the library:
+
+```tersus
+struct Box<T> { addr: Addr<T> };
+
+ghost fn contents<T>(b: &Box<T>) -> T;
+
+impl<T> Box<T> {
+    trusted fn new(x: T) -> Self [{ }] [{ affirm contents(return) = x; }] {
+        a = Addr::alloc(1);
+        done = Addr::write(a, x);
+        return Self { addr: a };
+    };
+
+    trusted fn unbox(self: Self) -> T [{ }] [{ affirm return = contents(self); }] {
+        x = Addr::read(self.addr);       // x is now the owner of what the room held
+        done = Addr::free(self.addr);
+        return x;
+    };
+};
+
+impl<T> Drop for Box<T> {
+    trusted fn drop(self: &Self) -> Int [{ }] [{ }] {
+        x = Addr::read(self.addr);       // dropped when drop returns
+        return Addr::free(self.addr);
+    };
+};
+```
+
+`Box<T>` meets rule 3 because `new` is the only code that makes one, and it allocates fresh room. It meets rule 2 because nothing writes through the address of a live `Box`. A `Box` that is moved into a trusted function and changed in place is a new value when it comes back.
+
+What the compiler does for `Box` by name today (looking through it for fields and `match`, `Box::new(p) = Box::new(q)` meaning `p = q`, the recursion check) becomes a language item, as step 29 describes. For the validator, the lang item says that a `Box` is its `contents`: `a = b` exactly when `contents(a) = contents(b)`, an axiom of the item and not something each program states. `Box<Array<T>>` keeps its length in a second field, `len: Int`, with `Addr` arithmetic in its trusted functions.
+
+## Layer 3: `Uninit<T>`
+
+### The type
+
+`Uninit<T>` is room for one `T` that may or may not hold one. Natively it is the words of a `T` and nothing else: there is no tag, and whether it is filled is known only to the validator.
+
+- **Ghost facts**: `filled(u)` says it holds a value, and `at(u)` is that value, known only when it is filled. They are used in contracts, `affirm`, `define` and invariants.
+- **Dropping one drops nothing**, whether or not it is filled. Forgetting a filled one leaks what it holds, which is safe. Once linear types exist (DROPS.md, Part 2), an `Uninit<T>` of a `T` that owns something is linear, and `Uninit::discard(u)`, which needs `!filled(u)`, is how an empty one is consumed.
+- **Copy when `T` is Copy**, and otherwise neither Copy nor Clone, since a copy cannot know at run time whether there is a value to copy. No `=`.
+- **Any `T` that has a size.** In `MirOwnership` it is plain: its words are moved, and nothing about it is freed.
+
+### Operations
 
 | Operation | Needs | Gives |
 |---|---|---|
-| `Ptr::alloc(n)` | `n >= 0` | `cap(return) = n`, no slot filled |
-| `Ptr::write(p, i, x)` | `0 <= i < cap(p)`, `!filled(p, i)` | `filled` and `at(_, i) = x` at `i`, the other slots as they were |
-| `Ptr::get(p, i)` | `0 <= i < cap(p)`, `filled(p, i)` | `return = at(p, i)`: a view, as `get` of a list is |
-| `Ptr::set(p, i, x)` | `0 <= i < cap(p)`, `filled(p, i)` | `at(_, i) = x`; the old element is dropped |
-| `Ptr::take(p, i)` | `0 <= i < cap(p)`, `filled(p, i)` | a `Taken<T>`: `.value = at(p, i)`, and `.ptr` with slot `i` empty |
-| `Ptr::clear(p, from, to)` | `0 <= from <= to <= cap(p)`, every slot in `from..to` filled | those slots empty, their elements dropped |
-| `Ptr::resize(p, n)` | `n >= 0`, no slot in `n..cap(p)` filled | `cap(return) = n`, slots below `min(n, cap(p))` as they were |
-| `Ptr::free(p)` | no slot in `0..cap(p)` filled | `0` (there is no unit type) |
+| `Uninit::empty()` | | `!filled(return)` |
+| `Uninit::new(x)` | | `filled(return)`, `at(return) = x` |
+| `Uninit::get(u)` | `filled(u)` | `return = at(u)`, a view of `u`: reading it moves nothing |
+| `Uninit::take(u)` | `filled(u)` | `return = at(u)`; `u` is moved |
+| `Uninit::drop(u)` | `filled(u)`, in a `drop` only | drops the value in place, through the lent `self` of the drop |
 
-- **`write`, `set`, `take`, `clear` and `resize` take the pointer and give one back**, in place natively. The validator sees a new value, so each one is an assignment: `p = Ptr::write(p, i, x);`.
-- **`get` reads the pointer and moves nothing**, so its pointer operand can be a lent `&Ptr<T>`, or a field of a lent `&Self`, and the result is a view (MIR.md, Moves). `MirMoves` refuses to move the result out (`cannot move x out of a Ptr, which still holds it: write clone(x), or Ptr::take`), as it does for an element of a list.
-- **`write` needs an empty slot, `set` a filled one.** Writing over a filled slot would lose an element that may own something, and setting an empty slot would drop memory that was never written. For a `Ptr<Int>` that costs nothing: `set` drops nothing.
-- **`take` gives two values back.** There are no tuples, so the prelude declares `struct Taken<T> { ptr: Ptr<T>, value: T };`, and the program takes its fields: `t = Ptr::take(p, i); x = t.value; p = t.ptr;`.
-- **`clear` and `set` drop what they remove** with the runtime's `tersus_drop`, walking the descriptor of `T`, as a list frees its elements today. This is the only place a pointer operation runs code on an element, and it does nothing for a type that owns nothing.
-- **`resize` is `realloc`.** Moving an element is copying its words in Tersus, so the bitwise copy that `realloc` makes is a move of every filled slot.
-- **What fails at run time and not in the proof**: an allocation the system refuses, and a size whose bytes overflow an `Int`. Both end the program with an error, as an overflow does. No contract can promise memory.
+`Uninit::drop` is the one operation that changes memory through a lent value. It is allowed only in the body of a `drop`, where the value is ending and nothing will look at it again (see Decision 3).
 
-The contracts are axioms, the trusted base, as the contract of `writeByte` is. Everything written on top of them is proved.
+### On sequences
 
-## Ghost facts
+Two additions to arrays make `Uninit` usable as an element:
 
-Three functions describe a pointer to the validator. They can be used in contracts, `affirm`, `define` and invariants, and nowhere else (`cap is known to the validator only: keep the capacity in a field`).
+- **Empty arrays without a filler.** `array(n, Uninit::empty())` is accepted for any `T` (an empty slot is copied by copying words that mean nothing), and `Array::uninit(n)` is a `Box<Array<Uninit<T>>>` of `n` empty slots, allocated without being written.
+- **`replace(a, i, x)`** moves `x` into element `i` and gives back the element that was there: a `Replaced<S, E> { seq: S, old: E }` (from the prelude, since there are no tuples), with `return.seq = set(a, i, x)` and `return.old = get(a, i)`. This is useful beyond `Uninit`: today nothing can be moved out of an element of an array or a list, and `replace` is the way.
+- **`Box::resize(b, n)`** for a `Box<Array<Uninit<T>>>`: the size is `n`, the elements below `min(n, size(b))` are as they were, and the new ones are empty. It is `realloc`, so the moves of the elements cost nothing.
 
-- `cap(p)`: the number of slots, which is at least 0.
-- `filled(p, i)`: slot `i` holds an element.
-- `at(p, i)`: the element in slot `i`, which is known only when it is filled.
+The validator needs nothing new. `filled(get(a, i))` and `at(get(a, i))` are terms over `get`, so the `forall` facts of arrays, their triggers and the frame facts of `set` work as they do for any element.
 
-**They are arrays the validator already knows.** Internally `filled(p, i)` is `get(filledOf(p), i)` and `at(p, i)` is `get(contentsOf(p), i)`, over two ghost arrays of size `cap(p)`. Each operation's facts are then those of `set` on the arrays: `write` gives `contentsOf(return) = set(contentsOf(p), i, x)` and `filledOf(return) = set(filledOf(p), i, true)`. The `forall` triggers, frame facts, case splits and linked-list proofs of LANGUAGE.md work unchanged, and no new term reaches the proof engine. This is the main reason for modelling the contents as values: none of `ProofEngine` changes.
+### A `Vec` on `Uninit`
 
-## Examples
-
-A `Vec` built on a pointer. This is `examples/vec.tersus` without the filler value that `Array::boxed` needed, and with a `pop` that gives the element back:
+`examples/vec.tersus` without the filler that `Array::boxed` needs, with a `pop` that gives the element back, and with nothing trusted:
 
 ```tersus
 struct Vec<T> {
-    ptr: Ptr<T>,
-    cap: Int,
+    data: Box<Array<Uninit<T>>>,
     len: Int,
 } invariant [{
-    affirm 0 <= len; affirm len <= cap; affirm cap = cap(ptr);
-    affirm forall j in 0..len: filled(ptr, j);
-    affirm forall j in len..cap: !filled(ptr, j);
+    affirm 0 <= len; affirm len <= size(data);
+    affirm forall j in 0..len: filled(get(data, j));
+    affirm forall j in len..size(data): !filled(get(data, j));
 }];
 
 struct Popped<T> { vec: Vec<T>, value: T };
 
 impl<T> Vec<T> {
     fn new() -> Self [{ }] [{ affirm return.len = 0; }] {
-        return Self { ptr: Ptr::alloc(4), cap: 4, len: 0 };
+        return Self { data: Array::uninit(4), len: 0 };
     };
 
-    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm at(return.ptr, self.len) = x; }] {
-        v = self;
-        if v.len = v.cap {
-            n = v.cap * 2 + 4;
-            v = Self { ptr: Ptr::resize(v.ptr, n), cap: n, len: v.len };
+    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm at(get(return.data, self.len)) = x; }] {
+        data = self.data;
+        if self.len = size(data) {
+            data = Box::resize(data, size(data) * 2 + 4);
         };
-        return Self { ptr: Ptr::write(v.ptr, v.len, x), cap: v.cap, len: v.len + 1 };
+        return Self { data: set(data, self.len, Uninit::new(x)), len: self.len + 1 };
     };
 
-    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = at(self.ptr, i); }] {
-        return clone(Ptr::get(self.ptr, i));
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = at(get(self.data, i)); }] {
+        return clone(Uninit::get(get(self.data, i)));
     };
 
     fn pop(self: Self) -> Popped<T> [{ affirm self.len >= 1; }] [{ affirm return.vec.len = self.len - 1; }] {
-        t = Ptr::take(self.ptr, self.len - 1);
-        return Popped<T> { vec: Self { ptr: t.ptr, cap: self.cap, len: self.len - 1 }, value: t.value };
+        r = replace(self.data, self.len - 1, Uninit::empty());
+        return Popped<T> { vec: Self { data: r.seq, len: self.len - 1 }, value: Uninit::take(r.old) };
     };
+};
 
-    // Until step 26 gives Vec a Drop, a program frees a Vec by calling this
-    fn free(self: Self) -> Int [{ }] [{ }] {
-        return Ptr::free(Ptr::clear(self.ptr, 0, self.len));
+impl<T> Drop for Vec<T> {
+    fn drop(self: &Self) -> Int [{ }] [{ }] {
+        i = 0;
+        while i < self.len [{ affirm i >= 0; affirm i <= self.len; }] shrinks self.len - i {
+            Uninit::drop(get(self.data, i));
+            i = i + 1;
+        };
+        return 0;
     };
 };
 ```
 
-`Box<T>` in Tersus (step 29) is a pointer with one filled slot:
-
-```tersus
-struct Box<T> { ptr: Ptr<T> } invariant [{ affirm cap(ptr) = 1; affirm filled(ptr, 0); }];
-
-fn boxNew<T>(x: T) -> Box<T> [{ }] [{ affirm at(return.ptr, 0) = x; }] {
-    return Box<T> { ptr: Ptr::write(Ptr::alloc(1), 0, x) };
-};
-
-fn unbox<T>(b: Box<T>) -> T [{ }] [{ affirm return = at(b.ptr, 0); }] {
-    t = Ptr::take(b.ptr, 0);
-    done = Ptr::free(t.ptr);
-    return t.value;
-};
-```
-
-## Ownership and moves
-
-- **Use after free and double free are already caught.** A `Ptr` is not Copy, so `Ptr::free(p)` moves `p`, and `MirMoves` reports any use after it (`p was moved at line 12:5`) on every path. The same holds for the pointer given to `write` and the other operations that take one. This needs no new analysis, so pointers do not have to wait for linear types.
-- **Leaks are caught once `Ptr` is linear** (DROPS.md, Part 2). A `Ptr` is then a linear type: it has to be given to `free`, returned, or put in a value that is used. A struct that holds one is linear unless it has a `Drop`, which is how a `Vec` becomes affine at step 26. Until then a forgotten pointer leaks, `TERSUS_CHECK` and valgrind report it, and nothing unsafe happens.
-- **No element is lost.** `free` needs every slot empty, and an element can only leave a slot through `take` (to the program) or `clear` and `set` (dropped), so a block is never freed with something in it.
-- **Containers.** `List<Ptr<T>>`, `Array<Ptr<T>, N>` and a type parameter that is not bounded are refused for a `Ptr`, or anything that holds one, with a message that names the type: `StdList` copies its element into its slack, and an unbounded `T` is taken to be Clone (DROPS.md, Decision 5). `Box<Ptr<T>>`, fields and enum payloads hold exactly one and are fine. The restriction on lists ends when `StdList` is built on a `Ptr`, as `Vec` is above.
+`set(data, self.len, ...)` drops the empty slot it replaces, which does nothing. The invariant says it was empty, so no element is lost. Before step 26, a `Vec` that holds values which own something leaks them when it is dropped. A `Vec<Int>` loses nothing.
 
 ## Running it
 
-- **`eval` and the executor keep values.** Since nothing else can name the block, a `Ptr` can be a value in the interpreters: `VPtr cap (Map Int Value)`, with each operation a function from value to value. `MirEval` and `StdLib.evalBuiltinFunct` need no heap, and `testNative` compares them with native code as it does now.
-- **The heap model of `TestOwnership`** learns blocks that are allocated, written, taken from and freed by hand, and reports a slot read before it is written, a block freed with a slot filled, and a block left at the end.
-- **MIR.** The operations are `ListOp`s (`PtrAlloc`, `PtrWrite`, `PtrGet`, `PtrSet`, `PtrTake`, `PtrClear`, `PtrResize`, `PtrFree`), with words in `MirData`. `PtrGet` is a `Peek` when the ownership pass would make it one, so a read in place costs nothing. `roles` makes the pointer operand of `PtrGet` a read and that of the others a consume. `MirVerify` checks the types. `Ptr` is a new `Type` constructor (`ptr T` in the data).
-- **Native code.** A `Ptr` is an `i64` address. `alloc` and `resize` call the runtime's `allocate` and `reallocate`, so the `TERSUS_CHECK` accounting covers them. An element is `words(T)` words at `address + i * words(T) * 8`, read and written as an element of an array is. `clear` and `set` call `tersus_drop` on the slot. The descriptor gets `KIND_PTR = 8`: dropping it does nothing, and it is never cloned, compared or printed.
+- **`eval` needs a heap for `Addr`.** An `Addr` can be shared, so `MirEval` gets a store of blocks (a map from a block to its slots, with an address encoded as a block and an index) that `alloc`, `read`, `write`, `offset` and `free` work on. It fails on a read of a freed or unwritten slot and on a double free, so `eval` is the first check of trusted code. The older executor in `StdLib` refuses trusted code, and `testNative` uses `eval` for those programs. `Uninit` needs no heap: it is `VUninit (Maybe Value)`.
+- **MIR.** The `Addr` operations and the `Uninit` operations are `ListOp`s (`AddrAlloc`, `AddrResize`, `AddrFree`, `AddrNull`, `AddrOffset`, `AddrRead`, `AddrWrite`, `AddrCast`, `UninitNew`, `UninitEmpty`, `UninitGet`, `UninitTake`, `UninitDrop`, `ArrayUninit`, `Replace`, `BoxResize`), with words in `MirData`. `Addr T` and `Uninit T` are new `Type` constructors (`addr T`, `uninit T` in the data). Functions carry a `trusted` flag, which `MirValidate` uses to skip the body and assume the contract.
+- **Native code.** An `Addr` is an `i64`. `alloc`, `resize` and `free` call the runtime's `allocate`, `reallocate` and `release`, so `TERSUS_CHECK` counts the blocks. `read` and `write` copy `words(T)` words, and `offset` adds `i * words(T) * 8`. An `Uninit<T>` is laid out as a `T`, and its descriptor is `KIND_UNINIT`, which drops, clones and compares nothing. `Uninit::drop` calls `tersus_drop` with the descriptor of `T`.
 - **Both emitters, in step.** `LlvmEmit` and `examples/emit.tersus` gain the same cases, `examples/mir_reader.tersus` reads the new words, and `bootstrap/emitter.ll` is regenerated. `TestMirEmit` keeps them equal.
-
-## Why not an address
-
-The roadmap's sketch of step 25 was `*T`: a Copy word with `*p`, `p.offset(i)`, `load` and `store`, where the validator tracks `valid(p)` and `size(p)` through contracts, and a function that uses one is marked in its signature. Three things go wrong with it against the validator as it is:
-
-1. `valid(p)` is a fact about the heap and not about `p`. After `free(q)` it is false for every `p` that aliases `q`, so a fact the validator holds would stop being true without any assignment, which the validator rests on never happening.
-2. A `load` through `p` after a `store` through an alias `q` needs to know whether `p` and `q` overlap. That is a heap and a frame on every contract, a bigger change than everything else in this document combined.
-3. `p.offset(i)` makes an interior pointer, which is an alias by construction.
-
-What `*T` would add over `Ptr<T>` is sharing. The users the roadmap names don't need it: `Box`, `StdList`, `Vec` and `String`'s storage (steps 29 and 30b) own their blocks. The runtime's descriptor walking is replaced by code made per type (step 30a) and not by type-erased pointers. `write(fd, ptr, n)` (step 30d) can take a lent `&Ptr<Byte>` and a range. A graph or a doubly linked list is a block of nodes linked by index, as in A linked list in an array, and now with no filler values.
-
-If something does need sharing later (a C struct passed by address, an intrusive list, `mmap`), it should be a separate, explicitly unchecked type, `Addr<T>`. It would be a Copy word whose loads give a value the validator knows nothing about, usable only in a `trusted fn`: a function whose body is checked for types and compiled, and whose contract is assumed, the way an `axiom`'s is. That is a contained escape hatch and not the memory model, and it is left out until something in the repository needs it.
-
-## Changes to other documents
-
-- `README.md`, step 25: `Ptr<T>` and the operations above in place of `*T`, `*p` and `p.offset(i)`, no marker in signatures, and `Ptr` as the way a value holds its block. Step 29's `struct Box<T> { ptr: *T }` becomes `ptr: Ptr<T>`, and `*[T]` becomes a `Ptr<T>` with a capacity field.
-- `DROPS.md`, Part 3: points here. Its sketch (`alloc`, `store` giving the pointer back, `load` through a lent pointer, `take`, contents as an array) is this design, with `filled`, `set`, `clear`, `resize`, `Taken` and the non-linear first step added.
-- `LANGUAGE.md`: a section "Pointers" after "Box", the ghost functions in Validation Statements, and the container refusals in Current Limitations, when it is built.
 
 ## Order of work
 
-1. **The type and the operations**, with nothing built on them: the checker (`TPtr`, the builtins, the refusals, ghost-only `cap`/`filled`/`at`), `StdLib` contracts, the executor and `MirEval`, `MirMoves` roles, the emitters and runtime, `examples/pointers.tersus` (a hand-managed buffer that is filled, read, emptied and freed) and `examples/rejected/` programs for each contract: read before write, write over a filled slot, index out of range, free with a slot filled, use after free.
-2. **`Vec` on a pointer** (`examples/vec.tersus` as above), which tests whether the invariant's two foralls are cheap enough to prove at every operation.
-3. **Linear `Ptr`**, when DROPS.md, Part 2 lands. It turns leaks into errors.
-4. **`StdList` on a pointer** after drops (step 26), which gives it a `Drop`, then lists of values with drops, then `Box` (step 29).
+1. **`Uninit<T>`, `replace`, `Array::uninit` and `Box::resize`**, on the builtin `Box`. This is validated code with no trust in it, and it gives `examples/vec.tersus` its new form. The test is whether the invariant's two foralls are cheap enough to prove at each operation. `Uninit::drop` waits for step 26.
+2. **`trusted fn` and `ghost fn`**, with no `Addr` yet: a trusted function over the types that exist, `tersus trusted`, the `MirValidate` flag, and tests that a trusted contract is assumed and that a ghost function cannot be called in code.
+3. **`Addr<T>`**: the type, the operations, the rules on making values that hold one and on structural copies, the heap in `MirEval`, the emitters and runtime, `examples/addresses.tersus` (a buffer managed by hand in trusted functions behind a validated interface), and rejected programs for each rule a checker enforces.
+4. **Drops (step 26)**, then `StdList` on `Uninit`, and `Uninit::drop`.
+5. **`Box` in the library (step 29)**, on `Addr`.
+
+## Changes to other documents
+
+- `README.md`, step 25: `Addr<T>`, `trusted fn`, `ghost fn` and `Uninit<T>` in place of `*T` and the contracts on `valid(p)`. Step 29: `struct Box<T> { addr: Addr<T> }` in place of `ptr: *T`, and `*[T]` as an `Addr<T>` and a length. Step 30: `extern fn` as trusted.
+- `DROPS.md`, Part 3: points here. Its owning pointer is gone; `Uninit` and `replace` cover what Part 1's containers section needed of it.
+- `LANGUAGE.md`, when it is built: sections "Uninitialized slots" and "Trusted code", the ghost functions, and the rules of trusted code as a list a reader of a library can check it against.
 
 ## Decisions to make
 
-1. **Ghost capacity, or a fat pointer.** Here the capacity is ghost and the pointer is one word, which keeps `Box` at one word and leaves a `Vec` holding a `cap` field equal to `cap(ptr)`. A fat pointer (address and capacity, readable as `Ptr::cap(p)`) saves that field and matches today's `Box<Array<T>>`, at a word per `Box`.
-2. **Must `free` find every slot empty?** It is what makes "no element is lost" a proof. For `Vec` it is a `forall` over `0..cap` from two foralls over `0..len` and `len..cap`, after `clear(ptr, 0, len)`, and whether the engine splits that range without help is untested. If it doesn't, the cheaper rule is that `free` drops what is filled (like `clear(0, cap)`, which needs no proof, and leaves leaks to the linear check).
-3. **`write` and `set` as two operations**, or one `put` that drops whatever is there. Two keep "this slot was empty" in the proof, which is what catches a lost element at the place it is lost. One is simpler for a `Ptr<Int>`.
-4. **`Taken<T>` in the prelude**, or tuples. A struct is all the language has now. If tuples come, `take` should return one.
-5. **Whether `Addr<T>` and `trusted fn` are worth designing now** or only when a user appears. The recommendation is the latter.
+1. **Is the body of a trusted function validated at all?** Here it is not: its contract is assumed, as an `axiom`'s is. The alternative is to validate it with the `Addr` operations giving nothing, and to report what fails as a warning. That proves the arithmetic and the calls around the raw memory, at the cost of contracts written for the validator in code that is trusted anyway.
+2. **Who can make a value that holds an `Addr`.** Here it is trusted code, which stands in for private fields. With fields that can be private, this rule would become "a private field", and `Box` would need no special rule.
+3. **`Uninit::drop` through a lent `self`.** Part 1 of `DROPS.md` gives `drop` a `&Self`, so a drop cannot take its elements out. This allows the one change through a lent value that is unobservable. The alternatives are a `drop` that takes `Self` with its fields not dropped afterwards, or dropping the elements of a `Vec` in a trusted `drop`.
+4. **`Replaced<S, E>` in the prelude, or tuples.** A struct is all the language has. If tuples come, `replace` should return one.
+5. **Spelling: `Addr<T>` or `*T`.** `Addr<T>` reads like `Box<T>` and needs no change to the parser. `*T` is shorter and familiar, and makes `*` mean two things.
