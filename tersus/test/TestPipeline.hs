@@ -746,6 +746,8 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkBooleanBranch boolConstants (1,2) [execBlock 1 [] execEndDone, execBlock 2 [joinCheck] execEndDone] 2
                       , checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)
                       , checkMirSubset "x = 1; affirm x = 2; return x;" (Just False)
+                      , checkMirSubset "x = 5; below = x < 6; affirm below = true; return 0;" (Just True)
+                      , checkMirSubset "x = 5; below = x < 6; affirm below = false; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { affirm x = x; return x; }; return 0;" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int { affirm x = 0; return x; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { return 1 / x; }; return 0;" (Just False)

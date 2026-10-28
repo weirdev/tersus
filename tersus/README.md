@@ -61,7 +61,9 @@ calls and termination clauses remain unsupported. It
 is used for comparison, not for production validation;
 the returned flow state is one path's state and is not a joined postcondition.
 Branch facts include both the boolean result and, for a saved comparison, the
-relation between its operands at the time it was evaluated.
+relation between its operands at the time it was evaluated. A check of a boolean
+term against a literal is discharged from the comparison that produced the term,
+so `below = true` follows from `below` being `x < 6` with `x < 6` known.
 The symbolic executor records multiplication by zero or one, division by one,
 and concrete products, quotients and remainders when they fit in a signed
 64-bit integer.
