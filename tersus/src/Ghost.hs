@@ -157,6 +157,8 @@ rvalueCall rv =
         M.MakeBox _ -> Nothing
         M.Unbox _ -> Nothing
         M.Unsize _ -> Nothing
+        M.Clone _ -> Nothing
+        M.TakeField{} -> Nothing
   where
     binary op = case op of
         M.Add -> Plus

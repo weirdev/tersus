@@ -6,6 +6,9 @@
 // node before i has i after it). The operations keep both true. The invariant is six foralls.
 struct Node { value: Int, prev: Int, next: Int };
 
+impl Clone for Node { };
+impl Copy for Node { };
+
 // The links of every node are inside the list and agree with each other
 fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node>
     [{
@@ -37,7 +40,7 @@ fn insertAfter(nodes: List<Node>, p: Int, v: Int) -> List<Node>
 };
 
 // Following links is safe, however many times: cur is always a valid index
-fn walk(nodes: List<Node>, start: Int, steps: Int) -> Int
+fn walk(nodes: &List<Node>, start: Int, steps: Int) -> Int
     [{
         affirm start >= 0; affirm start < size(nodes);
         affirm forall i in 0..size(nodes): get(nodes, i).next >= 0;

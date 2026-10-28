@@ -121,8 +121,8 @@ testGenericLists =
             , parseValidProgramHelper "l = [true, false]; affirm get(l, 1) = false; affirm size(l) = 2;"
             , parseValidProgramHelper "m = [[1, 2], [3]]; affirm size(get(m, 0)) = 2; affirm get(get(m, 0), 1) = 2;"
             , parseValidateFailProgramHelper "l = [true, false]; affirm get(l, 1) = true;" "Could not prove: get(l, 1) = true"
-            , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; }] [{ affirm size(return) = size(m) + 1; affirm get(return, size(m)) = get(m, 0); }] { return push(m, first(m)); };"
-            , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; affirm forall j in 0..size(m): size(get(m, j)) = 2; }] [{ affirm forall j in 0..size(return): size(get(return, j)) = 2; }] { return push(m, first(m)); };"
+            , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; }] [{ affirm size(return) = size(m) + 1; affirm get(return, size(m)) = get(m, 0); }] { return push(m, clone(first(m))); };"
+            , parseValidProgramHelper "fn f(m: List<List<Int>>) -> List<List<Int>> [{ affirm size(m) > 0; affirm forall j in 0..size(m): size(get(m, j)) = 2; }] [{ affirm forall j in 0..size(return): size(get(return, j)) = 2; }] { return push(m, clone(first(m))); };"
             ]
 
 testStructs :: Test

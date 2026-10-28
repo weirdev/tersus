@@ -8,6 +8,7 @@ module Parse
     , parseStatementBlockWith
     , Decls
     , emptyDecls
+    , locating
     , proof
     , semicolon
     , statement
@@ -38,10 +39,15 @@ data Decls = Decls
     , declTypeParams :: [Name] -- the type parameters of the function or the struct being read: a name of these in a type is that parameter
     , declGenerics :: Map.Map Name [Variable] -- the structs with sizes and types, and the parameters of each, in order
     , declImplParams :: [Variable] -- the type and size parameters of the impl being read (`impl<T> Vec<T>`), which each of its functions has
+    , declLocate :: Bool -- whether a statement of a block is preceded by a `Mark` of the place it is written at
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty []
+emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty [] False
+
+-- The declarations from which a program is parsed with the place of each of its statements kept
+locating :: Decls -> Decls
+locating decls = decls{declLocate = True}
 
 type Parser = Parsec String Decls
 
@@ -106,7 +112,18 @@ genericStatementBlock p = do
 
 -- Tersus parsers
 statementBlock :: Parser [Statement]
-statementBlock = concat <$> genericStatementBlock statements
+statementBlock = concat <$> genericStatementBlock located
+
+-- (a statement of a program that is parsed to keep places comes after a mark of where it starts)
+located :: Parser [Statement]
+located = do
+    locate <- declLocate <$> getState
+    if locate
+        then do
+            position <- getPosition
+            stmts <- statements
+            return (Mark (sourceLine position) (sourceColumn position) : stmts)
+        else statements
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
@@ -363,8 +380,10 @@ structField = do
 
 -- Name { field: value, ..., ..base }: every field of the struct, or the ones that change and a base
 -- struct to copy the rest from. The result applies the struct's constructor, so it is an ordinary term.
-structLiteral :: Parser a -> (Value -> [a] -> a) -> Parser a
-structLiteral element apply = do
+-- With `..clone(base)` the fields that are not given are cloned one by one (`clone(base.f)`), and not all of base to be taken apart:
+-- the way to build a value like another that is only lent, or that is still wanted. The second argument tells a clone from another base.
+structLiteral :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Parser a
+structLiteral element cloned apply = do
     (name, declared) <- try $ do
         base <- qualifiedName
         ctors <- declCtors <$> getState
@@ -381,13 +400,13 @@ structLiteral element apply = do
                 whitespace
                 void (char '{')
                 return (candidate, known)
-    if null declared && isVariant name then whitespace >> return (apply (builtinFunct (Ctor name [])) []) else structFields element apply name declared
+    if null declared && isVariant name then whitespace >> return (apply (builtinFunct (Ctor name [])) []) else structFields element cloned apply name declared
   where
     isVariant = ("::" `isInfixOf`)
 
 -- The braces of a struct or variant literal, after its name and the opening brace
-structFields :: Parser a -> (Value -> [a] -> a) -> Name -> [Variable] -> Parser a
-structFields element apply name declared = do
+structFields :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Name -> [Variable] -> Parser a
+structFields element cloned apply name declared = do
     whitespace
     inits <- many fieldInit
     base <- optionMaybe (string ".." >> whitespace >> element <* whitespace <* optional (char ',' >> whitespace))
@@ -410,12 +429,15 @@ structFields element apply name declared = do
         whitespace
         optional (char ',' >> whitespace)
         return (field, value')
+    fieldOf from field
+        | "::" `isInfixOf` name = apply (builtinFunct (Field Nothing field)) [apply (builtinFunct (Cast name)) [from]]
+        | otherwise = apply (builtinFunct (Field (Just name) field)) [from]
     argument name base inits field =
         case (lookup field inits, base) of
             (Just given, _) -> return given
             (Nothing, Just from)
-                | "::" `isInfixOf` name -> return (apply (builtinFunct (Field Nothing field)) [apply (builtinFunct (Cast name)) [from]])
-                | otherwise -> return (apply (builtinFunct (Field (Just name) field)) [from])
+                | Just inner <- cloned from -> return (apply (builtinFunct CloneOf) [fieldOf inner field])
+                | otherwise -> return (fieldOf from field)
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
 
 -- Name or Enum::Variant
@@ -560,6 +582,12 @@ methodCall name receiver args = F (Var ('.' : name)) (receiver : args)
 
 expressionApply :: Value -> [Expression] -> Expression
 expressionApply funct = F (Val funct)
+
+-- (the base of an update that is a clone, `..clone(x)` or `..x.clone()`, which copies the fields it is used for)
+clonedBase :: Expression -> Maybe Expression
+clonedBase (F (Var "clone") [x]) = Just x
+clonedBase (F (Var ".clone") [x]) = Just x
+clonedBase _ = Nothing
 
 proofApply :: Value -> [VariableProof] -> VariableProof
 proofApply funct = FApp (CTerm funct)
@@ -933,7 +961,7 @@ nonInfixProof :: Parser VariableProof
 nonInfixProof =
     stringLiteralOf proofApply CTerm
         <|> concreteProof
-        <|> withFields proofApply Nothing (parensProof <|> structLiteral proof proofApply <|> try functionProof <|> try abstractProof)
+        <|> withFields proofApply Nothing (parensProof <|> structLiteral proof (const Nothing) proofApply <|> try functionProof <|> try abstractProof)
 
 infixProof :: Parser VariableProof
 infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof]) (\funct proof' -> FApp (CTerm (builtinFunct funct)) [proof'])
@@ -1016,7 +1044,7 @@ expression = try infixExpression <|> nonInfixExpression
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
     notExpression
-        <|> withFields expressionApply methods (structLiteral expression expressionApply <|> try fExpression <|> qualifiedCall)
+        <|> withFields expressionApply methods (structLiteral expression clonedBase expressionApply <|> try fExpression <|> qualifiedCall)
         <|> arrayLiteral (\items -> F (Val (builtinFunct ArrayFrom)) [Val items])
         <|> withFields expressionApply methods stringLiteral
         <|> (Val <$> value)

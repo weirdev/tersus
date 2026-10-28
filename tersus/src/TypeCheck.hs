@@ -545,6 +545,7 @@ builtinType funct =
         Set -> list (\a -> TFn [TList a, TInt, a] (TList a))
         UnBox -> failTc "Type error: Box::unbox is called, as in Box::unbox(b), and cannot be used as a value"
         NewBox -> failTc "Type error: Box::new is called, as in Box::new(x), and cannot be used as a value"
+        CloneOf -> failTc "Type error: clone is called, as in clone(x) or x.clone(), and cannot be used as a value"
         NewArray -> failTc "Type error: array needs a size that is a constant, so it is written array(3, x) and cannot be used as a value"
         ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
         NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
@@ -925,6 +926,8 @@ checkStatement top ctx env stmt =
             return (ctx, env, stmt)
         AxiomDef{} -> return (ctx, env, stmt)
         ProofDef{} -> return (ctx, env, stmt)
+        Mark{} -> return (ctx, env, stmt)
+        CopyDef{} -> return (ctx, env, stmt)
         TraitDef{} -> failTc "Type error: a trait can only be defined at the top of the program"
         ImplDef{} -> failTc "Type error: an impl can only be written at the top of the program"
         BoundedDef{} -> failTc "Type error: a function with bounds on its types cannot be written in an impl or a block"
@@ -1078,6 +1081,7 @@ inferExprR ctx env expr =
                 (xt, x') <- inferExprR ctx env x
                 let ty = TArrayOf xt SizeAny
                 arrayOk ty
+                requireMarker "Clone" xt
                 return (TBox ty, F (Val (builtinFunct NewBoxedArray)) [n', x'])
             _ -> failTc ("Type error: Array::boxed takes 2 arguments, got " ++ show (length args))
         F funct args
@@ -1089,6 +1093,7 @@ inferExprR ctx env expr =
                     (size, sizeArg) <- arraySize (constantInt n') n'
                     let ty = TArrayOf xt size
                     arrayOk ty
+                    requireMarker "Clone" xt
                     return (ty, F funct [sizeArg, x'])
                 _ -> failTc ("Type error: array takes 2 arguments, got " ++ show (length args))
         F (Val (VFunct _ _ _ (BuiltinFunct ArrayFrom) _)) [Val literal@(VList items)] -> do
@@ -1100,7 +1105,31 @@ inferExprR ctx env expr =
                     literalOk e
                     return (ty, expr)
                 _ -> failTc "Type error: an array literal is made from a list"
-        F (Var ('.' : method)) (receiver : args) -> do
+        F (Val (VFunct _ _ _ (BuiltinFunct CloneOf) _)) args -> cloneCall args
+        -- clone(x) and x.clone(): a copy of x, which has its value (unless the program has a function of that name)
+        F (Var "clone") args
+            | not (Map.member "clone" (ctxFns ctx)), not (any (Map.member "clone") env) -> cloneCall args
+        F (Var ".clone") args@[receiver] -> do
+            (receiverTy, _) <- inferExprR ctx env receiver
+            t <- zonk receiverTy
+            s <- getState
+            let owned = case t of
+                    TNamed name -> Map.member (maybe name fst (instanceOf name), "clone") (tcAssoc s)
+                    _ -> False
+            if owned then methodCall "clone" args else cloneCall args
+        F (Var ('.' : method)) (receiver : args) -> methodCall method (receiver : args)
+        F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
+        F (Var name) args
+            | Just (path, function) <- traitPath name -> traitCall path function args
+        F funct args -> general funct args
+  where
+    cloneCall args = case args of
+        [x] -> do
+            (xt, x') <- inferExprR ctx env x
+            requireMarker "Clone" xt
+            return (xt, F (Val (builtinFunct CloneOf)) [x'])
+        _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
+    methodCall method (receiver : args) = do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
             receiverTy <- zonk (fst (head inferred))
             case (listMethod method, receiverTy) of
@@ -1113,10 +1142,9 @@ inferExprR ctx env expr =
                 _ -> do
                     owner <- ownerOfValue method (fst (head inferred))
                     resolveAssociated owner method >>= \name -> callResolved name inferred
-        -- <Type as Trait>::f, written in full
-        F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
-        F (Var name) args
-            | Just (path, function) <- traitPath name -> do
+    methodCall _ [] = failTc "Type error: a method is called on a value"
+    -- Trait::f(x) and Type::f(x)
+    traitCall path function args = do
                 s <- getState
                 case (Map.lookup path (tcTraits s), Map.member path (tcTypes s) || Map.member path (tcGenerics s)) of
                     (Just functions, _) -> do
@@ -1126,9 +1154,7 @@ inferExprR ctx env expr =
                     (Nothing, True) -> do
                         inferred <- mapM (inferExprR ctx env) args
                         resolveAssociated path function >>= \full -> callResolved full inferred
-                    _ -> general (Var name) args
-        F funct args -> general funct args
-  where
+                    _ -> general (Var (path ++ "::" ++ function)) args
     general funct args = do
         s <- getState
         case funct of
@@ -1305,6 +1331,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                 failTc ("Type error: trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">, which impl " ++ traitName ++ " for " ++ typeName ++ " gives " ++ show (length traitArgs))
             when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
             putState s{tcImpls = Set.insert (traitName, typeName) (tcImpls s), tcImplArgs = Map.insert (traitName, typeName) (selfName, traitArgs) (tcImplArgs s)}
+            when (traitName `elem` ["Clone", "Copy"] && null found && null params) $ checkMarkerImpl traitName typeName
             return (found, params)
     (ctx', env', checked) <- definitions True (ctx, env, []) functions
     case trait of
@@ -1333,7 +1360,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                         return (wrapper traitName typeName f (Signature aptys arty asizes atypes) term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
             (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
-            return (ctx'', env'', checked ++ wrapped)
+            return (ctx'', env'', [CopyDef typeName | traitName == "Copy", null required] ++ checked ++ wrapped)
   where
     -- The functions of the impl can be called as Type::f from the next one on, itself included; the functions that check
     -- the impl against its trait cannot
@@ -1597,10 +1624,110 @@ declareTemplate ctx name bounds params signature@(Signature _ _ _ types) ins out
                 failTc ("Type error: trait " ++ trait ++ " has parameters <" ++ intercalate ", " params' ++ ">, which the bound on " ++ param ++ " of " ++ name ++ " gives " ++ show (length args))
     putState s{tcTemplates = Map.insert name (Template bounds ctx params signature ins outs term body) (tcTemplates s)}
 
+-- Clone and Copy are traits with no functions, in lib/prelude.tersus, that a struct or enum says it has: `impl Clone for P { };` and
+-- `impl Copy for P { };`. Int, Byte, Bool and functions have both, an array has what its elements have, and a list or a Box is Clone when its
+-- elements are (never Copy). A type parameter of a function is taken to be Clone and not Copy: that is checked for the types it is given
+-- when functions can say what their type parameters are.
+implementsMarker :: Name -> Type -> TC Bool
+implementsMarker trait = go (0 :: Int) False
+  where
+    -- (lenient: a type parameter has it, for the fields of a generic struct, which have it when the parameter does)
+    go depth lenient ty0
+        | depth > 16 = return True
+        | otherwise = do
+            ty <- zonk ty0
+            case ty of
+                TInt -> return True
+                TByte -> return True
+                TBool -> return True
+                TFn{} -> return True
+                TVar _ -> return True
+                TRef t -> go (depth + 1) lenient t
+                TParam _ -> return (lenient || trait == "Clone")
+                TArrayOf e _ -> go (depth + 1) lenient e
+                TList e -> if trait == "Clone" then go (depth + 1) lenient e else return False
+                TBox e -> if trait == "Clone" then go (depth + 1) lenient e else return False
+                TNamed "Self" -> return (trait == "Clone")
+                TNamed name -> declared depth lenient name
+                TVariant variant -> ctorInfo variant >>= \(owner, _) -> declared depth lenient owner
+                _ -> return False
+    declared depth lenient name = do
+        s <- getState
+        let base = maybe name fst (instanceOf name)
+        if not (Set.member (trait, base) (tcImpls s))
+            then return False
+            else
+                -- (a struct with types is Copy for the types that are, and a Clone one is checked where its impl is)
+                if trait == "Copy" && base /= name
+                    then do
+                        ctors <- typeCtors name
+                        fields <- concat <$> mapM (fmap snd . ctorInfo) ctors
+                        and <$> mapM (go (depth + 1) lenient . snd) fields
+                    else return True
+
+-- A copy is made of a type that has Clone
+requireMarker :: Name -> Type -> TC ()
+requireMarker trait ty = do
+    ok <- implementsMarker trait ty
+    unless ok $ do
+        t <- zonk ty >>= lacking
+        failTc ("Type error: " ++ renderType t ++ " does not implement " ++ trait ++ (if trait == "Clone" then ", so a copy of it is not made: write impl Clone for " ++ describeOwner t ++ " { }; (its fields have to be Clone) if it should be" else ""))
+  where
+    -- (the type inside a list, a Box or an array that is the one without it)
+    lacking t = case t of
+        TList e -> inner t e
+        TBox e -> inner t e
+        TArrayOf e _ -> inner t e
+        _ -> return t
+    inner t e = do
+        ok <- implementsMarker trait e
+        if ok then return t else zonk e >>= lacking
+    describeOwner t = case t of
+        TNamed name -> maybe name fst (instanceOf name)
+        TVariant variant -> variant
+        _ -> renderType t
+
+-- The check of `impl Clone for T { };` and `impl Copy for T { };`: every field has what the type says it has, and a Copy type is Clone
+checkMarkerImpl :: Name -> Name -> TC ()
+checkMarkerImpl trait typeName = do
+    s <- getState
+    when (trait == "Copy" && not (Set.member ("Clone", typeName) (tcImpls s))) $
+        failTc ("Type error: impl Copy for " ++ typeName ++ ": " ++ typeName ++ " is Copy only if it is Clone, so write impl Clone for " ++ typeName ++ " { }; first")
+    fields <- case Map.lookup typeName (tcGenerics s) of
+        Just (_, declared) -> return [(typeName, declared)]
+        Nothing -> do
+            ctors <- typeCtors typeName
+            mapM (\c -> (,) c . snd <$> ctorInfo c) ctors
+    forM_ fields $ \(ctor, declared) -> forM_ declared $ \(field, fieldTy) -> do
+        ok <- implementsMarkerLenient fieldTy
+        unless ok $ do
+            t <- zonk fieldTy
+            failTc ("Type error: impl " ++ trait ++ " for " ++ typeName ++ ": the field " ++ field ++ " of " ++ ctor ++ " is " ++ renderType t ++ ", which is not " ++ trait)
+  where
+    implementsMarkerLenient fieldTy = do
+        -- (a type parameter is accepted: the type has the trait for the types that do)
+        let parameterFree = fieldTy
+        parameterOk parameterFree
+    parameterOk ty = do
+        t <- zonk ty
+        case t of
+            TParam _ -> return True
+            TList e | trait == "Clone" -> parameterOk e
+            TBox e | trait == "Clone" -> parameterOk e
+            TArrayOf e _ -> parameterOk e
+            _ -> implementsMarker trait t
+
 -- The types a type gives a trait that it implements: Nothing if it does not. A list implements Sequence and Growable, an array and a Box of an array
 -- implement Sequence, each of the type of its elements; a struct or enum does what its impls say.
 traitArguments :: Name -> Type -> TC (Maybe [Type])
 traitArguments trait ty = do
+    s <- getState
+    if trait `elem` ["Clone", "Copy"] && Map.lookup trait (tcTraits s) == Just [] && null (Map.findWithDefault [] trait (tcTraitParams s))
+        then implementsMarker trait ty >>= \ok -> return (if ok then Just [] else Nothing)
+        else traitArgumentsOf trait ty
+
+traitArgumentsOf :: Name -> Type -> TC (Maybe [Type])
+traitArgumentsOf trait ty = do
     s <- getState
     let arity = length (Map.findWithDefault [] trait (tcTraitParams s))
         builtin elementType traits = Just [elementType | trait `elem` traits, arity == 1]

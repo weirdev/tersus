@@ -8,12 +8,12 @@ fn flags(values: List<Int>) -> List<Bool> [{ }] [{ affirm size(return) = size(va
     return out;
 };
 
-// Appends a copy of the first row; the new last row is known to be that copy.
+// Appends a copy of the first row (the row is cloned, since the list still holds it); the new last row is known to be that copy.
 fn repeatFirst(rows: List<List<Int>>) -> List<List<Int>>
     [{ affirm size(rows) > 0; }]
     [{ affirm size(return) = size(rows) + 1; affirm get(return, size(rows)) = get(rows, 0); }]
 {
-    return push(rows, first(rows));
+    return push(rows, clone(first(rows)));
 };
 
 marks = flags([3, -1]);

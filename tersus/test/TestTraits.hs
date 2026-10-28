@@ -8,8 +8,11 @@ testTraits :: Test
 testTraits =
     let types =
             unlines
-                [ "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
+                [ "trait Clone { }; trait Copy { };"
+                , "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
                 , "struct Counter { value: Int };"
+                , "impl Clone for Shape { }; impl Copy for Shape { };"
+                , "impl Clone for Counter { }; impl Copy for Counter { };"
                 ]
         runs body expected = parseEvalProgramHelper (types ++ body) (Just (VInt expected))
         valid body = parseValidProgramHelper (types ++ body)

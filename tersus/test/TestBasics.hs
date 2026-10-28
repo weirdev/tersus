@@ -327,7 +327,7 @@ argPassingSource :: String
 argPassingSource =
     "fn reset(xs: List<Int>) -> Int { xs = []; return size(xs); };\
     \xs = [1, 2, 3];\
-    \n = reset(xs);\
+    \n = reset(clone(xs));\
     \return size(xs) - n;"
 
 testArgPassingByValue :: TestResult
@@ -758,7 +758,7 @@ testLists =
         , parseEvalProgramHelper "return push([1, 2], 3);" (Just (VList [VInt 1, VInt 2, VInt 3]))
         , parseEvalProgramHelper "return push([], 4);" (Just (VList [VInt 4]))
         , parseEvalProgramHelper "return get(push(push([], 4), 9), 1);" (Just (VInt 9))
-        , parseEvalProgramHelper "a = [1]; b = push(a, 2); return size(a) + size(b);" (Just (VInt 3))
+        , parseEvalProgramHelper "a = [1]; b = push(clone(a), 2); return size(a) + size(b);" (Just (VInt 3))
         , parseEvalFailStmtHelper "{ return get([5], 1); }" "Get index out of range"
         , parseEvalFailStmtHelper "{ return get([5], 0 - 1); }" "Get index out of range"
         , parseEvalFailStmtHelper "{ return push(1, 2); }" "argument 1 of push: expected List<?>, got Int"
@@ -766,7 +766,7 @@ testLists =
         , parseEvalProgramHelper "return set([1, 2, 3], 1, 20);" (Just (VList [VInt 1, VInt 20, VInt 3]))
         , parseEvalProgramHelper "return set([1, 2, 3], 0, 9);" (Just (VList [VInt 9, VInt 2, VInt 3]))
         , parseEvalProgramHelper "return set([1, 2, 3], 2, 9);" (Just (VList [VInt 1, VInt 2, VInt 9]))
-        , parseEvalProgramHelper "a = [1, 2, 3]; b = set(a, 0, 9); return first(a) + first(b);" (Just (VInt 10))
+        , parseEvalProgramHelper "a = [1, 2, 3]; b = set(clone(a), 0, 9); return first(a) + first(b);" (Just (VInt 10))
         , parseEvalProgramHelper "return set(push([1], 2), 1, 5);" (Just (VList [VInt 1, VInt 5]))
         , parseEvalFailStmtHelper "{ return set([5], 1, 0); }" "Set index out of range"
         , parseEvalFailStmtHelper "{ return set([5], 0 - 1, 0); }" "Set index out of range"

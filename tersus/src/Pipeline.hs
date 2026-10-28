@@ -13,10 +13,10 @@ import qualified Mir as M
 import MirOwnership (insertOwnership)
 import MirVerify (verifyProgram)
 import MirEval (MirValue, runProgram)
-import MirLower (lowerElaborated)
+import MirLower (lowerElaborated, lowerLibrary)
 import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
-import Parse (emptyDecls, parseStatementBlock, parseStatementBlockWith)
+import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
 import PreludeSource (listsSource, preludeSource, stringSource)
 import TersusTypes (Expression (..), Statement (..), Value (..))
@@ -38,12 +38,12 @@ parseSource source = parseSourceWith True source
 -- (the library of lists is the one program that may use the names that a program may not)
 parseSourceWith :: Bool -> String -> Result [Statement] String
 parseSourceWith reserving source = case libraries source of
-    [] -> case parseStatementBlock source of
+    [] -> case parseStatementBlockWith (locating emptyDecls) source of
         Left err -> Error ("Parse error: " ++ show err)
-        Right stmts -> checked stmts
+        Right (stmts, _) -> checked stmts
     texts -> case readLibraries texts emptyDecls of
         Left err -> Error err
-        Right (library, declared) -> case parseStatementBlockWith declared source of
+        Right (library, declared) -> case parseStatementBlockWith (locating declared) source of
             Left err -> Error ("Parse error: " ++ show err)
             Right (stmts, _) -> checked stmts `bindResult` \stmts' -> Ok (library ++ stmts')
   where
@@ -78,9 +78,9 @@ libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string l
     ws = names code
     ws' = zip ws (drop 1 ws)
     declares candidates = any (\(keyword, name) -> keyword `elem` ["struct", "enum", "trait"] && name `elem` candidates) ws'
-    preludeFree = not (declares ["Sequence", "Growable"])
+    preludeFree = not (declares ["Sequence", "Growable", "Clone", "Copy"])
     strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || '"' `elem` code)
-    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable"])
+    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy"])
     -- (the names in a text: runs of letters, digits and underscores)
     names text = case dropWhile (not . isNameChar) text of
         "" -> []
@@ -107,7 +107,7 @@ compileWith :: Bool -> String -> Result M.Program String
 compileWith reserving source =
     parseSourceWith reserving source `bindResult` \stmts ->
         stage "Validation failed: " (elaborate stmts) `bindResult` \elaborated ->
-            stage "Lowering failed: " (lowerElaborated elaborated) `bindResult` \program ->
+            stage "Lowering failed: " ((if reserving then lowerElaborated else lowerLibrary) elaborated) `bindResult` \program ->
                 stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
                     Ok program
 

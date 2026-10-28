@@ -8,7 +8,7 @@ struct Pair<T> {
 };
 
 fn swap<U>(p: &Pair<U>) -> Pair<U> {
-    return Pair<U> { a: p.b, b: p.a };
+    return Pair<U> { a: clone(p.b), b: clone(p.a) };
 };
 
 // A field can be a Box of an array of the type: the start of a list that is a library type
@@ -22,7 +22,7 @@ fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; a
 };
 
 fn at<T>(h: &Holder<T>, i: Int) -> T [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ }] {
-    return get(h.items, i);
+    return clone(get(h.items, i));
 };
 
 // A type and a size together

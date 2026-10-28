@@ -129,7 +129,7 @@ parseValFailStmtHelper stmtStr =
 
 -- Control flow tests. A program runs on the MIR once it type checks; nothing here validates it.
 parseEvalProgramHelper :: String -> Maybe Value -> TestResult
-parseEvalProgramHelper source expected =
+parseEvalProgramHelper source expected = withProgram source $
     case parseStatementBlock source of
         Left err -> Just $ "Parse failed: " ++ show err
         Right stmts -> case runStatements stmts of
@@ -137,13 +137,13 @@ parseEvalProgramHelper source expected =
             Error e -> Just $ "Evaluation failed with error: " ++ e
 
 parseEvalProgramFailHelper :: String -> String -> TestResult
-parseEvalProgramFailHelper source expectedError =
+parseEvalProgramFailHelper source expectedError = withProgram source $
     case parseStatementBlock source of
         Left err -> Just $ "Parse failed: " ++ show err
         Right stmts -> testAssertErrorContains expectedError (runStatements stmts)
 
 parseValidProgramHelper :: String -> TestResult
-parseValidProgramHelper source =
+parseValidProgramHelper source = withProgram source $
     case parseStatementBlock source of
         Left err -> Just $ "Parse failed: " ++ show err
         Right stmts -> case validateStatements stmts of
@@ -151,10 +151,14 @@ parseValidProgramHelper source =
             Error e -> Just $ "Validation failed with error: " ++ e
 
 parseValidateFailProgramHelper :: String -> String -> TestResult
-parseValidateFailProgramHelper source expectedError =
+parseValidateFailProgramHelper source expectedError = withProgram source $
     case parseStatementBlock source of
         Left err -> Just $ "Parse failed: " ++ show err
         Right stmts -> testAssertErrorContains expectedError (validateStatements stmts)
+
+-- A failure says which program it was about (the start of it)
+withProgram :: String -> TestResult -> TestResult
+withProgram source = fmap (\message -> message ++ "\nProgram: " ++ take 500 source)
 
 -- Run tests
 -- A function over integers only
@@ -178,6 +182,8 @@ vecLibrary =
         , "    data: Box<Array<T>>,"
         , "    len: Int,"
         , "} invariant [{ affirm len >= 0; affirm len <= size(data); affirm size(data) >= 1; }];"
+        , "trait Clone { };"
+        , "impl<T> Clone for Vec<T> { };"
         , "impl<T> Vec<T> {"
         , "    fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; }] {"
         , "        return Self { data: Array::boxed(4, filler), len: 0 };"
@@ -191,7 +197,7 @@ vecLibrary =
         , "        return self.len;"
         , "    };"
         , "    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = get(self.data, i); }] {"
-        , "        return get(self.data, i);"
+        , "        return clone(get(self.data, i));"
         , "    };"
         , "    fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return.len = self.len; affirm get(return.data, i) = x; }] {"
         , "        return Self { data: set(self.data, i, x), len: self.len };"
@@ -202,10 +208,10 @@ vecLibrary =
         , "        if self.len < size(self.data) {"
         , "            return Self { data: set(self.data, self.len, x), len: self.len + 1 };"
         , "        };"
-        , "        big = Array::boxed(size(self.data) * 2, x);"
+        , "        big = Array::boxed(size(self.data) * 2, clone(x));"
         , "        i = 0;"
         , "        while i < self.len [{ affirm i >= 0; affirm i <= self.len; affirm size(big) = size(self.data) * 2; }] shrinks self.len - i {"
-        , "            big = set(big, i, get(self.data, i));"
+        , "            big = set(big, i, clone(get(self.data, i)));"
         , "            i = i + 1;"
         , "        };"
         , "        return Self { data: set(big, self.len, x), len: self.len + 1 };"

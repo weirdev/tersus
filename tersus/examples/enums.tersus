@@ -7,6 +7,11 @@ enum Shape {
     Empty,
 };
 
+// Fields that are numbers can be copied wherever the value is wanted, if the enum says so (without Copy a value is moved, and
+// a program that needs it again writes clone(s), which needs Clone)
+impl Clone for Shape { };
+impl Copy for Shape { };
+
 fn area(s: Shape) -> Int {
     return match s {
         Shape::Circle { radius: r } => r * r * 3,

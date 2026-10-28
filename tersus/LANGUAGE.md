@@ -291,6 +291,7 @@ n = c.size() + Measure::size(c);                 // through the trait
   The call has to meet the impl's input contract, which the trait's input contract is assumed to give, and the impl's output contract has to give the trait's. The failure names the impl: `impl Step for Counter: advance does not meet what Step declares (...): Funct input validation failed: Could not prove: by > 5`. Only the impl's contracts count, not what its body happens to establish: an impl whose body returns `4` meets `affirm return >= 0;` only if its own output contract says so. These functions show in `mir` and are compiled, and nothing calls them.
 - **A call is to the impl's function**, so the caller knows the impl's contracts, which may be stronger than the trait's (`examples/traits.tersus`). A function that may not end (`~`) can implement a trait, and the functions that call it have to be `~` as for any function.
 - **A trait's contracts are type checked where the trait is written**, with `Self` as a type that has no fields, so they can mention the other parameters and `return` but not read a field of a `Self` value (`affirm self.value > 0;` in a trait is a type error). A contract calls the functions of the trait on `Self` (`size(self)`) and the functions of the program, and the check of an impl resolves them to the impl's.
+- **`Clone` and `Copy`** are traits with no functions that a struct or enum says it has with an impl with no functions, `impl Clone for T { };`, and the checker checks the fields (see Moves, Clone And Copy). A function with a type parameter can bound it by either: `fn twice<T: Clone>(x: T) -> List<T>`.
 - `trait`, `impl` and `Self` are reserved (`Self` cannot be the name of a type or a trait); `implement` and `traits` are still ordinary names. Trait and impl blocks end with `;` like every declaration.
 
 ### A trait with types
@@ -361,7 +362,7 @@ return total(push(push([], 3), 4)) + total(array(3, 5)) + total(Vec::new(0).push
 ```
 
 ```tersus
-fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0); }] { return get(s, 0); };
+fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0); }] { return clone(get(s, 0)); };
 fn add<S: Sequence<Int> + Growable<Int>>(s: S, x: Int) -> S { return push(s, x); };
 ```
 
@@ -887,7 +888,7 @@ A function body runs with its argument bindings and is expected to set a return 
 
 ### Argument Passing
 
-Arguments are passed by value. Each argument expression is evaluated before the call and bound to the matching parameter in a fresh scope. The caller's variable is not moved and is still usable afterwards, and nothing the function does to a parameter, including reassigning it, is visible to the caller.
+Arguments are passed by value. Each argument expression is evaluated before the call and bound to the matching parameter in a fresh scope. A value that is not `Copy` (a list, a `Box`, a struct or an enum that does not say it is `Copy`) is *moved* into the parameter: the caller's variable holds nothing afterwards, and using it again is an error (see Moves, Clone And Copy). Nothing the function does to a parameter, including reassigning it, is visible to the caller.
 
 ```tersus
 fn reset(xs: List<Int>) -> Int {
@@ -896,7 +897,7 @@ fn reset(xs: List<Int>) -> Int {
 };
 
 xs = [1, 2, 3];
-n = reset(xs);
+n = reset(clone(xs));      // the function is given a copy; without clone(xs), xs would be moved and could not be used below
 return size(xs) - n; // 3, because the caller's xs is unchanged
 ```
 
@@ -904,7 +905,7 @@ A function body's scope has no parent scope, so assignments inside it never reac
 
 #### Lent parameters
 
-A parameter written `&T` is *lent*: the function only reads it, and a call does not copy it for the function. It is for a parameter only (a result, a field, a local or a `Box` is never a `&T`).
+A parameter written `&T` is *lent*: the function only reads it, so a call neither moves nor copies it and the caller keeps it. It is for a parameter only (a result, a field, a local or a `Box` is never a `&T`).
 
 ```tersus
 fn total(a: &List<Int>) -> Int {
@@ -923,13 +924,42 @@ return total(xs) + total(xs) + size(xs);   // 6 + 6 + 3: xs is lent each time, a
 
 - **The call does not say it.** `total(xs)` lends `xs` because the function says so; the arguments are checked against `T` (`argument 1 of f: expected List<Int>, got Int`).
 - **In the function the parameter is a `T`** that it cannot assign (`a = push(a, 1)` is an error: assign a copy to another variable). Everything that reads it works as usual, and the validator treats it as the value it is, so contracts and proofs are unchanged.
-- **What the function needs for itself it copies.** Returning the parameter, giving it to a parameter that is not lent, or using it where a value is taken (`push(a, 9)`) uses a copy, and the caller's value is as it was. A lent parameter given on to another lent one costs nothing.
-- **What it saves.** An argument for a parameter that is not lent is copied when the caller uses it again after the call (a list, or a struct or array that owns one) and, held inline, is copied into the function (an array of 1000 words, a struct). A lent one is neither: natively the function reads the caller's words where they are.
+- **What the function needs for itself it copies, and says so.** Returning the parameter, giving it to a parameter that is not lent, or using it where a value is taken (`push(a, 9)`) is an error (`a is lent (&T) to this function and can only be read: write clone(a)`): `push(clone(a), 9)` is a copy of its own, and the caller's value is as it was. A lent parameter given on to another lent one costs nothing.
+- **What it saves.** An argument for a parameter that is not lent is moved into the function, so the caller needs a `clone` of it to use it again, and a value held inline is copied into the function (an array of 1000 words, a struct). A lent one is neither: natively the function reads the caller's words where they are.
 - **A function that lends is a different type** from one that does not (`fn(&List<Int>) -> Int` and `fn(List<Int>) -> Int`), since a call is made differently.
 
 See `examples/borrowing.tersus`.
 
 During validation, arguments are symbolic values. Proofs the caller has established about an argument are visible to the callee's input contract, which is how a call such as `spread(x)` can rely on `size(x) > 0` proven at the call site.
+
+## Moves, Clone And Copy
+
+A value is moved to where it is wanted, and a copy is made only where the program writes `clone`. Int, Byte, Bool and functions are *Copy*: they are copied wherever they are wanted, and a variable that holds one can be used again. Every other value is *moved* when it is given to a function, put in a struct, list or Box, assigned to another variable or returned, and the variable it came from holds nothing afterwards.
+
+```tersus
+xs = [1, 2, 3];
+ys = xs;                 // xs is moved into ys
+n = size(xs);            // error: xs was moved at line 2:1 and cannot be used again: write clone(xs) where it is moved to keep it
+
+ys = clone(xs);          // a copy, which has the value of xs and shares nothing with it
+```
+
+- **`clone(x)` and `x.clone()`** are a copy of `x`, which has the value of `x` (the validator knows `clone(x) = x`). A type has to be `Clone`: Int, Byte, Bool and functions are; an array, a list and a `Box` are when their elements are; a struct or enum is when it says so with `impl Clone for T { };`, which asks every field to be `Clone` (`P does not implement Clone`, `impl Clone for P: the field q of P is Q, which is not Clone`). The traits `Clone` and `Copy` are in `lib/prelude.tersus`, which a program has when it mentions either.
+- **`impl Copy for T { };`** makes a struct or enum Copy: it is copied wherever it is wanted, as a number is. It has to be `Clone` too, and every field has to be Copy, so a list never is. An array of Copy elements is Copy without saying so. For a struct with parameters, `impl<T> Copy for Pair<T> { };` is Copy for the types that are (`Pair<Int>` is, `Pair<List<Int>>` is not).
+
+  ```tersus
+  struct Point { x: Int, y: Int };
+  impl Clone for Point { };
+  impl Copy for Point { };        // a Point is used wherever it is wanted, as an Int is
+  ```
+- **A use of a moved value is an error**, along any path to it: after an `if` that moves it in one branch, and in the next iteration of a loop that moves it (`x was moved at line 5:9 and cannot be used again`). Assigning the variable gives it a value again, so `xs = push(xs, 1);` moves `xs` into `push` and gives the result back. A field can be moved out of a struct while the others are kept (`a = p.name;`), and the struct as a whole cannot be used after that.
+- **A part of a value that is read is not a move.** `get(rows, i)`, `first`, `last`, a field, the contents of a `Box`, and the value a `match` or `for` is over are *views* of the value they come from: `size(get(rows, i))`, `row = get(rows, i)` followed by reads of `row`, and `for x in xs { total = total + size(x); }` move and copy nothing. Taking a view for itself is the move that is an error: `get(rows, i)` cannot be moved out of `rows`, which still holds it (`cannot move row (rows[..]) out of a list, which still holds it: write clone(row)`), and a field of a value that is lent cannot be moved out of it (`p.name is lent (&T)`). Write `clone(get(rows, i))`, `clone(p.name)`.
+- **A struct update from a value that is still wanted** says `..clone(base)`: `P { n: p.n + 1, ..clone(p) }` clones the fields that are not given, one by one, and not the whole of `p`. It needs those fields to be Clone, not `P`. A base that is not a clone moves the fields that are not given.
+- **`array(n, x)` and `Array::boxed(n, x)`** make `n` copies of `x`, so `x` is moved into them and its type has to be Clone.
+- **Type parameters** are taken to be Clone and not Copy inside a function that has them, so `clone(x)` is allowed for an `x` of type `T` and a `T` is moved. `fn f<T: Clone>(...)`, `<T: Copy>`, are bounds like those of any trait (see Bounded types), checked for the types a call gives. A function written for any type is not yet checked for the types it is given.
+- **What the check does not see.** Native code may still make a copy for a view that is only read, when the original changes before the view is used, and a `for` loop over a variable that is used again after it is given a copy of the list (`for x in clone(xs)` says so, and `for i in 0..size(xs)` with `get(xs, i)` makes none). That is a cost and not a meaning: values do not change, and the copy shares nothing with the original.
+
+The check runs on the program after it is checked and lowered and before it is validated, and reports every use of a moved value it finds with the function and the line (`Lowering failed: Move error: in total, line 9:5: ...`). `lib/lists.tersus`, the library that native code makes lists of, copies where the program made of it needs it and is not checked.
 
 ## Validation Statements
 
@@ -1224,8 +1254,8 @@ return get(c, 1) + size(b) + first(b);
 - **The size is a constant.** `array(n, x)` makes `n` copies of `x`, and `n` has to be a number or arithmetic on numbers (`array(2 * 3, 0)`), so that the compiler knows how much room the array takes. `n = 3; array(n, 0)` is an error. The arithmetic is the program's, so each step has to fit in an `Int` and a divisor cannot be 0 (`array(9223372036854775807 + 1 - 9223372036854775807, 0)` is refused for the overflow, not folded to 1). The size cannot be negative, and an array is limited to 8192 words (64 KB), counting the arrays inside it, since it lives in a frame. `array` cannot be used as a value (`h = array;`).
 - **The type says the size, and so does the validator.** The validator knows `size(a) = N` for every local of the type `Array<T, N>` wherever it came from (a parameter, a result, a loop that sets it, a row of a grid), so a contract or a loop invariant never has to repeat it, and `get(a, 3)` on an `Array<Int, 4>` needs no proof.
 - **The same operations as a list, minus `push`.** `size`, `get`, `first`, `last` and `set` work on an array with the same contracts and facts (an index in range for `get` and `set`, an array that is not empty for `first` and `last`; `set` gives a new array, in place on the local when the result is assigned back to it). `array(n, x)` also says `forall j in 0..n: get(return, j) = x`. `=` and `!=` compare two arrays of the same type structurally. An array has no `push`: its size never changes.
-- **Arrays nest.** `Array<Array<Int, 3>, 2>` is two rows of three, six words in one block. `get(m, 1)` is a row (a copy of it), and `set(m, 1, row)` replaces one.
-- **A value, not a reference.** Giving an array to a function gives the function a copy, so it cannot change the caller's array, and a function returns an array by value.
+- **Arrays nest.** `Array<Array<Int, 3>, 2>` is two rows of three, six words in one block. `get(m, 1)` is a row (a Copy value, as the elements are), and `set(m, 1, row)` replaces one.
+- **A value, not a reference.** An array of Copy elements is Copy, so giving it to a function gives the function a copy and it cannot change the caller's array; an array of anything else is moved (`clone(a)` to keep it). A function returns an array by value.
 
 A function names the size in the types of its parameters and result:
 
@@ -1589,17 +1619,17 @@ See `examples/sized_structs.tersus`.
 
 ### Elements that own something
 
-An element can be a list, a struct, an enum, a `Box`, or an array of those. An array that holds one owns it as a struct owns its fields: it is moved with the array, copied with it (a copy shares nothing with the original), and freed with it, and replacing an element frees the one it held.
+An element can be a list, a struct, an enum, a `Box`, or an array of those. An array that holds one owns it as a struct owns its fields: it is moved with the array, cloned with it (a clone shares nothing with the original), and freed with it, and replacing an element frees the one it held. An array of such elements is not Copy, and its elements have to be Clone to make an array of copies of one.
 
 ```tersus
 a = array(3, push([], 1));            // Array<List<Int>, 3>: three lists, each [1]
 a = set(a, 1, push(push([], 2), 3));  // the second is replaced, and the list it held is freed
-l = get(a, 0);                        // a copy of the first
+l = clone(get(a, 0));                 // a copy of the first (the element itself stays in a)
 l = push(l, 9);                       // does not change a
 return a;                             // [[1], [2, 3], [1]]
 ```
 
-- **`array(n, x)` copies `x` into each slot** (a list or a struct that owns one is cloned `n` times); `set(a, i, x)` takes `x`. `get`, `first` and `last` give a copy of the element, as for a list. Equality and printing go through the elements.
+- **`array(n, x)` copies `x` into each slot** (a list or a struct that owns one is cloned `n` times, so it has to be Clone); `set(a, i, x)` takes `x`. `get`, `first` and `last` read the element in place, as for a list, and `clone(get(a, i))` is a copy of it. Equality and printing go through the elements.
 - **A literal is for Int, Bool and arrays of them**: `#[[1], [2]]` is an error (make the array with `array(n, x)` and `set`), since a literal is a constant that is written out.
 - **Not a function**: an array of functions is an error.
 - **Frame limit.** The 8192 words an array held in a frame can have are counted in words of the elements (`Array<P, 3000>` for a struct of 3 words takes 9000).
@@ -1630,4 +1660,5 @@ return a;                             // [[1], [2, 3], [1]]
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - Source files are read as UTF-8 whatever the locale is (and `tersus` prints in UTF-8), so a program with a letter that is not ASCII in a name loads under any locale.
 - A program has no input or output: it computes and returns one value, which `run` and an executable print.
-- Native code (`build`) copies an argument that is passed to a function and used again afterwards, and recursion that is very deep, or a recursive value that is very long to free or copy, can overflow the stack of the process (see the roadmap in `README.md`).
+- A copy is made only where the program writes `clone`, with these exceptions that are costs and not meanings: native code copies a part that is only read when what it was read from changes first, and a `for` loop over a variable that is used again after it. Recursion that is very deep, or a recursive value that is very long to free or copy, can overflow the stack of the process (see the roadmap in `README.md`).
+- A type parameter of a function is taken to be Clone (and not Copy), and nothing checks that the types a call gives are: that waits for bounds on the type parameters of generic functions (roadmap step 24). Clone cannot be implemented with a body of its own yet (`impl Clone for T { };` is the structural clone), and no type is without a Clone yet, so the only types that cannot be cloned are the structs and enums that do not say they can.

@@ -21,9 +21,15 @@
 
 struct Token { quoted: Bool, text: String };
 
+impl Clone for Token { };
+
 struct Parsed<T> { value: T, pos: Int, ok: Bool };
 
+impl<T> Clone for Parsed<T> { };
+
 enum Size { SConst { n: Int }, SAny, SParam { name: String }, SVar { n: Int } };
+
+impl Clone for Size { };
 
 enum Type {
     TInt,
@@ -41,11 +47,19 @@ enum Type {
     TRef { inner: Box<Type> },
 };
 
+impl Clone for Type { };
+
 struct Field { name: String, ty: Type };
+
+impl Clone for Field { };
 
 struct Variant { name: String, fields: List<Field> };
 
+impl Clone for Variant { };
+
 enum TypeDecl { DStruct { name: String, fields: List<Field> }, DEnum { name: String, variants: List<Variant> } };
+
+impl Clone for TypeDecl { };
 
 enum Constant {
     CInt { n: Int },
@@ -56,7 +70,11 @@ enum Constant {
     CFn { name: String },
 };
 
+impl Clone for Constant { };
+
 enum Operand { Copy { local: Int }, Move { local: Int }, Const { value: Constant } };
+
+impl Clone for Operand { };
 
 enum Rvalue {
     Use { o: Operand },
@@ -74,7 +92,11 @@ enum Rvalue {
     TakeField { local: Int, name: String, field: String },
 };
 
+impl Clone for Rvalue { };
+
 enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int } };
+
+impl Clone for Statement { };
 
 enum Terminator {
     Goto { block: Int },
@@ -84,9 +106,15 @@ enum Terminator {
     Unreachable,
 };
 
+impl Clone for Terminator { };
+
 struct Block { id: Int, stmts: List<Statement>, term: Terminator };
 
+impl Clone for Block { };
+
 struct LocalDecl { id: Int, named: Bool, name: String, ty: Type };
+
+impl Clone for LocalDecl { };
 
 struct Function {
     name: String,
@@ -100,7 +128,11 @@ struct Function {
     blocks: List<Block>,
 };
 
+impl Clone for Function { };
+
 struct Program { types: List<TypeDecl>, functions: List<Function>, entry: Function };
+
+impl Clone for Program { };
 
 // The words of the binary operations and of the list operations, whose index is the operation
 fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
@@ -156,7 +188,7 @@ fn indexOf(table: &List<String>, word: &String) -> Int [{ }] [{ affirm return >=
 
 // The word at an index of a table (the empty string when there is none)
 fn wordOf(table: &List<String>, i: Int) -> String [{ }] [{ }] {
-    if i >= 0 && i < size(table) { return get(table, i); };
+    if i >= 0 && i < size(table) { return clone(get(table, i)); };
     return "";
 };
 
@@ -272,13 +304,13 @@ fn parseInt(text: &String) -> Parsed<Int> [{ }] [{ }] {
 fn wordAt(ts: &List<Token>, pos: Int) -> Parsed<String> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
     t = get(ts, pos);
     if t.quoted { return Parsed<String> { value: "", pos: pos + 1, ok: false }; };
-    return done(t.text, pos + 1);
+    return done(clone(t.text), pos + 1);
 };
 
 fn nameAt(ts: &List<Token>, pos: Int) -> Parsed<String> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
     t = get(ts, pos);
     if !t.quoted { return Parsed<String> { value: "", pos: pos + 1, ok: false }; };
-    return done(t.text, pos + 1);
+    return done(clone(t.text), pos + 1);
 };
 
 fn intAt(ts: &List<Token>, pos: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
@@ -622,6 +654,8 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
 // `call O N O... L B`, `return`, `unreachable`)
 enum Line { LStatement { s: Statement }, LTerminator { t: Terminator } };
 
+impl Clone for Line { };
+
 fn noLine() -> Line [{ }] [{ }] {
     return Line::LTerminator { t: Terminator::Unreachable };
 };
@@ -693,7 +727,7 @@ fn isWord(ts: &List<Token>, pos: Int, w: &String) -> Bool [{ }] [{ }] {
 fn keywordOf(ts: &List<Token>) -> String [{ }] [{ }] {
     if size(ts) > 0 {
         t = get(ts, 0);
-        if !t.quoted { return t.text; };
+        if !t.quoted { return clone(t.text); };
     };
     return "";
 };

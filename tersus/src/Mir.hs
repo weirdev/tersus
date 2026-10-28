@@ -119,6 +119,9 @@ data GhostStatement
     | -- Where a function is defined (the validator checks its body here and from then on knows what it promises): its name in
       -- the program, the name it has in the source, and whether it is one of the functions defined at the top of the program
       GhostFunction Name Variable Bool
+    | -- The line and column in the source of the statements that follow, up to the next one. Lowering writes them and the check of
+      -- moves reads them (and takes them out), so no other pass sees one.
+      GhostPosition Int Int
     deriving (Show, Eq)
 
 data Rvalue
@@ -375,6 +378,7 @@ renderStatement :: Statement -> String
 renderStatement (Assign dest rv) = show dest ++ " = " ++ renderRvalue rv ++ ";"
 renderStatement (Ghost _ (GhostValidation v)) = "ghost " ++ renderValidation v ++ ";"
 renderStatement (Ghost _ (GhostAxiom name args _ _)) = "ghost axiom " ++ name ++ "(" ++ intercalate ", " args ++ ");"
+renderStatement (Ghost _ (GhostPosition line column)) = "ghost at " ++ show line ++ ":" ++ show column ++ ";"
 renderStatement (Ghost _ (GhostProof name args _ _ _)) = "ghost proof " ++ name ++ "(" ++ intercalate ", " args ++ ");"
 renderStatement (Ghost _ (GhostFunction name _ _)) = "ghost fn " ++ name ++ ";"
 renderStatement (Drop l) = "drop " ++ show l ++ ";"

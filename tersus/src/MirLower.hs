@@ -1,11 +1,13 @@
-module MirLower (lowerProgram, lowerElaborated) where
+module MirLower (lowerProgram, lowerElaborated, lowerLibrary) where
 
 import Control.Monad (unless, when)
+import Data.List (intercalate)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import qualified Mir as M
+import MirMoves (checkMoves, stripPositions)
 import MirVerify (verifyProgram)
 import StdLib (stdLibCtx)
 import TersusTypes
@@ -24,8 +26,16 @@ lowerProgram stmts = elaborate stmts `bindResult` lowerElaborated
 
 -- For a program that `elaborate` has checked and handed back (the pipeline checks a program once)
 lowerElaborated :: [Statement] -> Result M.Program String
-lowerElaborated elaborated =
-    case runL (program elaborated) (initialState elaborated) of
+lowerElaborated = lowerWith True
+
+-- A library of the compiler (lib/lists.tersus), which copies values where the program that is made of it needs them, and is not checked for
+-- moves
+lowerLibrary :: [Statement] -> Result M.Program String
+lowerLibrary = lowerWith False
+
+lowerWith :: Bool -> [Statement] -> Result M.Program String
+lowerWith checking elaborated =
+    case runL (program elaborated) ((initialState elaborated){lsChecking = checking}) of
         Left e -> Error e
         Right (p, _) -> Ok p
 
@@ -80,6 +90,7 @@ data Builder = Builder
     , bOpen :: Maybe (M.BlockId, [M.Statement]) -- the block being written, with its statements last first; Nothing after a return
     , bScopes :: [Map Variable Binding] -- innermost first
     , bLoops :: Map M.BlockId M.LoopSpec
+    , bPlace :: Maybe (Int, Int) -- the place in the source of the statement being lowered, when the program was parsed with places
     }
 
 data LS = LS
@@ -92,10 +103,12 @@ data LS = LS
     , lsBuilder :: Builder
     , lsGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes
     , lsInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets
+    , lsChecking :: Bool -- whether the program is checked for values used after they were moved
+    , lsCopies :: Set.Set Name -- the structs and enums that implement Copy
     }
 
 initialState :: [Statement] -> LS
-initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty
+initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty
 
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
@@ -129,6 +142,7 @@ newBuilder name isMain returns =
         , bOpen = Just (M.BlockId 0, [])
         , bScopes = [Map.empty]
         , bLoops = Map.empty
+        , bPlace = Nothing
         }
 
 builder :: L Builder
@@ -167,8 +181,12 @@ terminate term =
             Nothing -> b
         )
 
+-- (a block starts with the place of the statement it continues, so that each statement and each call has the one before it)
 openBlock :: M.BlockId -> L ()
-openBlock id' = modifyB (\b -> b{bOpen = Just (id', [])})
+openBlock id' = do
+    modifyB (\b -> b{bOpen = Just (id', [])})
+    b <- builder
+    mapM_ (\(line, column) -> emit (M.Ghost Map.empty (M.GhostPosition line column))) (bPlace b)
 
 scoped :: L a -> L a
 scoped action = do
@@ -216,7 +234,9 @@ program stmts = do
         result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s))
     case verifyProgram result of
         Error e -> failL ("Lowering produced a malformed program: " ++ e)
-        Ok () -> return result
+        Ok () -> case if lsChecking s then checkMoves (lsCopies s) result else [] of
+            [] -> return (stripPositions result)
+            errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
 -- Applies what the checker learned about the type variables; one it never learned (the elements of a list that is
 -- never used) is an Int
@@ -304,6 +324,10 @@ lowerStatement stmt =
             finishInto dest pending
         Return expr -> lowerReturn expr
         ValidationStatement vs -> ghost (M.GhostValidation vs)
+        CopyDef name -> modifyS (\s -> s{lsCopies = Set.insert name (lsCopies s)})
+        Mark line column -> do
+            modifyB (\b -> b{bPlace = Just (line, column)})
+            emit (M.Ghost Map.empty (M.GhostPosition line column))
         StructDef name sizes fields invariant | not (null sizes) -> do
             tc (declareGeneric name sizes fields)
             modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s), lsInvariants = withInvariant name invariant (lsInvariants s)})
@@ -567,6 +591,7 @@ lowerBuiltin b args = do
         (Unsize, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
             TBox (TArrayOf elementTy _) -> return (TBox (TArrayOf elementTy SizeAny))
             _ -> failL "unsize was given something that is not a Box of an array"
+        (CloneOf, [(_, copied)]) -> return copied
         (UnBox, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
             TBox held -> return held
             _ -> failL "Box::unbox was given something that is not a Box"
@@ -629,6 +654,7 @@ builtinRvalue b tys ops =
         (BytesFrom, _) -> failL "A list of bytes is written with numbers from 0 to 255"
         (Unsize, [o]) -> return (M.Unsize o)
         (UnBox, [o]) -> return (M.Unbox o)
+        (CloneOf, [o]) -> return (M.Clone o)
         (Is variant, [o]) -> return (M.IsVariant o variant)
         (Cast variant, [o]) -> return (M.AsVariant o variant)
         (Within, _) -> failL "within only exists in proofs"
@@ -709,6 +735,7 @@ builtinLabel b = case b of
     Set -> "set"
     NewBox -> "box"
     UnBox -> "unbox"
+    CloneOf -> "clone"
     NewArray -> "array"
     NewBoxedArray -> "boxed_array"
     NewEmptyArray -> "empty_array"

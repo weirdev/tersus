@@ -1,6 +1,10 @@
 module MirOwnership
     ( insertOwnership
     , needsDrop
+    , Role (..)
+    , roles
+    , isProjection
+    , operandLocal
     ) where
 
 import Data.Map.Strict (Map)

@@ -27,6 +27,11 @@ struct Vec<T> {
     len: Int,
 } invariant [{ affirm len >= 0; affirm len <= size(data); affirm size(data) >= 1; }];
 
+// A Vec can be cloned if its elements can: the Box of an array is cloned with what it holds (the traits are declared here, since the program
+// declares its own Sequence and has not the prelude)
+trait Clone { };
+impl<T> Clone for Vec<T> { };
+
 impl<T> Vec<T> {
     // An empty Vec. The array needs an element to fill it with, which is never read: nothing is in use until it is pushed.
     fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; }] {
@@ -45,7 +50,7 @@ impl<T> Sequence<T> for Vec<T> {
     };
 
     fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = get(self.data, i); }] {
-        return get(self.data, i);
+        return clone(get(self.data, i));
     };
 
     fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return.len = self.len; affirm get(return.data, i) = x; }] {
@@ -59,10 +64,10 @@ impl<T> Growable<T> for Vec<T> {
         if self.len < size(self.data) {
             return Self { data: set(self.data, self.len, x), len: self.len + 1 };
         };
-        big = Array::boxed(size(self.data) * 2, x);
+        big = Array::boxed(size(self.data) * 2, clone(x));
         i = 0;
         while i < self.len [{ affirm i >= 0; affirm i <= self.len; affirm size(big) = size(self.data) * 2; }] shrinks self.len - i {
-            big = set(big, i, get(self.data, i));
+            big = set(big, i, clone(get(self.data, i)));
             i = i + 1;
         };
         return Self { data: set(big, self.len, x), len: self.len + 1 };

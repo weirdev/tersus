@@ -23,7 +23,7 @@ testSequence =
         double = "fn double(x: Int) -> Int [{ }] [{ affirm return = x * 2; }] { return x * 2; }; "
         counted = "struct V<T> { x: T, len: Int }; "
         trait2 = "trait Seq<E> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }]; fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }]; }; "
-        two = "struct Two<T> { a: T, b: T, n: Int } invariant [{ affirm n >= 0; }]; impl<T> Seq<T> for Two<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { if i = 0 { return self.a; }; return self.b; }; fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: self.a, b: x, n: self.n + 1 }; }; }; "
+        two = "struct Two<T> { a: T, b: T, n: Int } invariant [{ affirm n >= 0; }]; impl<T> Seq<T> for Two<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { if i = 0 { return clone(self.a); }; return clone(self.b); }; fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: self.a, b: x, n: self.n + 1 }; }; }; "
      in TestList
             "testSequence"
             [ TestList
@@ -61,7 +61,7 @@ testSequence =
                 , testCase "through the trait" (runs (trait2 ++ two ++ "t = Two<Int> { a: 4, b: 5, n: 2 }; return Seq::size(t) + Seq::get(t, 0);") (VInt 6))
                 , testCase "a contract that calls a function of the type" (valid (trait2 ++ two ++ "fn lastOf<T>(t: &Two<T>) -> T [{ affirm size(t) > 0; }] [{ }] { return get(t, size(t) - 1); }; return 0;"))
                 , testCase "an index past the size is refused" (rejected (trait2 ++ two ++ "t = Two<Int> { a: 4, b: 5, n: 2 }; return get(t, 2);") "Could not prove: i < <Two as Seq>::size(self)")
-                , testCase "an impl that promises less than the trait is refused" (rejected (trait2 ++ "struct Two<T> { a: T, n: Int }; impl<T> Seq<T> for Two<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { return self.a; }; fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: x, n: self.n + 1 }; }; }; return 0;") "size does not meet what Seq declares")
+                , testCase "an impl that promises less than the trait is refused" (rejected (trait2 ++ "struct Two<T> { a: T, n: Int }; impl<T> Seq<T> for Two<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ }] { return clone(self.a); }; fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; }] { return Self { a: x, n: self.n + 1 }; }; }; return 0;") "size does not meet what Seq declares")
                 , testCase "the types are given" (parseFails (trait2 ++ "struct Two<T> { a: T, n: Int }; impl<T> Seq for Two<T> { }; return 0;"))
                 , testCase "as many as the trait has" (parseFails "trait Seq<E> { fn size(self: &Self) -> Int; }; struct Two<T> { a: T, n: Int }; impl<T> Seq<T, T> for Two<T> { }; return 0;")
                 , testCase "a trait without any is not given some" (parseFails "trait Plain { fn size(self: &Self) -> Int; }; struct Two<T> { a: T, n: Int }; impl<T> Plain<T> for Two<T> { }; return 0;")
@@ -76,7 +76,7 @@ testSequence =
                 , testCase "pushed past its capacity, in a loop" (runs (vecLibrary ++ "v = Vec::new(0); i = 0; while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm size(v) = i; }] shrinks 10 - i { v = v.push(i * i); i = i + 1; }; return size(v) + v.get(9);") (VInt 91))
                 , testCase "set" (runs (vecLibrary ++ "v = Vec::new(1).push(2).push(3).set(0, 9); return v.get(0) + v.get(1) * 10;") (VInt 39))
                 , testCase "popped" (runs (vecLibrary ++ "v = Vec::new(false).push(true).push(false).pop(); return size(v);") (VInt 1))
-                , testCase "a copy is a Vec of its own" (runs (vecLibrary ++ "a = Vec::new(0).push(1); b = a.set(0, 7); return a.get(0) * 10 + b.get(0);") (VInt 17))
+                , testCase "a copy is a Vec of its own" (runs (vecLibrary ++ "a = Vec::new(0).push(1); b = a.clone().set(0, 7); return a.get(0) * 10 + b.get(0);") (VInt 17))
                 , testCase "of lists" (runs (vecLibrary ++ "rows = Vec::new(push([], 0)).push(push(push([], 4), 5)); return size(rows.get(0));") (VInt 2))
                 , testCase "of Vecs" (runs (vecLibrary ++ "g = Vec::new(Vec::new(0)).push(Vec::new(0).push(8).push(9)); return size(g.get(0));") (VInt 2))
                 , testCase "of structs that own a list" (runs (vecLibrary ++ "struct P { n: Int, xs: List<Int> }; ps = Vec::new(P { n: 0, xs: [] }).push(P { n: 3, xs: push([], 1) }); p = ps.get(0); return p.n + size(p.xs);") (VInt 4))

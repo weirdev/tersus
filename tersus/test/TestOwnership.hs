@@ -559,22 +559,22 @@ planTests =
         withOwned "a = array(3, 0); b = set(a, 0, 1); return get(b, 0) + get(a, 1) + size(a);" (\t -> testAssertEq (count "clone" t, count "move" t, count "drop" t, count "peek" t) (0, 0, 0, 0))
     , TestCase "an array beside a list: only the list is freed" . pure $
         withOwned "l = [1]; a = array(2, 0); a = set(a, 1, size(l)); return get(a, 1);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue (not ("drop _2" `isInfixOf` m) && "drop _1" `isInfixOf` m))
-    , TestCase "a list that is used after a push is copied once" . pure $
-        withOwned "x = [1]; y = push(x, 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
+    , TestCase "a list that is cloned for a push is copied once" . pure $
+        withOwned "x = [1]; y = push(clone(x), 2); return size(x) + size(y);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
     , TestCase "a match takes the fields out of the value" . pure $
         withOwned "enum T { Leaf, Node { l: Box<T>, v: Int, r: Box<T> } }; fn sum(t: Box<T>) -> Int shrinks t { return match t { T::Leaf => 0, T::Node { l: l, v: v, r: r } => v + sum(l) + sum(r) }; }; return sum(Box::new(T::Node { l: Box::new(T::Leaf), v: 1, r: Box::new(T::Leaf) }));" (\t -> let f = functionText "sum" t in testAssertEq (count "clone" f, count "take " f) (0, 2))
     , TestCase "a part that is only read is looked at" . pure $
         withOwned "rows = [[1], [2, 3]]; return size(get(rows, 1));" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m, count "peek Get" m) (0, 1))
     , TestCase "a part that is kept is copied" . pure $
-        withOwned "rows = [[1], [2, 3]]; row = get(rows, 1); rows = set(rows, 0, row); return size(row);" (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1))
-    , TestCase "a call with an argument that is used after it copies the argument" . pure $
-        withOwned "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(l) + n(l);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
+        withOwned "rows = [[1], [2, 3]]; row = clone(get(rows, 1)); rows = set(rows, 0, clone(row)); return size(row);" (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1))
+    , TestCase "a call with a clone of an argument that is used after it copies the argument" . pure $
+        withOwned "fn n(l: List<Int>) -> Int { return size(l); }; l = [1, 2]; return n(clone(l)) + n(l);" (\t -> testAssertEq (count "clone" (functionText "main" t)) 1)
     , TestCase "a cast is read from the value itself" . pure $
         withOwned "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue (not (" as S::A;" `isInfixOf` t)))
     , TestCase "a parameter that is assigned a part is freed first" . pure $
         withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "clone" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
     , TestCase "a copy of a parameter is one copy" . pure $
-        withOwned "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = a; out = set(out, 0, size(a)); return out; }; return f([5]);" (\t -> testAssertEq (count "clone" (functionText "f" t)) 1)
+        withOwned "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);" (\t -> testAssertEq (count "clone" (functionText "f" t)) 1)
     ]
   where
     withOwned source check = either Just check (ownedText source)

@@ -1,6 +1,7 @@
 module TestTersus (main) where
 
 import Control.Monad (when)
+import System.Environment (getArgs)
 import System.Exit (exitFailure)
 import System.IO (BufferMode (LineBuffering), hSetBuffering, stdout)
 
@@ -16,6 +17,7 @@ import TestOwnership
 import TestTraits
 import TestArrays
 import TestBorrow
+import TestCopies
 import TestGenerics
 import TestBox
 import TestSequence
@@ -30,11 +32,14 @@ import TestBootstrap
 main :: IO ()
 main = do
     hSetBuffering stdout LineBuffering
+    -- (the names of groups on the command line run only those: `tests testBorrow testCopies`)
+    chosen <- getArgs
+    let only groups = if null chosen then groups else [g | g <- groups, groupName g `elem` chosen]
     summary <-
         foldr combineSummaries (testSummary 0 0)
             <$> mapM
                 (runTest [])
-                [ testParse
+                (only [ testParse
                 , testParseEval
                 , testValidateWithExpectedMatch
                 , testValidateWithExpectedMismatch
@@ -87,6 +92,7 @@ main = do
                 , testArrays
                 , testBox
                 , testBorrow
+                , testCopies
                 , testGenerics
                 , testSequence
                 , testStrings
@@ -96,7 +102,7 @@ main = do
                 , testMirReader
                 , testMirEmit
                 , testBootstrap
-                ]
+                ])
     putStrLn $
         "Summary: "
             ++ show (summaryPassed summary)
@@ -104,3 +110,7 @@ main = do
             ++ show (summaryFailed summary)
             ++ " failed"
     when (summaryFailed summary > 0) exitFailure
+
+groupName :: Test -> String
+groupName (TestList name _) = name
+groupName (TestCase name _) = name

@@ -2,11 +2,14 @@
 // struct owns its fields: a copy of the array shares nothing with it, replacing an element frees the one it held, and the array's
 // elements are freed with it.
 //
-// array(n, x) puts a copy of x in each slot; get gives a copy of an element, so changing it does not change the array.
+// array(n, x) puts a copy of x in each slot (so x has to be Clone); an element is read in place by get, and clone(get(a, i)) is a copy of
+// it, so changing the copy does not change the array.
 struct Player {
     name: Int,
     scores: List<Int>,
 };
+
+impl Clone for Player { };
 
 fn total(players: &Array<Player, 3>) -> Int {
     sum = 0;
@@ -21,12 +24,12 @@ fn total(players: &Array<Player, 3>) -> Int {
 players = array(3, Player { name: 0, scores: push([], 10) });
 players = set(players, 1, Player { name: 1, scores: push(push([], 20), 30) });
 
-// get gives a copy: the player in the array has not changed
-copy = get(players, 0);
+// a clone of an element is its own: the player in the array has not changed
+copy = clone(get(players, 0));
 copy = Player { scores: push(copy.scores, 99), ..copy };
 
-// and an array copies as a whole
-backup = players;
+// and an array is cloned as a whole
+backup = clone(players);
 players = set(players, 2, Player { name: 2, scores: [] });
 
 return total(players) + total(backup) + size(copy.scores) * 100;    // (1 + 2 + 0) + (1 + 2 + 1) + 200
