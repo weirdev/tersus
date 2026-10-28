@@ -40,8 +40,8 @@ library
       MirEval
       MirLists
       MirLower
-      MirMoves
       MirMono
+      MirMoves
       MirOwnership
       MirValidate
       MirVerify
@@ -76,6 +76,26 @@ library
     , template-haskell
   default-language: Haskell2010
 
+executable parity
+  main-is: Parity.hs
+  other-modules:
+      Paths_tersus
+  autogen-modules:
+      Paths_tersus
+  hs-source-dirs:
+      dev/parity
+  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
+  build-depends:
+      base >=4.7 && <5
+    , containers
+    , directory
+    , filepath
+    , parsec
+    , process
+    , template-haskell
+    , tersus
+  default-language: Haskell2010
+
 executable tersus-exe
   main-is: Main.hs
   other-modules:
@@ -100,28 +120,28 @@ test-suite tersus-test
   type: exitcode-stdio-1.0
   main-is: TestTersus.hs
   other-modules:
-      TestBasics
-      TestControl
-      TestData
-      TestHarness
-      TestNative
-      TestOwnership
       TestArrays
+      TestBasics
+      TestBootstrap
       TestBorrow
-      TestCopies
-      TestGenerics
-      TestSequence
-      TestStrings
+      TestBox
       TestBytes
       TestConnectives
+      TestControl
+      TestCopies
+      TestData
+      TestGenerics
+      TestHarness
       TestMirData
-      TestMirReader
       TestMirEmit
-      TestBox
-      TestBootstrap
-      TestTraits
+      TestMirReader
+      TestNative
+      TestOwnership
       TestPipeline
       TestProofs
+      TestSequence
+      TestStrings
+      TestTraits
       TestValidation
       Paths_tersus
   autogen-modules:
