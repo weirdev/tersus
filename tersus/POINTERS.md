@@ -63,13 +63,16 @@ The validator knows it through ghost functions, usable in contracts, `affirm`, `
 | `Addr::get(p, b)` | `inside(b, p)`, `filled(b, p)` | `at(b, p)`, a view: reading it moves nothing, and `b` is lent |
 | `Addr::write(p, x, b)` | `inside(b, p)`, `!filled(b, p)` | a new block, with `p` filled with `x` and every other slot as it was |
 | `Addr::take(p, b)` | `inside(b, p)`, `filled(b, p)` | `(at(b, p), ghost b2)`: the value, and a block with `p` empty |
-| `Addr::drop(p, b)` | `inside(b, p)`, `filled(b, p)` | a block with `p` empty; the value is dropped in place |
+| `Addr::dropValue(p, b)` | `inside(b, p)`, `filled(b, p)` | a block with `p` empty; the value is dropped in place |
+| `Addr::dropRange(p, n, b)` | `n >= 0`, the `n` slots from `p` inside `b` and filled | a block with those slots empty, each value dropped in place, and every other slot as it was |
 | `Addr::resize(p, n, b)` | `p = base(b)`, `n >= 0`, no slot from index `n` filled | `(q, ghost b2)`: `base(b2) = q`, `cap(b2) = n`, the slots below `min(n, cap(b))` as they were, by index |
 | `Addr::free(p, b)` | `p = base(b)`, no slot filled | `0` (there is no unit type); `b` is consumed |
 
-- **`write` needs an empty slot.** Writing over a filled one would lose a value that may own something. Replacing a value is `drop` then `write`.
+- **Dropping a value and freeing a block are different things.** `dropValue` ends the value in one slot: it runs that value's drop, which frees what the value owns (a list's elements, the block of a `Vec` in the slot) and leaves the slot empty. The block's memory stays allocated. `free` returns the block's memory to the allocator, and runs nothing. A block is emptied, slot by slot, with `take`, `dropValue` or `dropRange`, and then freed. This is Rust's `drop_in_place` and `dealloc`.
+- **Why `free` needs every slot empty.** Natively nothing records which slots are filled: that is only in the permission, which is erased. So `free` cannot drop what is left, and a value still in a slot would be lost along with everything it owns. Requiring empty slots makes "nothing is lost" a proof.
+- **`write` needs an empty slot.** Writing over a filled one would lose a value that may own something. Replacing a value is `dropValue` then `write`.
 - **`get` is a view**, as `get` of a list is (MIR.md, Moves). `MirMoves` refuses to move it out (`cannot move x out of a Block, which still holds it: write clone(x), or Addr::take`).
-- **`drop` runs `tersus_drop` with the descriptor of `T`.** It does nothing for a type that owns nothing.
+- **`dropValue` and `dropRange` run `tersus_drop` with the descriptor of `T`.** For a type that owns nothing they do nothing natively, and are there only for the proof.
 - **`resize` is `realloc`.** Moving a value in Tersus is copying its words, so a bitwise move of every filled slot is right.
 - **What fails at run time and not in a proof**: an allocation the system refuses, and a size whose bytes overflow an `Int`. The program ends with an error, as for an overflow. No contract can promise memory.
 
@@ -81,7 +84,7 @@ A function that should see only part of a buffer gets part of the permission: `B
 
 ### Reinterpreting memory
 
-`Block::cast(b)` gives a `Block<U>` for the same memory. It is allowed when `T` and `U` have the same words, and every filled slot's words are a valid `U`. `Int` to a struct of `Int`s is allowed; `Int` to `Bool` needs every filled slot to be 0 or 1, which a proof can give; `Int` to a list is never allowed. Anything else is an assumption (`Block::assume`).
+`Block::cast(b)` gives a `Block<U>` for the same memory. It is allowed when `T` and `U` have the same layout (see Layout), and every filled slot's bytes are a valid `U`. `Int` to a struct of `Int`s is allowed; `Int` to `Bool` needs every filled slot to be 0 or 1, which a proof can give; `Int` to a list is never allowed. Anything else is an assumption (`Block::assume`).
 
 ## Ghost values
 
@@ -105,18 +108,35 @@ Every primitive above gives back two things: an address and a permission, or a v
 
 Tuples are useful well beyond pointers: `replace` (below), a function that returns a result and a count, and every `Popped`-like struct a library declares today.
 
+## Layout: bytes, not words
+
+Natively every value is held in 64-bit words today: an `Int`, a `Bool` and a `Byte` are a word each, and a struct, an enum or an array is its parts' words (`LlvmRuntime`, `slotsOf` in `LlvmEmit`). An address makes layout visible, because the stride of `Addr::offset`, the bytes `Block::cast` compares and the memory a C function reads all depend on it. A `String` also takes eight times the memory it needs. So layout changes to C's, before addresses are built:
+
+- **`Byte` is 8 bits**, and `Bool` is 8 bits (C's `_Bool`, 0 or 1).
+- **Fixed-width integers**: `I8`, `I16`, `I32`, `U16` and `U32` join `Byte` (which is `U8`) and `Int` (which is `I64`). Each is a type of its own, with its range known to the validator wherever a value comes from, as `Byte`'s is (LANGUAGE.md, Bytes). Arithmetic and order stay on `Int`: `toInt(x)` widens, and `I32::from(x)`, `U16::from(x)` and so on narrow, with the range proved at the call, as `toByte(x)` does now. A number written out where one is wanted is converted, as for `Byte`. There is no `U64`, since it does not fit in an `Int`; a C `size_t` is an `Int`, which holds every size a program can allocate.
+- **Structs use C's rules**: fields in the order they are declared, each at an offset that is a multiple of its alignment, and the size rounded up to the largest alignment. So every struct of fixed-width fields has the layout of the same C struct, and needs no annotation to be passed to C.
+- **Enums** keep a tag followed by the largest variant, with the tag a `U32`. C has no equivalent, so an enum is not passed to C by address.
+- **Arrays** are their elements, each `size(T)` bytes apart, as in C. The limit of an array held in a frame becomes 64 KB of bytes and not 8192 words.
+- **What does not change**: an `Int`, an address, a function and a `Box` are 8 bytes, and the validator sees values, not bytes, so no proof changes. `eval` holds values and is unaffected.
+
+**What it costs.** The emitters (both, in step), the runtime's descriptors and walks (`words` becomes a size in bytes and an alignment, and `tersus_drop`, `tersus_clone`, `tersus_equal` and `tersus_print` step by field offsets), the stride of a list's elements in `StdList`, `MirData`'s types, the `bootstrap/emitter.ll` seed, and the builtins that move bytes in and out (`writeByte`, `readByte`, `fileByte`, which become 8-bit). The same tests are the check: `TestNative` against `eval`, the heap model, `TERSUS_CHECK` and valgrind. It is mechanical, but it touches every place that counts words.
+
 ## Assumptions
 
-What the validator cannot prove, a program says explicitly, in one of four ways:
+What the validator cannot prove, a program says explicitly, in one of four ways. Each new form has to give its reason, a string after `because`:
 
 | Form | What is assumed |
 |---|---|
-| `assume e;` | a fact, which the rest of the path then knows, as after an `affirm` |
-| `Block::assume(p, n)` | a permission for `n` slots of `T` at `p`, with no slot filled, for memory the program did not allocate |
-| `extern fn` | the contract of a function with no body that the emitter declares (step 30: `write`, `exit`, the system's allocator, a C library) |
-| `axiom` | a rule of proof, as now |
+| `assume e because "...";` | a fact, which the rest of the path then knows, as after an `affirm` |
+| `Block::assume(p, n) because "..."` | a permission for `n` slots of `T` at `p`, with no slot filled, for memory the program did not allocate |
+| `extern fn ... because "...";` | the contract of a function with no body that the emitter declares (step 30: `write`, `exit`, the system's allocator, a C library) |
+| `axiom` | a rule of proof, as now; its name serves as its reason, so existing programs do not change |
 
-`tersus assumptions <file>` prints every one in the program and its prelude, with its line. That list is everything the program's proofs take on trust, besides the builtins.
+```tersus
+assume n <= 4096 because "the kernel never returns more than one page from this read";
+```
+
+`tersus assumptions <file>` prints every one in the program and its prelude, with its line and its reason. That list is everything the program's proofs take on trust, besides the builtins. An assumption without `because` is a parse error.
 
 **What needs an assumption, at first:**
 
@@ -199,19 +219,7 @@ impl<T> Vec<T> {
 
     // Until step 26 gives Vec a Drop, a Vec is linear (it holds a permission), and the program frees it with this
     fn free(self: Self) -> Int [{ }] [{ }] {
-        b = self.blk;
-        i = 0;
-        while i < self.len [{
-            affirm i >= 0; affirm i <= self.len;
-            affirm base(b) = self.addr; affirm cap(b) = self.cap;
-            affirm forall j in 0..i: !filled(b, Addr::offset(self.addr, j));
-            affirm forall j in i..self.len: filled(b, Addr::offset(self.addr, j));
-            affirm forall j in self.len..self.cap: !filled(b, Addr::offset(self.addr, j));
-        }] shrinks self.len - i {
-            b = Addr::drop(Addr::offset(self.addr, i), b);
-            i = i + 1;
-        };
-        return Addr::free(self.addr, b);
+        return Addr::free(self.addr, Addr::dropRange(self.addr, self.len, self.blk));
     };
 };
 ```
@@ -230,8 +238,8 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 ## Running it
 
 - **`eval` needs a heap for `Addr`.** Addresses can be shared, so `MirEval` gets a store of blocks (a map from a block to its slots, with an address encoded as a block and an index) that `alloc`, `get`, `write`, `take`, `drop`, `resize` and `free` work on. It runs after ghost values are erased. It fails on a read of an empty or freed slot and on a double free, which a proved program cannot do, so on such a program it is a check of the assumptions. The older executor in `StdLib` refuses addresses. `Uninit` needs no heap: it is `VUninit (Maybe Value)`.
-- **MIR.** The operations are `ListOp`s (`AddrAlloc`, `AddrNull`, `AddrOffset`, `AddrCast`, `AddrGet`, `AddrWrite`, `AddrTake`, `AddrDrop`, `AddrResize`, `AddrFree`, and the `Uninit`, `replace` and tuple operations), with words in `MirData`. `Addr T`, `Block T`, `Uninit T` and tuple types are new `Type` constructors; a ghost local has a flag. The ghost operations (`Block::split`, `join`, `cast`, `assume`) erase to nothing.
-- **Native code.** An `Addr` is an `i64`. `alloc`, `resize` and `free` call the runtime's `allocate`, `reallocate` and `release`, so `TERSUS_CHECK` counts the blocks. `get`, `write` and `take` copy `words(T)` words, `offset` adds `i * words(T) * 8`, and `drop` calls `tersus_drop` with the descriptor of `T`. An `Uninit<T>` is laid out as a `T`, with a descriptor that drops, clones and compares nothing.
+- **MIR.** The operations are `ListOp`s (`AddrAlloc`, `AddrNull`, `AddrOffset`, `AddrCast`, `AddrGet`, `AddrWrite`, `AddrTake`, `AddrDropValue`, `AddrDropRange`, `AddrResize`, `AddrFree`, and the `Uninit`, `replace` and tuple operations), with words in `MirData`. `Addr T`, `Block T`, `Uninit T` and tuple types are new `Type` constructors; a ghost local has a flag. The ghost operations (`Block::split`, `join`, `cast`, `assume`) erase to nothing.
+- **Native code.** An `Addr` is an `i64`. `alloc`, `resize` and `free` call the runtime's `allocate`, `reallocate` and `release`, so `TERSUS_CHECK` counts the blocks. `get`, `write` and `take` copy `size(T)` bytes, `offset` adds `i * size(T)`, and `dropValue` and `dropRange` call `tersus_drop` with the descriptor of `T`. An `Uninit<T>` is laid out as a `T`, with a descriptor that drops, clones and compares nothing.
 - **Both emitters, in step.** `LlvmEmit` and `examples/emit.tersus` gain the same cases, `examples/mir_reader.tersus` reads the new words, and `bootstrap/emitter.ll` is regenerated. `TestMirEmit` keeps them equal.
 
 ## Order of work
@@ -240,21 +248,21 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 2. **Linear types** (DROPS.md, Part 2), which permissions rely on.
 3. **`Uninit<T>` and `replace`**, on the builtin `Box`: a proved `Vec` with no addresses, and a test of whether the invariant's foralls are cheap enough to prove at each operation.
 4. **Ghost values**: ghost locals, parameters, fields and tuple parts, the check that they do not flow into runtime values, the linear check over them, and the erasure pass.
-5. **`Addr<T>` and `Block<T>`**: the types, the operations, the address facts and ghost arrays in the proof engine, the heap in `MirEval`, the emitters and runtime, `examples/addresses.tersus` (a buffer and an arena-linked list, both proved), and a rejected program for each contract: read of an empty slot, write over a filled one, out of bounds, free with a slot filled, use after free, a permission dropped.
-6. **Assumptions**: `assume`, `Block::assume`, `extern fn`, and `tersus assumptions`.
-7. **Drops (step 26)**, then `StdList` on an address, then `Box` in the library (step 29).
+5. **Layout in bytes**: 8-bit `Byte` and `Bool`, the fixed-width integers, C's rules for structs, in both emitters and the runtime. This is independent of 1 to 4 and can be done at any point before 6.
+6. **`Addr<T>` and `Block<T>`**: the types, the operations, the address facts and ghost arrays in the proof engine, the heap in `MirEval`, the emitters and runtime, `examples/addresses.tersus` (a buffer and an arena-linked list, both proved), and a rejected program for each contract: read of an empty slot, write over a filled one, out of bounds, free with a slot filled, use after free, a permission dropped.
+7. **Assumptions**: `assume`, `Block::assume`, `extern fn` (each with its `because`), and `tersus assumptions`.
+8. **Drops (step 26)**, then `StdList` on an address, then `Box` in the library (step 29).
 
 ## Changes to other documents
 
 - `README.md`, step 25: `Addr<T>`, `Block<T>`, ghost values, tuples and assumptions in place of `*T`, the marker in signatures and the contracts on `valid(p)`. Step 29: `struct Box<T> { addr: Addr<T>, ghost blk: Block<T> }` in place of `ptr: *T`, and `*[T]` as an address, a length and a block. Step 30: `extern fn` as an assumption.
 - `DROPS.md`, Part 3: points here. Its owning pointer is now an address and a permission, and `Uninit` and `replace` cover what Part 1's section on containers needed. The order there changes: linear types come before pointers.
-- `LANGUAGE.md`, when it is built: sections on tuples, ghost values, addresses and permissions, and assumptions, with the list of what `tersus assumptions` reports.
+- `LANGUAGE.md`, when it is built: sections on tuples, ghost values, addresses and permissions, and assumptions, with the list of what `tersus assumptions` reports. Bytes (a `Byte` is 8 bits natively) and a new section on the fixed-width integers and layout.
 
 ## Decisions to make
 
 1. **How a `drop` frees a permission (postponed).** Part 1 of `DROPS.md` gives `drop` a lent `self: &Self`, which cannot consume the linear permission inside the value. A type that holds a permission needs a `drop` that takes `Self`, without its fields being dropped again afterwards. This is decided with step 26.
-2. **Must `free` find every slot empty?** It is what makes "no element is lost" a proof, and `Vec::free` above shows its cost: a loop with three foralls in its invariant. The cheaper rule is that `free` drops whatever is filled, which needs no proof and is always safe.
+2. **Must `free` find every slot empty?** It cannot drop what is left itself, since natively nothing records which slots are filled. The alternative is a `free` that asks nothing, and leaks whatever the filled slots own. That is safe, but loses the proof that nothing is lost. `dropRange` keeps the cost of the strict rule to one call for a `Vec`; whether the engine proves `free`'s `forall` over `0..cap` from `dropRange`'s result over `0..len` and the invariant over `len..cap` without help is untested.
 3. **Ghost collections of permissions**, for structures over many blocks: a ghost map from addresses to `Block`s, and when to add it.
 4. **Fractional permissions**, for proved sharing of memory that is only read (`Rc` of an immutable value, a buffer read by several functions at once).
-5. **C layout.** Tersus lays every value out in 8-byte words, a `Byte` included, which is not C's layout. Addresses passed to C need types with C's layout (`i32`, a real `u8`, structs with C's rules), probably a step of their own before `extern fn` is useful beyond whole words.
-6. **Should `assume` carry a reason** (`assume e because "...";`) that `tersus assumptions` prints?
+5. **Wrapping arithmetic** on the fixed-width integers (for hashes and checksums), or only arithmetic on `Int` with checked narrowing, as above.
