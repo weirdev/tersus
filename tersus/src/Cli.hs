@@ -8,6 +8,7 @@ module Cli
     , noWorld
     , runSourceIn
     , runSourceFiles
+    , runProgramIn
     , readWorldFile
     , writeWorldFiles
     , runSource
@@ -25,7 +26,7 @@ import Control.Exception (IOException, try)
 import System.IO
 import System.IO.Unsafe (unsafePerformIO)
 
-import Mir (renderProgram)
+import Mir (Program, renderProgram)
 import MirData (writeProgram)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
@@ -128,13 +129,17 @@ runSourceIn world command source = mapResult fst (runSourceFiles world command s
 -- The same with the files that the program wrote (each path once, with what the file holds at the end), which `Interpret` does not write itself
 runSourceFiles :: World -> Command -> String -> Result ((String, String), [(FilePath, String)]) String
 runSourceFiles _ Check source = mapResult (\_ -> (("OK", ""), [])) (compileSource source)
-runSourceFiles world Interpret source =
-    compileSource source `bindResult` \program ->
-        case runProgramEnv RunEnv{envArgs = worldArgs world, envInput = worldInput world, envFile = worldFile world} program of
-            Error e -> Error ("Evaluation failed: " ++ e)
-            -- (what the program wrote, then its value: the same text as an executable prints)
-            Ok o -> Ok ((decodeUtf8 (outStdout o) ++ maybe "" renderMirValue (outValue o), decodeUtf8 (outStderr o)), outFiles o)
+runSourceFiles world Interpret source = compileSource source `bindResult` runProgramIn world
 runSourceFiles world command source = mapResult (\text -> ((text, ""), [])) (runOther (worldInput world) command source)
+
+-- What a validated program does when the reference interpreter runs it (what `Interpret` does after `compileSource`): the text it wrote to the
+-- standard output and to the standard error, and the files it wrote. A test that runs the same program in several ways compiles it once and calls this.
+runProgramIn :: World -> Program -> Result ((String, String), [(FilePath, String)]) String
+runProgramIn world program =
+    case runProgramEnv RunEnv{envArgs = worldArgs world, envInput = worldInput world, envFile = worldFile world} program of
+        Error e -> Error ("Evaluation failed: " ++ e)
+        -- (what the program wrote, then its value: the same text as an executable prints)
+        Ok o -> Ok ((decodeUtf8 (outStdout o) ++ maybe "" renderMirValue (outValue o), decodeUtf8 (outStderr o)), outFiles o)
 
 runOther :: String -> Command -> String -> Result String String
 runOther _ Mir source = mapResult renderProgram (compileSource source)

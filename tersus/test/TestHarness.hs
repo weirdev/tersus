@@ -18,13 +18,19 @@ module TestHarness
     , parseValidateFailProgramHelper
     , nativeInts
     , vecLibrary
+    , compileOnce
     ) where
 
 import qualified Control.Exception as Exception
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Exception (SomeException, displayException, try)
+import qualified Data.Map.Strict as Map
+import System.IO.Unsafe (unsafePerformIO)
+
+import Mir (Program)
 import MirEval (fromMirValue)
 import Parse
-import Pipeline (runStatements, validateStatements)
+import Pipeline (compileSource, runStatements, validateStatements)
 import TersusTypes
 import Utils
 
@@ -159,6 +165,21 @@ parseValidateFailProgramHelper source expectedError = withProgram source $
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult
 withProgram source = fmap (\message -> message ++ "\nProgram: " ++ take 500 source)
+
+-- The compilation of a program, remembered for the process: cases that all use the same big program (the emitter of
+-- examples/emit.tersus) validate it once instead of once per case. Compilation is pure, so a result stays valid.
+compileOnce :: String -> IO (Result Program String)
+compileOnce source = modifyMVar compiledSources $ \cache ->
+    case Map.lookup source cache of
+        Just result -> pure (cache, result)
+        Nothing -> do
+            let result = compileSource source
+            _ <- Exception.evaluate result
+            pure (Map.insert source result cache, result)
+
+{-# NOINLINE compiledSources #-}
+compiledSources :: MVar (Map.Map String (Result Program String))
+compiledSources = unsafePerformIO (newMVar Map.empty)
 
 -- Run tests
 -- A function over integers only
