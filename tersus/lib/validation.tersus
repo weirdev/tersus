@@ -1662,9 +1662,9 @@ fn negateRelation(relation: Int, left: Int, right: Int) -> NegatedRelation {
     return NegatedRelation { relation: 2, left: right, right: left };
 };
 
-// Recognize a boolean directly or through the comparison that produced it.
-// The application keeps the operands from the time of the comparison.
-fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool) -> Bool {
+// The comparison that produced the term, negated when the term has to be
+// false. The application keeps the operands from the time of the comparison.
+fn booleanRelationKnown(context: &ValidatorContext, term: Int, truth: Bool) -> Bool {
     for app in context.applications {
         if app.id = term {
             if size(app.arguments) = 2 {
@@ -1691,6 +1691,14 @@ fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool
             };
         };
     };
+    return false;
+};
+
+// Recognize a boolean directly or through the comparison that produced it.
+// The literal is the term for the truth value being asked about, so `truth` and
+// `literal` always agree.
+fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool) -> Bool {
+    if booleanRelationKnown(context, term, truth) { return true; };
     return entailsGoal(context, ValidatorGoal::Equal { left: term, right: literal });
 };
 
@@ -1705,6 +1713,47 @@ fn booleanLiteral(context: &ValidatorContext, term: Int) -> IntegerLookup {
     return IntegerLookup::Missing;
 };
 
+// The term for the boolean constant with this value, if the program has one.
+// A check against the other value has to name its own literal.
+fn booleanConstant(context: &ValidatorContext, value: Int) -> ValueLookup {
+    for constant in context.constants {
+        if constant.kind = 1 {
+            if constant.value = value { return ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+// A disequality asks the term for the opposite of the literal it was compared
+// with, so the literal itself cannot answer it. The producing comparison still
+// can; a plain constant needs the term for that value, which the program may
+// not mention at all.
+fn booleanOpposite(context: &ValidatorContext, term: Int, truth: Bool) -> Bool {
+    if booleanRelationKnown(context, term, truth) { return true; };
+    value = 0;
+    if truth { value = 1; };
+    literal = booleanConstant(context, value);
+    if literal is ValueLookup::Found {
+        return entailsGoal(context, ValidatorGoal::Equal { left: term, right: (literal as ValueLookup::Found).term });
+    };
+    return false;
+};
+
+// `term` has to be the literal `value` when the operands are equal and the
+// other value when they differ, so a disequality asks for the opposite
+// literal rather than reusing the one it was compared with.
+fn booleanAgainstLiteral(context: &ValidatorContext, term: Int, literal: Int, value: Int, relation: Int) -> Bool {
+    if value != 0 {
+        if value != 1 { return false; };
+    };
+    if relation = 0 {
+        if value = 1 { return booleanKnown(context, term, literal, true); };
+        return booleanKnown(context, term, literal, false);
+    };
+    if value = 0 { return booleanOpposite(context, term, true); };
+    return booleanOpposite(context, term, false);
+};
+
 // A check of a boolean term against a literal is the comparison that produced
 // the term, so `below = true` follows from `below` being `x < 6` with x < 6.
 // The relation itself stays with the terms that were compared, not with the
@@ -1713,18 +1762,13 @@ fn booleanCheck(context: &ValidatorContext, relation: Int, left: Int, right: Int
     if relation != 0 {
         if relation != 1 { return false; };
     };
-    truth = false;
-    if relation = 0 { truth = true; };
     a = booleanLiteral(context, left);
     if a is IntegerLookup::Found {
-        if (a as IntegerLookup::Found).value = 1 { return booleanKnown(context, right, left, truth); };
-        if (a as IntegerLookup::Found).value = 0 { return booleanKnown(context, right, left, false); };
-        return false;
+        return booleanAgainstLiteral(context, right, left, (a as IntegerLookup::Found).value, relation);
     };
     b = booleanLiteral(context, right);
     if b is IntegerLookup::Found {
-        if (b as IntegerLookup::Found).value = 1 { return booleanKnown(context, left, right, truth); };
-        if (b as IntegerLookup::Found).value = 0 { return booleanKnown(context, left, right, false); };
+        return booleanAgainstLiteral(context, left, right, (b as IntegerLookup::Found).value, relation);
     };
     return false;
 };
