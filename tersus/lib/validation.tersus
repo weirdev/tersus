@@ -1649,6 +1649,86 @@ fn existingApplication(context: &ValidatorContext, function: Int, args: &List<In
     return ValueLookup::Missing;
 };
 
+struct NegatedRelation { relation: Int, left: Int, right: Int };
+
+impl Clone for NegatedRelation { };
+
+impl Copy for NegatedRelation { };
+
+fn negateRelation(relation: Int, left: Int, right: Int) -> NegatedRelation {
+    if relation = 0 { return NegatedRelation { relation: 1, left: left, right: right }; };
+    if relation = 1 { return NegatedRelation { relation: 0, left: left, right: right }; };
+    if relation = 2 { return NegatedRelation { relation: 3, left: right, right: left }; };
+    return NegatedRelation { relation: 2, left: right, right: left };
+};
+
+// Recognize a boolean directly or through the comparison that produced it.
+// The application keeps the operands from the time of the comparison.
+fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool) -> Bool {
+    for app in context.applications {
+        if app.id = term {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                relation = -1;
+                left = a;
+                right = b;
+                if app.function = -6 { relation = 0; };
+                if app.function = -7 { relation = 1; };
+                if app.function = -8 { relation = 2; };
+                if app.function = -9 { relation = 3; };
+                if app.function = -10 { relation = 2; left = b; right = a; };
+                if app.function = -11 { relation = 3; left = b; right = a; };
+                if relation >= 0 {
+                    if truth = false {
+                        opposite = negateRelation(relation, left, right);
+                        relation = opposite.relation;
+                        left = opposite.left;
+                        right = opposite.right;
+                    };
+                    if entailsGoal(context, localGoal(relation, left, right)) { return true; };
+                };
+            };
+        };
+    };
+    return entailsGoal(context, ValidatorGoal::Equal { left: term, right: literal });
+};
+
+// A boolean term that the context knows to be a literal: kind 1 is a boolean,
+// and its value is 0 or 1.
+fn booleanLiteral(context: &ValidatorContext, term: Int) -> IntegerLookup {
+    for constant in context.constants {
+        if constant.id = term {
+            if constant.kind = 1 { return IntegerLookup::Found { value: constant.value }; };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
+// A check of a boolean term against a literal is the comparison that produced
+// the term, so `below = true` follows from `below` being `x < 6` with x < 6.
+// The relation itself stays with the terms that were compared, not with the
+// current values of the locals.
+fn booleanCheck(context: &ValidatorContext, relation: Int, left: Int, right: Int) -> Bool {
+    if relation != 0 {
+        if relation != 1 { return false; };
+    };
+    truth = false;
+    if relation = 0 { truth = true; };
+    a = booleanLiteral(context, left);
+    if a is IntegerLookup::Found {
+        if (a as IntegerLookup::Found).value = 1 { return booleanKnown(context, right, left, truth); };
+        if (a as IntegerLookup::Found).value = 0 { return booleanKnown(context, right, left, false); };
+        return false;
+    };
+    b = booleanLiteral(context, right);
+    if b is IntegerLookup::Found {
+        if (b as IntegerLookup::Found).value = 1 { return booleanKnown(context, left, right, truth); };
+        if (b as IntegerLookup::Found).value = 0 { return booleanKnown(context, left, right, false); };
+    };
+    return false;
+};
+
 fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
     state = clone(initial);
     for i in 0..size(steps) {
@@ -1811,8 +1891,15 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
             right = resolveValue(state, check.right);
             if left is ValueLookup::Found {
                 if right is ValueLookup::Found {
-                    g = localGoal(check.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
-                    if entailsGoal(state.context, g) = false {
+                    a = (left as ValueLookup::Found).term;
+                    b = (right as ValueLookup::Found).term;
+                    g = localGoal(check.relation, a, b);
+                    ok = entailsGoal(state.context, g);
+                    if ok = false {
+                        if check.relation = 0 { ok = booleanCheck(state.context, 0, a, b); };
+                        if check.relation = 1 { ok = booleanCheck(state.context, 1, a, b); };
+                    };
+                    if ok = false {
                         return ExecutionResult { status: 1, failedAt: i, state: state };
                     };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
@@ -1875,51 +1962,6 @@ impl Clone for ExecutionBlockLookup { };
 struct ExecutionFlowResult { status: Int, block: Int, step: Int, state: ExecutionState };
 
 impl Clone for ExecutionFlowResult { };
-
-struct NegatedRelation { relation: Int, left: Int, right: Int };
-
-impl Clone for NegatedRelation { };
-
-impl Copy for NegatedRelation { };
-
-fn negateRelation(relation: Int, left: Int, right: Int) -> NegatedRelation {
-    if relation = 0 { return NegatedRelation { relation: 1, left: left, right: right }; };
-    if relation = 1 { return NegatedRelation { relation: 0, left: left, right: right }; };
-    if relation = 2 { return NegatedRelation { relation: 3, left: right, right: left }; };
-    return NegatedRelation { relation: 2, left: right, right: left };
-};
-
-// Recognize a boolean directly or through the comparison that produced it.
-// The application keeps the operands from the time of the comparison.
-fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool) -> Bool {
-    for app in context.applications {
-        if app.id = term {
-            if size(app.arguments) = 2 {
-                a = get(app.arguments, 0);
-                b = get(app.arguments, 1);
-                relation = -1;
-                left = a;
-                right = b;
-                if app.function = -6 { relation = 0; };
-                if app.function = -7 { relation = 1; };
-                if app.function = -8 { relation = 2; };
-                if app.function = -9 { relation = 3; };
-                if app.function = -10 { relation = 2; left = b; right = a; };
-                if app.function = -11 { relation = 3; left = b; right = a; };
-                if relation >= 0 {
-                    if truth = false {
-                        opposite = negateRelation(relation, left, right);
-                        relation = opposite.relation;
-                        left = opposite.left;
-                        right = opposite.right;
-                    };
-                    if entailsGoal(context, localGoal(relation, left, right)) { return true; };
-                };
-            };
-        };
-    };
-    return entailsGoal(context, ValidatorGoal::Equal { left: term, right: literal });
-};
 
 fn findExecutionBlock(blocks: &List<ExecutionBlock>, id: Int) -> ExecutionBlockLookup {
     for block in blocks {
