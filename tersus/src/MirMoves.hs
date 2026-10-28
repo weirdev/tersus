@@ -69,16 +69,18 @@ type Pos = Maybe (Int, Int)
 -- Along the paths that reach a point: the places that may have been moved out (and where), and the places that a local is a view of
 -- on every path (a local that is a view on one path and not on another is taken for a value of its own, so a move of it is not reported
 -- as a move out of what it was a view of)
-data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place)}
+-- stMay holds the places a local may be a view of on some path (a local that is a view on one path and owns its value on another is in it),
+-- which only decides whether a move is allowed: a move out of a list or out of a lent parameter on any path is an error.
+data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place)}
 
 emptySt :: St
-emptySt = St Map.empty Map.empty
+emptySt = St Map.empty Map.empty Map.empty
 
 joinSt :: St -> St -> St
-joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b))
+joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b))
 
 sameShape :: St -> St -> Bool
-sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b
+sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b
 
 overlaps :: Place -> Place -> Bool
 overlaps (l, a) (m, b) = l == m && (a `isPrefixOf` b || b `isPrefixOf` a)
@@ -179,7 +181,7 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs)
     taking = role == Consume && not (isCopy cx l)
     moveErrs
         | not taking = []
-        | otherwise = concatMap moveError places
+        | otherwise = concatMap moveError (places ++ [(r, ps ++ steps) | Just may <- [Map.lookup l (stMay st)], (r, ps) <- Set.toList may, (r, ps ++ steps) `notElem` places])
     moveError q@(root, ps)
         | SElem `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of a list, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it")]
         | root `Set.member` cxLent cx = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
@@ -192,10 +194,16 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs)
 
 -- The local gets a new value: nothing is moved out of it, and it is a view of the places the value comes from (if it is a view)
 define :: Cx -> St -> Local -> [Place] -> St
-define _ st d view =
+define _ st d view0 =
+    -- (a path is followed to a fixed depth, so that a loop down a recursive value reaches a fixed point: the place that is left is a prefix, which stands for
+    -- everything below it)
+    let view = view0
+        view' = [(r, take maxDepth ps) | (r, ps) <- view0]
+     in
     St
         { stMoved = Map.filterWithKey (\(root, _) _ -> root /= d) (stMoved st)
-        , stViews = if null view then Map.delete d (stViews st) else Map.insert d (Set.fromList view) (stViews st)
+        , stViews = if null view then Map.delete d (stViews st) else Map.insert d (Set.fromList view') (stViews st)
+        , stMay = if null view then Map.delete d (stMay st) else Map.insert d (Set.fromList view') (stMay st)
         }
 
 terminator :: Cx -> Pos -> St -> Terminator -> (St, [String])
@@ -259,3 +267,6 @@ stripPositions program = program{progFunctions = Map.map strip (progFunctions pr
     strip fn = fn{fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock (filter (not . position) stmts) term) (fnBlocks fn)}
     position (Ghost _ GhostPosition{}) = True
     position _ = False
+
+maxDepth :: Int
+maxDepth = 6

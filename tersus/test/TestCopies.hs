@@ -116,6 +116,13 @@ testCopies =
                 , testCase "an enum variant too" (runs (markers ++ "enum E { A { xs: List<Int>, n: Int }, B }; impl Clone for E { }; fn bump(e: &E) -> E { return E::A { n: 9, ..clone(e) }; }; r = bump(E::A { xs: [1, 2], n: 1 }); return size((r as E::A).xs) + (r as E::A).n;") (VInt 11))
                 ]
             , TestList
+                "review"
+                [ -- a loop down a recursive value reaches a fixed point (it used to add a step to the places at each round)
+                  testCase "a loop down a recursive value ends" (runs "enum N { End, Next { tail: Box<N> } }; fn depth(root: &Box<N>) -> Int { node = Box::unbox(root); n = 0; while node is N::Next shrinks node { node = Box::unbox((node as N::Next).tail); n = n + 1; }; return n; }; return depth(Box::new(N::Next { tail: Box::new(N::End) }));" (VInt 1))
+                , testCase "a view on one branch and a value of its own on the other is a view" (moveError "fn f(c: Bool, rows: &List<List<Int>>) -> List<Int> [{ affirm size(rows) > 0; }] [{ }] { row = []; if c { row = get(rows, 0); }; return row; }; return size(f(true, [[1]]));" "out of a list")
+                , testCase "a user function named clone is called by a struct update" (runs "struct S { n: Int }; fn clone(s: &S) -> S { return S { n: s.n + 1 }; }; s = S { n: 1 }; t = S { ..clone(s) }; return t.n;" (VInt 2))
+                ]
+            , TestList
                 "arrays of copies"
                 [ testCase "array(n, x) moves x" (moveError "xs = [1]; a = array(2, xs); return size(xs);" "xs was moved")
                 , testCase "of a type that is Clone" (rejected "struct S { n: Int }; a = array(2, S { n: 1 }); return 1;" "S does not implement Clone")

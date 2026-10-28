@@ -39,11 +39,12 @@ data Decls = Decls
     , declTypeParams :: [Name] -- the type parameters of the function or the struct being read: a name of these in a type is that parameter
     , declGenerics :: Map.Map Name [Variable] -- the structs with sizes and types, and the parameters of each, in order
     , declImplParams :: [Variable] -- the type and size parameters of the impl being read (`impl<T> Vec<T>`), which each of its functions has
+    , declOwnClone :: Bool -- whether the program defines a function or method named clone, which `..clone(x)` then calls and the parser does not take apart
     , declLocate :: Bool -- whether a statement of a block is preceded by a `Mark` of the place it is written at
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty [] False
+emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty [] False False
 
 -- The declarations from which a program is parsed with the place of each of its statements kept
 locating :: Decls -> Decls
@@ -406,10 +407,11 @@ structLiteral element cloned apply = do
 
 -- The braces of a struct or variant literal, after its name and the opening brace
 structFields :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Name -> [Variable] -> Parser a
-structFields element cloned apply name declared = do
+structFields element cloned0 apply name declared = do
     whitespace
     inits <- many fieldInit
     base <- optionMaybe (string ".." >> whitespace >> element <* whitespace <* optional (char ',' >> whitespace))
+    own <- declOwnClone <$> getState
     void (char '}')
     whitespace
     mapM_ (\(field, _) -> when (field `notElem` declared) (fail ("Struct " ++ name ++ " has no field " ++ field))) inits
@@ -417,7 +419,7 @@ structFields element cloned apply name declared = do
         fail ("Struct " ++ name ++ " literal repeats a field")
     when (isJust base && all (`elem` map fst inits) declared) $
         fail ("Struct " ++ name ++ " literal gives every field, so ..base copies nothing")
-    args <- mapM (argument name base inits) declared
+    args <- mapM (argument own name base inits) declared
     return (apply (builtinFunct (Ctor name declared)) args)
   where
     fieldInit = do
@@ -432,11 +434,11 @@ structFields element cloned apply name declared = do
     fieldOf from field
         | "::" `isInfixOf` name = apply (builtinFunct (Field Nothing field)) [apply (builtinFunct (Cast name)) [from]]
         | otherwise = apply (builtinFunct (Field (Just name) field)) [from]
-    argument name base inits field =
+    argument own name base inits field =
         case (lookup field inits, base) of
             (Just given, _) -> return given
             (Nothing, Just from)
-                | Just inner <- cloned from -> return (apply (builtinFunct CloneOf) [fieldOf inner field])
+                | not own, Just inner <- cloned0 from -> return (apply (builtinFunct CloneOf) [fieldOf inner field])
                 | otherwise -> return (fieldOf from field)
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
 
@@ -598,6 +600,7 @@ functStatement = do
     whitespace
     var <- variable
     whitespace
+    when (var == "clone") $ modifyState (\d -> d{declOwnClone = True})
     -- fn f<T, n>(...): what a call gives. A name that starts with a capital letter is a type (`T`, which the function knows nothing of);
     -- any other is a size, which is one of the last parameters of the function (an Int that the body and the contracts can read).
     -- Neither is written in a call.
