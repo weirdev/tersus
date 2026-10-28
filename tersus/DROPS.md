@@ -1,22 +1,27 @@
 # Drops, linear types and raw pointers (design)
 
-This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the two emitters (`LlvmEmit` and `examples/emit.tersus`, which must write the same IR), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built yet, except what the first step needed: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`, and `MirMoves`, which finds a use of a moved value), see LANGUAGE.md, Moves, Clone And Copy, and the notes below that say what that changed.
+> **Provisional.** This is a plan, not a decision, and it was revised once already: the first draft assumed implicit copies, and explicit `Clone`/`Copy` and the `MirMoves` check were built before any of it. Expect more changes when the drops are started (the flag word, the moment a drop runs and the `eval` change are open, see Decisions). Where the text says "now", it means the code as of the explicit-copies change.
+
+This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the two emitters (`LlvmEmit` and `examples/emit.tersus`, which must write the same IR), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built, except what came first and changed the plan: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`), statements carry their line (`Mark`, `GhostPosition`), and `MirMoves` finds a use of a moved value, see LANGUAGE.md, Moves, Clone And Copy.
 
 ## Where things stand
 
 - Ownership is implicit and structural. `needsDrop` says a type owns something to free (a list, a `Box`, or a struct, enum or array that holds one). `insertOwnership` turns every use into a `Move` or a `Clone` and puts a `Drop` for every owned local at each `Return`. `tersus_drop` frees by walking the descriptor. A moved-from slot holds cleared words, and dropping that does nothing.
-- Copying is explicit (it was implicit: a value wanted twice was cloned): a value that is not Copy is moved, and the program writes `clone(x)` to keep it. A clone has the value of what it copies, which is why a proof about a value stays true. `MirMoves` is the first half of the check that Part 2 asks for (it follows places, with views of fields and elements, along every path), so the linear check is that pass with one more fact per local, the obligations to move it.
+- Copying is explicit (it was implicit: a value wanted twice was cloned): a value that is not Copy is moved, and the program writes `clone(x)` to keep it. A clone has the value of what it copies, which is why a proof about a value stays true. `MirMoves` already does the first half of the check that Part 2 asks for: it follows places (a local with the fields and elements followed from it, and the views that `get`, a field read, a cast, `Box::unbox`, `match` and `for` make of them) along every path, and reports with a line. The linear check is that pass with one more fact per local, the obligations to move it. Positions in errors, which the first draft listed as future work, exist.
 - A drop is memory only. Nothing a program writes runs when a value goes away, and nothing stops a program from forgetting a handle.
 - There is no unit type (a function that does something returns an `Int`), no `&mut` (`&T` is a lent parameter that is only read), no visibility of fields, and a trap ends the process with no unwinding.
 - `eval` runs the validated MIR, which has no ownership in it. `testNative` compares `eval` with the executable, so any effect a drop has must be in both.
 
 ## Three kinds of type, and one new rule
 
-| Kind | Copied implicitly | Dropped implicitly | Made by |
-|---|---|---|---|
-| plain / owning (today) | yes | yes | everything now |
-| **affine** | no (moved; an `impl Clone` makes it copyable) | yes, at the end of its life, running its `Drop` | `impl Drop for T` |
-| **linear** | no | no: it has to be consumed | `linear struct`, `linear enum` |
+| Kind | Copied wherever wanted | `clone(x)` | Dropped implicitly | Made by |
+|---|---|---|---|---|
+| **Copy** (now) | yes | if Clone | yes (nothing to free) | `Int`, `Byte`, `Bool`, functions, `impl Copy for T { };` |
+| **moved** (now: every other type) | no | if `impl Clone` | yes, freeing what it owns | everything else |
+| **affine** | no | only if the type says it has `Clone` | yes, at the end of its life, running its `Drop` | `impl Drop for T` |
+| **linear** | no | no | no: it has to be consumed | `linear struct`, `linear enum` |
+
+"Moved" is the old "plain / owning" row without the implicit copy; affine is moved plus a `Drop`. A type with a `Drop` is never Copy (the checker refuses `impl Copy` for it), and a type with a drop cannot be built by `array(n, x)` or `Array::boxed(n, x)` unless it is Clone, which is the container rule below arriving for free.
 
 The kind of a type is that of its most restrictive part: a struct, enum, array or `Box` that holds a linear value is linear, one that holds an affine value is affine (the same walk as `needsDrop`, which is where it is computed). `List<T>` and `Array<T, N>` of such a type are refused for now (see Containers).
 
@@ -60,7 +65,7 @@ An explicit early drop is a function, not a feature: `fn discard<T>(x: T) -> Int
 
 **A value with a drop is not taken apart.** A `match` that binds an owning field of it would move the field out and leave the rest. Following Rust (E0509), a field of a type with a `Drop` is read, never taken: a plain field is copied, and an owning field is a `Peek` or a `Clone` (which needs the field's type to be cloneable). So the cleared-words case cannot occur inside a value, and the flag only has to describe whole values.
 
-**Copying.** `Clone` and `Copy` exist already, as traits with no functions that a type says it has (`impl Clone for T { };`): `clone(x)` is the structural copy, the MIR's `Clone`, and a value that is not Copy is moved. A type with a drop is not Copy, and it is Clone only if it says so, so `x was moved` (the check of `MirMoves`) is what a second use of an affine value already is. What this step adds is a `Clone` with a body of its own, for a type whose copy is more than its fields:
+**Copying.** `Clone` and `Copy` exist already, as traits with no functions that a type says it has (`impl Clone for T { };`): `clone(x)` is the structural copy, the MIR's `Clone`, and a value that is not Copy is moved. A type with a drop is not Copy, and it is Clone only if it says so, and a structural `impl Clone` for a type with a `Drop` is refused (the copy would be bitwise, and freed twice), so `x was moved` (the check of `MirMoves`) is what a second use of an affine value already is. What this step adds is a `Clone` with a body of its own, for a type whose copy is more than its fields (the trait then has a function, where `Clone` has none now, so the prelude's trait and the check of the impl change, and `clone(x)` on such a type becomes a call):
 
 ```tersus
 impl Clone for Counted { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { ... }; };
@@ -76,8 +81,8 @@ Lists of such values come with raw pointers (below): the slack is memory that ho
 
 ### Implementation
 
-1. Checker: `Drop` and `Clone` in the prelude, `impl Drop for T` allowed for a struct or enum, one per type, a `~` drop refused; `Program.progDrops` and `progClones`.
-2. `MirOwnership`: `needsDrop` is true for a type with a drop, whatever its fields; a local of an affine type is never `Clone`d (the check of Part 2 refuses first); locals are dropped in reverse.
+1. Checker: `Drop` in the prelude (`Clone` is there already), `impl Drop for T` allowed for a struct or enum, one per type, a `~` drop refused, `impl Copy` refused for a type with a drop; `Program.progDrops` (and a table of the types with a `Clone` of their own). A `CopyDef`-like statement carries each to the lowering, as `CopyDef` does for Copy.
+2. `MirOwnership`: `needsDrop` is true for a type with a drop, whatever its fields; locals are dropped in reverse. The pass still clones a read-only view that cannot look at its value in place; for a value with a drop that is an error, since a clone of it runs the drop twice, so `MirMoves` must refuse a view of one that the pass would clone.
 3. `LlvmRuntime`: the descriptor gets `dropfn` (and `clonefn`); `tersus_drop` calls `dropfn(slot)` on a live value before the fields; the flag word counts in `words`.
 4. Both emitters, in step: `slotsOf` adds the flag, `MakeData` stores 1, the descriptor has the new fields, `MirData` writes `progDrops`, and `bootstrap/emitter.ll` is regenerated. `TestMirEmit` fails if they differ, so they cannot drift. (This is the main cost of the layout change; keeping the new behaviour in the descriptor and the runtime rather than in new MIR statements keeps it to this.)
 5. `MirEval`: `Move` leaves a moved-from marker, `Drop` runs the user drop for a live value and then the fields. `Cli.eval` runs the owned MIR whenever the program has an `impl Drop` (and everywhere, once nothing depends on `eval` being cheap), so the reference semantics of a drop live in one place.
@@ -85,7 +90,7 @@ Lists of such values come with raw pointers (below): the slack is memory that ho
 
 ## Part 2: linear and affine checking (step 27)
 
-A linear value must be consumed on every path, and a value that cannot be copied must not be used after it is moved. Both are one analysis of the MIR, written next to `MirOwnership` and sharing its notion of what an operand does (`roles`: `Read` or `Consume`). **The module is called `MirMoves`** (`Linear.hs` is the Fourier-Motzkin solver of the proof engine).
+A linear value must be consumed on every path, and a value that cannot be copied must not be used after it is moved. Both are one analysis of the MIR, written next to `MirOwnership` and sharing its notion of what an operand does (`roles`: `Read` or `Consume`). **The module is `MirMoves`, which exists** (`Linear.hs` is the Fourier-Motzkin solver of the proof engine, hence the name).
 
 ### Syntax
 
@@ -120,9 +125,9 @@ A forward dataflow over the basic blocks. For each local of a linear or affine t
 
 A loop needs no rule of its own. The join at the header gives `x was moved` for a value of the loop that a body moves and the next iteration uses (obligations empty at the back edge, full at the entry), and a body that rebuilds it (`f = write(f, b);` moves `f` into the call and assigns the result) is fine. A `~` function may leave a linear value, since it never reaches a `Return` that way: that falls out of the dataflow and is not a special case.
 
-The check runs on the lowered MIR **before validation** (a source error is cheaper than a proof) and again on the monomorphized MIR that `MirOwnership` runs on, so a generic `fn dup<T>(x: T)` that is fine for `T = Int` is refused for `T = File` at that instance. That is the same template rule steps 21 and 24 give bounded functions. Making it modular means a kind bound on a type parameter (`T: Copy`), which waits for step 24.
+`MirMoves` already runs on the lowered MIR **before validation**, from `lowerElaborated` (not on the monomorphized MIR). A function with bounds (`<T: Clone>`, `<T: Copy>`) is made for each type it is called with, so it is checked for those types. An unbounded type parameter is taken to be Clone and not Copy, and not checked against what it is given, so `fn dup<T>(x: T)` would be accepted for `T = File`: a `File` is not Clone, so `clone(x)` there is a hole until type parameters can say what they need (step 24), or until the check also runs on the instances that native code is made of. Linear and affine types make that hole matter, so closing it comes before they are allowed in generic code (refuse them as arguments of an unbounded type parameter until then).
 
-Errors name the function and the local, and the source line when the MIR has one; today only ghost statements carry positions, so the first version reports `in fn close: file is linear and is not used`. Adding a position to `Assign` is useful elsewhere and can follow.
+Errors name the function, the line and column of the statement, and the variable, as `MirMoves` does now (`in close, line 9:5: file is linear and is not used`). The check does not distinguish a move that happens on some paths from one on all of them in its messages; the linear rule needs that difference (it is the union of obligations at a join).
 
 ### Consuming a linear value
 
@@ -172,9 +177,10 @@ The builtins `alloc`, `free`, `take` and the descriptor-walking drop are the tru
 
 ## Order of work
 
-1. **Linear checking and affine types without drops.** `MirMoves`, `linear struct` and `enum`, the refusal of a linear element in a list, the examples `examples/linear_file.tersus` and `examples/typestate.tersus`, tests of each error and of a program that passes. No emitter change, no runtime change, and the value is real already (a handle that cannot be forgotten).
+0. **Done: explicit copies.** `Clone`, `Copy`, `clone`, `MirMoves` (moves, views, lent parameters) and positions.
+1. **Linear checking.** Extend `MirMoves` with the obligations, `linear struct` and `enum`, the refusal of a linear element in a list and of a linear type for an unbounded type parameter, the examples `examples/linear_file.tersus` and `examples/typestate.tersus`, tests of each error and of a program that passes. No emitter change, no runtime change, and the value is real already (a handle that cannot be forgotten).
 2. **Drops.** `Drop` in the prelude, `progDrops`, the flag word, the descriptor and runtime change, the same change in both emitters, `MirEval` and the heap model, tests that compare the order of effects between `eval` and the executable, and a check under valgrind that nothing is dropped twice.
-3. **`Clone`** as a user trait, for types with a drop that can be copied.
+3. **`Clone` with a body of its own**, for types with a drop that can be copied.
 4. **Raw pointers**, then lists of values with drops and linear values, then `Box` and lists written in Tersus (steps 29 and 30).
 
 ## Decisions to make
@@ -183,4 +189,5 @@ The builtins `alloc`, `free`, `take` and the descriptor-walking drop are the tru
 2. **Drops at the end of the function, or at the last use.** The end of the function is predictable (a file stays open to the end of its function) and is what the pass does now. The last use closes sooner and puts the order of effects at the mercy of liveness.
 3. **`eval` runs the owned MIR.** Required for the reference interpreter to run drops. It is a change in what `eval` costs and in what it is the oracle for.
 4. **Linear types before drops.** The first step needs no runtime work at all and the guarantee does not depend on the second.
-5. **Template checking of generics now, a kind bound later.**
+5. **The hole for unbounded type parameters** (above): refuse linear and affine arguments until bounds exist, or check the instances native code is made of. It was a choice to take type parameters as Clone for the explicit-copies change; it is the first thing this plan has to revisit.
+6. **Whether a `for` loop and a `match` may keep reading a value that has a drop.** They are views now, and native code may copy a view that is disturbed; for a value with a drop that copy must be an error, which needs `MirMoves` to know what native code will do.
