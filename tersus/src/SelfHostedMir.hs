@@ -524,19 +524,13 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
         _ -> Nothing
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (steps ++ extra)), ("end", ending)], b2)
   where
-    -- The initial induction implementation only accepts a canonical loop:
-    -- one comparison in the header and a single body block returning to it.
-    -- This makes every entry, invariant check and back edge explicit.
+    -- A loop is checked by its invariant: its region is walked once, and every
+    -- edge back to the header has to re-establish the invariant and shrink the
+    -- variant. A block that leaves the loop (a return, or an exit from inside
+    -- the body) is not in the region and is walked as an exit, as the reference
+    -- validator does.
     encodeLoop spec local yes no conditions b = do
-        case stmts of
-            [M.Assign dest (M.BinaryOp (M.Compare _) _ _)] | dest == local -> Just ()
-            _ -> Nothing
         if yes == M.loopBody spec && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
-        if Map.member yes (M.specLoops (M.fnSpec fn)) then Nothing else Just ()
-        bodyBlock <- Map.lookup yes (M.fnBlocks fn)
-        case M.blockTerminator bodyBlock of M.Goto target | target == blockId -> Just (); _ -> Nothing
-        let incoming = [from | (from, candidate) <- Map.toList (M.fnBlocks fn), yes `elem` M.successors (M.blockTerminator candidate)]
-        if incoming == [blockId] then Just () else Nothing
         (r, a, c) <- Map.lookup local conditions
         (mode, variant, variantLocal, upper) <- case M.loopTermination spec of
             Just (Counting (Var name)) -> case Map.lookup name (M.loopEnv spec) of
@@ -549,7 +543,13 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
             _ -> Nothing
         decl <- Map.lookup variantLocal (M.fnLocals fn)
         if M.localType decl == TInt then Just () else Nothing
-        let assigned = nub (local : [v | M.Assign v _ <- M.blockStatements bodyBlock])
+        let region = Map.findWithDefault (Set.singleton blockId) blockId (loopRegions fn)
+            assigned = nub
+                [ v
+                | member <- Set.toList region
+                , Just (M.BasicBlock blockStmts term) <- [Map.lookup member (M.fnBlocks fn)]
+                , v <- [d | M.Assign d _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> [])
+                ]
         case upper of
             M.Copy v -> do
                 upperDecl <- Map.lookup v (M.fnLocals fn)
@@ -561,18 +561,14 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
         (zeroRef, b3) <- operand (M.Const (M.CInt 0)) b2
         (typeAssumptions, withTypes) <- foldM (loopType fn) ([], b3) assigned
         (checks, assumptions, b4) <- foldM (invariant (M.loopEnv spec)) ([], typeAssumptions, withTypes) (M.loopInvariant spec)
-        (bodyEncoded, b5) <- block types invariants functions False fn (yes, bodyBlock) b4
-        bodySteps <- case bodyEncoded of
-            MData "ExecutionBlock" fields -> case lookup "steps" fields of
-                Just (MList xs) -> Just xs
-                _ -> Nothing
-            _ -> Nothing
         let (kind, left, right) = normal r a c
             M.BlockId exitId = no
-        pure (record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MList bodySteps),
+            M.BlockId bodyId = yes
+        pure (record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
+             ("region", MList [MInt (toInteger number) | M.BlockId number <- Set.toList region]),
              ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map (MInt . localNumber) assigned)),
              ("relation", MInt kind), ("left", left), ("right", right), ("variant", variantRef), ("variantMode", MInt mode),
-             ("variantOther", upperRef), ("zero", zeroRef)], b5)
+             ("variantOther", upperRef), ("zero", zeroRef)], b4)
     expressionOperand env expr = case expr of
         Var name -> Map.lookup name env
         Val (VInt value) -> Just (M.Const (M.CInt value))
@@ -639,6 +635,31 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
                 LtEq -> (3, a, b)
                 Gt -> (2, b, a)
                 GtEq -> (3, b, a)
+
+-- The blocks of each loop: its header and every block that can get back to it
+-- without passing the header. A block that leaves the loop (a return, or an
+-- exit from inside the body) is not in the region, so the checker walks it as
+-- an exit from the loop, as the reference validator does.
+loopRegions :: M.Function -> Map.Map M.BlockId (Set.Set M.BlockId)
+loopRegions fn = Map.mapWithKey regionOf (M.specLoops (M.fnSpec fn))
+  where
+    blocks = M.fnBlocks fn
+    succs b = maybe [] (M.successors . M.blockTerminator) (Map.lookup b blocks)
+    (_, _, _, backEdges) = dfs (Set.empty, [], Set.empty, []) (M.BlockId 0)
+    dfs (seen, acc, active, edges) b
+        | Set.member b seen = (seen, acc, active, edges)
+        | otherwise =
+            let visit (s0, a0, act0, e0) next
+                    | Set.member next act0 = (s0, a0, act0, (b, next) : e0)
+                    | otherwise = dfs (s0, a0, act0, e0) next
+                (s1, a1, _, e1) = foldl visit (Set.insert b seen, acc, Set.insert b active, edges) (succs b)
+             in (s1, b : a1, active, e1)
+    preds = Map.fromListWith (++) [(target, [from]) | from <- Map.keys blocks, target <- succs from]
+    regionOf header _ = go (Set.singleton header) [from | (from, target) <- backEdges, target == header]
+    go seen [] = seen
+    go seen (b : rest)
+        | Set.member b seen = go seen rest
+        | otherwise = go (Set.insert b seen) (Map.findWithDefault [] b preds ++ rest)
 
 encodeFunction :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
 encodeFunction types invariants functions allowCalls fn

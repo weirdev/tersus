@@ -34,6 +34,8 @@ are not yet covered.
 Haskell proof terms and runs supported relation queries against that context;
 it declines unsupported goals and omits unsupported premises. It is a bridge
 for comparison with the Haskell engine, not the production validation path.
+A size is known to be at least 0, as in the reference engine, so a loop bound
+like `i <= size(xs)` holds on entry when `i` starts at 0.
 The Tersus search is incomplete, so a negative answer does not establish that
 the goal is false.
 
@@ -50,9 +52,14 @@ elements have their known values. Append records the new length and element and
 preserves previously checked reads; removal preserves known reads within the
 shortened length. Simple relational invariants on non-generic structs are
 checked at construction and assumed for typed values; enums are not yet
-supported. It also checks a canonical single-block loop by proving
-its declared invariant and an integer or fixed-limit countdown variant. Other
-loop shapes and operations it cannot translate return unsupported. Functions
+supported. It also checks a loop by its declared invariant over the loop region:
+the header and every block that can get back to it are walked once, each edge
+back to the header re-establishes the invariant and shrinks the variant, and a
+block that leaves the loop is walked as an exit. A body with several blocks, a
+return inside the loop, and a nested loop are handled the same way. Invariants
+that the reference validator infers, such as the relation between a counter and
+the size of a list it pushes to, are not yet inferred here, so a loop that needs
+one is rejected. Operations it cannot translate return unsupported. Functions
 are checked with symbolic parameters and simple relational input and output
 contracts. Direct calls to previously defined functions check those contracts
 when the callee does not reassign its parameters. Contract assumptions support
@@ -60,6 +67,10 @@ total expressions; assumptions with operations requiring safety checks, other
 calls and termination clauses remain unsupported. It
 is used for comparison, not for production validation;
 the returned flow state is one path's state and is not a joined postcondition.
+Paths are walked independently instead of being joined at each block, so the
+walk costs more the more branches and concrete values a loop body has, where
+the reference walks each block once with the states joined; the differential
+cases keep their loop bounds small for that reason.
 Branch facts include both the boolean result and, for a saved comparison, the
 relation between its operands at the time it was evaluated. A check of a boolean
 term against a literal is discharged from the comparison that produced the term,
