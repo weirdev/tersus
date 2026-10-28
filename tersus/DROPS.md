@@ -77,7 +77,7 @@ impl Clone for Counted { fn clone(self: &Self) -> Self [{ }] [{ affirm return = 
 
 `StdList<T>` is a `Box<Array<T>>` and a length. A push into a full list makes `Array::boxed(2n + 4, x)`, which **copies `x` into every slot** (the slack), and `pop` leaves the popped element in the array, to be written over or freed with it. Both are wrong for a value with a drop: the slack would hold clones that run the drop, and the popped element would be dropped late or twice. So the first cut refuses `List<T>`, `Array<T, N>`, `Array::boxed` and `Vec<T>` of a type with a `Drop` or a linear type, with a message that names the type and the container. A `Box<T>`, a struct field and an enum payload are fine: they hold exactly one value or none.
 
-Lists of such values come with raw pointers (below): the slack is memory that holds nothing, and the list's own `Drop` drops elements `0..len` and frees the block.
+Lists of such values come with raw pointers (Part 3 and `POINTERS.md`): the slack is slots that hold nothing, and the list's own `Drop` drops elements `0..len` and frees the block.
 
 ### Implementation
 
@@ -156,24 +156,19 @@ fn shut(c: Conn) -> Conn [{ affirm c.open; }] [{ affirm !return.open; }] { ... }
 
 ### Containers and generics
 
-`List<File>` and `Array<File, N>` are refused until a list can give an element back (`get` clones, and `pop` forgets the element; there is no `take`). With raw pointers the library list gets `swapRemove`-like consuming operations and the restriction goes. `Box<File>`, fields and payloads work now (`Box::unbox` consumes).
+`List<File>` and `Array<File, N>` are refused until a list can give an element back (`get` clones, and `pop` forgets the element; there is no `take`). With raw pointers (`POINTERS.md`: `Addr::take`, or `replace` on slots of `Uninit<T>`) the library list gets consuming operations and the restriction goes. `Box<File>`, fields and payloads work now (`Box::unbox` consumes).
 
 ### What this does not give
 
 There are no fields hidden from other code, so any code can destructure a `File` and discard its parts. Linear types guard against forgetting by accident, and a program that matches on someone's linear struct is doing it in the open. Making the guarantee a boundary needs private fields or opaque types, which is a separate step (the invariant of a struct is already safe against code that builds the struct by hand, because the validator checks it at each `MakeData`; there is no equivalent for a protocol that code outside is not allowed to bypass).
 
-## Part 3: raw pointers (step 25), as far as 26 and 27 need
+## Part 3: raw pointers (step 25)
 
-The roadmap sketch (`*T`, `alloc`, `free`, `load`, `store`) stands. The one design question this document answers is **how the validator sees memory**, and the answer comes from Part 2: **a pointer to memory the program owns is a linear value that holds its contents as an array.**
+Raw pointers have a design of their own, `POINTERS.md`, which replaces the sketch that was here (a linear `Ptr<T>` that held its contents as an array). The question this section answered, how the validator sees memory, has the same answer in a different shape: an address `Addr<T>` is a runtime word that can be aliased, and the permission to the memory, `Block<T>`, is a ghost linear value whose contents are ghost arrays, so a write is `set` and the facts about arrays carry over without a heap model. What Part 1 and Part 2 need of it:
 
-- `alloc<T>(n)` returns `Ptr<T>`, linear, with `cap(p) = n`. Its contents are an array value of `n` slots the program may not read until it writes them.
-- `store(p, i, x) -> Ptr<T>` moves the pointer in and out, with `i < cap(p)`: the result has the contents of `set(contents(p), i, x)` and the same capacity. It is `set`, so the facts about arrays carry over without a heap model.
-- `load(&p, i)` reads through a lent pointer.
-- `free(p)` consumes it. Linear says it is freed once and not used after; the contracts say index in range.
-- The contents of slots past what the library has written are not known, and that is the point: `Vec<T>` is `{ ptr: Ptr<T>, len: Int }` with the invariant `len <= cap(ptr)`, and its `Drop` drops elements `0..len` (a builtin `take(&p, i)` that moves an element out, trusted, with `i < len` proved by the program) and frees the block.
-- `Ptr<T>` itself is linear and has no drop. `Vec<T>` is affine because it has one. `Box<T>`, `StdList<T>` and `String`'s storage move to this in steps 29 and 30.
-
-The builtins `alloc`, `free`, `take` and the descriptor-walking drop are the trusted base, the way `writeByte` is: their contracts are axioms, and the library built on them is proved. Whether `Ptr<T>` holds a pointer and a length (a fat pointer, like `Box<Array<T>>` today) or a pointer only is a layout decision for that step.
+- **Lists of values with drops or linear values** are built on a block whose slots can be empty: the slack holds nothing, `take` moves an element out, and the list's `Drop` drops slots `0..len` (`Addr::dropRange`) and frees the block. `Uninit<T>` and `replace` give the same without addresses.
+- **A permission is linear**, so linear checking (Part 2) comes before pointers, and a struct that holds one is linear until it has a `Drop`.
+- **A `drop` that frees a permission** has to consume it, which a lent `self: &Self` cannot: that is Decision 1 of `POINTERS.md`, decided with step 26.
 
 ## Order of work
 
@@ -181,7 +176,7 @@ The builtins `alloc`, `free`, `take` and the descriptor-walking drop are the tru
 1. **Linear checking.** Extend `MirMoves` with the obligations, `linear struct` and `enum`, the refusal of a linear element in a list and of a linear type for an unbounded type parameter, the examples `examples/linear_file.tersus` and `examples/typestate.tersus`, tests of each error and of a program that passes. No emitter change, no runtime change, and the value is real already (a handle that cannot be forgotten).
 2. **Drops.** `Drop` in the prelude, `progDrops`, the flag word, the descriptor and runtime change, the same change in both emitters, `MirEval` and the heap model, tests that compare the order of effects between `eval` and the executable, and a check under valgrind that nothing is dropped twice.
 3. **`Clone` with a body of its own**, for types with a drop that can be copied.
-4. **Raw pointers**, then lists of values with drops and linear values, then `Box` and lists written in Tersus (steps 29 and 30).
+4. **Raw pointers** (`POINTERS.md`, which has its own order: tuples, ghost values and layout in bytes come first), then lists of values with drops and linear values, then `Box` and lists written in Tersus (steps 29 and 30).
 
 ## Decisions to make
 
