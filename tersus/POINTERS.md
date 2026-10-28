@@ -9,17 +9,57 @@ The validator never models a heap. A local's value never changes, an assignment 
 The design splits a pointer into two values, following separation logic (and Verus's `PointsTo`):
 
 - **`Addr<T>`, the address**: a runtime word. It is Copy, can be aliased, offset, kept in many places and passed to C, and allows nothing by itself.
-- **`Block<T>`, the permission**: a *ghost*, *linear* value that `alloc` returns with the address. It has no runtime form and is erased after validation. It says what the block holds: its base, its capacity, which slots are filled and with what. Every operation on memory needs it.
+- **`Block<T>`, the permission**: a *ghost*, *linear* value that `alloc` returns with the address. It has no runtime form and is erased after validation. It says which memory it is for and what that memory holds. Every operation on memory needs it.
 
-The permission is a value, so the validator's model survives. A write takes the permission and gives a new one, which is an assignment with a new iota, as `set` is for an array. Addresses can alias because the permission cannot: it is linear, so there is only ever one for a block. The properties that make raw memory safe are then **proved, in ordinary code**:
+The permission is a value, so the validator's model survives. A write takes the permission and gives a new one, which is an assignment with a new iota, as `set` is for an array. Addresses can alias because the permission cannot: it is linear, so there is only ever one for a piece of memory. The properties that make raw memory safe are then **proved, in ordinary code**:
 
 - every access is in bounds;
 - no slot is read before it is written;
 - nothing is used after it is freed, and nothing is freed twice;
 - no element is lost when a block is freed;
-- the permission to a block is exclusive.
+- the permission to memory is exclusive.
 
-**What is unsafe is an assumption, not a pointer.** Code that uses addresses needs no mark, because what it does is proved. What cannot be proved is said with `assume`, `Block::assume` or the contract of an `extern fn`. These are local and named, and `tersus assumptions` lists them. Rust marks `unsafe fn` because its caller has to uphold something the compiler cannot check; in Tersus that something is an input contract, which the caller proves. So no function is marked.
+**What is unsafe is an assumption, not a pointer.** Code that uses addresses needs no mark, because what it does is proved. What cannot be proved is said with `assume`, `Block::assume` or the contract of an `extern fn`, and `tersus assumptions` lists them. Rust marks `unsafe fn` because its caller has to uphold something the compiler cannot check; in Tersus that something is an input contract, which the caller proves. So no function is marked.
+
+## Design choices
+
+These are the choices the rest of the document follows from, with the alternatives and why they lose.
+
+### A Block names its memory, as a ghost
+
+A permission has to say which memory it is for. If it did not, nothing would stop a program from using the permission of one block with the address of another, and the proof about the first would be applied to memory it does not describe. So a `Block` has a ghost `base(b)`, an `Addr<T>`, and every operation asks `p = base(b)` of the address it is given.
+
+The address is not *in* the `Block` as runtime data. If it were, the `Block` would be the owning pointer of the first draft (`Ptr<T>`), and could not be aliased. The two halves are separate values tied by one equation that the proof carries. Natively the operation uses `p`; the validator checks that `p` is the address the permission names.
+
+A library type that wants the two together has them as two fields and the equation as its invariant (`Box`, `Vec`, and `Buffer<T>` below), so a program working with a buffer never writes the equation.
+
+### Facts are about indexes, not addresses
+
+An operation takes the base address and an index: `Addr::get(p, i, b)`, not the address of the slot. What the validator knows of a block is then two ghost arrays indexed from 0, which `filled(b, i)` and `at(b, i)` read. Every fact about a block is a fact about an array, which the engine already proves things about: `forall`, its triggers, the frame facts of `set`, and the case splits of A linked list in an array.
+
+The alternative keys facts by address (`filled(b, p)` for `p = offset(base(b), i)`). To use a fact the engine would have to find the `i` for an arbitrary address term, `p` being a field read from a node or a result of a call, which needs an `index(b, p)` function and a rewrite of every address into `offset(base, index)` form: new engine machinery, for every access. With indexes, address arithmetic leaves the proofs almost entirely. The engine needs two facts about addresses, `offset(p, 0) = p` and `offset(offset(p, i), j) = offset(p, i + j)`, used when a block is split or joined.
+
+An address into the middle of a block (to give part of a buffer to a function, or to C) is made by splitting the permission, so that the address is the base of a block of its own (see Splitting).
+
+### Separation needs no proof
+
+Two blocks never overlap, because every block comes from an allocation or from splitting another, and permissions cannot be copied. So a write through one block cannot change what another says, and nothing has to prove that two addresses differ or that two ranges are disjoint. The engine needs no injectivity of `offset` and no inequalities between addresses. This is the main thing linearity buys: the frame is free.
+
+### A block knows its allocation
+
+Splitting a block and joining it back means that a block can be a part of an allocation. `free` and `resize` need the whole of one, and `join` must not glue together two blocks that are adjacent by chance but were allocated apart (freeing the result would free memory the allocator gave out twice). So each block has a ghost `origin(b)`, the allocation it is part of, and `whole(b)`, which says it is all of it. `alloc` gives a whole block with a new origin, `split` keeps the origin and makes the parts not whole, and `join` needs both parts to have the same origin and gives back a whole block when the parts cover it.
+
+### Blocks of slots, not of bytes
+
+A slot holds a whole `T`, and is filled or empty as a whole. Writing the fields of a struct in a slot one at a time, or one byte of an `I32`, is not possible. Rust's `MaybeUninit` and C allow it; here it would need permissions per field, which is a later extension (see Decisions). Most code writes whole values, and code that fills memory piece by piece (a C function filling a buffer) does it through an `extern fn` whose contract says what it filled.
+
+### Typed addresses
+
+`Addr<T>` carries a type, though it promises nothing about the memory. What says the memory holds `T`s is the `Block<T>`. The `T` gives a stride for `Addr::offset`, the types of what an operation reads and writes, and a static match: an operation needs a `Block<T>` for an `Addr<T>`, so using a `Block<Int>` with an `Addr<Node>` is a type error, found before any proof. An untyped address would be simpler, but it would lose that check and the types in the signatures of `extern fn`s. Casting an address is free; reinterpreting memory is a change of permission, `Block::cast`, and that is checked.
+
+### Primitives, and a buffer over them
+
+The builtins take the address and the permission apart, because that is the general form (an address can be in a node, in a C struct, in many places). The library adds `Buffer<T> { addr: Addr<T>, ghost blk: Block<T> }`, the two together with the invariant `base(blk) = addr`, with the same operations as methods. That is the type most code uses, and it reads like the owning pointer of the first draft.
 
 ## `Addr<T>`
 
@@ -30,68 +70,102 @@ The permission is a value, so the validator's model survives. A write takes the 
 | `Addr::null()` | the null address |
 | `Addr::offset(p, i)` | the address `i` values of `T` past `p` (an `Int` `i`, negative allowed) |
 | `Addr::cast(p)` | the same address as an `Addr<U>`, with `U` decided by the use, as for `Array::empty()` |
+| `Addr::toInt(p)` and `Addr::fromInt(n)` | the address as a number and back (for hashing, alignment, and memory-mapped I/O) |
 
-**What the `T` gives.** It does not describe the memory: an `Addr<T>` can dangle, be null, or point at something else, as Rust's `*const T` can. What says the memory holds `T`s is the permission, `Block<T>`. The parameter gives three things:
+None of them can do harm: an address that is wrong is useless without a permission for it. The validator knows the two offset facts above and nothing else about addresses.
 
-1. **A stride.** `offset(p, i)` moves `i` values of `T`.
-2. **Result types.** An operation through an `Addr<T>` gives a `T` or takes one, with no annotation at each use.
-3. **A static match with the permission.** An operation needs a `Block<T>` for an `Addr<T>`, so using a `Block<Int>` with an `Addr<Node>` is a type error, found before any proof.
-
-So `Addr<T>` to `Addr<U>` is a free cast, since it only changes the stride and the types. Reinterpreting memory is a change of permission, `Block<T>` to `Block<U>` (see Reinterpreting memory), and that is where it is checked.
-
-**`void*` is `Addr<Opaque>`.** `Opaque` is a type with no size. Its address has no stride, so it cannot be offset, read or written; it can be compared, passed and cast, as in C. A `Block<Opaque>` cannot exist.
+**`void*` is `Addr<Opaque>`.** `Opaque` is a type with no size. Its address has no stride, so it cannot be offset; it can be compared, passed and cast, as in C. A `Block<Opaque>` cannot exist.
 
 ## `Block<T>`
 
-`Block<T>` is the permission to a block of `n` slots of `T`. It is a ghost type: it can be held in a ghost local, a ghost parameter, a ghost field or the ghost part of a tuple (see Ghost values), and it is linear: it has to be freed, given on, or put in a value that is.
+`Block<T>` is the permission to a run of slots of `T`. It is a ghost type: it can be held in a ghost local, a ghost parameter (lent as `&Block<T>`, or by value), a ghost field or the ghost part of a tuple (see Ghost values), and it is linear: it has to be freed, given on, or put in a value that is. It has no literal: a program cannot write one, only get one from the operations below.
 
-The validator knows it through ghost functions, usable in contracts, `affirm`, `define` and invariants:
+The validator knows a block through ghost functions, usable in contracts, `affirm`, `define` and invariants:
 
-- `base(b)`: the `Addr<T>` of the first slot.
-- `cap(b)`: the number of slots, at least 0.
-- `inside(b, p)`: `p` is a slot of the block, that is `p = offset(base(b), i)` for an `i` with `0 <= i < cap(b)`.
-- `filled(b, p)`: the slot at `p` holds a value.
-- `at(b, p)`: that value, known only when it is filled.
+| Function | Is |
+|---|---|
+| `base(b)` | the `Addr<T>` of slot 0 |
+| `cap(b)` | the number of slots, at least 0 |
+| `filled(b, i)` | slot `i` holds a value |
+| `at(b, i)` | that value, known only when it is filled |
+| `origin(b)` | the allocation the block is part of (an opaque ghost value, compared with `=`) |
+| `whole(b)` | the block is all of its allocation |
 
-**Addresses as terms.** The proof engine learns four facts about addresses: `offset(p, 0) = p`; `offset(offset(p, i), j) = offset(p, i + j)`; `offset(p, i) = offset(p, j)` exactly when `i = j`; and `inside(b, offset(base(b), i))` exactly when `0 <= i < cap(b)` (null is inside no block). A fact about the slot at `offset(base(b), i)` is a fact about element `i` of two ghost arrays, so `filled` and `at` are `get` on arrays that the engine already reasons about. `forall`, its triggers, the frame facts of `set` and the case splits of A linked list in an array all apply unchanged.
+`filled(b, i)` and `at(b, i)` are `get(filledOf(b), i)` and `get(contentsOf(b), i)` on two ghost arrays of size `cap(b)`, so what is proved about them is proved as for arrays.
 
-### Operations
+### Operations on memory
+
+`p` is the address the permission names (each operation needs `p = base(b)`), and `i` an index with `0 <= i < cap(b)`.
+
+| Operation | Needs besides | Gives |
+|---|---|---|
+| `Addr::alloc(n)` | `n >= 0` | `(p, ghost b)`: `base(b) = p`, `cap(b) = n`, `whole(b)`, a new `origin(b)`, no slot filled |
+| `Addr::get(p, i, b)` | `filled(b, i)` | `at(b, i)`, a view: reading it moves nothing, and `b` is lent |
+| `Addr::write(p, i, x, b)` | `!filled(b, i)` | a block with slot `i` filled with `x` |
+| `Addr::take(p, i, b)` | `filled(b, i)` | `(at(b, i), ghost b2)`: the value, and a block with slot `i` empty |
+| `Addr::dropValue(p, i, b)` | `filled(b, i)` | a block with slot `i` empty; the value is dropped in place |
+| `Addr::dropRange(p, i, n, b)` | `n >= 0`, `i + n <= cap(b)`, slots `i..i + n` filled | a block with those slots empty, each value dropped in place |
+| `Addr::resize(p, n, b)` | `whole(b)`, `n >= 0`, no slot from `n` filled | `(q, ghost b2)`: `base(b2) = q`, `cap(b2) = n`, `whole(b2)`, a new origin, slots below `min(n, cap(b))` as they were |
+| `Addr::free(p, b)` | `whole(b)`, no slot filled | `0` (there is no unit type); `b` is consumed |
+
+Every operation that gives a block back says the rest: the same `base`, `cap`, `origin` and `whole` (except `resize`), and every slot it does not name as it was.
+
+- **Dropping a value and freeing a block are different things.** `dropValue` ends the value in one slot: it runs that value's drop, which frees what the value owns (a list's elements, the block of a `Vec` in the slot) and leaves the slot empty. The block's memory stays allocated. `free` returns the memory of a whole allocation to the allocator, and runs nothing. A block is emptied with `take`, `dropValue` or `dropRange`, and then freed. This is Rust's `drop_in_place` and `dealloc`.
+- **Why `free` needs every slot empty.** Natively nothing records which slots are filled: that is only in the permission, which is erased. So `free` cannot drop what is left, and a value still in a slot would be lost with everything it owns. Requiring empty slots makes "nothing is lost" a proof.
+- **`write` needs an empty slot.** Writing over a filled one would lose a value that may own something. Replacing a value is `dropValue` then `write`.
+- **A view does not outlive its block.** `get` is a view of `b`, as `get` of a list is a view of the list (MIR.md, Moves). Once `b` is given to an operation that changes it, the view is gone (`MirMoves` reports a use of it as a use of a moved value), which is what stops a read through a view after `resize` moved the memory or `take` emptied the slot. Moving the view out is refused (`cannot move x out of a Block, which still holds it: write clone(x), or Addr::take`).
+- **`dropValue` and `dropRange` run `tersus_drop` with the descriptor of `T`.** For a type that owns nothing they do nothing natively, and are there only for the proof.
+- **`resize` is `realloc`.** Moving a value in Tersus is copying its bytes, so a bitwise move of every filled slot is right. It needs the whole allocation, and the result is a new one.
+- **What fails at run time and not in a proof**: an allocation the system refuses, and a size whose bytes overflow an `Int`. The program ends with an error, as for an overflow. No contract can promise memory.
+
+### Splitting and joining
 
 | Operation | Needs | Gives |
 |---|---|---|
-| `Addr::alloc(n)` | `n >= 0` | `(p, ghost b)`: `base(b) = p`, `cap(b) = n`, no slot filled |
-| `Addr::get(p, b)` | `inside(b, p)`, `filled(b, p)` | `at(b, p)`, a view: reading it moves nothing, and `b` is lent |
-| `Addr::write(p, x, b)` | `inside(b, p)`, `!filled(b, p)` | a new block, with `p` filled with `x` and every other slot as it was |
-| `Addr::take(p, b)` | `inside(b, p)`, `filled(b, p)` | `(at(b, p), ghost b2)`: the value, and a block with `p` empty |
-| `Addr::dropValue(p, b)` | `inside(b, p)`, `filled(b, p)` | a block with `p` empty; the value is dropped in place |
-| `Addr::dropRange(p, n, b)` | `n >= 0`, the `n` slots from `p` inside `b` and filled | a block with those slots empty, each value dropped in place, and every other slot as it was |
-| `Addr::resize(p, n, b)` | `p = base(b)`, `n >= 0`, no slot from index `n` filled | `(q, ghost b2)`: `base(b2) = q`, `cap(b2) = n`, the slots below `min(n, cap(b))` as they were, by index |
-| `Addr::free(p, b)` | `p = base(b)`, no slot filled | `0` (there is no unit type); `b` is consumed |
+| `Block::split(b, i)` | `0 <= i <= cap(b)` | `(ghost lo, ghost hi)`: slots `0..i` and `i..cap(b)`; `base(lo) = base(b)`, `base(hi) = Addr::offset(base(b), i)`, slot `j` of `hi` is slot `i + j` of `b`, the same origin, neither whole unless the other is empty |
+| `Block::join(lo, hi)` | `origin(lo) = origin(hi)`, `base(hi) = Addr::offset(base(lo), cap(lo))` | one block of `cap(lo) + cap(hi)` slots, whole when it covers its origin |
 
-- **Dropping a value and freeing a block are different things.** `dropValue` ends the value in one slot: it runs that value's drop, which frees what the value owns (a list's elements, the block of a `Vec` in the slot) and leaves the slot empty. The block's memory stays allocated. `free` returns the block's memory to the allocator, and runs nothing. A block is emptied, slot by slot, with `take`, `dropValue` or `dropRange`, and then freed. This is Rust's `drop_in_place` and `dealloc`.
-- **Why `free` needs every slot empty.** Natively nothing records which slots are filled: that is only in the permission, which is erased. So `free` cannot drop what is left, and a value still in a slot would be lost along with everything it owns. Requiring empty slots makes "nothing is lost" a proof.
-- **`write` needs an empty slot.** Writing over a filled one would lose a value that may own something. Replacing a value is `dropValue` then `write`.
-- **`get` is a view**, as `get` of a list is (MIR.md, Moves). `MirMoves` refuses to move it out (`cannot move x out of a Block, which still holds it: write clone(x), or Addr::take`).
-- **`dropValue` and `dropRange` run `tersus_drop` with the descriptor of `T`.** For a type that owns nothing they do nothing natively, and are there only for the proof.
-- **`resize` is `realloc`.** Moving a value in Tersus is copying its words, so a bitwise move of every filled slot is right.
-- **What fails at run time and not in a proof**: an allocation the system refuses, and a size whose bytes overflow an `Int`. The program ends with an error, as for an overflow. No contract can promise memory.
+Both are ghost: they erase to nothing. Splitting is how a function gets part of a buffer (`fn fill(p: Addr<Byte>, ghost b: Block<Byte>)` given the upper half) and how an address into the middle of a block is the base of a permission (to pass to C). Linearity guarantees the parts can be joined back for `free`.
 
-The contracts of these builtins are axioms, as the contract of `get` is. Code written with them is proved.
+### Making blocks
 
-### Splitting a block
+A block comes from one of these, and from nothing else:
 
-A function that should see only part of a buffer gets part of the permission: `Block::split(b, i)` gives `(ghost lo, ghost hi)`, the slots below index `i` and from it, and `Block::join(lo, hi)` needs `base(hi) = offset(base(lo), cap(lo))` and gives them back as one. Both are ghost operations with no runtime form. A `free` needs the whole block back, which linearity guarantees can be done.
+| Source | Proved |
+|---|---|
+| `Addr::alloc` and `Addr::resize` | yes |
+| `Block::split` and `Block::join` of blocks the program holds | yes |
+| `Block::cast` of a block the program holds | yes, when the layouts match (below) |
+| a ghost field or tuple part of a value that is taken apart | yes: it is a move |
+| `Block::assume(p, n)` | no: an assumption |
+| the contract of an `extern fn` that returns one | no: an assumption |
+
+Since a program cannot write a `Block` and cannot copy one, it can only use memory it was given a permission for. This is what makes `Box`, `Vec` and the rest safe to build by hand: a struct literal with a ghost `Block` field needs a block from one of these sources, and the struct's invariant ties it to the address.
+
+Memory in a frame (the address of a local) is not in this list: Tersus has no address-of, and a permission to a frame would need to end when the function returns, which is a scoped ghost value the language does not have. It is a later extension.
 
 ### Reinterpreting memory
 
-`Block::cast(b)` gives a `Block<U>` for the same memory. It is allowed when `T` and `U` have the same layout (see Layout), and every filled slot's bytes are a valid `U`. `Int` to a struct of `Int`s is allowed; `Int` to `Bool` needs every filled slot to be 0 or 1, which a proof can give; `Int` to a list is never allowed. Anything else is an assumption (`Block::assume`).
+`Block::cast(b)` gives a `Block<U>` for the same memory, with the same base, origin and filled slots. It is allowed when `T` and `U` have the same layout (see Layout), and either no slot is filled or `U` is *plain bits*: a type whose every bit pattern is a value (the integers, `Byte`, and structs and arrays of them). `Int` to a struct of two `I32`s is allowed; `I32` to `Bool` is not, since a `Bool` is 0 or 1. Anything else is an assumption.
+
+## Interaction with proofs
+
+**What a block is to the engine.** A `Block` local holds an iota like any value. Its facts are equations about `base`, `cap`, `origin` and `whole`, and facts about two ghost arrays. Each operation gives a new iota, with the equations carried over and the arrays changed by `set`. So a `Vec` with a `Block` is proved as a struct with an array and a length is proved now; the engine gains the ghost functions and the two offset facts, and no new kind of reasoning.
+
+**Loops.** A loop that writes a block reassigns it, so its invariant has to say what it needs of the block at the head. `base`, `cap`, `origin` and `whole` are kept by every operation but `resize`, so they are candidates for the inferred invariants (LANGUAGE.md, Inferred invariants), and a program states only the facts about slots.
+
+**Functions that take a block.** A function given a block by value, which gives one back, has to say in its contract what it kept: the equations, and which slots it did not change. That is the price of separation logic everywhere it is used, and it is the main burden on a programmer. Most code uses `Buffer`, `Vec` or `Box`, whose functions say it once, or lends the block (`&Block<T>`) to a function that only reads, which keeps every fact without saying so. A shorthand for "the same block except slots `i..j`" may be worth adding once examples show how often it is written (see Decisions).
+
+**Values in slots.** `at(b, i)` is the value written there, and values do not change, so `Addr::take` gives back exactly the `x` that `write` put. For a slot that holds a list, `at` is the list, and its facts (`size`, its elements) carry over as for any value.
+
+**Cost.** Every operation adds a frame `forall` over a ghost array, and a `Vec`'s invariant has two foralls of its own, so the proofs of a collection may be slow, as the proofs of a chain of `concat` are (LANGUAGE.md, Current Limitations). The first examples measure this before anything is built on them.
 
 ## Ghost values
 
 A ghost value exists only for the validator. The ones this design needs are permissions, but the mechanism is general.
 
-- **Where they are**: a ghost local (one that holds a ghost type), a parameter written `ghost b: Block<T>`, a struct field written `ghost b: Block<T>`, and a part of a tuple written `ghost` in its type, `(Addr<T>, ghost Block<T>)`.
-- **They flow only into ghost places.** A ghost value can be given to a ghost parameter, field or tuple part, and mentioned in contracts. It can never become part of a runtime value (`b is a ghost value and the program cannot use it`). A runtime value can be used in a ghost place.
+- **Where they are**: a ghost local (one that holds a ghost type), a parameter written `ghost b: Block<T>` (or `ghost b: &Block<T>`, lent), a struct field written `ghost b: Block<T>`, and a part of a tuple written `ghost` in its type, `(Addr<T>, ghost Block<T>)`.
+- **They flow only into ghost places.** A ghost value can be given to a ghost parameter, field or tuple part, and mentioned in contracts. It can never become part of a runtime value (`b is a ghost value and the program cannot use it`). A runtime value can be used in a ghost place. A ghost function (`filled`, `at`, ...) cannot be called in code, so no branch depends on a ghost.
 - **They are moved and linear like any value.** `MirMoves` runs before validation on MIR that still has them, so a permission used after it is consumed, or left unused, is reported as for any linear value.
 - **They are erased after validation.** A pass after `validateProgram` and before `insertOwnership` removes ghost locals, ghost arguments, ghost fields and ghost tuple parts. `eval`, the ownership pass, `MirData` and both emitters never see them, and a struct's layout is its runtime fields only.
 - **A struct with a ghost linear field is linear** (DROPS.md, Part 2), unless it has a `Drop`.
@@ -114,7 +188,7 @@ Natively every value is held in 64-bit words today: an `Int`, a `Bool` and a `By
 
 - **`Byte` is 8 bits**, and `Bool` is 8 bits (C's `_Bool`, 0 or 1).
 - **Fixed-width integers**: `I8`, `I16`, `I32`, `U16` and `U32` join `Byte` (which is `U8`) and `Int` (which is `I64`). Each is a type of its own, with its range known to the validator wherever a value comes from, as `Byte`'s is (LANGUAGE.md, Bytes). Arithmetic and order stay on `Int`: `toInt(x)` widens, and `I32::from(x)`, `U16::from(x)` and so on narrow, with the range proved at the call, as `toByte(x)` does now. A number written out where one is wanted is converted, as for `Byte`. There is no `U64`, since it does not fit in an `Int`; a C `size_t` is an `Int`, which holds every size a program can allocate.
-- **Structs use C's rules**: fields in the order they are declared, each at an offset that is a multiple of its alignment, and the size rounded up to the largest alignment. So every struct of fixed-width fields has the layout of the same C struct, and needs no annotation to be passed to C.
+- **Structs use C's rules**: fields in the order they are declared, each at an offset that is a multiple of its alignment, and the size rounded up to the largest alignment. So every struct of fixed-width fields has the layout of the same C struct, and needs no annotation to be passed to C. Ghost fields take no room.
 - **Enums** keep a tag followed by the largest variant, with the tag a `U32`. C has no equivalent, so an enum is not passed to C by address.
 - **Arrays** are their elements, each `size(T)` bytes apart, as in C. The limit of an array held in a frame becomes 64 KB of bytes and not 8192 words.
 - **What does not change**: an `Int`, an address, a function and a `Box` are 8 bytes, and the validator sees values, not bytes, so no proof changes. `eval` holds values and is unaffected.
@@ -123,57 +197,66 @@ Natively every value is held in 64-bit words today: an `Int`, a `Bool` and a `By
 
 ## Assumptions
 
-What the validator cannot prove, a program says explicitly, in one of four ways. Each new form has to give its reason, a string after `because`:
+What the validator cannot prove, a program says explicitly, in one of four ways:
 
 | Form | What is assumed |
 |---|---|
-| `assume e because "...";` | a fact, which the rest of the path then knows, as after an `affirm` |
-| `Block::assume(p, n) because "..."` | a permission for `n` slots of `T` at `p`, with no slot filled, for memory the program did not allocate |
-| `extern fn ... because "...";` | the contract of a function with no body that the emitter declares (step 30: `write`, `exit`, the system's allocator, a C library) |
-| `axiom` | a rule of proof, as now; its name serves as its reason, so existing programs do not change |
+| `assume e;` | a fact, which the rest of the path then knows, as after an `affirm` |
+| `Block::assume(p, n)` | a whole block of `n` slots of `T` at `p`, with a new origin and no slot filled, for memory the program did not allocate |
+| `extern fn` | the contract of a function with no body that the emitter declares (step 30: `write`, `exit`, the system's allocator, a C library) |
+| `axiom` | a rule of proof, as now |
 
-```tersus
-assume n <= 4096 because "the kernel never returns more than one page from this read";
-```
-
-`tersus assumptions <file>` prints every one in the program and its prelude, with its line and its reason. That list is everything the program's proofs take on trust, besides the builtins. An assumption without `because` is a parse error.
+`tersus assumptions <file>` prints every one in the program and its prelude, with its line. That list is everything the program's proofs take on trust, besides the builtins.
 
 **What needs an assumption, at first:**
 
-- **Memory that `alloc` did not make**: from C, the system, `mmap`, memory-mapped I/O. An `extern fn` that returns `(Addr<T>, ghost Block<T>)` gives the permission in its contract, or the program uses `Block::assume`.
+- **Memory that `alloc` did not make**: from C, the system, `mmap`, memory-mapped I/O. An `extern fn` that returns `(Addr<T>, ghost Block<T>)` gives the permission in its contract (with the slots it says are filled), or the program uses `Block::assume`.
 - **Shared memory that is written**: a reference count over a mutable value, or memory shared between threads. Shared memory that is only read can be proved later with fractional permissions (a permission split into read-only parts that join back).
 - **Reinterpretation** beyond what `Block::cast` checks.
-- **A structure spread over many blocks**, such as a linked list of nodes allocated one by one. Each node has its own permission, so the structure needs a ghost collection of permissions (Verus uses ghost maps). Until that exists, a structure inside one block is proved (an arena, where links are addresses into the same block), and one over many blocks uses `Block::assume`.
+- **A structure spread over many blocks**, such as a linked list of nodes allocated one by one. Each node has its own permission, so the structure needs a ghost collection of permissions (Verus uses ghost maps). Until that exists, a structure inside one block is proved (an arena, where links are indexes into the same block), and one over many blocks uses `Block::assume`.
 
 ## The library on top
 
+### `Buffer<T>`
+
+The address and the permission together, which is what most code that manages memory wants:
+
+```tersus
+struct Buffer<T> {
+    addr: Addr<T>,
+    ghost blk: Block<T>,
+} invariant [{ affirm base(blk) = addr; affirm whole(blk); }];
+```
+
+with `Buffer::alloc(n)`, `get`, `write`, `take`, `dropValue`, `dropRange`, `resize` and `free` as methods that call the builtins with `self.addr` and `self.blk`, and contracts in terms of `cap(self.blk)`, `filled(self.blk, i)` and `at(self.blk, i)`.
+
 ### `Box<T>` (step 29)
 
-A `Box` is an address with one filled slot and its permission. It has no assumption in it:
+A `Box` is a buffer of one filled slot. It has no assumption in it:
 
 ```tersus
 struct Box<T> {
     addr: Addr<T>,
     ghost blk: Block<T>,
-} invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm filled(blk, addr); }];
+} invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm filled(blk, 0); }];
 
 impl<T> Box<T> {
-    fn new(x: T) -> Self [{ }] [{ affirm at(return.blk, return.addr) = x; }] {
+    fn new(x: T) -> Self [{ }] [{ affirm at(return.blk, 0) = x; }] {
         (a, b) = Addr::alloc(1);
-        return Self { addr: a, blk: Addr::write(a, x, b) };
+        return Self { addr: a, blk: Addr::write(a, 0, x, b) };
     };
 
-    fn unbox(self: Self) -> T [{ }] [{ affirm return = at(self.blk, self.addr); }] {
-        (x, b) = Addr::take(self.addr, self.blk);
+    fn unbox(self: Self) -> T [{ }] [{ affirm return = at(self.blk, 0); }] {
+        (x, b) = Addr::take(self.addr, 0, self.blk);
         done = Addr::free(self.addr, b);
         return x;
     };
 };
 ```
 
-Making a `Box` by hand is safe. The invariant is checked at every struct literal, as struct invariants already are, and it needs a permission for the address. A permission comes only from `alloc`, from taking another value apart, or from an assumption, so no code can wrap an address it does not own.
+Making a `Box` by hand is safe: the invariant is checked at every struct literal, and a block for the address comes only from the sources above, so no code can wrap an address it does not own.
 
-What the compiler does for `Box` by name today (looking through it for fields and `match`, `Box::new(p) = Box::new(q)` meaning `p = q`, the recursion check) becomes a language item, as step 29 describes. For the validator, the item says that a `Box` is the value it holds: `a = b` exactly when `at(a.blk, a.addr) = at(b.blk, b.addr)`.
+What the compiler does for `Box` by name today (looking through it for fields and `match`, `Box::new(p) = Box::new(q)` meaning `p = q`, the recursion check) becomes a language item, as step 29 describes. For the validator, the item says that a `Box` is the value it holds: `a = b` exactly when `at(a.blk, 0) = at(b.blk, 0)`.
 
 ### `Vec<T>`
 
@@ -186,10 +269,10 @@ struct Vec<T> {
     len: Int,
     ghost blk: Block<T>,
 } invariant [{
-    affirm base(blk) = addr; affirm cap(blk) = cap;
+    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap;
     affirm 0 <= len; affirm len <= cap;
-    affirm forall j in 0..len: filled(blk, Addr::offset(addr, j));
-    affirm forall j in len..cap: !filled(blk, Addr::offset(addr, j));
+    affirm forall j in 0..len: filled(blk, j);
+    affirm forall j in len..cap: !filled(blk, j);
 }];
 
 impl<T> Vec<T> {
@@ -198,28 +281,28 @@ impl<T> Vec<T> {
         return Self { addr: a, cap: 4, len: 0, blk: b };
     };
 
-    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; }] {
+    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm at(return.blk, self.len) = x; }] {
         (a, b) = (self.addr, self.blk);
         cap = self.cap;
         if self.len = cap {
             cap = cap * 2 + 4;
             (a, b) = Addr::resize(a, cap, b);
         };
-        return Self { addr: a, cap: cap, len: self.len + 1, blk: Addr::write(Addr::offset(a, self.len), x, b) };
+        return Self { addr: a, cap: cap, len: self.len + 1, blk: Addr::write(a, self.len, x, b) };
     };
 
-    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = at(self.blk, Addr::offset(self.addr, i)); }] {
-        return clone(Addr::get(Addr::offset(self.addr, i), self.blk));
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = at(self.blk, i); }] {
+        return clone(Addr::get(self.addr, i, self.blk));
     };
 
     fn pop(self: Self) -> (Self, T) [{ affirm self.len >= 1; }] [{ affirm return.0.len = self.len - 1; }] {
-        (x, b) = Addr::take(Addr::offset(self.addr, self.len - 1), self.blk);
+        (x, b) = Addr::take(self.addr, self.len - 1, self.blk);
         return (Self { addr: self.addr, cap: self.cap, len: self.len - 1, blk: b }, x);
     };
 
     // Until step 26 gives Vec a Drop, a Vec is linear (it holds a permission), and the program frees it with this
     fn free(self: Self) -> Int [{ }] [{ }] {
-        return Addr::free(self.addr, Addr::dropRange(self.addr, self.len, self.blk));
+        return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
     };
 };
 ```
@@ -237,9 +320,9 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 
 ## Running it
 
-- **`eval` needs a heap for `Addr`.** Addresses can be shared, so `MirEval` gets a store of blocks (a map from a block to its slots, with an address encoded as a block and an index) that `alloc`, `get`, `write`, `take`, `drop`, `resize` and `free` work on. It runs after ghost values are erased. It fails on a read of an empty or freed slot and on a double free, which a proved program cannot do, so on such a program it is a check of the assumptions. The older executor in `StdLib` refuses addresses. `Uninit` needs no heap: it is `VUninit (Maybe Value)`.
-- **MIR.** The operations are `ListOp`s (`AddrAlloc`, `AddrNull`, `AddrOffset`, `AddrCast`, `AddrGet`, `AddrWrite`, `AddrTake`, `AddrDropValue`, `AddrDropRange`, `AddrResize`, `AddrFree`, and the `Uninit`, `replace` and tuple operations), with words in `MirData`. `Addr T`, `Block T`, `Uninit T` and tuple types are new `Type` constructors; a ghost local has a flag. The ghost operations (`Block::split`, `join`, `cast`, `assume`) erase to nothing.
-- **Native code.** An `Addr` is an `i64`. `alloc`, `resize` and `free` call the runtime's `allocate`, `reallocate` and `release`, so `TERSUS_CHECK` counts the blocks. `get`, `write` and `take` copy `size(T)` bytes, `offset` adds `i * size(T)`, and `dropValue` and `dropRange` call `tersus_drop` with the descriptor of `T`. An `Uninit<T>` is laid out as a `T`, with a descriptor that drops, clones and compares nothing.
+- **`eval` needs a heap for `Addr`.** Addresses can be shared, so `MirEval` gets a store of allocations (a map from an allocation to its slots, with an address encoded as an allocation and an index) that the operations work on. It runs after ghost values are erased. It fails on a read of an empty or freed slot and on a double free, which a proved program cannot do, so on such a program it is a check of the assumptions. The older executor in `StdLib` refuses addresses. `Uninit` needs no heap: it is `VUninit (Maybe Value)`.
+- **MIR.** The operations are `ListOp`s (`AddrAlloc`, `AddrNull`, `AddrOffset`, `AddrCast`, `AddrToInt`, `AddrFromInt`, `AddrGet`, `AddrWrite`, `AddrTake`, `AddrDropValue`, `AddrDropRange`, `AddrResize`, `AddrFree`, and the `Uninit`, `replace` and tuple operations), with words in `MirData`. `Addr T`, `Block T`, `Uninit T` and tuple types are new `Type` constructors; a ghost local has a flag. The ghost operations (`Block::split`, `join`, `cast`, `assume`) erase to nothing.
+- **Native code.** An `Addr` is an `i64`. `alloc`, `resize` and `free` call the runtime's `allocate`, `reallocate` and `release`, so `TERSUS_CHECK` counts the blocks. `get`, `write` and `take` copy `size(T)` bytes at `p + i * size(T)`, `offset` adds `i * size(T)`, and `dropValue` and `dropRange` call `tersus_drop` with the descriptor of `T`. An `Uninit<T>` is laid out as a `T`, with a descriptor that drops, clones and compares nothing.
 - **Both emitters, in step.** `LlvmEmit` and `examples/emit.tersus` gain the same cases, `examples/mir_reader.tersus` reads the new words, and `bootstrap/emitter.ll` is regenerated. `TestMirEmit` keeps them equal.
 
 ## Order of work
@@ -249,13 +332,13 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 3. **`Uninit<T>` and `replace`**, on the builtin `Box`: a proved `Vec` with no addresses, and a test of whether the invariant's foralls are cheap enough to prove at each operation.
 4. **Ghost values**: ghost locals, parameters, fields and tuple parts, the check that they do not flow into runtime values, the linear check over them, and the erasure pass.
 5. **Layout in bytes**: 8-bit `Byte` and `Bool`, the fixed-width integers, C's rules for structs, in both emitters and the runtime. This is independent of 1 to 4 and can be done at any point before 6.
-6. **`Addr<T>` and `Block<T>`**: the types, the operations, the address facts and ghost arrays in the proof engine, the heap in `MirEval`, the emitters and runtime, `examples/addresses.tersus` (a buffer and an arena-linked list, both proved), and a rejected program for each contract: read of an empty slot, write over a filled one, out of bounds, free with a slot filled, use after free, a permission dropped.
-7. **Assumptions**: `assume`, `Block::assume`, `extern fn` (each with its `because`), and `tersus assumptions`.
+6. **`Addr<T>` and `Block<T>`**: the types, the operations, the ghost functions and the two offset facts in the proof engine, split and join, the heap in `MirEval`, the emitters and runtime, `Buffer<T>`, `examples/addresses.tersus` (a buffer, a buffer split between two functions, and an arena-linked list, all proved), and a rejected program for each contract: read of an empty slot, write over a filled one, out of bounds, the permission of one block with the address of another, free of a part, join of blocks from two allocations, free with a slot filled, use after free, a view used after its block changed, a permission dropped.
+7. **Assumptions**: `assume`, `Block::assume`, `extern fn`, and `tersus assumptions`.
 8. **Drops (step 26)**, then `StdList` on an address, then `Box` in the library (step 29).
 
 ## Changes to other documents
 
-- `README.md`, step 25: `Addr<T>`, `Block<T>`, ghost values, tuples and assumptions in place of `*T`, the marker in signatures and the contracts on `valid(p)`. Step 29: `struct Box<T> { addr: Addr<T>, ghost blk: Block<T> }` in place of `ptr: *T`, and `*[T]` as an address, a length and a block. Step 30: `extern fn` as an assumption.
+- `README.md`, step 25: `Addr<T>`, `Block<T>`, ghost values, tuples and assumptions in place of `*T`, the marker in signatures and the contracts on `valid(p)`. Step 29: `struct Box<T> { addr: Addr<T>, ghost blk: Block<T> }` in place of `ptr: *T`, and `*[T]` as a `Buffer<T>`. Step 30: `extern fn` as an assumption.
 - `DROPS.md`, Part 3: points here. Its owning pointer is now an address and a permission, and `Uninit` and `replace` cover what Part 1's section on containers needed. The order there changes: linear types come before pointers.
 - `LANGUAGE.md`, when it is built: sections on tuples, ghost values, addresses and permissions, and assumptions, with the list of what `tersus assumptions` reports. Bytes (a `Byte` is 8 bits natively) and a new section on the fixed-width integers and layout.
 
@@ -265,4 +348,7 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 2. **Must `free` find every slot empty?** It cannot drop what is left itself, since natively nothing records which slots are filled. The alternative is a `free` that asks nothing, and leaks whatever the filled slots own. That is safe, but loses the proof that nothing is lost. `dropRange` keeps the cost of the strict rule to one call for a `Vec`; whether the engine proves `free`'s `forall` over `0..cap` from `dropRange`'s result over `0..len` and the invariant over `len..cap` without help is untested.
 3. **Ghost collections of permissions**, for structures over many blocks: a ghost map from addresses to `Block`s, and when to add it.
 4. **Fractional permissions**, for proved sharing of memory that is only read (`Rc` of an immutable value, a buffer read by several functions at once).
-5. **Wrapping arithmetic** on the fixed-width integers (for hashes and checksums), or only arithmetic on `Int` with checked narrowing, as above.
+5. **Permissions finer than a slot**: one per field of a struct in a slot, for building a value in place a field at a time and for an address of a field to give to C.
+6. **Scoped permissions**, for the address of a local in a frame: a ghost value that has to be given back before the function returns.
+7. **A shorthand for framing**, "this block is the one given except slots `i..j`", if the contracts of functions that take blocks turn out to repeat it.
+8. **Wrapping arithmetic** on the fixed-width integers (for hashes and checksums), or only arithmetic on `Int` with checked narrowing, as above.
