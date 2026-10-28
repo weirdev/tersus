@@ -4,13 +4,12 @@ import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
-import Cli (Command (..), World (..), noWorld, runSourceIn)
+import Cli (World (..), noWorld, runProgramIn)
 import LlvmEmit (emitBody, emitOutline, emitOwned)
 import Mir
 import MirData (forNative, writeProgram)
 import Pipeline (ownedSource)
 import Pretty (renderType)
-import TersusTypes (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
@@ -41,6 +40,16 @@ testMirEmit =
 readerOf :: String -> String
 readerOf source = unlines (takeWhile (not . isPrefixOf "// ---- end of the reader ----") (dropWhile (not . isPrefixOf "// ---- the reader:") (lines source)))
 
+-- The emitter of examples/emit.tersus, compiled once: the three interpreted cases each run it for a part of the IR, and its
+-- validation is the most expensive thing in this group.
+emitterProgram :: IO (Result Program String)
+emitterProgram = readFile "examples/emit.tersus" >>= compileOnce
+
+runEmitter :: World -> Result Program String -> Result ((String, String), [(FilePath, String)]) String
+runEmitter world compiled = case compiled of
+    Error e -> Error e
+    Ok program -> runProgramIn world program
+
 sameReader :: IO TestResult
 sameReader = do
     reader <- readFile "examples/mir_reader.tersus"
@@ -67,10 +76,10 @@ sectionsOf = go . lines
 
 interpretedIr :: String -> IO TestResult
 interpretedIr source = do
-    emitter <- readFile "examples/emit.tersus"
+    emitter <- emitterProgram
     pure $ case ownedSource source of
         Error e -> Just e
-        Ok owned -> case (emitOwned (forNative owned), runSourceIn noWorld{worldInput = writeProgram owned} Interpret emitter) of
+        Ok owned -> case (emitOwned (forNative owned), mapResult fst (runEmitter noWorld{worldInput = writeProgram owned} emitter)) of
             (Ok text, Ok (output, errors))
                 | not (null errors) -> Just ("reported: " ++ errors)
                 | sameText output text -> Nothing
@@ -80,10 +89,10 @@ interpretedIr source = do
 
 interpretedOutline :: String -> IO TestResult
 interpretedOutline source = do
-    emitter <- readFile "examples/emit.tersus"
+    emitter <- emitterProgram
     pure $ case ownedSource source of
         Error e -> Just e
-        Ok owned -> case (emitOutline (forNative owned), runSourceIn noWorld{worldInput = writeProgram owned, worldArgs = ["outline"]} Interpret emitter) of
+        Ok owned -> case (emitOutline (forNative owned), mapResult fst (runEmitter noWorld{worldInput = writeProgram owned, worldArgs = ["outline"]} emitter)) of
             (Ok text, Ok (output, errors))
                 | not (null errors) -> Just ("reported: " ++ errors)
                 | sameText output text -> Nothing
@@ -93,10 +102,10 @@ interpretedOutline source = do
 
 interpretedBodies :: String -> IO TestResult
 interpretedBodies source = do
-    emitter <- readFile "examples/emit.tersus"
+    emitter <- emitterProgram
     pure $ case ownedSource source of
         Error e -> Just e
-        Ok owned -> case runSourceIn noWorld{worldInput = writeProgram owned, worldArgs = ["bodies"]} Interpret emitter of
+        Ok owned -> case mapResult fst (runEmitter noWorld{worldInput = writeProgram owned, worldArgs = ["bodies"]} emitter) of
             Error e -> Just e
             Ok (output, errors)
                 | not (null errors) -> Just ("reported: " ++ errors)

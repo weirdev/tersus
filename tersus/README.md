@@ -217,7 +217,7 @@ Running (from this (tersus/) directory):
        stack run -- mir --data <file>
     4. stack run -- llvm <file>
 Tests:
-    0. stack test (test/TestTersus.hs runs the groups of TestBasics, TestValidation, TestProofs, TestControl, TestData and TestPipeline, which share TestHarness)
+    0. stack test (test/TestTersus.hs runs the groups of TestBasics, TestValidation, TestProofs, TestControl, TestData, TestPipeline and the rest, which share TestHarness; each group runs in a process of its own, several at a time, and `-j 1` or group names go after `--test-arguments=`)
 Examples:
     0. See examples/README.md; `stack test` checks every program in examples/
 Interactive use:

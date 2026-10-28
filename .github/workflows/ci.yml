@@ -8,26 +8,39 @@ on:
 permissions:
   contents: read
 
+# A newer push to the same branch makes the run it supersedes pointless, so stop it instead of paying for both.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   haskell:
     name: Haskell build and tests
     runs-on: ubuntu-latest
     # (the tests that build the emitter written in Tersus, twice, and compile every program with it are the longest)
-    timeout-minutes: 60
+    timeout-minutes: 45
     defaults:
       run:
         working-directory: tersus
     steps:
       - uses: actions/checkout@v4
 
+      # (the toolchain: it changes only when the resolver does, so a miss here rarely rebuilds a snapshot)
       - name: Cache Stack
         uses: actions/cache@v4
         with:
-          path: |
-            ~/.stack
-            tersus/.stack-work
-          key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock', 'tersus/package.yaml') }}
+          path: ~/.stack
+          key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}
           restore-keys: stack-${{ runner.os }}-
+
+      # (the package's own build output: keyed on everything it is made of, and restored from the previous run when
+      # only a little of that changed, so stack rebuilds the changed modules instead of all of them)
+      - name: Cache build output
+        uses: actions/cache@v4
+        with:
+          path: tersus/.stack-work
+          key: stack-work-${{ runner.os }}-${{ hashFiles('tersus/package.yaml', 'tersus/stack.yaml', 'tersus/src/**', 'tersus/app/**', 'tersus/test/**', 'tersus/lib/**', 'tersus/examples/**', 'tersus/bootstrap/**') }}
+          restore-keys: stack-work-${{ runner.os }}-
 
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
       # reports "cannot find 'ld'". ld.bfd takes the same options, so let it answer to that name.
@@ -37,7 +50,9 @@ jobs:
       - name: Build
         run: stack build --test --no-run-tests
 
-      # The harness prints [PASS]/[FAIL] per case and exits non-zero if any case fails.
+      # The harness prints [PASS]/[FAIL] per case and exits non-zero if any case fails. It runs each group in a process
+      # of its own, several at a time, prints [TIME] for each, and adds the results up into one Summary line;
+      # `stack test --test-arguments='-j 1'` runs the groups one at a time when a failure needs a quiet log.
       # It loads examples/ relative to the package directory, so run from tersus/.
       - name: Test
         run: stack test
@@ -63,6 +78,7 @@ jobs:
   python:
     name: Python prototype tests
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

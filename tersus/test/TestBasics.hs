@@ -10,7 +10,6 @@ module TestBasics
     , testControlFlow
     ) where
 
-import qualified Data.Map as Map
 import Parse
 import MirEval (fromMirValue)
 import Pipeline (runStatements, validateStatements)

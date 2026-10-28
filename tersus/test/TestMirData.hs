@@ -7,7 +7,7 @@ import Cli (Command (..), runSource)
 import Mir
 import MirData
 import LlvmEmit (emitOwned)
-import Pipeline (llvmSource, ownedSource)
+import Pipeline (ownedSource)
 import TersusTypes (Type (..))
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
@@ -19,11 +19,8 @@ testMirData :: Test
 testMirData =
     TestList
         "testMirData"
-        [ TestList "examples" [TestCase path (roundTrips <$> readFile path) | path <- nativeExamples]
-        , TestList "programs" [TestCase name (pure (roundTrips source)) | (name, source) <- validatedPrograms]
-        , -- The data is all that the code made needs: the IR of the program read back from it is the IR of the program
-          TestList "the same IR" [TestCase path (sameIr <$> readFile path) | path <- nativeExamples]
-        , TestList "the same IR for the native programs" [TestCase name (pure (sameIr source)) | (name, source) <- validatedPrograms]
+        [ TestList "examples" [TestCase path (roundTripsAndIr <$> readFile path) | path <- nativeExamples]
+        , TestList "programs" [TestCase name (pure (roundTripsAndIr source)) | (name, source) <- validatedPrograms]
         , TestList
             "format"
             [ testCase "the command prints it" $
@@ -62,29 +59,22 @@ testMirData =
         Ghost _ _ -> True
         _ -> False
 
-roundTrips :: String -> TestResult
-roundTrips source = case ownedSource source of
+-- The data of a program reads back as the same program, is written the same way again, and the IR of the program read back is the
+-- IR of the program: one compilation answers both questions, which the two cases this replaces asked separately.
+roundTripsAndIr :: String -> TestResult
+roundTripsAndIr source = case ownedSource source of
     Error e -> Just ("does not compile: " ++ e)
     Ok program ->
         let text = writeProgram program
+            native = forNative program
          in case readProgram text of
                 Error e -> Just ("cannot be read back: " ++ e)
                 Ok back
                     | not (all isAscii text) -> Just "the data is not ASCII"
-                    | back /= forNative program -> Just "reads back as another program"
+                    | back /= native -> Just "reads back as another program"
                     | writeProgram back /= text -> Just "is written differently after it was read"
+                    | emitOwned back /= emitOwned native -> Just "the IR of the program read back differs from the IR of the program"
                     | otherwise -> Nothing
-
--- The IR of a program, and the IR of the program that its data is read back as
-sameIr :: String -> TestResult
-sameIr source = case (llvmSource source, ownedSource source) of
-    (Ok ir, Ok owned) -> case readProgram (writeProgram owned) of
-        Error e -> Just ("cannot be read back: " ++ e)
-        Ok back -> case emitOwned back of
-            Error e -> Just ("no IR from the data: " ++ e)
-            Ok ir' -> if ir' == ir then Nothing else Just "the IR differs"
-    (Error e, _) -> Just e
-    (_, Error e) -> Just e
 
 -- Names with a space, quotes, a backslash, a newline and letters of every width
 names :: Program -> TestResult

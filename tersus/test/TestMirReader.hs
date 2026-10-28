@@ -1,8 +1,11 @@
 module TestMirReader (testMirReader, withProgram, sameText) where
 
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
+import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.IO.Unsafe (unsafePerformIO)
 
 import Cli (Command (..), World (..), noWorld, runSourceIn)
 import MirData (writeProgram)
@@ -61,18 +64,29 @@ withProgram path name use = do
     if not available
         then pure Nothing
         else do
-            source <- readFile path
-            tmp <- getTemporaryDirectory
-            let dir = tmp </> ("tersus-" ++ name ++ "-test")
-                exe = dir </> name
-            createDirectoryIfMissing True dir
-            case llvmSource source of
-                Error e -> pure (Just e)
-                Ok ir -> do
-                    built <- buildExecutable exe ir
-                    case built of
-                        Error e -> pure (Just e)
-                        Ok () -> use exe
+            built <- modifyMVar builtPrograms $ \built ->
+                case Map.lookup name built of
+                    Just exe -> pure (built, Right exe)
+                    Nothing -> do
+                        source <- readFile path
+                        tmp <- getTemporaryDirectory
+                        let dir = tmp </> ("tersus-" ++ name ++ "-test")
+                            exe = dir </> name
+                        createDirectoryIfMissing True dir
+                        result <- case llvmSource source of
+                            Error e -> pure (Error e)
+                            Ok ir -> buildExecutable exe ir
+                        case result of
+                            -- (a build that failed is not remembered: the case that asked for it reports why)
+                            Error e -> pure (built, Left e)
+                            Ok () -> pure (Map.insert name exe built, Right exe)
+            case built of
+                Left e -> pure (Just e)
+                Right exe -> use exe
+
+{-# NOINLINE builtPrograms #-}
+builtPrograms :: MVar (Map.Map String FilePath)
+builtPrograms = unsafePerformIO (newMVar Map.empty)
 
 withReader :: (FilePath -> IO TestResult) -> IO TestResult
 withReader = withProgram "examples/mir_reader.tersus" "mir-reader"

@@ -6,7 +6,7 @@ module TestPipeline
     , testPipeline
     ) where
 
-import Control.Exception (finally)
+import Control.Exception (evaluate, finally)
 import Data.List (isInfixOf, subsequences)
 import GHC.IO.Encoding (char8, getLocaleEncoding, setLocaleEncoding)
 import System.Directory (getTemporaryDirectory, removeFile)
@@ -232,6 +232,8 @@ testCliReadsUtf8 = TestCase "utf8 source" $ do
     saved <- getLocaleEncoding
     (do setLocaleEncoding char8
         source <- readSourceFile path
+        -- (the whole text, so that the handle has reached its end before the file is removed: Windows will not remove a file that is open)
+        _ <- evaluate (length source)
         return (if runSource Interpret source == Ok "42" then Nothing else Just ("got " ++ show (runSource Interpret source))))
         `finally` (setLocaleEncoding saved >> removeFile path)
 
