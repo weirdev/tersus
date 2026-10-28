@@ -13,8 +13,8 @@ testGenerics =
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
             _ -> Just ("Expected a parse error for: " ++ source)
-        pairBox = "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn first(self: &Self) -> T { return self.a; }; fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; }; "
-        lead = "fn lead<T>(a: &List<T>) -> T [{ define s = size(a); rewrite eqToGtZero s; affirm s > 0; }] [{ }] { return get(a, 0); }; "
+        pairBox = "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn first(self: &Self) -> T { return clone(self.a); }; fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; }; "
+        lead = "fn lead<T>(a: &List<T>) -> T [{ define s = size(a); rewrite eqToGtZero s; affirm s > 0; }] [{ }] { return clone(get(a, 0)); }; "
      in TestList
             "testGenerics"
             [ TestList
@@ -30,21 +30,21 @@ testGenerics =
                 , testCase "a type in an array and a list" (runs "fn pair<T>(a: T, b: T) -> Array<T, 2> { return set(array(2, a), 1, b); }; return pair(1, 2);" (VList [VInt 1, VInt 2]))
                 , testCase "a list is grown" (runs "fn grow<T>(a: List<T>, x: T) -> List<T> { return push(a, x); }; return grow(grow(push([], true), false), true);" (VList [VBool True, VBool False, VBool True]))
                 , testCase "a Box" (runs "fn wrap<T>(a: T) -> Box<T> { return Box::new(a); }; return Box::unbox(wrap(push([], 2)));" (VList [VInt 2]))
-                , testCase "a loop that builds a list of any type" (runs "fn mk<T>(x: T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ }] { out = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { out = push(out, x); i = i + 1; }; return out; }; return mk(push([], 4), 2);" (VList [VList [VInt 4], VList [VInt 4]]))
-                , testCase "a type and a size together" (runs "fn fill<T, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] { return set(a, 0, x); }; return fill(#[true, true], false);" (VList [VBool False, VBool True]))
+                , testCase "a loop that builds a list of any type" (runs "fn mk<T>(x: T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ }] { out = []; i = 0; while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i { out = push(out, clone(x)); i = i + 1; }; return out; }; return mk(push([], 4), 2);" (VList [VList [VInt 4], VList [VInt 4]]))
+                , testCase "a type and a size together" (runs "fn fill<T, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] { return set(clone(a), 0, x); }; return fill(#[true, true], false);" (VList [VBool False, VBool True]))
                 , testCase "a function calls another with its type" (runs "fn count<T>(a: &List<T>) -> Int { return size(a); }; fn twice<T>(a: &List<T>) -> Int { return count(a) + count(a); }; return twice(push([], 1)) + twice(push([], true));" (VInt 4))
                 , testCase "a type that is an empty list" (runs "fn same<T>(a: T, b: T) -> Bool { return a = b; }; return same([], []);" (VBool True))
                 , testCase "a function calls itself with its type" (runs "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(a, n - 1); }; return f(push([], 2), 3);" (VInt 3))
                 , testCase "or with its types in another order" (runs "fn f<A, B>(a: A, b: B, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(b, a, n - 1); }; return f(1, true, 3);" (VInt 3))
                 , testCase "or with a type of its own" (runs "fn f<T>(a: T, n: Int) -> Int [{ define k = n; affirm k >= 0; }] [{ }] shrinks n { if n = 0 { return 0; }; return 1 + f(1, n - 1); }; return f(true, 2);" (VInt 2))
                 , testCase "a type that nothing decides is an Int" (runs "fn nil<T>() -> List<T> { return []; }; return size(nil());" (VInt 0))
-                , testCase "a lent parameter of a type" (runs "fn twice<T>(a: &T) -> Array<T, 2> { return array(2, a); }; return twice(push([], 5));" (VList [VList [VInt 5], VList [VInt 5]]))
+                , testCase "a lent parameter of a type" (runs "fn twice<T>(a: &T) -> Array<T, 2> { return array(2, clone(a)); }; return twice(push([], 5));" (VList [VList [VInt 5], VList [VInt 5]]))
                 ]
             , TestList
                 "validation"
                 [ testCase "a contract about the values is checked" (rejected (lead ++ "return lead([]);") "Proof term is not greater than 0")
                 , testCase "and met" (valid (lead ++ "return lead([5]);"))
-                , testCase "an index past the end" (rejected "fn past<T>(a: &List<T>) -> T { return get(a, 0); }; return past([1]);" "Relation lacks a proof")
+                , testCase "an index past the end" (rejected "fn past<T>(a: &List<T>) -> T { return clone(get(a, 0)); }; return past([1]);" "Relation lacks a proof")
                 ]
             , TestList
                 "types"
@@ -67,15 +67,15 @@ testGenerics =
                 , testCase "a type is a type of its own" (rejected "struct Pair<T> { a: T, b: T };  fn f(p: Pair<Int>) -> Int { return p.a; }; return f(Pair<Bool> { a: true, b: false });" "argument 1 of f: expected Pair<Int>, got Pair<Bool>")
                 , testCase "the fields have the type" (rejected "struct Pair<T> { a: T, b: T };  x = Pair<Int> { a: 1, b: true }; return 0;" "field b of Pair<Int>: expected Int, got Bool")
                 , testCase "structs of one type are compared" (runs "struct Pair<T> { a: T, b: T };  return Pair<Int> { a: 1, b: 2 } = Pair<Int> { a: 1, b: 2 };" (VBool True))
-                , testCase "a function over any type of one" (runs "struct Pair<T> { a: T, b: T };  fn swap<U>(p: &Pair<U>) -> Pair<U> { return Pair<U> { a: p.b, b: p.a }; }; q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }); return q;" (VData "Pair" [("a", VList [VInt 2, VInt 3]), ("b", VList [VInt 1])]))
+                , testCase "a function over any type of one" (runs "struct Pair<T> { a: T, b: T };  fn swap<U>(p: &Pair<U>) -> Pair<U> { return Pair<U> { a: clone(p.b), b: clone(p.a) }; }; q = swap(Pair<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }); return q;" (VData "Pair" [("a", VList [VInt 2, VInt 3]), ("b", VList [VInt 1])]))
                 , testCase "its type is the type of the struct" (runs "struct Pair<T> { a: T, b: T };  fn first<U>(p: Pair<U>) -> U { return p.a; }; return first(Pair<Bool> { a: true, b: false });" (VBool True))
                 , testCase "an update keeps the type" (runs "struct Pair<T> { a: T, b: T };  a = Pair<Int> { a: 1, b: 2 }; b = Pair<Int> { b: 9, ..a }; return b.a + b.b;" (VInt 10))
                 , testCase "a struct that holds another of its type" (runs "struct Pair<T> { a: T, b: T };  struct Wrap<T> { inner: Pair<T>, tag: Int }; fn mk<T>(x: T, y: T) -> Wrap<T> { return Wrap<T> { inner: Pair<T> { a: x, b: y }, tag: 7 }; }; return mk(true, false).tag;" (VInt 7))
-                , testCase "in a list, an array and a Box" (runs "struct Pair<T> { a: T, b: T };  l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<Bool> { a: true, b: true }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return get(l, 0).b + b.a + size(a);" (VInt 9))
+                , testCase "in a list, an array and a Box" (runs "trait Clone { }; struct Pair<T> { a: T, b: T }; impl<T> Clone for Pair<T> { }; l = push([], Pair<Int> { a: 1, b: 2 }); a = array(2, Pair<Bool> { a: true, b: true }); b = Box::new(Pair<Int> { a: 5, b: 6 }); return get(l, 0).b + b.a + size(a);" (VInt 9))
                 , testCase "a type and a size" (runs "struct Vec<T, n> { cells: Array<T, n>, used: Int }; fn capacity<T, m>(v: &Vec<T, m>) -> Int { return m + v.used; }; return capacity(Vec<Int, 3> { cells: #[1, 2, 3], used: 1 }) * 10 + capacity(Vec<Bool, 2> { cells: #[true, false], used: 0 });" (VInt 42))
                 , testCase "an array of the type and the size is known" (valid "struct Vec<T, n> { cells: Array<T, n>, used: Int }; v = Vec<Int, 3> { cells: #[1, 2, 3], used: 0 }; affirm size(v.cells) = 3; return get(v.cells, 2);")
-                , testCase "a Box of an array of the type" (runs "struct Holder<T> { items: Box<Array<T>>, len: Int }; h = Holder<List<Int>> { items: Array::boxed(2, push([], 1)), len: 2 }; return get(h.items, 1);" (VList [VInt 1]))
-                , testCase "a contract about it" (valid "struct Holder<T> { items: Box<Array<T>>, len: Int }; fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; affirm s > 0; }] [{ affirm size(return.items) = n; }] { return Holder<T> { items: Array::boxed(n, x), len: n }; }; fn at<T>(h: &Holder<T>, i: Int) -> T [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ }] { return get(h.items, i); }; h = holder(push([], 5), 3); return at(h, 2);")
+                , testCase "a Box of an array of the type" (runs "struct Holder<T> { items: Box<Array<T>>, len: Int }; h = Holder<List<Int>> { items: Array::boxed(2, push([], 1)), len: 2 }; return clone(get(h.items, 1));" (VList [VInt 1]))
+                , testCase "a contract about it" (valid "struct Holder<T> { items: Box<Array<T>>, len: Int }; fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; affirm s > 0; }] [{ affirm size(return.items) = n; }] { return Holder<T> { items: Array::boxed(n, x), len: n }; }; fn at<T>(h: &Holder<T>, i: Int) -> T [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ }] { return clone(get(h.items, i)); }; h = holder(push([], 5), 3); return at(h, 2);")
                 , testCase "a struct that holds itself in a Box" (valid "struct L<T> { v: T, next: Box<L<T>> }; return 0;")
                 , testCase "or in a list" (runs "struct Chain<T> { value: T, rest: List<Chain<T>> }; c = Chain<Int> { value: 1, rest: push([], Chain<Int> { value: 2, rest: [] }) }; return get(c.rest, 0).value;" (VInt 2))
                 , testCase "but not by value" (rejected "struct L<T> { v: T, next: L<T> }; return 0;" "L holds itself, so it would have no size")
@@ -96,11 +96,11 @@ testGenerics =
                 "impl for a struct with parameters"
                 [ testCase "a method" (runs (pairBox ++ "x = Box2<Int> { a: 1, b: 2 }.swap(); return x.first() * 10 + x.b;") (VInt 21))
                 , testCase "for any type" (runs (pairBox ++ "x = Box2<List<Int>> { a: push([], 1), b: push(push([], 2), 3) }; return size(x.swap().first());") (VInt 2))
-                , testCase "its own names for the parameters" (runs "struct Box2<T> { a: T, b: T }; impl<U> Box2<U> { fn second(self: &Self) -> U { return self.b; }; }; return Box2<Int> { a: 1, b: 2 }.second();" (VInt 2))
-                , testCase "a function without self is called through the type" (runs "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn both(x: T) -> Self { return Self { a: x, b: x }; }; }; return Box2::both(4).b;" (VInt 4))
+                , testCase "its own names for the parameters" (runs "struct Box2<T> { a: T, b: T }; impl<U> Box2<U> { fn second(self: &Self) -> U { return clone(self.b); }; }; return Box2<Int> { a: 1, b: 2 }.second();" (VInt 2))
+                , testCase "a function without self is called through the type" (runs "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn both(x: T) -> Self { return Self { a: clone(x), b: x }; }; }; return Box2::both(4).b;" (VInt 4))
                 , testCase "a size of the impl is a value" (runs "struct Packet<n> { cells: Array<Int, n>, tag: Int }; impl<n> Packet<n> { fn count(self: &Self) -> Int { return n + self.tag; }; }; return Packet<3> { cells: #[1, 2, 3], tag: 10 }.count();" (VInt 13))
                 , testCase "a method calls another" (runs "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn swap(self: Self) -> Self { return Self { a: self.b, b: self.a }; }; fn back(self: Self) -> Self { return self.swap().swap(); }; }; return Box2<Int> { a: 1, b: 2 }.back().a;" (VInt 1))
-                , testCase "validated against its contract" (rejected "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn pick(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < 2; }] [{ }] { return self.a; }; }; return Box2<Int> { a: 1, b: 2 }.pick(5);" "Could not prove: i < 2")
+                , testCase "validated against its contract" (rejected "struct Box2<T> { a: T, b: T }; impl<T> Box2<T> { fn pick(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < 2; }] [{ }] { return clone(self.a); }; }; return Box2<Int> { a: 1, b: 2 }.pick(5);" "Could not prove: i < 2")
                 , testCase "the parameters are written" (parseFails "struct Box2<T> { a: T, b: T }; impl Box2 { fn first(self: &Self) -> Int { return 0; }; }; return 0;")
                 , testCase "or none for a struct without any" (parseFails "struct S { a: Int }; impl<T> S { fn f(self: &Self) -> Int { return 0; }; }; return 0;")
                 , testCase "a trait is implemented for these" (runs "struct Box2<T> { a: T, b: T }; trait Counted { fn count(self: &Self) -> Int; }; impl<T> Counted for Box2<T> { fn count(self: &Self) -> Int { return 2; }; }; return Box2<Int> { a: 1, b: 2 }.count();" (VInt 2))

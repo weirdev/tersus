@@ -1,18 +1,18 @@
 // Updating a list: set(list, index, x) returns a new list with one element replaced, and the
 // old list is unchanged. Like get it needs 0 <= index < size(list), and its output contract
 // says the result has the same size, which the loop invariant carries so that every get and set
-// in the loop is provably in range. bumpAll starts from a copy of its argument and rewrites
+// in the loop is provably in range. bumpAll is lent its argument, starts from a copy of it (clone) and rewrites
 // each element in place, so its result is as long as its input, and every element of the result
 // is 100 more than the matching element of the input. The loop invariant carries that fact with
 // a forall: the elements below i are done, and the ones from i on are untouched.
 // The counter facts come with the for loop, and the validator works out that out keeps the size of a:
 // out starts as a copy of a, and set does not change a size.
 
-fn bumpAll(a: List<Int>) -> List<Int> [{ }] [{
+fn bumpAll(a: &List<Int>) -> List<Int> [{ }] [{
     affirm size(return) = size(a);
     affirm forall j in 0..size(a): get(return, j) = (get(a, j) + 100);
 }] {
-    out = a;
+    out = clone(a);
     for i in 0..size(a) [{
         // the elements already visited are bumped, and the rest are as they were
         affirm forall j in 0..i: get(out, j) = (get(a, j) + 100);

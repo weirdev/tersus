@@ -6,7 +6,7 @@
 // and compare two with =, and that is all, so `a + 1` for a T is an error. Native code is made for each type the program calls it with
 // (head<Int>, head<List<Int>>), which is also how it knows whether a T owns something to free.
 fn head<T>(items: &List<T>) -> T [{ define s = size(items); rewrite eqToGtZero s; affirm s > 0; }] [{ }] {
-    return get(items, 0);
+    return clone(get(items, 0));
 };
 
 // The type can be in the result, in a Box, and in an array of a size
@@ -14,7 +14,7 @@ fn repeat<T>(x: T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ affi
     out = [];
     i = 0;
     while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; }] shrinks n - i {
-        out = push(out, x);
+        out = push(out, clone(x));
         i = i + 1;
     };
     return out;
@@ -34,7 +34,7 @@ fn second<A, B>(a: A, b: B) -> B {
 };
 
 fn setFirst<T, n>(a: &Array<T, n>, x: T) -> Array<T, n> [{ define k = n; rewrite eqToGtZero k; affirm k > 0; }] [{ }] {
-    return set(a, 0, x);
+    return set(clone(a), 0, x);
 };
 
 lists = repeat(push(push([], 1), 2), 3);                      // three copies of [1, 2]

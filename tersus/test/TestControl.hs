@@ -190,12 +190,12 @@ testInferredInvariants =
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = size(a); return -1; };"
             , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { i = 0; while i < size(a) shrinks size(a) - i { if get(a, i) > 2 { return i; }; i = i + 1; }; affirm i = 0; return -1; };" "Could not prove: i = 0"
             , -- Starting from something that is not a number: a copy of an argument, or a counter bounded by a parameter
-              parseValidProgramHelper "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = a; for i in 0..size(a) { out = set(out, i, 0); }; return out; };"
-            , parseValidProgramHelper "fn f(a: List<Int>) -> Int { c = a; i = 0; while i < size(a) shrinks size(a) - i { c = set(c, i, 1); i = i + 1; }; affirm size(c) = size(a); return 0; };"
+              parseValidProgramHelper "fn f(a: List<Int>) -> List<Int> [{ }] [{ affirm size(return) = size(a); }] { out = clone(a); for i in 0..size(a) { out = set(out, i, 0); }; return out; };"
+            , parseValidProgramHelper "fn f(a: List<Int>) -> Int { c = clone(a); i = 0; while i < size(a) shrinks size(a) - i { c = set(c, i, 1); i = i + 1; }; affirm size(c) = size(a); return 0; };"
             , parseValidProgramHelper "fn f(a: List<Int>) -> Int { i = 0; n = size(a); while i < n shrinks n - i { i = i + 1; }; affirm i = n; return i; };"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { i = 0; while i < n shrinks n - i { i = i + 1; }; affirm i = n; return i; };"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int { i = 0; while i < n shrinks n - i { i = i + 1; }; affirm i = n; return i; };" "Could not prove: i = n"
-            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { c = a; i = 0; while i < size(a) shrinks size(a) - i { c = push(c, 0); i = i + 1; }; affirm size(c) = size(a); return 0; };" "Could not prove: size(c) = size(a)"
+            , parseValidateFailProgramHelper "fn f(a: List<Int>) -> Int { c = clone(a); i = 0; while i < size(a) shrinks size(a) - i { c = push(c, 0); i = i + 1; }; affirm size(c) = size(a); return 0; };" "Could not prove: size(c) = size(a)"
             , parseValidateFailProgramHelper "fn f(a: List<Int>, b: List<Int>) -> Int { c = b; i = 0; while i < size(a) shrinks size(a) - i { c = set(c, 0, 1); i = i + 1; }; return 0; };" "Funct input validation failed"
             ]
 
@@ -244,7 +244,7 @@ testTermination =
             , parseValidProgramHelper "fn down(n: Int) -> Int ~ { return down(n); };"
             , -- Recursion over a structure: the call is given a field of the value
               parseValidProgramHelper (tree ++ "fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(r) }; };")
-            , parseValidateFailProgramHelper (tree ++ "fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(t) }; };") "Recursive call does not shrink the variant: t"
+            , parseValidateFailProgramHelper (tree ++ "trait Clone { }; impl Clone for Tree { }; fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(clone(l)) + count(clone(t)) }; };") "Recursive call does not shrink the variant: t"
             , parseValidProgramHelper (tree ++ "fn depth(t: Box<Tree>) -> Int { n = 0; while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; n = n + 1; }; return n; };")
             , parseValidateFailProgramHelper (tree ++ "fn depth(t: Box<Tree>) -> Int { n = 0; while t is Tree::Branch shrinks t { n = n + 1; }; return n; };") "Loop variant does not shrink: t"
             , -- Code that may not end makes a function that contains it say so

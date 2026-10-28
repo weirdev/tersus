@@ -40,6 +40,7 @@ library
       MirEval
       MirLists
       MirLower
+      MirMoves
       MirMono
       MirOwnership
       MirValidate
@@ -107,6 +108,7 @@ test-suite tersus-test
       TestOwnership
       TestArrays
       TestBorrow
+      TestCopies
       TestGenerics
       TestSequence
       TestStrings

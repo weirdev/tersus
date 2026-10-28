@@ -15,6 +15,12 @@ struct Frame<n> {
     packet: Packet<n>,
 };
 
+// (made of numbers and arrays of them, they are copied wherever they are wanted)
+impl<n> Clone for Packet<n> { };
+impl<n> Copy for Packet<n> { };
+impl<n> Clone for Frame<n> { };
+impl<n> Copy for Frame<n> { };
+
 fn total<m>(p: Packet<m>) -> Int {
     sum = p.id;
     i = 0;

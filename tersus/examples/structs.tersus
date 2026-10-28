@@ -2,6 +2,10 @@
 // `Node { next: 5, ..n }` is a new Node whose other fields are copied from n.
 struct Node { value: Int, prev: Int, next: Int };
 
+// A struct is moved to where it is wanted, unless it says it can be copied: a Node is made of numbers, so it is Copy (which needs Clone)
+impl Clone for Node { };
+impl Copy for Node { };
+
 // Updating one field leaves the others as they were, which the contract states and the validator proves.
 fn relink(n: Node, target: Int) -> Node
     [{ }]

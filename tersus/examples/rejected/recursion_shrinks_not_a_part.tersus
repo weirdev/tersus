@@ -4,10 +4,12 @@ enum Tree {
     Branch { left: Box<Tree>, right: Box<Tree> },
 };
 
+impl Clone for Tree { };
+
 fn count(t: Box<Tree>) -> Int shrinks t {
     return match t {
         Tree::Leaf => 1,
-        Tree::Branch { left: l, right: r } => count(l) + count(t),
+        Tree::Branch { left: l, right: r } => count(clone(l)) + count(clone(t)),
     };
 };
 return count(Box::new(Tree::Leaf));

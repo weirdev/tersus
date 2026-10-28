@@ -8,14 +8,14 @@ fn upTo(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ affirm return = n; }] shr
     if i < n { return upTo(i + 1, n); } else { return n; };
 };
 
-// Adds up the elements of l from index i on.
-fn sumFrom(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ affirm size(l) >= 0; }] shrinks size(l) - i {
+// Adds up the elements of l from index i on (l is lent, so the recursion does not move it).
+fn sumFrom(l: &List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i <= size(l); }] [{ affirm size(l) >= 0; }] shrinks size(l) - i {
     if i < size(l) { return get(l, i) + sumFrom(l, i + 1); } else { return 0; };
 };
 
 // Walks to the last element. The arithmetic knows i = size(l) - 1 in the last step, but the term
 // get(l, i) is only linked to get(l, size(l) - 1) once that is affirmed, and affirms become facts.
-fn endOf(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] shrinks size(l) - i {
+fn endOf(l: &List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ affirm return = get(l, size(l) - 1); }] shrinks size(l) - i {
     if i + 1 < size(l) {
         return endOf(l, i + 1);
     } else {

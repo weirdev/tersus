@@ -106,7 +106,7 @@ testBox =
                 , testCase "a Box of a size is not given where another size is wanted" (rejected "fn f(a: Box<Array<Int, 3>>) -> Int { return 0; }; return f(Box::new(#[1, 2]));" "expected Box<Array<Int, 3>>, got Box<Array<Int, 2>>")
                 , testCase "a Box of any size is not given where a size is wanted" (rejected "fn f(a: Box<Array<Int, 3>>) -> Int { return 0; }; return f(Array::boxed(3, 1));" "expected Box<Array<Int, 3>>, got Box<Array<Int, ?>>")
                 , testCase "the elements can be lists" (runs "a = Array::boxed(2, push([], 1)); a = set(a, 1, push(push([], 2), 3)); return a;" (VList [VList [VInt 1], VList [VInt 2, VInt 3]]))
-                , testCase "or structs" (runs "struct P { x: Int }; a = Array::boxed(2, P { x: 1 }); return get(a, 1).x + size(a);" (VInt 3))
+                , testCase "or structs" (runs "trait Clone { }; struct P { x: Int }; impl Clone for P { }; a = Array::boxed(2, P { x: 1 }); return get(a, 1).x + size(a);" (VInt 3))
                 , testCase "Array::boxed is called, not named" (parseFails "h = Array::boxed; return 0;")
                 , testCase "Array::boxed takes a size and an element" (rejected "return Array::boxed(3);" "Array::boxed takes 2 arguments, got 1")
                 , testCase "the size is an Int" (rejected "return Array::boxed(true, 1);" "argument 1 of Array::boxed: expected Int, got Bool")

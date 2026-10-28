@@ -1,11 +1,11 @@
 # Drops, linear types and raw pointers (design)
 
-This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the two emitters (`LlvmEmit` and `examples/emit.tersus`, which must write the same IR), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built yet.
+This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the two emitters (`LlvmEmit` and `examples/emit.tersus`, which must write the same IR), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built yet, except what the first step needed: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`, and `MirMoves`, which finds a use of a moved value), see LANGUAGE.md, Moves, Clone And Copy, and the notes below that say what that changed.
 
 ## Where things stand
 
 - Ownership is implicit and structural. `needsDrop` says a type owns something to free (a list, a `Box`, or a struct, enum or array that holds one). `insertOwnership` turns every use into a `Move` or a `Clone` and puts a `Drop` for every owned local at each `Return`. `tersus_drop` frees by walking the descriptor. A moved-from slot holds cleared words, and dropping that does nothing.
-- Copying is implicit: a value wanted twice is cloned. That is what keeps the language one of values, and why a proof about a value stays true.
+- Copying is explicit (it was implicit: a value wanted twice was cloned): a value that is not Copy is moved, and the program writes `clone(x)` to keep it. A clone has the value of what it copies, which is why a proof about a value stays true. `MirMoves` is the first half of the check that Part 2 asks for (it follows places, with views of fields and elements, along every path), so the linear check is that pass with one more fact per local, the obligations to move it.
 - A drop is memory only. Nothing a program writes runs when a value goes away, and nothing stops a program from forgetting a handle.
 - There is no unit type (a function that does something returns an `Int`), no `&mut` (`&T` is a lent parameter that is only read), no visibility of fields, and a trap ends the process with no unwinding.
 - `eval` runs the validated MIR, which has no ownership in it. `testNative` compares `eval` with the executable, so any effect a drop has must be in both.
@@ -60,13 +60,13 @@ An explicit early drop is a function, not a feature: `fn discard<T>(x: T) -> Int
 
 **A value with a drop is not taken apart.** A `match` that binds an owning field of it would move the field out and leave the rest. Following Rust (E0509), a field of a type with a `Drop` is read, never taken: a plain field is copied, and an owning field is a `Peek` or a `Clone` (which needs the field's type to be cloneable). So the cleared-words case cannot occur inside a value, and the flag only has to describe whole values.
 
-**Copying.** `insertOwnership` emits `Clone` where a value is wanted twice. For an affine type that is an error, reported by the check of Part 2 (`x was moved`), unless the type has `impl Clone`:
+**Copying.** `Clone` and `Copy` exist already, as traits with no functions that a type says it has (`impl Clone for T { };`): `clone(x)` is the structural copy, the MIR's `Clone`, and a value that is not Copy is moved. A type with a drop is not Copy, and it is Clone only if it says so, so `x was moved` (the check of `MirMoves`) is what a second use of an affine value already is. What this step adds is a `Clone` with a body of its own, for a type whose copy is more than its fields:
 
 ```tersus
-trait Clone { fn clone(self: &Self) -> Self [{ }] [{ }]; }
+impl Clone for Counted { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { ... }; };
 ```
 
-The `Clone` call is then an ordinary `Call` in the MIR, so a refcount can be written. The runtime's deep copy never copies an affine value bitwise (it would be freed twice): the descriptor of a type with a `Clone` impl names that function, and `tersus_clone` calls it.
+`clone(x)` is then an ordinary `Call` in the MIR, so a refcount can be written. The runtime's deep copy never copies an affine value bitwise (it would be freed twice): the descriptor of a type with such an impl names that function, and `tersus_clone` calls it.
 
 ### Containers (the reason step 25 comes first)
 

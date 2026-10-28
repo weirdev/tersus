@@ -232,6 +232,7 @@ assign st dest rv =
         M.MakeBox o -> assign st dest (M.Use o)
         M.Unbox o -> assign st dest (M.Use o)
         M.Unsize o -> assign st dest (M.Use o)
+        M.Clone o -> assign st dest (M.Use o)
         _ -> case rvalueCall rv of
             Nothing -> throwV "An operation the validator does not know"
             Just (builtin, operands) -> do
@@ -306,6 +307,7 @@ ghostStatement _ st env g =
         M.GhostAxiom name args ins outs -> defineAxiom st name args ins outs
         M.GhostProof name args ins outs body -> defineProofRule st name args ins outs body
         M.GhostFunction name source top -> defineFunction st name source top
+        M.GhostPosition _ _ -> return st
 
 -- A function is validated where it is defined: its body, against what holds everywhere, and its output contract
 defineFunction :: PState -> Name -> Variable -> Bool -> V PState
@@ -459,6 +461,8 @@ upcoming cx b rules = concatMap fromBlock reachable
         M.MakeBox o -> [o]
         M.Unbox o -> [o]
         M.Unsize o -> [o]
+        M.Clone o -> [o]
+        M.TakeField{} -> []
     rvalueTerm rv = case rv of
         M.Use o -> Just (atom o)
         _ -> do

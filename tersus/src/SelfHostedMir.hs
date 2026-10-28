@@ -286,6 +286,7 @@ statement (M.Assign (M.Local dest) (M.Use source)) b = do
 statement (M.Assign dest (M.MakeBox source)) b = statement (M.Assign dest (M.Use source)) b
 statement (M.Assign dest (M.Unbox source)) b = statement (M.Assign dest (M.Use source)) b
 statement (M.Assign dest (M.Unsize source)) b = statement (M.Assign dest (M.Use source)) b
+statement (M.Assign dest (M.Clone source)) b = statement (M.Assign dest (M.Use source)) b
 statement (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
     (snapshots, b1) <- foldM snapshot ([], b0) fields
     let (constructor, b2) = namedFunction ("ctor:" ++ name) b1

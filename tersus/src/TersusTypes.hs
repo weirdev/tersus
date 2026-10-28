@@ -53,6 +53,8 @@ data BuiltinFunct
       NewBox
     | -- UnBox b: the value that b holds, taken out of it
       UnBox
+    | -- CloneOf x: clone(x), a copy of x, which has its value. It is the one place a program says that a value is copied.
+      CloneOf
     | Rel Rel
     | -- a && b, a || b and !a: the connectives of a condition. The lowering turns them into the jumps they stand for (a && b does not
       -- evaluate b when a is false), so only the checker, the evaluation of a constant and the printer see them.
@@ -405,6 +407,13 @@ data Statement
       -- which the type checker keeps as a template and makes a function of for each type it is called with (see TypeCheck.templateCall).
       -- It does not reach the lowering.
       BoundedDef [Bound] Statement
+    | -- The line and column of the statement that follows it in its block, in a program that was parsed to keep them (`Pipeline`
+      -- does, the parser functions called on their own do not). Nothing runs it: the lowering takes it as the place that the
+      -- MIR statements after it come from, for the errors that name a place (a value used after it was moved).
+      Mark Int Int
+    | -- T implements Copy (`impl Copy for T { };`), which the checker has seen to hold: a value of it is copied where it is wanted,
+      -- and not moved. The lowering collects them.
+      CopyDef Name
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- A bound on a type parameter of a function: the parameter, the trait its type has to implement and the types it is given

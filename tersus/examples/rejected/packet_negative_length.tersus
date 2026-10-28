@@ -9,7 +9,7 @@ enum Parsed {
 
 // The sum of buf[lo..hi) modulo 256. The remainder of a division by 256 is from 0 to 255 (see Linear arithmetic), and
 // the input contract is what makes every get safe.
-fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
+fn checksum(buf: &List<Int>, lo: Int, hi: Int) -> Int
     [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
     [{ affirm 0 <= return; affirm return < 256; }]
 {
@@ -20,7 +20,7 @@ fn checksum(buf: List<Int>, lo: Int, hi: Int) -> Int
     return total % 256;
 };
 
-fn slice(buf: List<Int>, lo: Int, hi: Int) -> List<Int>
+fn slice(buf: &List<Int>, lo: Int, hi: Int) -> List<Int>
     [{ affirm 0 <= lo; affirm lo <= hi; affirm hi <= size(buf); }]
     [{ affirm size(return) = hi - lo; }]
 {
@@ -33,7 +33,7 @@ fn slice(buf: List<Int>, lo: Int, hi: Int) -> List<Int>
 
 // Every way out is a Parsed. Each check is what makes the reads after it safe: the buffer has the two header
 // numbers, the length is not negative, the payload and the checksum fit, and the checksum is right.
-fn parse(buf: List<Int>) -> Parsed {
+fn parse(buf: &List<Int>) -> Parsed {
     if size(buf) < 3 { return Parsed::TooShort; };
     version = get(buf, 0);
     len = get(buf, 1);

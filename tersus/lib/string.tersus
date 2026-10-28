@@ -10,6 +10,9 @@ struct String {
     bytes: List<Byte>,
 };
 
+// (a copy of a String is made where a program writes clone(s))
+impl Clone for String { };
+
 impl String {
     // The text of a then the text of b: the bytes of a, then the bytes of b
     fn concat(self: Self, other: &String) -> Self [{ }] [{
