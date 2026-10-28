@@ -1927,7 +1927,7 @@ fn constantShape(cx: &Ctx, c: &Constant) -> Type ~ {
         if i >= 0 {
             sig = get(cx.sigs, i);
             ret = Type::TInt;
-            if sig.hasReturn { ret = sig.returns; };
+            if sig.hasReturn { ret = clone(sig.returns); };
             return Type::TFn { args: clone(sig.params), ret: Box::new(ret) };
         };
         return Type::TInt;
