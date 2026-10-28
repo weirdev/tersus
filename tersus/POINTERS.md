@@ -146,7 +146,7 @@ Memory in a frame (the address of a local) is not in this list: Tersus has no ad
 
 ### Reinterpreting memory
 
-`Block::cast(b)` gives a `Block<U>` for the same memory, with the same base, origin and filled slots. It is allowed when `T` and `U` have the same layout (see Layout), and either no slot is filled or `U` is *plain bits*: a type whose every bit pattern is a value (the integers, `Byte`, and structs and arrays of them). `Int` to a struct of two `I32`s is allowed; `I32` to `Bool` is not, since a `Bool` is 0 or 1. Anything else is an assumption.
+`Block::cast(b)` gives a `Block<U>` for the same memory, with the same base, origin and filled slots. It is allowed when `T` and `U` have the same layout (see Layout), and either no slot is filled or both `T` and `U` are *plain bits*: a type whose every bit pattern is a value and that owns nothing (the integers, `Byte`, and structs and arrays of them, with no ghost field). `Int` to a struct of two `I32`s is allowed; `I32` to `Bool` is not, since a `Bool` is 0 or 1. The source has to be plain bits too, because a value that owns something can have the layout of one that does not: a ghost field takes no room, so a one-word `Box<Int>` has the layout of an `Int`, and casting a filled slot of one to an `Int` would lose its allocation and its permission without dropping or consuming them. Anything else is an assumption.
 
 ## Interaction with proofs
 
@@ -256,7 +256,10 @@ impl<T> Box<T> {
 
 Making a `Box` by hand is safe: the invariant is checked at every struct literal, and a block for the address comes only from the sources above, so no code can wrap an address it does not own.
 
-What the compiler does for `Box` by name today (looking through it for fields and `match`, `Box::new(p) = Box::new(q)` meaning `p = q`, the recursion check) becomes a language item, as step 29 describes. For the validator, the item says that a `Box` is the value it holds: `a = b` exactly when `at(a.blk, 0) = at(b.blk, 0)`.
+What the compiler does for `Box` by name today (looking through it for fields and `match`, `Box::new(p) = Box::new(q)` meaning `p = q`, the recursion check) becomes a language item, as step 29 describes. For the validator, `=` written between two `Box`es in a program means that they hold equal values, `at(a.blk, 0) = at(b.blk, 0)`, and not that they are the same value. The two cannot be the same relation: the engine substitutes equals into every term (congruence), so taking two separately allocated boxes with equal contents to be equal values would give `a.addr = b.addr`, a false equation that satisfies the check that ties an address to its permission. The same holds for every type that holds an `Addr` or a `Block`:
+
+- **It has no structural `=`.** The `=` a program writes on it is the equality its library gives (for `Box`, the language item), which the validator reads as a relation of its own, defined by that equality's contract, and never as the equality of the two values as terms.
+- **A `clone` of it does not promise `return = self`**, which is what `clone(x) = x` gives every other type (LANGUAGE.md, Moves, Clone And Copy). A copy is a new allocation, so its contract says what the contents are (`at(return.blk, 0) = at(self.blk, 0)`), and the copy is a different value with a different address.
 
 ### `Vec<T>`
 
