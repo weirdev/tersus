@@ -179,7 +179,11 @@ runInParallel jobs names = do
         _ <- forkIO $
             bracket_ (waitQSem sem) (signalQSem sem) $ do
                 started <- getMonotonicTime
-                outcome <- try (readCreateProcessWithExitCode (proc self [name, "--child"]) "")
+                -- (a group runs in one thread, so one capability is all its process can use: left to the package's -with-rtsopts=-N, every
+                -- child would take as many capabilities as the machine has processors, so N children would make N times N of them and their
+                -- threads and parallel garbage collectors would compete for the same cores)
+                let arguments = [name, "--child", "+RTS", "-N1", "-RTS"]
+                outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
                 finished <- getMonotonicTime
                 putMVar done (name, finished - started, outcome)
         pure done
