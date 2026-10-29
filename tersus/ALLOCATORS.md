@@ -39,7 +39,7 @@ The types that own memory take a region parameter, written `a: Alloc`. These are
 ```tersus
 struct Box<T, a: Alloc> {
     addr: Addr<T>,
-    ghost blk: Block<T>,
+    ghost blk: Block<T, a>,
 } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm filled(blk, 0); affirm allocator(origin(blk)) = a; }];
 ```
 
@@ -118,6 +118,7 @@ This is unification, the rule every parameter of a type has. Only the last step 
 - A local whose type mentions it belongs to the block. It is new each time the block is entered, it is not seen after the block, and it is not carried around a loop that holds the block.
 - An outer local cannot be given one, since the outer local's type cannot mention the region.
 - `return` from inside the block cannot give one, since the function's result type cannot mention it.
+- **A permission is one of these too.** What an allocator's own functions give is `Block<T, arena>`, so a raw `(p, b) = arena.alloc(n)` in the block is scoped like a list is. The permission is linear, so it must be freed, or held by a value that is dropped, before the block ends: a permission still owned at an exit is the rejected program of `POINTERS.md`, "a permission dropped". An arena that frees in bulk (`BulkFree`) takes the permission in `free` all the same, which only does nothing else.
 
 The messages: `tokens is in arena, and cannot be used after the with block that opened it; clone it into another region first`, and `names is a List<String, ctx>, and cannot hold a String in arena; clone it`.
 
@@ -131,17 +132,19 @@ The messages: `tokens is in arena, and cannot be used after the with block that 
 
 An allocator gives out and takes back the blocks of `POINTERS.md`. A block's ghost `origin(b)` gains one fact, `allocator(origin(b))`, the allocator it came from. `split`, `join` and `cast` keep the origin, so they keep that fact with no rule of their own.
 
+**A permission is branded with its region.** `Block<T>` becomes `Block<T, a: Alloc>`, a ghost type that names the region of the allocator the memory came from, and the allocator's own functions give and take `Block<T, Self>` (`Self` is the region the allocator is: `System`, a parameter, or the fresh region of a `with`). `Addr<T>` stays as it is, since an address allows nothing without its permission. The brand is what the escape rule needs. A permission is a value like any other, so a permission from a local arena's `alloc` that was not branded could leave the block as a bare `(Addr<T>, ghost Block<T>)`, outlive the arena, and be used with `Addr::write` or `Addr::get` on freed memory, and the equation `allocator(origin(b)) = self` could not stop that, because regions are erased from validation and those operations ask for the permission and not for a live allocator. With the brand, `Block<T, arena>` is a type that mentions `arena`, so it is scoped to the block like `List<T, arena>` is (see The with block). The same holds for a region parameter: a function cannot return a `Block<T, a>` for a region it was not given. The brand is ghost and is erased with the permission, so it takes no room and no code.
+
 ```tersus
 trait Allocator {
-    fn alloc<T>(self: &Self, n: Int) -> (Addr<T>, ghost Block<T>) [{ affirm n >= 0; }]
+    fn alloc<T>(self: &Self, n: Int) -> (Addr<T>, ghost Block<T, Self>) [{ affirm n >= 0; }]
         [{ affirm base(return.1) = return.0; affirm cap(return.1) = n; affirm whole(return.1); affirm fresh(origin(return.1));
            affirm allocator(origin(return.1)) = self; affirm forall i in 0..n: !filled(return.1, i); }];
-    fn resize<T>(self: &Self, p: Addr<T>, b: Block<T>, n: Int) -> (Addr<T>, ghost Block<T>)
+    fn resize<T>(self: &Self, p: Addr<T>, b: Block<T, Self>, n: Int) -> (Addr<T>, ghost Block<T, Self>)
         [{ affirm base(b) = p; affirm whole(b); affirm allocator(origin(b)) = self; affirm n >= 0; affirm forall i in n..cap(b): !filled(b, i); }]
-        [{ affirm cap(return.1) = n; affirm whole(return.1); affirm allocator(origin(return.1)) = self;
+        [{ affirm base(return.1) = return.0; affirm cap(return.1) = n; affirm whole(return.1); affirm allocator(origin(return.1)) = self;
            affirm forall i where i >= 0, i < n, i < cap(b): filled(return.1, i) = filled(b, i);
            affirm forall i where i >= 0, i < n, i < cap(b), filled(b, i): at(return.1, i) = at(b, i); }];
-    fn free<T>(self: &Self, p: Addr<T>, b: Block<T>)
+    fn free<T>(self: &Self, p: Addr<T>, b: Block<T, Self>)
         [{ affirm base(b) = p; affirm whole(b); affirm allocator(origin(b)) = self; affirm forall i in 0..cap(b): !filled(b, i); }] [{ }];
 };
 ```
@@ -161,7 +164,7 @@ Every value is a number of words today, so every block is aligned to a word. Whe
 
 ### Failure
 
-Every allocation made through a region ends the program with `Out of memory` when it fails, as today. An allocator that can be expected to fail also has `fn tryAlloc<T>(self: &Self, n: Int) -> Option<(Addr<T>, ghost Block<T>)>`, which is called by name. A context that can fail would make every function that allocates return a failure, and that is not part of this design.
+Every allocation made through a region ends the program with `Out of memory` when it fails, as today. An allocator that can be expected to fail also has `fn tryAlloc<T>(self: &Self, n: Int) -> Option<(Addr<T>, ghost Block<T, Self>)>`, which is called by name. A context that can fail would make every function that allocates return a failure, and that is not part of this design.
 
 ## Native code
 
@@ -234,11 +237,12 @@ Stage 1 is where the cost to users shows: every message about a type is now able
 | A brand per `with` gave a copy of a function per block, and no end under recursion | Copies are per kind of allocator, and a brand is a type variable of the block, which no callee can name |
 | `System` would rename instances and change the descriptors | `System` is erased, and a copy for it keeps today's name |
 | `Arena` needed assumptions that the design said it had none of, and `Checked` needed statics | Allocators are trusted code listed by `tersus assumptions`, and `Checked` is a local |
+| A permission from a local allocator's `alloc` could leave the block with a bare address, and be used after the arena was gone | `Block<T, a>` is branded with its region, so it is scoped like any value of that region (Allocators, The trait; The with block) |
 | The contracts differed from `POINTERS.md` | They are the contracts of `Addr::alloc`, `resize` and `free`, with `allocator(origin(b))` in place of a new relation |
 | `FREES` needed per-instance drops and could skip a file's | `BulkFree` acts on drops made per type after `MirMono`, and only on parts that own nothing but memory |
 
 ## Changes to other documents
 
 - `README.md`: step 32 points here. When stage 3 is begun, step 30 (c) says that it is done here.
-- `POINTERS.md`, when step 25 is built: `allocator(origin(b))` and `fresh(origin)` in its table of ghost functions, `Addr::alloc`, `resize` and `free` as the primitives of `System`, and the library's containers calling their region.
+- `POINTERS.md`, when step 25 is built: the region of `Block<T, a>` (ghost, so erased with it), `allocator(origin(b))` and `fresh(origin)` in its table of ghost functions, `Addr::alloc`, `resize` and `free` as the primitives of `System`, and the library's containers calling their region.
 - `LANGUAGE.md`, at stage 1: regions, where they are left out, borrows and equality; at stage 2: `with`, its scope, and the messages.
