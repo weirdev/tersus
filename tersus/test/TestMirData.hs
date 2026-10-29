@@ -73,8 +73,18 @@ roundTripsAndIr source = case ownedSource source of
                     | not (all isAscii text) -> Just "the data is not ASCII"
                     | back /= native -> Just "reads back as another program"
                     | writeProgram back /= text -> Just "is written differently after it was read"
-                    | emitOwned back /= emitOwned native -> Just "the IR of the program read back differs from the IR of the program"
-                    | otherwise -> Nothing
+                    | otherwise -> sameIr back program
+
+-- The IR of the program read back from the data and the IR of the program the data was written from. The data leaves the validator's part
+-- out, so this is what says that what it leaves out does not change what is emitted; comparing against `forNative` of the same program
+-- instead, as the guard above already established, would compare two programs that are equal.
+sameIr :: Program -> Program -> TestResult
+sameIr back program = case (emitOwned back, emitOwned program) of
+    (Ok fromData, Ok fromProgram)
+        | fromData == fromProgram -> Nothing
+        | otherwise -> Just "the IR of the program read back differs from the IR of the program"
+    (Error e, _) -> Just ("no IR from the data: " ++ e)
+    (_, Error e) -> Just ("no IR from the program: " ++ e)
 
 -- Names with a space, quotes, a backslash, a newline and letters of every width
 names :: Program -> TestResult
@@ -88,21 +98,21 @@ names program =
 roundTripsNames :: Program
 roundTripsNames =
     Program
-        { progTypes = Map.fromList [(odd, StructDecl [(odd, TNamed odd)])]
-        , progFunctions = Map.fromList [(odd, fn odd)]
+        { progTypes = Map.fromList [(oddName, StructDecl [(oddName, TNamed oddName)])]
+        , progFunctions = Map.fromList [(oddName, fn oddName)]
         , progMain = fn "main"
         , progGenerics = Map.empty
         , progInvariants = Map.empty
         }
   where
-    odd = "a \"quoted\" \\ name\nwith caf\233, \955 and \128512"
+    oddName = "a \"quoted\" \\ name\nwith caf\233, \955 and \128512"
     fn n =
         Function
             { fnName = n
             , fnParams = []
             , fnReturns = Nothing
-            , fnLocals = Map.fromList [(Local 0, LocalDecl TInt (Just odd))]
-            , fnBlocks = Map.fromList [(BlockId 0, BasicBlock [Assign (Local 0) (Use (Const (CData odd [(odd, CFn odd)])))] Return)]
+            , fnLocals = Map.fromList [(Local 0, LocalDecl TInt (Just oddName))]
+            , fnBlocks = Map.fromList [(BlockId 0, BasicBlock [Assign (Local 0) (Use (Const (CData oddName [(oddName, CFn oddName)])))] Return)]
             , fnSizeParams = []
             , fnTypeParams = []
             , fnBorrowed = []
