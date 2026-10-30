@@ -102,8 +102,22 @@ freeTree (VP a) = do
             mapM_ freeTree (children (cellObject c))
 -- (a list of native code owns the memory at its address, with the elements in it)
 freeTree (VS name fs) | isListStruct name, Just a <- listCell fs = freeTree (VP a)
-freeTree (VS _ fs) = mapM_ (freeTree . snd) fs
+-- (a value of a type with a drop is given to its drop first, which frees what it holds by hand, and its fields are freed after)
+freeTree v@(VS name fs) = do
+    program <- stProgram <$> getSt
+    case typeOfValue program name >>= dropFunction program >>= (`Map.lookup` progFunctions program) of
+        Just fn -> callFunction program fn [v] >> return ()
+        Nothing -> return ()
+    mapM_ (freeTree . snd) fs
 freeTree _ = return ()
+
+-- The struct or the enum that a value of a struct or of a variant is of
+typeOfValue :: Program -> Name -> Maybe Name
+typeOfValue program name = case Map.lookup name (progTypes program) of
+    Just StructDecl{} -> Just name
+    _ -> case [n | (n, EnumDecl variants) <- Map.toList (progTypes program), name `elem` map fst variants] of
+        n : _ -> Just n
+        [] -> Nothing
 
 -- The memory that a list of native code (a StdList, on an address) has its elements in
 listCell :: [(Variable, Val)] -> Maybe Int
@@ -430,6 +444,8 @@ listOp op os =
             s <- getSt
             putSt s{stHeap = Map.delete a (stHeap s)}
             pure (VI 0)
+        -- (an empty Uninit is cleared bytes, which own nothing; a value taken apart is cleared so, MirGhost)
+        (UninitEmpty, []) -> pure VNull
         _ -> failM ("list operation on the wrong operands: " ++ show op)
   where
     memorySpan = 2 ^ (32 :: Integer)
@@ -540,7 +556,9 @@ callFunction program fn args = do
         f : rest -> do
             -- (a function of the library of lists gives the memory of the list it is given to the list it returns: MirOwnership does not free it)
             let givesItsMemory l = take 7 (fnName fn) == "stdList" && l `elem` fnParams fn && l `notElem` fnBorrowed fn
-                leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap program f l, not (givesItsMemory l)]
+                -- (nor the value a drop is given, whose fields are freed after it)
+                dropped l = isDropFunction (fnName fn) && take 1 (fnParams fn) == [l]
+                leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap program f l, not (givesItsMemory l), not (dropped l)]
             if null leftover
                 then putSt s'{stFrames = rest}
                 else failM ("a function returns while it owns " ++ show leftover)

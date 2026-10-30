@@ -107,10 +107,11 @@ data LS = LS
     , lsCopies :: Set.Set Name -- the structs and enums that implement Copy
     , lsLinear :: Set.Set Name -- the structs and enums that are linear
     , lsExterns :: Set.Set Variable -- the functions that are extern
+    , lsDrops :: Set.Set Name -- the structs and enums that have a drop
     }
 
 initialState :: [Statement] -> LS
-initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty
+initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty
 
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
@@ -236,7 +237,7 @@ program stmts = do
         result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s))
     case verifyProgram result of
         Error e -> failL ("Lowering produced a malformed program: " ++ e)
-        Ok () -> case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) result else [] of
+        Ok () -> case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) (lsDrops s) result else [] of
             [] -> return (stripPositions result)
             errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
@@ -352,7 +353,13 @@ lowerStatement stmt =
         ValidationStatement vs -> ghost (M.GhostValidation vs)
         CopyDef name -> modifyS (\s -> s{lsCopies = Set.insert name (lsCopies s)})
         LinearDef name -> modifyS (\s -> s{lsLinear = Set.insert name (lsLinear s)})
+        DropDef name -> modifyS (\s -> s{lsDrops = Set.insert name (lsDrops s)})
         ExternDef name -> modifyS (\s -> s{lsExterns = Set.insert name (lsExterns s)})
+        Dissolve var -> do
+            binding <- lookupBinding var
+            case binding of
+                Just (BLocal l _) -> emit (M.Ghost Map.empty (M.GhostDissolve l))
+                _ -> failL ("Undefined variable: " ++ var)
         Mark line column -> do
             modifyB (\b -> b{bPlace = Just (line, column)})
             emit (M.Ghost Map.empty (M.GhostPosition line column))

@@ -46,7 +46,27 @@ monomorphize program
     (main', mainNeeds) = redirect program (progMain program)
     redirected = [redirect program f | f <- Map.elems (progFunctions program), not (generic f)]
     plain' = map fst redirected
-    instances = build program (mainNeeds ++ concatMap snd redirected) Map.empty
+    -- (the drop of a struct with types is made for each instance of the struct that the program has, and named for it, `<Vec<Int> as Drop>::drop`:
+    -- native code calls it where a value of that instance is freed, which no call in the program says)
+    instances = Map.mapWithKey dropName (withDrops (build program (mainNeeds ++ concatMap snd redirected) Map.empty) (4 :: Int))
+    withDrops done k =
+        let p = withInstances program{progFunctions = Map.fromList [(fnName f, f) | f <- plain' ++ Map.elems done], progMain = main'}
+            keys = [key | n <- Map.keys (progTypes p), not (symbolic n), Just key <- [dropKey n], Map.notMember key done]
+         in if null keys || k <= 0 then done else withDrops (build program keys done) (k - 1)
+    dropKey n = do
+        (base, _) <- instanceOf n
+        let name = "<" ++ base ++ " as Drop>::drop"
+        f <- Map.lookup name (progFunctions program)
+        self <- case fnParams f of
+            p : _ -> Just p
+            [] -> Nothing
+        selfTy <- localType <$> Map.lookup self (fnLocals f)
+        let bindings = match selfTy (TNamed n)
+        tys <- mapM (`lookup` bindings) (fnTypeParams f)
+        Just (name, tys, [])
+    dropName (name, _, _) f
+        | isDropFunction name, self : _ <- fnParams f, Just (TNamed n) <- localType <$> Map.lookup self (fnLocals f) = f{fnName = "<" ++ n ++ " as Drop>::drop"}
+        | otherwise = f
 
 -- The copies to make, with those that the copies need
 -- (the types and the sizes that a copy is for)

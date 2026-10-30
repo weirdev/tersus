@@ -23,3 +23,11 @@ trait Growable<E> {
 // `impl Copy for T { };` (it has to be Clone, and every field Copy: a list never is). An array has what its elements have.
 trait Clone { };
 trait Copy { };
+
+// What is done when a value goes out of scope: `impl Drop for T { fn drop(self: Self) -> Int { ... }; };` is called by native code where a value
+// of T is freed (at the end of the scope of the local that holds it, when it is given another value, or when what holds it is freed), before
+// what its fields own is freed. It is how a type that holds a permission (POINTERS.md) frees the memory it is for, so such a type is not
+// linear: its drop is its use. A program does not call it, and a type with a drop is not Clone or Copy.
+trait Drop {
+    fn drop(self: Self) -> Int [{ }] [{ }];
+};

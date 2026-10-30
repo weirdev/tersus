@@ -80,6 +80,8 @@ needsDrop program = owning
         _ -> False
     -- (the struct that a list is made of owns the memory at its address, which the runtime frees and copies with the elements in use)
     declared n | takeWhile (/= '<') n == "StdList" = True
+    -- (a struct or an enum with a drop has something to do when it is freed, whatever its fields are)
+    declared n | Just _ <- dropFunction program n = True
     declared n = case Map.lookup n (progTypes program) of
         Just (StructDecl fields) -> any (owning . snd) fields
         Just (EnumDecl variants) -> any (owning . snd) (concatMap snd variants)
@@ -264,7 +266,9 @@ ownFunction program fn0 =
         (blocks, finalState) =
             runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty)
         allLocals = Map.union (fnLocals fn) (rsNew finalState)
-        owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState, l `Set.notMember` cxBorrowed cx, not (givesItsMemory l d)]
+        owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState, l `Set.notMember` cxBorrowed cx, not (givesItsMemory l d), not (dropped l)]
+        -- (the drop of a type is given the value to free: native code frees what its fields own after it, so the drop does not free it)
+        dropped l = isDropFunction (fnName fn) && take 1 (fnParams fn) == [l]
         -- (a function of the library of lists, lib/lists.tersus, is given a list and returns one made of its memory: the memory at the address,
         -- which a push may have moved, is the one it returns, so the list it is given is not freed)
         givesItsMemory l d = take 7 (fnName fn) == "stdList" && l `elem` fnParams fn && takeWhile (/= '<') (typeName (localType d)) == "StdList"

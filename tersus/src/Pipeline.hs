@@ -83,9 +83,9 @@ libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string l
     ws = names code
     ws' = zip ws (drop 1 ws)
     declares candidates = any (\(keyword, name) -> keyword `elem` ["struct", "enum", "trait"] && name `elem` candidates) ws'
-    preludeFree = not (declares ["Sequence", "Growable", "Clone", "Copy"])
+    preludeFree = not (declares ["Sequence", "Growable", "Clone", "Copy", "Drop"])
     strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || '"' `elem` code)
-    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy"])
+    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy", "Drop"])
     -- (the names in a text: runs of letters, digits and underscores)
     names text = case dropWhile (not . isNameChar) text of
         "" -> []

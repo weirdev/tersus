@@ -316,6 +316,7 @@ ghostStatement _ st env g =
         M.GhostProof name args ins outs body -> defineProofRule st name args ins outs body
         M.GhostFunction name source top -> defineFunction st name source top
         M.GhostPosition _ _ -> return st
+        M.GhostDissolve _ -> return st
 
 -- A function is validated where it is defined: its body, against what holds everywhere, and its output contract
 defineFunction :: PState -> Name -> Variable -> Bool -> V PState

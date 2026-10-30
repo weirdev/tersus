@@ -128,7 +128,7 @@ located = do
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
-statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> assumeStatements <|> linearStatement <|> externStatement <|> affirmStatements <|> (pure <$> statement)
+statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> structAssign <|> assumeStatements <|> linearStatement <|> externStatement <|> affirmStatements <|> (pure <$> statement)
 
 -- `linear struct T { ... };` and `linear enum T { ... };`: a type whose values are used exactly once (the declaration, and the mark)
 linearStatement :: Parser [Statement]
@@ -251,6 +251,37 @@ tupleAssign = do
     whitespace
     let held = "$tuple " ++ show (sourceLine position) ++ ":" ++ show (sourceColumn position)
     return (Assign held expr : [Assign name (F (Val (builtinFunct (Field Nothing (show i)))) [Var held]) | (i, name) <- zip [0 :: Int ..] names])
+
+-- `Vec { addr: a, len: n, blk: b } = e;`: a struct taken apart, each field to a name. Every field is moved to its name (as the parts of a tuple
+-- are), and the value is used up, so a drop it has (`impl Drop`) is not run: this is how a function that is given a value with a drop and
+-- a permission makes another of its parts (POINTERS.md, decision 1).
+structAssign :: Parser [Statement]
+structAssign = do
+    (position, name, declared, binds) <- try $ do
+        position <- getPosition
+        (name, declared) <- declaredCtor
+        whitespace
+        binds <- curlyBracesParse (bind `sepEndBy` skipWhitespace (char ','))
+        void (char '=')
+        notFollowedBy (char '=')
+        return (position, name, declared, binds)
+    whitespace
+    when ("::" `isInfixOf` name) $ fail "a variant is taken apart with match, which says what to do with the other variants"
+    when (map fst binds /= declared) $ fail ("Struct " ++ name ++ " is taken apart into every one of its fields, in the order it declares them (" ++ intercalate ", " declared ++ ")")
+    when (length (nub (map snd binds)) /= length binds) $ fail "a struct is taken apart into a name twice"
+    expr <- expression
+    whitespace
+    let held = "$struct " ++ show (sourceLine position) ++ ":" ++ show (sourceColumn position)
+    return (Assign held expr : [Assign var (F (Val (builtinFunct (Field Nothing field))) [Var held]) | (field, var) <- binds] ++ [Dissolve held])
+  where
+    bind = do
+        field <- variable
+        whitespace
+        void (char ':')
+        whitespace
+        var <- variable
+        whitespace
+        return (field, var)
 
 -- `f(x);` and `v.f(x);`: a call that is made for what it does, whose result is not used. It is an assignment of the result to a name that
 -- no program can write (`$call L:C`, from the place of the call), as `for` makes the names of its bounds.

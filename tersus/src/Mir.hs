@@ -26,6 +26,8 @@ module Mir
     , readersOfInput
     , functionsNamed
     , slotsOf
+    , dropFunction
+    , isDropFunction
     , layoutOf
     , sizeOf
     , alignOf
@@ -128,6 +130,9 @@ data GhostStatement
     | -- The line and column in the source of the statements that follow, up to the next one. Lowering writes them and the check of
       -- moves reads them (and takes them out), so no other pass sees one.
       GhostPosition Int Int
+    | -- The value of the local has been taken apart into its fields (`S { a: x, ... } = v;`): it is used up, and a drop of its type is not run
+      -- on it. MirGhost makes it the clearing of the local's bytes, which native code takes for a value that was moved out.
+      GhostDissolve Local
     deriving (Show, Eq)
 
 data Rvalue
@@ -385,6 +390,16 @@ fieldOffsets program name = case Map.lookup name (progTypes program) of
 slotsOf :: Program -> Type -> Integer
 slotsOf program ty = (sizeOf program ty + 7) `div` 8
 
+-- The drop of a struct or an enum, when it has one (`impl Drop for T`, step 26 of the roadmap): the function `<T as Drop>::drop`, which MirMono
+-- also names the copy of the drop of a struct with types for an instance so (`<Vec<Int> as Drop>::drop`)
+dropFunction :: Program -> Name -> Maybe Name
+dropFunction program n =
+    let f = "<" ++ n ++ " as Drop>::drop"
+     in if Map.member f (progFunctions program) then Just f else Nothing
+
+isDropFunction :: Name -> Bool
+isDropFunction name = let suffix = " as Drop>::drop" in reverse suffix == take (length suffix) (reverse name)
+
 emptySpec :: FunctionSpec
 emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty
 
@@ -477,6 +492,7 @@ renderStatement (Ghost _ (GhostAxiom name args _ _)) = "ghost axiom " ++ name ++
 renderStatement (Ghost _ (GhostPosition line column)) = "ghost at " ++ show line ++ ":" ++ show column ++ ";"
 renderStatement (Ghost _ (GhostProof name args _ _ _)) = "ghost proof " ++ name ++ "(" ++ intercalate ", " args ++ ");"
 renderStatement (Ghost _ (GhostFunction name _ _)) = "ghost fn " ++ name ++ ";"
+renderStatement (Ghost _ (GhostDissolve l)) = "ghost dissolve " ++ show l ++ ";"
 renderStatement (Drop l) = "drop " ++ show l ++ ";"
 renderStatement (Peek dest rv) = show dest ++ " = peek " ++ renderRvalue rv ++ ";"
 

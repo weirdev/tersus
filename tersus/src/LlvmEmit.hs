@@ -216,7 +216,7 @@ typeDescriptors program types =
     shape _ = (-1, "null")
     dataDescriptor n =
         let variants = variantsOf program n
-         in [ global "data." n ++ " = private constant { i64, ptr, i64 } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ ", i64 " ++ (if isEnum n then "1" else if takeWhile (/= '<') n == "StdList" then "2" else "0") ++ " }"
+         in [ global "data." n ++ " = private constant { i64, ptr, i64, ptr } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ ", i64 " ++ (if isEnum n then "1" else if takeWhile (/= '<') n == "StdList" then "2" else "0") ++ ", ptr " ++ maybe "null" functionSymbol (dropFunction program n) ++ " }"
             , global "variants." n ++ " = private constant [" ++ show (length variants) ++ " x { ptr, i64, ptr }] ["
                 ++ intercalate ", " ["{ ptr, i64, ptr } { ptr " ++ global "str." v ++ ", i64 " ++ show (length fields) ++ ", ptr " ++ (if null fields then "null" else global "fields." v) ++ " }" | (v, fields) <- variants]
                 ++ "]"

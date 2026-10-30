@@ -1,0 +1,85 @@
+// A user-defined drop (impl Drop): a Vec<T> on an address that frees its memory where it goes out of scope, so no free is written and
+// a Vec is not linear. See LANGUAGE.md (Drops) and POINTERS.md.
+
+struct Vec<T> {
+    addr: Addr<T>,
+    cap: Int,
+    len: Int,
+    ghost blk: Block<T>,
+} invariant [{
+    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len;
+    affirm 0 <= len; affirm len <= cap;
+    affirm forall j in 0..len: filled(blk, j) = true;
+    affirm forall j in len..cap: filled(blk, j) = false;
+}];
+
+impl<T> Vec<T> {
+    fn new() -> Self [{ }] [{ affirm return.len = 0; }] {
+        (a, b) = Addr::alloc(2);
+        return Self { addr: a, cap: 2, len: 0, blk: b };
+    };
+
+    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; }] {
+        // (the Vec is taken apart, which uses it up without its drop: the new one has its memory)
+        Vec { addr: p, cap: c, len: n, blk: b } = self;
+        if n = c {
+            cap = c * 2 + 1;
+            (q, b2) = Addr::resize(p, cap, b);
+            return Self { addr: q, cap: cap, len: n + 1, blk: Addr::write(q, n, x, b2) };
+        };
+        return Self { addr: p, cap: c, len: n + 1, blk: Addr::write(p, n, x, b) };
+    };
+
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ }] {
+        return clone(Addr::get(self.addr, i, self.blk));
+    };
+
+    fn pop(self: Self) -> (Self, T) [{ affirm self.len >= 1; }] [{ affirm return.0.len = self.len - 1; }] {
+        Vec { addr: p, cap: c, len: n, blk: b } = self;
+        (x, b2) = Addr::take(p, n - 1, b);
+        return (Self { addr: p, cap: c, len: n - 1, blk: b2 }, x);
+    };
+};
+
+// The drop is given the Vec, and frees what it holds: the values left in it, then the memory
+impl<T> Drop for Vec<T> {
+    fn drop(self: Self) -> Int {
+        return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
+    };
+};
+
+// A struct that holds a Vec has nothing to write: the Vec is dropped with it
+struct Named {
+    name: Int,
+    items: Vec<List<Int>>,
+};
+
+fn filled(n: Int) -> Vec<List<Int>> [{ affirm n >= 0; }] [{ affirm return.len = n; }] {
+    v = Vec::new();
+    i = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm v.len = i; }] shrinks n - i {
+        v = v.push(push(push([], i), i * 10));
+        i = i + 1;
+    };
+    return v;
+};
+
+fn named() -> Int [{ }] [{ }] {
+    a = Named { name: 1, items: filled(5) };
+    b = Named { name: 2, items: filled(3) };
+    // (b is dropped here, and so is a after its Vec was read)
+    return a.name + b.name + a.items.len + b.items.len;
+};
+
+v = filled(6);
+x = v.get(5);
+(v, last) = v.pop();
+(v, before) = v.pop();
+// a list of Vecs: each is dropped with the list
+vs = push(push([], filled(2)), filled(4));
+s = 0;
+if size(x) > 1 && size(last) > 1 {
+    s = get(x, 1) + get(last, 0);
+};
+// 50 + 5 + 2 + 11 + 2, and v and vs are dropped where the program ends
+return s + size(before) + named() + size(vs);

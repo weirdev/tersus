@@ -88,6 +88,7 @@ data TcState = TcState
     , tcEmitted :: [Statement] -- the instances made since the last statement of the program, which come before it
     , tcActive :: [Name] -- the templates that an instance is being checked of, which a call of one of them cannot make another instance of
     , tcLinear :: Set.Set Name -- the structs and enums that are linear
+    , tcDrops :: Set.Set Name -- the structs and enums that have a drop
     , tcGhost :: Bool -- whether the expression being checked is the validator's (of a `define`), where what is known of a permission can be read
     }
 
@@ -110,7 +111,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty False
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -584,7 +585,10 @@ holdsGhost ty0 = fst <$> go Set.empty ty0
                 | Set.member n seen -> return (False, seen)
                 | otherwise -> do
                   linear <- tcLinear <$> getState
-                  if Set.member (maybe n fst (instanceOf n)) linear then return (True, seen) else do
+                  drops <- tcDrops <$> getState
+                  -- (a type with a drop is used by its drop, wherever it goes out of scope: it is not linear, whatever it holds)
+                  if Set.member (maybe n fst (instanceOf n)) drops then return (False, seen) else
+                   if Set.member (maybe n fst (instanceOf n)) linear then return (True, seen) else do
                     s0 <- getState
                     when (isJust (instanceOf n) && Map.notMember n (tcCtors s0)) (ensureInstance n)
                     s <- getState
@@ -1094,7 +1098,9 @@ checkStatement top ctx env stmt =
         AxiomDef{} -> return (ctx, env, stmt)
         ProofDef{} -> return (ctx, env, stmt)
         Mark{} -> return (ctx, env, stmt)
+        Dissolve var -> lookupVar ctx env var >> return (ctx, env, stmt)
         CopyDef{} -> return (ctx, env, stmt)
+        DropDef{} -> return (ctx, env, stmt)
         ExternDef _ -> return (ctx, env, stmt)
         LinearDef name -> do
             getState >>= \s -> putState s{tcLinear = Set.insert name (tcLinear s)}
@@ -1415,8 +1421,13 @@ inferExprR ctx env expr =
         return (result, F funct' (map snd inferred))
     describe (Var name) = name
     describe _ = "call"
+    isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
     -- the call of a function of the program by name, with arguments that are checked already
     callResolved name inferred0 = do
+        -- (a drop is called by native code where a value goes out of scope, and by the check of its impl, and by nothing else)
+        current <- tcCurrent <$> getState
+        when (" as Drop>::drop" `isSuffixOf'` name && maybe True (\c -> take 9 c /= "Drop for ") current) $
+            failTc ("Type error: " ++ name ++ " is a drop, which is called where a value goes out of scope, and not by the program")
         unless (Map.member name (ctxFns ctx)) $
             failTc ("Type error: " ++ name ++ " is not defined before this call (there is no such function, or its impl comes later)")
         ft <- lookupVar ctx env name
@@ -1554,6 +1565,13 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
             when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
             putState s{tcImpls = Set.insert (traitName, typeName) (tcImpls s), tcImplArgs = Map.insert (traitName, typeName) (selfName, traitArgs) (tcImplArgs s)}
             when (traitName `elem` ["Clone", "Copy"] && null found && null params) $ checkMarkerImpl traitName typeName
+            -- (a type with a drop is freed by it: it is not linear, and not copied, since each copy would be freed)
+            when (traitName == "Drop") $ do
+                s' <- getState
+                when (Set.member typeName (tcLinear s')) $ failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " is linear, so it is used by the program and not dropped")
+                when (Set.member ("Clone", typeName) (tcImpls s') || Set.member ("Copy", typeName) (tcImpls s')) $
+                    failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " is Clone, and a copy of a value with a drop would be dropped twice")
+                putState s'{tcDrops = Set.insert typeName (tcDrops s')}
             return (found, params)
     (ctx', env', checked) <- definitions True (ctx, env, []) functions
     case trait of
@@ -1582,7 +1600,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                         return (wrapper traitName typeName f (Signature aptys arty asizes atypes) term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
             (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
-            return (ctx'', env'', [CopyDef typeName | traitName == "Copy", null required] ++ checked ++ wrapped)
+            return (ctx'', env'', [CopyDef typeName | traitName == "Copy", null required] ++ [DropDef typeName | traitName == "Drop"] ++ checked ++ wrapped)
   where
     -- The functions of the impl can be called as Type::f from the next one on, itself included; the functions that check
     -- the impl against its trait cannot
@@ -2047,6 +2065,8 @@ checkMarkerImpl trait typeName = do
     s <- getState
     when (Set.member typeName (tcLinear s)) $
         failTc ("Type error: impl " ++ trait ++ " for " ++ typeName ++ ": " ++ typeName ++ " is linear, so a value of it is used exactly once and is never copied")
+    when (Set.member typeName (tcDrops s)) $
+        failTc ("Type error: impl " ++ trait ++ " for " ++ typeName ++ ": " ++ typeName ++ " has a drop, and a copy of a value with a drop would be dropped twice")
     when (trait == "Copy" && not (Set.member ("Clone", typeName) (tcImpls s))) $
         failTc ("Type error: impl Copy for " ++ typeName ++ ": " ++ typeName ++ " is Copy only if it is Clone, so write impl Clone for " ++ typeName ++ " { }; first")
     fields <- case Map.lookup typeName (tcGenerics s) of

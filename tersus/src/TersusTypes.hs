@@ -561,6 +561,12 @@ data Statement
     | -- The function of that name, defined next, is extern (`extern fn write(...) -> Int [{ ... }] [{ ... }];`): it has no body, native code
       -- calls the C function of the name, and what its contract promises is assumed (POINTERS.md, Assumptions)
       ExternDef Name
+    | -- T has a drop (`impl Drop for T { fn drop(self: Self) -> Int { ... }; };`), which native code calls where a value of it goes out of
+      -- scope: the checker hands it to the lowering, for the check of moves (a type with a drop is not linear)
+      DropDef Name
+    | -- The value of the variable has been taken apart into its fields (`Vec { addr: a, len: n, blk: b } = v;`, which the parser makes into
+      -- the reads of the fields and this): it is used up, so a drop it has is not run. Only native code needs it (MirGhost).
+      Dissolve Variable
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- A bound on a type parameter of a function: the parameter, the trait its type has to implement and the types it is given

@@ -228,6 +228,8 @@ lowerFunction original fn =
     lowerStatement stmt = case stmt of
         Ghost{} -> return ()
         Assign dest rv -> lowerAssign dest rv
+        -- (a value taken apart is cleared where it is, and what it held is not freed: see MirGhost)
+        Peek _ (ListOp UninitEmpty []) -> emit stmt
         Peek dest rv -> lowerAssign dest rv
         Drop _ -> emit stmt
 
