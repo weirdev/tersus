@@ -1230,6 +1230,16 @@ struct ExecutionState { context: ValidatorContext, locals: List<LocalBinding> };
 
 impl Clone for ExecutionState { };
 
+struct MergePair { left: Int, right: Int, joined: Int, ambiguous: Bool };
+
+impl Clone for MergePair { };
+
+fn emptyMergePairs() -> List<MergePair> { return []; };
+
+enum StateMergeLookup { Missing, Found { state: ExecutionState } };
+
+impl Clone for StateMergeLookup { };
+
 fn lookupLocal(locals: &List<LocalBinding>, local: Int) -> ValueLookup {
     for binding in locals {
         if binding.local = local {
@@ -1246,6 +1256,14 @@ fn bindLocal(locals: List<LocalBinding>, local: Int, term: Int) -> List<LocalBin
         };
     };
     return push(locals, LocalBinding { local: local, term: term });
+};
+
+fn forgetLocal(locals: &List<LocalBinding>, local: Int) -> List<LocalBinding> {
+    result = [];
+    for binding in locals {
+        if binding.local != local { result = push(result, clone(binding)); };
+    };
+    return result;
 };
 
 // Term references are supplied by the host's term interner; a Local reference
@@ -1288,6 +1306,9 @@ fn termInUse(state: &ExecutionState, term: Int) -> Bool {
     for fact in state.context.differences {
         if fact.left = term { return true; }; if fact.right = term { return true; };
     };
+    for fact in state.context.variants {
+        if fact.object = term { return true; };
+    };
     for constant in state.context.constants { if constant.id = term { return true; }; };
     for app in state.context.applications {
         if app.id = term { return true; };
@@ -1309,6 +1330,209 @@ fn freshValue(state: &ExecutionState) -> ValueLookup {
         };
     };
     return ValueLookup::Missing;
+};
+
+fn sameConstructorField(a: &ConstructorField, b: &ConstructorField) -> Bool {
+    return a.constructor = b.constructor && a.field = b.field && a.index = b.index;
+};
+
+fn containsConstructorField(fields: &List<ConstructorField>, field: &ConstructorField) -> Bool {
+    for candidate in fields {
+        if sameConstructorField(candidate, field) { return true; };
+    };
+    return false;
+};
+
+fn unionContexts(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
+    equalities = clone(left.equalities);
+    applications = clone(left.applications);
+    constants = clone(left.constants);
+    orders = clone(left.orders);
+    different = clone(left.different);
+    variants = clone(left.variants);
+    fieldFunctions = clone(left.fieldFunctions);
+    constructorFunctions = clone(left.constructorFunctions);
+    constructorFields = clone(left.constructorFields);
+    differences = clone(left.differences);
+    for fact in right.equalities { equalities = push(equalities, clone(fact)); };
+    for fact in right.applications { applications = push(applications, clone(fact)); };
+    for fact in right.constants { constants = push(constants, clone(fact)); };
+    for fact in right.orders { orders = push(orders, clone(fact)); };
+    for fact in right.different { different = push(different, clone(fact)); };
+    for fact in right.variants { variants = push(variants, clone(fact)); };
+    for function in right.fieldFunctions { if containsValue(fieldFunctions, function) = false { fieldFunctions = push(fieldFunctions, function); }; };
+    for function in right.constructorFunctions { if containsValue(constructorFunctions, function) = false { constructorFunctions = push(constructorFunctions, function); }; };
+    for field in right.constructorFields { if containsConstructorField(constructorFields, field) = false { constructorFields = push(constructorFields, clone(field)); }; };
+    for fact in right.differences { differences = push(differences, clone(fact)); };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn mergeTerm(pairs: &List<MergePair>, term: Int, leftSide: Bool) -> ValueLookup {
+    found = false;
+    joined = 0;
+    for pair in pairs {
+        source = pair.right;
+        if leftSide { source = pair.left; };
+        if source = term {
+            if pair.ambiguous { return ValueLookup::Missing; };
+            if found {
+                if joined != pair.joined { return ValueLookup::Missing; };
+            } else {
+                found = true;
+                joined = pair.joined;
+            };
+        };
+    };
+    if found { return ValueLookup::Found { term: joined }; };
+    if term >= 0 { return ValueLookup::Found { term: term }; };
+    return ValueLookup::Missing;
+};
+
+fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> ValidatorContext {
+    equalities = [];
+    applications = [];
+    constants = [];
+    orders = [];
+    different = [];
+    variants = [];
+    fieldFunctions = clone(context.fieldFunctions);
+    constructorFunctions = clone(context.constructorFunctions);
+    constructorFields = clone(context.constructorFields);
+    differences = [];
+    for fact in context.equalities {
+        left = mergeTerm(pairs, fact.left, leftSide);
+        right = mergeTerm(pairs, fact.right, leftSide);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found {
+                equalities = push(equalities, EqualityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term });
+            };
+        };
+    };
+    for fact in context.applications {
+        id = mergeTerm(pairs, fact.id, leftSide);
+        arguments = [];
+        valid = true;
+        for argument in fact.arguments {
+            mapped = mergeTerm(pairs, argument, leftSide);
+            if mapped is ValueLookup::Found { arguments = push(arguments, (mapped as ValueLookup::Found).term); } else { valid = false; };
+        };
+        if id is ValueLookup::Found {
+            if valid { applications = push(applications, ApplicationTerm { id: (id as ValueLookup::Found).term, function: fact.function, arguments: arguments }); };
+        };
+    };
+    for fact in context.constants {
+        id = mergeTerm(pairs, fact.id, leftSide);
+        if id is ValueLookup::Found { constants = push(constants, ConstantTerm { id: (id as ValueLookup::Found).term, kind: fact.kind, value: fact.value }); };
+    };
+    for fact in context.orders {
+        smaller = mergeTerm(pairs, fact.smaller, leftSide);
+        greater = mergeTerm(pairs, fact.greater, leftSide);
+        if smaller is ValueLookup::Found {
+            if greater is ValueLookup::Found { orders = push(orders, OrderFact { smaller: (smaller as ValueLookup::Found).term, greater: (greater as ValueLookup::Found).term, strict: fact.strict }); };
+        };
+    };
+    for fact in context.different {
+        left = mergeTerm(pairs, fact.left, leftSide);
+        right = mergeTerm(pairs, fact.right, leftSide);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found { different = push(different, DisequalityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term }); };
+        };
+    };
+    for fact in context.differences {
+        left = mergeTerm(pairs, fact.left, leftSide);
+        right = mergeTerm(pairs, fact.right, leftSide);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found { differences = push(differences, DifferenceFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term, bound: fact.bound }); };
+        };
+    };
+    for fact in context.variants {
+        object = mergeTerm(pairs, fact.object, leftSide);
+        if object is ValueLookup::Found { variants = push(variants, VariantFact { object: (object as ValueLookup::Found).term, family: fact.family, constructor: fact.constructor, matches: fact.matches }); };
+    };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn sameEquality(a: &EqualityFact, b: &EqualityFact) -> Bool {
+    return (a.left = b.left && a.right = b.right) || (a.left = b.right && a.right = b.left);
+};
+
+fn sameDisequality(a: &DisequalityFact, b: &DisequalityFact) -> Bool {
+    return (a.left = b.left && a.right = b.right) || (a.left = b.right && a.right = b.left);
+};
+
+fn sameVariantFact(a: &VariantFact, b: &VariantFact) -> Bool {
+    return a.object = b.object && a.family = b.family && a.constructor = b.constructor && a.matches = b.matches;
+};
+
+fn sameApplication(a: &ApplicationTerm, b: &ApplicationTerm) -> Bool {
+    return a.id = b.id && a.function = b.function && a.arguments = b.arguments;
+};
+
+fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
+    equalities = [];
+    applications = [];
+    constants = [];
+    orders = [];
+    different = [];
+    variants = [];
+    fieldFunctions = [];
+    constructorFunctions = [];
+    constructorFields = [];
+    differences = [];
+    for fact in left.equalities { for other in right.equalities { if sameEquality(fact, other) { equalities = push(equalities, clone(fact)); }; }; };
+    for fact in left.applications { for other in right.applications { if sameApplication(fact, other) { applications = push(applications, clone(fact)); }; }; };
+    for fact in left.constants { for other in right.constants { if fact.id = other.id && fact.kind = other.kind && fact.value = other.value { constants = push(constants, clone(fact)); }; }; };
+    for fact in left.orders { for other in right.orders { if fact.smaller = other.smaller && fact.greater = other.greater && fact.strict = other.strict { orders = push(orders, clone(fact)); }; }; };
+    for fact in left.different { for other in right.different { if sameDisequality(fact, other) { different = push(different, clone(fact)); }; }; };
+    for fact in left.variants { for other in right.variants { if sameVariantFact(fact, other) { variants = push(variants, clone(fact)); }; }; };
+    for function in left.fieldFunctions { if containsValue(right.fieldFunctions, function) { fieldFunctions = push(fieldFunctions, function); }; };
+    for function in left.constructorFunctions { if containsValue(right.constructorFunctions, function) { constructorFunctions = push(constructorFunctions, function); }; };
+    for field in left.constructorFields { for other in right.constructorFields { if sameConstructorField(field, other) { constructorFields = push(constructorFields, clone(field)); }; }; };
+    for fact in left.differences { for other in right.differences { if fact.left = other.left && fact.right = other.right && fact.bound = other.bound { differences = push(differences, clone(fact)); }; }; };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+};
+
+fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
+    poolContext = unionContexts(left.context, right.context);
+    poolEqualities = clone(poolContext.equalities);
+    for binding in left.locals { poolEqualities = push(poolEqualities, EqualityFact { left: binding.term, right: binding.term }); };
+    for binding in right.locals { poolEqualities = push(poolEqualities, EqualityFact { left: binding.term, right: binding.term }); };
+    poolContext = ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) };
+    pool = ExecutionState { context: clone(poolContext), locals: [] };
+    pairs = emptyMergePairs();
+    locals = [];
+    for binding in left.locals {
+        other = lookupLocal(right.locals, binding.local);
+        if other is ValueLookup::Found {
+            rightTerm = (other as ValueLookup::Found).term;
+            if binding.term >= 0 && rightTerm >= 0 && binding.term = rightTerm {
+                locals = bindLocal(locals, binding.local, binding.term);
+            } else {
+                joined = 0;
+                found = false;
+                for pair in pairs {
+                    if pair.left = binding.term && pair.right = rightTerm {
+                        joined = pair.joined;
+                        found = true;
+                    };
+                };
+                if found = false {
+                    fresh = freshValue(pool);
+                    if fresh is ValueLookup::Found {
+                        joined = (fresh as ValueLookup::Found).term;
+                        pairs = push(pairs, MergePair { left: binding.term, right: rightTerm, joined: joined, ambiguous: binding.term < 0 && binding.term = rightTerm });
+                        poolEqualities = push(clone(poolEqualities), EqualityFact { left: joined, right: joined });
+                        pool = ExecutionState { context: ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) }, locals: [] };
+                        found = true;
+                    } else { return StateMergeLookup::Missing; };
+                };
+                if found { locals = bindLocal(locals, binding.local, joined); };
+            };
+        };
+    };
+    leftContext = normalizedContext(left.context, pairs, true);
+    rightContext = normalizedContext(right.context, pairs, false);
+    return StateMergeLookup::Found { state: ExecutionState { context: commonContext(leftContext, rightContext), locals: locals } };
 };
 
 // The MIR bridge reserves function -1 for addition and -2 for subtraction.
