@@ -508,12 +508,12 @@ rewriteNeeds _ (CheckRel proof) = [proof]
 rewriteNeeds _ (CheckGtZero proof) = [FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]]
 rewriteNeeds rules (UserRewrite name args) =
     case Map.lookup name rules of
-        Just (AxiomRule vars inputs _) -> instantiate vars inputs
-        Just (ProofRule vars inputs _) -> instantiate vars inputs
+        Just (AxiomRule vars inputs _) -> instantiate vars (assertedProofs rules inputs)
+        Just (ProofRule vars inputs _) -> instantiate vars (assertedProofs rules inputs)
         Nothing -> []
   where
-    instantiate vars inputs
-        | length vars == length args = [substituteVars (Map.fromList (zip vars args)) proof | ProofAssert proof <- inputs]
+    instantiate vars proofs
+        | length vars == length args = [substituteVars (Map.fromList (zip vars args)) proof | proof <- proofs]
         | otherwise = []
 rewriteNeeds _ _ = []
 
