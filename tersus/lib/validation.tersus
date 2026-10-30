@@ -1667,6 +1667,39 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
 
 // Scaling preserves or reverses an operand's order around zero according to
 // the sign of the known integer factor.
+fn knownNonnegative(context: &ValidatorContext, term: Int) -> Bool {
+    if isSizeTerm(context.applications, term) { return true; };
+    v = integerValue(context, term);
+    if v is IntegerLookup::Found {
+        if (v as IntegerLookup::Found).value >= 0 { return true; };
+    };
+    z = 0;
+    found = false;
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = 0 { z = constant.id; found = true; };
+        };
+    };
+    if found = false { return false; };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    return hasOrder(equalities, orders, z, term, false);
+};
+
+fn addSumOrders(context: &ValidatorContext, result: Int, a: Int, b: Int) -> ValidatorContext {
+    facts = clone(context.orders);
+    if knownNonnegative(context, b) { facts = push(facts, OrderFact { smaller: a, greater: result, strict: false }); };
+    if knownNonnegative(context, a) { facts = push(facts, OrderFact { smaller: b, greater: result, strict: false }); };
+    if knownNonnegative(context, a) && knownNonnegative(context, b) {
+        for constant in context.constants {
+            if constant.kind = 0 {
+                if constant.value = 0 { facts = push(facts, OrderFact { smaller: constant.id, greater: result, strict: false }); };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
 fn addScaleOrders(context: &ValidatorContext, result: Int, operand: Int, factor: Int) -> ValidatorContext {
     zero = ValueLookup::Missing;
     z = 0;
@@ -1680,7 +1713,7 @@ fn addScaleOrders(context: &ValidatorContext, result: Int, operand: Int, factor:
     } else { return clone(context); };
     equalities = semanticFacts(context.equalities, context.applications, context.constants);
     orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
-    nonnegative = hasOrder(equalities, orders, z, operand, false);
+    nonnegative = hasOrder(equalities, orders, z, operand, false) || isSizeTerm(context.applications, operand);
     positive = hasOrder(equalities, orders, z, operand, true);
     nonpositive = hasOrder(equalities, orders, operand, z, false);
     negative = hasOrder(equalities, orders, operand, z, true);
@@ -1791,6 +1824,7 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
         if av is IntegerLookup::Found {
             return addOffsetFacts(context, result, b, (av as IntegerLookup::Found).value);
         };
+        return addSumOrders(context, result, a, b);
     };
     if function = -2 {
         bv = integerValue(context, b);
@@ -1904,6 +1938,8 @@ enum ExecutionStep {
     RequireDefined { value: ValueRef },
     Check { relation: Int, left: ValueRef, right: ValueRef },
     Assume { relation: Int, left: ValueRef, right: ValueRef },
+    AssumeVariant { object: ValueRef, family: Int, constructor: Int, matches: Bool },
+    RequireVariant { object: ValueRef, family: Int, constructor: Int },
     Proof { step: ProofStep },
 };
 
@@ -2540,6 +2576,29 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     };
                     state = ExecutionState { context: context, ..state };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::AssumeVariant {
+            handled = true;
+            av = step as ExecutionStep::AssumeVariant;
+            object = resolveValue(state, av.object);
+            if object is ValueLookup::Found {
+                variants = push(clone(state.context.variants), VariantFact { object: (object as ValueLookup::Found).term, family: av.family, constructor: av.constructor, matches: av.matches });
+                context = ValidatorContext { variants: variants, ..state.context };
+                state = ExecutionState { context: context, ..state };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::RequireVariant {
+            handled = true;
+            rv = step as ExecutionStep::RequireVariant;
+            object = resolveValue(state, rv.object);
+            if object is ValueLookup::Found {
+                term = (object as ValueLookup::Found).term;
+                if knownVariant(closeContext(state.context), state.context.variants, term, rv.family, rv.constructor) = 1 {
+                    variants = push(clone(state.context.variants), VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
+                    context = ValidatorContext { variants: variants, ..state.context };
+                    state = ExecutionState { context: context, ..state };
+                } else { return ExecutionResult { status: 1, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
         if step is ExecutionStep::Proof {
