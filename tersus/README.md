@@ -4,8 +4,10 @@ See [LANGUAGE.md](LANGUAGE.md) for the current syntax and language constructs.
 
 ## Validator written in Tersus
 
-`lib/validation.tersus` starts a Tersus implementation of validation alongside the
-Haskell implementation, which remains the bootstrap and reference. Its first
+`lib/validation.tersus` is a Tersus implementation of validation. The production
+pipeline uses it for MIR it can encode and prove, then falls back to the Haskell
+validator for unsupported or unproved cases; the Haskell implementation remains
+the bootstrap and reference. Its first
 query, `hasEquality`, treats integers as symbolic value identifiers and proves
 reflexive, symmetric and transitive consequences of the supplied equalities.
 `hasCongruence` additionally closes equalities over binary applications of
@@ -15,25 +17,39 @@ term a unique identifier and distinguish different operators.
 function as a term, so equal functions applied to equal arguments are equal.
 `hasApplicationOrder` uses those equalities while following comparisons. A false answer
 means only that the query did not find a proof. General proof terms and MIR
-validation remain incomplete, and the production pipeline still uses Haskell.
+validation remain incomplete, so the Haskell fallback is still required.
 
 `hasStrictOrder` follows strict comparisons transitively and substitutes
 equivalent identifiers at either end of a comparison. `hasOrder` also handles
 chains mixing strict and non-strict comparisons. Neither query handles
 general arithmetic expressions. `hasDifference` follows difference constraints
 with checked 64-bit intermediate bounds, giving up on a path if a bound would
-overflow; it does not detect negative cycles. `entailsApplicationOrder` detects contradictions
-formed by a cycle containing a strict comparison and treats those premises as
-inconsistent. `entailsApplicationDisequality` transports explicit disequalities
+overflow. `entailsGoal` also detects representable negative cycles in those
+constraints and treats their premises as inconsistent; it may miss a cycle
+whose path needs an unrepresentable intermediate. `entailsApplicationOrder`
+detects contradictions formed by a cycle containing a strict comparison.
+`entailsApplicationDisequality` transports explicit disequalities
 through equality, uses strict comparisons, and detects an equality contradicting
 a disequality. `entailsRefinedOrder` also strengthens a non-strict bound to a
-strict one when its endpoints are known to differ. Other forms of contradiction
-are not yet covered.
+strict one when its endpoints are known to differ. Enum values built from
+different variants are known to be unequal, and equating such values makes the
+context inconsistent. Equal applications of a known constructor function now
+imply equal corresponding arguments, making field equalities available to
+later proof queries. A field-read application on a known constructor value is
+also equal to that constructor's corresponding argument. Applications of
+different constructor functions for one value are contradictory, and their
+results are known to be unequal. General forms of contradiction are not yet
+covered.
 
 `entailsGoal` combines these facts in a proof context. `SelfHostedProof` interns
-Haskell proof terms and runs supported relation queries against that context;
-it declines unsupported goals and omits unsupported premises. It is a bridge
-for comparison with the Haskell engine, not the production validation path.
+Haskell proof terms, including constructor applications, transparent variant
+casts, concrete data-value distinctions, evaluated builtin calls on concrete
+arguments and assumed enum variants, and runs
+supported relation queries against that context, including `Within` queries
+proved by following field reads through equal values; it declines unsupported
+premises. `SelfHostedMir`
+uses it through the Tersus execution engine for programs in its supported MIR
+subset.
 A size is known to be at least 0, as in the reference engine, so a loop bound
 like `i <= size(xs)` holds on entry when `i` starts at 0.
 The Tersus search is incomplete, so a negative answer does not establish that
@@ -42,44 +58,179 @@ the goal is false.
 `validateProofSteps` checks a sequence of obligations in order. Its `Known`
 steps are reserved for trusted premises and facts established by an operation;
 an assertion must be a `Check`. The result identifies the first unproved check.
-`validateExecution` also tracks local bindings and checks acyclic paths
-independently. `SelfHostedMir.validateMirSubset` translates a limited subset of
-typed MIR (copies, boxing, plain structs, pure binary operations, list and
-array literals, empty and repeated-element arrays, length, indexed reads and updates,
-first, last and list removal with known length, list append, assertions, jumps
-and branches) to that representation. Reads require proof of their bounds, and literal sequence
-elements have their known values. Append records the new length and element and
-preserves previously checked reads; removal preserves known reads within the
-shortened length. Simple relational invariants on non-generic structs are
-checked at construction and assumed for typed values; enums are not yet
-supported. It also checks a loop by its declared invariant over the loop region:
+`validateExecution` also tracks local bindings and joins the two arms of a
+boolean branch at the common successor selected by the MIR bridge. Differing
+local values receive fresh joined terms, and only normalized facts present on
+both arms survive the join. Branches without a common successor still walk
+their paths independently. `SelfHostedMir.validateMirSubset` translates a
+limited subset of typed MIR (copies, boxing, plain structs, pure binary operations, list and
+array literals, runtime lists constructed from local values, empty and
+repeated-element arrays, length, indexed reads and updates, first, last and
+list removal with known length, list append, byte conversions, byte and error
+output, relational and boolean-value assertions (including conjunction,
+disjunction and negation), equality checks on integer, Boolean,
+list, struct and enum-constructor values, block-local, contract-local and
+loop-invariant `define` statements,
+`checkRel` and `checkGtZero` rewrites, ownership-generated `Peek`, `TakeField`
+and `Drop` statements, jumps, branches and unreachable terminators) to that
+representation. `Peek` reads the same proof value as an assignment, while a
+moved field and dropped local are removed from the local environment. Defined
+proof variables snapshot their
+value; body definitions can be used across blocks when their unique definition
+dominates every use, while contract definitions stay within their contract.
+Byte conversions preserve the integer term and check the `Byte`
+range; output effects are not represented in proof state.
+Primitive rewrites check their obligation before adding the proved fact. An
+unreachable terminator is accepted only when the path facts are contradictory.
+Reads require proof of their bounds, and literal sequence
+elements and constructed-list elements have their known values. A
+constructed list also records its exact length. Append records the new length
+and element and preserves previously checked reads; removal preserves known
+reads within the shortened length. Simple relational invariants on structs are
+checked at construction and assumed for typed values, including instantiated
+generic structs. Enum constructors, field projections, variant tests and
+matches are translated. Variant names in MIR are already qualified, and the
+bridge records the variant of constructed enums and refines both arms of a
+variant test on a symbolic enum value. Direct variant assertions in contracts
+and proof bodies check the known tag, while positive and negative `is`
+assumptions record it. Those facts prove values with different known variants
+unequal and let the flow checker skip impossible arms. It also checks a loop by its declared
+invariant over the loop region:
 the header and every block that can get back to it are walked once, each edge
 back to the header re-establishes the invariant and shrinks the variant, and a
 block that leaves the loop is walked as an exit. A body with several blocks, a
-return inside the loop, and a nested loop are handled the same way. Invariants
-that the reference validator infers, such as the relation between a counter and
-the size of a list it pushes to, are not yet inferred here, so a loop that needs
-one is rejected. Operations it cannot translate return unsupported. Functions
-are checked with symbolic parameters and simple relational input and output
-contracts. Direct calls to previously defined functions check those contracts
-when the callee does not reassign its parameters. Contract assumptions support
-total expressions; assumptions with operations requiring safety checks, other
-calls and termination clauses remain unsupported. It
-is used for comparison, not for production validation;
-the returned flow state is one path's state and is not a joined postcondition.
-Paths are walked independently instead of being joined at each block, so the
-walk costs more the more branches and concrete values a loop body has, where
-the reference walks each block once with the states joined; the differential
-cases keep their loop bounds small for that reason.
+return inside the loop, and a nested loop are handled the same way. The bridge
+also infers a lower or upper bound for a literal-initialized integer local when
+all of its loop updates are monotone additions or subtractions; it checks the
+candidate on entry and every back edge before assuming it. Relational
+upper bounds are also inferred for a counter incremented once by one under a
+strict `<` condition, when the bound is unchanged and its entry value or input
+contract proves the candidate. A straight-line loop that pushes once to a
+list and increments an integer counter once also gets the candidate
+`size(list) = counter + offset`, where the offset comes from their initial
+values; entry and back-edge checks must prove it before it is assumed. More
+generally, two integer locals initialized to constants keep their entry
+difference when each is updated by the same constant delta in the same loop
+blocks. More general relations between loop variables are not yet inferred
+here, so a loop that needs one is rejected. Universal proofs over integer
+ranges whose bounds resolve to concrete values in the current state are
+checked by enumerating up to 256 instances. For a symbolic or larger range,
+the bridge checks the body
+for one fresh symbolic index under the range guards, then discards that local
+proof context. Other symbolic guards are handled the same way when their
+guard expressions can be evaluated without safety checks. This supports
+relational consequences that need several guards. Universal assumptions with
+literal bounds and at most 256 instances are expanded into their individual
+facts. For a symbolic range, a direct relation whose bound index is one
+operand and whose other operand is independent of the index is retained as a
+bounded universal fact. A later matching goal can use it at any index the
+validator proves is inside that range; strict relations also establish their
+non-strict form, and equality and disequality are symmetric. For other body
+shapes, the bridge can assume a binder-independent Boolean or relational body,
+or the body instance at a candidate index, when it proves that candidate
+satisfies every guard. If no candidate is proved, it leaves the context
+unchanged. Reusing other binder-dependent body shapes, or guards requiring
+unsupported safety checks, remains unsupported here.
+Operations it cannot
+translate return unsupported. Functions are checked with symbolic parameters
+and simple relational input and output
+contracts. Direct calls to previously defined functions check those contracts,
+including output contracts that mention reassigned integer parameters, which
+are modeled as fresh symbolic results constrained by the callee's contract.
+Reassigned parameters of other types use the same model, with facts guaranteed
+by their type (such as byte bounds and struct invariants) added to the result.
+This includes simple monomorphized generic calls; generic struct invariants can
+also be checked when their field contracts are expressible by the bridge.
+Standard axioms and top-level user `axiom` declarations can be applied after
+their definition when their arguments and clauses fit this subset. `proof`
+declarations with relational assertions are checked in an isolated proof
+context, including symbolic `forall` assertions with supported pure guards,
+and can then be applied. Applied proof declarations export their checked body and output
+assertions after expanding `define` snapshots and earlier user rewrites,
+including definitions carried from the input contract. Axiom outputs and proof
+exports substitute rewrite arguments; cyclic or unsupported expansions still
+use the fallback. `define` snapshots can also flow from function
+requires into its body and ensures, and within an axiom input or output block.
+Axiom input definitions do not flow into outputs, matching the reference
+validator. Proof expressions can construct fixed-size, boxed, and empty arrays
+while retaining their size and element facts. Definitions that need unsupported
+safety checks still use the fallback. Primitive
+`refl`, `eval`, and `evalAll` rewrites are treated as proof-search hints: the
+checker can establish consequences already represented by its equality closure
+and builtin facts, and ignoring a rewrite never assumes a new fact.
+Proof expressions can also call an earlier, total, non-world-reading function
+whose size arguments are constants or the caller's size parameters. Their
+nonnegative checks are preserved, and return type facts are instantiated with
+those size arguments. The input contract is checked even when the call occurs
+inside an assumed contract, and the result is constrained by the function's
+output contract and any return type facts that do not depend on an unbound size
+parameter. Definitions from supported input contracts flow into the output
+contract, and reassigned parameters receive fresh post-call values constrained
+by that contract. Input clauses with unsupported rewrites or safety operations
+still use the fallback.
+Calls through function-valued locals use the same static target analysis as
+MIR call terminators. A single resolved target is handled directly; for a
+join, all candidates must share a signature and only identical encodings of
+their output contracts are retained. Otherwise, the result stays unconstrained
+so the Haskell fallback decides proofs that need those guarantees.
+World-reading operations use a fresh symbolic result for each call and import
+the builtin result bounds, so repeated input reads are not treated as equal.
+Contract assumptions support pure expressions whose safety conditions can be
+encoded as proof checks. Division checks both a nonzero divisor and the
+`minInt / -1` overflow case; a function may assume these conditions from its
+precondition, while callers must prove them. Remainder checks for a nonzero
+divisor. Other operations requiring safety checks and call forms remain
+unsupported. Calls through function-valued locals assigned from a function
+reference, including aliases across blocks, are resolved across predecessors.
+When a join has several statically known targets, the checker checks every
+candidate's input contract. It keeps output guarantees shared by every target
+when they can be translated unambiguously, including guarantees about
+reassigned parameters when every target reassigns the same positions and their
+shared type facts can be encoded; otherwise, it uses an unconstrained result
+rather than relying on one candidate's output contract. If dataflow cannot
+resolve a function-valued local, the checker conservatively considers every
+program function with its exact callable signature and checks all of their
+input contracts. It retains only guarantees common to those candidates. An
+indirect call with no matching program function still uses the fallback.
+Proof expressions that call an unresolved function-valued local use the same
+closed-world signature candidates. Each target's input contract is checked,
+and output guarantees are retained from the common translated prefix, so any
+proof-variable definitions they depend on are preserved across candidates.
+A function declared `~` may call another
+`~` function; callers without `~` are declined. A statically resolved
+recursive cycle without a termination clause is rejected directly.
+Recursive functions with a
+counting integer variant check the entry bound and strict decrease; structural
+`Parts` variants rooted in a parameter, including roots wrapped in
+value-preserving boxes or variant casts, track field projections and allow the
+parameter to be reassigned only from values already known to be its parts
+through value-preserving MIR aliases and check that recursive arguments are
+within the entry value. A loop can use the same structural check when its
+variant is rooted in a loop local that the body assigns exactly once from a
+strict field projection of that iteration's entry value, possibly through
+value-preserving aliases across body blocks. A loop declared `~` is checked
+for its invariants without a decrease obligation when its containing function
+is also declared `~`. Other structural variant expressions remain unsupported.
+Plain Boolean loop conditions are encoded as equality with `true`.
+This is a production fast path with the Haskell validator as fallback. At a
+join, the returned flow state contains the common
+facts and joined locals. Paths that lack a
+recognized common successor, and paths inside a loop region, are still walked
+independently, so branching control flow can cost more than the reference
+validator, which joins states at each block. A saved relational comparison is
+branched on using its captured operands and joins through the same common
+successor logic as a saved boolean condition.
 Branch facts include both the boolean result and, for a saved comparison, the
 relation between its operands at the time it was evaluated. A check of a boolean
 term against a literal is discharged from the comparison that produced the term,
 so `below = true` follows from `below` being `x < 6` with `x < 6` known. A
 disequality asks for the opposite value, so `below != false` is the same claim
 and `below != true` is its negation.
-The symbolic executor records multiplication by zero or one, division by one,
-and concrete products, quotients and remainders when they fit in a signed
-64-bit integer.
+The symbolic executor records multiplication by zero or one, sign and order
+bounds when one multiplication operand is a known integer, quotient bounds
+when the divisor and dividend signs are proved, bounds on a remainder when its
+divisor is known nonzero or its sign is proved, and concrete products,
+quotients and remainders when they fit in a signed 64-bit integer.
 
 `MirEval.runNamedFunction` lets the host invoke a lowered Tersus function with
 explicit MIR values. It executes code without checking its input contract or
@@ -208,8 +359,8 @@ Next steps, roughly in priority order:
 32. Allocators chosen by the code that calls
     The design is `ALLOCATORS.md`. A block `with a { ... }` makes `a` the allocator of what is made inside it, including what the functions it calls make. Where a value's memory comes from is a region in its type (`List<Token, arena>`), which the validator never sees; a region a program leaves out is the context, the region a function is called in (`System` at the top), decided at each call by unification; a borrow and `=` ignore regions, so `clone` copies into the region it is expected in; the context decides only where a value is made, and a value is grown and freed by the region in its type; and a value made in a local allocator cannot leave its `with` block, which drops it at every exit. Natively no container holds an allocator: a region is a hidden `&K` parameter, nothing for `System`, `MirMono` copies a function per kind of allocator and not per block, and a program that uses only `System` compiles to the IR of today. The library has `System`, `Arena`, `Checked` (the `TERSUS_CHECK` of step 30 (c) in Tersus) and `Fixed<n>`. It needs steps 25, 26, 29 and 30 (a)
 18. Validate calls of function values
-    The validator does not follow a call of a function that is a value: `fn apply(g: fn(Int) -> Int, n: Int) -> Int { return g(g(n)); }` is refused with `Function object not validated`, though the type checker, the executor and native code run it. The tests of native code for function values lower the programs without validating them (`functionPrograms` in `TestNative`) because of this
-    The function a call reaches is not known statically, so the call needs the contract of the function type (the contracts of a parameter that is a function would be written in its type), or the callee has to be one of a known few
+    Calls through locals assigned from function references and unresolved function-valued parameters are checked by the self-hosted validator. An unresolved target is conservatively selected from all program functions with the same callable signature; every candidate's inputs are checked and only common output guarantees are used. This can reject a call when another same-signature function has stronger preconditions, because function types do not yet carry contracts.
+    Function-valued calls whose type has no matching program function, and contracts on function types, still need a design
 20. Strings, and input and output
     Done: strings (LANGUAGE.md, Strings; a literal can be written in a proof, and `concat` promises its bytes), output (Output, with `writeError` for the standard error), input from the standard input (Input), the command-line arguments (Arguments) and files (Files). A literal is a `String` of UTF-8 bytes, a library struct over a `List<Byte>` (`lib/string.tersus`) that implements `Sequence<Byte>` and `Growable<Byte>` and has `concat`, the readers and writers, so native code and the validator needed nothing new for strings. Everything that touches the world is a few primitives that are `ListOp`s of the MIR: `writeByte` and `writeError`, `readByte`, `argCount` and `argByte`, and `pathByte`, `fileLoad`, `fileByte`, `storeByte` and `fileStore` (a path is built a byte at a time and a whole file is loaded or stored), with the C runtime calling `putchar`, `getchar`, `argv` and `fopen`, and the interpreter threading the input, the path and the files through its monad (`MirEval.runProgramEnv`: `RunEnv` is what it is run in, `Outcome` what it did, including the files written, which the CLI writes when the program has ended). The validator knows only the range of what the reading ones give (`Mir.readersOfInput`, `FnInfo.fnReads`: a function that reads is not a function of its arguments, and a proof may not call one). The type `Byte` (LANGUAGE.md, Bytes: `TByte`, `toByte(x)` and `toInt(b)`, the range of every `Byte` known to the validator) is what a string is made of, and a number written out is a `Byte` where one is wanted (`TypeCheck.coerce`). What is left of the step, each a design of its own: what the later bytes of a `concat` are without naming the element (the engine does not match `size(a) + j` with a constant index, and a `forall` over a range that is not `0..n` was not preserved by `push`), printing a returned `String` as text, appending to a file, streams and directories, the environment, `write(fd, ptr, n)` and `read` as the only system calls (step 30), and what the validator says of an effect (today it says nothing: a program that fails does not take back what it wrote, the proofs cannot mention what was written or read, and two reads are two unrelated values)
 23. Sizes, `Box`, and the data model without implicit heap values (the plan for arrays; DATA_MODEL.md, Sizes and Box)

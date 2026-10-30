@@ -313,9 +313,16 @@ ghostStatement _ st env g =
 defineFunction :: PState -> Name -> Variable -> Bool -> V PState
 defineFunction st name source top = do
     when (top && Map.member source (psGlobals st)) (throwV ("Function already defined: " ++ source))
-    info <- inImplCheck name (validateFunction st name top)
+    info <- inFunctionCheck name (inImplCheck name (validateFunction st name top))
     let st' = st{psFns = Map.insert name info (psFns st)}
     return (if top then st'{psGlobals = Map.insert source (fnIota name) (psGlobals st')} else st')
+
+inFunctionCheck :: Name -> V a -> V a
+inFunctionCheck name action = do
+    outcome <- tryV action
+    case outcome of
+        Ok value -> return value
+        Error e -> throwV ("Function " ++ name ++ ": " ++ e)
 
 -- The function that stands for the check that an impl meets its trait fails with the reason, and says which impl
 inImplCheck :: Name -> V a -> V a
@@ -497,12 +504,12 @@ rewriteNeeds _ (CheckRel proof) = [proof]
 rewriteNeeds _ (CheckGtZero proof) = [FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]]
 rewriteNeeds rules (UserRewrite name args) =
     case Map.lookup name rules of
-        Just (AxiomRule vars inputs _) -> instantiate vars inputs
-        Just (ProofRule vars inputs _) -> instantiate vars inputs
+        Just (AxiomRule vars inputs _) -> instantiate vars (assertedProofs rules inputs)
+        Just (ProofRule vars inputs _) -> instantiate vars (assertedProofs rules inputs)
         Nothing -> []
   where
-    instantiate vars inputs
-        | length vars == length args = [substituteVars (Map.fromList (zip vars args)) proof | ProofAssert proof <- inputs]
+    instantiate vars proofs
+        | length vars == length args = [substituteVars (Map.fromList (zip vars args)) proof | proof <- proofs]
         | otherwise = []
 rewriteNeeds _ _ = []
 

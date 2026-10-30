@@ -206,7 +206,7 @@ applyCall :: PState -> FnInfo -> [IotaProof] -> Iota -> V PState
 applyCall st info args result = do
     let params = fnParamNames info
     when (length params /= length args) (throwV ("Function expected " ++ show (length params) ++ " arguments, got " ++ show (length args)))
-    checkInputs st params args (fnRequires info)
+    checkInputs (show (fnTerm info)) st params args (fnRequires info)
     callTermination st info args
     (st', instantiated) <- instantiateOutputs st params args result (fnExported info)
     -- (a function that reads the input is not a function of its arguments: its result is only what it promises)
@@ -272,17 +272,17 @@ evaluateCall st name info args term = do
         Just (Recursing _) -> throwV ("A proof calls " ++ name ++ " from its own contract or body")
         _ -> return ()
     when (fnReads info) (throwV ("A proof calls " ++ name ++ ", which reads the input: what it gives is not determined by its arguments"))
-    checkInputs st params args (fnRequires info)
+    checkInputs (show (fnTerm info)) st params args (fnRequires info)
     (st', instantiated) <- instantiateOutputsWith st params args term (fnExported info)
     return (addFacts st' (evaluatedFact term : instantiated))
 
 -- The contract is checked in a state of its own: the names it uses are the parameters
-checkInputs :: PState -> [Variable] -> [IotaProof] -> [ValidationStatement] -> V ()
-checkInputs _ _ _ [] = return ()
-checkInputs st params args stmts = do
+checkInputs :: String -> PState -> [Variable] -> [IotaProof] -> [ValidationStatement] -> V ()
+checkInputs _ _ _ _ [] = return ()
+checkInputs name st params args stmts = do
     result <- tryV (checkStatements (calleeView st (zip params args)) stmts)
     case result of
-        Error e -> throwV ("Funct input validation failed: " ++ e)
+        Error e -> throwV ("Funct input validation failed for " ++ name ++ ": " ++ e)
         Ok () -> return ()
 
 calleeView :: PState -> [(Variable, IotaProof)] -> PState
@@ -525,7 +525,18 @@ defineProofRule st name args inputs outputs body = do
     assumed <- assumeStatements start inputs
     done <- runStatements assumed body
     exported <- exportOutputs done bindings inputs outputs
-    insertRule st name (ProofRule args inputs exported)
+    let definitions = Map.fromList [(var, exprToProof expr) | AssignProofVar var expr <- inputs]
+        exported' = map (substituteProofDefinitions definitions) exported
+    insertRule st name (ProofRule args inputs exported')
+
+substituteProofDefinitions :: Map Variable VariableProof -> VariableProof -> VariableProof
+substituteProofDefinitions definitions proof = case proof of
+    ATerm name -> Map.findWithDefault proof name definitions
+    FApp function arguments -> FApp (substituteProofDefinitions definitions function) (map (substituteProofDefinitions definitions) arguments)
+    Forall index guards body ->
+        let scoped = Map.delete index definitions
+         in Forall index (map (substituteProofDefinitions scoped) guards) (substituteProofDefinitions scoped body)
+    _ -> proof
 
 -- What a function or rule promises, as facts over the names it gives its parameters and result: the outputs are checked
 -- once more, and then the facts about those values are what is left.

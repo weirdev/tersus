@@ -4,6 +4,7 @@ module PreludeSource
     ( preludeSource
     , listsSource
     , stringSource
+    , validationSource
     , emitterSource
     , seedSource
     , seedFingerprint
@@ -36,6 +37,15 @@ stringSource =
     $( do
         addDependentFile "lib/string.tersus"
         contents <- runIO (readFile "lib/string.tersus")
+        lift contents
+     )
+
+-- The validator implemented in Tersus, loaded lazily by the MIR bridge.
+validationSource :: String
+validationSource =
+    $( do
+        addDependentFile "lib/validation.tersus"
+        contents <- runIO (readFile "lib/validation.tersus")
         lift contents
      )
 

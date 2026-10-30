@@ -15,6 +15,7 @@ import MirVerify (verifyProgram)
 import MirEval (MirValue, runProgram)
 import MirLower (lowerElaborated, lowerLibrary)
 import MirValidate (Validated, validateProgram)
+import SelfHostedMir (validateMir)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
@@ -26,7 +27,7 @@ import Utils
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
 --
 --   source -> AST (parseSource) -> checked AST (elaborate: types checked, each `shrinks` resolved)
---          -> MIR (lowerElaborated) -> validated MIR (validateProgram) -> executed (runProgram)
+--          -> MIR (lowerElaborated) -> validated MIR -> executed (runProgram)
 --                                                                    or -> LLVM IR (emitOwned)
 --
 -- The program is type checked once, by `elaborate`; the lowering takes its result and the validator the MIR. Errors name
@@ -108,8 +109,16 @@ compileWith reserving source =
     parseSourceWith reserving source `bindResult` \stmts ->
         stage "Validation failed: " (elaborate stmts) `bindResult` \elaborated ->
             stage "Lowering failed: " ((if reserving then lowerElaborated else lowerLibrary) elaborated) `bindResult` \program ->
-                stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
+            stage "Validation failed: " (validateForCompile program) `bindResult` \_ ->
                     Ok program
+
+-- Use the Tersus validator when it can decide the program; the Haskell
+-- validator remains the fallback for MIR the current self-hosted encoding
+-- does not cover or cannot prove.
+validateForCompile :: M.Program -> Result () String
+validateForCompile program = case validateMir program of
+    Ok (Just True) -> Ok ()
+    _ -> validateProgram program `bindResult` \_ -> Ok ()
 
 -- The MIR of a program that passes every check, with who owns each value made explicit (MirOwnership), for native code
 ownedSource :: String -> Result M.Program String

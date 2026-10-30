@@ -1094,6 +1094,12 @@ linearSystem table classes trueId positive negative
     constraintsOf (_, t, Just Times, [a, b])
         | Just n <- known b = [Equal (form [(t, 1), (a, negate (fromInteger n))]) 0]
         | Just n <- known a = [Equal (form [(t, 1), (b, negate (fromInteger n))]) 0]
+    -- The native Int division minBound / -1 overflows. Do not apply the
+    -- mathematical quotient bounds to that undefined operation; the caller
+    -- must establish that it is safe before relying on any fact about it.
+    constraintsOf (_, _, Just Div, [a, b])
+        | known a == Just (toInteger (minBound :: Int))
+        , known b == Just (-1) = []
     constraintsOf (_, t, Just Div, [a, b])
         | Just n <- known b, n > 0 = [AtMost (form [(t, fromInteger n), (a, -1)]) 0, AtMost (form [(a, 1), (t, negate (fromInteger n))]) (fromInteger (n - 1))]
         | Just n <- known b, n < 0 = [AtMost (form [(a, 1), (t, negate (fromInteger n))]) 0, AtMost (form [(t, fromInteger n), (a, -1)]) (fromInteger (negate n - 1))]
