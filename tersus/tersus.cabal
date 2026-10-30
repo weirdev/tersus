@@ -21,6 +21,7 @@ extra-source-files:
     examples/emit.tersus
     bootstrap/emitter.ll
     lib/validation.tersus
+    lib/stdlib.tersus
 
 source-repository head
   type: git
@@ -56,6 +57,7 @@ library
       SelfHostedMir
       SelfHostedProof
       StdLib
+      StdLibDefs
       TersusTypes
       TypeCheck
       Utils

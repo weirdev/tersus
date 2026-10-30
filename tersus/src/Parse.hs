@@ -128,7 +128,7 @@ located = do
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
-statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> structAssign <|> assumeStatements <|> linearStatement <|> externStatement <|> affirmStatements <|> (pure <$> statement)
+statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> structAssign <|> assumeStatements <|> linearStatement <|> externStatement <|> builtinStatement <|> affirmStatements <|> (pure <$> statement)
 
 -- `linear struct T { ... };` and `linear enum T { ... };`: a type whose values are used exactly once (the declaration, and the mark)
 linearStatement :: Parser [Statement]
@@ -165,6 +165,30 @@ externStatement = do
         TBlock _ -> True
         TRef (TBlock _) -> True
         _ -> False
+
+-- `builtin fn name(parameters) -> T [{ in }] [{ out }];`: the declaration of a builtin of the standard library
+-- (lib/stdlib.tersus, StdLibDefs). It has no body: what it does is the builtin it names, which the lowering and
+-- the executor have as an operation. The affirmations of the output contract are what a call exports, as the
+-- exported proofs of a builtin are; a rewrite there would have nothing to run on, so it is refused.
+builtinStatement :: Parser [Statement]
+builtinStatement = do
+    keyword "builtin"
+    whitespace
+    keyword "fn"
+    whitespace
+    name <- variable
+    whitespace
+    (params, _, inputReqs, outputReqs) <- functHeader
+    builtin <- case lookup name stdlibBuiltinDecls of
+        Just b -> return b
+        Nothing -> fail ("builtin fn " ++ name ++ " is not a builtin of the standard library (StdLib.stdlibBuiltinDecls)")
+    exported <- case traverse affirmed outputReqs of
+        Just proofs -> return proofs
+        Nothing -> fail ("builtin fn " ++ name ++ " promises only affirmations in its output contract")
+    return [Assign name (Val (VFunct (map fst params) inputReqs [] (BuiltinFunct builtin) exported))]
+  where
+    affirmed (ProofAssert proof) = Just proof
+    affirmed _ = Nothing
 
 -- `assume e;`: e is known from here on without a proof (an assumption: see `tersus assumptions`). It is split as an affirm is.
 assumeStatements :: Parser [Statement]
@@ -1126,6 +1150,7 @@ functionProof = do
             "last" -> CTerm (builtinFunct Last)
             "get" -> CTerm (builtinFunct Get)
             "push" -> CTerm (builtinFunct Push)
+            "pop" -> CTerm (builtinFunct Pop)
             "set" -> CTerm (builtinFunct Set)
             "array" -> CTerm (builtinFunct NewArray)
             _ -> ATerm fname

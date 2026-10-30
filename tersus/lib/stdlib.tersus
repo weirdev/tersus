@@ -1,0 +1,152 @@
+// The standard library, written in Tersus: the contracts of the builtins a program calls by name.
+//
+// Each `builtin fn` here declares one builtin (StdLib.stdlibBuiltinDecls): it has no body, because what it
+// does is the builtin it names, which the lowering and the executor have as an operation (a ListOp, a
+// BinaryOp, an effect). The input contract is checked at each call and the affirmations of the output
+// contract are what a call exports. The types written here are placeholders: the checker types these
+// builtins by name (a builtin is used at whatever element type the call has), so they say the shape and
+// nothing more.
+//
+// What is not here stays primitive in StdLib.hs: the operations on addresses and permissions, whose
+// contracts are built from the ghost terms of a block (`base(b)`, `filled(b, i)`, ...); the ones made
+// afresh for a type (the constructor, field, is, cast and projection of a struct or enum, and the word
+// conversions, whose ranges depend on the type); and relations, connectives, `within` and the rest that
+// have no contract to write. StdLibDefs parses this file once and takes the contracts from it, so this
+// text, and not a Haskell literal, is what the validator is given.
+
+// size(list) is the number of elements. It has no contract: nothing is needed and nothing is promised.
+builtin fn size(list: List<Int>) -> Int;
+
+// first and last are get at the first and the last index, which is how element facts about the list reach them
+builtin fn first(list: List<Int>) -> Int [{ affirm size(list) > 0; }] [{ affirm return = get(list, 0); }];
+builtin fn last(list: List<Int>) -> Int [{ affirm size(list) > 0; }] [{ affirm return = get(list, size(list) - 1); }];
+
+// get requires a valid index, and its result is equal to the term get(list, index), which is what
+// forall facts about the list are instantiated at. The contract is checked with checkRel so that a concrete
+// list and index need no proof from the caller, while symbolic ones must already have
+// 0 <= index < size(list) in the proof context.
+builtin fn get(list: List<Int>, index: Int) -> Int [{
+    rewrite checkRel index >= 0;
+    rewrite checkRel index < size(list);
+    affirm index >= 0;
+    affirm index < size(list);
+}] [{ affirm return = get(list, index); }];
+
+// push adds an element at the end, so the result is one longer than the input list and its
+// last element (at the old size) is x. The elements it already had are unchanged. The result is
+// also equal to the term push(list, x).
+builtin fn push(list: List<Int>, x: Int) -> List<Int> [{ }] [{
+    affirm return = push(list, x);
+    affirm size(return) = size(list) + 1;
+    affirm get(return, size(list)) = x;
+    affirm forall j in 0..size(list): get(return, j) = get(list, j);
+}];
+
+// pop takes the last element out, so the list must have one; the result is one shorter and keeps the others
+// in their places. The result is also equal to the term pop(list).
+builtin fn pop(list: List<Int>) -> List<Int> [{
+    rewrite checkRel size(list) > 0;
+    affirm size(list) > 0;
+}] [{
+    affirm return = pop(list);
+    affirm size(return) = size(list) - 1;
+    affirm forall j in 0..size(return): get(return, j) = get(list, j);
+}];
+
+// set replaces one element, so it needs a valid index like get, and the result has the same
+// size as the input list, and x at that index. The list itself is not changed: the result is
+// a new list. Every other element is unchanged. The result is also equal to the term
+// set(list, index, x).
+builtin fn set(list: List<Int>, index: Int, x: Int) -> List<Int> [{
+    rewrite checkRel index >= 0;
+    rewrite checkRel index < size(list);
+    affirm index >= 0;
+    affirm index < size(list);
+}] [{
+    affirm return = set(list, index, x);
+    affirm size(return) = size(list);
+    affirm get(return, index) = x;
+    affirm forall j where j >= 0, j < size(list), j != index: get(return, j) = get(list, j);
+}];
+
+// array(n, x) is an array of n copies of x, so it needs a size that is not negative. Its size is n and
+// every element is x; the result is also equal to the term array(n, x). An array has no push: its size
+// never changes, which is all that makes this a fact a caller can keep.
+builtin fn array(n: Int, x: Int) -> List<Int> [{
+    rewrite checkRel n >= 0;
+    affirm n >= 0;
+}] [{
+    affirm return = array(n, x);
+    affirm size(return) = n;
+    affirm forall j in 0..n: get(return, j) = x;
+}];
+
+// Array::boxed(n, x) promises what array(n, x) does, for an n that need not be a constant
+builtin fn arrayBoxed(n: Int, x: Int) -> List<Int> [{
+    rewrite checkRel n >= 0;
+    affirm n >= 0;
+}] [{
+    affirm return = array(n, x);
+    affirm size(return) = n;
+    affirm forall j in 0..n: get(return, j) = x;
+}];
+
+// Array::empty() is the array of no elements
+builtin fn arrayEmpty() -> List<Int> [{ }] [{ affirm size(return) = 0; }];
+
+// writeByte(b) writes the Byte b to the standard output and is b; writeError(b) is the same on the standard error
+builtin fn writeByte(b: Byte) -> Byte [{ }] [{ affirm return = b; }];
+builtin fn writeError(b: Byte) -> Byte [{ }] [{ affirm return = b; }];
+
+// readByte() is the next byte of the standard input, or -1 at its end: it is not known beyond that,
+// so a program has to test what it relies on
+builtin fn readByte() -> Int [{ }] [{ affirm return >= -1; affirm return < 256; }];
+
+// argCount() is the number of arguments of the program, argByte(i, j) the byte j of argument i,
+// or -1 when there is no such argument or byte
+builtin fn argCount() -> Int [{ }] [{ affirm return >= 0; }];
+builtin fn argByte(i: Int, j: Int) -> Int [{ }] [{ affirm return >= -1; affirm return < 256; }];
+
+// The files: a path is built a byte at a time (pathByte), and then the file at it is loaded (fileLoad:
+// its size, or -1) and read a byte at a time (fileByte(i): the byte i, or -1), or a file is built a byte
+// at a time (storeByte) and stored (fileStore: 0, or -1) in the file at the path
+builtin fn pathByte(b: Byte) -> Int [{ }] [{ affirm return >= 0; }];
+builtin fn fileLoad() -> Int [{ }] [{ affirm return >= -1; }];
+builtin fn fileByte(i: Int) -> Int [{ }] [{ affirm return >= -1; affirm return < 256; }];
+builtin fn storeByte(b: Byte) -> Int [{ }] [{ affirm return >= 0; }];
+builtin fn fileStore() -> Int [{ }] [{ affirm return >= -1; affirm return <= 0; }];
+
+// toByte(x) is x as a Byte: x has to be from 0 to 255. toInt(b) is b as an Int.
+builtin fn toByte(x: Int) -> Byte [{
+    rewrite checkRel x >= 0;
+    affirm x >= 0;
+    rewrite checkRel x < 256;
+    affirm x < 256;
+}] [{ affirm return = x; }];
+builtin fn toInt(b: Byte) -> Int [{ }] [{ affirm return = b; }];
+
+// The List<Byte> of a list of Ints that is written out: the same list
+builtin fn bytesFrom(list: List<Int>) -> List<Int>;
+
+// unsize b is b: the Box has the same value, it carries the size. The array that a literal makes is
+// the list of its elements, read as an array: the same value. Box::new(x) is x, box::unbox(b) the value
+// it holds, and clone(x) x: a copy has the value of what it copies.
+builtin fn unsize(box: Int) -> Int;
+builtin fn arrayFrom(list: List<Int>) -> List<Int>;
+builtin fn boxNew(value: Int) -> Int;
+builtin fn boxUnbox(box: Int) -> Int;
+builtin fn cloneOf(value: Int) -> Int;
+
+// Arithmetic has no contract but the one on division and modulo: the divisor must already be
+// known to be non-zero, as an out of range index must already be known to be in range.
+builtin fn plus(a: Int, b: Int) -> Int;
+builtin fn minus(a: Int, b: Int) -> Int;
+builtin fn times(a: Int, b: Int) -> Int;
+builtin fn div(a: Int, b: Int) -> Int [{
+    rewrite checkRel b != 0;
+    affirm b != 0;
+}];
+builtin fn mod(a: Int, b: Int) -> Int [{
+    rewrite checkRel b != 0;
+    affirm b != 0;
+}];

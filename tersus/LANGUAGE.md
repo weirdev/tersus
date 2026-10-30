@@ -616,6 +616,8 @@ The standard library seeds these builtin functions:
 
 `first` and `last` have builtin input contracts requiring the list size to be greater than zero. The validator checks that with the arithmetic (see Arithmetic), so a call such as `first(l)` needs `size(l) > 0` to be known (from a literal list, a guard or an earlier `affirm`) and fails with `Could not prove: size(list) > 0` otherwise. They also export `return = get(list, 0)` and `return = get(list, size(list) - 1)`, so facts about the elements of a list (a `forall`, or `get(l, 0) = x`) reach `first(l)` and `last(l)`. Concrete evaluation still rejects empty lists and wrong argument types.
 
+The contracts of the builtins in this section are written in Tersus, in `lib/stdlib.tersus`, as `builtin fn` declarations with no body; the compiler reads them from there. A `builtin fn` names a builtin the compiler already has as an operation, so it is only for the standard library, not a way to define a function.
+
 `get` and `set` have a builtin input contract requiring `index >= 0` and `index < size(list)`. It is checked with the primitive `checkRel` rewrite, so a call with a concrete list and index needs no proof, while a symbolic index must already be provable at the call site, usually from the enclosing function's contract or a loop invariant:
 
 ```tersus

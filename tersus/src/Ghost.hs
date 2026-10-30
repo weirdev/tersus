@@ -43,6 +43,7 @@ import ProofHelpers
 import qualified Mir as M
 import ProofState
 import StdLib
+import StdLibDefs (stdlibBuiltin)
 import TersusTypes
 import Utils
 
@@ -140,7 +141,7 @@ resolveFunction st term =
 
 builtinInfo :: BuiltinFunct -> FnInfo
 builtinInfo b =
-    case builtinFunct b of
+    case stdlibBuiltin b of
         VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b)
         _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b)
 

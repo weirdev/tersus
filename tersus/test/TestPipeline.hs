@@ -24,6 +24,7 @@ import SelfHostedProof (querySelfHosted)
 import SelfHostedMir (validateMirSubset)
 import Parse
 import StdLib
+import StdLibDefs (stdLibCtx, stdlibBuiltin)
 import TypeCheck (elaborate)
 import TersusTypes
 import Utils
@@ -485,6 +486,7 @@ testMir =
         , testMirTypes
         , testMirRun
         , testSelfHostedEquality
+        , testStdlibInTersus
         , testCaseSeq
             "testMirCli"
             [ -- `mir` prints the blocks
@@ -494,6 +496,22 @@ testMir =
               testAssertEq (runMir "return 1 / 0;") (Error "Division by zero")
             ]
         ]
+
+-- The standard library is written in Tersus (lib/stdlib.tersus): the contracts the validator is
+-- given for a builtin come from that text, and the names a program calls it by are all there.
+testStdlibInTersus :: Test
+testStdlibInTersus =
+    TestCase "the standard library is written in Tersus" $
+        pure $
+            testAssertTrue
+                ( (case stdlibBuiltin Get of
+                    VFunct params inputs _ _ exported -> (params, length inputs, exported)
+                    _ -> ([], 0, []))
+                    == (["list", "index"], 4, [relProof Eq (ATerm "return") (FApp (CTerm (builtinFunct Get)) [ATerm "list", ATerm "index"])])
+                    && Map.size stdLibCtx == 31
+                    && Map.member "get" stdLibCtx
+                    && Map.member "push" stdLibCtx
+                )
 
 -- Compare the Tersus equality closure with the reference solver over all graphs
 -- of four vertices, including disconnected graphs, cycles and reverse queries.
