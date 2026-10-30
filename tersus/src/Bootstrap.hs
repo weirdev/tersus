@@ -11,12 +11,13 @@ module Bootstrap
     ) where
 
 import Control.Exception (IOException, finally, try)
-import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFileSystemEncoding, setLocaleEncoding)
+import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (hClose, hPutStrLn, openTempFile, stderr)
-import System.Process (readProcessWithExitCode)
+import Control.Concurrent (forkIO)
+import System.IO (hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openTempFile, stderr)
+import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
 
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
@@ -60,20 +61,25 @@ stageOne compiler output = case ownedSource emitterSource of
             Error e -> pure (Error e)
             Ok text -> buildExecutable output text
 
--- What the emitter at the path writes for the MIR as data: its IR, or its reason (on the standard error) for refusing the program. The bytes are read as they are.
+-- What the emitter at the path writes for the MIR as data: its IR, or its reason (on the standard error) for refusing the program. The bytes are read as they are:
+-- the encodings are set on the pipes of the process, not on this one, so that callers may run emitters at the same time.
 emitWith :: FilePath -> String -> IO (Result String String)
 emitWith exe input = do
-    saved <- getLocaleEncoding
-    savedFs <- getFileSystemEncoding
-    setLocaleEncoding char8
-    setFileSystemEncoding char8
-    outcome <- try (readProcessWithExitCode exe [] input) `finally` (setLocaleEncoding saved >> setFileSystemEncoding savedFs)
+    outcome <- try run :: IO (Either IOException (ExitCode, String, String))
     pure $ case outcome of
-        Left e -> Error ("Could not run the emitter: " ++ show (e :: IOException))
+        Left e -> Error ("Could not run the emitter: " ++ show e)
         Right (ExitSuccess, out, _) -> Ok out
         Right (ExitFailure _, _, err) -> Error (dropWhileEnd' (== '\n') (decodeUtf8 err))
   where
     dropWhileEnd' p = reverse . dropWhile p . reverse
+    run = do
+        (Just hin, Just hout, Just herr, process) <- createProcess (proc exe []){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
+        mapM_ (`hSetEncoding` char8) [hin, hout, herr]
+        _ <- forkIO (hPutStr hin input >> hClose hin)
+        out <- hGetContents hout
+        err <- hGetContents herr
+        code <- length out `seq` length err `seq` waitForProcess process
+        pure (code, out, err)
 
 -- Stage 0 in the cache, built if it is not there yet
 cachedSeed :: IO (Result FilePath String)
