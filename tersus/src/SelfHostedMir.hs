@@ -4,7 +4,7 @@
 module SelfHostedMir (validateMirSubset) where
 
 import Control.Monad (foldM)
-import Data.List (nub)
+import Data.List (isPrefixOf, nub)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
@@ -708,6 +708,9 @@ encodeFunction types invariants functions allowCalls fn
 encode :: M.Program -> Maybe [(MirValue, MirValue, Integer)]
 encode program
     | any isEnum (Map.elems (M.progTypes program)) = Nothing
+    | any externFunction allFunctions = Nothing
+    | any unsupportedFunction allFunctions = Nothing
+    | any unsupportedDecl (Map.elems (M.progTypes program)) = Nothing
     -- Results of world-reading functions are not determined by arguments.
     | not (Set.null (M.readersOfInput program)) = Nothing
     | not (null (M.fnParams (M.progMain program))) = Nothing
@@ -728,6 +731,23 @@ encode program
         main <- encodeFunction types invariants functions True (M.progMain program)
         pure (checked ++ [main])
   where
+    allFunctions = M.progMain program : Map.elems (M.progFunctions program)
+    externFunction fn = "extern " `isPrefixOf` M.fnName fn
+    unsupportedFunction fn = any (unsupportedType . M.localType) (Map.elems (M.fnLocals fn)) || maybe False unsupportedType (M.fnReturns fn)
+    unsupportedDecl (M.StructDecl fields) = any (unsupportedType . snd) fields
+    unsupportedDecl (M.EnumDecl variants) = any (any (unsupportedType . snd) . snd) variants
+    unsupportedType t = case t of
+        TWord{} -> True
+        TAddr{} -> True
+        TBlock{} -> True
+        TList element -> unsupportedType element
+        TArrayOf element _ -> unsupportedType element
+        TBox element -> unsupportedType element
+        TFn args result -> any unsupportedType args || unsupportedType result
+        TForall _ _ element -> unsupportedType element
+        TUninit element -> unsupportedType element
+        TRef element -> unsupportedType element
+        _ -> False
     isEnum M.EnumDecl{} = True
     isEnum _ = False
     mainSpec = M.fnSpec (M.progMain program)

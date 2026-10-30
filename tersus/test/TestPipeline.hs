@@ -904,6 +904,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "fn f<n>(a: Array<Int, n>) -> Int [{ affirm n > 0; }] { return get(a, 0); }; return f(#[]);" (Just False)
                       , checkMalformedArrayLength
                       , checkMirSubset "enum E { A, B }; return E::A;" Nothing
+                      , checkMirSubset "extern fn labs(x: Int) -> Int [{ }] [{ affirm return >= 0; }]; a = labs(0 - 3); affirm a >= 0; return a;" Nothing
+                      , checkMirSubset "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); x = Addr::get(p, 0, b); return x + Addr::free(p, b);" Nothing
+                      , checkMirSubset "x = I32::from(3); return toInt(x);" Nothing
                       , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm size(xs) = 2; affirm get(xs, 1) = 5; return 0;" (Just True)
                       , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm get(xs, 1) = 4; return 0;" (Just False)
                       , checkMirSubset "xs = []; xs = push(xs, 5); affirm size(xs) = 1; return get(xs, 0);" (Just True)
