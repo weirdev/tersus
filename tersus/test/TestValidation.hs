@@ -218,6 +218,11 @@ testUserRewriteValidation =
         , parseValidateWEMatchHelper
             "{ proof positiveSum(x, y) [{ define total = x + y; affirm total > 0; }] [{ affirm x + y > 0; }] { define total = x + y; affirm total > 0; }; fn f(flag: Bool) -> Int { x = 0; y = 0; if flag { x = 1; y = 0; } else { x = 0; y = 1; }; rewrite positiveSum x y; return 0; }; return f(true); }"
             []
+        , parseValidationFailHelper
+            "{ proof bad(x) [{ define n = x + 1; }] [{ define n = 0; affirm n = 0; }] { }; x = 5; rewrite bad x; affirm x + 1 = 0; }"
+        , parseValidateWEMatchHelper
+            "{ proof bad(x) [{ define n = x + 1; }] [{ define n = x + 1; affirm n > x; }] { }; x = 5; rewrite bad x; affirm x + 1 > x; }"
+            [FApp (CTerm (builtinFunct (Rel Gt))) [FApp (CTerm (builtinFunct Plus)) [ATerm "x", CTerm (VInt 1)], ATerm "x"]]
         ]
 
 testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult
@@ -246,6 +251,13 @@ parseValidateWEMatchHelper stmtStr expected =
     case parseStatement stmtStr of
         Left err -> Just $ "Parse failed: " ++ show err
         Right (Block stmts) -> validateWEMatchHelper stmts expected
+        Right _ -> Just "Not a block statement"
+
+parseValidationFailHelper :: String -> TestResult
+parseValidationFailHelper stmtStr =
+    case parseStatement stmtStr of
+        Left err -> Just $ "Parse failed: " ++ show err
+        Right (Block stmts) -> validationFailHelper stmts
         Right _ -> Just "Not a block statement"
 
 testParseValBlockExpr :: TestResult
