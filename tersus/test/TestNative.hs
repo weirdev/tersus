@@ -122,8 +122,8 @@ testNativeIr =
             withIr "x = 1;" (\ir -> testAssertTrue ("define internal void @tersus_main()" `isInfixOf` ir))
         , TestCase "ghost statements are dropped" . pure $
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
-        , TestCase "a list is the struct of the library, which holds its elements in a Box of an array" . pure $
-            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.StdList<Int>\" = private constant" `isInfixOf` ir && "call ptr @tersus_box_new" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
+        , TestCase "a list is the struct of the library, which holds its elements in memory at an address" . pure $
+            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.StdList<Int>\" = private constant" `isInfixOf` ir && "call i64 @tersus_addr_alloc" `isInfixOf` ir && "call i64 @tersus_addr_resize" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
         , TestCase "a struct is held in the frame, as its fields, with a descriptor" . pure $
             withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir && not ("tersus_data_new" `isInfixOf` ir)))
         , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" . pure $

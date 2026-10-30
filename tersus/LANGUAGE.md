@@ -1725,18 +1725,23 @@ A name is the UTF-8 bytes of the string, up to 4095 of them, and stops at a byte
 
 ### Lists In Native Code
 
-A `List<T>` is checked and validated as a list, and run by the interpreter (`tersus eval`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of a Box of an array and a count, written in Tersus (`lib/lists.tersus`), and a program is changed to use it after it is validated.
+A `List<T>` is checked and validated as a list, and run by the interpreter (`tersus eval`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of an address, the permission to the memory at it, a count and the room there is, written in Tersus (`lib/lists.tersus`) and managed by hand (see Addresses and permissions), and a program is changed to use it after it is validated.
 
 ```
 struct StdList<T> {
-    data: Box<Array<T>>,
+    addr: Addr<T>,
     len: Int,
-} invariant [{ affirm len >= 0; affirm len <= size(data); }];
+    cap: Int,
+    ghost blk: Block<T>,
+} invariant [{
+    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len; affirm len >= 0; affirm len <= cap;
+    affirm forall j in 0..len: filled(blk, j) = true; affirm forall j in len..cap: filled(blk, j) = false;
+}];
 
-fn stdListPush<T>(l: StdList<T>, x: T) -> StdList<T> [{ }] [{ affirm return.len = l.len + 1; affirm get(return.data, l.len) = x; affirm forall j in 0..l.len: get(return.data, j) = get(l.data, j); }] { ... };
+fn stdListPush<T>(l: StdList<T>, x: T) -> StdList<T> [{ }] [{ affirm return.len = l.len + 1; affirm at(return.blk, l.len) = x; affirm forall j in 0..l.len: at(return.blk, j) = at(l.blk, j); }] { ... };
 ```
 
-- **What a list operation becomes** (`MirLists`): `size(l)` reads `len`; `get`, `first` and `last` read the element out of the array where it is, so a part that is only read is not copied; `push` and `set` are calls of `stdListPush` and `stdListSet`, which change the array where it is when nothing else holds the list; a list written as `[1, 2]` is a call of `stdListNew` and one of `stdListPush` for each element; an empty list holds an `Array::empty()` and allocates nothing. A `List<T>` in a type is a `StdList<T>`, in a struct, an enum, an array, a Box or another list. A push into a full array makes one of twice the room and four more and moves the elements over, so a list built by pushing is built in time and room in proportion to its length.
+- **What a list operation becomes** (`MirLists`): `size(l)` reads `len`; `get`, `first` and `last` read the element out of the array where it is, so a part that is only read is not copied; `push` and `set` are calls of `stdListPush` and `stdListSet`, which change the memory where it is when nothing else holds the list (`set` drops the element it replaces, and `pop` the one it takes off); a list written as `[1, 2]` is a call of `stdListNew` and one of `stdListPush` for each element. A `List<T>` in a type is a `StdList<T>`, in a struct, an enum, an array, a Box or another list. A push into a full list moves the elements to memory with room for twice as many and four more (`Addr::resize`), so a list built by pushing is built in time and room in proportion to its length. The runtime frees a list with the elements in use, and a copy of one has memory of its own; a function of the library is given a list and returns one made of its memory, so the list it is given is not freed there (`MirOwnership`).
 - **Comparing and printing** a list are done as a list is: `=` compares the first `len` elements and not the room that is left, and the result of a program that is a list prints as `[1, 2, 3]`. (The runtime knows a `StdList` by its name.)
 - **What is proved, and where.** The proofs about a program's lists are those of lists: the validator never sees the struct. The library is validated on its own, with contracts that say what a list does (`get` gives what `set` put, `push` adds one at the end and leaves the others, and the size changes by the right amount), so the form that native code uses has been shown to do what a list does. That the change itself is right is checked by running: every test program that has a list is built and run, and its output has to be the executor's.
 - **Reserved names.** A program may not declare a struct, an enum or a trait named `StdList`, or a function whose name starts with `stdList` (`Type error: stdListNew is reserved`), since native code calls the functions of the library by those names.

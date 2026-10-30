@@ -100,8 +100,16 @@ freeTree (VP a) = do
         Just c -> do
             putSt s{stHeap = Map.delete a (stHeap s)}
             mapM_ freeTree (children (cellObject c))
+-- (a list of native code owns the memory at its address, with the elements in it)
+freeTree (VS name fs) | isListStruct name, Just a <- listCell fs = freeTree (VP a)
 freeTree (VS _ fs) = mapM_ (freeTree . snd) fs
 freeTree _ = return ()
+
+-- The memory that a list of native code (a StdList, on an address) has its elements in
+listCell :: [(Variable, Val)] -> Maybe Int
+listCell fs = case lookup "addr" fs of
+    Just (VI address) | address > 0 -> Just (fromInteger (address `div` (2 ^ (32 :: Integer))))
+    _ -> Nothing
 
 children :: Obj -> [Val]
 children (OList vs) = vs
@@ -111,6 +119,7 @@ children (OMem slots _) = Map.elems slots
 -- The values of the heap that a value holds, inline or not
 pointersOf :: Val -> [Int]
 pointersOf (VP a) = [a]
+pointersOf (VS name fs) | isListStruct name, Just a <- listCell fs = [a]
 pointersOf (VS _ fs) = concatMap (pointersOf . snd) fs
 pointersOf _ = []
 
@@ -121,6 +130,20 @@ cloneVal (VP a) = do
         OList vs -> mapM cloneVal vs >>= alloc . OList
         OBox v -> cloneVal v >>= alloc . OBox
         OMem _ _ -> failM "memory is copied"
+-- (a copy of a list has memory of its own, with copies of the elements in use)
+cloneVal (VS name fs) | isListStruct name, Just a <- listCell fs = do
+    c <- cell a
+    used <- case lookup "len" fs of
+        Just (VI n) -> return n
+        _ -> failM "a list without its length"
+    case cellObject c of
+        OMem slots _ -> do
+            copies <- mapM (\(k, v) -> (,) k <$> cloneVal v) [(k, v) | (k, v) <- Map.toList slots, k < used]
+            copy <- alloc (OMem (Map.fromList copies) used)
+            case copy of
+                VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else if f == "cap" then VI used else v) | (f, v) <- fs])
+                _ -> failM "an allocation is not on the heap"
+        _ -> failM "a list that is not in memory"
 cloneVal (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneVal v) fs
 cloneVal v = return v
 
@@ -203,8 +226,8 @@ toPure (VP a) = do
         OMem _ _ -> failM "memory is compared"
 -- (a list of native code is the elements in use of the array it holds)
 toPure (VS name fs)
-    | isListStruct name, Just elements <- lookup "data" fs, Just (VI used) <- lookup "len" fs = do
-        (_, obj) <- object elements
+    | isListStruct name, Just a <- listCell fs, Just (VI used) <- lookup "len" fs = do
+        (_, obj) <- object (VP a)
         PL <$> mapM toPure (take (fromIntegral used) (children obj))
     | otherwise = PD name <$> mapM (\(f, v) -> (,) f <$> toPure v) fs
 
@@ -220,7 +243,7 @@ object (VP a) = do
     c <- cell a
     return (a, cellObject c)
 -- (a list of native code is read where its elements are: the first field of the struct StdList is the Box of the array that holds them)
-object (VS name ((_, elements@(VP _)) : _)) | isListStruct name = object elements
+object (VS name fs) | isListStruct name, Just a <- listCell fs = object (VP a)
 object v = failM ("not a value of the heap: " ++ show v)
 
 isListStruct :: Name -> Bool
@@ -392,7 +415,7 @@ listOp op os =
         (AddrDropValue, [p, i]) -> dropSlots p i (Const (CInt 1))
         (AddrDropRange, [p, i, n]) -> dropSlots p i n
         (AddrResize, [p, n]) -> do
-            (a, slots, _, k) <- slotOf p (Const (CInt 0))
+            (a, slots, _, k) <- memoryOf p
             count <- intOperand n
             if k /= 0 || any (>= count) (Map.keys slots) then failM "memory is resized that is not whole, or to fewer slots than hold values" else pure ()
             s <- getSt
@@ -402,7 +425,7 @@ listOp op os =
                 VP b -> pure (VI (toInteger b * memorySpan))
                 _ -> failM "an allocation is not on the heap"
         (AddrFree, [p]) -> do
-            (a, slots, _, k) <- slotOf p (Const (CInt 0))
+            (a, slots, _, k) <- memoryOf p
             if k /= 0 || not (Map.null slots) then failM "memory is freed that is not whole, or that holds a value" else pure ()
             s <- getSt
             putSt s{stHeap = Map.delete a (stHeap s)}
@@ -410,6 +433,13 @@ listOp op os =
         _ -> failM ("list operation on the wrong operands: " ++ show op)
   where
     memorySpan = 2 ^ (32 :: Integer)
+    memoryOf p = do
+        address <- intOperand p
+        let (a, k) = address `divMod` memorySpan
+        c <- cell (fromInteger a)
+        case cellObject c of
+            OMem slots size -> pure (fromInteger a, slots, size, k)
+            _ -> failM "an address that is not of memory"
     slotOf p i = do
         address <- intOperand p
         index <- intOperand i
@@ -508,7 +538,9 @@ callFunction program fn args = do
     s' <- getSt
     case stFrames s' of
         f : rest -> do
-            let leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap program f l]
+            -- (a function of the library of lists gives the memory of the list it is given to the list it returns: MirOwnership does not free it)
+            let givesItsMemory l = take 7 (fnName fn) == "stdList" && l `elem` fnParams fn && l `notElem` fnBorrowed fn
+                leftover = [l | (l, Slot v Nothing) <- Map.toList (frameSlots f), v /= VNull, l /= Local 0, localHeap program f l, not (givesItsMemory l)]
             if null leftover
                 then putSt s'{stFrames = rest}
                 else failM ("a function returns while it owns " ++ show leftover)
@@ -552,7 +584,7 @@ runBlock program fn b = do
 -- Runs the whole program on the model, and checks that nothing is left on the heap
 runOwned :: Program -> Either String (Maybe MirValue)
 runOwned program =
-    case runM go (St Map.empty 0 [] 1000000 program) of
+    case runM go (St Map.empty 1 [] 1000000 program) of
         Left e -> Left e
         Right (r, _) -> Right r
   where
