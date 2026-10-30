@@ -1,0 +1,32 @@
+// The native form of a Box. A `Box<T>` that is checked and validated as a Box is made, for native code, of this: one slot of memory at an
+// address, filled, with the permission to it (see MirBoxes, which replaces each Box of a validated program with one of these). As with lists,
+// the program that is checked is the one with Boxes, and what is proved here is that this form holds a value and gives it back, with the
+// memory managed by hand and nothing assumed (POINTERS.md, `Box<T>`).
+//
+// The runtime and the emitter know this struct by its name and its field: `addr` is the only field that is there when the program runs, and
+// the runtime prints, compares and copies a StdBox as the value at it. It is freed by its drop.
+struct StdBox<T> {
+    addr: Addr<T>,
+    ghost blk: Block<T>,
+} invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }];
+
+// Box::new(x): room for one value, with x in it
+fn stdBoxNew<T>(x: T) -> StdBox<T> [{ }] [{ affirm at(return.blk, 0) = x; }] {
+    (a, b) = Addr::alloc(1);
+    return StdBox<T> { addr: a, blk: Addr::write(a, 0, x, b) };
+};
+
+// Box::unbox(b): the value, taken out, and the room freed
+fn stdBoxUnbox<T>(b: StdBox<T>) -> T [{ }] [{ affirm return = at(b.blk, 0); }] {
+    StdBox { addr: a, blk: k } = b;
+    (x, k2) = Addr::take(a, 0, k);
+    done = Addr::free(a, k2);
+    return x;
+};
+
+// A Box that goes out of scope drops the value it holds, and frees its room
+impl<T> Drop for StdBox<T> {
+    fn drop(self: Self) -> Int {
+        return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk));
+    };
+};

@@ -216,7 +216,7 @@ typeDescriptors program types =
     shape _ = (-1, "null")
     dataDescriptor n =
         let variants = variantsOf program n
-         in [ global "data." n ++ " = private constant { i64, ptr, i64, ptr } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ ", i64 " ++ (if isEnum n then "1" else if takeWhile (/= '<') n == "StdList" then "2" else "0") ++ ", ptr " ++ maybe "null" functionSymbol (dropFunction program n) ++ " }"
+         in [ global "data." n ++ " = private constant { i64, ptr, i64, ptr } { i64 " ++ show (length variants) ++ ", ptr " ++ global "variants." n ++ ", i64 " ++ (if isEnum n then "1" else if takeWhile (/= '<') n == "StdList" then "2" else if takeWhile (/= '<') n == "StdBox" then "3" else "0") ++ ", ptr " ++ maybe "null" functionSymbol (dropFunction program n) ++ " }"
             , global "variants." n ++ " = private constant [" ++ show (length variants) ++ " x { ptr, i64, ptr }] ["
                 ++ intercalate ", " ["{ ptr, i64, ptr } { ptr " ++ global "str." v ++ ", i64 " ++ show (length fields) ++ ", ptr " ++ (if null fields then "null" else global "fields." v) ++ " }" | (v, fields) <- variants]
                 ++ "]"
@@ -654,6 +654,11 @@ isArray :: Type -> Bool
 isArray TArray{} = True
 isArray _ = False
 
+-- The struct that a Box is made of in native code (StdBox of lib/box.tersus): the address of what it holds, as a Box is
+isBoxStruct :: Type -> Bool
+isBoxStruct (TNamed n) = takeWhile (/= '<') n == "StdBox"
+isBoxStruct _ = False
+
 -- A Box of an array, of a size or of any size: the array is on the heap, and the address of it is the first word of the Box
 isBoxedArray :: Type -> Bool
 isBoxedArray (TBox TArrayOf{}) = True
@@ -757,6 +762,8 @@ dataBase fn ty o =
         localTy <- localTypeG fn l
         case localTy of
             TBox _ -> ins "b" ("load ptr, ptr " ++ slot l)
+            -- (a Box of the library is the address of what it holds, as a Box is: lib/box.tersus; its own field is read from it)
+            _ | isBoxStruct localTy, not (isBoxStruct ty) -> ins "b" ("load ptr, ptr " ++ slot l)
             _ -> pure (slot l)
 
 -- The type of a local that an operand is
@@ -996,6 +1003,17 @@ assignAggregate dropsOld fn dest ty rv = do
                     case o of
                         Move _ -> emit ("call void @tersus_box_free(ptr " ++ block ++ ")")
                         _ -> pure ()
+                -- (and so is a Box of the library, whose room is freed with the value moved out, so that its drop has nothing to do)
+                (Just boxTy, Copy l) | isBoxStruct boxTy -> do
+                    block <- ins "b" ("load ptr, ptr " ++ slot l)
+                    freeOld
+                    copyWords target block bytes
+                (Just boxTy, Move l) | isBoxStruct boxTy -> do
+                    block <- ins "b" ("load ptr, ptr " ++ slot l)
+                    emit ("store i64 0, ptr " ++ slot l)
+                    freeOld
+                    copyWords target block bytes
+                    emit ("call void @tersus_box_free(ptr " ++ block ++ ")")
                 _ -> do
                     src <- operandAddress fn ty o
                     freeOld

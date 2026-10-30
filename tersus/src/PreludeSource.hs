@@ -3,6 +3,7 @@
 module PreludeSource
     ( preludeSource
     , listsSource
+    , boxSource
     , stringSource
     , emitterSource
     , seedSource
@@ -27,6 +28,15 @@ listsSource =
     $( do
         addDependentFile "lib/lists.tersus"
         contents <- runIO (readFile "lib/lists.tersus")
+        lift contents
+     )
+
+-- The text of lib/box.tersus: the Box that native code is made of (see MirLists)
+boxSource :: String
+boxSource =
+    $( do
+        addDependentFile "lib/box.tersus"
+        contents <- runIO (readFile "lib/box.tersus")
         lift contents
      )
 

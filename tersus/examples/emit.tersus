@@ -1557,7 +1557,7 @@ fn descriptorBody(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Strin
 fn dataDescriptor(types: &List<TypeDecl>, fns: &List<String>, n: &String) -> List<String> ~ {
     variants = variantsOf(types, n);
     kind = "0";
-    if isEnum(types, n) { kind = "1"; } else { if beforeAngle(n) = "StdList" { kind = "2"; }; };
+    if isEnum(types, n) { kind = "1"; } else { if beforeAngle(n) = "StdList" { kind = "2"; } else { if beforeAngle(n) = "StdBox" { kind = "3"; }; }; };
     out = noStrings();
     drop = "null";
     if containsName(fns, dropName(n)) { drop = functionSymbol(dropName(n)); };
@@ -2059,6 +2059,12 @@ fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
     return false;
 };
 
+// A Box of native code: the struct StdBox of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
+fn isBoxStruct(t: &Type) -> Bool [{ }] [{ }] {
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdBox"; };
+    return false;
+};
+
 // Whether the contents of a constant say what it is made of: a number or a Bool does, and a list when one element does
 fn constantKnown(c: &Constant) -> Bool ~ {
     if c is Constant::CList {
@@ -2473,6 +2479,8 @@ fn dataBase(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
     lt = localTypeOf(f, l);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
     if lt.ty is Type::TBox { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
+    // (a Box of the library is the address of what it holds, as a Box is: lib/box.tersus; its own field is read from it)
+    if isBoxStruct(lt.ty) && !isBoxStruct(ty) { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
     return giving(g, slot(l));
 };
 
@@ -3276,6 +3284,22 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             g3 = copyWords(g2, target, block, bytes);
             if o is Operand::Move { return emit(g3, "call void @tersus_box_free(ptr ".then(block).then(")")); };
             return g3;
+        };
+        // (and so is a Box of the library, whose room is freed with the value moved out, so that its drop has nothing to do)
+        if held.ok && isBoxStruct(held.ty) {
+            l = 0;
+            if o is Operand::Copy { l = (o as Operand::Copy).local; };
+            if o is Operand::Move { l = (o as Operand::Move).local; };
+            g1 = ins(g, "b", "load ptr, ptr ".then(slot(l)));
+            block = clone(g1.last);
+            if o is Operand::Move {
+                g2 = emit(g1, "store i64 0, ptr ".then(slot(l)));
+                g3 = freeOld(clone(g2), cx, dropsOld, ty, dest);
+                g4 = copyWords(g3, target, block, bytes);
+                return emit(g4, "call void @tersus_box_free(ptr ".then(block).then(")"));
+            };
+            g2 = freeOld(clone(g1), cx, dropsOld, ty, dest);
+            return copyWords(g2, target, block, bytes);
         };
         g1 = operandAddress(g, cx, f, ty, o);
         src = g1.last;

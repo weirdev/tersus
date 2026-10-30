@@ -133,7 +133,7 @@ children (OMem slots _) = Map.elems slots
 -- The values of the heap that a value holds, inline or not
 pointersOf :: Val -> [Int]
 pointersOf (VP a) = [a]
-pointersOf (VS name fs) | isListStruct name, Just a <- listCell fs = [a]
+pointersOf (VS name fs) | isListStruct name || isBoxStruct name, Just a <- listCell fs = [a]
 pointersOf (VS _ fs) = concatMap (pointersOf . snd) fs
 pointersOf _ = []
 
@@ -158,6 +158,17 @@ cloneVal (VS name fs) | isListStruct name, Just a <- listCell fs = do
                 VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else if f == "cap" then VI used else v) | (f, v) <- fs])
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a list that is not in memory"
+-- (a copy of a Box of the library has room of its own, with a copy of the value)
+cloneVal (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
+    c <- cell a
+    case cellObject c of
+        OMem slots size -> do
+            copies <- mapM (\(k, v) -> (,) k <$> cloneVal v) (Map.toList slots)
+            copy <- alloc (OMem (Map.fromList copies) size)
+            case copy of
+                VP b -> return (VS name [(f, if f == "addr" then VI (toInteger b * 2 ^ (32 :: Integer)) else v) | (f, v) <- fs])
+                _ -> failM "an allocation is not on the heap"
+        _ -> failM "a Box that is not in memory"
 cloneVal (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneVal v) fs
 cloneVal v = return v
 
@@ -243,6 +254,12 @@ toPure (VS name fs)
     | isListStruct name, Just a <- listCell fs, Just (VI used) <- lookup "len" fs = do
         (_, obj) <- object (VP a)
         PL <$> mapM toPure (take (fromIntegral used) (children obj))
+    -- (a Box of the library is the value it holds)
+    | isBoxStruct name, Just a <- listCell fs = do
+        (_, obj) <- object (VP a)
+        case children obj of
+            [v] -> toPure v
+            _ -> failM "a Box that does not hold one value"
     | otherwise = PD name <$> mapM (\(f, v) -> (,) f <$> toPure v) fs
 
 fromPure :: Pure -> MirValue
@@ -263,6 +280,9 @@ object v = failM ("not a value of the heap: " ++ show v)
 isListStruct :: Name -> Bool
 isListStruct name = takeWhile (/= '<') name == "StdList"
 
+isBoxStruct :: Name -> Bool
+isBoxStruct name = takeWhile (/= '<') name == "StdBox"
+
 -- The fields of a struct or an enum value that a value is: held inline, or in a Box
 dataValue :: Val -> M (Name, [(Variable, Val)])
 dataValue (VS name fs) = return (name, fs)
@@ -272,6 +292,20 @@ dataValue v@(VP _) = do
         OBox inner -> dataValue inner
         _ -> failM "a field of a list"
 dataValue v = failM ("not a struct or an enum: " ++ show v)
+
+-- (a Box of the library is looked into, for a read of what it holds and not of its own field: what it holds is in the one slot at its address)
+throughBox :: Name -> Val -> M Val
+throughBox name v = case v of
+    VS boxName fs | isBoxStruct boxName, boxName /= name, Just a <- listCell fs -> boxed a
+    _ -> return v
+
+-- The value in the slot of a Box of the library
+boxed :: Int -> M Val
+boxed a = do
+    c <- cell a
+    case cellObject c of
+        OMem slots _ | Just v <- Map.lookup 0 slots -> return v
+        _ -> failM "a Box of the library that holds nothing"
 
 -- The value in a Box, taken out of it: the room of the Box is freed, and not what it held
 unbox :: Val -> M Val
@@ -299,10 +333,10 @@ evalRvalue rv =
         MakeList os -> mapM readOperand os >>= alloc . OList
         MakeData name fs -> VS name <$> mapM (\(f, o) -> (,) f <$> readOperand o) fs
         ReadField o name field -> do
-            (actual, fs) <- readOperand o >>= dataValue
+            (actual, fs) <- readOperand o >>= throughBox name >>= dataValue
             if actual == name then maybe (failM ("no field " ++ field)) return (lookup field fs) else failM ("expected a " ++ name ++ ", got a " ++ actual)
         IsVariant o name -> do
-            (actual, _) <- readOperand o >>= dataValue
+            (actual, _) <- readOperand o >>= throughBox name >>= dataValue
             return (VB (actual == name))
         -- (a Box that is cast is taken out of its room when the cast takes it, and is looked into when it does not)
         AsVariant o _ -> do
@@ -310,6 +344,13 @@ evalRvalue rv =
             case (v, o) of
                 (VP _, Move _) -> unbox v
                 (VP _, _) -> dataValueOf v
+                -- (and so is a Box of the library)
+                (VS name fs, Move _) | isBoxStruct name, Just a <- listCell fs -> do
+                    inner <- boxed a
+                    s <- getSt
+                    putSt s{stHeap = Map.delete a (stHeap s)}
+                    return inner
+                (VS name fs, _) | isBoxStruct name, Just a <- listCell fs -> boxed a
                 _ -> return v
         Clone o -> readOperand o >>= cloneVal
         TakeField l name field -> do
@@ -319,6 +360,14 @@ evalRvalue rv =
                 _ -> return ()
             v <- readLocal l
             case v of
+                VS boxName boxFs | isBoxStruct boxName, Just a <- listCell boxFs -> do
+                    c <- cell a
+                    case cellObject c of
+                        OMem slots size | Just (VS actual fs) <- Map.lookup 0 slots -> do
+                            (taken, fs') <- takeFrom actual fs
+                            setObject a (OMem (Map.insert 0 (VS actual fs') slots) size)
+                            return taken
+                        _ -> failM "a field of a Box of the library that holds nothing"
                 VS actual fs -> do
                     (taken, fs') <- takeFrom actual fs
                     putSlot l (Slot (VS actual fs') Nothing)
@@ -523,7 +572,9 @@ execStatement stmt = do
             v <- evalRvalue rv
             -- (a local that only looks remembers how what it looks at was)
             looks <- mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf v)
-            putSlot d (Slot v (if null looks then Nothing else Just looks))
+            -- (and owns nothing, even when what it looks at holds nothing of the heap, as a value read where it is at an address;
+            -- a value taken apart is cleared, and holds nothing)
+            putSlot d (Slot v (if v == VNull then Nothing else Just looks))
         Assign d rv -> do
             v <- evalRvalue rv
             f <- currentFrame

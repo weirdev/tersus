@@ -293,8 +293,9 @@ rvalueProblems env localTy d rv =
         _ -> False
     -- a value of the type with this name, or of one of its variants
     isValueOf typeName o = case operandType env localTy o of
-        -- (a Box is looked into)
+        -- (a Box is looked into, and so is the struct a Box is made of in native code, lib/box.tersus)
         Just (TBox t) -> sub env (TNamed typeName) t
+        Just t@(TNamed n) | Just ("StdBox", [ArgType held]) <- instanceOf n -> sub env (TNamed typeName) t || sub env (TNamed typeName) held
         Just t -> sub env (TNamed typeName) t
         Nothing -> False
 

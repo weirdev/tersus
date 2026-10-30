@@ -21,7 +21,12 @@ import TersusTypes (Arg (..), Name, Type (..), instanceName, instanceOf, mention
 -- `stdListPush` for each element. A comparison of lists stays as it is: native code compares a `StdList` as a list (the elements in use,
 -- not the room that is left), and prints it as one.
 
--- Whether the program has a list anywhere
+-- A Box is lowered the same way (step 29): a `Box<T>` whose T is not an array is the struct `StdBox<T>` of lib/box.tersus, one filled slot at
+-- an address that its drop frees, and `Box::new(x)` and `Box::unbox(b)` are calls of `stdBoxNew` and `stdBoxUnbox`. A field read, a test of a
+-- variant or a cast through a Box stays one through the `StdBox`, which native code reads at its address as it read a Box (the address is
+-- the struct's only word), so a `match` still takes the fields out of a Box that is not used again. A Box of an array stays the language's.
+
+-- Whether the program has a list or a Box (of what is not an array) anywhere
 hasLists :: Program -> Bool
 hasLists program =
     any mentionsList (programTypes program)
@@ -30,7 +35,7 @@ hasLists program =
     mentionsList ty = case ty of
         TList _ -> True
         TArrayOf t _ -> mentionsList t
-        TBox t -> mentionsList t
+        TBox t -> not (isArrayType t) || mentionsList t
         TAddr t -> mentionsList t
         TUninit t -> mentionsList t
         TRef t -> mentionsList t
@@ -82,7 +87,8 @@ operandsOf rv = case rv of
     Clone o -> [o]
     TakeField{} -> []
 
--- The program with lists made of the library's structs and functions. The first program is the library (lib/lists.tersus compiled).
+-- The program with lists and Boxes made of the library's structs and functions. The first program is the library (lib/lists.tersus and
+-- lib/box.tersus compiled).
 lowerLists :: Program -> Program -> Program
 lowerLists library program
     | not (hasLists program) = program
@@ -106,11 +112,12 @@ lowerLists library program
         StructDecl fields -> StructDecl [(f, listType t) | (f, t) <- fields]
         EnumDecl variants -> EnumDecl [(v, [(f, listType t) | (f, t) <- fields]) | (v, fields) <- variants]
 
--- The type that a list is: the struct of the library, with the type of the elements
+-- The type that a list or a Box is: the struct of the library, with the type of the elements
 listType :: Type -> Type
 listType ty = case ty of
     TList t -> TNamed (instanceName "StdList" [ArgType (listType t)])
     TArrayOf t size -> TArrayOf (listType t) size
+    TBox t | not (isArrayType t) -> TNamed (boxStruct t)
     TBox t -> TBox (listType t)
     TAddr t -> TAddr (listType t)
     TUninit t -> TUninit (listType t)
@@ -118,6 +125,15 @@ listType ty = case ty of
     TFn args ret -> TFn (map listType args) (listType ret)
     TNamed n -> TNamed (renameName n)
     _ -> ty
+
+-- The name of the struct that a Box of the type is
+boxStruct :: Type -> Name
+boxStruct t = instanceName "StdBox" [ArgType (listType t)]
+
+isArrayType :: Type -> Bool
+isArrayType t = case t of
+    TArrayOf{} -> True
+    _ -> False
 
 -- The name of a struct made with types that are lists
 renameName :: Name -> Name
@@ -235,6 +251,22 @@ lowerFunction original fn =
 
     lowerAssign dest rv = do
         destTy <- fromMaybe TInt <$> localTypeOf dest
+        boxed <- case rv of
+            Unbox o -> heldIn o
+            _ -> return Nothing
+        case (rv, boxed) of
+            (MakeBox o, _) | TBox held <- destTy, not (isArrayType held) -> operandFor held o >>= \o' -> callTo "stdBoxNew" [o'] dest
+            (Unbox o, Just _) -> callTo "stdBoxUnbox" [renameOperand o] dest
+            _ -> lowerOther dest destTy rv
+
+    -- (the type a Box that is not of an array holds, if the operand is one)
+    heldIn o = do
+        ty <- operandType o
+        return $ case ty of
+            Just (TBox held) | not (isArrayType held) -> Just held
+            _ -> Nothing
+
+    lowerOther dest destTy rv =
         case rv of
             ListOp op os@(first : _) -> do
                 isList <- listOperand first

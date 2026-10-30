@@ -20,7 +20,7 @@ import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
-import PreludeSource (listsSource, preludeSource, stringSource)
+import PreludeSource (boxSource, listsSource, preludeSource, stringSource)
 import Pretty (renderVarProof)
 import TersusTypes (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
@@ -56,7 +56,7 @@ parseSourceWith reserving source = case libraries source of
     readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
         Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
         Right (stmts, declared') -> fmap (\(rest, final) -> (stmts ++ rest, final)) (readLibraries more declared')
-    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
+    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, and a Box of the struct StdBox and the functions stdBox... of lib/box.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
 
 -- A name the program declares that native code uses for lists (see MirLists)
 reservedName :: [Statement] -> Maybe String
@@ -71,7 +71,7 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         TraitDef name _ _ -> [name]
         BoundedDef _ (Assign name _) -> [name]
         _ -> []
-    reserved name = name == "StdList" || take 7 name == "stdList"
+    reserved name = name `elem` ["StdList", "StdBox"] || take 7 name == "stdList" || take 6 name == "stdBox"
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
 -- unchanged: lib/prelude.tersus (the traits `Sequence` and `Growable`) if it mentions either, and lib/string.tersus (the struct `String` that a string
@@ -161,16 +161,16 @@ llvmSource source =
         let owned = insertOwnership (nativeProgram program)
          in stage "Native code failed: " (verifyProgram owned `bindResult` \_ -> emitOwned owned)
 
--- The program that native code is made of: a validated program with each list made of the library's struct (see MirLists), and each
+-- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists), and each
 -- Uninit<T> a T (it is laid out as one: an empty one is the words of a T cleared, which own nothing)
 nativeProgram :: M.Program -> M.Program
 nativeProgram = lowerLists listLibrary . withoutUninit
 
--- The library, compiled and validated once
+-- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once
 listLibrary :: M.Program
-listLibrary = case compileWith False listsSource of
+listLibrary = case compileWith False (listsSource ++ "\n" ++ boxSource) of
     Ok program -> program
-    Error e -> error ("lib/lists.tersus does not compile: " ++ e)
+    Error e -> error ("lib/lists.tersus and lib/box.tersus do not compile: " ++ e)
 
 -- Checks and validates a program given as statements
 validateStatements :: [Statement] -> Result Validated String
