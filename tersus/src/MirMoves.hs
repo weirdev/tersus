@@ -143,6 +143,8 @@ data Cx = Cx
     , cxLent :: Set Local
     , cxLinear :: Set Name
     , cxDrops :: Set Name
+    , -- the value that a drop is given (`self` of `<T as Drop>::drop`): lent, except for the permissions it holds, which the drop uses
+      cxDropSelf :: Maybe Local
     }
 
 typeOf :: Cx -> Local -> Type
@@ -164,7 +166,7 @@ checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx st 
         (Just owner, self : _) | " as Drop>::drop" `isSuffixOf'` fnName fn -> Just (owner, self)
         _ -> Nothing
     lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
-    cx = Cx program copies fn lent linear drops
+    cx = Cx program copies fn lent linear drops (snd <$> dropOf)
     -- (a permission given to the function, and not lent, is the function's to use)
     entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)])}
     isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
@@ -270,19 +272,21 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs)
             [message cx pos ("the permission " ++ named q ++ " is moved out of a value of " ++ n ++ ", which has a drop that would free the memory again: take the value apart, as in " ++ n ++ " { ... } = " ++ describeLocal cx root ++ ";, which uses it up")]
         | SSlot `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of the memory of a permission or an Uninit, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it, or take it out with Addr::take or Uninit::take")]
         | SElem `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of a list, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it")]
-        | root `Set.member` cxLent cx, not (permissionPlace q) = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
+        | root `Set.member` cxLent cx, permissionPlace q, not (dropsPermission q) = [message cx pos (named q ++ " is a permission in a value that is lent (&T) to this function, which can lend it to an operation (Addr::get) but not use it up")]
+        | root `Set.member` cxLent cx, not (dropsPermission q) = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
         | otherwise = []
     named q = maybe (describe cx q) (\v -> v ++ " (" ++ describe cx q ++ ")") (localSource cx l)
-    -- (a permission in the value that a drop is given is the drop's to use)
     permissionPlace q = case placeType cx q of
         Just (TBlock _) -> True
         _ -> False
+    -- (a permission in the value that a drop is given is the drop's to use, once; one in any other value that is lent is not)
+    dropsPermission q@(root, _) = permissionPlace q && Just root == cxDropSelf cx
     dropTypeOf root = case typeOf cx root of
         TNamed n | maybe n fst (instanceOf n) `Set.member` cxDrops cx -> Just (maybe n fst (instanceOf n))
         _ -> Nothing
     st'
         | taking =
-            let moved = [q | q@(root, ps) <- places, SElem `notElem` ps, SSlot `notElem` ps, root `Set.notMember` cxLent cx]
+            let moved = [q | q@(root, ps) <- places, SElem `notElem` ps, SSlot `notElem` ps, root `Set.notMember` cxLent cx || dropsPermission q]
                 -- (a local that is a view of a permission on one path and has one of its own on another uses whichever it has)
                 used = moved ++ [q | q@(root, _) <- places, root `Set.member` cxLent cx] ++ [(r, ps ++ steps) | Just may <- [Map.lookup l (stMay st)], (r, ps) <- Set.toList may]
              in st{stMoved = foldl' (\m q -> Map.insert q (pos, localSource cx l) m) (stMoved st) moved, stHeld = Map.filterWithKey (\h _ -> not (any (overlaps h) used)) (stHeld st)}
