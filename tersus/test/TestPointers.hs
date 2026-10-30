@@ -117,6 +117,20 @@ testPointers =
             , testCase "it is an assumption" (testAssertEq (runSource Assumptions "extern fn labs(x: Int) -> Int [{ }] [{ }];\nreturn labs(1);") (Ok "line 1:1: extern fn labs"))
             ]
         , TestList
+            "drops"
+            [ testCase "a value with a drop is dropped where it goes out of scope" (runs (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") "7")
+            , testCase "a type that holds a permission and has a drop is not linear" (valid (dropper ++ "fn f() -> Int { v = V::new(2); return 1; }; return f();"))
+            , testCase "a type that holds a permission and has no drop is linear" (rejected (owner ++ "v = V::new(3); return v.n;") "that is not used")
+            , testCase "a value is taken apart without its drop" (runs (dropper ++ "v = V::new(3); V { addr: a, n: k, blk: b } = v; return Addr::free(a, b) + k;") "3")
+            , testCase "what a value taken apart holds is used" (rejected (dropper ++ "v = V::new(3); V { addr: a, n: k, blk: b } = v; return k;") "b is a permission")
+            , testCase "a value with a drop in a struct, an enum, a list and a box" (runs (dropper ++ "struct W { v: V, k: Int }; enum E { A { v: V }, B { k: Int } }; w = W { v: V::new(2), k: 5 }; e = E::A { v: V::new(2) }; l = push(push([], V::new(1)), V::new(2)); b = Box::new(V::new(3)); return w.k + size(l);") "7")
+            , testCase "a generic drop" (runs "struct G<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 0; }]; impl<T> Drop for G<T> { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; }; impl<T> G<T> { fn new() -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, blk: b }; }; }; fn one(x: G<Int>) -> Int { return 1; }; fn other(y: G<Bool>) -> Int { return 1; }; return one(G::new()) + other(G::new());" "2")
+            , testCase "a permission moved out of a value with a drop" (rejected (dropper ++ "v = V::new(3); b = v.blk; return Addr::free(v.addr, b);") "which has a drop that would free the memory again")
+            , testCase "a drop is not called by the program" (rejected (dropper ++ "v = V::new(3); return v.drop();") "is a drop, which is called where a value goes out of scope")
+            , testCase "a drop of the wrong type" (rejected (owner ++ "impl Drop for V { fn drop(self: Self) -> Bool { return true; }; }; return 0;") "but Drop declares fn(V) -> Int")
+            , testCase "a value with a drop is not copied" (rejected (dropper ++ "impl Clone for V { }; return 0;") "V has a drop")
+            ]
+        , TestList
             "assumptions"
             [ testCase "assume gives a fact" (valid "fn f(x: Int) -> Int [{ }] [{ affirm return > 0; }] { assume x > 0; return x; }; return f(1);")
             , testCase "the assumptions of a program are listed" (testAssertEq (assumptionsOf "assume 1 > 0;\nfn f(n: Int) -> Int { assume n = n; return n; };\n(p, b) = Addr::alloc(1);\nc = Block::assume(p, 0);\naxiom twice(x) [{ }] [{ affirm x + x = 2 * x; }];\nd = Addr::free(p, b);\nreturn d;") (Ok ["line 1:1: assume 1 > 0", "line 2:23: assume n = n", "line 4:1: Block::assume(p, 0)", "line 5:1: axiom twice(x)"]))
@@ -133,6 +147,9 @@ testPointers =
         Error e
             | expected `isInfixOf` e -> Nothing
             | otherwise -> Just ("Expected an error with " ++ show expected ++ ", got: " ++ e)
+    -- (a struct that holds a permission, which is linear unless it has a drop)
+    owner = "struct V { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl V { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; };"
+    dropper = owner ++ "impl Drop for V { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
     handle = "linear struct Handle { fd: Int }; impl Handle { fn open(n: Int) -> Self { return Self { fd: n }; }; fn close(self: Self) -> Int { return self.fd; }; };"
     memory =
         unlines

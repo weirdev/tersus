@@ -336,6 +336,29 @@ return h.close();   // without the close: `h is a value of a linear type given a
 - **It is never copied**: `impl Clone` and `impl Copy` for a linear type are errors, and it cannot be in a list, an array, a Box, a function value, or the type given to a type parameter (any of them could drop it without using it).
 - **It is an ordinary value otherwise**: held, moved and freed by native code as a struct is. A function that may not end (`~`) is not excused from using one.
 
+## Drops
+
+`impl Drop for T { fn drop(self: Self) -> Int { ... }; };` gives a struct or an enum a drop: a function that native code runs where a value of `T` goes out of scope (at the end of its block, when its local is given another value, or with the struct, enum, list or box that holds it), before what its fields own is freed. It is how a type that holds a permission frees its memory without a call the program writes, and a type with a drop is not linear even when it holds a permission.
+
+```tersus
+impl<T> Drop for Vec<T> {
+    fn drop(self: Self) -> Int {
+        return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
+    };
+};
+
+fn total() -> Int {
+    v = Vec::new();
+    v = v.push(1);
+    return v.len;    // v is dropped here: its slots are emptied and its memory freed
+};
+```
+
+- **The drop is given the value** and has to use what it holds that is linear (its permission), as any function does; the validator checks it as a function with the invariant of `T` on `self`. It is not called by the program (`<V as Drop>::drop is a drop, which is called where a value goes out of scope`), and a generic drop (`impl<T> Drop for Vec<T>`) is made for each instance.
+- **A value is taken apart** by `T { f: x, ... } = v;`, which gives each field to a local and uses `v` up without its drop. A function that makes a new value from the memory of an old one (`push` of a `Vec` that is moved to a bigger allocation) takes the old one apart, so its drop does not free what the new one holds. A field that is a permission cannot be moved out of a value with a drop by reading it (`the permission b (v.blk) is moved out of a value of V, which has a drop that would free the memory again`), except in its own drop.
+- **It is never copied**: `impl Clone` or `impl Copy` for a type with a drop is an error, since the copy would free the memory again.
+- **Natively** the descriptor of the type has the address of the drop, and `tersus_drop` calls it with the value unless the value's bytes are all 0 (it was moved out, or taken apart). `eval` does not run drops: the heap of `MirEval` does not check for leaks.
+
 ## Uninit
 
 `Uninit<T>` is room for one `T` that may hold nothing, laid out as a `T` with no tag: the empty slots of a buffer that needs no addresses.

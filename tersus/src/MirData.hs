@@ -109,6 +109,7 @@ typeTokens ty = case ty of
     TArrayOf t s -> "array" : typeTokens t ++ sizeTokens s
     TBox t -> "box" : typeTokens t
     TAddr t -> "addr" : typeTokens t
+    TUninit t -> "uninit" : typeTokens t
     TBlock t -> "block" : typeTokens t
     TFn args ret -> ["fn", show (length args)] ++ concatMap typeTokens (args ++ [ret])
     TNamed n -> ["named", quote n]

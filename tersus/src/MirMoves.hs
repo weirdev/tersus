@@ -111,13 +111,16 @@ sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a 
 -- The parts of a value of the type that are permissions or values of a linear type, as the steps to each from the value: the value itself
 -- for a Block or a linear struct or enum, the fields that are (or hold) one for any other struct. An enum that holds one in a variant is taken
 -- as a whole.
-linearParts :: Set Name -> Program -> Type -> [[Step]]
-linearParts linear program = go (0 :: Int)
+-- A struct or an enum with a drop is not linear: its drop is its use, wherever it goes out of scope.
+linearParts :: Set Name -> Set Name -> Program -> Type -> [[Step]]
+linearParts linear drops program = go (0 :: Int)
   where
     go depth ty
         | depth > 8 = []
         | otherwise = case ty of
             TBlock _ -> [[]]
+            TNamed n | maybe n fst (instanceOf n) `Set.member` drops -> []
+            TVariant v | Just n <- ownerOf program v, maybe n fst (instanceOf n) `Set.member` drops -> []
             -- (an Uninit of a value that owns something is linear: what it holds is freed only by taking it out)
             TUninit t | ownsHeap program t -> [[]]
             TNamed n | maybe n fst (instanceOf n) `Set.member` linear -> [[]]
@@ -139,6 +142,7 @@ data Cx = Cx
     , cxFn :: Function
     , cxLent :: Set Local
     , cxLinear :: Set Name
+    , cxDrops :: Set Name
     }
 
 typeOf :: Cx -> Local -> Type
@@ -148,15 +152,22 @@ isCopy :: Cx -> Local -> Bool
 isCopy cx = isCopyType (cxCopies cx) (cxProgram cx) . typeOf cx
 
 -- The errors of a program: none if it never uses a value that was moved
-checkMoves :: Set Name -> Set Name -> Program -> [String]
-checkMoves copies linear program = concatMap (checkFunction copies linear program) (Map.elems (progFunctions program) ++ [progMain program])
+checkMoves :: Set Name -> Set Name -> Set Name -> Program -> [String]
+checkMoves copies linear drops program = concatMap (checkFunction copies linear drops program) (Map.elems (progFunctions program) ++ [progMain program])
 
-checkFunction :: Set Name -> Set Name -> Program -> Function -> [String]
-checkFunction copies linear program fn = nub (concat [snd (runBlock cx st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
+checkFunction :: Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
+checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
   where
-    cx = Cx program copies fn (Set.fromList (fnBorrowed fn)) linear
+    -- (the drop of a type, `<T as Drop>::drop`, is given the value to free: it only reads what native code frees after it (its fields), and
+    -- it has to use the permissions the value holds, which nothing else will)
+    dropOf = case (implOwner (fnName fn), fnParams fn) of
+        (Just owner, self : _) | " as Drop>::drop" `isSuffixOf'` fnName fn -> Just (owner, self)
+        _ -> Nothing
+    lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
+    cx = Cx program copies fn lent linear drops
     -- (a permission given to the function, and not lent, is the function's to use)
-    entry = emptySt{stHeld = Map.fromList [((p, steps), Nothing) | p <- fnParams fn, p `notElem` fnBorrowed fn, steps <- linearParts linear program (typeOf cx p)]}
+    entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)])}
+    isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
     ins = fixpoint (Map.singleton (BlockId 0) entry)
     fixpoint known =
         let outs = [(b, fst (runBlock cx st block)) | (b, st) <- Map.toList known, Just block <- [Map.lookup b (fnBlocks fn)]]
@@ -212,7 +223,7 @@ assign cx pos st0 d rv = (hold cx pos (define cx st1 d view) d view, errs ++ los
     ty = typeOf cx d
     -- (a part of a tuple that is taken apart, `(a, b) = e`, is taken out of it: the name has it, and not a view of the hidden tuple)
     tuplePart = case rv of
-        ReadField o _ _ | Just l <- operandLocal o -> maybe False ("$tuple " `isPrefixOf`) (localNameOf cx l)
+        ReadField o _ _ | Just l <- operandLocal o -> maybe False (\n -> "$tuple " `isPrefixOf` n || "$struct " `isPrefixOf` n) (localNameOf cx l)
         _ -> False
     -- (the list that a `for` loop goes through and the value that a `match` takes apart are read where they are)
     forLoopList = maybe False (\name -> "$list " `isPrefixOf` name || name == "$match") (localNameOf cx d)
@@ -255,16 +266,25 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs)
         | not taking = []
         | otherwise = concatMap moveError (places ++ [(r, ps ++ steps) | Just may <- [Map.lookup l (stMay st)], (r, ps) <- Set.toList may, (r, ps ++ steps) `notElem` places])
     moveError q@(root, ps)
+        | permissionPlace q, root `Set.notMember` cxLent cx, Just n <- dropTypeOf root, maybe True (not . ("$struct " `isPrefixOf`)) (localNameOf cx root) =
+            [message cx pos ("the permission " ++ named q ++ " is moved out of a value of " ++ n ++ ", which has a drop that would free the memory again: take the value apart, as in " ++ n ++ " { ... } = " ++ describeLocal cx root ++ ";, which uses it up")]
         | SSlot `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of the memory of a permission or an Uninit, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it, or take it out with Addr::take or Uninit::take")]
         | SElem `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of a list, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it")]
-        | root `Set.member` cxLent cx = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
+        | root `Set.member` cxLent cx, not (permissionPlace q) = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
         | otherwise = []
     named q = maybe (describe cx q) (\v -> v ++ " (" ++ describe cx q ++ ")") (localSource cx l)
+    -- (a permission in the value that a drop is given is the drop's to use)
+    permissionPlace q = case placeType cx q of
+        Just (TBlock _) -> True
+        _ -> False
+    dropTypeOf root = case typeOf cx root of
+        TNamed n | maybe n fst (instanceOf n) `Set.member` cxDrops cx -> Just (maybe n fst (instanceOf n))
+        _ -> Nothing
     st'
         | taking =
             let moved = [q | q@(root, ps) <- places, SElem `notElem` ps, SSlot `notElem` ps, root `Set.notMember` cxLent cx]
                 -- (a local that is a view of a permission on one path and has one of its own on another uses whichever it has)
-                used = moved ++ [(r, ps ++ steps) | Just may <- [Map.lookup l (stMay st)], (r, ps) <- Set.toList may]
+                used = moved ++ [q | q@(root, _) <- places, root `Set.member` cxLent cx] ++ [(r, ps ++ steps) | Just may <- [Map.lookup l (stMay st)], (r, ps) <- Set.toList may]
              in st{stMoved = foldl' (\m q -> Map.insert q (pos, localSource cx l) m) (stMoved st) moved, stHeld = Map.filterWithKey (\h _ -> not (any (overlaps h) used)) (stHeld st)}
         | otherwise = st
     at p = maybe "" (\(line, column) -> " at line " ++ show line ++ ":" ++ show column) p
@@ -272,7 +292,7 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs)
 -- A local that gets a value that is or holds a permission, of its own (not a view of one), holds it
 hold :: Cx -> Pos -> St -> Local -> [Place] -> St
 hold cx pos st d view
-    | null view = st{stHeld = foldl' (\m steps -> Map.insert (d, steps) pos m) (Map.filterWithKey (\(root, _) _ -> root /= d) (stHeld st)) (linearParts (cxLinear cx) (cxProgram cx) (typeOf cx d))}
+    | null view = st{stHeld = foldl' (\m steps -> Map.insert (d, steps) pos m) (Map.filterWithKey (\(root, _) _ -> root /= d) (stHeld st)) (linearParts (cxLinear cx) (cxDrops cx) (cxProgram cx) (typeOf cx d))}
     | otherwise = st{stHeld = Map.filterWithKey (\(root, _) _ -> root /= d) (stHeld st)}
 
 -- The permissions a local still holds when it is given another value, which are lost

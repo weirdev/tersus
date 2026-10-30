@@ -97,6 +97,8 @@ eraseFunction program fn =
             _ -> [Assign (Local 0) (Use (Const (CInt 0)))]
         Assign d _ | ghost d -> []
         Assign d rv -> [Assign d (eraseRvalue rv)]
+        -- (a value taken apart is used up: its bytes are cleared, which native code takes for a value that was moved out, so its drop does not run)
+        Ghost _ (GhostDissolve l) | not (ghost l) -> [Peek l (ListOp UninitEmpty [])]
         Ghost env g -> [Ghost (scrub env) g]
         _ -> [stmt]
     eraseRvalue rv = case rv of
