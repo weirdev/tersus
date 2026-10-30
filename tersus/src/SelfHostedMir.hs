@@ -514,7 +514,7 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
             let M.BlockId yesId = yes
                 M.BlockId noId = no
                 ending = record "ExecutionEnd::BooleanBranch"
-                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
+                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (-1)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
             Just ([required], ending, b3)
         (Nothing, M.Call (M.Const (M.CFn name)) args dest target) | allowCalls -> do
             callee <- Map.lookup name functions
