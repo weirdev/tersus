@@ -10,7 +10,7 @@ import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
 import TypeCheck (functionType, maxArraySlots)
-import TersusTypes (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, instanceOf, pattern TArray, substSizes)
+import TersusTypes (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, instanceOf, pattern TArray, substSizes, wordRange)
 import Utils (Result (..))
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and function
@@ -160,7 +160,8 @@ rvalueProblems env localTy d rv =
         ListOp StoreByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt
         ListOp FileStore [] -> result TInt
         ListOp ToByte [x] -> ints [x] ++ result TByte
-        ListOp FromByte [b] -> [expected TByte b | not (fits' TByte b)] ++ result TInt
+        ListOp FromByte [b] -> [expected TByte b | not (fits' TByte b || any (\t -> fits' t b) [TWord s n | s <- [True, False], n <- [8, 16, 32]])] ++ result TInt
+        ListOp (Narrow signed bits) [x] -> ints [x] ++ result (TWord signed bits)
         ListOp NewEmptyBoxed [] -> case d of
             TBox (TArrayOf _ SizeAny) -> []
             _ -> ["Array::empty needs a result that is a Box of an array of any size"]
@@ -321,7 +322,7 @@ constantFits :: Env -> Type -> Constant -> Bool
 constantFits env (TRef wanted) c = constantFits env wanted c
 constantFits _ TParam{} _ = True
 constantFits env wanted c = case c of
-    CInt n -> wanted == TInt || (wanted == TByte && n >= 0 && n < 256)
+    CInt n -> wanted == TInt || (wanted == TByte && n >= 0 && n < 256) || (case wanted of TWord s b -> n >= fst (wordRange s b) && n < snd (wordRange s b); _ -> False)
     CBool _ -> wanted == TBool
     CList cs -> case wanted of
         TList e -> all (constantFits env e) cs

@@ -170,6 +170,7 @@ builtinName UninitDiscard = "Uninit::discard"
 builtinName UninitFilled = "filled"
 builtinName UninitAt = "at"
 builtinName Replace = "replace"
+builtinName (ToWord signed bits) = wordName signed bits ++ "::from"
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
@@ -191,6 +192,7 @@ renderType :: Type -> String
 renderType TInt = "Int"
 renderType TByte = "Byte"
 renderType TBool = "Bool"
+renderType (TWord signed bits) = wordName signed bits
 renderType (TList t) = "List<" ++ renderType t ++ ">"
 renderType (TBox t) = "Box<" ++ renderType t ++ ">"
 renderType (TAddr t) = "Addr<" ++ renderType t ++ ">"

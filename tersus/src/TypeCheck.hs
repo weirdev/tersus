@@ -225,6 +225,7 @@ unify a b = do
         (TInt, TInt) -> return True
         (TByte, TByte) -> return True
         (TBool, TBool) -> return True
+        (TWord s n, TWord t m) -> return (s == t && n == m)
         (TNamed x, TNamed y)
             | x == y -> return True
             -- two instances of one struct with sizes are the same type if their sizes are
@@ -274,6 +275,12 @@ coerce wanted (actual, expr) = do
         (TBox (TArrayOf x SizeAny), TBox (TArrayOf y size)) | size /= SizeAny -> do
             same <- unify x y
             return (if same then (w, F (Val (builtinFunct Unsize)) [expr]) else (actual, expr))
+        -- an integer written out where a fixed-width integer is wanted is that integer, if it is in its range
+        (TWord signed bits, TInt) | Val (VInt n) <- expr ->
+            let (low, high) = wordRange signed bits
+             in if n >= low && n < high
+                    then return (w, F (Val (builtinFunct (ToWord signed bits))) [expr])
+                    else failTc ("Type error: " ++ show n ++ " is not a " ++ wordName signed bits ++ ": a " ++ wordName signed bits ++ " is from " ++ show low ++ " to " ++ show (high - 1))
         -- an integer written out where a Byte is wanted is that Byte, if it is from 0 to 255 (`writeByte(104)`)
         (TByte, TInt) | Val (VInt n) <- expr ->
             if n >= 0 && n < 256
@@ -666,6 +673,7 @@ builtinType funct =
         FileStore -> return (TFn [] TInt)
         ToByte -> return (TFn [TInt] TByte)
         FromByte -> return (TFn [TByte] TInt)
+        ToWord signed bits -> return (TFn [TInt] (TWord signed bits))
         BytesFrom -> return (TFn [TList TInt] (TList TByte))
         Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
         Plus -> arith
@@ -782,6 +790,12 @@ checkBuiltinCall (Just b) name ft (first : rest)
     isLookingAt (Cast _) = True
     isLookingAt (Project _ _) = True
     isLookingAt _ = False
+-- (toInt widens a Byte or a fixed-width integer)
+checkBuiltinCall (Just FromByte) name ft [a] = do
+    t <- zonk a
+    case t of
+        TWord _ _ -> return TInt
+        _ -> checkCall name ft [a]
 checkBuiltinCall _ name ft ats = checkCall name ft ats
 
 -- Arrays: held inline, so their size is a constant of the type
@@ -1780,6 +1794,11 @@ pointerBuiltin name =
         , ("Uninit::take", UninitTake)
         , ("Uninit::discard", UninitDiscard)
         , ("replace", Replace)
+        , ("I8::from", ToWord True 8)
+        , ("I16::from", ToWord True 16)
+        , ("I32::from", ToWord True 32)
+        , ("U16::from", ToWord False 16)
+        , ("U32::from", ToWord False 32)
         ]
 
 -- What a proof can say of a permission, and the operations on addresses a proof can use (they need no permission)
@@ -1961,6 +1980,7 @@ implementsMarker trait = go (0 :: Int) False
                 TInt -> return True
                 TByte -> return True
                 TBool -> return True
+                TWord _ _ -> return True
                 TFn{} -> return True
                 TVar _ -> return True
                 TRef t -> go (depth + 1) lenient t

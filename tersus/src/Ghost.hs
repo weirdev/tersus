@@ -218,6 +218,7 @@ rvalueCall rv =
         M.UninitGet -> UninitGet
         M.UninitTake -> UninitTake
         M.UninitDiscard -> UninitDiscard
+        M.Narrow signed bits -> ToWord signed bits
 
 -- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
 wrapperInfo :: PState -> Name -> Maybe FnInfo

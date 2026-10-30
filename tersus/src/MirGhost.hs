@@ -113,21 +113,21 @@ eraseFunction program fn =
         Const _ -> False
     scrub = Map.filter (not . ghostOperand)
 
--- `Block::cast(b)` gives the permission to the same memory as slots of another type, which have to take as much room as those of the
--- first. The validator does not see types, so it is checked here, where every type is known.
+-- `Block::cast(b)` gives the permission to the same memory as slots of another type, which have to take as many bytes as those of the
+-- first, and be aligned no more strictly. The validator does not see types, so it is checked here, where every type is known.
 checkCasts :: Program -> Result () String
 checkCasts program = case concatMap castsOf (progMain program : Map.elems (progFunctions program)) of
     [] -> Ok ()
     problem : _ -> Error ("Validation failed: " ++ problem)
   where
     castsOf fn =
-        [ "in " ++ fnName fn ++ ": Block::cast from " ++ renderType from ++ " to " ++ renderType to ++ ", whose slots are not the same size (" ++ show (slotsOf program from) ++ " and " ++ show (slotsOf program to) ++ " words)"
+        [ "in " ++ fnName fn ++ ": Block::cast from " ++ renderType from ++ " to " ++ renderType to ++ ", whose slots are not the same size, or are aligned more strictly (" ++ show (layoutOf program from) ++ " and " ++ show (layoutOf program to) ++ ", as bytes and alignment)"
         | BasicBlock stmts _ <- Map.elems (fnBlocks fn)
         , Assign d (ListOp BlockCast [o]) <- stmts
         , Just (TBlock to) <- [localType <$> Map.lookup d (fnLocals fn)]
         , Just source <- [operandLocalOf o]
         , Just (TBlock from) <- [localType <$> Map.lookup source (fnLocals fn)]
-        , slotsOf program from /= slotsOf program to
+        , sizeOf program from /= sizeOf program to || alignOf program to > alignOf program from
         ]
     operandLocalOf o = case o of
         Copy l -> Just l

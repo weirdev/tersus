@@ -433,7 +433,7 @@ structStatement = do
     invariant <- option [] (keyword "invariant" >> whitespace >> functContractReqs <* whitespace)
     modifyState (\d -> d{declTypeParams = outerParams})
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
-    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self", "Addr", "Block", "Uninit"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
+    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self", "Addr", "Block", "Uninit", "I8", "I16", "I32", "I64", "U8", "U16", "U32"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
     return (StructDef name params fields invariant)
   where
@@ -891,6 +891,7 @@ typeAnnotation = do
             "Int" -> return TInt
             "Byte" -> return TByte
             "Bool" -> return TBool
+            _ | Just t <- wordType name -> return t
             "List" -> TList <$> typeArgument
             "Box" -> TBox <$> typeArgument
             "Addr" -> TAddr <$> typeArgument

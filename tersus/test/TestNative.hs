@@ -56,7 +56,42 @@ testNative =
         , TestList "build" [testBuildKeepsFiles, testEveryExampleIsBuilt, testRunExecutable]
         , TestList "memory" memoryTests
         , TestList "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
+        , TestList "layout" [TestCase name (sameAsMir name source) | (name, source) <- layoutPrograms]
+        , TestList "layout and C" [TestCase name (nativeOnly i name source expected) | (i, (name, source, expected)) <- zip [1 :: Int ..] cPrograms]
         ]
+
+-- Values laid out as C lays them out (Mir.layoutOf): narrow numbers stored and loaded, structs and enums with their fields at aligned offsets, printed and
+-- compared by their descriptors, as the executor of the MIR has them
+layoutPrograms :: [(String, String)]
+layoutPrograms =
+    [ ("a struct of fixed-width fields", "struct H { kind: U16, flags: Byte, length: I32, ok: Bool, small: I8 }; return H { kind: 60000, flags: 255, length: -5, ok: true, small: -128 };")
+    , ("compared", "struct H { kind: U16, length: I32 }; a = H { kind: 1, length: -2 }; b = H { kind: 1, length: -2 }; return a = b;")
+    , ("in a list", "l = push(push(push([], I32::from(-7)), I32::from(2000000000)), I32::from(0)); return toInt(get(l, 0)) + toInt(get(l, 1));")
+    , ("in an array", "a = array(3, U16::from(65535)); a = set(a, 1, U16::from(7)); return a;")
+    , ("Bools in a list and an array", "l = push(push([], true), false); a = #[true, false, true]; if get(a, 2) && !get(l, 1) { return size(l) + size(a); }; return 0;")
+    , ("an enum with narrow fields", "enum E { A { x: Byte }, B { y: I16, z: Int } }; e = E::B { y: -300, z: 9 }; return e;")
+    , ("in memory", "(p, b) = Addr::alloc(3); b = Addr::write(p, 0, I32::from(-1), b); b = Addr::write(p, 2, I32::from(5), b); x = Addr::get(p, 0, b); b = Addr::dropValue(p, 0, b); y = Addr::get(p, 2, b); b = Addr::dropValue(p, 2, b); return toInt(x) * 10 + toInt(y) + Addr::free(p, b);")
+    , ("a Box of a narrow value", "b = Box::new(I8::from(-3)); return toInt(Box::unbox(b));")
+    ]
+
+-- Programs that only native code runs (they call C), with what they print
+cPrograms :: [(String, String, String)]
+cPrograms =
+    [ ("a struct takes the bytes of the same struct of C", "struct H { kind: U16, flags: Byte, length: I32 }; (p, b) = Addr::alloc(2); b = Addr::write(p, 0, H { kind: 1, flags: 2, length: 3 }, b); n = Addr::toInt(Addr::offset(p, 1)) - Addr::toInt(p); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return n;", "8\n")
+    , ("an enum is a U32 tag and its widest variant", "enum E { A { x: Byte }, B { y: Int } }; (p, b) = Addr::alloc(1); b = Addr::write(p, 0, E::B { y: 3 }, b); n = Addr::toInt(Addr::offset(p, 1)) - Addr::toInt(p); b = Addr::dropValue(p, 0, b); d = Addr::free(p, b); return n;", "16\n")
+    , ("C reads the bytes of memory the program wrote", "extern fn strlen(p: Addr<Byte>) -> Int [{ }] [{ affirm return >= 0; }]; (p, b) = Addr::alloc(3); b = Addr::write(p, 0, toByte(104), b); b = Addr::write(p, 1, toByte(105), b); b = Addr::write(p, 2, toByte(0), b); n = strlen(p); b = Addr::dropRange(p, 0, 3, b); return n + Addr::free(p, b);", "2\n")
+    , ("memory that C allocated", "extern fn malloc(bytes: Int) -> Addr<Int> [{ affirm bytes > 0; }] [{ }]; extern fn free(p: Addr<Int>, ghost b: Block<Int>) -> Int [{ affirm count(b) = 0; }] [{ }]; p = malloc(16); b = Block::assume(p, 2); b = Addr::write(p, 1, 42, b); (x, b) = Addr::take(p, 1, b); d = free(p, b); return x;", "42\n")
+    ]
+
+-- Builds the program with the memory checks of the runtime and runs it: it has to print what is expected
+nativeOnly :: Int -> String -> String -> String -> IO TestResult
+nativeOnly i name source expected = do
+    available <- clangAvailable
+    if not available
+        then pure Nothing
+        else case llvmSource source of
+            Error e -> pure (Just e)
+            Ok ir -> buildAndRun "" [] ("c_program_" ++ show i) name ir (ExitSuccess, expected, "")
 
 -- Every example that validates
 nativeExamples :: [FilePath]
@@ -91,10 +126,10 @@ testNativeIr =
             withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.StdList<Int>\" = private constant" `isInfixOf` ir && "call ptr @tersus_box_new" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
         , TestCase "a struct is held in the frame, as its fields, with a descriptor" . pure $
             withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir && not ("tersus_data_new" `isInfixOf` ir)))
-        , TestCase "an enum value is a tag and the widest of its variants, in the frame" . pure $
-            withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i64 1, ptr" `isInfixOf` ir && "icmp eq i64" `isInfixOf` ir))
+        , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" . pure $
+            withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
         , TestCase "a Box takes room on the heap for what it holds" . pure $
-            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call ptr @tersus_box_new(i64 2)" `isInfixOf` ir))
+            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call ptr @tersus_box_new(i64 16)" `isInfixOf` ir))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" . pure $
             withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[3 x i8] c\"\\C3\\A9\\00\"" `isInfixOf` ir))
         , TestCase "a letter of four bytes" . pure $

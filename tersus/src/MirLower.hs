@@ -725,6 +725,7 @@ builtinRvalue b tys ops =
         (FileStore, []) -> return (M.ListOp M.FileStore [])
         (ToByte, [_]) -> return (M.ListOp M.ToByte ops)
         (FromByte, [_]) -> return (M.ListOp M.FromByte ops)
+        (ToWord signed bits, [_]) -> return (M.ListOp (M.Narrow signed bits) ops)
         -- (the list of the literal, as a list of Bytes: the numbers are the same)
         (BytesFrom, [M.Const (M.CList items)])
             | all (\i -> case i of M.CInt n -> n >= 0 && n < 256; _ -> False) items -> return (M.Use (M.Const (M.CList items)))
