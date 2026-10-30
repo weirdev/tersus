@@ -2,7 +2,7 @@
 
 > **Provisional.** This is a plan, not a decision, and it was revised once already: the first draft assumed implicit copies, and explicit `Clone`/`Copy` and the `MirMoves` check were built before any of it. Expect more changes when the drops are started (the flag word, the moment a drop runs and the `eval` change are open, see Decisions). Where the text says "now", it means the code as of the explicit-copies change.
 
-This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the two emitters (`LlvmEmit` and `examples/emit.tersus`, which must write the same IR), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built, except what came first and changed the plan: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`), statements carry their line (`Mark`, `GhostPosition`), and `MirMoves` finds a use of a moved value, see LANGUAGE.md, Moves, Clone And Copy.
+This is the design for steps 25 to 27 of the roadmap in `README.md`, written against the code as it is: `MirOwnership` (who owns what), `LlvmRuntime` (`tersus_drop` walks a type descriptor), the emitter (`examples/emit.tersus`), `MirEval` (which ignores `Drop`), and a validator that treats values as immutable. Nothing here is built, except what came first and changed the plan: copies are explicit (`clone`, `impl Clone for T { };`, `impl Copy for T { };`), statements carry their line (`Mark`, `GhostPosition`), and `MirMoves` finds a use of a moved value, see LANGUAGE.md, Moves, Clone And Copy.
 
 ## Where things stand
 

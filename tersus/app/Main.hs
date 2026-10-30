@@ -16,16 +16,16 @@ main = do
     useUtf8
     -- (the arguments are the bytes they were given as, whatever the locale is: they are the arguments of the program too)
     setFileSystemEncoding char8
-    (haskellEmitter, args) <- splitEmitterFlag <$> getArgs
+    args <- getArgs
     case parseProgramArguments args of
         Nothing -> hPutStr stderr usage >> exitWith (ExitFailure 2)
         Just (command, file, programArgs) -> do
             source <- readSource file
             -- (a program that is read from the standard input has none left to read)
             input <- if command == Interpret && file /= "-" then readInputBytes else return ""
-            -- (the IR is written by the emitter in Tersus, unless the flag asks for the one in Haskell)
+            -- (the IR is written by the emitter in Tersus)
             result <-
-                if not haskellEmitter && makesIr command
+                if makesIr command
                     then mapResult (\ir -> ((ir, ""), [])) <$> tersusLlvm source
                     else pure (runSourceFiles (World input programArgs readWorldFile) command source)
             case result of

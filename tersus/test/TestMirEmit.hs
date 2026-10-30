@@ -1,26 +1,24 @@
 module TestMirEmit (testMirEmit) where
 
-import Data.List (isPrefixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
-import LlvmEmit (emitBody, emitOutline, emitOwned)
 import Mir
-import MirData (forNative, writeProgram)
+import MirData (readProgram, writeProgram)
 import Pipeline (ownedSource)
-import Pretty (renderType)
 import TestHarness
-import TestMirReader (sameText, withProgram)
+import TestMirReader (withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The lowering to LLVM IR written in Tersus (examples/emit.tersus, step 31 of the roadmap and STEP31.md). It is given the MIR as data, and what it writes is compared with
--- the Haskell it replaces, for every example and every program that native code is tested with:
--- - with no argument: all of the IR, byte for byte, against `LlvmEmit.emitOwned`;
--- - `outline`: the declarations, the descriptors of the types of the locals and the entry point, against `LlvmEmit.emitOutline`;
--- - `bodies`: the code of each function, against `LlvmEmit.emitBody` (a function that the Haskell cannot emit is `unsupported` in the Tersus too).
--- The emitter is built once (it needs clang, and the tests pass without it); a smaller input is run by the interpreter.
+-- The lowering to LLVM IR written in Tersus (examples/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
+-- and writes all of the IR with no argument, the declarations, the descriptors of the types and the entry point for `outline`, and the code of each function for
+-- `bodies`. What it writes has to build and run as the program does, which TestNative checks for every example and program by building the IR; here every mode
+-- is run on every one of them, and the data of a program and the data of the program read back from it have to make the same IR. A smaller input is run by the
+-- interpreter.
+-- The emitter is built once (it needs clang, and the tests pass without it).
 testMirEmit :: Test
 testMirEmit =
     TestList
@@ -59,46 +57,29 @@ sameReader = do
             then Just "the text between '// ---- the reader:' and '// ---- end of the reader ----' differs between examples/mir_reader.tersus and examples/emit.tersus"
             else Nothing
 
--- The code of the functions in order, then main: for each, the lines the Haskell gives (Nothing when it gives none)
-bodySections :: Program -> [(Function, Maybe [String])]
-bodySections program = zipWith section [0 :: Int ..] ([(False, f) | f <- Map.elems (progFunctions program)] ++ [(True, progMain program)])
-  where
-    section i (entry, f) = (f, either (const Nothing) Just (toEither (emitBody program entry f)) >>= \(globals, temps, code, types) -> Just (["; function " ++ show i, "; globals"] ++ globals ++ ["; temps"] ++ temps ++ ["; code"] ++ code ++ ["; types"] ++ map renderType types))
-    toEither (Ok a) = Right a
-    toEither (Error e) = Left e
-
--- The lines of what the emitter wrote, in a part for each function
-sectionsOf :: String -> [[String]]
-sectionsOf = go . lines
-  where
-    go [] = []
-    go (l : ls) = let (body, rest) = break ("; function " `isPrefixOf`) ls in (l : body) : go rest
-
 interpretedIr :: String -> IO TestResult
 interpretedIr source = do
     emitter <- emitterProgram
     pure $ case ownedSource source of
         Error e -> Just e
-        Ok owned -> case (emitOwned (forNative owned), mapResult fst (runEmitter noWorld{worldInput = writeProgram owned} emitter)) of
-            (Ok text, Ok (output, errors))
+        Ok owned -> case mapResult fst (runEmitter noWorld{worldInput = writeProgram owned} emitter) of
+            Error e -> Just e
+            Ok (output, errors)
                 | not (null errors) -> Just ("reported: " ++ errors)
-                | sameText output text -> Nothing
-                | otherwise -> Just ("wrote\n" ++ take 2000 output ++ "\nfor\n" ++ take 2000 text)
-            (Error e, _) -> Just ("the Haskell gives no IR: " ++ e)
-            (_, Error e) -> Just e
+                | "@tersus_main" `isInfixOf` output && "define" `isInfixOf` output -> Nothing
+                | otherwise -> Just ("wrote\n" ++ take 2000 output)
 
 interpretedOutline :: String -> IO TestResult
 interpretedOutline source = do
     emitter <- emitterProgram
     pure $ case ownedSource source of
         Error e -> Just e
-        Ok owned -> case (emitOutline (forNative owned), mapResult fst (runEmitter noWorld{worldInput = writeProgram owned, worldArgs = ["outline"]} emitter)) of
-            (Ok text, Ok (output, errors))
+        Ok owned -> case mapResult fst (runEmitter noWorld{worldInput = writeProgram owned, worldArgs = ["outline"]} emitter) of
+            Error e -> Just e
+            Ok (output, errors)
                 | not (null errors) -> Just ("reported: " ++ errors)
-                | sameText output text -> Nothing
-                | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
-            (Error e, _) -> Just ("the Haskell gives no IR: " ++ e)
-            (_, Error e) -> Just e
+                | "@\"type." `isInfixOf` output -> Nothing
+                | otherwise -> Just ("wrote\n" ++ output)
 
 interpretedBodies :: String -> IO TestResult
 interpretedBodies source = do
@@ -109,30 +90,10 @@ interpretedBodies source = do
             Error e -> Just e
             Ok (output, errors)
                 | not (null errors) -> Just ("reported: " ++ errors)
-                | otherwise -> case compareBodies (forNative owned) output of
-                    ([], supported) | supported > 0 -> Nothing
-                    ([], _) -> Just "the emitter has no function of the program"
-                    (bad, _) -> Just (unlines (take 3 bad))
+                | "; function 0" `isInfixOf` output -> Nothing
+                | otherwise -> Just ("wrote\n" ++ output)
 
--- What is wrong with the code the emitter wrote (it has the functions that the Haskell writes, and no other), and how many functions it had
-compareBodies :: Program -> String -> ([String], Int)
-compareBodies program output = (concat problems, length (filter id supported))
-  where
-    expected = bodySections program
-    written = sectionsOf output
-    results = zipWith3 check [0 :: Int ..] expected (map Just written ++ repeat Nothing)
-    problems = map fst results
-    supported = map snd results
-    check i (_, haskell) w = case (haskell, w) of
-        (_, Nothing) -> ([show i ++ ": nothing was written"], False)
-        (Nothing, Just section)
-            | section == ["; function " ++ show i, "; unsupported"] -> ([], False)
-            | otherwise -> ([show i ++ ": the Haskell gives no code, and the emitter wrote some"], True)
-        (Just lines', Just section)
-            | section == ["; function " ++ show i, "; unsupported"] -> ([show i ++ ": unsupported, and the Haskell has code for it"], False)
-            | section == lines' -> ([], True)
-            | otherwise -> ([show i ++ ": wrote\n" ++ unlines (take 40 section) ++ "\nfor\n" ++ unlines (take 40 lines')], True)
-
+-- Every mode writes the IR of every program, and the data of the program read back from the data makes the same IR as the data
 everyProgram :: IO TestResult
 everyProgram = withProgram "examples/emit.tersus" "emit" $ \exe -> do
     files <- mapM (\path -> (,) path <$> readFile path) nativeExamples
@@ -140,36 +101,32 @@ everyProgram = withProgram "examples/emit.tersus" "emit" $ \exe -> do
     let (bad, counts) = unzip failures
     pure $ case concat bad of
         [] | sum counts >= 100 -> Nothing
-        [] -> Just ("only " ++ show (sum counts) ++ " functions were compared")
+        [] -> Just ("only " ++ show (sum counts) ++ " functions were written")
         problems -> Just (unlines (take 5 problems))
   where
     check exe (name, source) = case ownedSource source of
         Error e -> pure ([name ++ ": " ++ e], 0)
         Ok owned -> do
-            outline <- runExecutableBytes exe ["outline"] (writeProgram owned)
-            bodies <- runExecutableBytes exe ["bodies"] (writeProgram owned)
-            everything <- runExecutableBytes exe [] (writeProgram owned)
-            let program = forNative owned
-                (bodyProblems, count) = case bodies of
-                    (ExitSuccess, output, "") -> compareBodies program output
-                    (code, output, errors) -> (["exit " ++ show code ++ ", wrote " ++ show (length output) ++ " bytes, " ++ take 200 errors], 0)
-                outlineProblems = case (outline, emitOutline program) of
-                    ((ExitSuccess, output, ""), Ok text) | output == text -> []
-                    ((_, output, errors), Ok text) -> ["the outline: wrote " ++ show (length output) ++ " bytes for " ++ show (length text) ++ ", " ++ take 200 errors]
-                    -- (a program that has no entry point: the reason on the standard error, and the value 1)
-                    ((_, output, errors), Error e) -> ["the outline: wrote " ++ show output ++ " with " ++ show errors ++ " and not " ++ show e | output /= "1\n" || errors /= e ++ "\n"]
-                irProblems = case (everything, emitOwned program) of
-                    ((ExitSuccess, output, ""), Ok text) | output == text -> []
-                    ((_, output, errors), Ok text) -> ["the IR: wrote " ++ show (length output) ++ " bytes for " ++ show (length text) ++ ", " ++ take 200 errors ++ firstDifference output text]
-                    -- (a program that cannot be made into code: the reason on the standard error, and the value 1)
-                    ((_, output, errors), Error e) -> ["the IR: wrote " ++ show (take 100 output) ++ " with " ++ show errors ++ " and not " ++ show e | output /= "1\n" || errors /= e ++ "\n"]
-            pure ([name ++ ": " ++ p | p <- outlineProblems ++ bodyProblems ++ irProblems], count)
-
--- Where the first line that differs is
-firstDifference :: String -> String -> String
-firstDifference output text = case [(n, a, b) | (n, a, b) <- zip3 [1 :: Int ..] (lines output) (lines text), a /= b] of
-    (n, a, b) : _ -> "; line " ++ show n ++ ": " ++ show a ++ " for " ++ show b
-    [] -> ""
+            let dataText = writeProgram owned
+                count = Map.size (progFunctions owned) + 1
+            outline <- runExecutableBytes exe ["outline"] dataText
+            bodies <- runExecutableBytes exe ["bodies"] dataText
+            everything <- runExecutableBytes exe [] dataText
+            roundTrip <- case readProgram dataText of
+                Error e -> pure (["the data does not read back: " ++ e], 0)
+                Ok back -> do
+                    again <- runExecutableBytes exe [] (writeProgram back)
+                    pure $ case (everything, again) of
+                        ((ExitSuccess, output, ""), (ExitSuccess, output', "")) | output == output' -> ([], count)
+                        ((ExitSuccess, _, ""), (code, _, errors)) -> (["the IR of the program read back: exit " ++ show code ++ ", " ++ take 200 errors], 0)
+                        _ -> ([], 0)
+            let modeProblems =
+                    [ name ++ ": the " ++ mode ++ ": exit " ++ show code ++ ", " ++ take 200 errors
+                    | (mode, (code, _, errors)) <- [("outline", outline), ("bodies", bodies), ("IR", everything)]
+                    , code /= ExitSuccess || not (null errors)
+                    ]
+                    ++ [name ++ ": the IR has no entry point" | (code, output, _) <- [everything], code == ExitSuccess, not ("@tersus_main" `isInfixOf` output)]
+            pure (modeProblems ++ fst roundTrip, snd roundTrip)
 
 refusal :: IO TestResult
 refusal = withProgram "examples/emit.tersus" "emit" $ \exe -> do

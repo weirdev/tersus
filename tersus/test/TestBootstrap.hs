@@ -6,16 +6,15 @@ import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, finally, mask, throwIO, try)
 import Control.Monad (forM)
 import Data.Char (isHexDigit)
-import Data.List (sort)
+import Data.List (isInfixOf, sort)
 import System.Directory (copyFile, createDirectoryIfMissing, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, doesDirectoryExist)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 
 import Bootstrap
-import Cli (Command (..), makesIr, splitEmitterFlag)
+import Cli (Command (..), makesIr)
 import MirData (writeProgram)
-import LlvmEmit (emitOwned)
-import Pipeline (llvmSource, ownedSource)
+import Pipeline (ownedSource)
 import PreludeSource (emitterSource)
 import TestHarness
 import TestNative (clangAvailable, nativeExamples, validatedPrograms)
@@ -25,17 +24,15 @@ import Utils
 -- kept in the repository (bootstrap/emitter.ll):
 -- - stage 0 is the seed built;
 -- - stage 1 is the emitter as it is now, made from the IR that stage 0 writes for it.
--- The fixpoint is that stage 1 writes the same IR for the emitter as stage 0 does (so that the emitter built by stage 1 would be stage 1 again), and that both write what
--- the Haskell emitter (LlvmEmit) writes for the emitter; stage 1 is the one that compiles programs, and writes for every example and every program what the Haskell
--- writes. The flag that has the command line use the emitter in Haskell, and the cache that both stages are kept in, are tested too. Stage 0 writes the same IR as the
--- Haskell for every program, which `TestMirEmit` checks of the emitter as it is now, so here it is only asked for the emitter's own. The stages need clang, and the
--- tests pass without it.
+-- The fixpoint is that stage 1 writes the same IR for the emitter as stage 0 does (so that the emitter built by stage 1 would be stage 1 again); stage 1 is the one
+-- that compiles programs, and it has to write the IR of every example and every program that native code is tested with (what that IR does when it is built and run
+-- is TestNative's to check). The cache that both stages are kept in is tested too. The stages need clang, and the tests pass without it.
 testBootstrap :: Test
 testBootstrap =
     TestList
         "testBootstrap"
         [ TestCase "the hashes of what the emitter is made of" hashShape
-        , TestCase "the flag of the emitter in Haskell" flag
+        , TestCase "the commands that make IR" commands
         , TestCase "the seed, stage 0 and stage 1 are a fixpoint, and the cache keeps them" bootstrap
         ]
 
@@ -46,14 +43,11 @@ hashShape =
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, emitterHash))
 
-flag :: IO TestResult
-flag =
+commands :: IO TestResult
+commands =
     pure $
         firstFailure
-            [ testAssertEq (splitEmitterFlag ["--haskell-emitter", "build", "a.tersus", "-o", "a"]) (True, ["build", "a.tersus", "-o", "a"])
-            , testAssertEq (splitEmitterFlag ["run", "a.tersus", "--haskell-emitter"]) (False, ["run", "a.tersus", "--haskell-emitter"])
-            , testAssertEq (splitEmitterFlag ["--tersus-emitter", "llvm", "a.tersus"]) (False, ["--tersus-emitter", "llvm", "a.tersus"])
-            , testAssertEq (map makesIr [Llvm, Run, Build "a"]) [True, True, True]
+            [ testAssertEq (map makesIr [Llvm, Run, Build "a"]) [True, True, True]
             , testAssertEq (map makesIr [Check, Interpret, Mir, MirText, Owned]) [False, False, False, False, False]
             ]
 
@@ -72,7 +66,7 @@ withDirectory name use = do
     createDirectoryIfMissing True dir
     use dir `finally` removeDirectoryRecursive dir
 
--- Every program that native code is tested with, as the MIR as data and the IR that LlvmEmit writes
+-- Every program that native code is tested with
 programs :: IO [(String, String)]
 programs = do
     files <- forM nativeExamples (\path -> (,) path <$> readFile path)
@@ -95,26 +89,35 @@ bootstrap = do
                         Error e -> pure (Just ("stage 1: " ++ e))
                         Ok () -> do
                             all' <- programs
-                            -- (stage 0 gives what the Haskell gives for the emitter, and stage 1 for every program)
-                            atZero <- check [("stage 0", zero)] ("the emitter", emitterSource)
-                            atOne <- parallelFor (("the emitter", emitterSource) : all') (check [("stage 1", one)])
+                            fixpoint <- sameEmitter zero one
+                            written <- parallelFor all' (writesIr one)
                             kept <- cache zero one
-                            pure $ case atZero ++ concat atOne of
+                            pure $ case fixpoint ++ concat written of
                                 [] -> kept
                                 found -> Just (unlines (take 5 found))
   where
-    -- (the IR that llvmSource gives is that of emitOwned over the owned MIR)
-    check stages (name, source) = case ownedSource source of
+    -- Stage 0 and stage 1 write the same IR for the emitter, so the emitter built by stage 1 would be stage 1 again
+    sameEmitter zero one = case ownedSource emitterSource of
+        Error e -> pure ["the emitter: " ++ e]
+        Ok owned -> do
+            fromZero <- emitWith zero (writeProgram owned)
+            fromOne <- emitWith one (writeProgram owned)
+            pure [ "the emitter: stage 1 " ++ describe fromOne fromZero | not (sameIr fromOne fromZero) ]
+      where
+        sameIr (Ok a) (Ok b) = a == b
+        sameIr _ _ = False
+        describe (Ok text) (Ok expected) = "wrote " ++ show (length text) ++ " bytes for " ++ show (length expected) ++ firstDifference text expected
+        describe (Error e) _ = "failed: " ++ take 300 e
+        describe _ (Error e) = "stage 0 failed: " ++ take 300 e
+    -- Stage 1 writes the IR of a program
+    writesIr exe (name, source) = case ownedSource source of
         Error e -> pure [name ++ ": " ++ e]
-        Ok owned -> case emitOwned owned of
-            Error e -> pure [name ++ ": " ++ e]
-            Ok expected -> do
-                results <- forM stages (\(stage, exe) -> (,) stage <$> emitWith exe (writeProgram owned))
-                pure [name ++ ": " ++ stage ++ " " ++ describe r expected | (stage, r) <- results, not (sameIr r expected)]
-    sameIr (Ok text) expected = text == expected
-    sameIr (Error _) _ = False
-    describe (Ok text) expected = "wrote " ++ show (length text) ++ " bytes for " ++ show (length expected) ++ firstDifference text expected
-    describe (Error e) _ = "failed: " ++ take 300 e
+        Ok owned -> do
+            written <- emitWith exe (writeProgram owned)
+            pure $ case written of
+                Ok text | "@tersus_main" `isInfixOf` text -> []
+                Ok _ -> [name ++ ": the IR has no entry point"]
+                Error e -> [name ++ ": " ++ take 300 e]
 
 -- The results of an action over each of a list, with as many at once as there are cores (the programs are independent, and what takes the time is the front end
 -- and the emitter, which use one core each)
@@ -149,11 +152,14 @@ cache zero one = withDirectory "tersus-cache-test" $ \home -> do
         before <- mapM getModificationTime kept
         let source = "x = 6 * 7; return x;"
         ir <- tersusLlvm source
+        expected <- case ownedSource source of
+            Error e -> pure (Error e)
+            Ok owned -> emitWith one (writeProgram owned)
         after <- mapM getModificationTime kept
         entries <- listDirectory (home </> "tersus")
-        pure $ case (ir, llvmSource source) of
-            (Ok text, Ok expected)
-                | text /= expected -> Just "the IR is not what the Haskell writes"
+        pure $ case (ir, expected) of
+            (Ok text, Ok fromStage1)
+                | text /= fromStage1 -> Just "the IR is not what stage 1 writes"
                 | before /= after || sort entries /= sort names -> Just ("the cache was written to: " ++ show entries)
                 | otherwise -> Nothing
             (Error e, _) -> Just e

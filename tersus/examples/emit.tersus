@@ -1,11 +1,11 @@
-// The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): LlvmEmit.hs, function by function, with the Haskell emitter as the
+// The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
 // oracle. It reads the MIR as data from the standard input (what `tersus mir --data` prints) and writes the LLVM IR.
 //
 //     tersus mir --data examples/hello.tersus | tersus run examples/emit.tersus
 //
-// With no argument it writes all of the IR of the program, the same text as `LlvmEmit.emitOwned` (TestMirEmit compares them, byte for byte, for every example and every
-// program of the native tests). The argument `outline` writes the declarations, the descriptors of the types of the locals and the entry point (`LlvmEmit.emitOutline`),
-// and `bodies` the code of each function (`LlvmEmit.emitBody`): the parts it was written in.
+// With no argument it writes all of the IR of the program (TestMirEmit runs every mode of it on every example and every
+// program of the native tests, and TestNative builds and runs the IR). The argument `outline` writes the declarations, the descriptors of the types of the locals and the entry point,
+// and `bodies` the code of each function: the parts it was written in.
 //
 // A program is one file, so the reader of examples/mir_reader.tersus (its types, tokenizer and parsers) is repeated here, between the same two lines in both
 // (TestMirEmit checks that the text is the same). The rest is written as the Haskell is, in the same order and with the same names, so that the two can be read side
@@ -1742,7 +1742,7 @@ fn printLines(lines: &List<String>) -> Int [{ }] [{ }] {
 // time to emit a function grow with the square of its size. An error is the first message in `error`: what comes after it is not looked at.
 //
 // Everything the Haskell emits is here: words, values held inline (arrays, structs and enums), Boxes, clones and drops, the calls and returns of each, and the function
-// around its blocks. `bodies` shows the blocks of each function (LlvmEmit.emitBody), `ir` is all of LlvmEmit.emitOwned.
+// around its blocks. `bodies` shows the blocks of each function, `ir` is all of the IR.
 
 struct Gen { count: Int, lines: List<String>, types: List<Type>, globals: List<String>, temps: List<String>, error: String, last: String, owner: String };
 
@@ -2207,7 +2207,7 @@ fn fieldOffset(cx: &Ctx, c: &Ctor, i: Int) -> Int ~ {
     return start + offset;
 };
 
-// The LLVM type a number of the type is stored as (LlvmEmit.memoryType)
+// The LLVM type a number of the type is stored as
 fn memoryType(t: &Type) -> String [{ }] [{ }] {
     if t is Type::TByte || t is Type::TBool { return "i8"; };
     if t is Type::TWord { return "i".then(showInt((t as Type::TWord).bits)); };
@@ -2699,7 +2699,7 @@ fn slotAddress(g: Gen, cx: &Ctx, f: &Function, p: &Operand, i: &Operand) -> Gen 
     return ins(clone(g1), "p", "inttoptr i64 ".then(n).then(" to ptr"));
 };
 
-// The operations on addresses (POINTERS.md, LlvmEmit.addressOp), whose permissions are erased: an address is an i64, the memory of an allocation is slots of the bytes of a
+// The operations on addresses (POINTERS.md), whose permissions are erased: an address is an i64, the memory of an allocation is slots of the bytes of a
 // value of the type one after another, and a value is in a slot as it is in an element of an array. The runtime allocates, resizes and frees.
 fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &List<Operand>) -> Gen ~ {
     n = size(args);
@@ -3412,7 +3412,7 @@ fn emitBlock(g: Gen, cx: &Ctx, entry: Bool, f: &Function, b: &MirBlock) -> Gen ~
     return emitTerminator(g1, cx, entry, f, b.term);
 };
 
-// The lines of the blocks of a function (LlvmEmit.emitBody)
+// The lines of the blocks of a function
 fn emitBody(cx: &Ctx, entry: Bool, f: &Function) -> Gen ~ {
     g = newGen(f.name);
     for b in f.blocks { g = emitBlock(g, cx, entry, f, b); };
@@ -3450,7 +3450,7 @@ fn lentInline(f: &Function, l: Int) -> Bool ~ {
     return lt.ok && isAggregate(lt.ty);
 };
 
-// The declaration of a C function (LlvmEmit.externDeclaration): its parameters and its result are words
+// The declaration of a C function: its parameters and its result are words
 fn externDeclaration(f: &Function) -> FnOut ~ {
     ptexts = noStrings();
     for p in f.params {
@@ -3569,7 +3569,7 @@ fn emitFunction(cx: &Ctx, entry: Bool, symbol: &String, f: &Function) -> FnOut ~
     return FnOut { ok: true, error: "", lines: lines, types: newest };
 };
 
-// What `LlvmEmit.emitBody` gives, as lines: the globals the code needs, the rooms for the values it builds, the code, and the types whose descriptors it asks for (the
+// What the code of a function gives, as lines: the globals the code needs, the rooms for the values it builds, the code, and the types whose descriptors it asks for (the
 // newest first)
 fn bodyLines(index: Int, g: &Gen) -> List<String> ~ {
     out = noStrings();
@@ -3614,7 +3614,7 @@ fn bodies(program: &Program) -> List<String> ~ {
     return out;
 };
 
-// The whole IR of the program (LlvmEmit.emitOwned): the declarations, the descriptors of the types that the code asks for and the types inside them, the functions in order,
+// The whole IR of the program: the declarations, the descriptors of the types that the code asks for and the types inside them, the functions in order,
 // main, and the entry point
 fn ir(program: &Program) -> Entry ~ {
     cx = contextOf(program);
@@ -3647,7 +3647,7 @@ fn ir(program: &Program) -> Entry ~ {
     return Entry { ok: true, error: "", lines: lines, types: closed };
 };
 
-// The IR so far: the declarations, the descriptors of the types of the locals and what they contain, and the entry point (LlvmEmit.emitOutline)
+// The IR so far: the declarations, the descriptors of the types of the locals and what they contain, and the entry point
 fn outline(program: &Program) -> Entry ~ {
     entry = entryPoint(program.types, functionNames(program), program.entry);
     if !entry.ok { return entry; };
@@ -3665,8 +3665,8 @@ fn outline(program: &Program) -> Entry ~ {
     return Entry { ok: true, error: "", lines: lines, types: closed };
 };
 
-// The program is read from the standard input and its IR is written. The first argument says what: `ir` (or none) is all of it (LlvmEmit.emitOwned), `outline` the
-// declarations, the descriptors and the entry point (LlvmEmit.emitOutline), and `bodies` the code of each function (LlvmEmit.emitBody). What cannot be read or made is
+// The program is read from the standard input and its IR is written. The first argument says what: `ir` (or none) is all of it, `outline` the
+// declarations, the descriptors and the entry point, and `bodies` the code of each function. What cannot be read or made is
 // reported on the standard error.
 mode = String::arg(0, 100);
 read = readLines();

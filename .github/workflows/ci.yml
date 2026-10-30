@@ -70,12 +70,9 @@ jobs:
       - name: Check an example through the CLI
         run: stack run tersus-exe -- run examples/frame_facts.tersus
 
-      # The command line itself (the tests call its parts): the emitter in Tersus, which is the default, and the one in Haskell write the same IR
-      - name: Check that both emitters write the same IR through the CLI
-        run: |
-          stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
-          stack run tersus-exe -- --haskell-emitter llvm examples/loops.tersus > "$RUNNER_TEMP/haskell.ll"
-          cmp "$RUNNER_TEMP/tersus.ll" "$RUNNER_TEMP/haskell.ll"
+      # The command line itself (the tests call its parts): the emitter in Tersus writes the IR
+      - name: Check the emitter in Tersus through the CLI
+        run: stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
 
   python:
     name: Python prototype tests

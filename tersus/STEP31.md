@@ -138,10 +138,14 @@ Each slice is a PR, and nothing changes the default `build` until slice 8 adds a
      fixpoint test does, and the seed is made again with `tersus llvm examples/emit.tersus > bootstrap/emitter.ll` (from a build that works).
    - **Two programs are in the cache**, `seed-<hash>` and `emitter-<hash>`: the hash of the first is of the seed and the runtime, and that of the second adds the emitter and
      the library every program has. The first `build`, `run` or `llvm` takes about a minute and a half (two builds); the next ones are as fast as before.
-   - **`TestBootstrap`** is the fixpoint again: stage 0 and stage 1 write for the emitter the IR that `LlvmEmit` writes (so they are the same as each other, and the emitter
-     built from either is the same program), and stage 1 writes for every example and native-test program what `LlvmEmit` does. It checks the cache keeps both.
-   - `llvm` needs clang now (to build the emitter once); `--haskell-emitter llvm` does not. The tests use `LlvmEmit` through `llvmSource` as before: it is the oracle, and
-     deleting it is a step of its own (the tests that compile programs to compare them with the interpreter would go through the emitter in Tersus, which is slower).
+   - **`TestBootstrap`** is the fixpoint again: stage 0 and stage 1 write the same IR for the emitter (so the emitter built from either is the same program), and stage 1
+     writes the IR of every example and native-test program. It checks the cache keeps both.
+   - `llvm` needs clang now (to build the emitter once). Since `LlvmEmit` was deleted (slice 10), the tests go through the emitter in Tersus: `TestNative` builds and
+     runs its IR against the executor, which is slower than the Haskell oracle was.
+10. **The Tersus emitter is the only emitter.** Done: `LlvmEmit.hs` and the `--haskell-emitter` flag are deleted. The tests stand without the oracle: `TestNative`
+    builds and runs the IR of the emitter in Tersus against the MIR executor, `TestMirEmit` runs every mode of it on every example and native-test program and checks
+    that the data of a program and of the program read back from it make the same IR, and `TestBootstrap` checks the stage 0/stage 1 fixpoint. The seed
+    `bootstrap/emitter.ll` is unchanged: it still compiles the emitter as it is now.
 
 Slices 5 to 7 are the bulk of the work. Slice 1 is the one that may change the plan.
 
@@ -149,7 +153,7 @@ Slices 5 to 7 are the bulk of the work. Slice 1 is the one that may change the p
 
 1. **Port style**: a faithful, byte-identical port (same evaluation order and temp numbering), so that the Haskell emitter is
    the oracle. Tidying comes after.
-2. **`LlvmEmit.hs` is kept** as the oracle of the tests (and `--haskell-emitter`). The Tersus emitter is the default since slice 9, with a checked-in seed
-   (`bootstrap/emitter.ll`); deleting `LlvmEmit` waits for the tests to stand without it.
+2. **`LlvmEmit.hs` was kept** as the oracle of the tests (and `--haskell-emitter`) while the Tersus emitter became the default in slice 9, with a checked-in seed
+   (`bootstrap/emitter.ll`). It is deleted in slice 10: the tests now stand on the emitter in Tersus, and the seed alone builds it.
 3. **Where the Tersus emitter lives at run time**: built lazily on first use from the seed and cached under a hash of what it is made of, so that
    `stack build` still does not need clang.

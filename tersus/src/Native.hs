@@ -13,7 +13,7 @@ import System.Process (readProcessWithExitCode, rawSystem)
 import LlvmRuntime (runtimeSource)
 import Utils
 
--- Compiles LLVM IR (see LlvmEmit) and the runtime to an executable with clang. The two sources are written to files with
+-- Compiles LLVM IR (written by the emitter in Tersus, see Bootstrap) and the runtime to an executable with clang. The two sources are written to files with
 -- names no other program has, in the temporary directory, and only those files are removed afterwards.
 buildExecutable :: FilePath -> String -> IO (Result () String)
 buildExecutable = buildExecutableWith []

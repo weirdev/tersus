@@ -7,10 +7,11 @@ import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO.Unsafe (unsafePerformIO)
 
+import Bootstrap (tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runSourceIn)
 import MirData (writeProgram)
 import Native (buildExecutable)
-import Pipeline (llvmSource, ownedSource)
+import Pipeline (ownedSource)
 import TestHarness
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
@@ -73,9 +74,10 @@ withProgram path name use = do
                         let dir = tmp </> ("tersus-" ++ name ++ "-test")
                             exe = dir </> name
                         createDirectoryIfMissing True dir
-                        result <- case llvmSource source of
+                        ir <- tersusLlvm source
+                        result <- case ir of
                             Error e -> pure (Error e)
-                            Ok ir -> buildExecutable exe ir
+                            Ok text -> buildExecutable exe text
                         case result of
                             -- (a build that failed is not remembered: the case that asked for it reports why)
                             Error e -> pure (built, Left e)
