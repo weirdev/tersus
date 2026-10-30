@@ -304,9 +304,9 @@ return x + y + Addr::free(p, b);    // free gives 0
 | `Addr::free(p, b)` | `whole(b)`, `count(b) = 0` | `0`; the memory is given back |
 | `Block::split(b, i)` | `0 <= i <= cap(b)` | `(lo, hi)`: slots `0..i` and `i..cap(b)` (at `Addr::offset(base(b), i)`), of the same allocation |
 | `Block::join(lo, hi)` | the same origin, `start(hi) = start(lo) + cap(lo)` | one block of both |
-| `Block::cast(b)` | `count(b) = 0`, slots of the same size, aligned no more strictly | the permission to the same memory as slots of another type |
+| `Block::cast(b)` | `count(b) = 0`, slots of the same size (a list is three words, as native code holds it), aligned no more strictly, and no type parameter or size parameter in either type | the permission to the same memory as slots of another type |
 
-`Addr::null()`, `Addr::offset(p, i)` (`i` slots further on), `Addr::cast(p)`, `Addr::toInt(p)` and `Addr::fromInt(n)` need no permission: an address alone can do no harm. Every operation that gives a permission back says the rest of what it knows: the same base, size, origin and start, and the other slots as they were.
+`Addr::null()`, `Addr::offset(p, i)` (`i` slots further on), `Addr::cast(p)`, `Addr::toInt(p)` and `Addr::fromInt(n)` need no permission: an address alone can do no harm. The validator knows `Addr::cast(p)` only as the term `cast(p)`, not as `p`: an offset counts slots of the address's own type, so an offset of a cast address is not the same address as an offset of `p`, and casting back gives `cast(cast(p))`. The base of a block from `Block::cast(b)` is `cast(base(b))`, so the cast of the block's address is what its operations take. Every operation that gives a permission back says the rest of what it knows: the same base, size, origin and start, and the other slots as they were.
 
 What this proves, for a program that uses no assumption: every access is in bounds, no slot is read before it is written or written over, nothing is used after it is freed or freed twice, the address given is the one the permission is for, and no value is lost when memory is freed (`free` needs every slot empty, since natively nothing records which are filled, so it cannot drop them).
 

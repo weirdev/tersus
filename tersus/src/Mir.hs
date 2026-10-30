@@ -336,6 +336,8 @@ layoutOf program = go (0 :: Int)
             TVariant v -> maybe (8, 8) (declared depth) (ownerOf program v)
             TUninit t -> go (depth + 1) t
             TBlock _ -> (0, 1)
+            -- (a list is laid out as the StdList that native code makes of it, MirLists: an address, a length and a capacity)
+            TList _ -> (24, 8)
             _ -> (8, 8)
     declared depth n = case Map.lookup n (progTypes program) of
         Just (StructDecl fields) -> structLayout (map (go (depth + 1) . snd) fields)

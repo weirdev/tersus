@@ -310,7 +310,9 @@ builtinFunct Mod =
 -- Addresses (POINTERS.md). The address of an offset is the term offset(p, i), so the base of the upper part of a split block is that term too.
 builtinFunct AddrNull = VFunct [] [] [] (BuiltinFunct AddrNull) []
 builtinFunct AddrOffset = VFunct ["p", "i"] [] [] (BuiltinFunct AddrOffset) []
-builtinFunct AddrCast = VFunct ["p"] [] [] (BuiltinFunct AddrCast) [relProof Eq (ATerm "return") (ATerm "p")]
+-- The cast of an address is the term cast(p), and not p: offset(p, i) is i slots of the type of p further on, so offsets of an address and of
+-- its cast are not the same address unless the types have the same size, which the validator does not know
+builtinFunct AddrCast = VFunct ["p"] [] [] (BuiltinFunct AddrCast) []
 builtinFunct AddrToInt = VFunct ["p"] [] [] (BuiltinFunct AddrToInt) []
 builtinFunct AddrFromInt = VFunct ["n"] [] [] (BuiltinFunct AddrFromInt) [relProof Eq (ptrApp AddrToInt [ATerm "return"]) (ATerm "n")]
 -- n new slots: the address is new (AddrAlloc reads the world), and nothing is known of it but what its permission, BlockNew, says

@@ -10,7 +10,7 @@ import qualified Data.Set as Set
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Arg (..), Type (..), instanceName, instanceOf)
+import TersusTypes (Arg (..), Size (..), Type (..), instanceName, instanceOf)
 import Utils
 
 -- Permissions (`Block<T>`, POINTERS.md) are ghost values: the validator has them, and the program that runs does not. This pass takes them
@@ -129,6 +129,39 @@ checkCasts program = case concatMap castsOf (progMain program : Map.elems (progF
         , Just (TBlock from) <- [localType <$> Map.lookup source (fnLocals fn)]
         , sizeOf program from /= sizeOf program to || alignOf program to > alignOf program from
         ]
+            ++ [ "in " ++ fnName fn ++ ": Block::cast from " ++ renderType from ++ " to " ++ renderType to ++ ", where the layout of a type parameter or a size parameter is not known"
+               | BasicBlock stmts _ <- Map.elems (fnBlocks fn)
+               , Assign d (ListOp BlockCast [o]) <- stmts
+               , Just (TBlock to) <- [localType <$> Map.lookup d (fnLocals fn)]
+               , Just source <- [operandLocalOf o]
+               , Just (TBlock from) <- [localType <$> Map.lookup source (fnLocals fn)]
+               , not (knownLayout from && knownLayout to)
+               ]
+    -- (the layout of a generic type is that of each instance, so a cast in a generic function is checked only where nothing in it is a parameter)
+    knownLayout = go (0 :: Int)
+      where
+        go depth ty
+            | depth > 16 = True
+            | otherwise = case ty of
+                TParam _ -> False
+                TArrayOf t (SizeConst _) -> go (depth + 1) t
+                TArrayOf _ _ -> False
+                TList t -> go (depth + 1) t
+                TBox t -> go (depth + 1) t
+                TAddr t -> go (depth + 1) t
+                TBlock t -> go (depth + 1) t
+                TUninit t -> go (depth + 1) t
+                TNamed n -> case instanceOf n of
+                    Just (_, args) -> and [go (depth + 1) t | ArgType t <- args] && and [False | ArgSize s <- args, not (constSize s)]
+                    Nothing -> fieldsKnown depth n
+                _ -> True
+        fieldsKnown depth n = case Map.lookup n (progTypes program) of
+            Just (StructDecl fields) -> all (go (depth + 1) . snd) fields
+            Just (EnumDecl variants) -> and [go (depth + 1) t | (_, fields) <- variants, (_, t) <- fields]
+            Nothing -> True
+        constSize s = case s of
+            SizeConst _ -> True
+            _ -> False
     operandLocalOf o = case o of
         Copy l -> Just l
         Move l -> Just l
