@@ -9,7 +9,7 @@ module MirOwnership
 
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
-import Data.Maybe (listToMaybe)
+import Data.Maybe (isJust, listToMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -270,17 +270,18 @@ ownFunction program fn0 =
         -- (the drop of a type is given the value to free: native code frees what its fields own after it, so the drop does not free it)
         dropped l = isDropFunction (fnName fn) && take 1 (fnParams fn) == [l]
         nextBlock = 1 + maximum (0 : [n | BlockId n <- map fst blocks])
-        (allLocals', blocks') = elaborateDrops fn (Set.fromList owned) allLocals (Map.fromList blocks) (rsNext finalState) nextBlock
+        (allLocals', blocks') = elaborateDrops program fn (Set.fromList owned) allLocals (Map.fromList blocks) (rsNext finalState) nextBlock
      in fn{fnLocals = allLocals', fnBlocks = blocks'}
 
--- Whether a local that owns something still holds it at a point: it holds nothing (it was never given a value, or what
--- it held was moved out or dropped), it holds a value on every path to the point, or it may hold one (the paths differ).
--- The pass works this out over the blocks of a function and only says to drop a local where it may hold a value, so a
--- drop never has to look at the bytes of the value to tell whether it is there. Where the paths differ a flag local
--- keeps the answer instead: it is given the value of the state whenever the local is given a value, is moved from or is
--- dropped, and the drop at a return is made under a test of it. A local part of the way through a value (a field taken
--- out of a struct) is a different question: the rest of the value is still held, and what is left of it is freed by the
--- drop of the whole, as before.
+-- Whether a local that owns something still holds it at a point, and whether each field of it that owns something
+-- is still in it: a part holds nothing (it was never given a value, or what it held was moved out, taken out or
+-- dropped), it holds a value on every path to the point, or it may hold one (the paths differ). The pass works this
+-- out over the blocks of a function and only says to drop a part where it may hold a value, so a drop never has to
+-- look at the bytes of the value to tell whether it is there. Where the paths differ a flag local keeps the answer
+-- instead: it is given the value of the state whenever the part is given a value, is moved or taken from, or is
+-- dropped, and the drop at a return is made under a test of it. A local whose fields were taken out in part is
+-- dropped field by field at the return (each one that is still in it is taken out and dropped on its own), so what
+-- is left of it is freed without its drop, as a value that is taken apart is.
 data OwnState = Empty | Owned | MaybeOwned
     deriving (Eq, Show)
 
@@ -289,30 +290,53 @@ joinOwn a b
     | a == b = a
     | otherwise = MaybeOwned
 
-type OwnStates = Map Local OwnState
+-- A whole local, or one field of one (the name of its constructor and the field)
+type OwnKey = (Local, Maybe (Name, Variable))
 
+type OwnStates = Map OwnKey OwnState
+
+-- (a field that was taken out is in the state holding nothing, which says more than a field that is not in the
+-- state at all: that one is as the whole of it is)
 ownStates :: OwnStates -> OwnStates
-ownStates = Map.filter (/= Empty)
+ownStates = Map.filterWithKey (\k state -> state /= Empty || isJust (snd k))
 
--- (a local that is not in a state holds nothing in it, so a join looks at every local that either side names)
+-- (a part that is not in a state holds nothing in it, and a field that is not in it is as the whole of it is, so a
+-- join looks at every part that either side names, and asks for a field of the whole of the other side)
 joinOwnStates :: OwnStates -> OwnStates -> OwnStates
 joinOwnStates a b =
     ownStates
         ( Map.fromList
-            [ (l, joinOwn (Map.findWithDefault Empty l a) (Map.findWithDefault Empty l b))
-            | l <- Set.toList (Map.keysSet a `Set.union` Map.keysSet b)
+            [ (k, joinOwn (look a k) (look b k))
+            | k <- Set.toList (Map.keysSet a `Set.union` Map.keysSet b)
             ]
         )
+  where
+    look states (l, Nothing) = Map.findWithDefault Empty (l, Nothing) states
+    look states (l, Just field) =
+        case Map.lookup (l, Just field) states of
+            Just state -> state
+            Nothing -> Map.findWithDefault Empty (l, Nothing) states
 
-stateOf :: Set Local -> OwnStates -> Local -> OwnState
-stateOf tracked states l
-    | l `Set.member` tracked = Map.findWithDefault Empty l states
+stateOf :: Set Local -> OwnStates -> OwnKey -> OwnState
+stateOf tracked states k@(l, _)
+    | l `Set.member` tracked = Map.findWithDefault Empty k states
     | otherwise = Empty
 
-setState :: Set Local -> Local -> OwnState -> OwnStates -> OwnStates
-setState tracked l state states
-    | l `Set.member` tracked = ownStates (Map.insert l state states)
+-- The state of a field that no take has named: what the state of the whole says
+fieldStateOf :: Set Local -> OwnStates -> Local -> (Name, Variable) -> OwnState
+fieldStateOf tracked states l key =
+    case Map.lookup (l, Just key) states of
+        Just state -> state
+        Nothing -> stateOf tracked states (l, Nothing)
+
+setState :: Set Local -> OwnKey -> OwnState -> OwnStates -> OwnStates
+setState tracked k@(l, _) state states
+    | l `Set.member` tracked = ownStates (Map.insert k state states)
     | otherwise = states
+
+-- What a whole value being given, moved or dropped does to the states of its fields
+clearFields :: Local -> OwnStates -> OwnStates
+clearFields l = Map.filterWithKey (\(m, field) _ -> m /= l || field == Nothing)
 
 movedLocals :: [Operand] -> [Local]
 movedLocals operands = [l | Move l <- operands]
@@ -334,29 +358,31 @@ terminatorMoved term =
 transferStatement :: Set Local -> OwnStates -> Statement -> OwnStates
 transferStatement tracked states st =
     case st of
-        Assign d rv -> setState tracked d Owned consumed
-        Drop l -> setState tracked l Empty states
+        Assign d (TakeField s name field) ->
+            setState tracked (d, Nothing) Owned (clearFields d (setState tracked (s, Just (name, field)) Empty consumed))
+        Assign d _ -> setState tracked (d, Nothing) Owned (clearFields d consumed)
+        Drop l -> setState tracked (l, Nothing) Empty (clearFields l states)
         _ -> consumed
   where
-    consumed = foldl (\s l -> setState tracked l Empty s) states (statementMoved st)
+    consumed = foldl (\s l -> setState tracked (l, Nothing) Empty (clearFields l s)) states (statementMoved st)
 
 transferTerminator :: Set Local -> OwnStates -> Terminator -> OwnStates
 transferTerminator tracked states term =
     case term of
-        Call _ _ d _ -> setState tracked d Owned consumed
+        Call _ _ d _ -> setState tracked (d, Nothing) Owned (clearFields d consumed)
         _ -> consumed
   where
-    consumed = foldl (\s l -> setState tracked l Empty s) states (terminatorMoved term)
+    consumed = foldl (\s l -> setState tracked (l, Nothing) Empty (clearFields l s)) states (terminatorMoved term)
 
 transferBlock :: Set Local -> OwnStates -> BasicBlock -> OwnStates
 transferBlock tracked states (BasicBlock stmts term) =
     transferTerminator tracked (foldl (transferStatement tracked) states stmts) term
 
--- The state of every local at the start of each block, and at the end of it
+-- The state of every part at the start of each block, and at the end of it
 blockStates :: Function -> Set Local -> Map BlockId BasicBlock -> (Map BlockId OwnStates, Map BlockId OwnStates)
 blockStates fn tracked blocks = (ins, outs)
   where
-    entry = ownStates (Map.fromList [(p, Owned) | p <- fnParams fn, p `Set.member` tracked])
+    entry = ownStates (Map.fromList [((p, Nothing), Owned) | p <- fnParams fn, p `Set.member` tracked])
     ins = fixpoint (Map.singleton (BlockId 0) entry)
     outs = Map.mapWithKey (\b block -> transferBlock tracked (Map.findWithDefault Map.empty b ins) block) blocks
     fixpoint known =
@@ -367,65 +393,183 @@ blockStates fn tracked blocks = (ins, outs)
             known' = Map.unionWith joinOwnStates known reached
          in if known' == known then known else fixpoint known'
 
--- Inserts the drops of a function at its returns, under what the states say: a drop of a local that holds nothing on
+-- The constructors of the type of a local, each with the fields of it that own something, and whether the type has
+-- a drop of its own (which a value that is taken apart does not run, so such a value is dropped whole, as before)
+type DropShape = [(Name, [(Name, Variable, Type)])]
+
+dropShape :: Program -> Map Local LocalDecl -> Local -> (DropShape, Bool)
+dropShape program locals l =
+    case localType <$> Map.lookup l locals of
+        Just (TNamed n) -> (variantsOf [(n, decl) | decl <- maybe [] (: []) (Map.lookup n (progTypes program))], hasDrop n)
+        Just (TVariant v) -> (variantsOf [(n, decl) | (n, decl@(EnumDecl variants)) <- Map.toList (progTypes program), v `elem` map fst variants], maybe False hasDrop (ownerName v))
+        _ -> ([], False)
+  where
+    variantsOf decls = [(ctor, [(ctor, f, t) | (f, t) <- fields, needsDrop program t]) | (ctor, fields) <- concatMap declVariants decls]
+    declVariants (n, StructDecl fields) = [(n, fields)]
+    declVariants (_, EnumDecl variants) = variants
+    hasDrop n = dropFunction program n /= Nothing
+    ownerName v = listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
+
+-- What drops a local at a return, before the flags and the new locals are known: the whole of it, or the fields of
+-- it that are still in it, constructor by constructor
+data DropPlan
+    = NoDrop
+    | WholeDrop
+    | FieldsDrop DropShape
+
+dropPlan :: Program -> Map Local LocalDecl -> Set Local -> OwnStates -> Local -> DropPlan
+dropPlan program locals tracked state l
+    | whole == Empty = NoDrop
+    | hasDrop || null shape || allHeld = WholeDrop
+    | otherwise = FieldsDrop [(ctor, [(ctor', f, t) | (ctor', f, t) <- fields, fieldStateOf tracked state l (ctor', f) /= Empty]) | (ctor, fields) <- shape]
+  where
+    whole = stateOf tracked state (l, Nothing)
+    (shape, hasDrop) = dropShape program locals l
+    allHeld = all (\(_, fields) -> all (\(ctor, f, _) -> fieldStateOf tracked state l (ctor, f) == Owned) fields) shape
+
+-- A drop to make at a return: the statements of it, under a test of a flag, or the drops of one constructor of a
+-- value (under a test that the value is that constructor)
+data DropAct
+    = Act (Maybe OwnKey) [Statement]
+    | SpliceAct [DropAct]
+    | GroupAct OwnKey [DropAct]
+    | VariantAct Local Name [DropAct]
+
+-- Inserts the drops of a function at its returns, under what the states say: a drop of a part that holds nothing on
 -- any path to the return is not inserted, and one that may hold a value is made under a test of its flag. The flags
--- are new locals, kept up to date where a local they stand for is given a value, is moved from, or is dropped.
-elaborateDrops :: Function -> Set Local -> Map Local LocalDecl -> Map BlockId BasicBlock -> Int -> Int -> (Map Local LocalDecl, Map BlockId BasicBlock)
-elaborateDrops fn tracked locals blocks nextLocal nextBlock = (locals', blocks')
+-- are new locals, kept up to date where a part they stand for is given a value, is moved or taken from, or is dropped.
+elaborateDrops :: Program -> Function -> Set Local -> Map Local LocalDecl -> Map BlockId BasicBlock -> Int -> Int -> (Map Local LocalDecl, Map BlockId BasicBlock)
+elaborateDrops program fn tracked locals blocks nextLocal nextBlock = (locals', blocks')
   where
     (_, endStates) = blockStates fn tracked blocks
     endState b = Map.findWithDefault Map.empty b endStates
+    plans b = [(l, dropPlan program locals tracked (endState b) l) | l <- Set.toList tracked]
     flagged =
         Set.fromList
-            [ l
-            | (b, BasicBlock _ term) <- Map.toList blocks
-            , term == Return
-            , l <- Set.toList tracked
-            , stateOf tracked (endState b) l == MaybeOwned
-            ]
+            ( [ (l, Nothing)
+              | (b, BasicBlock _ term) <- Map.toList blocks
+              , term == Return
+              , l <- Set.toList tracked
+              , stateOf tracked (endState b) (l, Nothing) == MaybeOwned
+              ]
+                ++ [ (l, Just (ctor, f))
+                   | (b, BasicBlock _ term) <- Map.toList blocks
+                   , term == Return
+                   , (l, FieldsDrop shape) <- plans b
+                   , (_, fields) <- shape
+                   , (ctor, f, _) <- fields
+                   , fieldStateOf tracked (endState b) l (ctor, f) == MaybeOwned
+                   ]
+            )
     flagOf = Map.fromList (zip (Set.toList flagged) (map Local [nextLocal ..]))
-    locals' = Map.union locals (Map.fromList [(f, LocalDecl TBool Nothing) | f <- Map.elems flagOf])
-    setFlag l value = Assign (flagOf Map.! l) (Use (Const (CBool value)))
-    flagClears ls = [setFlag l False | l <- ls, l `Map.member` flagOf]
+    nextLocal' = nextLocal + Map.size flagOf
+    setFlag key value = Assign (flagOf Map.! key) (Use (Const (CBool value)))
+    flagsOf l value = [setFlag key value | (key, _) <- Map.toList flagOf, fst key == l]
+    flagClears ls = concatMap (\l -> flagsOf l False) ls
     withStatementFlags st =
         [st]
             ++ flagClears (statementMoved st)
             ++ (case st of
-                    Assign d _ | d `Map.member` flagOf -> [setFlag d True]
-                    Drop l | l `Map.member` flagOf -> [setFlag l False]
+                    Assign d (TakeField s name field) ->
+                        [setFlag (s, Just (name, field)) False | (s, Just (name, field)) `Map.member` flagOf]
+                            ++ flagsOf d True
+                    Assign d _ -> flagsOf d True
+                    Drop l -> flagsOf l False
                     _ -> [])
     withEntryFlags b stmts
-        | b == BlockId 0 = [Assign f (Use (Const (CBool (l `elem` fnParams fn)))) | (l, f) <- Map.toList flagOf] ++ stmts
+        | b == BlockId 0 = [Assign f (Use (Const (CBool (fst key `elem` fnParams fn)))) | (key, f) <- Map.toList flagOf] ++ stmts
         | otherwise = stmts
-    (blocks', _) = foldl step (Map.empty, nextBlock) (Map.toList blocks)
-    step (done, fresh) (b, BasicBlock stmts term) =
+    (blocks', _, _, newDecls) = foldl step (Map.empty, nextBlock, nextLocal', []) (Map.toList blocks)
+    locals' = Map.union (Map.union locals (Map.fromList [(f, LocalDecl TBool Nothing) | f <- Map.elems flagOf])) (Map.fromList newDecls)
+    step (done, freshB, freshL, decls) (b, BasicBlock stmts term) =
         let stmts' = withEntryFlags b (concatMap withStatementFlags stmts)
          in case term of
                 Return ->
-                    let state = endState b
-                        certain = [l | l <- Set.toList tracked, stateOf tracked state l == Owned]
-                        maybes = [l | l <- Set.toList tracked, stateOf tracked state l == MaybeOwned]
-                        (term', fresh', chainBlocks) = maybeChain maybes fresh
-                     in (Map.insert b (BasicBlock (stmts' ++ map Drop certain) term') (Map.union done (Map.fromList chainBlocks)), fresh')
+                    let (acts, freshL', decls') = dropActs (endState b) freshL decls
+                        finalBlock = BlockId freshB
+                        (entry, (freshB', freshL'', blocks'', decls'')) = buildActs acts finalBlock (freshB + 1, freshL', done, decls')
+                     in ( Map.insert finalBlock (BasicBlock [] Return) (Map.insert b (BasicBlock stmts' (Goto entry)) blocks'')
+                        , freshB'
+                        , freshL''
+                        , decls''
+                        )
                 Call callee args dest next ->
-                    let updates = flagClears (terminatorMoved term) ++ [setFlag dest True | dest `Map.member` flagOf]
+                    let updates = flagClears (terminatorMoved term) ++ flagsOf dest True
                      in if null updates
-                            then (Map.insert b (BasicBlock stmts' term) done, fresh)
+                            then (Map.insert b (BasicBlock stmts' term) done, freshB, freshL, decls)
                             else
-                                let trampoline = BlockId fresh
+                                let trampoline = BlockId freshB
                                  in ( Map.insert trampoline (BasicBlock updates (Goto next)) (Map.insert b (BasicBlock stmts' (Call callee args dest trampoline)) done)
-                                    , fresh + 1
+                                    , freshB + 1
+                                    , freshL
+                                    , decls
                                     )
-                _ -> (Map.insert b (BasicBlock stmts' term) done, fresh)
-    -- The drops of the locals that may hold a value, each under a test of its flag, and then the return
-    maybeChain [] fresh = (Return, fresh, [])
-    maybeChain (l : rest) fresh =
-        let (term', fresh', chainBlocks) = maybeChain rest (fresh + 2)
-            dropBlock = BlockId fresh
-            nextBlockId = BlockId (fresh + 1)
-         in ( SwitchBool (Copy (flagOf Map.! l)) dropBlock nextBlockId
-            , fresh'
-            , (dropBlock, BasicBlock [Drop l] (Goto nextBlockId)) : (nextBlockId, BasicBlock [] term') : chainBlocks
+                _ -> (Map.insert b (BasicBlock stmts' term) done, freshB, freshL, decls)
+    -- The drops of every local at a return, as actions, with the new locals that the fields are taken into
+    dropActs state freshL decls = foldl one ([], freshL, decls) (plansHere)
+      where
+        plansHere = [(l, dropPlan program locals tracked state l) | l <- Set.toList tracked]
+        one (acts, fresh, ds) (l, plan) =
+            case plan of
+                NoDrop -> (acts, fresh, ds)
+                WholeDrop
+                    | stateOf tracked state (l, Nothing) == MaybeOwned -> (acts ++ [Act (Just (l, Nothing)) [Drop l]], fresh, ds)
+                    | otherwise -> (acts ++ [Act Nothing [Drop l]], fresh, ds)
+                FieldsDrop shape ->
+                    let (sub, fresh', ds') = foldl variant ([], fresh, ds) shape
+                        variant (vacts, vf, vds) (ctor, fields) =
+                            let (facts, vf', vds') = foldl field ([], vf, vds) fields
+                                field (facts, ff, fds) (ctor', f, t)
+                                    | fieldStateOf tracked state l (ctor', f) == MaybeOwned =
+                                        let temp = Local ff
+                                         in (facts ++ [Act (Just (l, Just (ctor', f))) [Assign temp (TakeField l ctor' f), Drop temp]], ff + 1, (temp, LocalDecl t Nothing) : fds)
+                                    | otherwise =
+                                        let temp = Local ff
+                                         in (facts ++ [Act Nothing [Assign temp (TakeField l ctor' f), Drop temp]], ff + 1, (temp, LocalDecl t Nothing) : fds)
+                             in if null facts then (vacts, vf', vds') else (vacts ++ [if length shape == 1 then SpliceAct facts else VariantAct l ctor facts], vf', vds')
+                     in case stateOf tracked state (l, Nothing) of
+                            MaybeOwned -> (acts ++ [GroupAct (l, Nothing) (sub ++ [Act Nothing [Drop l]])], fresh', ds')
+                            _ -> (acts ++ sub ++ [Act Nothing [Drop l]], fresh', ds')
+    -- Runs the actions in order, each block going to the next, and then to the block it all ends at
+    buildActs [] cont acc = (cont, acc)
+    buildActs (SpliceAct sub : rest) cont acc = buildActs (sub ++ rest) cont acc
+    buildActs (GroupAct key sub : rest) cont acc =
+        let (restEntry, acc1) = buildActs rest cont acc
+            (subEntry, (freshB', freshL', done', decls')) = buildActs sub restEntry acc1
+            testB = BlockId freshB'
+         in ( testB
+            , ( freshB' + 1
+              , freshL'
+              , Map.insert testB (BasicBlock [] (SwitchBool (Copy (flagOf Map.! key)) subEntry restEntry)) done'
+              , decls'
+              )
+            )
+    buildActs (Act Nothing stmts : rest) cont (freshB, freshL, done, decls) =
+        let (restEntry, (freshB', freshL', done', decls')) = buildActs rest cont (freshB, freshL, done, decls)
+            bid = BlockId freshB'
+         in (bid, (freshB' + 1, freshL', Map.insert bid (BasicBlock stmts (Goto restEntry)) done', decls'))
+    buildActs (Act (Just key) stmts : rest) cont (freshB, freshL, done, decls) =
+        let (restEntry, (freshB', freshL', done', decls')) = buildActs rest cont (freshB, freshL, done, decls)
+            dropB = BlockId freshB'
+            testB = BlockId (freshB' + 1)
+         in ( testB
+            , ( freshB' + 2
+              , freshL'
+              , Map.insert testB (BasicBlock [] (SwitchBool (Copy (flagOf Map.! key)) dropB restEntry)) (Map.insert dropB (BasicBlock stmts (Goto restEntry)) done')
+              , decls'
+              )
+            )
+    buildActs (VariantAct l ctor sub : rest) cont (freshB, freshL, done, decls) =
+        let (restEntry, acc1) = buildActs rest cont (freshB, freshL, done, decls)
+            (subEntry, (freshB', freshL', done', decls')) = buildActs sub restEntry acc1
+            temp = Local freshL'
+            testB = BlockId freshB'
+         in ( testB
+            , ( freshB' + 1
+              , freshL' + 1
+              , Map.insert testB (BasicBlock [Assign temp (IsVariant (Copy l) ctor)] (SwitchBool (Copy temp) subEntry restEntry)) done'
+              , (temp, LocalDecl TBool Nothing) : decls'
+              )
             )
 
 -- Forwards a cast to the reads that follow it in its block, so that `(x as V).f` reads the field of x itself, which is what
