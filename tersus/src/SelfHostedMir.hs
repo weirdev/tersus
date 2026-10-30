@@ -679,7 +679,7 @@ encodeFunction types invariants functions allowCalls fn
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires, withRequires) <- contractSteps True (M.specEnv spec) (M.specRequires spec) withSizes
         (blocks, b) <- foldM add ([], withRequires) (Map.toList (M.fnBlocks fn))
-        let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+        let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
             entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (paramFacts ++ sizeFacts ++ requires)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
         pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", MList params)], -1)
   where

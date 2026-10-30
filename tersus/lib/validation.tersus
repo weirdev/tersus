@@ -202,16 +202,61 @@ fn equalArguments(equalities: &List<EqualityFact>, a: &List<Int>, b: &List<Int>)
     return true;
 };
 
-// Saturation is bounded by the number of applications: every successful
-// addition merges two previously distinct classes containing applications.
-fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -> List<EqualityFact> {
+struct ConstructorField { constructor: Int, field: Int, index: Int };
+
+impl Clone for ConstructorField { };
+
+// Saturation is bounded by the finite terms in the facts and applications.
+// Constructor injectivity can merge argument classes, which can then make
+// additional application results equal.
+fn applicationFactsWithConstructors(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, constructors: &List<Int>, constructorFields: &List<ConstructorField>) -> List<EqualityFact> {
     known = clone(facts);
     finished = false;
-    for round in 0..size(terms) {
+    for round in 0..2 * size(facts) + 8 * size(terms) + 8 {
         if finished = false {
             before = size(known);
             for a in terms {
+                if containsValue(constructors, a.function) {
+                    for fieldApp in terms {
+                        if size(fieldApp.arguments) = 1 {
+                            for parent in fieldApp.arguments {
+                                if hasEquality(known, parent, a.id) {
+                                    for selection in constructorFields {
+                                        if selection.constructor = a.function && selection.field = fieldApp.function {
+                                            index = 0;
+                                            for value in a.arguments {
+                                                if index = selection.index {
+                                                    if hasEquality(known, fieldApp.id, value) = false {
+                                                        known = push(known, EqualityFact { left: fieldApp.id, right: value });
+                                                    };
+                                                };
+                                                index = index + 1;
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+            for a in terms {
                 for b in terms {
+                    if containsValue(constructors, a.function) {
+                        if hasEquality(known, a.function, b.function) {
+                            if hasEquality(known, a.id, b.id) {
+                                if size(a.arguments) = size(b.arguments) {
+                                    for i in 0..size(a.arguments) {
+                                        x = get(a.arguments, i);
+                                        y = get(b.arguments, i);
+                                        if hasEquality(known, x, y) = false {
+                                            known = push(known, EqualityFact { left: x, right: y });
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
                     if hasEquality(known, a.function, b.function) {
                         if equalArguments(known, a.arguments, b.arguments) {
                             if hasEquality(known, a.id, b.id) = false {
@@ -225,6 +270,10 @@ fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -
         };
     };
     return known;
+};
+
+fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -> List<EqualityFact> {
+    return applicationFactsWithConstructors(facts, terms, [], []);
 };
 
 fn hasApplicationEquality(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, left: Int, right: Int) -> Bool {
@@ -261,6 +310,15 @@ struct DisequalityFact { left: Int, right: Int };
 impl Clone for DisequalityFact { };
 
 impl Copy for DisequalityFact { };
+
+// Values built with different variants of the same enum cannot be equal.
+// The host emits these facts only for actual enum constructors.
+struct VariantFact { object: Int, family: Int, constructor: Int, matches: Bool };
+
+impl Clone for VariantFact { };
+
+impl Copy for VariantFact { };
+
 
 fn contradictoryDisequalities(equalities: &List<EqualityFact>, different: &List<DisequalityFact>) -> Bool {
     for fact in different {
@@ -623,6 +681,10 @@ struct ValidatorContext {
     constants: List<ConstantTerm>,
     orders: List<OrderFact>,
     different: List<DisequalityFact>,
+    variants: List<VariantFact>,
+    fieldFunctions: List<Int>,
+    constructorFunctions: List<Int>,
+    constructorFields: List<ConstructorField>,
     differences: List<DifferenceFact>,
 };
 
@@ -681,11 +743,11 @@ fn closeContext(context: &ValidatorContext) -> List<EqualityFact> {
     nodes = contextNodes(context);
     known = semanticFacts(context.equalities, context.applications, context.constants);
     finished = false;
-    for round in 0..size(nodes) {
+    for round in 0..size(nodes) + 2 * size(context.equalities) + 8 * size(context.applications) + 8 {
         if finished = false {
             orders = refinedOrders(known, constantOrders(context.orders, context.constants), context.different);
             differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
-            next = applicationFacts(boundEqualities(known, differences, nodes), context.applications);
+            next = applicationFactsWithConstructors(boundEqualities(known, differences, nodes), context.applications, context.constructorFunctions, context.constructorFields);
             if size(next) = size(known) {
                 finished = true;
             };
@@ -701,6 +763,7 @@ enum ValidatorGoal {
     Less { left: Int, right: Int },
     AtMost { left: Int, right: Int },
     Difference { left: Int, right: Int, bound: Int },
+    Within { inner: Int, outer: Int },
 };
 
 impl Clone for ValidatorGoal { };
@@ -725,6 +788,147 @@ fn contextDifferent(equalities: &List<EqualityFact>, applications: &List<Applica
         return true;
     };
     return entailsApplicationDisequality(equalities, applications, orders, different, left, right);
+};
+
+fn contradictoryVariants(equalities: &List<EqualityFact>, variants: &List<VariantFact>) -> Bool {
+    for a in variants {
+        for b in variants {
+            if a.family = b.family {
+                if hasEquality(equalities, a.object, b.object) {
+                    if a.constructor = b.constructor {
+                        if a.matches != b.matches { return true; };
+                    } else if a.matches {
+                        if b.matches { return true; };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn contradictoryConstructors(equalities: &List<EqualityFact>, applications: &List<ApplicationTerm>, constructors: &List<Int>) -> Bool {
+    for a in applications {
+        if containsValue(constructors, a.function) {
+            for b in applications {
+                if containsValue(constructors, b.function) {
+                    if hasEquality(equalities, a.id, b.id) {
+                        if hasEquality(equalities, a.function, b.function) = false { return true; };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn entailsConstructorDisequality(equalities: &List<EqualityFact>, applications: &List<ApplicationTerm>, constructors: &List<Int>, left: Int, right: Int) -> Bool {
+    for a in applications {
+        if containsValue(constructors, a.function) {
+            for b in applications {
+                if containsValue(constructors, b.function) {
+                    if hasEquality(equalities, a.function, b.function) = false {
+                        if hasEquality(equalities, left, a.id) {
+                            if hasEquality(equalities, right, b.id) { return true; };
+                        };
+                        if hasEquality(equalities, left, b.id) {
+                            if hasEquality(equalities, right, a.id) { return true; };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn entailsVariantDisequality(equalities: &List<EqualityFact>, variants: &List<VariantFact>, left: Int, right: Int) -> Bool {
+    for a in variants {
+        for b in variants {
+            if a.family = b.family {
+                distinct = (a.constructor != b.constructor && a.matches && b.matches)
+                    || (a.constructor = b.constructor && a.matches != b.matches);
+                if distinct {
+                    if hasEquality(equalities, left, a.object) {
+                        if hasEquality(equalities, right, b.object) { return true; };
+                    };
+                    if hasEquality(equalities, left, b.object) {
+                        if hasEquality(equalities, right, a.object) { return true; };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// A positive test for another variant of the same enum makes this test false.
+// Negative facts for other tags do not establish a tag without exhaustiveness.
+fn knownVariant(equalities: &List<EqualityFact>, variants: &List<VariantFact>, object: Int, family: Int, constructor: Int) -> Int {
+    answer = -1;
+    for fact in variants {
+        if fact.family = family {
+            if hasEquality(equalities, object, fact.object) {
+                if fact.constructor = constructor {
+                    if fact.matches { answer = 1; } else { answer = 0; };
+                } else if fact.matches {
+                    answer = 0;
+                };
+            };
+        };
+    };
+    return answer;
+};
+
+fn equivalentTermIn(equalities: &List<EqualityFact>, terms: &List<Int>, term: Int) -> Bool {
+    for candidate in terms {
+        if hasEquality(equalities, candidate, term) { return true; };
+    };
+    return false;
+};
+
+fn contextWithin(context: &ValidatorContext, inner: Int, outer: Int) -> Bool {
+    equalities = closeContext(context);
+    if hasEquality(equalities, inner, outer) { return false; };
+    reached = push([], outer);
+    // Each useful round adds a distinct field-result class; the graph is finite.
+    for round in 0..size(context.applications) {
+        for app in context.applications {
+            if containsValue(context.fieldFunctions, app.function) {
+                if size(app.arguments) = 1 {
+                    parent = get(app.arguments, 0);
+                    if equivalentTermIn(equalities, reached, parent) {
+                        if equivalentTermIn(equalities, reached, app.id) = false {
+                            reached = push(reached, app.id);
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return equivalentTermIn(equalities, reached, inner);
+};
+
+enum VariantObjectLookup { Missing, Found { object: Int } };
+
+impl Clone for VariantObjectLookup { };
+
+impl Copy for VariantObjectLookup { };
+
+// Resolve the object from the saved IsVariant application, not from the
+// current local value, which may have been reassigned after the test.
+fn variantTestObject(context: &ValidatorContext, test: Int, predicate: Int) -> VariantObjectLookup {
+    equalities = closeContext(context);
+    for app in context.applications {
+        if app.function = predicate {
+            if size(app.arguments) = 1 {
+                if hasEquality(equalities, app.id, test) {
+                    return VariantObjectLookup::Found { object: get(app.arguments, 0) };
+                };
+            };
+        };
+    };
+    return VariantObjectLookup::Missing;
 };
 
 // False means not established, including when a search omitted an overflowed
@@ -755,6 +959,7 @@ fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     if goal is ValidatorGoal::Less { recognized = true; };
     if goal is ValidatorGoal::AtMost { recognized = true; };
     if goal is ValidatorGoal::Difference { recognized = true; };
+    if goal is ValidatorGoal::Within { recognized = true; };
     if recognized = false { return false; };
     if goal is ValidatorGoal::Equal {
         g = goal as ValidatorGoal::Equal;
@@ -787,6 +992,8 @@ fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
         };
     };
     equalities = closeContext(context);
+    if contradictoryVariants(equalities, context.variants) { return true; };
+    if contradictoryConstructors(equalities, context.applications, context.constructorFunctions) { return true; };
     if contradictoryConstants(equalities, context.constants) {
         return true;
     };
@@ -804,6 +1011,8 @@ fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     };
     if goal is ValidatorGoal::Different {
         g = goal as ValidatorGoal::Different;
+        if entailsConstructorDisequality(equalities, context.applications, context.constructorFunctions, g.left, g.right) { return true; };
+        if entailsVariantDisequality(equalities, context.variants, g.left, g.right) { return true; };
         return contextDifferent(equalities, context.applications, orders, context.different, differences, g.left, g.right);
     };
     if goal is ValidatorGoal::Less {
@@ -818,12 +1027,14 @@ fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
         g = goal as ValidatorGoal::Difference;
         return hasDifference(equalities, differences, g.left, g.right, g.bound);
     };
+    if goal is ValidatorGoal::Within {
+        g = goal as ValidatorGoal::Within;
+        return contextWithin(context, g.inner, g.outer);
+    };
     return false;
 };
 
-// A sequence of proof obligations. Known facts must come from a trusted
-// source such as a function's preconditions or a verified MIR operation;
-// source-level assertions must be encoded as Check, never as Known.
+
 enum ProofStep {
     KnownEquality { left: Int, right: Int },
     KnownDifferent { left: Int, right: Int },

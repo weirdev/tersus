@@ -612,12 +612,12 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                     let expected = Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [constantExpr a, constantExpr b]) Engine.emptyProofContext
                         actual = runNamedFunction program "entailsSemanticOrder" [MList [], MList [], MList (map constant constants), MList [], MList [], MInt a, MInt b, MBool True]
                      in testAssertEq actual (Ok (Just (MBool expected)))
-                validatorContext = MData "ValidatorContext" [("equalities", MList [fact (0,1)]), ("applications", MList []), ("constants", MList []), ("orders", MList (map mixedFact mixed)), ("different", MList []), ("differences", MList [])]
+                validatorContext = MData "ValidatorContext" [("equalities", MList [fact (0,1)]), ("applications", MList []), ("constants", MList []), ("orders", MList (map mixedFact mixed)), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 goal name a b = MData ("ValidatorGoal::" ++ name) [("left", MInt a), ("right", MInt b)]
                 checkContext name a b expected = testAssertEq (runNamedFunction program "entailsGoal" [validatorContext, goal name a b]) (Ok (Just (MBool expected)))
-                boundContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList (map app [(10,20,[0]),(11,20,[1])])), ("constants", MList []), ("orders", MList (map mixedFact [(0,1,False),(1,0,False)])), ("different", MList []), ("differences", MList [])]
+                boundContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList (map app [(10,20,[0]),(11,20,[1])])), ("constants", MList []), ("orders", MList (map mixedFact [(0,1,False),(1,0,False)])), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkBoundCongruence = testAssertEq (runNamedFunction program "entailsGoal" [boundContext, goal "Equal" 10 11]) (Ok (Just (MBool True)))
-                emptyContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+                emptyContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 knownOrder = MData "ProofStep::KnownOrder" [("left", MInt 1), ("right", MInt 2), ("strict", MBool True)]
                 checkStep = MData "ProofStep::Check" [("goal", goal "Less" 1 2)]
                 proofResult ok index = Ok (Just (MData "ProofResult" [("valid", MBool ok), ("failedAt", MInt index)]))
@@ -650,7 +650,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 checkSavedComparison function truth relation left right =
                     let comparison = app (10, function, [0,1])
                         bool = constant (20, 1, if truth then 1 else 0)
-                        context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [comparison]), ("constants", MList [bool]), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+                        context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [comparison]), ("constants", MList [bool]), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                         initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
                         assume = MData "ExecutionStep::Assume" [("relation", MInt 0), ("left", termRef 10), ("right", termRef 20)]
                         obligation = MData "ExecutionStep::Check" [("relation", MInt relation), ("left", termRef left), ("right", termRef right)]
@@ -667,7 +667,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                     Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields, lookup "block" fields) (Just (MInt status), Just (MInt blockId))
                     result -> Just ("Unexpected execution flow result: " ++ show result)
                 checkBooleanBranch constantTerms destinations blocks expected =
-                    let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("differences", MList [])]
+                    let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                         initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                      in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
@@ -703,6 +703,25 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                                     _ -> Just "Fixture has no unique m parameter"
                 bridgeFacts = [eq 0 1, lt 1 2, le 2 3]
                 checkBridge query = testAssertEq (querySelfHosted program bridgeFacts query) (Ok (Just (Engine.entails query (Engine.proofContextFromFacts bridgeFacts))))
+                variantFact (object, family, constructor, matches) = MData "VariantFact" [("object", MInt object), ("family", MInt family), ("constructor", MInt constructor), ("matches", MBool matches)]
+                variantContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList [variantFact (0, 10, 20, True), variantFact (1, 10, 21, True)]), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                checkVariantGoal name a b expected = testAssertEq (runNamedFunction program "entailsGoal" [variantContext, goal name a b]) (Ok (Just (MBool expected)))
+                constructorField = MData "ConstructorField" [("constructor", MInt 100), ("field", MInt 200), ("index", MInt 1)]
+                constructorContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, 100, [0, 1]), app (11, 200, [10])]), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt 200]), ("constructorFunctions", MList [MInt 100]), ("constructorFields", MList [constructorField]), ("differences", MList [])]
+                checkConstructorGoal name a b expected = testAssertEq (runNamedFunction program "entailsGoal" [constructorContext, goal name a b]) (Ok (Just (MBool expected)))
+                withinGoal a b = MData "ValidatorGoal::Within" [("inner", MInt a), ("outer", MInt b)]
+                withinContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (11, 200, [10]), app (12, 201, [11])]), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt 200, MInt 201]), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                checkWithin a b expected = testAssertEq (runNamedFunction program "entailsGoal" [withinContext, withinGoal a b]) (Ok (Just (MBool expected)))
+                variantNone = CTerm (VData "Option::None" [])
+                variantSome = CTerm (VData "Option::Some" [])
+                checkVariantBridge = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct (Rel NotEq))) [variantNone, variantSome])) (Ok (Just True))
+                checkVariantBridgeEqual = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct (Rel Eq))) [variantNone, variantSome])) (Ok (Just False))
+                leftValue = ATerm (Iota "left value")
+                rightValue = ATerm (Iota "right value")
+                checkSymbolicVariantBridge = testAssertEq (querySelfHosted program [FApp (CTerm (builtinFunct (Is "Option::None"))) [leftValue], FApp (CTerm (builtinFunct (Is "Option::Some"))) [rightValue]] (FApp (CTerm (builtinFunct (Rel NotEq))) [leftValue, rightValue])) (Ok (Just True))
+                withinOuter = ATerm (Iota "outer value")
+                withinInner = FApp (CTerm (builtinFunct (Field Nothing "x"))) [withinOuter]
+                checkWithinBridge = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct Within)) [withinInner, withinOuter])) (Ok (Just True))
              in foldr orElse Nothing
                     ( [check graph a b | graph <- graphs, a <- [0..3], b <- [0..3]] ++
                       [checkProduct a b (productResult a b) | a <- productValues, b <- productValues] ++
@@ -912,6 +931,10 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = [1]; for i in 0..size(xs) { if i > 0 { affirm i >= 1; }; }; return 0;" (Just True)
                       , checkMirSubset "fn f(xs: List<Int>) -> Int { affirm size(xs) >= 0; return 0; }; return f([]);" (Just True)
                       , checkMirSubset "fn f(xs: List<Int>) -> Int { affirm size(xs) >= 1; return 0; }; return f([]);" (Just False)
+                      , checkVariantGoal "Different" 0 1 True, checkVariantGoal "Equal" 0 1 False
+                      , checkConstructorGoal "Equal" 11 1 True, checkConstructorGoal "Equal" 11 0 False
+                      , checkWithin 12 10 True, checkWithin 10 12 False, checkWithin 10 10 False
+                      , checkVariantBridge, checkVariantBridgeEqual, checkSymbolicVariantBridge, checkWithinBridge
                       , checkBridge (lt 0 3), checkBridge (lt 3 0), checkBridge (ne 0 3), checkBridge (eq 0 1)
                       , testAssertEq (querySelfHosted program [] (BVar "i")) (Ok Nothing)
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
