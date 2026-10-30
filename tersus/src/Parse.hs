@@ -128,7 +128,17 @@ located = do
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
-statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> affirmStatements <|> (pure <$> statement)
+statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> assumeStatements <|> affirmStatements <|> (pure <$> statement)
+
+-- `assume e;`: e is known from here on without a proof (an assumption: see `tersus assumptions`). It is split as an affirm is.
+assumeStatements :: Parser [Statement]
+assumeStatements = do
+    keyword "assume"
+    whitespace
+    p <- proof
+    whitespace
+    facts <- splitAffirm (ProofAssert p)
+    return [ValidationStatement (case fact of ProofAssert q -> Assume q; other -> other) | fact <- facts]
 
 -- (an affirm with && is several statements)
 affirmStatements :: Parser [Statement]
@@ -139,8 +149,14 @@ validationStatementBlock = concat <$> genericStatementBlock (validationStatement
 
 -- `affirm a && b;` says what `affirm a; affirm b;` does, so it is two statements. A proof has no `||` or `!`: they are of conditions of a program.
 splitAffirm :: ValidationStatement -> Parser [ValidationStatement]
-splitAffirm (ProofAssert p) = mapM check (conjuncts p)
+splitAffirm (ProofAssert p) = concat <$> mapM (fmap wholeFacts . check) (conjuncts p)
   where
+    -- `affirm whole(b);` says that the permission b is all of its allocation: it starts at its start and is as long as it
+    wholeFacts (ProofAssert (FApp (ATerm "whole") [b])) =
+        [ ProofAssert (FApp (CTerm (builtinFunct (Rel Eq))) [FApp (ATerm "start") [b], CTerm (VInt 0)])
+        , ProofAssert (FApp (CTerm (builtinFunct (Rel Eq))) [FApp (ATerm "cap") [b], FApp (ATerm "extent") [FApp (ATerm "origin") [b]]])
+        ]
+    wholeFacts other = [other]
     conjuncts (FApp (CTerm (VFunct _ _ _ (BuiltinFunct And) _)) [a, b]) = conjuncts a ++ conjuncts b
     conjuncts q = [q]
     check q
@@ -181,6 +197,24 @@ assignStatement = do
     expr <- expression
     whitespace
     return (Assign var expr)
+
+-- `(a, b) = e;`: the parts of a tuple, each given to a name. The tuple is held by a name that no program can write (`$tuple L:C`, from the
+-- place of the statement), and each part is read from it, so each is moved on its own and the tuple need not be Clone.
+tupleAssign :: Parser [Statement]
+tupleAssign = do
+    (position, names) <- try $ do
+        position <- getPosition
+        names <- parensParse ((variable <* whitespace) `sepBy1` skipWhitespace (char ','))
+        void (char '=')
+        notFollowedBy (char '=')
+        return (position, names)
+    whitespace
+    when (length names < 2) $ fail "a tuple is taken apart into two names or more"
+    when (length (nub names) /= length names) $ fail "a tuple is taken apart into a name twice"
+    expr <- expression
+    whitespace
+    let held = "$tuple " ++ show (sourceLine position) ++ ":" ++ show (sourceColumn position)
+    return (Assign held expr : [Assign name (F (Val (builtinFunct (Field Nothing (show i)))) [Var held]) | (i, name) <- zip [0 :: Int ..] names])
 
 -- `f(x);` and `v.f(x);`: a call that is made for what it does, whose result is not used. It is an assignment of the result to a name that
 -- no program can write (`$call L:C`, from the place of the call), as `for` makes the names of its bounds.
@@ -363,7 +397,7 @@ structStatement = do
     invariant <- option [] (keyword "invariant" >> whitespace >> functContractReqs <* whitespace)
     modifyState (\d -> d{declTypeParams = outerParams})
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
-    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a struct name")
+    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self", "Addr", "Block"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
     return (StructDef name params fields invariant)
   where
@@ -372,12 +406,24 @@ structStatement = do
 -- field: Type
 structField :: Parser (Variable, Type)
 structField = do
+    ghostly <- option False (True <$ (keyword "ghost" >> whitespace))
     field <- variable
     whitespace
     void (char ':')
     whitespace
     ty <- typeAnnotation
+    ghostOnly ghostly ty
     return (field, ty)
+
+-- `ghost` before a field, a parameter or a part of a tuple says that it is a value only the validator has: a permission, `Block<T>`.
+-- Whether a value is ghost is decided by its type, so the word is what the reader sees, and it is only allowed where the type is ghost.
+ghostOnly :: Bool -> Type -> Parser ()
+ghostOnly ghostly ty = when (ghostly && not (ghostType ty)) $ fail "ghost is written before a type that is a permission, Block<T>"
+  where
+    ghostType t = case t of
+        TBlock _ -> True
+        TRef inner -> ghostType inner
+        _ -> False
 
 -- Name { field: value, ..., ..base }: every field of the struct, or the ones that change and a base
 -- struct to copy the rest from. The result applies the struct's constructor, so it is an ordinary term.
@@ -563,7 +609,8 @@ withFields apply methods term = do
     fieldSuffix = do
         void (char '.')
         notFollowedBy (char '.')
-        field <- variable
+        -- (a part of a tuple is named by its place, `t.0`)
+        field <- variable <|> many1 digit
         arguments <- case methods of
             Just (element, _) -> optionMaybe (char '(' >> whitespace >> element `sepBy` skipWhitespace (char ',') <* whitespace <* char ')')
             Nothing -> return Nothing
@@ -753,20 +800,32 @@ implStatement = do
 -- A parameter is a name and its type: `n: Int`
 parameter :: Parser (Variable, Type)
 parameter = do
+    ghostly <- option False (True <$ (keyword "ghost" >> whitespace))
     name <- variable
     whitespace
     void (char ':')
     whitespace
     ty <- typeAnnotation
+    ghostOnly ghostly ty
     return (name, ty)
 
 -- Int, Bool, List<T>, and fn(T, ...) -> T for a function value
 typeAnnotation :: Parser Type
 typeAnnotation = do
-    ty <- borrowed <|> try functionType <|> namedType
+    ty <- borrowed <|> try functionType <|> tupleType' <|> namedType
     whitespace
     return ty
   where
+    -- (A, B): a tuple of two parts or more, any of which may be ghost
+    tupleType' = do
+        parts <- parensParse (tuplePart `sepBy1` skipWhitespace (char ','))
+        when (length parts < 2) $ fail "a tuple type has two parts or more"
+        return (tupleType parts)
+    tuplePart = do
+        ghostly <- option False (True <$ (keyword "ghost" >> whitespace))
+        ty <- typeAnnotation
+        ghostOnly ghostly ty
+        return ty
     -- &T: a parameter that is only read
     borrowed = char '&' >> whitespace >> (TRef <$> namedOrFunction)
     namedOrFunction = try functionType <|> namedType
@@ -798,6 +857,8 @@ typeAnnotation = do
             "Bool" -> return TBool
             "List" -> TList <$> typeArgument
             "Box" -> TBox <$> typeArgument
+            "Addr" -> TAddr <$> typeArgument
+            "Block" -> TBlock <$> typeArgument
             "Array" -> do
                 whitespace
                 void (char '<')
@@ -1106,8 +1167,13 @@ curlyBracesParse = bracketsParse (char '{') (char '}')
 squareBracketsParse :: Parser a -> Parser a
 squareBracketsParse = bracketsParse (char '[') (char ']')
 
+-- (e) is e, and (a, b) is a tuple
 parensExpression :: Parser Expression
-parensExpression = parensParse expression
+parensExpression = do
+    parts <- parensParse (expression `sepBy1` skipWhitespace (char ','))
+    case parts of
+        [single] -> return single
+        _ -> return (F (Val (builtinFunct (Ctor (tupleBase (length parts)) (map show [0 .. length parts - 1])))) parts)
 
 value :: Parser Value
 value = vbool <|> vint <|> vlist

@@ -27,6 +27,7 @@ import TestBorrow
 import TestCopies
 import TestGenerics
 import TestBox
+import TestPointers
 import TestSequence
 import TestStrings
 import TestBytes
@@ -120,6 +121,7 @@ allGroups =
     , testTraits
     , testArrays
     , testBox
+    , testPointers
     , testBorrow
     , testCopies
     , testGenerics

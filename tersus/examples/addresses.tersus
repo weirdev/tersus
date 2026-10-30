@@ -1,0 +1,152 @@
+// Memory by hand, with no assumption: an address (Addr<T>) is a word that allows nothing by itself, and every operation on the memory
+// at it is given the permission to it (Block<T>), a ghost value that says what the memory holds and that is used exactly once.
+// See POINTERS.md and LANGUAGE.md (Addresses and permissions).
+
+// A buffer: an address and the permission to it, together, with the equation that ties them as the invariant
+struct Buffer<T> {
+    addr: Addr<T>,
+    ghost blk: Block<T>,
+} invariant [{ affirm base(blk) = addr; affirm whole(blk); }];
+
+impl<T> Buffer<T> {
+    fn alloc(n: Int) -> Self [{ affirm n >= 0; }] [{ affirm cap(return.blk) = n; affirm count(return.blk) = 0; affirm forall j in 0..n: filled(return.blk, j) = false; }] {
+        (a, b) = Addr::alloc(n);
+        return Self { addr: a, blk: b };
+    };
+
+    fn free(self: Self) -> Int [{ affirm count(self.blk) = 0; }] [{ }] {
+        return Addr::free(self.addr, self.blk);
+    };
+};
+
+// A growable list of any type on an address: no filler value, and pop gives the element back
+struct Vec<T> {
+    addr: Addr<T>,
+    cap: Int,
+    len: Int,
+    ghost blk: Block<T>,
+} invariant [{
+    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len;
+    affirm 0 <= len; affirm len <= cap;
+    affirm forall j in 0..len: filled(blk, j) = true;
+    affirm forall j in len..cap: filled(blk, j) = false;
+}];
+
+impl<T> Vec<T> {
+    fn new() -> Self [{ }] [{ affirm return.len = 0; }] {
+        (a, b) = Addr::alloc(4);
+        return Self { addr: a, cap: 4, len: 0, blk: b };
+    };
+
+    fn push(self: Self, x: T) -> Self [{ }] [{ affirm return.len = self.len + 1; affirm at(return.blk, self.len) = x; }] {
+        // (a full Vec moves to an allocation of twice the size and 4 more)
+        if self.len = self.cap {
+            cap = self.cap * 2 + 4;
+            (a, b) = Addr::resize(self.addr, cap, self.blk);
+            return Self { addr: a, cap: cap, len: self.len + 1, blk: Addr::write(a, self.len, x, b) };
+        };
+        return Self { addr: self.addr, cap: self.cap, len: self.len + 1, blk: Addr::write(self.addr, self.len, x, self.blk) };
+    };
+
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < self.len; }] [{ affirm return = at(self.blk, i); }] {
+        return clone(Addr::get(self.addr, i, self.blk));
+    };
+
+    fn pop(self: Self) -> (Self, T) [{ affirm self.len >= 1; }] [{ affirm return.0.len = self.len - 1; }] {
+        (x, b) = Addr::take(self.addr, self.len - 1, self.blk);
+        return (Self { addr: self.addr, cap: self.cap, len: self.len - 1, blk: b }, x);
+    };
+
+    // (the values left are dropped where they are, and the memory is given back)
+    fn free(self: Self) -> Int [{ }] [{ }] {
+        return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
+    };
+};
+
+// Fills the k slots of a block that is given, all empty, with n, n + 1, ...: the block can be a part of a bigger one, which the function does
+// not know of. (What the validator knows of a permission, cap(b) or origin(b), is not a value the program has, so k is given.)
+fn fill(p: Addr<Int>, ghost b: Block<Int>, k: Int, n: Int) -> Block<Int>
+    [{ affirm base(b) = p; affirm cap(b) = k; affirm count(b) = 0; affirm forall j in 0..k: filled(b, j) = false; }]
+    [{ affirm base(return) = p; affirm cap(return) = k; affirm origin(return) = origin(b); affirm start(return) = start(b); affirm count(return) = k;
+       affirm forall j in 0..k: filled(return, j) = true; }] {
+    // (the block is a new value each time a slot is written, so the loop says what it keeps of the one it was given)
+    define o = origin(b);
+    define s = start(b);
+    i = 0;
+    while i < k [{
+        affirm i >= 0; affirm i <= k;
+        affirm base(b) = p; affirm cap(b) = k; affirm origin(b) = o; affirm start(b) = s; affirm count(b) = i;
+        affirm forall j in 0..i: filled(b, j) = true;
+        affirm forall j in i..k: filled(b, j) = false;
+    }] shrinks k - i {
+        b = Addr::write(p, i, n + i, b);
+        i = i + 1;
+    };
+    return b;
+};
+
+// Empties the k slots of a block that is given, all filled, and gives it back
+fn empty(p: Addr<Int>, ghost b: Block<Int>, k: Int) -> Block<Int>
+    [{ affirm base(b) = p; affirm cap(b) = k; affirm count(b) = k; affirm forall j in 0..k: filled(b, j) = true; }]
+    [{ affirm base(return) = p; affirm cap(return) = k; affirm origin(return) = origin(b); affirm start(return) = start(b); affirm count(return) = 0; }] {
+    return Addr::dropRange(p, 0, k, b);
+};
+
+// A buffer of 6 slots, split between two calls of fill, and joined again to be read and freed: the halves are separate permissions, so
+// nothing has to prove that the calls do not overlap
+fn halves() -> Int [{ }] [{ }] {
+    buf = Buffer::alloc(6);
+    (lo, hi) = Block::split(buf.blk, 2);
+    upper = Addr::offset(buf.addr, 2);
+    lo = fill(buf.addr, lo, 2, 10);
+    hi = fill(upper, hi, 4, 20);
+    // (a value read from a slot is a view of the permission, which is lent to the read)
+    x = Addr::get(upper, 3, hi);
+    lo = empty(buf.addr, lo, 2);
+    hi = empty(upper, hi, 4);
+    whole = Block::join(lo, hi);
+    return x + Addr::free(buf.addr, whole);
+};
+
+// A singly linked list in one block, with the links as indexes into it (an arena): node i holds a value and the index of the next node
+struct Node {
+    value: Int,
+    next: Int,
+};
+
+impl Clone for Node { };
+impl Copy for Node { };
+
+fn arena() -> Int [{ }] [{ }] {
+    (p, b) = Addr::alloc(3);
+    // 2 -> 0 -> 1, and -1 ends the list
+    b = Addr::write(p, 0, Node { value: 20, next: 1 }, b);
+    b = Addr::write(p, 1, Node { value: 30, next: 0 - 1 }, b);
+    b = Addr::write(p, 2, Node { value: 10, next: 0 }, b);
+    first = Addr::get(p, 2, b);
+    second = Addr::get(p, first.next, b);
+    third = Addr::get(p, second.next, b);
+    s = first.value + second.value + third.value;
+    b = Addr::dropRange(p, 0, 3, b);
+    return s + Addr::free(p, b);
+};
+
+v = Vec::new();
+i = 0;
+while i < 10 [{ affirm i >= 0; affirm i <= 10; affirm v.len = i; }] shrinks 10 - i {
+    v = v.push(push(push([], i), i * 2));
+    i = i + 1;
+};
+l = v.get(9);
+(v, last) = v.pop();
+d = v.free();
+s = 0;
+if size(l) > 1 {
+    s = get(l, 1);
+};
+t = 0;
+if size(last) > 0 {
+    t = get(last, 0);
+};
+// 2 + 18 + 9 from the Vec, 23 from the halves, 60 from the arena
+return size(l) + s + t + d + halves() + arena();

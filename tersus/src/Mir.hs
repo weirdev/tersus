@@ -14,6 +14,7 @@ module Mir
     , Rvalue (..)
     , BinOp (..)
     , ListOp (..)
+    , ghostOp
     , Operand (..)
     , Constant (..)
     , Terminator (..)
@@ -21,6 +22,7 @@ module Mir
     , LoopSpec (..)
     , emptySpec
     , completeInstances
+    , completeErasedInstances
     , readersOfInput
     , functionsNamed
     , slotsOf
@@ -40,7 +42,7 @@ import Data.Maybe (listToMaybe)
 
 import Pretty (renderType, renderVarProof)
 import qualified Data.Set as Set
-import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, instanceFields, Size (..), pattern TArray)
+import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, instanceFields, tupleGeneric, Size (..), pattern TArray)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -155,8 +157,22 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 
 -- First and Last need a list that is not empty, Get and Set an index in range. These work on an array as on a list; NewArray n x
 -- makes an array of n copies of x, with n not negative; NewBoxed n x does so for an n that is not a constant, in a Box. NewEmptyBoxed makes the Box of an array of no elements.
+--
+-- The operations on addresses (POINTERS.md): AddrNull, AddrOffset p i (i slots of the type further on), AddrCast p, AddrToInt p and
+-- AddrFromInt n need no permission; AddrAlloc n (n new slots), AddrGet p i b (a view of the value in a slot), AddrWrite p i x b (x moved
+-- into an empty slot), AddrTake p i b (the value moved out of a slot), AddrDropValue p i b and AddrDropRange p i n b (the values of slots
+-- dropped where they are), AddrResize p n b (the slots moved to an allocation of n) and AddrFree p b (the allocation given back) are given
+-- the permission b too, which only the validator reads. The Block operations make a permission and are ghost: the validator has them, and
+-- they are erased (see MirGhost) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
+-- and AddrDropRange, which give the permission after, give 0.
 data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
+    | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree
+    | BlockNew | BlockTaken | BlockResized | BlockSplitLo | BlockSplitHi | BlockJoin | BlockAssume | BlockCast
     deriving (Show, Eq)
+
+-- The operations that make a permission, which are erased with it
+ghostOp :: ListOp -> Bool
+ghostOp op = op `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast]
 
 -- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns
 data Operand = Copy Local | Move Local | Const Constant
@@ -205,8 +221,15 @@ data LoopSpec = LoopSpec
 -- A struct with sizes is a struct of its own for each list of sizes (`Packet<4>`, and `Packet<n>` in a function that has the size n),
 -- named by them. This declares every one the program mentions, from the declaration of the struct with the sizes put in.
 completeInstances :: Program -> Program
-completeInstances program
-    | Map.null (progGenerics program) = program
+completeInstances = completeInstancesWith False
+
+-- The same after the permissions are erased (MirGhost): an instance that is declared now (by a copy of a function for its types, `(T, Block<T>)`
+-- for an Int) has no field that is a permission either
+completeErasedInstances :: Program -> Program
+completeErasedInstances = completeInstancesWith True
+
+completeInstancesWith :: Bool -> Program -> Program
+completeInstancesWith erased program
     | otherwise = program{progTypes = go (progTypes program) (Set.toList mentioned)}
   where
     functions = progMain program : Map.elems (progFunctions program)
@@ -223,10 +246,14 @@ completeInstances program
     go types (name : rest) =
         case (Map.member name types, instanceOf name) of
             (False, Just (base, args))
-                | Just (params, fields) <- Map.lookup base (progGenerics program)
-                , Just fields' <- instanceFields params args fields ->
-                    go (Map.insert name (StructDecl fields') types) (concatMap (typeNames . snd) fields' ++ rest)
+                | Just (params, fields) <- maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program))
+                , Just fields0 <- instanceFields params args fields ->
+                    let fields' = [(f, t) | (f, t) <- fields0, not (erased && isPermission t)]
+                     in go (Map.insert name (StructDecl fields') types) (concatMap (typeNames . snd) fields' ++ rest)
             _ -> go types rest
+    isPermission t = case t of
+        TBlock _ -> True
+        _ -> False
     statementRvalues s = case s of
         Assign _ rv -> [rv]
         Peek _ rv -> [rv]
@@ -240,6 +267,8 @@ completeInstances program
         TList t -> typeNames t
         TArrayOf t _ -> typeNames t
         TBox t -> typeNames t
+        TAddr t -> typeNames t
+        TBlock t -> typeNames t
         TFn args ret -> concatMap typeNames (ret : args)
         _ -> []
     rvalueNames rv = case rv of
@@ -364,6 +393,7 @@ renderGhostList stmts = "{ " ++ intercalate "; " (map renderValidation stmts) ++
 renderValidation :: ValidationStatement -> String
 renderValidation (ProofAssert p) = "affirm " ++ renderVarProof p
 renderValidation (AssignProofVar v e) = "define " ++ v ++ " = " ++ renderExpr e
+renderValidation (Assume p) = "assume " ++ renderVarProof p
 renderValidation (Rewrite rule) = "rewrite " ++ renderRule rule
 
 renderRule :: RwRule -> String
@@ -436,9 +466,9 @@ renderTerminator (Call f args dest next) =
 renderTerminator Return = "return;"
 renderTerminator Unreachable = "unreachable;"
 
--- The operations that give something outside the program: the input and the arguments
+-- The operations that give something outside the program: the input and the arguments, and a new allocation
 readsWorldOp :: ListOp -> Bool
-readsWorldOp op = op `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore]
+readsWorldOp op = op `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore, AddrAlloc, AddrResize, BlockAssume]
 
 -- The functions of the program that read the standard input or the arguments (`readByte`, `argCount`, `argByte`), or call or mention one that does. What such a function gives is not
 -- determined by its arguments, so a validator may not say that two calls with the same arguments give the same value.

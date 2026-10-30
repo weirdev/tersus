@@ -244,9 +244,11 @@ resolveFunction :: M.Function -> L M.Function
 resolveFunction fn = do
     locals <- mapM (\d -> (\t -> d{M.localType = t}) <$> resolveType (M.localType d)) (M.fnLocals fn)
     returns <- mapM resolveType (M.fnReturns fn)
+    -- (a struct that is named by types that were not known when it was made, a tuple, has the name of what they came to)
+    blocks <- mapM resolveBlock (M.fnBlocks fn)
     -- (an element that no use decided was not looked at when the array was made: what it came to is looked at now)
     mapM_ (mapM_ arrayHolds . universe . M.localType) (Map.elems locals)
-    return fn{M.fnLocals = locals, M.fnReturns = returns}
+    return fn{M.fnLocals = locals, M.fnReturns = returns, M.fnBlocks = blocks}
   where
     universe ty = ty : case ty of
         TList t -> universe t
@@ -257,17 +259,38 @@ resolveFunction fn = do
     arrayHolds ty = case ty of
         TArrayOf t _ | not (arrayElement t) -> failL ("Type error: an array holds values that have a size, not " ++ renderType t)
         _ -> return ()
+    resolveBlock (M.BasicBlock stmts term) = (\stmts' -> M.BasicBlock stmts' term) <$> mapM resolveStatement stmts
+    resolveStatement stmt = case stmt of
+        M.Assign l rv -> M.Assign l <$> resolveRvalue rv
+        _ -> return stmt
+    resolveRvalue rv = case rv of
+        M.MakeData name fields -> (\n -> M.MakeData n fields) <$> resolveName name
+        M.ReadField o name field -> (\n -> M.ReadField o n field) <$> resolveName name
+        _ -> return rv
+    resolveName name
+        | '?' `elem` name, Just _ <- instanceOf name = typeName <$> resolveType (TNamed name)
+        | otherwise = return name
 
 resolveType :: Type -> L Type
 resolveType ty = defaultType <$> tc (zonk ty)
   where
     defaultType (TVar _) = TInt
+    defaultType (TNamed name) | Just (base, args) <- instanceOf name = TNamed (instanceName base (map defaultArg args))
+    defaultType (TAddr t) = TAddr (defaultType t)
+    defaultType (TBlock t) = TBlock (defaultType t)
     defaultType (TList t) = TList (defaultType t)
     defaultType (TArrayOf t n) = TArrayOf (defaultType t) n
     defaultType (TBox t) = TBox (defaultType t)
     defaultType (TRef t) = TRef (defaultType t)
     defaultType (TFn args ret) = TFn (map defaultType args) (defaultType ret)
     defaultType t = t
+    defaultArg (ArgType t) = ArgType (defaultType t)
+    defaultArg arg = arg
+
+-- The name of the struct a type is (a tuple whose types were not all known when it was made is named again when they are: see resolveFunction)
+typeName :: Type -> Name
+typeName (TNamed name) = name
+typeName _ = ""
 
 -- Finished blocks, numbered in the order a walk from the entry reaches them; blocks nothing jumps to are dropped
 buildFunction :: [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> M.Env -> Builder -> M.Function
@@ -598,13 +621,45 @@ lowerBuiltin b args = do
         (ArrayFrom, [(M.Const (M.CList items), TList elementTy)]) -> return (TArray elementTy (fromIntegral (length items)))
         (ArrayFrom, _) -> failL "an array literal was not made from a list of constants"
         _ -> builtinResult b tys
-    rv <- builtinRvalue b tys (map fst operands)
+    rv <- case pairParts b of
+        Just (first, second) -> pairRvalue b first second result (map fst operands)
+        Nothing -> builtinRvalue b tys (map fst operands)
     return (PRvalue rv, result)
   where
     builtinResult b' tys' = case (b', tys') of
         (Field owner field, [structTy]) -> tc (readField owner field structTy)
         (Ctor name fields, _) -> tc (checkConstruct name fields tys')
         _ -> tc (builtinType b' >>= \ft -> checkBuiltinCall (Just b') "call" ft tys')
+
+-- The forms that give two things, an address or a value and a permission: each is two operations, and the tuple of what they give
+pairParts :: BuiltinFunct -> Maybe (M.ListOp, M.ListOp)
+pairParts b = case b of
+    AllocPair -> Just (M.AddrAlloc, M.BlockNew)
+    TakePair -> Just (M.AddrTake, M.BlockTaken)
+    ResizePair -> Just (M.AddrResize, M.BlockResized)
+    SplitPair -> Just (M.BlockSplitLo, M.BlockSplitHi)
+    _ -> Nothing
+
+-- The first operation reads the permission (the second takes it), and the second is given what the first made where it needs it:
+-- Addr::alloc(n) is p = AddrAlloc(n), b = BlockNew(p, n); Addr::take(p, i, b) is x = AddrTake(p, i, b), b2 = BlockTaken(b, i);
+-- Addr::resize(p, n, b) is q = AddrResize(p, n, b), b2 = BlockResized(b, q, n); Block::split(b, i) is BlockSplitLo(b, i), BlockSplitHi(b, i)
+pairRvalue :: BuiltinFunct -> M.ListOp -> M.ListOp -> Type -> [M.Operand] -> L M.Rvalue
+pairRvalue b first second result ops = do
+    resultTy <- tc (zonk result)
+    case tupleParts resultTy of
+        Just [firstTy, secondTy] -> do
+            x <- newLocal Nothing firstTy
+            emit (M.Assign x (M.ListOp first ops))
+            y <- newLocal Nothing secondTy
+            secondOps <- case (b, ops) of
+                (AllocPair, [n]) -> return [M.Copy x, n]
+                (TakePair, [_, i, blk]) -> return [blk, i]
+                (ResizePair, [_, n, blk]) -> return [blk, M.Copy x, n]
+                (SplitPair, _) -> return ops
+                _ -> failL ("A builtin was applied to the wrong number of arguments: " ++ show b)
+            emit (M.Assign y (M.ListOp second secondOps))
+            return (M.MakeData (typeName resultTy) [("0", M.Copy x), ("1", M.Copy y)])
+        _ -> failL ("The result of " ++ show b ++ " is not a pair")
 
 -- The operation that a builtin applied to operands stands for. `as` keeps the value and gives it the variant's type.
 builtinRvalue :: BuiltinFunct -> [Type] -> [M.Operand] -> L M.Rvalue
@@ -628,6 +683,8 @@ builtinRvalue b tys ops =
         (Mod, [x, y]) -> return (M.BinaryOp M.Mod x y)
         (Rel rel, [x, y]) -> return (M.BinaryOp (M.Compare rel) x y)
         (Not, [x]) -> return (M.BinaryOp (M.Compare Eq) x (M.Const (M.CBool False)))
+        -- (a tuple is a literal of the instance of its struct for the types of its parts)
+        (Ctor name fields, _) | Just _ <- tupleGeneric name, length fields == length ops -> return (M.MakeData (typeName (tupleType tys)) (zip fields ops))
         (Ctor name fields, _) | length fields == length ops -> return (M.MakeData name (zip fields ops))
         (Field owner field, [o]) -> do
             ctor <- maybe (structCtor (head tys)) return owner
@@ -658,7 +715,18 @@ builtinRvalue b tys ops =
         (Is variant, [o]) -> return (M.IsVariant o variant)
         (Cast variant, [o]) -> return (M.AsVariant o variant)
         (Within, _) -> failL "within only exists in proofs"
+        _ | Just op <- pointerOp b -> return (M.ListOp op ops)
         _ -> failL ("A builtin was applied to the wrong number of arguments: " ++ show b)
+
+-- The operations on addresses and permissions that are one operation of the MIR
+pointerOp :: BuiltinFunct -> Maybe M.ListOp
+pointerOp b = lookup b
+    [ (AddrNull, M.AddrNull), (AddrOffset, M.AddrOffset), (AddrCast, M.AddrCast), (AddrToInt, M.AddrToInt), (AddrFromInt, M.AddrFromInt)
+    , (AddrAlloc, M.AddrAlloc), (AddrGet, M.AddrGet), (AddrWrite, M.AddrWrite), (AddrTake, M.AddrTake), (AddrDropValue, M.AddrDropValue)
+    , (AddrDropRange, M.AddrDropRange), (AddrResize, M.AddrResize), (AddrFree, M.AddrFree)
+    , (BlockNew, M.BlockNew), (BlockTaken, M.BlockTaken), (BlockResized, M.BlockResized), (BlockSplitLo, M.BlockSplitLo)
+    , (BlockSplitHi, M.BlockSplitHi), (BlockJoin, M.BlockJoin), (BlockAssume, M.BlockAssume), (BlockCast, M.BlockCast)
+    ]
 
 -- The constructor that a struct type has, or the variant a value is known to be
 structCtor :: Type -> L Name
@@ -766,3 +834,4 @@ builtinLabel b = case b of
     Is variant -> "is_" ++ variant
     Project variant field -> variant ++ "." ++ field
     Cast variant -> "as_" ++ variant
+    other -> show other

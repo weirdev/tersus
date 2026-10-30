@@ -261,6 +261,10 @@ withTypeFacts fn l st =
     case (M.localType <$> Map.lookup l (M.fnLocals fn), Map.lookup l (psLocals st)) of
         -- (a Byte is from 0 to 255, wherever it came from: it is only ever made from an Int that was proved to be, or read from a list of them)
         (Just TByte, Just iota) -> addFacts st [FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm iota, CTerm (VInt 0)], FApp (CTerm (builtinFunct (Rel Lt))) [ATerm iota, CTerm (VInt 256)]]
+        -- (a permission is to a number of slots that is not negative, and as many of them are filled as count says, which are at most all of them)
+        (Just (TBlock _), Just iota) ->
+            let app f = FApp (CTerm (VFunct [] [] [] (BuiltinFunct f) [])) [ATerm iota]
+             in addFacts st [FApp (CTerm (builtinFunct (Rel GtEq))) [app BlockCap, CTerm (VInt 0)], FApp (CTerm (builtinFunct (Rel GtEq))) [app BlockCount, CTerm (VInt 0)], FApp (CTerm (builtinFunct (Rel LtEq))) [app BlockCount, app BlockCap]]
         (Just (TArray _ n), Just iota) -> sized n iota
         (Just (TBox (TArray _ n)), Just iota) -> sized n iota
         (Just (TArrayOf _ (SizeParam p)), Just iota) -> sizedByParam p iota

@@ -34,7 +34,7 @@ monomorphize program
     -- (the structs with sizes that the copies mention are declared, and those that only a function with sizes mentioned, whose sizes
     -- were names, are not there any more)
     withInstances p =
-        let complete = completeInstances p
+        let complete = completeErasedInstances p
          in complete{progTypes = Map.filterWithKey (\name _ -> not (symbolic name)) (progTypes complete)}
     symbolic name = mentionsParameter (TNamed name)
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)
@@ -175,6 +175,8 @@ match :: Type -> Type -> [(Variable, Type)]
 match pattern actual = case (pattern, actual) of
     (TParam name, a) -> [(name, a)]
     (TBox p, TBox a) -> match p a
+    (TAddr p, TAddr a) -> match p a
+    (TBlock p, TBlock a) -> match p a
     (TRef p, a) -> match p a
     (p, TRef a) -> match p a
     (TArrayOf p _, TArrayOf a _) -> match p a

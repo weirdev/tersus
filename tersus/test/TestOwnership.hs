@@ -30,7 +30,8 @@ import Utils
 data Val = VI Integer | VB Bool | VP Int | VNull | VF Name | VS Name [(Variable, Val)]
     deriving (Eq, Show)
 
-data Obj = OList [Val] | OBox Val
+-- (OMem is the memory of Addr::alloc: the slots that hold a value, of so many; an address is the number of the cell times 2^32 and the slot)
+data Obj = OList [Val] | OBox Val | OMem (Map Integer Val) Integer
 
 data Cell = Cell {cellGeneration :: Int, cellObject :: Obj}
 
@@ -105,6 +106,7 @@ freeTree _ = return ()
 children :: Obj -> [Val]
 children (OList vs) = vs
 children (OBox v) = [v]
+children (OMem slots _) = Map.elems slots
 
 -- The values of the heap that a value holds, inline or not
 pointersOf :: Val -> [Int]
@@ -118,6 +120,7 @@ cloneVal (VP a) = do
     case cellObject c of
         OList vs -> mapM cloneVal vs >>= alloc . OList
         OBox v -> cloneVal v >>= alloc . OBox
+        OMem _ _ -> failM "memory is copied"
 cloneVal (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneVal v) fs
 cloneVal v = return v
 
@@ -197,6 +200,7 @@ toPure (VP a) = do
     case cellObject c of
         OList vs -> PL <$> mapM toPure vs
         OBox v -> toPure v
+        OMem _ _ -> failM "memory is compared"
 -- (a list of native code is the elements in use of the array it holds)
 toPure (VS name fs)
     | isListStruct name, Just elements <- lookup "data" fs, Just (VI used) <- lookup "len" fs = do
@@ -361,8 +365,68 @@ listOp op os =
                     freeTree (vs !! n)
                     setObject a (OList (take n vs ++ [v] ++ drop (n + 1) vs))
                     return list
+        -- (the operations on memory, whose permissions are erased: what is in the slots is owned by the memory, and freeing it with a
+        -- value left is a leak, which the check at the end finds)
+        (AddrNull, []) -> pure (VI 0)
+        (AddrOffset, [p, i]) -> (\a b -> VI (a + b)) <$> intOperand p <*> intOperand i
+        (AddrCast, [p]) -> readOperand p
+        (AddrToInt, [p]) -> readOperand p
+        (AddrFromInt, [n]) -> readOperand n
+        (AddrAlloc, [n]) -> do
+            count <- intOperand n
+            v <- alloc (OMem Map.empty count)
+            case v of
+                VP a -> pure (VI (toInteger a * memorySpan))
+                _ -> failM "an allocation is not on the heap"
+        (AddrGet, [p, i]) -> slotOf p i >>= \(_, slots, _, k) -> maybe (failM "a slot that holds no value is read") pure (Map.lookup k slots)
+        (AddrTake, [p, i]) -> do
+            (a, slots, size, k) <- slotOf p i
+            v <- maybe (failM "a slot that holds no value is taken") pure (Map.lookup k slots)
+            setObject a (OMem (Map.delete k slots) size)
+            pure v
+        (AddrWrite, [p, i, x]) -> do
+            (a, slots, size, k) <- slotOf p i
+            v <- readOperand x
+            if Map.member k slots then failM "a value is written over a slot that holds one" else setObject a (OMem (Map.insert k v slots) size)
+            pure (VI 0)
+        (AddrDropValue, [p, i]) -> dropSlots p i (Const (CInt 1))
+        (AddrDropRange, [p, i, n]) -> dropSlots p i n
+        (AddrResize, [p, n]) -> do
+            (a, slots, _, k) <- slotOf p (Const (CInt 0))
+            count <- intOperand n
+            if k /= 0 || any (>= count) (Map.keys slots) then failM "memory is resized that is not whole, or to fewer slots than hold values" else pure ()
+            s <- getSt
+            putSt s{stHeap = Map.delete a (stHeap s)}
+            v <- alloc (OMem slots count)
+            case v of
+                VP b -> pure (VI (toInteger b * memorySpan))
+                _ -> failM "an allocation is not on the heap"
+        (AddrFree, [p]) -> do
+            (a, slots, _, k) <- slotOf p (Const (CInt 0))
+            if k /= 0 || not (Map.null slots) then failM "memory is freed that is not whole, or that holds a value" else pure ()
+            s <- getSt
+            putSt s{stHeap = Map.delete a (stHeap s)}
+            pure (VI 0)
         _ -> failM ("list operation on the wrong operands: " ++ show op)
   where
+    memorySpan = 2 ^ (32 :: Integer)
+    slotOf p i = do
+        address <- intOperand p
+        index <- intOperand i
+        let (a, k) = (address + index * 1) `divMod` memorySpan
+        c <- cell (fromInteger a)
+        case cellObject c of
+            OMem slots size | k < size -> pure (fromInteger a, slots, size, k)
+            _ -> failM "an address out of its memory"
+    dropSlots p i n = do
+        count <- intOperand n
+        index <- intOperand i
+        mapM_ (\j -> do
+            (a, slots, size, k) <- slotOf p (Const (CInt j))
+            v <- maybe (failM "a slot that holds no value is dropped") pure (Map.lookup k slots)
+            setObject a (OMem (Map.delete k slots) size)
+            freeTree v) [index .. index + count - 1]
+        pure (VI 0)
     item l pick = do
         (_, obj) <- readOperand l >>= object
         let vs = children obj

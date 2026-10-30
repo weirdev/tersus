@@ -32,7 +32,7 @@ import Utils
 --     return
 --     end
 --
--- The words of a type are `int byte bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+-- The words of a type are `int byte bool`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
 -- `forall N "n"... N "n"... T`, `param "n"` and `ref T`, and of a size `c N`, `any`, `p "n"` and `v N`. An operand is `copy L`, `move L` or
 -- `const C`, a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. The statements are
 -- `assign L RVALUE`, `peek L RVALUE` and `drop L`; the terminators `goto B`, `switch O B B`, `call O N O... L B`, `return` and `unreachable`.
@@ -107,6 +107,8 @@ typeTokens ty = case ty of
     TList t -> "list" : typeTokens t
     TArrayOf t s -> "array" : typeTokens t ++ sizeTokens s
     TBox t -> "box" : typeTokens t
+    TAddr t -> "addr" : typeTokens t
+    TBlock t -> "block" : typeTokens t
     TFn args ret -> ["fn", show (length args)] ++ concatMap typeTokens (args ++ [ret])
     TNamed n -> ["named", quote n]
     TVariant n -> ["variant", quote n]
@@ -192,6 +194,11 @@ listOps =
     , ("writeByte", WriteByte), ("writeError", WriteError), ("readByte", ReadByte), ("argCount", ArgCount), ("argByte", ArgByte)
     , ("pathByte", PathByte), ("fileLoad", FileLoad), ("fileByte", FileByte), ("storeByte", StoreByte), ("fileStore", FileStore)
     , ("toByte", ToByte), ("fromByte", FromByte)
+    , ("addrNull", AddrNull), ("addrOffset", AddrOffset), ("addrCast", AddrCast), ("addrToInt", AddrToInt), ("addrFromInt", AddrFromInt)
+    , ("addrAlloc", AddrAlloc), ("addrGet", AddrGet), ("addrWrite", AddrWrite), ("addrTake", AddrTake), ("addrDropValue", AddrDropValue)
+    , ("addrDropRange", AddrDropRange), ("addrResize", AddrResize), ("addrFree", AddrFree)
+    , ("blockNew", BlockNew), ("blockTaken", BlockTaken), ("blockResized", BlockResized), ("blockSplitLo", BlockSplitLo)
+    , ("blockSplitHi", BlockSplitHi), ("blockJoin", BlockJoin), ("blockAssume", BlockAssume), ("blockCast", BlockCast)
     ]
 
 listOpWord :: ListOp -> String
@@ -288,6 +295,8 @@ typeP = word >>= \w -> case w of
     "list" -> TList <$> typeP
     "array" -> TArrayOf <$> typeP <*> sizeP
     "box" -> TBox <$> typeP
+    "addr" -> TAddr <$> typeP
+    "block" -> TBlock <$> typeP
     "fn" -> int >>= \n -> replicateM n typeP >>= \args -> TFn args <$> typeP
     "named" -> TNamed <$> name
     "variant" -> TVariant <$> name

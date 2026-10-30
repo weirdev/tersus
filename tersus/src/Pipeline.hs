@@ -6,6 +6,7 @@ module Pipeline
     , nativeProgram
     , validateStatements
     , runStatements
+    , assumptionsOf
     ) where
 
 import LlvmEmit (emitOwned)
@@ -13,13 +14,15 @@ import qualified Mir as M
 import MirOwnership (insertOwnership)
 import MirVerify (verifyProgram)
 import MirEval (MirValue, runProgram)
+import MirGhost (eraseGhosts)
 import MirLower (lowerElaborated, lowerLibrary)
 import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
 import PreludeSource (listsSource, preludeSource, stringSource)
-import TersusTypes (Expression (..), Statement (..), Value (..))
+import Pretty (renderVarProof)
+import TersusTypes (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
 import Utils
 
@@ -28,6 +31,8 @@ import Utils
 --   source -> AST (parseSource) -> checked AST (elaborate: types checked, each `shrinks` resolved)
 --          -> MIR (lowerElaborated) -> validated MIR (validateProgram) -> executed (runProgram)
 --                                                                    or -> LLVM IR (emitOwned)
+--
+-- The validated MIR has its permissions (ghost values, POINTERS.md) taken out by `eraseGhosts` before anything runs it or makes native code of it.
 --
 -- The program is type checked once, by `elaborate`; the lowering takes its result and the validator the MIR. Errors name
 -- the stage that refused the program, as the command line prints them.
@@ -99,6 +104,36 @@ libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string l
         _ : more -> afterString more
         [] -> []
 
+-- What a program takes on trust (POINTERS.md, Assumptions): each `assume e;`, each `Block::assume(p, n)` (the permission to memory it did not
+-- allocate) and each `axiom`, in the program and the libraries in front of it, with the place it is written at (a library's have none). The
+-- validator proves everything else, so this is the list to read to know what a program's proofs rest on.
+assumptionsOf :: String -> Result [String] String
+assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
+  where
+    statements place = foldl (\(p, found) stmt -> let (p', more) = statement p stmt in (p', found ++ more)) (place, [])
+    statement place stmt = case stmt of
+        Mark line column -> (Just (line, column), [])
+        ValidationStatement (Assume p) -> (place, [at place ("assume " ++ renderVarProof p)])
+        AxiomDef name args _ _ -> (place, [at place ("axiom " ++ name ++ "(" ++ commas args ++ ")")])
+        Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> (place, snd (statements place body))
+        Assign _ e -> (place, expression place e)
+        Let _ e -> (place, expression place e)
+        Return e -> (place, expression place e)
+        Block body -> (place, snd (statements place body))
+        If c yes no -> (place, expression place c ++ snd (statements place yes) ++ snd (statements place no))
+        While c _ _ body -> (place, expression place c ++ snd (statements place body))
+        ImplDef _ _ _ _ body -> (place, snd (statements place body))
+        BoundedDef _ s -> (place, snd (statement place s))
+        _ -> (place, [])
+    expression place e = case e of
+        F (Var "Block::assume") args -> at place (renderVarProof (exprToProof e)) : concatMap (expression place) args
+        F f args -> concatMap (expression place) (f : args)
+        _ -> []
+    at place text = maybe "in a library: " (\(line, column) -> "line " ++ show line ++ ":" ++ show column ++ ": ") place ++ text
+    commas = foldr1' (\a b -> a ++ ", " ++ b)
+    foldr1' _ [] = ""
+    foldr1' f xs = foldr1 f xs
+
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
 compileSource = compileWith True
@@ -109,7 +144,7 @@ compileWith reserving source =
         stage "Validation failed: " (elaborate stmts) `bindResult` \elaborated ->
             stage "Lowering failed: " ((if reserving then lowerElaborated else lowerLibrary) elaborated) `bindResult` \program ->
                 stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
-                    Ok program
+                    eraseGhosts program
 
 -- The MIR of a program that passes every check, with who owns each value made explicit (MirOwnership), for native code
 ownedSource :: String -> Result M.Program String
@@ -145,7 +180,7 @@ validateStatements stmts =
 runStatements :: [Statement] -> Result (Maybe MirValue) String
 runStatements stmts =
     elaborate stmts `bindResult` \elaborated ->
-        lowerElaborated elaborated `bindResult` runProgram
+        lowerElaborated elaborated `bindResult` eraseGhosts `bindResult` runProgram
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

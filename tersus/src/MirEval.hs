@@ -96,10 +96,81 @@ data S = S
     , sStore :: String
     , sFiles :: Map FilePath String -- by the path with its dots taken out (see samePath)
     , sOrder :: [(FilePath, FilePath)] -- the files written, by that path and the way the program first spelled it
+    , sHeap :: Map Integer Allocation -- the memory that Addr::alloc gave, by the number of each allocation
+    , sNextAllocation :: Integer
     }
 
+-- The memory of an allocation: its slots, each holding a value or nothing (POINTERS.md). An address is a number: allocation k starts at
+-- k * 2^32 and a slot is one more than the slot before it, so that `Addr::offset` is a sum, `Addr::toInt` is the number (which is not the
+-- one native code has) and the null address, 0, is in no allocation. A read of an empty slot, a write over a filled one, a use of memory
+-- that was freed or never allocated, and a free of memory that still holds a value are errors: a proved program does none of them, so
+-- this is a check of what a program assumes (Block::assume).
+data Allocation = Allocation {allocSize :: Integer, allocSlots :: Map Integer MirValue}
+
 startState :: String -> S
-startState input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = []}
+startState input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1}
+
+allocationSpan :: Integer
+allocationSpan = 2 ^ (32 :: Integer)
+
+-- The allocation an address is in and the slot it is, if it is the address of a slot of an allocation that is there
+slotAt :: S -> Integer -> Result (Integer, Allocation, Integer) String
+slotAt s address =
+    let (k, slot) = address `divMod` allocationSpan
+     in case Map.lookup k (sHeap s) of
+            Just a | slot < allocSize a -> Ok (k, a, slot)
+            Just _ -> Error "An address past the end of its allocation was used"
+            Nothing -> Error "An address of memory that is not allocated (it was freed, or never allocated) was used"
+
+heapE :: (S -> Result (a, S) String) -> E a
+heapE f = E (\_ s -> mapResult (\(a, s') -> (a, none, s')) (f s))
+
+-- n new slots, all empty: the address of the first
+allocate :: Integer -> E Integer
+allocate n
+    | n < 0 = failE "Addr::alloc needs a number of slots that is not negative"
+    | n >= allocationSpan = failE "Addr::alloc was asked for more memory than there is"
+    | otherwise = heapE (\s -> let k = sNextAllocation s in Ok (k * allocationSpan, s{sHeap = Map.insert k (Allocation n Map.empty) (sHeap s), sNextAllocation = k + 1}))
+
+-- The value in a slot, which stays there, or which is taken out of it
+readSlot :: Bool -> Integer -> E MirValue
+readSlot taking address = heapE $ \s ->
+    slotAt s address `bindResult` \(k, a, slot) -> case Map.lookup slot (allocSlots a) of
+        Nothing -> Error "A slot that holds no value was read"
+        Just v -> Ok (v, if taking then s{sHeap = Map.insert k a{allocSlots = Map.delete slot (allocSlots a)} (sHeap s)} else s)
+
+writeSlot :: Integer -> MirValue -> E ()
+writeSlot address v = heapE $ \s ->
+    slotAt s address `bindResult` \(k, a, slot) ->
+        if Map.member slot (allocSlots a)
+            then Error "A value was written over a slot that holds one"
+            else Ok ((), s{sHeap = Map.insert k a{allocSlots = Map.insert slot v (allocSlots a)} (sHeap s)})
+
+-- The allocation that starts at the address
+wholeAt :: S -> Integer -> Result (Integer, Allocation) String
+wholeAt s address =
+    let (k, slot) = address `divMod` allocationSpan
+     in case Map.lookup k (sHeap s) of
+            Just a | slot == 0 -> Ok (k, a)
+            Just _ -> Error "Memory was freed or resized from an address that is not the start of its allocation"
+            Nothing -> Error "Memory that is not allocated (it was freed already, or never allocated) was freed or resized"
+
+release :: Integer -> E ()
+release address = heapE $ \s ->
+    wholeAt s address `bindResult` \(k, a) ->
+        if Map.null (allocSlots a)
+            then Ok ((), s{sHeap = Map.delete k (sHeap s)})
+            else Error "Memory that still holds a value was freed, which would lose it"
+
+-- The slots moved to a new allocation of n: those from n have to be empty
+reallocate :: Integer -> Integer -> E Integer
+reallocate address n = do
+    moved <- heapE (\s -> wholeAt s address `bindResult` \(k, a) ->
+        if any (>= n) (Map.keys (allocSlots a))
+            then Error "Memory was resized to fewer slots than hold values"
+            else Ok (allocSlots a, s{sHeap = Map.delete k (sHeap s)}))
+    q <- allocate n
+    heapE (\s -> let k = q `div` allocationSpan in Ok (q, s{sHeap = Map.adjust (\a -> a{allocSlots = moved}) k (sHeap s)}))
 
 -- The evaluator is a function of what the program is run in and of its state, and the failure of a result, with the bytes written so far
 newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
@@ -287,9 +358,49 @@ runStatements frame (Assign dest (ListOp WriteError [o]) : rest) = do
     case v of
         MInt b -> writeError (chr (fromIntegral (b `mod` 256))) >> runStatements (Map.insert dest v frame) rest
         _ -> failE "writeError takes an Int"
+runStatements frame (Assign dest (ListOp op os) : rest) | Just run <- memoryOp op = do
+    args <- mapM (intOrValue frame) os
+    v <- run args
+    runStatements (Map.insert dest v frame) rest
 runStatements frame (Assign dest rv : rest) = do
     v <- liftE (evalRvalue frame rv)
     runStatements (Map.insert dest v frame) rest
+
+intOrValue :: Frame -> Operand -> E MirValue
+intOrValue frame o = liftE (operandValue frame o)
+
+-- The operations on memory, which change the heap (the permissions they were given are erased: see MirGhost)
+memoryOp :: ListOp -> Maybe ([MirValue] -> E MirValue)
+memoryOp op = case op of
+    AddrAlloc -> Just (\args -> case args of
+        [MInt n] -> MInt <$> allocate n
+        _ -> bad)
+    AddrGet -> Just (\args -> case args of
+        [MInt p, MInt i] -> readSlot False (p + i)
+        _ -> bad)
+    AddrTake -> Just (\args -> case args of
+        [MInt p, MInt i] -> readSlot True (p + i)
+        _ -> bad)
+    AddrWrite -> Just (\args -> case args of
+        [MInt p, MInt i, x] -> writeSlot (p + i) x >> return (MInt 0)
+        _ -> bad)
+    AddrDropValue -> Just (\args -> case args of
+        [MInt p, MInt i] -> readSlot True (p + i) >> return (MInt 0)
+        _ -> bad)
+    AddrDropRange -> Just (\args -> case args of
+        [MInt p, MInt i, MInt n] -> mapM_ (\j -> readSlot True (p + j)) [i .. i + n - 1] >> return (MInt 0)
+        _ -> bad)
+    AddrResize -> Just (\args -> case args of
+        [MInt p, MInt n]
+            | n < 0 -> failE "Addr::resize needs a number of slots that is not negative"
+            | otherwise -> MInt <$> reallocate p n
+        _ -> bad)
+    AddrFree -> Just (\args -> case args of
+        [MInt p] -> release p >> return (MInt 0)
+        _ -> bad)
+    _ -> Nothing
+  where
+    bad = failE (show op ++ " is given an address, numbers and a value, without the permission (which is erased before the program runs)")
 
 -- The Int that an operand is
 intArgument :: Frame -> Operand -> E Integer
@@ -401,6 +512,12 @@ listOp NewArray [MInt n, x]
 listOp Set [MList l, MInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok (MList (before ++ x : drop 1 after))
+-- (an address is a number: see Allocation)
+listOp AddrNull [] = Ok (MInt 0)
+listOp AddrOffset [MInt p, MInt i] = checked (p + i)
+listOp AddrCast [p] = Ok p
+listOp AddrToInt [p] = Ok p
+listOp AddrFromInt [n] = Ok n
 listOp op _ = Error (show op ++ " is not defined for these values")
 
 -- A struct with sizes is one struct to a program that runs: the sizes are in the name of each copy that native code makes, and

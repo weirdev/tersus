@@ -45,6 +45,7 @@ enum Type {
     TForall { sizes: List<String>, types: List<String>, body: Box<Type> },
     TParam { name: String },
     TRef { inner: Box<Type> },
+    TAddr { inner: Box<Type> },
 };
 
 impl Clone for Type { };
@@ -108,9 +109,9 @@ enum Terminator {
 
 impl Clone for Terminator { };
 
-struct Block { id: Int, stmts: List<Statement>, term: Terminator };
+struct MirBlock { id: Int, stmts: List<Statement>, term: Terminator };
 
-impl Clone for Block { };
+impl Clone for MirBlock { };
 
 struct LocalDecl { id: Int, named: Bool, name: String, ty: Type };
 
@@ -125,7 +126,7 @@ struct Function {
     typeParams: List<String>,
     borrowed: List<Int>,
     locals: List<LocalDecl>,
-    blocks: List<Block>,
+    blocks: List<MirBlock>,
 };
 
 impl Clone for Function { };
@@ -150,7 +151,7 @@ fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
     return w;
 };
 
-fn listWords() -> List<String> [{ }] [{ affirm size(return) = 22; }] {
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 35; }] {
     w = push([], "length");
     w = push(w, "first");
     w = push(w, "last");
@@ -173,6 +174,19 @@ fn listWords() -> List<String> [{ }] [{ affirm size(return) = 22; }] {
     w = push(w, "fileStore");
     w = push(w, "toByte");
     w = push(w, "fromByte");
+    w = push(w, "addrNull");
+    w = push(w, "addrOffset");
+    w = push(w, "addrCast");
+    w = push(w, "addrToInt");
+    w = push(w, "addrFromInt");
+    w = push(w, "addrAlloc");
+    w = push(w, "addrGet");
+    w = push(w, "addrWrite");
+    w = push(w, "addrTake");
+    w = push(w, "addrDropValue");
+    w = push(w, "addrDropRange");
+    w = push(w, "addrResize");
+    w = push(w, "addrFree");
     return w;
 };
 
@@ -375,7 +389,7 @@ fn sizeAt(ts: &List<Token>, pos: Int) -> Parsed<Size> [{ affirm pos >= 0; affirm
     return bad;
 };
 
-// A type. The words are `int byte bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+// A type. The words are `int byte bool`, `list T`, `array T SIZE`, `box T`, `addr T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
 // `forall N "n"... N "n"... T`, `param "n"` and `ref T`.
 fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
     bad = failed(Type::TInt, ts);
@@ -387,9 +401,10 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
     if kw = "byte" { return done(Type::TByte, next); };
     if kw = "bool" { return done(Type::TBool, next); };
     if next >= size(ts) { return bad; };
-    if kw = "list" || kw = "box" || kw = "ref" {
+    if kw = "list" || kw = "box" || kw = "ref" || kw = "addr" {
         e = typeAt(ts, next);
         if !e.ok { return bad; };
+        if kw = "addr" { return done(Type::TAddr { inner: Box::new(e.value) }, e.pos); };
         if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
         if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
         return done(Type::TRef { inner: Box::new(e.value) }, e.pos);
@@ -860,13 +875,13 @@ fn localDeclAt(ts: &List<Token>) -> Parsed<LocalDecl> [{ }] [{ }] {
     return done(LocalDecl { id: l.value, named: named, name: name, ty: t.value }, t.pos);
 };
 
-fn noBlock() -> Block [{ }] [{ }] {
-    return Block { id: 0, stmts: [], term: Terminator::Unreachable };
+fn noBlock() -> MirBlock [{ }] [{ }] {
+    return MirBlock { id: 0, stmts: [], term: Terminator::Unreachable };
 };
 
 // The block that starts at the line li (`block B`): its statements and the terminator that ends it. The index in the result is the line after the terminator.
-fn blockAt(lines: &List<List<Token>>, li: Int) -> Parsed<Block> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
-    bad = Parsed<Block> { value: noBlock(), pos: size(lines), ok: false };
+fn blockAt(lines: &List<List<Token>>, li: Int) -> Parsed<MirBlock> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
+    bad = Parsed<MirBlock> { value: noBlock(), pos: size(lines), ok: false };
     head = get(lines, li);
     if size(head) != 2 { return bad; };
     id = intAt(head, 1);
@@ -884,7 +899,7 @@ fn blockAt(lines: &List<List<Token>>, li: Int) -> Parsed<Block> [{ affirm li >= 
                 j = j + 1;
             },
             Line::LTerminator { t: term } => {
-                return done(Block { id: id.value, stmts: stmts, term: term }, j + 1);
+                return done(MirBlock { id: id.value, stmts: stmts, term: term }, j + 1);
             },
         };
     };
@@ -1063,6 +1078,7 @@ fn printType(t: &Type) -> Int ~ {
         },
         Type::TParam { name: name } => { n = " param".print() + printName(name); },
         Type::TRef { inner: e } => { n = " ref".print() + printType(Box::unbox(e)); },
+        Type::TAddr { inner: e } => { n = " addr".print() + printType(Box::unbox(e)); },
     };
     return n;
 };
@@ -1180,7 +1196,7 @@ fn printTerminator(t: &Terminator) -> Int ~ {
     return n + newLine();
 };
 
-fn printBlock(b: &Block) -> Int ~ {
+fn printBlock(b: &MirBlock) -> Int ~ {
     n = "block".print() + printInt(b.id) + newLine();
     i = 0;
     while i < size(b.stmts) [{ affirm i >= 0; affirm i <= size(b.stmts); }] ~ {

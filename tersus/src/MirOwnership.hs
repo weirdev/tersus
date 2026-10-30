@@ -99,6 +99,13 @@ roles rv =
         ListOp Push [l, x] -> [(l, Consume), (x, Consume)]
         ListOp Pop [l] -> [(l, Consume)]
         ListOp Set [l, i, x] -> [(l, Consume), (i, Read), (x, Consume)]
+        -- (a value written to memory is moved there; a permission that an operation changes is taken by it, and one it only looks at is lent)
+        ListOp AddrWrite (p : i : x : rest) -> [(p, Read), (i, Read), (x, Consume)] ++ [(b, Consume) | b <- rest]
+        ListOp AddrDropValue [p, i, b] -> [(p, Read), (i, Read), (b, Consume)]
+        ListOp AddrDropRange [p, i, n, b] -> [(p, Read), (i, Read), (n, Read), (b, Consume)]
+        ListOp AddrFree [p, b] -> [(p, Read), (b, Consume)]
+        ListOp op (b : rest) | op `elem` [BlockTaken, BlockResized, BlockSplitHi, BlockCast] -> (b, Consume) : [(o, Read) | o <- rest]
+        ListOp BlockJoin os -> [(o, Consume) | o <- os]
         ListOp _ os -> [(o, Read) | o <- os]
         MakeList os -> [(o, Consume) | o <- os]
         MakeBox o -> [(o, Consume)]
@@ -113,7 +120,7 @@ roles rv =
 
 -- The rvalues that read a part of a value
 isProjection :: Rvalue -> Bool
-isProjection (ListOp op _) = op `elem` [First, Last, Get]
+isProjection (ListOp op _) = op `elem` [First, Last, Get, AddrGet]
 isProjection ReadField{} = True
 isProjection _ = False
 

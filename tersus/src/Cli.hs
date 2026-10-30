@@ -40,7 +40,8 @@ import Utils
 -- prints that as data for a program to read (MirData).
 -- `Llvm` prints the LLVM IR of the validated program, and `Build` compiles that to the
 -- executable at the path.
-data Command = Check | Run | Interpret | Mir | MirText | Owned | Llvm | Build FilePath deriving (Show, Eq)
+-- `Assumptions` lists what the program takes on trust (`assume`, `Block::assume` and `axiom`), which the validator does not prove.
+data Command = Check | Run | Interpret | Mir | MirText | Owned | Llvm | Build FilePath | Assumptions deriving (Show, Eq)
 
 usage :: String
 usage =
@@ -58,6 +59,8 @@ usage =
         , "                Validate a program, then print the MIR that native code is made from as data (see MirData)"
         , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
+        , "  assumptions <file>"
+        , "                Print what the program takes on trust, which the validator does not prove: each assume, Block::assume and axiom"
         , "  build <file> -o <output>"
         , "                Validate a program, then compile it to an executable with clang"
         , ""
@@ -78,6 +81,7 @@ parseCommandLine ["mir", "--data", file] = Just (MirText, file)
 parseCommandLine ["owned", file] = Just (Owned, file)
 parseCommandLine ["llvm", file] = Just (Llvm, file)
 parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
+parseCommandLine ["assumptions", file] = Just (Assumptions, file)
 parseCommandLine _ = Nothing
 
 -- Whether the command line starts with the flag that has the emitter in Haskell write the LLVM IR (it is the emitter in Tersus that does otherwise), and the rest of it
@@ -146,6 +150,7 @@ runOther _ Mir source = mapResult renderProgram (compileSource source)
 runOther _ Owned source = mapResult renderProgram (ownedSource source)
 runOther _ MirText source = mapResult writeProgram (ownedSource source)
 runOther _ Llvm source = llvmSource source
+runOther _ Assumptions source = mapResult (\found -> if null found then "No assumptions" else intercalate "\n" found) (assumptionsOf source)
 -- (compiling the IR, and running it for `Run`, is left to the caller, since it runs clang)
 runOther _ Run source = llvmSource source
 runOther _ (Build _) source = llvmSource source

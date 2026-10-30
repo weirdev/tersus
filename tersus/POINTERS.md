@@ -1,6 +1,6 @@
 # Raw pointers (design)
 
-> **Draft.** This is a proposal for step 25 of the roadmap in `README.md`, and for the part of step 29 that puts `Box` in the library. It replaces Part 3 of `DROPS.md`, and the `*T` that step 25 sketches. Nothing here is built.
+> This is the design of step 25 of the roadmap in `README.md`, and of the part of step 29 that puts `Box` in the library. It replaces Part 3 of `DROPS.md`, and the `*T` that step 25 sketches. Most of it is built: see Status, at the end, for what is and how it differs from what is written here.
 
 ## The idea
 
@@ -355,3 +355,26 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 6. **Scoped permissions**, for the address of a local in a frame: a ghost value that has to be given back before the function returns.
 7. **A shorthand for framing**, "this block is the one given except slots `i..j`", if the contracts of functions that take blocks turn out to repeat it.
 8. **Wrapping arithmetic** on the fixed-width integers (for hashes and checksums), or only arithmetic on `Int` with checked narrowing, as above.
+
+## Status
+
+Built, as LANGUAGE.md (Tuples, Addresses and permissions, Assumptions) describes it:
+
+- **Tuples** (step 1 of the order of work): `(A, B)`, `(a, b)`, `t.0` and `(a, b) = e;`. A tuple is an instance of a struct of the language, `Tuple2<A, B>` with fields `0` and `1`, so the MIR, the validator, the ownership pass and both emitters needed nothing new; the checker makes the instance from the types of the parts, and the lowering names it again once they are known.
+- **Ghost values** (step 4), by type: a value is ghost when its type is `Block<T>` (or a struct made only of them, as the tuple `Block::split` gives). `ghost` before a parameter, a field or a part of a tuple is checked to be before such a type. `MirGhost.eraseGhosts` runs after `validateProgram` and before everything else, as written above, and also checks that `Block::cast` is between slots of the same size.
+- **The linear check, for permissions only** (step 2 for what step 6 needs): `MirMoves` follows the places that hold a permission (a `Block`, or a field or part of a value that is one) and reports one that is still held at a return or when its local is given another value. A struct or tuple that holds one is linear with it. A general `linear struct` is not built.
+- **`Addr<T>` and `Block<T>`** (step 6): the types, every operation of the tables above, the ghost functions, `Block::split`, `join`, `cast` and `assume`, the heap in `MirEval`, both emitters (an address is an `i64`) and the runtime, and `examples/addresses.tersus` with a buffer, a `Vec<T>` (`examples/vec.tersus` on an address), a buffer split between two functions and an arena-linked list, all proved; `TestPointers` has a rejected program for each contract.
+- **Assumptions** (step 7): `assume e;`, `Block::assume` and `tersus assumptions`; `extern fn` is not built (it is step 30's).
+
+Where the built form differs from the text above:
+
+- **`count(b)`**, the number of filled slots, is a ghost function that every operation keeps (a write adds one, a take or a drop takes one away, a split divides it and a join adds the parts), and `free` and `Block::cast` ask for `count(b) = 0` instead of a `forall` over the slots. A proof that every slot is empty after a split, two calls and a join needs the facts of four blocks chained through index arithmetic, which the proof engine does not instantiate (it instantiates a `forall` at indexes of a low generation), while a count is a sum. This settles decision 2: `free` finds every slot empty, by a count. A `Vec` says `count(blk) = len` in its invariant.
+- **`whole(b)`** is two facts, `start(b) = 0` and `cap(b) = extent(origin(b))`, where `start(b)` is where the block starts in its allocation and `extent(o)` the size of the allocation `o`. A split gives the parts their starts, and a join needs `start(hi) = start(lo) + cap(lo)` and the same origin, which is what "next to each other in one allocation" is; `affirm whole(b);` is a statement of its own.
+- **The operations that give two things** are each two operations of the MIR and a tuple: `Addr::alloc(n)` is `p = AddrAlloc(n)` and `b = BlockNew(p, n)`, `Addr::take` is `AddrTake` (which lends the permission) and `BlockTaken`, `Addr::resize` is `AddrResize` and `BlockResized`, `Block::split` is `BlockSplitLo` and `BlockSplitHi`. The `Block` operations are ghost and erased; an operation that runs and gives a permission (`AddrWrite`, `AddrDropValue`, `AddrDropRange`) gives `0` once it is erased.
+- **Addresses in `eval`** are numbers (allocation `k` starts at `k * 2^32`, and a slot is one more than the slot before), so `Addr::toInt` gives another number than native code does.
+- **The two offset facts are not given** (`offset(p, 0) = p` and `offset(offset(p, i), j) = offset(p, i + j)`): an address of an offset is the term `Addr::offset(p, i)`, which is what the upper part of a split is based at, so a program passes that term (or a local that holds it) where the upper part's address is wanted.
+- **The layout is still in words** (step 5 is not done): a slot is a value as an element of an array is, 8 bytes a word, and `Addr::offset` steps by that. So memory is not shared with C yet.
+- **The view of a slot** (`Addr::get`) is a view of the permission in `MirMoves` (`cannot move x out of the memory of a permission, which still holds it`), and a read of it after the permission changed is a use of a moved value, as designed.
+- **Facts with a `forall` are not kept where two paths meet**, so a function that changes a block in one branch of an `if` returns there (as `Vec::push` does), and a loop that changes a block names what it keeps of the first one with `define` (`define o = origin(b);`), which can read what the validator knows of a permission.
+
+Not built: the layout in bytes and the fixed-width integers (step 5), `Uninit<T>` and `replace` (step 3), general linear types, `extern fn`, and drops, `StdList` on an address and `Box` in the library (step 8).
