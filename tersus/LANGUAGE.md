@@ -238,7 +238,7 @@ return sum(Box::new(Tree::Branch { left: leaf, value: 2, right: Box::new(Tree::L
 
 - **`Box::new(x)`** holds `x` in a Box; `Box::unbox(b)` gives back what a Box holds. They are written as calls and cannot be used as values (`h = Box::new` is an error).
 - **A Box has the value of what it holds.** It changes where the value lives, not what it is: `Box::new(p) = Box::new(q)` compares `p` and `q`, the validator reasons about a Box as about its contents, and `Box::unbox(Box::new(x))` is `x`. `Box<Tree>` and `Tree` are different types, and neither is used for the other.
-- **A Box is looked into where a struct or an enum is looked at.** A field of a boxed struct is read as `b.x`, the base of an update can be a Box (`P { x: 9, ..b }`), `b is Tree::Branch`, `b as Tree::Branch` and `match b { ... }` work on a Box, and `shrinks b` is the shrinking of a value that loses a field at a time. A function over the contents of a Box is called on `Box::unbox(b)`, as in `Box::unbox(b).total()`.
+- **A Box is looked into where a struct or an enum is looked at.** A field of a boxed struct is read as `b.x`, the base of an update can be a Box (`P { x: 9, ..b }`), `b is Tree::Branch`, `b as Tree::Branch` and `match b { ... }` work on a Box, and `shrinks b` is the shrinking of a value that loses a field at a time. A function over the contents of a Box is called on `Box::unbox(b)`, as in `Box::unbox(b).total()`. A type of the program is looked into the same way when it implements `Deref` for what it holds (see Deref); a Box is the one such type the language gives itself, since what it holds is not a field of it.
 - **What a Box can hold.** Any type that has a size: a struct or an enum, an `Int` or a `Bool`, a list, an array of a size, another Box (`Box::unbox(Box::new(3))` is `3`). An array of no size, `Array<T>` or `Array<T, ?>`, is held only behind a Box (see Arrays), and `Box::unbox` cannot take one out, since it would not know how much to take.
 - **A Box of an array is looked through by `size`, `first`, `last`, `get` and `set`**, which work on it as on the array (`set` gives the Box back with the element changed, in place when nothing else has the Box).
 - **Where a Box lives.** Natively a struct or an enum is not on the heap: it is held where it is made, as the words of its fields (an enum a word that says the variant and then the fields of that variant), in the frame of a function, in a field, or in a list, and copied by value. A `Box` is what puts one on the heap, and the pointer to it is one word (a `StdBox` of `lib/box.tersus`, see Lists In Native Code), so a type that holds itself holds it in a `Box` (or at an `Addr`); the list is the other thing on the heap. A `Box` of an array, of a size or of any, is a list of native code (a `StdList`: the address, the number of elements and the room, three words held in line).
@@ -452,7 +452,32 @@ n = c.size() + Measure::size(c);                 // through the trait
 - **A call is to the impl's function**, so the caller knows the impl's contracts, which may be stronger than the trait's (`examples/traits.tersus`). A function that may not end (`~`) can implement a trait, and the functions that call it have to be `~` as for any function.
 - **A trait's contracts are type checked where the trait is written**, with `Self` as a type that has no fields, so they can mention the other parameters and `return` but not read a field of a `Self` value (`affirm self.value > 0;` in a trait is a type error). A contract calls the functions of the trait on `Self` (`size(self)`) and the functions of the program, and the check of an impl resolves them to the impl's.
 - **`Clone` and `Copy`** are traits with no functions that a struct or enum says it has with an impl with no functions, `impl Clone for T { };`, and the checker checks the fields (see Moves, Clone And Copy). A function with a type parameter can bound it by either: `fn twice<T: Clone>(x: T) -> List<T>`.
+- **`Deref<T>`** says that a value of the type holds a `T` and is looked into where a struct or an enum is looked at, through the value its `deref` gives (see the next section). The trait is in `lib/prelude.tersus`, which a program has when it mentions `Deref` and does not declare it itself.
 - `trait`, `impl` and `Self` are reserved (`Self` cannot be the name of a type or a trait); `implement` and `traits` are still ordinary names. Trait and impl blocks end with `;` like every declaration.
+
+### Deref
+
+A type that holds another can say so with `Deref`, and is then looked into where a struct or an enum is looked at, as a Box is:
+
+```tersus
+trait Deref<T> {
+    fn deref(self: &Self) -> T [{ }] [{ }];
+};
+
+struct W { v: P };
+
+impl Deref<P> for W {
+    fn deref(self: &Self) -> P [{ }] [{ affirm return = self.v; }] { return clone(self.v); };
+};
+
+w = W { v: P { x: 4, y: 5 } };
+return w.x + w.y;                       // 9: the fields of the P it holds
+```
+
+- **Where the look-through applies.** A field read (`w.x`), a test of the variant (`w is E::A`), a cast (`w as E::A`), a `match` on the value, the base of an update (`P { x: 9, ..w }`) and `shrinks w` all work on what `deref` gives, in code and in proofs. A field the type has itself is read as it is (`w.v` above), and only a field it does not have is read through it. A type can be looked through in steps (`W` to a `W` to a `P`).
+- **What it does not do.** The functions of what is held are not the functions of the holder: a method is called on the value inside, as with a Box (`w.deref().total()`, and `w.total()` is an error). A value of the type is not a value of what it holds anywhere else: it is not given where a `T` is wanted, and `=` on it is the equality of the holder, not of what it holds.
+- **`deref` is an ordinary function.** It is lent its value (`&Self`), it can be called in code and in proofs, and what a caller knows of the value it gives is its contract. What is read from it is a view of the value the call gives, so a `match` takes the fields out of that value, and the holder is neither moved nor changed by being looked through.
+- **A Box is the `Deref` the language gives itself.** What a Box holds is not a field of it, so no impl a program writes can give it; the language looks through a Box as it looks through a type with a `Deref` impl, and `Box::new`/`Box::unbox`, the equality of two Boxes and the unsizing of a Box of an array are the rest of what it does by name (see Box).
 
 ### A trait with types
 
