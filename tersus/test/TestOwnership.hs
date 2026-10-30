@@ -736,6 +736,10 @@ planTests =
         withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "clone" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
     , TestCase "a copy of a parameter is one copy" . pure $
         withOwned "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);" (\t -> testAssertEq (count "clone" (functionText "f" t)) 1)
+    , TestCase "a value moved on every path is not dropped at the return" . pure $
+        withOwned "l = [1]; m = l; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (not ("drop _1" `isInfixOf` m) && "drop _2" `isInfixOf` m))
+    , TestCase "a value moved on one path is dropped under a test of its flag" . pure $
+        withOwned "l = [1, 2]; m = [0]; if size(l) = 2 { m = l; }; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (count "drop _1" m == 1 && "drop _2;" `isInfixOf` m && "const false;" `isInfixOf` m))
     ]
   where
     withOwned source check = either Just check (ownedText source)
