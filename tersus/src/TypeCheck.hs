@@ -1634,10 +1634,12 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
     -- type with an impl that is not declared as a struct, and Self for it is a List of the type the impl names)
     let selfType = case (typeName, instanceOf selfName) of
             ("List", Just (_, [ArgType t])) -> TList t
+            ("Box", Just (_, [ArgType t])) -> TBox t
+            ("Array", Just (_, [ArgType t, ArgSize s])) -> TArrayOf t s
             _ -> TNamed selfName
         asSelf = substSelfAs selfName selfType
         functions' = map (rewriteSignature asSelf) functions
-    unless (typeName == "List" || Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
+    unless (typeName `elem` ["List", "Box", "Array"] || Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
     -- (the type implements the trait from the first function on, so a function can call an earlier one through the trait; if the
     -- impl is not accepted the program is refused, so this is never seen)
     (required, traitParams) <- case trait of
@@ -2230,17 +2232,30 @@ traitArgumentsOf trait ty = do
             Nothing -> Nothing
             Just (selfName, given) ->
                 let (sizesBound, typesBound) = case instanceOf selfName of
-                        Just (_, selfArgs) -> ([(p, s) | (ArgSize (SizeParam p), ArgSize s) <- zip selfArgs args], [(p, t) | (ArgType (TParam p), ArgType t) <- zip selfArgs args])
+                        Just (_, selfArgs) -> foldl collect ([], []) (zip selfArgs args)
                         Nothing -> ([], [])
+                    collect (ss, ts) (ArgSize (SizeParam p), ArgSize sz) = ((p, sz) : ss, ts)
+                    collect (ss, ts) (ArgType pattern, ArgType t) = (ss, matchTypes pattern t ++ ts)
+                    collect bound _ = bound
+                    -- (the types of the impl's type, as `Array<T>` in `Box<Array<T>>`, give the parameters they are made of)
+                    matchTypes (TParam p) t = [(p, t)]
+                    matchTypes (TArrayOf a _) (TArrayOf b _) = matchTypes a b
+                    matchTypes (TList a) (TList b) = matchTypes a b
+                    matchTypes (TBox a) (TBox b) = matchTypes a b
+                    matchTypes _ _ = []
                 in Just [substitute sizesBound typesBound t | ArgType t <- given]
     case ty of
-        -- (a list implements what an impl for it declares, which lib/prelude.tersus does for Sequence and Growable; with no impl
-        -- declared, as in a program that declares those traits itself, a list has them by being a list)
+        -- (a list, an array and a Box of an array implement what an impl for them declares, which lib/prelude.tersus does for
+        -- Sequence and Growable; with no impl declared, as in a program that declares those traits itself, they have them as before)
         TList e -> case own "List" [ArgType e] of
             Just args -> return (Just args)
             Nothing -> return (builtin e ["Sequence", "Growable"] >>= nonEmpty)
-        TArrayOf e _ -> return (builtin e ["Sequence"] >>= nonEmpty)
-        TBox (TArrayOf e _) -> return (builtin e ["Sequence"] >>= nonEmpty)
+        TArrayOf e size -> case own "Array" [ArgType e, ArgSize size] of
+            Just args -> return (Just args)
+            Nothing -> return (builtin e ["Sequence"] >>= nonEmpty)
+        TBox (TArrayOf e _) -> case own "Box" [ArgType (TArrayOf e SizeAny)] of
+            Just args -> return (Just args)
+            Nothing -> return (builtin e ["Sequence"] >>= nonEmpty)
         TNamed name -> return (maybe (own name []) (\(base, args) -> own base args) (instanceOf name))
         TVariant variant -> (\(enum, _) -> own enum []) <$> ctorInfo variant
         _ -> return Nothing

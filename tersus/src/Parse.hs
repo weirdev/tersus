@@ -829,20 +829,22 @@ implStatement = do
     forType <- optionMaybe (keyword "for" >> whitespace >> variable <* whitespace)
     (trait, traitArgs, typeName, typeArgs) <- case forType of
         Just t -> do
-            -- (an impl can be written for a list, `impl<T> Sequence<T> for List<T>`, whose impl is in lib/prelude.tersus: a list is
-            -- the one type with functions that is not declared as a struct, so its types are read as a list's are)
-            targs <- if t == "List" then optionMaybe (try (char '<' >> whitespace >> ((: []) . ArgType <$> typeAnnotation) <* whitespace <* char '>' <* whitespace)) else arguments t
+            -- (an impl can be written for a list, a Box and an array, `impl<T> Sequence<T> for List<T>`, whose impls are in
+            -- lib/prelude.tersus: they are types with functions that are not declared as structs, so their types are read as they are)
+            targs <- if t `elem` ["List", "Box"] then optionMaybe (try (char '<' >> whitespace >> ((: []) . ArgType <$> typeAnnotation) <* whitespace <* char '>' <* whitespace)) else if t == "Array" then optionMaybe (try (char '<' >> whitespace >> arrayArguments <* whitespace <* char '>' <* whitespace)) else arguments t
             return (Just first, maybe [] id firstArgs, t, targs)
         Nothing -> return (Nothing, [], first, firstArgs)
     modifyState (\d -> d{declTypeParams = outerParams})
     types <- declTypes <$> getState
-    when (typeName /= "List" && not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
+    when (typeName `notElem` ["List", "Box", "Array"] && not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
     case (trait, Map.lookup first generics) of
         (Just traitName, Just params) | firstArgs == Nothing -> fail ("trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">: write impl " ++ traitName ++ "<" ++ intercalate ", " params ++ "> for " ++ typeName)
         (Just traitName, Nothing) | firstArgs /= Nothing -> fail ("trait " ++ traitName ++ " has no parameters")
         _ -> return ()
     selfName <- case (typeName, typeArgs) of
         ("List", Just args) -> return (instanceName typeName args)
+        ("Box", Just args) -> return (instanceName typeName args)
+        ("Array", Just args) -> return (instanceName typeName args)
         ("List", Nothing) -> fail "impl for List names its types, so it is written impl<T> Trait<T> for List<T>"
         _ -> case (Map.lookup typeName generics, typeArgs) of
             (Just params, Nothing) -> fail ("impl for " ++ typeName ++ ", which has parameters <" ++ intercalate ", " params ++ ">: write impl<" ++ intercalate ", " params ++ "> " ++ typeName ++ "<" ++ intercalate ", " params ++ ">")
@@ -860,6 +862,12 @@ implStatement = do
     whitespace
     return (ImplDef trait traitArgs typeName selfName functions)
   where
+    -- the types of an array in an impl, `Array<T, n>`: a type and a size, as in a type
+    arrayArguments = do
+        element <- typeAnnotation
+        whitespace
+        size <- option SizeAny (char ',' >> whitespace >> sizeArgument)
+        return [ArgType element, ArgSize size]
     implFunction typeName trait = do
         definition <- functStatement
         case definition of
