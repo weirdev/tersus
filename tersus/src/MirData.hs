@@ -13,7 +13,7 @@ import Utils
 
 -- The MIR of a program as text that a program can read (`tersus mir --data`): what native code is made from, and nothing else. It is the
 -- owned MIR of MirOwnership with the validator's part left out (the ghost statements, the contracts, the structs with sizes and their
--- invariants), since the code that is made from it (LlvmEmit, and the emitter written in Tersus that replaces it, see STEP31.md) does not
+-- invariants), since the code that is made from it (the emitter written in Tersus, see STEP31.md) does not
 -- use them. `readProgram (writeProgram p) = Ok (forNative p)`.
 --
 -- A line is a record: words and numbers separated by one space, and names in quotes (the UTF-8 bytes of the name, those that are printable

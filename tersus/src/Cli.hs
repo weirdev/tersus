@@ -2,7 +2,6 @@ module Cli
     ( Command (..)
     , parseCommandLine
     , parseProgramArguments
-    , splitEmitterFlag
     , makesIr
     , World (..)
     , noWorld
@@ -46,7 +45,7 @@ data Command = Check | Run | Interpret | Mir | MirText | Owned | Llvm | Build Fi
 usage :: String
 usage =
     unlines
-        [ "Usage: tersus [--haskell-emitter] <command> <file> [-o <output>]"
+        [ "Usage: tersus <command> <file> [-o <output>]"
         , ""
         , "Commands:"
         , "  check <file>  Parse and validate a program"
@@ -67,8 +66,7 @@ usage =
         , "Use - as the file to read the program from standard input."
         , ""
         , "llvm, build and run write the LLVM IR with the emitter that is written in Tersus (examples/emit.tersus; see Bootstrap), which is built with clang the"
-        , "first time (from bootstrap/emitter.ll) and kept in the cache. With --haskell-emitter first they use the emitter in Haskell (LlvmEmit) instead, which needs no clang"
-        , "to print the IR."
+        , "first time (from bootstrap/emitter.ll) and kept in the cache."
         ]
 
 -- Splits the command line into a command and the file it applies to.
@@ -83,11 +81,6 @@ parseCommandLine ["llvm", file] = Just (Llvm, file)
 parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
 parseCommandLine ["assumptions", file] = Just (Assumptions, file)
 parseCommandLine _ = Nothing
-
--- Whether the command line starts with the flag that has the emitter in Haskell write the LLVM IR (it is the emitter in Tersus that does otherwise), and the rest of it
-splitEmitterFlag :: [String] -> (Bool, [String])
-splitEmitterFlag ("--haskell-emitter" : rest) = (True, rest)
-splitEmitterFlag args = (False, args)
 
 -- The commands that make LLVM IR, and so have it written by the emitter in Tersus
 makesIr :: Command -> Bool
@@ -149,11 +142,8 @@ runOther :: String -> Command -> String -> Result String String
 runOther _ Mir source = mapResult renderProgram (compileSource source)
 runOther _ Owned source = mapResult renderProgram (ownedSource source)
 runOther _ MirText source = mapResult writeProgram (ownedSource source)
-runOther _ Llvm source = llvmSource source
 runOther _ Assumptions source = mapResult (\found -> if null found then "No assumptions" else intercalate "\n" found) (assumptionsOf source)
--- (compiling the IR, and running it for `Run`, is left to the caller, since it runs clang)
-runOther _ Run source = llvmSource source
-runOther _ (Build _) source = llvmSource source
+-- (making the IR, compiling it, and running it for `Run`, is left to the caller: the emitter is a program that is built and run, see Bootstrap and Main)
 runOther _ _ _ = Error "not a command that is run on its own"
 
 renderValue :: Value -> String

@@ -2,14 +2,12 @@ module Pipeline
     ( parseSource
     , compileSource
     , ownedSource
-    , llvmSource
     , nativeProgram
     , validateStatements
     , runStatements
     , assumptionsOf
     ) where
 
-import LlvmEmit (emitOwned)
 import qualified Mir as M
 import MirOwnership (insertOwnership)
 import MirVerify (verifyProgram)
@@ -30,7 +28,7 @@ import Utils
 --
 --   source -> AST (parseSource) -> checked AST (elaborate: types checked, each `shrinks` resolved)
 --          -> MIR (lowerElaborated) -> validated MIR (validateProgram) -> executed (runProgram)
---                                                                    or -> LLVM IR (emitOwned)
+--                                                                    or -> owned MIR (ownedSource) -> LLVM IR (the emitter written in Tersus, see Bootstrap)
 --
 -- The validated MIR has its permissions (ghost values, POINTERS.md) taken out by `eraseGhosts` before anything runs it or makes native code of it.
 --
@@ -153,13 +151,6 @@ ownedSource source =
     compileSource source `bindResult` \program ->
         let owned = insertOwnership (nativeProgram program)
          in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
-
--- The LLVM IR of a program that passes every check
-llvmSource :: String -> Result String String
-llvmSource source =
-    compileSource source `bindResult` \program ->
-        let owned = insertOwnership (nativeProgram program)
-         in stage "Native code failed: " (verifyProgram owned `bindResult` \_ -> emitOwned owned)
 
 -- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists), and each
 -- Uninit<T> a T (it is laid out as one: an empty one is the words of a T cleared, which own nothing)

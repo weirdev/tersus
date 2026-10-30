@@ -6,7 +6,6 @@ import qualified Data.Map.Strict as Map
 import Cli (Command (..), runSource)
 import Mir
 import MirData
-import LlvmEmit (emitOwned)
 import Pipeline (ownedSource)
 import TersusTypes (Type (..))
 import TestHarness
@@ -59,8 +58,8 @@ testMirData =
         Ghost _ _ -> True
         _ -> False
 
--- The data of a program reads back as the same program, is written the same way again, and the IR of the program read back is the
--- IR of the program: one compilation answers both questions, which the two cases this replaces asked separately.
+-- The data of a program reads back as the same program, and is written the same way again. That the data the emitter is
+-- given and the data of the program read back from it make the same IR is checked with the emitter itself in TestMirEmit.
 roundTripsAndIr :: String -> TestResult
 roundTripsAndIr source = case ownedSource source of
     Error e -> Just ("does not compile: " ++ e)
@@ -73,18 +72,7 @@ roundTripsAndIr source = case ownedSource source of
                     | not (all isAscii text) -> Just "the data is not ASCII"
                     | back /= native -> Just "reads back as another program"
                     | writeProgram back /= text -> Just "is written differently after it was read"
-                    | otherwise -> sameIr back program
-
--- The IR of the program read back from the data and the IR of the program the data was written from. The data leaves the validator's part
--- out, so this is what says that what it leaves out does not change what is emitted; comparing against `forNative` of the same program
--- instead, as the guard above already established, would compare two programs that are equal.
-sameIr :: Program -> Program -> TestResult
-sameIr back program = case (emitOwned back, emitOwned program) of
-    (Ok fromData, Ok fromProgram)
-        | fromData == fromProgram -> Nothing
-        | otherwise -> Just "the IR of the program read back differs from the IR of the program"
-    (Error e, _) -> Just ("no IR from the data: " ++ e)
-    (_, Error e) -> Just ("no IR from the program: " ++ e)
+                    | otherwise -> Nothing
 
 -- Names with a space, quotes, a backslash, a newline and letters of every width
 names :: Program -> TestResult

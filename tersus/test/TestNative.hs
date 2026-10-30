@@ -17,11 +17,14 @@ import System.FilePath ((</>))
 import System.IO (IOMode (..), hGetContents, hPutStr, withBinaryFile)
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 
+import Bootstrap (cachedEmitter, emitWith, tersusLlvm)
 import Cli
 import qualified Mir as M
+import MirData (writeProgram)
 import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
-import LlvmEmit (emitProgram)
+import MirOwnership (insertOwnership)
+import MirVerify (verifyProgram)
 import Native (buildExecutable, buildExecutableWith, runExecutable)
 import Parse (parseStatementBlock)
 import Pipeline
@@ -89,9 +92,11 @@ nativeOnly i name source expected = do
     available <- clangAvailable
     if not available
         then pure Nothing
-        else case llvmSource source of
-            Error e -> pure (Just e)
-            Ok ir -> buildAndRun "" [] ("c_program_" ++ show i) name ir (ExitSuccess, expected, "")
+        else do
+            ir <- tersusLlvm source
+            case ir of
+                Error e -> pure (Just e)
+                Ok text -> buildAndRun "" [] ("c_program_" ++ show i) name text (ExitSuccess, expected, "")
 
 -- Every example that validates
 nativeExamples :: [FilePath]
@@ -112,66 +117,72 @@ testNativeIr :: Test
 testNativeIr =
     TestList
         "ir"
-        [ TestCase "overflow-checked add" . pure $
+        [ TestCase "overflow-checked add" $
             withIr "return 1 + 2;" (\ir -> testAssertTrue ("@llvm.sadd.with.overflow.i64" `isInfixOf` ir && "@tersus_overflow" `isInfixOf` ir))
-        , TestCase "comparison" . pure $
+        , TestCase "comparison" $
             withIr "x = 3; return x < 4;" (\ir -> testAssertTrue ("icmp slt i64" `isInfixOf` ir && "@\"type.Bool\"" `isInfixOf` ir))
-        , TestCase "function" . pure $
+        , TestCase "function" $
             withIr "fn f(a: Int) -> Int { return a; }; return f(1);" (\ir -> testAssertTrue ("define internal i64 @\"fn.f\"(i64 %p.1)" `isInfixOf` ir && "call i64 @\"fn.f\"" `isInfixOf` ir))
-        , TestCase "no return" . pure $
+        , TestCase "no return" $
             withIr "x = 1;" (\ir -> testAssertTrue ("define internal void @tersus_main()" `isInfixOf` ir))
-        , TestCase "ghost statements are dropped" . pure $
+        , TestCase "ghost statements are dropped" $
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
-        , TestCase "a list is the struct of the library, which holds its elements in memory at an address" . pure $
+        , TestCase "a list is the struct of the library, which holds its elements in memory at an address" $
             withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.StdList<Int>\" = private constant" `isInfixOf` ir && "call i64 @tersus_addr_alloc" `isInfixOf` ir && "call i64 @tersus_addr_resize" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
-        , TestCase "a struct is held in the frame, as its fields, with a descriptor" . pure $
+        , TestCase "a struct is held in the frame, as its fields, with a descriptor" $
             withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir && not ("tersus_data_new" `isInfixOf` ir)))
-        , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" . pure $
+        , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" $
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
-        , TestCase "a Box takes room on the heap for what it holds" . pure $
+        , TestCase "a Box takes room on the heap for what it holds" $
             withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.stdBoxNew<P>\"" `isInfixOf` ir))
-        , TestCase "a Box of an array is a list of the library" . pure $
+        , TestCase "a Box of an array is a list of the library" $
             withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.stdListFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
-        , TestCase "a Box is the struct of the library, freed by its drop" . pure $
+        , TestCase "a Box is the struct of the library, freed by its drop" $
             withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<StdBox<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.stdBoxUnbox<Int>\"" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
-        , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" . pure $
+        , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" $
             withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[3 x i8] c\"\\C3\\A9\\00\"" `isInfixOf` ir))
-        , TestCase "a letter of four bytes" . pure $
+        , TestCase "a letter of four bytes" $
             withIr "struct \x1D538 { \x1D539: Int }; return \x1D538 { \x1D539: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[5 x i8] c\"\\F0\\9D\\94\\B8\\00\"" `isInfixOf` ir))
-        , TestCase "a function with a non-ASCII name" . pure $
+        , TestCase "a function with a non-ASCII name" $
             withIr "fn d\x00e9(n: Int) -> Int { return n + 1; }; return d\x00e9(1);" (\ir -> testAssertTrue (all isAscii ir && "@\"fn.d\\C3\\A9\"" `isInfixOf` ir))
         , TestCase "a program with non-ASCII names builds" $ buildsOnly "struct P { \x00e9: Int }; enum \x00d1 { \x00c4 { \x00f6: Int }, \x00dc }; fn d\x00e9(n: Int) -> Int { return n + 1; }; return \x00d1::\x00c4 { \x00f6: d\x00e9(1) };"
-        , TestCase "a function value is the address of the function" . pure $
+        , TestCase "a function value is the address of the function" $
             case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
-                Left e -> Just e
-                Right program -> case emitProgram (nativeProgram program) of
-                    Error e -> Just e
-                    Ok ir -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` ir && "call i64 %" `isInfixOf` ir)
-        , TestCase "a function with a size is made for each size it is called with" . pure $
+                Left e -> pure (Just e)
+                Right program -> do
+                    ir <- emitUnvalidated (nativeProgram program)
+                    pure $ case ir of
+                        Error e -> Just e
+                        Ok text -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` text && "call i64 %" `isInfixOf` text)
+        , TestCase "a function with a size is made for each size it is called with" $
             withIr "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) + count(#[1]) + count(#[4, 5, 6]);" (\ir -> testAssertTrue ("@\"fn.count<3>\"" `isInfixOf` ir && "@\"fn.count<1>\"" `isInfixOf` ir && not ("@\"fn.count\"" `isInfixOf` ir)))
-        , TestCase "an array that a size makes too large for a frame is refused when the size is known" . pure $
-            testAssertErrorContains "In f<8192>: " (llvmSource "fn f<n>(a: Array<Int, n>) -> Int { b = array(n, a); return size(b); }; return f(array(8192, 0));")
-        , TestCase "a list that is moved to the call is not copied" . pure $
+        , TestCase "an array that a size makes too large for a frame is refused when the size is known" $ do
+            ir <- tersusLlvm "fn f<n>(a: Array<Int, n>) -> Int { b = array(n, a); return size(b); }; return f(array(8192, 0));"
+            pure (testAssertErrorContains "In f<8192>: " ir)
+        , TestCase "a list that is moved to the call is not copied" $
             withIr "fn total(a: List<Int>) -> Int { return size(a); }; l = push([], 1); return total(l);" (\ir -> testAssertTrue (not ("call void @tersus_clone" `isInfixOf` ir)))
-        , TestCase "a list that is lent is not copied for the call" . pure $
+        , TestCase "a list that is lent is not copied for the call" $
             withIr "fn total(a: &List<Int>) -> Int { return size(a); }; l = push([], 1); return total(l) + total(l);" (\ir -> testAssertTrue (not ("call void @tersus_clone" `isInfixOf` ir)))
-        , TestCase "a list that is cloned for a call is copied, and one that is moved is not" . pure $
+        , TestCase "a list that is cloned for a call is copied, and one that is moved is not" $
             withIr "fn total(a: List<Int>) -> Int { return size(a); }; l = push([], 1); return total(clone(l)) + total(l);" (\ir -> testAssertTrue ("call void @tersus_clone" `isInfixOf` ir))
-        , TestCase "an array that is lent is read where it is, and one that is given is copied into the function" . pure $
+        , TestCase "an array that is lent is read where it is, and one that is given is copied into the function" $
             withIr "fn ends(a: &Array<Int, 4>) -> Int { return get(a, 0) + get(a, 3); }; x = #[1, 2, 3, 4]; return ends(x);" (\ir -> testAssertTrue ("define internal i64 @\"fn.ends\"(ptr %l.1)" `isInfixOf` ir))
-        , TestCase "an array that is given has room of its own in the function" . pure $
+        , TestCase "an array that is given has room of its own in the function" $
             withIr "fn ends(a: Array<Int, 4>) -> Int { return get(a, 0) + get(a, 3); }; x = #[1, 2, 3, 4]; return ends(x);" (\ir -> testAssertTrue ("define internal i64 @\"fn.ends\"(ptr %p.1)" `isInfixOf` ir && "%l.1 = alloca [4 x i64]" `isInfixOf` ir))
-        , TestCase "a program that does not validate is not lowered" . pure $
-            testAssertErrorContains "Validation failed" (llvmSource "x = 5; affirm x < 4;")
+        , TestCase "a program that does not validate is not lowered" $ do
+            ir <- tersusLlvm "x = 5; affirm x < 4;"
+            pure (testAssertErrorContains "Validation failed" ir)
         , TestCase "command line" . pure $
             testAssertEq
                 (map parseCommandLine [["llvm", "a.tersus"], ["build", "a.tersus", "-o", "a"], ["build", "a.tersus"], ["owned", "a.tersus"]])
                 [Just (Llvm, "a.tersus"), Just (Build "a", "a.tersus"), Nothing, Just (Owned, "a.tersus")]
         ]
   where
-    withIr source check = case llvmSource source of
-        Error e -> Just e
-        Ok ir -> check ir
+    withIr source check = do
+        ir <- tersusLlvm source
+        pure $ case ir of
+            Error e -> Just e
+            Ok text -> check text
 
 arithmeticPrograms :: [(String, String)]
 arithmeticPrograms =
@@ -722,12 +733,16 @@ testRunExecutable = TestCase "run builds, runs and removes the executable" $ do
     if not available
         then pure Nothing
         else do
-            ran <- case llvmSource "return 6 * 7;" of
-                Error e -> pure (Error e)
-                Ok ir -> runExecutable ir []
-            failing <- case llvmSource "return 9223372036854775807 + 1;" of
-                Error e -> pure (Error e)
-                Ok ir -> runExecutable ir []
+            ran <- do
+                ir <- tersusLlvm "return 6 * 7;"
+                case ir of
+                    Error e -> pure (Error e)
+                    Ok text -> runExecutable text []
+            failing <- do
+                ir <- tersusLlvm "return 9223372036854775807 + 1;"
+                case ir of
+                    Error e -> pure (Error e)
+                    Ok text -> runExecutable text []
             pure (testAssertEq (ran, failing) (Ok ExitSuccess, Ok (ExitFailure 1)))
 
 -- Every example that validates is run natively: a new example has to be added to `nativeExamples`
@@ -751,9 +766,11 @@ testBuildKeepsFiles = TestCase "an existing output.build directory is kept" $ do
                 precious = exe ++ ".build" </> "precious.txt"
             createDirectoryIfMissing True (exe ++ ".build")
             writeFile precious "keep me"
-            built <- case llvmSource "return 1;" of
-                Error e -> pure (Error e)
-                Ok ir -> buildExecutable exe ir
+            built <- do
+                ir <- tersusLlvm "return 1;"
+                case ir of
+                    Error e -> pure (Error e)
+                    Ok text -> buildExecutable exe text
             kept <- doesFileExist precious
             pure $ case built of
                 Error e -> Just e
@@ -775,10 +792,11 @@ sameAsMirWorld name world source = do
         then pure Nothing
         else case compileSource source of
             Error e -> pure (Just ("Does not compile: " ++ e))
-            Ok _ -> case llvmSource source of
-                Error e -> pure (Just e)
-                Ok ir -> do
-                    buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name ir (expected (runSourceIn world Interpret source))
+            Ok _ -> do
+                ir <- tersusLlvm source
+                case ir of
+                    Error e -> pure (Just e)
+                    Ok text -> buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name text (expected (runSourceIn world Interpret source))
   where
     expected (Ok (output, errors)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
@@ -806,20 +824,22 @@ memoryTests =
         available <- clangAvailable
         if not available
             then pure Nothing
-            else case llvmSource source of
-                Error e -> pure (Just e)
-                Ok ir -> do
-                    tmp <- getTemporaryDirectory
-                    let dir = tmp </> "tersus-native-test"
-                        exe = dir </> "memory_limit"
-                    createDirectoryIfMissing True dir
-                    built <- buildExecutable exe ir
-                    case built of
-                        Error e -> pure (Just e)
-                        Ok () -> do
-                            -- 150 MB of address space
-                            (code, out, err) <- readProcessWithExitCode "sh" ["-c", "ulimit -v 150000; " ++ exe] ""
-                            pure (testAssertEq (code, out, err) (ExitSuccess, expected, ""))
+            else do
+                ir <- tersusLlvm source
+                case ir of
+                    Error e -> pure (Just e)
+                    Ok text -> do
+                        tmp <- getTemporaryDirectory
+                        let dir = tmp </> "tersus-native-test"
+                            exe = dir </> "memory_limit"
+                        createDirectoryIfMissing True dir
+                        built <- buildExecutable exe text
+                        case built of
+                            Error e -> pure (Just e)
+                            Ok () -> do
+                                -- 150 MB of address space
+                                (code, out, err) <- readProcessWithExitCode "sh" ["-c", "ulimit -v 150000; " ++ exe] ""
+                                pure (testAssertEq (code, out, err) (ExitSuccess, expected, ""))
 
 -- Builds the program, which tests the IR without running it
 buildsOnly :: String -> IO TestResult
@@ -827,16 +847,18 @@ buildsOnly source = do
     available <- clangAvailable
     if not available
         then pure Nothing
-        else case llvmSource source of
-            Error e -> pure (Just e)
-            Ok ir -> do
-                tmp <- getTemporaryDirectory
-                let dir = tmp </> "tersus-native-test"
-                createDirectoryIfMissing True dir
-                built <- buildExecutable (dir </> "builds_only") ir
-                pure $ case built of
-                    Error e -> Just e
-                    Ok () -> Nothing
+        else do
+            ir <- tersusLlvm source
+            case ir of
+                Error e -> pure (Just e)
+                Ok text -> do
+                    tmp <- getTemporaryDirectory
+                    let dir = tmp </> "tersus-native-test"
+                    createDirectoryIfMissing True dir
+                    built <- buildExecutable (dir </> "builds_only") text
+                    pure $ case built of
+                        Error e -> Just e
+                        Ok () -> Nothing
 
 -- The programs are built so that the runtime checks its use of memory: a value freed twice, or still there when the program
 -- ends, fails the run, and a value that is used after it is freed reads 0xDD
@@ -889,9 +911,11 @@ testUnwritableFile = TestCase "a file that cannot be written (natively)" $ do
     let source = "r = \"x\".writeFile(\"no/such/dir/x.txt\"); return 0 - r;"
     if not available
         then pure Nothing
-        else case llvmSource source of
-            Error e -> pure (Just e)
-            Ok ir -> buildAndRun "" [] "unwritable_file" "a file that cannot be written" ir (ExitSuccess, "1\n", "")
+        else do
+            ir <- tersusLlvm source
+            case ir of
+                Error e -> pure (Just e)
+                Ok text -> buildAndRun "" [] "unwritable_file" "a file that cannot be written" text (ExitSuccess, "1\n", "")
 
 -- A program that reads and writes files, run natively in a directory of its own that holds the files given (each path with the bytes of its contents) and on
 -- the MIR with the same files: the output and the standard error have to be the same, and so does each file that the MIR run wrote
@@ -902,32 +926,34 @@ sameAsMirFiles name initial source = do
         then pure Nothing
         else case compileSource source of
             Error e -> pure (Just ("Does not compile: " ++ e))
-            Ok _ -> case llvmSource source of
-                Error e -> pure (Just e)
-                Ok ir -> case runSourceFiles noWorld{worldFile = \path -> lookup path initial} Interpret source of
-                    Error e -> pure (Just ("The MIR run failed: " ++ e))
-                    Ok ((out, err), files) -> withByteNames $ do
-                        tmp <- getTemporaryDirectory
-                        let dir = tmp </> "tersus-native-files" </> map safeChar name
-                            exe = tmp </> "tersus-native-files" </> (map safeChar name ++ "_exe")
-                        exists <- doesDirectoryExist dir
-                        if exists then removeDirectoryRecursive dir else pure ()
-                        createDirectoryIfMissing True dir
-                        mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
-                        built <- buildExecutable exe ir
-                        case built of
-                            Error e -> pure (Just e)
-                            Ok () -> do
-                                saved <- getLocaleEncoding
-                                setLocaleEncoding char8
-                                (code, nativeOut, nativeErr) <- readCreateProcessWithExitCode (proc exe []){cwd = Just dir} "" `finally` setLocaleEncoding saved
-                                let expectedOut = if null out then "" else out ++ "\n"
-                                    sameStreams = testAssertEq (code, decodeUtf8 nativeOut, decodeUtf8 nativeErr) (ExitSuccess, expectedOut, err)
-                                written <- mapM (\(path, contents) -> readBytes (dir </> path) >>= \actual -> pure (path, actual, contents)) files
-                                let sameFiles = case [path ++ ": expected " ++ show contents ++ ", got " ++ show actual | (path, actual, contents) <- written, actual /= contents] of
-                                        [] -> Nothing
-                                        problems -> Just (unlines problems)
-                                pure (maybe sameFiles Just sameStreams)
+            Ok _ -> do
+                ir <- tersusLlvm source
+                case ir of
+                    Error e -> pure (Just e)
+                    Ok text -> case runSourceFiles noWorld{worldFile = \path -> lookup path initial} Interpret source of
+                        Error e -> pure (Just ("The MIR run failed: " ++ e))
+                        Ok ((out, err), files) -> withByteNames $ do
+                            tmp <- getTemporaryDirectory
+                            let dir = tmp </> "tersus-native-files" </> map safeChar name
+                                exe = tmp </> "tersus-native-files" </> (map safeChar name ++ "_exe")
+                            exists <- doesDirectoryExist dir
+                            if exists then removeDirectoryRecursive dir else pure ()
+                            createDirectoryIfMissing True dir
+                            mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
+                            built <- buildExecutable exe text
+                            case built of
+                                Error e -> pure (Just e)
+                                Ok () -> do
+                                    saved <- getLocaleEncoding
+                                    setLocaleEncoding char8
+                                    (code, nativeOut, nativeErr) <- readCreateProcessWithExitCode (proc exe []){cwd = Just dir} "" `finally` setLocaleEncoding saved
+                                    let expectedOut = if null out then "" else out ++ "\n"
+                                        sameStreams = testAssertEq (code, decodeUtf8 nativeOut, decodeUtf8 nativeErr) (ExitSuccess, expectedOut, err)
+                                    written <- mapM (\(path, contents) -> readBytes (dir </> path) >>= \actual -> pure (path, actual, contents)) files
+                                    let sameFiles = case [path ++ ": expected " ++ show contents ++ ", got " ++ show actual | (path, actual, contents) <- written, actual /= contents] of
+                                            [] -> Nothing
+                                            problems -> Just (unlines problems)
+                                    pure (maybe sameFiles Just sameStreams)
   where
     -- (the names of files are bytes here too)
     withByteNames action = do
@@ -967,13 +993,27 @@ sameAsUnvalidated name source = do
         then pure Nothing
         else case lowerSource source of
             Left e -> pure (Just e)
-            Right program -> case emitProgram (nativeProgram program) of
-                Error e -> pure (Just e)
-                Ok ir -> do
-                    buildAndRun "" [] ("unvalidated_" ++ map safeChar name) name ir (expected (runProgram program))
+            Right program -> do
+                ir <- emitUnvalidated (nativeProgram program)
+                case ir of
+                    Error e -> pure (Just e)
+                    Ok text -> buildAndRun "" [] ("unvalidated_" ++ map safeChar name) name text (expected (runProgram program))
   where
     expected (Ok result) = (ExitSuccess, maybe "" ((++ "\n") . renderMirValue) result, "")
     expected (Error e) = (ExitFailure 1, "", "Evaluation failed: " ++ e ++ "\n")
+
+-- The IR of a program that is lowered without being validated, written by the emitter in Tersus: who owns each value is
+-- made explicit and checked, and the emitter is given the owned MIR as data
+emitUnvalidated :: M.Program -> IO (Result String String)
+emitUnvalidated program = do
+    exe <- cachedEmitter
+    case exe of
+        Error e -> pure (Error e)
+        Ok path -> case verifyProgram owned of
+            Error e -> pure (Error e)
+            Ok () -> emitWith path (writeProgram owned)
+  where
+    owned = insertOwnership (nativeProgram program)
 
 lowerSource :: String -> Either String M.Program
 lowerSource source = case parseStatementBlock source of

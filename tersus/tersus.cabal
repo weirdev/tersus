@@ -33,7 +33,6 @@ library
       Ghost
       Hash
       Linear
-      LlvmEmit
       LlvmRuntime
       Mir
       MirData

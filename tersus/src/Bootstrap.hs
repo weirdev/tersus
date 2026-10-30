@@ -25,16 +25,15 @@ import Pipeline (ownedSource)
 import PreludeSource (emitterSource, listsSource, preludeSource, seedFingerprint, seedSource, stringSource)
 import Utils
 
--- The lowering to LLVM IR that is written in Tersus (examples/emit.tersus, step 31 and STEP31.md) is the compiler's emitter. An executable of it reads the MIR of a
--- program as data (MirData) and writes its LLVM IR; `tersus build`, `llvm` and `run` use it, and `--haskell-emitter` has LlvmEmit write the IR instead. It is a
+-- The lowering to LLVM IR that is written in Tersus (examples/emit.tersus, step 31 and STEP31.md) is the compiler's only emitter. An executable of it reads the MIR of a
+-- program as data (MirData) and writes its LLVM IR; `tersus build`, `llvm` and `run` use it. It is a
 -- program of the language that needs a compiler, so it is made in stages from a seed:
 -- - the seed (bootstrap/emitter.ll) is the IR of an emitter, kept in the repository. It is the IR that the emitter wrote for its own source when the seed was made, and
 --   it does not have to be the latest: it only has to be able to compile the emitter as it is now, which it can as long as the data it reads and the runtime it calls
 --   are the same;
 -- - stage 0 is the seed built with clang (`stageZero`);
 -- - stage 1 is the emitter as it is now, built from the IR that stage 0 writes for its source (`stageOne`). This is the one that compiles programs;
--- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it, and that the IR is
---   what LlvmEmit writes). Making a new seed is `tersus llvm examples/emit.tersus > bootstrap/emitter.ll`.
+-- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it). Making a new seed is `tersus llvm examples/emit.tersus > bootstrap/emitter.ll`.
 -- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang.
 
 -- What stage 0 is made of: the seed and the runtime it is linked with
