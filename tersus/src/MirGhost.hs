@@ -1,6 +1,7 @@
 module MirGhost
     ( eraseGhosts
     , ghostType
+    , withoutUninit
     ) where
 
 import Data.List (foldl')
@@ -9,7 +10,7 @@ import qualified Data.Set as Set
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Type (..))
+import TersusTypes (Arg (..), Type (..), instanceName, instanceOf)
 import Utils
 
 -- Permissions (`Block<T>`, POINTERS.md) are ghost values: the validator has them, and the program that runs does not. This pass takes them
@@ -132,3 +133,77 @@ checkCasts program = case concatMap castsOf (progMain program : Map.elems (progF
         Copy l -> Just l
         Move l -> Just l
         Const _ -> Nothing
+
+-- An Uninit<T> is laid out as a T (POINTERS.md, Uninit): native code is made of the program with each Uninit<T> a T, in every type and in the
+-- name of every struct made with one. Its operations are kept (an empty one is the words of a T cleared, which own nothing, and the others
+-- are the value as it is), and the validator has proved that nothing reads an empty one.
+withoutUninit :: Program -> Program
+withoutUninit program =
+    program
+        { progTypes = Map.fromList [(name n, decl d) | (n, d) <- Map.toList (progTypes program)]
+        , progGenerics = Map.map (\(params, fields) -> (params, [(f, plain t) | (f, t) <- fields])) (progGenerics program)
+        , progFunctions = Map.map function (progFunctions program)
+        , progMain = function (progMain program)
+        }
+  where
+    decl d = case d of
+        StructDecl fields -> StructDecl [(f, plain t) | (f, t) <- fields]
+        EnumDecl variants -> EnumDecl [(v, [(f, plain t) | (f, t) <- fields]) | (v, fields) <- variants]
+    function fn =
+        fn
+            { fnLocals = Map.map (\d -> d{localType = plain (localType d)}) (fnLocals fn)
+            , fnReturns = fmap plain (fnReturns fn)
+            , fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock (map statement stmts) (terminator term)) (fnBlocks fn)
+            }
+    statement st = case st of
+        Assign d rv -> Assign d (rvalue rv)
+        Peek d rv -> Peek d (rvalue rv)
+        _ -> st
+    terminator term = case term of
+        SwitchBool o a b -> SwitchBool (operand o) a b
+        Call f args d next -> Call (operand f) (map operand args) d next
+        _ -> term
+    rvalue rv = case rv of
+        Use o -> Use (operand o)
+        BinaryOp op a b -> BinaryOp op (operand a) (operand b)
+        ListOp op os -> ListOp op (map operand os)
+        MakeList os -> MakeList (map operand os)
+        MakeBox o -> MakeBox (operand o)
+        Unbox o -> Unbox (operand o)
+        Unsize o -> Unsize (operand o)
+        MakeData n fields -> MakeData (name n) [(f, operand o) | (f, o) <- fields]
+        ReadField o n f -> ReadField (operand o) (name n) f
+        IsVariant o n -> IsVariant (operand o) (name n)
+        AsVariant o n -> AsVariant (operand o) (name n)
+        Clone o -> Clone (operand o)
+        TakeField l n f -> TakeField l (name n) f
+    operand o = case o of
+        Const c -> Const (constant c)
+        _ -> o
+    constant c = case c of
+        CList cs -> CList (map constant cs)
+        CArray cs -> CArray (map constant cs)
+        CData n fields -> CData (name n) [(f, constant v) | (f, v) <- fields]
+        _ -> c
+    name n = case instanceOf n of
+        Just (base, args) -> instanceName base (map arg args)
+        Nothing -> n
+    arg a = case a of
+        ArgType t -> ArgType (plain t)
+        _ -> a
+
+-- The type with each Uninit<T> a T
+plain :: Type -> Type
+plain ty = case ty of
+    TUninit t -> plain t
+    TList t -> TList (plain t)
+    TArrayOf t size -> TArrayOf (plain t) size
+    TBox t -> TBox (plain t)
+    TAddr t -> TAddr (plain t)
+    TBlock t -> TBlock (plain t)
+    TRef t -> TRef (plain t)
+    TFn args ret -> TFn (map plain args) (plain ret)
+    TForall sizes types t -> TForall sizes types (plain t)
+    TNamed n | Just (base, args) <- instanceOf n -> TNamed (instanceName base [case a of ArgType t -> ArgType (plain t); _ -> a | a <- args])
+    _ -> ty
+

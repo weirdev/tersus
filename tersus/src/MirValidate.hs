@@ -5,7 +5,7 @@ module MirValidate
 
 import Control.Monad (filterM, foldM, forM_, when)
 import Data.Containers.ListUtils (nubOrd)
-import Data.List (isInfixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, isNothing)
@@ -357,11 +357,13 @@ validateFunction st name top = do
         withSizes' = foldr (\l st' -> maybe st' (\iota -> addFacts st' [FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm iota, CTerm (VInt 0)]]) (Map.lookup l (psLocals st'))) started sizeLocals
     withRequires <- assumeStatements (withEnv env (foldr (withTypeFacts fn) withSizes' params)) requires
     withVariant <- startFunctionVariant (withEnv env withRequires) term
-    returned <- walkFunction withVariant fn
+    -- (an extern function, `extern fn`, has no body here: what its contract promises is assumed, and `tersus assumptions` lists it)
+    let extern = "extern " `isPrefixOf` name
+    returned <- if extern then return [] else walkFunction withVariant fn
     let returnEnv = Map.insert "return" (M.Copy (M.Local 0)) env
     checked <- mapM (\s -> runStatements (withEnv returnEnv s) ensures) returned
     exported <- case checked of
-        [] -> return []
+        [] | not extern -> return []
         _ -> do
             -- (the result has no value of its own in the contracts' view: they only say things about it)
             result <- fresh

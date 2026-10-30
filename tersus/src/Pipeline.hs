@@ -14,7 +14,7 @@ import qualified Mir as M
 import MirOwnership (insertOwnership)
 import MirVerify (verifyProgram)
 import MirEval (MirValue, runProgram)
-import MirGhost (eraseGhosts)
+import MirGhost (eraseGhosts, withoutUninit)
 import MirLower (lowerElaborated, lowerLibrary)
 import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
@@ -105,7 +105,7 @@ libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string l
         [] -> []
 
 -- What a program takes on trust (POINTERS.md, Assumptions): each `assume e;`, each `Block::assume(p, n)` (the permission to memory it did not
--- allocate) and each `axiom`, in the program and the libraries in front of it, with the place it is written at (a library's have none). The
+-- allocate), each `extern fn` (whose contract is assumed) and each `axiom`, in the program and the libraries in front of it, with the place it is written at (a library's have none). The
 -- validator proves everything else, so this is the list to read to know what a program's proofs rest on.
 assumptionsOf :: String -> Result [String] String
 assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
@@ -115,6 +115,7 @@ assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
         Mark line column -> (Just (line, column), [])
         ValidationStatement (Assume p) -> (place, [at place ("assume " ++ renderVarProof p)])
         AxiomDef name args _ _ -> (place, [at place ("axiom " ++ name ++ "(" ++ commas args ++ ")")])
+        ExternDef name -> (place, [at place ("extern fn " ++ name)])
         Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> (place, snd (statements place body))
         Assign _ e -> (place, expression place e)
         Let _ e -> (place, expression place e)
@@ -160,9 +161,10 @@ llvmSource source =
         let owned = insertOwnership (nativeProgram program)
          in stage "Native code failed: " (verifyProgram owned `bindResult` \_ -> emitOwned owned)
 
--- The program that native code is made of: a validated program with each list made of the library's struct (see MirLists)
+-- The program that native code is made of: a validated program with each list made of the library's struct (see MirLists), and each
+-- Uninit<T> a T (it is laid out as one: an empty one is the words of a T cleared, which own nothing)
 nativeProgram :: M.Program -> M.Program
-nativeProgram = lowerLists listLibrary
+nativeProgram = lowerLists listLibrary . withoutUninit
 
 -- The library, compiled and validated once
 listLibrary :: M.Program

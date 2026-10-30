@@ -176,6 +176,7 @@ match pattern actual = case (pattern, actual) of
     (TParam name, a) -> [(name, a)]
     (TBox p, TBox a) -> match p a
     (TAddr p, TAddr a) -> match p a
+    (TUninit p, TUninit a) -> match p a
     (TBlock p, TBlock a) -> match p a
     (TRef p, a) -> match p a
     (p, TRef a) -> match p a

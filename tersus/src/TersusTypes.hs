@@ -104,6 +104,17 @@ data BuiltinFunct
     | -- count(b): the number of slots of the block that are filled, which every operation keeps, so that a block known to have none
       -- filled (to be freed) is a sum and not a forall
       BlockCount
+    | -- Uninit<T> (POINTERS.md): Uninit::empty(), Uninit::new(x), Uninit::get(u) (a view, of one that is filled), Uninit::take(u) (the value of
+      -- one that is filled, which is moved out) and Uninit::discard(u) (an empty one, used up); filled(u) and at(u) are what a proof knows of one
+      UninitEmpty
+    | UninitNew
+    | UninitGet
+    | UninitTake
+    | UninitDiscard
+    | UninitFilled
+    | UninitAt
+    | -- replace(a, i, x): x put in element i of a list or an array, and the element that was there, as a tuple (set(a, i, x), get(a, i))
+      Replace
     | Rel Rel
     | -- a && b, a || b and !a: the connectives of a condition. The lowering turns them into the jumps they stand for (a && b does not
       -- evaluate b when a is false), so only the checker, the evaluation of a constant and the printer see them.
@@ -149,6 +160,9 @@ data Type = TInt | TByte | TBool | TList Type | TArrayOf Type Size | TBox Type |
     | -- The permission to a run of slots of T: a ghost value, which only the validator has (it is erased before the program runs), and linear, so
       -- there is only ever one for a piece of memory. Every operation on memory needs it.
       TBlock Type
+    | -- Room for one T that may hold nothing (POINTERS.md, Uninit): laid out as a T, with no tag and no drop of its own. What the validator
+      -- knows of it is whether it is filled and what it holds. One of a T that owns something is linear.
+      TUninit Type
     | -- A parameter that the function only reads, so a call does not give it a copy (`fn sum(a: &List<Int>)`). Only a parameter has one:
       -- in the function it is its type, a value it cannot assign, and a call gives it the value as it is.
       TRef Type
@@ -198,6 +212,7 @@ typeText ty = case ty of
     TBox t -> "Box<" ++ typeText t ++ ">"
     TAddr t -> "Addr<" ++ typeText t ++ ">"
     TBlock t -> "Block<" ++ typeText t ++ ">"
+    TUninit t -> "Uninit<" ++ typeText t ++ ">"
     TRef t -> "&" ++ typeText t
     TArrayOf t size -> "Array<" ++ typeText t ++ ", " ++ sizeText size ++ ">"
     TFn args ret -> "fn(" ++ intercalate ", " (map typeText args) ++ ") -> " ++ typeText ret
@@ -292,6 +307,7 @@ readType text =
                             "Box" -> readOne inner >>= \t -> Just (TBox t, afterInner)
                             "Addr" -> readOne inner >>= \t -> Just (TAddr t, afterInner)
                             "Block" -> readOne inner >>= \t -> Just (TBlock t, afterInner)
+                            "Uninit" -> readOne inner >>= \t -> Just (TUninit t, afterInner)
                             "Array" -> readArray inner >>= \t -> Just (t, afterInner)
                             _ -> Just (TNamed full, afterInner)
                     _ -> case name of
@@ -358,6 +374,7 @@ mentionsParameter ty = case ty of
     TBox t -> mentionsParameter t
     TAddr t -> mentionsParameter t
     TBlock t -> mentionsParameter t
+    TUninit t -> mentionsParameter t
     TRef t -> mentionsParameter t
     TArrayOf t size -> mentionsParameter t || sizeParam size
     TFn args ret -> any mentionsParameter (ret : args)
@@ -383,6 +400,7 @@ substitute sizes types = go
         TBox t -> TBox (go t)
         TAddr t -> TAddr (go t)
         TBlock t -> TBlock (go t)
+        TUninit t -> TUninit (go t)
         TRef t -> TRef (go t)
         TFn args ret -> TFn (map go args) (go ret)
         TParam name | Just t <- lookup name types -> t
@@ -509,6 +527,12 @@ data Statement
     | -- T implements Copy (`impl Copy for T { };`), which the checker has seen to hold: a value of it is copied where it is wanted,
       -- and not moved. The lowering collects them.
       CopyDef Name
+    | -- T is linear (`linear struct T { ... };`): a value of it is used exactly once, as a permission is (POINTERS.md, DROPS.md Part 2).
+      -- The lowering collects them, for the check of moves.
+      LinearDef Name
+    | -- The function of that name, defined next, is extern (`extern fn write(...) -> Int [{ ... }] [{ ... }];`): it has no body, native code
+      -- calls the C function of the name, and what its contract promises is assumed (POINTERS.md, Assumptions)
+      ExternDef Name
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- A bound on a type parameter of a function: the parameter, the trait its type has to implement and the types it is given

@@ -33,6 +33,8 @@ data MirValue
     | MList [MirValue]
     | MData Name [(Variable, MirValue)]
     | MFn Name
+    | -- What an empty Uninit<T> holds: nothing, which no operation can read
+      MEmpty
     deriving (Eq, Show)
 
 -- The value of _0 when the program returns, and Nothing when it ends without
@@ -314,6 +316,8 @@ runBlock program fn block frame =
                 Unreachable -> failE "Function did not return a value"
 
 callFunction :: Program -> MirValue -> [MirValue] -> E MirValue
+callFunction _ (MFn name) _
+    | take 7 name == "extern " = failE ("The extern function " ++ drop 7 name ++ " is a function of C, which only native code can call")
 callFunction program (MFn name) args =
     case Map.lookup name (progFunctions program) of
         Nothing -> failE ("Call of a function that does not exist: " ++ name)
@@ -512,6 +516,14 @@ listOp NewArray [MInt n, x]
 listOp Set [MList l, MInt i, x]
     | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
     | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok (MList (before ++ x : drop 1 after))
+listOp UninitEmpty [] = Ok MEmpty
+listOp UninitNew [x] = Ok x
+listOp UninitGet [MEmpty] = Error "An Uninit that holds nothing was read"
+listOp UninitGet [x] = Ok x
+listOp UninitTake [MEmpty] = Error "An Uninit that holds nothing was taken"
+listOp UninitTake [x] = Ok x
+listOp UninitDiscard [MEmpty] = Ok (MInt 0)
+listOp UninitDiscard [_] = Error "An Uninit that holds a value was discarded, which would lose it"
 -- (an address is a number: see Allocation)
 listOp AddrNull [] = Ok (MInt 0)
 listOp AddrOffset [MInt p, MInt i] = checked (p + i)
@@ -533,6 +545,7 @@ renderMirValue (MList l) = "[" ++ intercalate ", " (map renderMirValue l) ++ "]"
 renderMirValue (MData name []) = name
 renderMirValue (MData name fields) = name ++ " { " ++ intercalate ", " [f ++ ": " ++ renderMirValue v | (f, v) <- fields] ++ " }"
 renderMirValue MFn{} = "<function>"
+renderMirValue MEmpty = "<empty>"
 
 -- The value of the AST that a value of the MIR is, and the other way: a function of the program is VFnRef, and no function
 -- written in the AST is a value of the MIR
@@ -542,6 +555,7 @@ fromMirValue (MBool b) = VBool b
 fromMirValue (MList vs) = VList (map fromMirValue vs)
 fromMirValue (MData name fields) = VData name [(f, fromMirValue v) | (f, v) <- fields]
 fromMirValue (MFn name) = VFnRef name
+fromMirValue MEmpty = VData "<empty>" []
 
 toMirValue :: Value -> Maybe MirValue
 toMirValue (VInt i) = Just (MInt i)

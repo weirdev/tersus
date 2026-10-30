@@ -56,7 +56,7 @@ emitProgram validated =
 -- (MirData), and so what this one can be given too
 emitOwned :: Program -> Result String String
 emitOwned program =
-    flatResultMap (\(name, fn) -> emitFunction program False (functionSymbol name) fn) (Map.toList (progFunctions program))
+    flatResultMap (\(name, fn) -> if isExtern name then externDeclaration fn else emitFunction program False (functionSymbol name) fn) (Map.toList (progFunctions program))
         `bindResult` \functions ->
             emitFunction program True "@tersus_main" (progMain program) `bindResult` \mainFunction ->
                 entryPoint program (progMain program) `bindResult` \(entry, entryTypes) ->
@@ -476,6 +476,10 @@ rvalue fn destType rv =
             y <- operandAt fn ty b
             binary op ty x y
         MakeList _ -> failG "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"
+        -- an Uninit<T> is a T (see Pipeline.nativeProgram): an empty one is a T that is 0, and the others are the value as it is
+        ListOp UninitEmpty [] -> typeG destType >>= \t -> pure (zeroOf t)
+        ListOp op [o] | op `elem` [UninitNew, UninitGet, UninitTake] -> rvalue fn destType (Use o)
+        ListOp UninitDiscard [_] -> pure "0"
         ListOp op os | op `elem` [AddrNull, AddrOffset, AddrCast, AddrToInt, AddrFromInt, AddrAlloc, AddrResize, AddrFree, AddrGet, AddrTake, AddrWrite, AddrDropValue, AddrDropRange] -> addressOp fn destType op os
         ListOp ReadByte [] -> ins "r" "call i64 @tersus_readByte()"
         ListOp PathByte [b] -> operandAt fn TByte b >>= \x -> ins "p" ("call i64 @tersus_pathByte(i64 " ++ x ++ ")")
@@ -922,6 +926,9 @@ assignAggregate dropsOld fn dest ty rv = do
             dropElement elementTy block index
             writeElement elementTy block index value
             fromPart src False
+        -- an Uninit of a value held inline: an empty one is the words cleared, and the others the value as it is
+        ListOp UninitEmpty [] -> freeOld >> zeroWords target bytes
+        ListOp op [o] | op `elem` [UninitNew, UninitGet, UninitTake] -> operandAddress fn ty o >>= \src -> fromPart src False
         -- the value held inline in a slot of memory, which is read or taken (the slot is empty after, which only the permission says)
         ListOp AddrGet [p, i] -> slotAddress fn p i >>= \at -> fromPart at False
         ListOp AddrTake [p, i] -> slotAddress fn p i >>= \at -> fromPart at False
@@ -1408,4 +1415,22 @@ blockNumber (BlockId n) = show n
 
 -- The symbol of a function of the program. Quoted, since a lifted function is named outer::inner.
 functionSymbol :: Name -> String
-functionSymbol name = global "fn." name
+functionSymbol name = case externName name of
+    Just c -> "@\"" ++ escaped c ++ "\""
+    Nothing -> global "fn." name
+
+-- An extern function (`extern fn`, named `extern f` in the MIR) is the C function f
+externName :: Name -> Maybe Name
+externName name = case splitAt 7 name of
+    ("extern ", c) -> Just c
+    _ -> Nothing
+
+isExtern :: Name -> Bool
+isExtern = maybe False (const True) . externName
+
+-- The declaration of a C function: its parameters and its result are words
+externDeclaration :: Function -> Result ([String], [Type]) String
+externDeclaration fn =
+    flatResultMap (localLlvmType fn) (fnParams fn) `bindResult` \paramTypes ->
+        maybe (Ok "void") llvmType (fnReturns fn) `bindResult` \ret ->
+            Ok (["declare " ++ ret ++ " " ++ functionSymbol (fnName fn) ++ "(" ++ intercalate ", " paramTypes ++ ")"], [])
