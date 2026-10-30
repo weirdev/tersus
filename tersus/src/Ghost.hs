@@ -556,7 +556,10 @@ defineProofRule st name args inputs outputs body = do
     done <- runStatements assumed body
     exported <- exportOutputs done bindings inputs outputs
     let rebound = Map.fromList [(var, renderVarProof (exprToProof expr)) | AssignProofVar var expr <- body ++ outputs]
-        definitions = Map.fromList [(var, proof) | AssignProofVar var expr <- inputs, let proof = exprToProof expr, Map.lookup var rebound `elem` [Nothing, Just (renderVarProof proof)]]
+        written = Map.fromList [(var, renderVarProof (exprToProof expr)) | AssignProofVar var expr <- inputs]
+        expand acc (var, proof) = Map.insert var (substituteProofDefinitions acc proof) acc
+        expanded = foldl expand Map.empty [(var, exprToProof expr) | AssignProofVar var expr <- inputs]
+        definitions = Map.filterWithKey (\var _ -> Map.lookup var rebound `elem` [Nothing, Just (written Map.! var)]) expanded
         exported' = map (substituteProofDefinitions definitions) exported
     insertRule st name (ProofRule args inputs exported')
 
