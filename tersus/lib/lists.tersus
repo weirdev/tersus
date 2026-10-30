@@ -74,3 +74,19 @@ impl<T> Drop for StdList<T> {
         return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
     };
 };
+
+// Array::boxed(n, x): n copies of x, in memory of its own (a Box of an array is a list of native code, with as many elements as room)
+fn stdListFilled<T>(n: Int, x: T) -> StdList<T> [{ affirm n >= 0; }] [{ affirm return.len = n; }] {
+    (a, b) = Addr::alloc(n);
+    i = 0;
+    while i < n [{
+        affirm i >= 0; affirm i <= n;
+        affirm base(b) = a; affirm whole(b); affirm cap(b) = n; affirm count(b) = i;
+        affirm forall j in 0..i: filled(b, j) = true;
+        affirm forall j in i..n: filled(b, j) = false;
+    }] shrinks n - i {
+        b = Addr::write(a, i, clone(x), b);
+        i = i + 1;
+    };
+    return StdList<T> { addr: a, len: n, cap: n, blk: b };
+};

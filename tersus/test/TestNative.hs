@@ -130,6 +130,8 @@ testNativeIr =
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
         , TestCase "a Box takes room on the heap for what it holds" . pure $
             withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.stdBoxNew<P>\"" `isInfixOf` ir))
+        , TestCase "a Box of an array is a list of the library" . pure $
+            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.stdListFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
         , TestCase "a Box is the struct of the library, freed by its drop" . pure $
             withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<StdBox<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.stdBoxUnbox<Int>\"" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" . pure $

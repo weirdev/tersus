@@ -24,7 +24,13 @@ import TersusTypes (Arg (..), Name, Type (..), instanceName, instanceOf, mention
 -- A Box is lowered the same way (step 29): a `Box<T>` whose T is not an array is the struct `StdBox<T>` of lib/box.tersus, one filled slot at
 -- an address that its drop frees, and `Box::new(x)` and `Box::unbox(b)` are calls of `stdBoxNew` and `stdBoxUnbox`. A field read, a test of a
 -- variant or a cast through a Box stays one through the `StdBox`, which native code reads at its address as it read a Box (the address is
--- the struct's only word), so a `match` still takes the fields out of a Box that is not used again. A Box of an array stays the language's.
+-- the struct's only word), so a `match` still takes the fields out of a Box that is not used again.
+--
+-- A Box of an array, of a size or of any (`Box<Array<T, n>>`, `Box<Array<T>>`), is a `StdList<T>` with as many elements as it has room for:
+-- `size`, `get`, `first`, `last` and `set` of one are those of a list, `Array::boxed(n, x)` is a call of `stdListFilled`, `Array::empty()` one
+-- of `stdListNew`, and the unsizing of a Box of an array of a size is the list as it is. `Box::new` of an inline array and `Box::unbox` of a
+-- Box of an array stay `MakeBox` and `Unbox`, which the emitters make of the list: the array's bytes are moved into memory of their own, or
+-- out of it.
 
 -- Whether the program has a list or a Box (of what is not an array) anywhere
 hasLists :: Program -> Bool
@@ -35,7 +41,7 @@ hasLists program =
     mentionsList ty = case ty of
         TList _ -> True
         TArrayOf t _ -> mentionsList t
-        TBox t -> not (isArrayType t) || mentionsList t
+        TBox _ -> True
         TAddr t -> mentionsList t
         TUninit t -> mentionsList t
         TRef t -> mentionsList t
@@ -117,8 +123,8 @@ listType :: Type -> Type
 listType ty = case ty of
     TList t -> TNamed (instanceName "StdList" [ArgType (listType t)])
     TArrayOf t size -> TArrayOf (listType t) size
-    TBox t | not (isArrayType t) -> TNamed (boxStruct t)
-    TBox t -> TBox (listType t)
+    TBox (TArrayOf t _) -> TNamed (instanceName "StdList" [ArgType (listType t)])
+    TBox t -> TNamed (boxStruct t)
     TAddr t -> TAddr (listType t)
     TUninit t -> TUninit (listType t)
     TRef t -> TRef (listType t)
@@ -255,6 +261,9 @@ lowerFunction original fn =
             Unbox o -> heldIn o
             _ -> return Nothing
         case (rv, boxed) of
+            (ListOp NewBoxed [n, x], _) | TBox (TArrayOf element _) <- destTy -> operandFor element x >>= \x' -> callTo "stdListFilled" [n, x'] dest
+            (ListOp NewEmptyBoxed [], _) | TBox TArrayOf{} <- destTy -> callTo "stdListNew" [] dest
+            (Unsize o, _) -> emit (Assign dest (Use (renameOperand o)))
             (MakeBox o, _) | TBox held <- destTy, not (isArrayType held) -> operandFor held o >>= \o' -> callTo "stdBoxNew" [o'] dest
             (Unbox o, Just _) -> callTo "stdBoxUnbox" [renameOperand o] dest
             _ -> lowerOther dest destTy rv
@@ -288,6 +297,8 @@ lowerFunction original fn =
         return $ case (o, ty) of
             (Const (CList _), _) -> True
             (_, Just (TList _)) -> True
+            -- (a Box of an array is a list of native code)
+            (_, Just (TBox TArrayOf{})) -> True
             _ -> False
 
     listCall dest destTy op os = do
@@ -303,6 +314,7 @@ lowerFunction original fn =
                 _ -> operandTy
             element = case listTy of
                 TList t -> t
+                TBox (TArrayOf t _) -> t
                 _ -> case destTy of
                     TList t -> t
                     _ -> TInt
