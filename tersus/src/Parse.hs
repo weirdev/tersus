@@ -829,24 +829,29 @@ implStatement = do
     forType <- optionMaybe (keyword "for" >> whitespace >> variable <* whitespace)
     (trait, traitArgs, typeName, typeArgs) <- case forType of
         Just t -> do
-            targs <- arguments t
+            -- (an impl can be written for a list, `impl<T> Sequence<T> for List<T>`, whose impl is in lib/prelude.tersus: a list is
+            -- the one type with functions that is not declared as a struct, so its types are read as a list's are)
+            targs <- if t == "List" then optionMaybe (try (char '<' >> whitespace >> ((: []) . ArgType <$> typeAnnotation) <* whitespace <* char '>' <* whitespace)) else arguments t
             return (Just first, maybe [] id firstArgs, t, targs)
         Nothing -> return (Nothing, [], first, firstArgs)
     modifyState (\d -> d{declTypeParams = outerParams})
     types <- declTypes <$> getState
-    when (not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
+    when (typeName /= "List" && not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
     case (trait, Map.lookup first generics) of
         (Just traitName, Just params) | firstArgs == Nothing -> fail ("trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">: write impl " ++ traitName ++ "<" ++ intercalate ", " params ++ "> for " ++ typeName)
         (Just traitName, Nothing) | firstArgs /= Nothing -> fail ("trait " ++ traitName ++ " has no parameters")
         _ -> return ()
-    selfName <- case (Map.lookup typeName generics, typeArgs) of
-        (Just params, Nothing) -> fail ("impl for " ++ typeName ++ ", which has parameters <" ++ intercalate ", " params ++ ">: write impl<" ++ intercalate ", " params ++ "> " ++ typeName ++ "<" ++ intercalate ", " params ++ ">")
-        (Just _, Just args) -> do
-            when (null implParams) $ fail ("impl for " ++ typeName ++ " names its types, so it is written impl<...>")
-            return (instanceName typeName args)
-        (Nothing, _) -> do
-            when (not (null implParams)) $ fail ("impl<" ++ intercalate ", " implParams ++ "> for " ++ typeName ++ ", which has no parameters")
-            return typeName
+    selfName <- case (typeName, typeArgs) of
+        ("List", Just args) -> return (instanceName typeName args)
+        ("List", Nothing) -> fail "impl for List names its types, so it is written impl<T> Trait<T> for List<T>"
+        _ -> case (Map.lookup typeName generics, typeArgs) of
+            (Just params, Nothing) -> fail ("impl for " ++ typeName ++ ", which has parameters <" ++ intercalate ", " params ++ ">: write impl<" ++ intercalate ", " params ++ "> " ++ typeName ++ "<" ++ intercalate ", " params ++ ">")
+            (Just _, Just args) -> do
+                when (null implParams) $ fail ("impl for " ++ typeName ++ " names its types, so it is written impl<...>")
+                return (instanceName typeName args)
+            (Nothing, _) -> do
+                when (not (null implParams)) $ fail ("impl<" ++ intercalate ", " implParams ++ "> for " ++ typeName ++ ", which has no parameters")
+                return typeName
     ctors <- declCtors <$> getState
     -- (`Self { ... }` is a literal of the struct with the types of the impl)
     modifyState (\d -> d{declSelf = Just selfName, declImplParams = implParams, declCtors = maybe (declCtors d) (\fields -> Map.insert selfName fields (declCtors d)) (Map.lookup typeName ctors)})

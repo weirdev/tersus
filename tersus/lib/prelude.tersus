@@ -17,6 +17,19 @@ trait Growable<E> {
     fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }];
 };
 
+// A list is a sequence that can grow, which it is by these impls: the functions are the ones a list has, so a call of one of them in a
+// body here is the list's own. What they promise is what the trait promises and the frame of each, which is what a caller of a list
+// through a bound relies on (a program that declares Sequence itself has a list implementing it by being a list, as before).
+impl<T> Sequence<T> for List<T> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); };
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self, i); }] { return clone(get(self, i)); };
+    fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }] { return set(self, i, x); };
+};
+
+impl<T> Growable<T> for List<T> {
+    fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; affirm forall j in 0..size(self): get(return, j) = get(self, j); }] { return push(self, x); };
+};
+
 // What makes a copy of a value explicit. A value is moved to where it is wanted, and a program that needs it again says `clone(x)` (or `x.clone()`),
 // which has the value of x. Int, Byte, Bool and functions are copied wherever they are wanted, and so is a struct or an enum that says it can be: a
 // type implements `Clone` with `impl Clone for T { };` (every field has to be Clone, and a list or a Box is when its elements are) and `Copy` with
