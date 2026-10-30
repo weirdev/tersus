@@ -31,12 +31,11 @@ import Utils
 -- A program that ends without a `return` on some path (`if c { return 1; };`) returns nothing on that path, so the function
 -- of `main` returns the value with a flag that says whether `_0` was assigned, and only then is the value printed.
 --
--- Int is i64 and Bool is i1. A list is a pointer to `{ rc, len, cap, elements }` (24 bytes of header, then one 8-byte slot per
--- element: an Int, a Bool as 0 or 1, or a pointer), made by the runtime, which `push` and `set` copy. A struct or an enum value
--- is a pointer to `{ rc, tag, fields }` (16 bytes of header, then a slot per field of its variant; the tag is the position of
--- the variant in the enum, and 0 for a struct), so that a type that contains itself needs no layout of its own. A function
--- value is the address of the function. An array is not a value of the heap: it is the words of its elements in the slot of
--- its local (`[N x i64]`), its value is the address of the first, and it is copied by `memcpy`; a function copies an array it is
+-- In a register a number (an Int, a Byte, a fixed-width integer, an address) is an i64 and a Bool an i1. In memory a value is laid out as
+-- C lays it out (Mir.layoutOf): a number its own width, a Bool a byte, a struct its fields at aligned offsets, an enum a U32 tag and the
+-- fields of its variant, an array its elements; a value is stored narrowed and loaded widened. A function value is the address of the
+-- function. A struct, an enum or an array is not a value of the heap: it is its bytes in the room of its local (`[N x i64]`, the words
+-- that hold them), its value is the address of the first, and it is copied by `memcpy`; a function copies an array it is
 -- given, and writes an array it returns into room the caller gives (the first parameter). The runtime prints, compares, copies and frees values by a descriptor of their type, a
 -- constant global `@"type.<type>"`.
 --
@@ -134,6 +133,7 @@ entryPoint program fn =
                     (convert, word) = case ty of
                         TInt -> ([], "%v")
                         TAddr _ -> ([], "%v")
+                        TWord _ _ -> ([], "%v")
                         TByte -> ([], "%v")
                         TBool -> (["%w = zext i1 %v to i64"], "%w")
                         _ -> (["%w = ptrtoint ptr %v to i64"], "%w")
@@ -200,9 +200,10 @@ typeDescriptors program types =
   where
     -- (the words of a value held inline and whether it owns something are worked out here, once, and not by the runtime at every drop and copy)
     body ty = case shape ty of
-        (kind, aux) -> "{ i64 " ++ show kind ++ ", ptr " ++ aux ++ ", i64 " ++ show (slotsOf program ty) ++ ", i64 " ++ (if needsDrop program ty then "1" else "0") ++ " }"
+        (kind, aux) -> "{ i64 " ++ show kind ++ ", ptr " ++ aux ++ ", i64 " ++ show (sizeOf program ty) ++ ", i64 " ++ (if needsDrop program ty then "1" else "0") ++ " }"
     shape TInt = (0 :: Int, "null")
-    shape TByte = (0, "null")
+    shape TByte = (8, "null")
+    shape (TWord signed _) = (if signed then 9 else 8, "null")
     shape (TAddr _) = (0, "null")
     shape TBool = (1, "null")
     shape ty@TArray{} = (5, global "array." (renderType ty))
@@ -218,8 +219,8 @@ typeDescriptors program types =
                 ++ intercalate ", " ["{ ptr, i64, ptr } { ptr " ++ global "str." v ++ ", i64 " ++ show (length fields) ++ ", ptr " ++ (if null fields then "null" else global "fields." v) ++ " }" | (v, fields) <- variants]
                 ++ "]"
             ]
-                ++ [ global "fields." v ++ " = private constant [" ++ show (length fields) ++ " x { ptr, ptr }] ["
-                        ++ intercalate ", " ["{ ptr, ptr } { ptr " ++ global "str." f ++ ", ptr " ++ typeSymbol program t ++ " }" | (f, t) <- fields]
+                ++ [ global "fields." v ++ " = private constant [" ++ show (length fields) ++ " x { ptr, ptr, i64 }] ["
+                        ++ intercalate ", " ["{ ptr, ptr, i64 } { ptr " ++ global "str." f ++ ", ptr " ++ typeSymbol program t ++ ", i64 " ++ show offset ++ " }" | ((f, t), offset) <- zip fields (fieldOffsets program v)]
                         ++ "]"
                    | (v, fields) <- variants
                    , not (null fields)
@@ -355,7 +356,7 @@ emitFunction program entry symbol fn =
                                 ++ temps
                                 -- (a local that owns something holds nothing until it is given a value, so that it can be dropped)
                                 ++ ["    store ptr null, ptr " ++ slot l | (l, d) <- Map.toList (fnLocals fn), isPointer (localType d), l `notElem` fnParams fn]
-                                ++ [ "    call void @llvm.memset.p0.i64(ptr " ++ slot l ++ ", i8 0, i64 " ++ show (8 * slotsOf program (localType d)) ++ ", i1 false)"
+                                ++ [ "    call void @llvm.memset.p0.i64(ptr " ++ slot l ++ ", i8 0, i64 " ++ show (sizeOf program (localType d)) ++ ", i1 false)"
                                    | (l, d) <- Map.toList (fnLocals fn)
                                    , isAggregate (localType d)
                                    , needsDrop program (localType d)
@@ -365,7 +366,7 @@ emitFunction program entry symbol fn =
                                     [ case Map.lookup p (fnLocals fn) of
                                         -- (a value held inline is given by its address, and the function works on its own copy, unless it is lent)
                                         Just _ | lentInline p -> []
-                                        Just d | isAggregate (localType d) -> ["    " ++ memcpyText (slot p) ("%p." ++ localNumber p) (8 * slotsOf program (localType d))]
+                                        Just d | isAggregate (localType d) -> ["    " ++ memcpyText (slot p) ("%p." ++ localNumber p) (sizeOf program (localType d))]
                                         _ -> ["    store " ++ t ++ " %p." ++ localNumber p ++ ", ptr " ++ slot p]
                                     | (p, t) <- zip (fnParams fn) paramTypes
                                     ]
@@ -438,7 +439,7 @@ cloneInto fn dest destType o = do
         then do
             -- the copy is made before what the local held is freed, since it can be a part of it (`t = clone of t.next`)
             bytes <- bytesG destType
-            room <- entryTemp (bytes `div` 8)
+            room <- entryTemp bytes
             emit ("call void @tersus_clone(ptr " ++ d ++ ", ptr " ++ room ++ ", ptr " ++ source ++ ")")
             dropSlot destType dest
             copyWords (slot dest) room bytes
@@ -453,10 +454,10 @@ rvalue fn destType rv =
         -- a Box has room of its own on the heap for what it holds, which is moved into it
         MakeBox o -> case destType of
             TBox held -> do
-                count <- slotsG held
+                count <- bytesG held
                 block <- ins "x" ("call ptr @tersus_box_new(i64 " ++ show count ++ ")")
                 if isAggregate held
-                    then operandAddress fn held o >>= \from -> copyWords block from (8 * count)
+                    then operandAddress fn held o >>= \from -> copyWords block from count
                     else operandAt fn held o >>= storeAt held block
                 pure block
             _ -> failG "A Box is made into a Box"
@@ -494,6 +495,7 @@ rvalue fn destType rv =
             ins "a" ("call i64 @tersus_argByte(i64 " ++ x ++ ", i64 " ++ y ++ ")")
         ListOp ToByte [x] -> operandAt fn TInt x
         ListOp FromByte [b] -> operandAt fn TByte b
+        ListOp (Narrow _ _) [x] -> operandAt fn TInt x
         ListOp WriteError [b] -> operandAt fn TByte b >>= \x -> ins "e" ("call i64 @tersus_writeError(i64 " ++ x ++ ")")
         ListOp WriteByte [b] -> operandAt fn TByte b >>= \x -> ins "w" ("call i64 @tersus_writeByte(i64 " ++ x ++ ")")
         ListOp op os@(first : _) | isArrayOperand fn first -> arrayRead fn destType op os
@@ -515,8 +517,8 @@ rvalue fn destType rv =
                 then pure "true"
                 else do
                     base <- dataBase fn (constructedType program name) o
-                    found <- ins "t" ("load i64, ptr " ++ base)
-                    ins "c" ("icmp eq i64 " ++ found ++ ", " ++ show tag)
+                    found <- ins "t" ("load i32, ptr " ++ base)
+                    ins "c" ("icmp eq i32 " ++ found ++ ", " ++ show tag)
         -- the field is moved out of the value: what it held is left holding nothing
         TakeField s name field -> do
             program <- programG
@@ -619,8 +621,8 @@ slotNumber fn p i = do
 slotAddress :: Function -> Operand -> Operand -> G String
 slotAddress fn p i = slotNumber fn p i >>= \n -> ins "p" ("inttoptr i64 " ++ n ++ " to ptr")
 
--- The words that a struct or an enum takes, and the byte offset of the field at a position of a constructor: an enum value starts
--- with a word that says the variant, a struct with its first field. A field is a word, or the words of a value held inline.
+-- Whether a constructor starts with a tag that says the variant (a U32): an enum's variants do, and a struct does not. The byte offset of the
+-- field at a position of a constructor is where C's rules put it (Mir.fieldOffsets).
 tagWords :: Program -> Name -> Integer
 tagWords program name =
     case Map.lookup name (progTypes program) of
@@ -628,9 +630,11 @@ tagWords program name =
         _ -> 1
 
 fieldOffsetG :: Name -> [(Variable, Type)] -> Int -> G Integer
-fieldOffsetG name declared i = do
+fieldOffsetG name _ i = do
     program <- programG
-    pure (8 * (tagWords program name + sum [slotsOf program t | (_, t) <- take i declared]))
+    case drop i (fieldOffsets program name) of
+        offset : _ -> pure offset
+        [] -> failG ("Variant " ++ name ++ " has no field at " ++ show i)
 
 constructorG :: Program -> Name -> G (Int, [(Variable, Type)])
 constructorG program name = maybe (failG ("Unknown struct or variant: " ++ name)) pure (constructor program name)
@@ -675,7 +679,7 @@ slotsG :: Type -> G Integer
 slotsG ty = (`slotsOf` ty) <$> programG
 
 bytesG :: Type -> G Integer
-bytesG ty = (8 *) <$> slotsG ty
+bytesG ty = (`sizeOf` ty) <$> programG
 
 -- Whether a local of the type has something to free: a word that is the address of a list or a Box, or a value held inline that
 -- holds one
@@ -695,7 +699,7 @@ zeroWords at bytes = if bytes == 0 then pure () else emit ("call void @llvm.mems
 
 -- Room in the frame of the function for a value it builds, made at its start
 entryTemp :: Integer -> G String
-entryTemp count = G (\s -> let name = "%t." ++ show (sCount s) in Ok (name, s{sCount = sCount s + 1, sTemps = ("    " ++ name ++ " = alloca [" ++ show count ++ " x i64]") : sTemps s}))
+entryTemp bytes = let count = (bytes + 7) `div` 8 in G (\s -> let name = "%t." ++ show (sCount s) in Ok (name, s{sCount = sCount s + 1, sTemps = ("    " ++ name ++ " = alloca [" ++ show count ++ " x i64]") : sTemps s}))
 
 -- Whether an operand is an array
 isArrayOperand :: Function -> Operand -> Bool
@@ -732,7 +736,7 @@ operandAddress fn ty o =
             if owns
                 then do
                     bytes <- bytesG localTy
-                    room <- entryTemp (bytes `div` 8)
+                    room <- entryTemp bytes
                     copyWords room (slot l) bytes
                     zeroWords (slot l) bytes
                     pure room
@@ -765,16 +769,23 @@ operandLocalType fn o =
 constantWords :: [Constant] -> G String
 constantWords cs = do
     k <- G (\s -> let name = global "const." (sOwner s ++ "#" ++ show (sCount s)) in Ok (name, s{sCount = sCount s + 1}))
+    -- (an array literal is of Ints, which are 8 bytes, or of Bools, which are 1)
     let words' = concatMap flatten cs
         flatten c = case c of
             CInt i -> [show i]
             CBool b -> [if b then "1" else "0"]
             CArray inner -> concatMap flatten inner
             _ -> []
+        bools = any isBool cs
+        isBool c = case c of
+            CBool _ -> True
+            CArray inner -> any isBool inner
+            _ -> False
+        element = if bools then "i8" else "i64"
         body
             | null words' = "zeroinitializer"
-            | otherwise = "[" ++ intercalate ", " ["i64 " ++ w | w <- words'] ++ "]"
-    G (\s -> Ok ((), s{sGlobals = (k ++ " = private constant [" ++ show (length words') ++ " x i64] " ++ body) : sGlobals s}))
+            | otherwise = "[" ++ intercalate ", " [element ++ " " ++ w | w <- words'] ++ "]"
+    G (\s -> Ok ((), s{sGlobals = (k ++ " = private constant [" ++ show (length words') ++ " x " ++ element ++ "] " ++ body) : sGlobals s}))
     pure k
 
 -- A constant that is held inline: an array literal is a global, and a struct or an enum is built in room of its own each time it
@@ -784,8 +795,8 @@ constantAggregate ty c =
     case c of
         CArray cs -> constantWords cs
         _ -> do
-            count <- slotsG ty
-            room <- entryTemp count
+            bytes <- bytesG ty
+            room <- entryTemp bytes
             writeConstant ty room c
             pure room
 
@@ -793,8 +804,8 @@ constantAggregate ty c =
 writeConstant :: Type -> String -> Constant -> G ()
 writeConstant ty at c =
     case c of
-        CInt i -> emit ("store i64 " ++ show i ++ ", ptr " ++ at)
-        CBool b -> emit ("store i64 " ++ (if b then "1" else "0") ++ ", ptr " ++ at)
+        CInt i -> emit ("store " ++ memoryType ty ++ " " ++ show i ++ ", ptr " ++ at)
+        CBool b -> emit ("store i8 " ++ (if b then "1" else "0") ++ ", ptr " ++ at)
         CFn name -> emit ("store ptr " ++ functionSymbol name ++ ", ptr " ++ at)
         CList _ -> failG ("Native code has no list constant: " ++ renderType ty)
         CArray cs -> do
@@ -804,7 +815,7 @@ writeConstant ty at c =
         CData name fields -> do
             program <- programG
             (tag, declared) <- constructorG program name
-            if tagWords program name == 1 then emit ("store i64 " ++ show tag ++ ", ptr " ++ at) else pure ()
+            if tagWords program name == 1 then emit ("store i32 " ++ show tag ++ ", ptr " ++ at) else pure ()
             mapM_
                 ( \(i, (f, t)) -> case lookup f fields of
                     Just e -> do
@@ -861,7 +872,7 @@ assignAggregate dropsOld fn dest ty rv = do
         fromPart address clear =
             if dropsOld && owns
                 then do
-                    room <- entryTemp (bytes `div` 8)
+                    room <- entryTemp bytes
                     copyWords room address bytes
                     if clear then zeroWords address bytes else pure ()
                     freeOld
@@ -875,7 +886,7 @@ assignAggregate dropsOld fn dest ty rv = do
             -- (an array that owns something is made in room of its own, then what the destination held is freed and the elements move in)
             if dropsOld && owns
                 then do
-                    room <- entryTemp (bytes `div` 8)
+                    room <- entryTemp bytes
                     fillArray fn room elementTy n x
                     freeOld
                     copyWords target room bytes
@@ -892,7 +903,7 @@ assignAggregate dropsOld fn dest ty rv = do
         -- Array::boxed(n, x): room on the heap for n elements, filled with x; the Box holds where it is and n
         ListOp NewBoxed [n, x] | TBox (TArrayOf elementTy _) <- ty -> do
             count <- operandAt fn TInt n
-            stride <- slotsG elementTy
+            stride <- bytesG elementTy
             total <- if stride == 1 then pure count else checked "smul" count (show stride)
             block <- ins "x" ("call ptr @tersus_box_new(i64 " ++ total ++ ")")
             fillElements fn block elementTy count Nothing x
@@ -970,7 +981,7 @@ assignAggregate dropsOld fn dest ty rv = do
                     )
                     declared
             freeOld
-            if tagWords program name == 1 then emit ("store i64 " ++ show tag ++ ", ptr " ++ target) else pure ()
+            if tagWords program name == 1 then emit ("store i32 " ++ show tag ++ ", ptr " ++ target) else pure ()
             mapM_ (\(i, (t, v)) -> fieldOffsetG name declared i >>= \offset -> storeSlot t target offset v) (zip [0 ..] values)
         -- the same value, known to be that variant (a Box that is cast is taken out of its room, which is freed)
         AsVariant o _ -> do
@@ -1007,7 +1018,8 @@ fillElements :: Function -> String -> Type -> String -> Maybe Integer -> Operand
 fillElements fn target elementTy count known x
     | known == Just 0 = pure ()
     | zero x && not (isAggregate elementTy) = do
-        bytes <- maybe (ins "z" ("mul i64 " ++ count ++ ", 8")) (pure . show . (8 *)) known
+        size <- bytesG elementTy
+        bytes <- maybe (ins "z" ("mul i64 " ++ count ++ ", " ++ show size)) (pure . show . (size *)) known
         emit ("call void @llvm.memset.p0.i64(ptr " ++ target ++ ", i8 0, i64 " ++ bytes ++ ", i1 false)")
     | otherwise = do
         program <- programG
@@ -1077,7 +1089,7 @@ arrayRead fn destType op os =
         (Last, [a]) -> do
             index <- arrayLength fn a >>= lastIndex
             base <- arrayPtr fn a
-            elementAddress base index 8 >>= loadElement destType
+            bytesG destType >>= elementAddress base index >>= loadElement destType
         -- the elements of a Box of an array are changed where they are, and the Box is given back (it is moved in, so nothing else has it)
         (Set, [a, i, x]) | TBox (TArrayOf elementTy _) <- destType -> do
             block <- operandAt fn destType a
@@ -1089,7 +1101,7 @@ arrayRead fn destType op os =
         (Get, [a, i]) -> do
             base <- arrayPtr fn a
             index <- operandAt fn TInt i
-            elementAddress base index 8 >>= loadElement destType
+            bytesG destType >>= elementAddress base index >>= loadElement destType
         _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os) ++ " for an array yet")
 
 loadElement :: Type -> String -> G String
@@ -1106,28 +1118,48 @@ loadSlot t object offset = do
     p <- ins "p" ("getelementptr i8, ptr " ++ object ++ ", i64 " ++ show offset)
     loadAt t p
 
--- Every slot is 8 bytes: an Int, a Bool as 0 or 1, or a pointer
+-- A value in memory is as many bytes as its type has (Mir.layoutOf): an Int or an address 8, a Bool 1 (0 or 1), a Byte 1 and a fixed-width
+-- integer its bits over 8, and a pointer 8. In a register, a number is an i64 and a Bool an i1, so a narrower one is truncated to be stored
+-- and widened when it is loaded (with its sign, for a signed one).
 storeAt :: Type -> String -> String -> G ()
 storeAt t p value =
     case t of
         TInt -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
-        TByte -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
         TAddr _ -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
+        TByte -> narrowStore "i8"
+        TWord _ bits -> narrowStore ("i" ++ show bits)
         TBool -> do
-            w <- ins "w" ("zext i1 " ++ value ++ " to i64")
-            emit ("store i64 " ++ w ++ ", ptr " ++ p)
+            w <- ins "w" ("zext i1 " ++ value ++ " to i8")
+            emit ("store i8 " ++ w ++ ", ptr " ++ p)
         _ -> emit ("store ptr " ++ value ++ ", ptr " ++ p)
+  where
+    narrowStore width = do
+        w <- ins "w" ("trunc i64 " ++ value ++ " to " ++ width)
+        emit ("store " ++ width ++ " " ++ w ++ ", ptr " ++ p)
 
 loadAt :: Type -> String -> G String
 loadAt t p =
     case t of
         TInt -> ins "v" ("load i64, ptr " ++ p)
-        TByte -> ins "v" ("load i64, ptr " ++ p)
         TAddr _ -> ins "v" ("load i64, ptr " ++ p)
+        TByte -> widen "zext" "i8"
+        TWord signed bits -> widen (if signed then "sext" else "zext") ("i" ++ show bits)
         TBool -> do
-            w <- ins "w" ("load i64, ptr " ++ p)
-            ins "b" ("icmp ne i64 " ++ w ++ ", 0")
+            w <- ins "w" ("load i8, ptr " ++ p)
+            ins "b" ("icmp ne i8 " ++ w ++ ", 0")
         _ -> ins "v" ("load ptr, ptr " ++ p)
+  where
+    widen how width = do
+        w <- ins "w" ("load " ++ width ++ ", ptr " ++ p)
+        ins "v" (how ++ " " ++ width ++ " " ++ w ++ " to i64")
+
+-- The LLVM type a number of the type is stored as
+memoryType :: Type -> String
+memoryType t = case t of
+    TByte -> "i8"
+    TBool -> "i8"
+    TWord _ bits -> "i" ++ show bits
+    _ -> "i64"
 
 -- Whether a value is the address of a value of the heap, which has one owner (a list, or a Box)
 isPointer :: Type -> Bool
@@ -1139,6 +1171,7 @@ toWord :: Type -> String -> G String
 toWord TInt value = pure value
 toWord TByte value = pure value
 toWord (TAddr _) value = pure value
+toWord (TWord _ _) value = pure value
 toWord TBool value = ins "w" ("zext i1 " ++ value ++ " to i64")
 toWord _ value = ins "w" ("ptrtoint ptr " ++ value ++ " to i64")
 
@@ -1268,7 +1301,7 @@ call entry fn target argTypes returnType args dest next = do
             let lends = Copy dest `elem` args
             if owns || lends
                 then do
-                    room <- slotsG returnType >>= entryTemp
+                    room <- bytesG returnType >>= entryTemp
                     emit ("call void " ++ target ++ "(" ++ intercalate ", " (("ptr " ++ room) : arguments) ++ ")")
                     if owns then dropSlot returnType dest else pure ()
                     bytesG returnType >>= copyWords (slot dest) room
@@ -1384,6 +1417,7 @@ llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TByte = Ok "i64"
 llvmType (TAddr _) = Ok "i64"
+llvmType (TWord _ _) = Ok "i64"
 llvmType TBool = Ok "i1"
 llvmType (TRef t) = llvmType t
 -- (an array is passed and held as the address of its words)

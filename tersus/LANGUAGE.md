@@ -304,7 +304,7 @@ return x + y + Addr::free(p, b);    // free gives 0
 | `Addr::free(p, b)` | `whole(b)`, `count(b) = 0` | `0`; the memory is given back |
 | `Block::split(b, i)` | `0 <= i <= cap(b)` | `(lo, hi)`: slots `0..i` and `i..cap(b)` (at `Addr::offset(base(b), i)`), of the same allocation |
 | `Block::join(lo, hi)` | the same origin, `start(hi) = start(lo) + cap(lo)` | one block of both |
-| `Block::cast(b)` | `count(b) = 0`, slots of the same size | the permission to the same memory as slots of another type |
+| `Block::cast(b)` | `count(b) = 0`, slots of the same size, aligned no more strictly | the permission to the same memory as slots of another type |
 
 `Addr::null()`, `Addr::offset(p, i)` (`i` slots further on), `Addr::cast(p)`, `Addr::toInt(p)` and `Addr::fromInt(n)` need no permission: an address alone can do no harm. Every operation that gives a permission back says the rest of what it knows: the same base, size, origin and start, and the other slots as they were.
 
@@ -1606,7 +1606,34 @@ if b = toByte(200) { }    // Bytes are compared with = and != as they are
 bs = push([], b);         // a List<Byte>, a Byte in a struct, a parameter, a result ...
 ```
 
-`toByte(x)` is refused unless `x` is known to be in range (`x = readByte(); b = toByte(x);` is not, `if x >= 0 { b = toByte(x); }` is, since `readByte()` is from -1 to 255), and `toInt(b)` is `b` (in a proof too: `affirm toInt(b) < 255;` is a fact about `b`). The validator knows that every `Byte` is from 0 to 255, wherever it came from (a parameter, a field, an element of a list, a result), and needs nothing in a contract for it: `fn sum(a: Byte, b: Byte) -> Int [{ }] [{ affirm return <= 510; }] { return toInt(a) + toInt(b); }` validates. A `Byte` is one word like an `Int` in native code and is written as a number. A number written out where a `Byte` is wanted is that `Byte`, if it is from 0 to 255, and is refused if it is not (`TypeCheck.coerce`, which writes `toByte(n)`): in the argument of a function whose parameter is a `Byte`, in a field of a struct, in a `return`, in `writeByte(104)`, and so is a list of numbers written out where a `List<Byte>` is wanted (`P { bs: [1, 2, 3] }`, through the builtin `BytesFrom`, which the parser also writes for a string literal). It is only where the type is known: a variable that holds a number is an `Int` (`n = 65; writeByte(n)` is `expected Byte, got Int`, and `writeByte(toByte(n))` is the way), and so is `100 + 100`, since only a number that is written out is converted. A `String` is made of `Byte`s (see Strings; `examples/bytes.tersus`).
+`toByte(x)` is refused unless `x` is known to be in range (`x = readByte(); b = toByte(x);` is not, `if x >= 0 { b = toByte(x); }` is, since `readByte()` is from -1 to 255), and `toInt(b)` is `b` (in a proof too: `affirm toInt(b) < 255;` is a fact about `b`). The validator knows that every `Byte` is from 0 to 255, wherever it came from (a parameter, a field, an element of a list, a result), and needs nothing in a contract for it: `fn sum(a: Byte, b: Byte) -> Int [{ }] [{ affirm return <= 510; }] { return toInt(a) + toInt(b); }` validates. A `Byte` is one byte in memory in native code (in a struct, an array, a list or the memory of an address; see Layout) and is written as a number. A number written out where a `Byte` is wanted is that `Byte`, if it is from 0 to 255, and is refused if it is not (`TypeCheck.coerce`, which writes `toByte(n)`): in the argument of a function whose parameter is a `Byte`, in a field of a struct, in a `return`, in `writeByte(104)`, and so is a list of numbers written out where a `List<Byte>` is wanted (`P { bs: [1, 2, 3] }`, through the builtin `BytesFrom`, which the parser also writes for a string literal). It is only where the type is known: a variable that holds a number is an `Int` (`n = 65; writeByte(n)` is `expected Byte, got Int`, and `writeByte(toByte(n))` is the way), and so is `100 + 100`, since only a number that is written out is converted. A `String` is made of `Byte`s (see Strings; `examples/bytes.tersus`).
+
+## Fixed-width integers
+
+`I8`, `I16`, `I32`, `U16` and `U32` are integers of so many bits, signed (`I`) or not (`U`), beside `Byte` (which is `U8`) and `Int` (which is `I64`; both names are accepted). They are what a struct shared with C holds. Arithmetic and order stay on `Int`, as for a `Byte`:
+
+```tersus
+struct Header { kind: U16, flags: Byte, length: I32 };
+
+h = Header { kind: 7, flags: 1, length: -5 };    // a number written out is converted where the type is known, and refused out of range
+n = toInt(h.length) + 10;                         // toInt widens any of them
+x = I32::from(n);                                 // I32::from (and U16::from, ...) narrows an Int, whose range the validator proves
+return toInt(x) + toInt(h.kind);                  // 12
+```
+
+- **Each is a type of its own**: an `I32` is not an `Int` (`x + y` of two `I32`s is `expected Int, got I32`), and they are compared with `=` and `!=` as they are.
+- **The validator knows the range of each** wherever it comes from (a parameter, a field, an element), as it does for a `Byte`, so `toInt(x) < 2147483648` needs no contract.
+- **Natively** each is as many bytes in memory as it has bits over 8 (see Layout), and a 64-bit word in a register: it is truncated when it is stored and widened (with its sign, for a signed one) when it is loaded. There is no `U64`, since it does not fit in an `Int`, and no arithmetic that wraps.
+
+## Layout
+
+Native code lays values out as C does, so that memory a program manages by hand can be shared with C (see Addresses and permissions, and `extern fn` in Assumptions):
+
+- **An `Int`, an address, a function and a `Box` are 8 bytes**; a `Box` of an array of no size is 16 (the address and the number of elements). **A `Byte` and a `Bool` are 1 byte** (a `Bool` is 0 or 1), and a fixed-width integer as many as it has bits over 8.
+- **A struct is its fields in the order they are declared**, each at an offset that is a multiple of its alignment (its size, for a number), and its size is rounded up to the largest alignment: `struct Header { kind: U16, flags: Byte, length: I32 }` is 8 bytes, as the same struct of C is.
+- **An enum is a tag, a `U32`, and then the fields of its variant**, laid out as a struct from the first offset after the tag at which every variant's fields can start, with the room of the widest variant. C has no equivalent, so an enum is not given to C by address.
+- **An array is its elements**, each the size of one apart, as in C; a `List<Byte>` (and so a `String`) is a byte an element.
+- **What does not change**: the validator sees values and not bytes, so no proof depends on the layout, and `eval` holds values and has none. An array held in a frame is still at most 8192 words (64 KB).
 
 ## Strings
 
@@ -1789,7 +1816,7 @@ return a;                             // [[1], [2, 3], [1]]
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
-- Addresses (see Addresses and permissions): a slot is a value of the word layout (an `Int`, a `Bool` and a `Byte` are 8 bytes each), not C's, so memory is not shared with C yet; no ghost collections of permissions, no permissions finer than a slot and no address of a local (POINTERS.md, Order of work and Decisions). A fact that has a `forall` (a slot of a block that is filled, say) is not kept where two paths meet: a function that changes a block in one branch of an `if` returns in that branch, as `push` of the `Vec` in `examples/addresses.tersus` does.
+- Addresses (see Addresses and permissions): no ghost collections of permissions, no permissions finer than a slot and no address of a local (POINTERS.md, Order of work and Decisions). A fact that has a `forall` (a slot of a block that is filled, say) is not kept where two paths meet: a function that changes a block in one branch of an `if` returns in that branch, as `push` of the `Vec` in `examples/addresses.tersus` does.
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.

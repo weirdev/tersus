@@ -32,7 +32,7 @@ import Utils
 --     return
 --     end
 --
--- The words of a type are `int byte bool`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+-- The words of a type are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
 -- `forall N "n"... N "n"... T`, `param "n"` and `ref T`, and of a size `c N`, `any`, `p "n"` and `v N`. An operand is `copy L`, `move L` or
 -- `const C`, a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. The statements are
 -- `assign L RVALUE`, `peek L RVALUE` and `drop L`; the terminators `goto B`, `switch O B B`, `call O N O... L B`, `return` and `unreachable`.
@@ -103,6 +103,7 @@ typeTokens :: Type -> [String]
 typeTokens ty = case ty of
     TInt -> ["int"]
     TByte -> ["byte"]
+    TWord signed bits -> [(if signed then "i" else "u") ++ show bits]
     TBool -> ["bool"]
     TList t -> "list" : typeTokens t
     TArrayOf t s -> "array" : typeTokens t ++ sizeTokens s
@@ -199,6 +200,7 @@ listOps =
     , ("addrDropRange", AddrDropRange), ("addrResize", AddrResize), ("addrFree", AddrFree)
     , ("blockNew", BlockNew), ("blockTaken", BlockTaken), ("blockResized", BlockResized), ("blockSplitLo", BlockSplitLo)
     , ("blockSplitHi", BlockSplitHi), ("blockJoin", BlockJoin), ("blockAssume", BlockAssume), ("blockCast", BlockCast)
+    , ("narrowI8", Narrow True 8), ("narrowI16", Narrow True 16), ("narrowI32", Narrow True 32), ("narrowU16", Narrow False 16), ("narrowU32", Narrow False 32)
     , ("uninitEmpty", UninitEmpty), ("uninitNew", UninitNew), ("uninitGet", UninitGet), ("uninitTake", UninitTake), ("uninitDiscard", UninitDiscard)
     ]
 
@@ -292,6 +294,11 @@ typeP :: P Type
 typeP = word >>= \w -> case w of
     "int" -> pure TInt
     "byte" -> pure TByte
+    "i8" -> pure (TWord True 8)
+    "i16" -> pure (TWord True 16)
+    "i32" -> pure (TWord True 32)
+    "u16" -> pure (TWord False 16)
+    "u32" -> pure (TWord False 32)
     "bool" -> pure TBool
     "list" -> TList <$> typeP
     "array" -> TArrayOf <$> typeP <*> sizeP

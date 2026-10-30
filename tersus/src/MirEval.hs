@@ -505,6 +505,11 @@ listOp ToByte [MInt x]
     | x >= 0 && x < 256 = Ok (MInt x)
     | otherwise = Error "toByte needs an Int from 0 to 255"
 listOp FromByte [MInt b] = Ok (MInt b)
+listOp (Narrow signed bits) [MInt x]
+    | x >= low && x < high = Ok (MInt x)
+    | otherwise = Error ("The Int is not in the range of the fixed-width integer it is made")
+  where
+    (low, high) = if signed then (negate (2 ^ (bits - 1)), 2 ^ (bits - 1)) else (0, 2 ^ bits)
 listOp ReadByte _ = Error "readByte is run by the statement that calls it"
 listOp ArgCount _ = Error "argCount is run by the statement that calls it"
 listOp ArgByte _ = Error "argByte is run by the statement that calls it"

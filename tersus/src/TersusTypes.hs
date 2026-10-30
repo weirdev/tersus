@@ -113,6 +113,8 @@ data BuiltinFunct
     | UninitDiscard
     | UninitFilled
     | UninitAt
+    | -- ToWord signed bits x: I32::from(x) and the others, the Int x as a fixed-width integer (x in its range). toInt widens one back (FromByte).
+      ToWord Bool Integer
     | -- replace(a, i, x): x put in element i of a list or an array, and the element that was there, as a tuple (set(a, i, x), get(a, i))
       Replace
     | Rel Rel
@@ -149,7 +151,12 @@ ghostBuiltin b = b `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, Blo
 -- look at them. TVar is the checker's own unknown and is never written by a program.
 -- TArrayOf element size: a sequence of that many elements held inline, wherever the array is made (a local, a parameter, a result
 -- or an element of a bigger array), with no pointer to it. The size is part of the type.
-data Type = TInt | TByte | TBool | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
+data Type = TInt | TByte | TBool
+    | -- A fixed-width integer (POINTERS.md, Layout): TWord signed bits is I8, I16, I32 (signed) or U16, U32. Arithmetic and order are on Int:
+      -- toInt widens one, and I32::from(x) and the others narrow an Int with its range proved, as toByte does. Natively it is as many bytes in
+      -- memory, and a word in a register.
+      TWord Bool Integer
+    | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
     | -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`): the type of the function for any values of the sizes. A call
       -- gives each its value, so a use of one that is not a call has no type.
       TForall [Variable] [Variable] Type
@@ -208,6 +215,7 @@ typeText ty = case ty of
     TInt -> "Int"
     TByte -> "Byte"
     TBool -> "Bool"
+    TWord signed bits -> wordName signed bits
     TList t -> "List<" ++ typeText t ++ ">"
     TBox t -> "Box<" ++ typeText t ++ ">"
     TAddr t -> "Addr<" ++ typeText t ++ ">"
@@ -312,6 +320,7 @@ readType text =
                             _ -> Just (TNamed full, afterInner)
                     _ -> case name of
                         "Int" -> Just (TInt, afterName)
+                        _ | Just t <- wordType name -> Just (t, afterName)
                         "Byte" -> Just (TByte, afterName)
                         "Bool" -> Just (TBool, afterName)
                         _ | "::" `isInfixOf'` name -> Just (TVariant name, afterName)
@@ -411,6 +420,25 @@ substitute sizes types = go
     arg (ArgType t) = ArgType (go t)
     sized (SizeParam n) | Just size <- lookup n sizes = size
     sized size = size
+
+-- The name of a fixed-width integer type, and the type of a name (I64 is Int and U8 is Byte)
+wordName :: Bool -> Integer -> String
+wordName signed bits = (if signed then "I" else "U") ++ show bits
+
+wordType :: String -> Maybe Type
+wordType name = case name of
+    "I8" -> Just (TWord True 8)
+    "I16" -> Just (TWord True 16)
+    "I32" -> Just (TWord True 32)
+    "I64" -> Just TInt
+    "U8" -> Just TByte
+    "U16" -> Just (TWord False 16)
+    "U32" -> Just (TWord False 32)
+    _ -> Nothing
+
+-- The values of a fixed-width integer type: the least, and one more than the greatest
+wordRange :: Bool -> Integer -> (Integer, Integer)
+wordRange signed bits = if signed then (negate (2 ^ (bits - 1)), 2 ^ (bits - 1)) else (0, 2 ^ bits)
 
 -- An array of a size that is a constant, which is every array there can be in a program that runs
 pattern TArray :: Type -> Integer -> Type

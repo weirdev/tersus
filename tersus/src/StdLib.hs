@@ -445,6 +445,19 @@ builtinFunct BlockCast =
         , relProof Eq (blockCount (ATerm "return")) (CTerm (VInt 0))
         , allEmpty "return"
         ]
+-- I32::from(x) and the others: x has to be in the range of the type, and is the same number
+builtinFunct (ToWord signed bits) =
+    let (low, high) = wordRange signed bits
+     in VFunct
+            ["x"]
+            [ Rewrite (CheckRel (relProof GtEq (ATerm "x") (CTerm (VInt low))))
+            , ProofAssert (relProof GtEq (ATerm "x") (CTerm (VInt low)))
+            , Rewrite (CheckRel (relProof Lt (ATerm "x") (CTerm (VInt high))))
+            , ProofAssert (relProof Lt (ATerm "x") (CTerm (VInt high)))
+            ]
+            []
+            (BuiltinFunct (ToWord signed bits))
+            [relProof Eq (ATerm "return") (ATerm "x")]
 -- Uninit<T>: whether one holds a value, and the value, are filled(u) and at(u)
 builtinFunct UninitEmpty = VFunct [] [] [] (BuiltinFunct UninitEmpty) [relProof Eq (uninitFilled (ATerm "return")) (CTerm (VBool False))]
 builtinFunct UninitNew =
@@ -542,6 +555,9 @@ evalBuiltinFunct ToByte [VInt x]
     | otherwise = Error "toByte needs an Int from 0 to 255"
 evalBuiltinFunct ToByte _ = Error "toByte takes one Int"
 evalBuiltinFunct FromByte [VInt b] = Ok (VInt b)
+evalBuiltinFunct (ToWord signed bits) [VInt x]
+    | x >= fst (wordRange signed bits) && x < snd (wordRange signed bits) = Ok (VInt x)
+    | otherwise = Error (wordName signed bits ++ "::from needs an Int in the range of " ++ wordName signed bits)
 evalBuiltinFunct FromByte _ = Error "toInt takes one Byte"
 evalBuiltinFunct BytesFrom [VList l]
     | all isByte l = Ok (VList l)

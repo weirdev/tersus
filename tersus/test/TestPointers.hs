@@ -39,7 +39,8 @@ testPointers =
             , testCase "a permission in a struct" (runs buffer "0")
             , testCase "a function takes a block and gives it back" (runs giveBack "9")
             , testCase "a function is lent a block" (runs lent "6")
-            , testCase "a block of one type as another" (runs "(p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, true, c); x = Addr::get(q, 0, c); c = Addr::dropValue(q, 0, c); d = Addr::free(q, c); if x { return 1; }; return 0;" "1")
+            , testCase "a block of one type as another" (runs "struct Two { a: I32, b: I32 }; impl Clone for Two { }; impl Copy for Two { }; (p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, Two { a: -1, b: 2 }, c); x = Addr::get(q, 0, c); c = Addr::dropValue(q, 0, c); d = Addr::free(q, c); return toInt(x.a) + toInt(x.b);" "1")
+            , testCase "a block of slots of another size" (rejected "(p, b) = Addr::alloc(2); c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, true, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c);" "are not the same size")
             , testCase "the permission to memory the program did not allocate is an assumption" (valid "p = Addr::fromInt(4096); b = Block::assume(p, 2); b = Addr::write(p, 0, 5, b); b = Addr::dropValue(p, 0, b); return Addr::free(p, b);")
             , testCase "a Vec on an address" (runs vec "1")
             ]

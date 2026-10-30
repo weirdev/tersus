@@ -43,6 +43,7 @@ isCopyType copies program = go (0 :: Int)
         | otherwise = case ty of
             TInt -> True
             TByte -> True
+            TWord _ _ -> True
             TBool -> True
             TFn{} -> True
             TAddr _ -> True

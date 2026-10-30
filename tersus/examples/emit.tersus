@@ -44,6 +44,7 @@ enum Type {
     TParam { name: String },
     TRef { inner: Box<Type> },
     TAddr { inner: Box<Type> },
+    TWord { signed: Bool, bits: Int },
 };
 
 impl Clone for Type { };
@@ -149,7 +150,7 @@ fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
     return w;
 };
 
-fn listWords() -> List<String> [{ }] [{ affirm size(return) = 40; }] {
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 45; }] {
     w = push([], "length");
     w = push(w, "first");
     w = push(w, "last");
@@ -190,6 +191,11 @@ fn listWords() -> List<String> [{ }] [{ affirm size(return) = 40; }] {
     w = push(w, "uninitGet");
     w = push(w, "uninitTake");
     w = push(w, "uninitDiscard");
+    w = push(w, "narrowI8");
+    w = push(w, "narrowI16");
+    w = push(w, "narrowI32");
+    w = push(w, "narrowU16");
+    w = push(w, "narrowU32");
     return w;
 };
 
@@ -392,7 +398,7 @@ fn sizeAt(ts: &List<Token>, pos: Int) -> Parsed<Size> [{ affirm pos >= 0; affirm
     return bad;
 };
 
-// A type. The words are `int byte bool`, `list T`, `array T SIZE`, `box T`, `addr T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+// A type. The words are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
 // `forall N "n"... N "n"... T`, `param "n"` and `ref T`.
 fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
     bad = failed(Type::TInt, ts);
@@ -403,6 +409,11 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
     if kw = "int" { return done(Type::TInt, next); };
     if kw = "byte" { return done(Type::TByte, next); };
     if kw = "bool" { return done(Type::TBool, next); };
+    if kw = "i8" { return done(Type::TWord { signed: true, bits: 8 }, next); };
+    if kw = "i16" { return done(Type::TWord { signed: true, bits: 16 }, next); };
+    if kw = "i32" { return done(Type::TWord { signed: true, bits: 32 }, next); };
+    if kw = "u16" { return done(Type::TWord { signed: false, bits: 16 }, next); };
+    if kw = "u32" { return done(Type::TWord { signed: false, bits: 32 }, next); };
     if next >= size(ts) { return bad; };
     if kw = "list" || kw = "box" || kw = "ref" || kw = "addr" {
         e = typeAt(ts, next);
@@ -1097,6 +1108,9 @@ fn renderType(t: &Type) -> String ~ {
         Type::TArray { elem: e, size: s } => { r = "Array<".then(renderType(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
         Type::TRef { inner: e } => { r = "&".then(renderType(Box::unbox(e))); },
         Type::TAddr { inner: e } => { r = "Addr<".then(renderType(Box::unbox(e))).then(">"); },
+        Type::TWord { signed: signed, bits: bits } => {
+            if signed { r = "I".then(showInt(bits)); } else { r = "U".then(showInt(bits)); };
+        },
         Type::TParam { name: name } => { r = clone(name); },
         Type::TForall { sizes: sizes, types: types, body: body } => {
             names = noStrings();
@@ -1259,35 +1273,104 @@ fn declaredName(types: &List<TypeDecl>, t: &Type) -> Res [{ }] [{ }] {
     return Res { ok: false, text: "" };
 };
 
-// The 8-byte words of a value held inline: an Int, a Bool or an address is one, and an array is its elements', a struct its fields' and an enum a word and the
-// widest of its variants'. A Box of an array of no size is two. (Mir.slotsOf)
-fn slotsOf(types: &List<TypeDecl>, t: &Type) -> Int ~ {
-    if isFat(t) { return 2; };
+// The layout of a value held inline (Mir.layoutOf, C's rules): its bytes and its alignment. An Int, an address, a function and a Box are 8 bytes, a Box of an
+// array of no size 16, a Byte and a Bool 1, a fixed-width integer its bits over 8; an array is its elements, a struct its fields each at a multiple of its
+// alignment (and the size rounded up to the largest), and an enum a U32 tag and then the fields of its variant from the first offset every variant can start at.
+struct Layout { size: Int, align: Int };
+
+impl Clone for Layout { };
+
+fn roundUp(n: Int, a: Int) -> Int [{ }] [{ }] {
+    if a <= 1 { return n; };
+    return (n + a - 1) / a * a;
+};
+
+fn wordLayout() -> Layout [{ }] [{ }] {
+    return Layout { size: 8, align: 8 };
+};
+
+// The layout of a type that is not a struct or an enum, or of no type when it is one
+struct Simple { ok: Bool, layout: Layout };
+
+impl Clone for Simple { };
+
+fn simpleLayout(t: &Type) -> Simple [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TBool { return Simple { ok: true, layout: Layout { size: 1, align: 1 } }; };
+    if t is Type::TWord {
+        b = (t as Type::TWord).bits / 8;
+        return Simple { ok: true, layout: Layout { size: b, align: b } };
+    };
+    if isFat(t) { return Simple { ok: true, layout: Layout { size: 16, align: 8 } }; };
+    return Simple { ok: false, layout: wordLayout() };
+};
+
+fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
+    simple = simpleLayout(t);
+    if simple.ok { return clone(simple.layout); };
     arr = sizedArray(t);
-    if arr.ok { return arr.length * slotsOf(types, arr.elem); };
+    if arr.ok {
+        e = layoutOf(types, arr.elem);
+        return Layout { size: arr.length * e.size, align: e.align };
+    };
     n = declaredName(types, t);
-    if !n.ok { return 1; };
+    if !n.ok { return wordLayout(); };
     i = lookupDecl(types, n.text);
-    if i < 0 { return 1; };
-    d = get(types, i);
-    r = 1;
-    match d {
+    if i < 0 { return wordLayout(); };
+    r = wordLayout();
+    match get(types, i) {
         TypeDecl::DStruct { name: name, fields: fields } => {
-            total = 0;
-            for f in fields { total = total + slotsOf(types, f.ty); };
-            r = total;
+            align = 1;
+            end = 0;
+            for f in fields {
+                l = layoutOf(types, f.ty);
+                if l.align > align { align = l.align; };
+                end = roundUp(end, l.align) + l.size;
+            };
+            r = Layout { size: roundUp(end, align), align: align };
         },
         TypeDecl::DEnum { name: name, variants: variants } => {
+            payload = 1;
             widest = 0;
             for v in variants {
-                w = 0;
-                for f in v.fields { w = w + slotsOf(types, f.ty); };
-                if w > widest { widest = w; };
+                align = 1;
+                end = 0;
+                for f in v.fields {
+                    l = layoutOf(types, f.ty);
+                    if l.align > align { align = l.align; };
+                    end = roundUp(end, l.align) + l.size;
+                };
+                if align > payload { payload = align; };
+                if roundUp(end, align) > widest { widest = roundUp(end, align); };
             };
-            r = 1 + widest;
+            start = roundUp(4, payload);
+            align = payload;
+            if align < 4 { align = 4; };
+            r = Layout { size: roundUp(start + widest, align), align: align };
         },
     };
     return r;
+};
+
+// The layout of a struct of these fields
+fn fieldsLayout(types: &List<TypeDecl>, fields: &List<Field>) -> Layout ~ {
+    align = 1;
+    end = 0;
+    for f in fields {
+        l = layoutOf(types, f.ty);
+        if l.align > align { align = l.align; };
+        end = roundUp(end, l.align) + l.size;
+    };
+    return Layout { size: roundUp(end, align), align: align };
+};
+
+// The layout of a declared struct or enum
+fn declLayout(types: &List<TypeDecl>, d: &TypeDecl) -> Layout ~ {
+    return layoutOf(types, Type::TNamed { name: declName(d) });
+};
+
+// The 8-byte words of room a value held inline takes in a frame (Mir.slotsOf)
+fn slotsOf(types: &List<TypeDecl>, t: &Type) -> Int ~ {
+    return (layoutOf(types, t).size + 7) / 8;
 };
 
 // Whether a value owns something to free: a Box, or an array, struct or enum that holds one (MirOwnership.needsDrop)
@@ -1319,7 +1402,7 @@ fn needsDrop(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
 
 // Whether a value is a word that is a number: an Int, a Byte or an address
 fn isNumberWord(t: &Type) -> Bool [{ }] [{ }] {
-    return t is Type::TInt || t is Type::TByte || t is Type::TAddr;
+    return t is Type::TInt || t is Type::TByte || t is Type::TAddr || t is Type::TWord;
 };
 
 // The LLVM type of a value that is a word, or why there is none
@@ -1405,8 +1488,14 @@ fn closeTypes(types: &List<TypeDecl>, roots: &List<Type>) -> List<Type> ~ {
 
 // Descriptors
 
-// The kind of a type for the runtime (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array of no size, -1 other) and what it points to
+// The kind of a type for the runtime (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array of no size, 8 an unsigned integer of fewer
+// bytes, 9 a signed one, -1 other) and what it points to
 fn descriptorShape(types: &List<TypeDecl>, t: &Type) -> Res ~ {
+    if t is Type::TByte { return Res { ok: true, text: "8, ptr null" }; };
+    if t is Type::TWord {
+        if (t as Type::TWord).signed { return Res { ok: true, text: "9, ptr null" }; };
+        return Res { ok: true, text: "8, ptr null" };
+    };
     if isNumberWord(t) { return Res { ok: true, text: "0, ptr null" }; };
     if t is Type::TBool { return Res { ok: true, text: "1, ptr null" }; };
     if isSizedArray(t) { return Res { ok: true, text: "5, ptr ".then(global("array.", renderType(t))) }; };
@@ -1426,7 +1515,7 @@ fn descriptorShape(types: &List<TypeDecl>, t: &Type) -> Res ~ {
 fn descriptorBody(types: &List<TypeDecl>, t: &Type) -> String ~ {
     drops = "0";
     if needsDrop(types, t) { drops = "1"; };
-    return "{ i64 ".then(descriptorShape(types, t).text).then(", i64 ").then(showInt(slotsOf(types, t))).then(", i64 ").then(drops).then(" }");
+    return "{ i64 ".then(descriptorShape(types, t).text).then(", i64 ").then(showInt(layoutOf(types, t).size)).then(", i64 ").then(drops).then(" }");
 };
 
 // The constants of a struct or an enum: how many variants, the variants with the names and descriptors of their fields, and whether the value starts with a word that
@@ -1444,13 +1533,25 @@ fn dataDescriptor(types: &List<TypeDecl>, n: &String) -> List<String> ~ {
         entries = push(entries, "{ ptr, i64, ptr } { ptr ".then(global("str.", v.name)).then(", i64 ").then(showInt(size(v.fields))).then(", ptr ").then(fieldsRef).then(" }"));
     };
     out = push(out, global("variants.", n).then(" = private constant [").then(showInt(size(variants))).then(" x { ptr, i64, ptr }] [").then(joinWith(", ", entries)).then("]"));
+    // (the offset of each field: after the tag of an enum, from where every variant's fields can start)
+    payload = 1;
+    for v in variants {
+        l = fieldsLayout(types, v.fields);
+        if l.align > payload { payload = l.align; };
+    };
+    start = 0;
+    if kind = "1" { start = roundUp(4, payload); };
     for v in variants {
         if size(v.fields) > 0 {
             fs = noStrings();
+            offset = 0;
             for f in v.fields {
-                fs = push(fs, "{ ptr, ptr } { ptr ".then(global("str.", f.name)).then(", ptr ").then(typeSymbol(types, f.ty)).then(" }"));
+                l = layoutOf(types, f.ty);
+                offset = roundUp(offset, l.align);
+                fs = push(fs, "{ ptr, ptr, i64 } { ptr ".then(global("str.", f.name)).then(", ptr ").then(typeSymbol(types, f.ty)).then(", i64 ").then(showInt(start + offset)).then(" }"));
+                offset = offset + l.size;
             };
-            out = push(out, global("fields.", v.name).then(" = private constant [").then(showInt(size(v.fields))).then(" x { ptr, ptr }] [").then(joinWith(", ", fs)).then("]"));
+            out = push(out, global("fields.", v.name).then(" = private constant [").then(showInt(size(v.fields))).then(" x { ptr, ptr, i64 }] [").then(joinWith(", ", fs)).then("]"));
         };
     };
     return out;
@@ -1663,7 +1764,7 @@ impl Clone for Ctor { };
 
 // The types of the program and the signatures of its functions, and for each type what is asked of it again and again, worked out once: the names, to look one up without
 // copying the declarations, whether a value of it owns something and the words it takes, and the constructors
-struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, words: List<Int>, ctors: List<Ctor>, ctorNames: List<String> };
+struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, sizes: List<Int>, aligns: List<Int>, ctors: List<Ctor>, ctorNames: List<String> };
 
 impl Clone for Ctx { };
 
@@ -1798,16 +1899,19 @@ fn contextOf(program: &Program) -> Ctx ~ {
     for f in program.functions { sigs = push(sigs, sigOf(f)); };
     names = noStrings();
     drops = noBools();
-    words = noInts2();
+    sizes = noInts2();
+    aligns = noInts2();
     for d in program.types {
         names = push(names, declName(d));
         drops = push(drops, needsDrop(program.types, Type::TNamed { name: declName(d) }));
-        words = push(words, slotsOf(program.types, Type::TNamed { name: declName(d) }));
+        l = declLayout(program.types, d);
+        sizes = push(sizes, l.size);
+        aligns = push(aligns, l.align);
     };
     ctors = ctorsOf(program.types);
     ctorNames = noStrings();
     for c in ctors { ctorNames = push(ctorNames, clone(c.name)); };
-    return Ctx { types: clone(program.types), sigs: sigs, names: names, drops: drops, words: words, ctors: ctors, ctorNames: ctorNames };
+    return Ctx { types: clone(program.types), sigs: sigs, names: names, drops: drops, sizes: sizes, aligns: aligns, ctors: ctors, ctorNames: ctorNames };
 };
 
 // The index of the declaration of a struct or an enum, or -1 (the same as lookupDecl, without copying the declarations)
@@ -1860,20 +1964,29 @@ fn needsDropIn(cx: &Ctx, t: &Type) -> Bool ~ {
     return get(cx.drops, i);
 };
 
-// The words of a value held inline (slotsOf, with the answer for a struct or an enum taken from the table)
-fn slotsIn(cx: &Ctx, t: &Type) -> Int ~ {
-    if isFat(t) { return 2; };
+// The layout of a value held inline (layoutOf, with the answer for a struct or an enum taken from the table)
+fn layoutIn(cx: &Ctx, t: &Type) -> Layout ~ {
+    simple = simpleLayout(t);
+    if simple.ok { return clone(simple.layout); };
     arr = sizedArray(t);
-    if arr.ok { return arr.length * slotsIn(cx, arr.elem); };
+    if arr.ok {
+        e = layoutIn(cx, arr.elem);
+        return Layout { size: arr.length * e.size, align: e.align };
+    };
     n = declaredIn(cx, t);
-    if !n.ok { return 1; };
+    if !n.ok { return wordLayout(); };
     i = declIndex(cx, n.text);
-    if i < 0 || i >= size(cx.words) { return 1; };
-    return get(cx.words, i);
+    if i < 0 || i >= size(cx.sizes) || i >= size(cx.aligns) { return wordLayout(); };
+    return Layout { size: get(cx.sizes, i), align: get(cx.aligns, i) };
 };
 
 fn bytesIn(cx: &Ctx, t: &Type) -> Int ~ {
-    return 8 * slotsIn(cx, t);
+    return layoutIn(cx, t).size;
+};
+
+// The 8-byte words of room a value held inline takes in a frame
+fn slotsIn(cx: &Ctx, t: &Type) -> Int ~ {
+    return (bytesIn(cx, t) + 7) / 8;
 };
 
 // Whether a local of the type has something to free: a word that is the address of a Box, or a value held inline that holds one
@@ -2060,33 +2173,74 @@ fn fieldIndex(fields: &List<Field>, name: &String) -> Int [{ }] [{ affirm return
 // The byte offset of the field at a position of a constructor: an enum value starts with a word that says the variant, a struct with its first field. A field is a word, or
 // the words of a value held inline.
 fn fieldOffset(cx: &Ctx, c: &Ctor, i: Int) -> Int ~ {
-    words = 0;
-    if c.tagged { words = 1; };
+    // (the fields of a variant of an enum start after the tag, where every variant's fields can start: Mir.fieldOffsets)
+    start = 0;
+    if c.tagged {
+        payload = 1;
+        k = lookupDecl(cx.types, c.owner);
+        if k >= 0 {
+            match get(cx.types, k) {
+                TypeDecl::DEnum { name: name, variants: variants } => {
+                    for v in variants {
+                        l = fieldsLayout(cx.types, v.fields);
+                        if l.align > payload { payload = l.align; };
+                    };
+                },
+                TypeDecl::DStruct { name: name, fields: fields } => { },
+            };
+        };
+        start = roundUp(4, payload);
+    };
+    offset = 0;
     j = 0;
     while j < i && j < size(c.fields) [{ affirm j >= 0; affirm j <= size(c.fields); }] shrinks size(c.fields) - j {
-        words = words + slotsIn(cx, get(c.fields, j).ty);
+        l = layoutIn(cx, get(c.fields, j).ty);
+        offset = roundUp(offset, l.align) + l.size;
         j = j + 1;
     };
-    return 8 * words;
+    if i >= 0 && i < size(c.fields) { offset = roundUp(offset, layoutIn(cx, get(c.fields, i).ty).align); };
+    return start + offset;
 };
 
-// Every slot is 8 bytes: an Int, a Bool as 0 or 1, or a pointer
+// The LLVM type a number of the type is stored as (LlvmEmit.memoryType)
+fn memoryType(t: &Type) -> String [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TBool { return "i8"; };
+    if t is Type::TWord { return "i".then(showInt((t as Type::TWord).bits)); };
+    return "i64";
+};
+
+// A value in memory is as many bytes as its type has (layoutOf): an Int or an address 8, a Bool 1 (0 or 1), a Byte 1 and a fixed-width integer its bits over 8, and a
+// pointer 8. In a register a number is an i64 and a Bool an i1, so a narrower one is truncated to be stored and widened when it is loaded (with its sign, for a signed one).
 fn storeAt(g: Gen, t: &Type, p: &String, value: &String) -> Gen [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TWord {
+        width = memoryType(t);
+        g1 = ins(g, "w", "trunc i64 ".then(value).then(" to ").then(width));
+        w = g1.last;
+        return emit(clone(g1), "store ".then(width).then(" ").then(w).then(", ptr ").then(p));
+    };
     if isNumberWord(t) { return emit(g, "store i64 ".then(value).then(", ptr ").then(p)); };
     if t is Type::TBool {
-        g1 = ins(g, "w", "zext i1 ".then(value).then(" to i64"));
+        g1 = ins(g, "w", "zext i1 ".then(value).then(" to i8"));
         w = g1.last;
-        return emit(g1, "store i64 ".then(w).then(", ptr ").then(p));
+        return emit(g1, "store i8 ".then(w).then(", ptr ").then(p));
     };
     return emit(g, "store ptr ".then(value).then(", ptr ").then(p));
 };
 
 fn loadAt(g: Gen, t: &Type, p: &String) -> Gen [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TWord {
+        width = memoryType(t);
+        how = "zext";
+        if t is Type::TWord && (t as Type::TWord).signed { how = "sext"; };
+        g1 = ins(g, "w", "load ".then(width).then(", ptr ").then(p));
+        w = g1.last;
+        return ins(clone(g1), "v", clone(how).then(" ").then(width).then(" ").then(w).then(" to i64"));
+    };
     if isNumberWord(t) { return ins(g, "v", "load i64, ptr ".then(p)); };
     if t is Type::TBool {
-        g1 = ins(g, "w", "load i64, ptr ".then(p));
+        g1 = ins(g, "w", "load i8, ptr ".then(p));
         w = g1.last;
-        return ins(g1, "b", "icmp ne i64 ".then(w).then(", 0"));
+        return ins(g1, "b", "icmp ne i8 ".then(w).then(", 0"));
     };
     return ins(g, "v", "load ptr, ptr ".then(p));
 };
@@ -2125,6 +2279,17 @@ fn flattenConstant(ws: List<String>, c: &Constant) -> List<String> ~ {
     return out;
 };
 
+// Whether a constant is, or has in it, a Bool
+fn hasBool(c: &Constant) -> Bool ~ {
+    if c is Constant::CBool { return true; };
+    if c is Constant::CArray {
+        for x in (c as Constant::CArray).items {
+            if hasBool(x) { return true; };
+        };
+    };
+    return false;
+};
+
 // The position of a name in a list of names, or -1
 fn fieldIndex2(names: &List<String>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(names); }] {
     i = 0;
@@ -2140,22 +2305,27 @@ fn constantWords(g: Gen, cs: &List<Constant>) -> Gen ~ {
     k = global("const.", clone(g.owner).then("#").then(showInt(g.count)));
     ws = noStrings();
     for c in cs { ws = flattenConstant(ws, c); };
+    // (an array literal is of Ints, which are 8 bytes, or of Bools, which are 1)
+    element = "i64";
+    for c in cs {
+        if hasBool(c) { element = "i8"; };
+    };
     body = "zeroinitializer";
     if size(ws) > 0 {
         parts = noStrings();
-        for w in ws { parts = push(parts, "i64 ".then(w)); };
+        for w in ws { parts = push(parts, clone(element).then(" ").then(w)); };
         body = "[".then(joinWith(", ", parts)).then("]");
     };
-    line = clone(k).then(" = private constant [").then(showInt(size(ws))).then(" x i64] ").then(body);
+    line = clone(k).then(" = private constant [").then(showInt(size(ws))).then(" x ").then(element).then("] ").then(body);
     return Gen { count: g.count + 1, globals: push(g.globals, line), last: k, ..g };
 };
 
 // Writes a constant into the words at an address, of the type that it is
 fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen ~ {
-    if c is Constant::CInt { return emit(g, "store i64 ".then(showInt((c as Constant::CInt).n)).then(", ptr ").then(at)); };
+    if c is Constant::CInt { return emit(g, "store ".then(memoryType(ty)).then(" ").then(showInt((c as Constant::CInt).n)).then(", ptr ").then(at)); };
     if c is Constant::CBool {
-        if (c as Constant::CBool).b { return emit(g, "store i64 1, ptr ".then(at)); };
-        return emit(g, "store i64 0, ptr ".then(at));
+        if (c as Constant::CBool).b { return emit(g, "store i8 1, ptr ".then(at)); };
+        return emit(g, "store i8 0, ptr ".then(at));
     };
     if c is Constant::CFn { return emit(g, "store ptr ".then(functionSymbol((c as Constant::CFn).name)).then(", ptr ").then(at)); };
     if c is Constant::CList { return failG(g, "Native code has no list constant: ".then(renderType(ty))); };
@@ -2172,7 +2342,7 @@ fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen 
     g1 = k.g;
     if size(g1.error.bytes) > 0 { return g1; };
     ctor = ctorAt(cx, k.i);
-    if ctor.tagged { g1 = emit(g1, "store i64 ".then(showInt(ctor.tag)).then(", ptr ").then(at)); };
+    if ctor.tagged { g1 = emit(g1, "store i32 ".then(showInt(ctor.tag)).then(", ptr ").then(at)); };
     i = 0;
     while i < size(ctor.fields) [{ affirm i >= 0; affirm i <= size(ctor.fields); }] ~ {
         field = get(ctor.fields, i);
@@ -2221,7 +2391,7 @@ fn operandAddress(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen
         if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
         if ownsIn(cx, lt.ty) {
             bytes = bytesIn(cx, lt.ty);
-            g1 = entryTemp(g, bytes / 8);
+            g1 = entryTemp(g, (bytes + 7) / 8);
             room = g1.last;
             g2 = copyWords(clone(g1), room, slot(l), bytes);
             g3 = zeroWords(g2, slot(l), bytes);
@@ -2489,7 +2659,7 @@ fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List
         index = g2.last;
         g3 = arrayPtr(clone(g2), f, get(os, 0));
         base = g3.last;
-        g4 = elementAddress(clone(g3), base, index, 8);
+        g4 = elementAddress(clone(g3), base, index, bytesIn(cx, destType));
         p = g4.last;
         return loadAt(clone(g4), destType, p);
     };
@@ -2514,7 +2684,7 @@ fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List
         base = g1.last;
         g2 = operandValue(clone(g1), cx, f, Type::TInt, get(os, 1));
         index = g2.last;
-        g3 = elementAddress(clone(g2), base, index, 8);
+        g3 = elementAddress(clone(g2), base, index, bytesIn(cx, destType));
         p = g3.last;
         return loadAt(clone(g3), destType, p);
     };
@@ -2628,14 +2798,14 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
     if rv is Rvalue::MakeBox {
         h = boxHolds(destType);
         if !h.ok { return failG(g, "A Box is made into a Box"); };
-        count = slotsIn(cx, h.ty);
+        count = bytesIn(cx, h.ty);
         g1 = ins(g, "x", "call ptr @tersus_box_new(i64 ".then(showInt(count)).then(")"));
         block = g1.last;
         o = (rv as Rvalue::MakeBox).o;
         if isAggregate(h.ty) {
             g2 = operandAddress(clone(g1), cx, f, h.ty, o);
             from = g2.last;
-            return giving(copyWords(clone(g2), block, from, 8 * count), block);
+            return giving(copyWords(clone(g2), block, from, count), block);
         };
         g2 = operandValue(clone(g1), cx, f, h.ty, o);
         value = g2.last;
@@ -2681,6 +2851,8 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         };
         if (op = 36 || op = 37 || op = 38) && n = 1 { return operandValue(g, cx, f, destType, get(args, 0)); };
         if op = 39 && n = 1 { return giving(g, "0"); };
+        // 40 to 44 an Int as a fixed-width integer: the same number in a register
+        if op >= 40 && op <= 44 && n = 1 { return operandValue(g, cx, f, Type::TInt, get(args, 0)); };
         if op = 12 && n = 0 { return ins(g, "r", "call i64 @tersus_readByte()"); };
         if op = 16 && n = 0 { return ins(g, "l", "call i64 @tersus_fileLoad()"); };
         if op = 19 && n = 0 { return ins(g, "t", "call i64 @tersus_fileStore()"); };
@@ -2736,9 +2908,9 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         if !ctor.tagged { return giving(k.g, "true"); };
         g1 = dataBase(k.g, cx, f, constructedType(cx, name), (rv as Rvalue::IsVariant).o);
         base = g1.last;
-        g2 = ins(g1, "t", "load i64, ptr ".then(base));
+        g2 = ins(g1, "t", "load i32, ptr ".then(base));
         found = g2.last;
-        return ins(g2, "c", "icmp eq i64 ".then(found).then(", ").then(showInt(ctor.tag)));
+        return ins(g2, "c", "icmp eq i32 ".then(found).then(", ").then(showInt(ctor.tag)));
     };
     // the field is moved out of the value: what it held is left holding nothing
     if rv is Rvalue::TakeField {
@@ -2773,10 +2945,11 @@ fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Typ
     if isZero && !isAggregate(elementTy) {
         g1 = clone(g);
         bytes = "";
+        size1 = bytesIn(cx, elementTy);
         if isKnown {
-            bytes = showInt(8 * n);
+            bytes = showInt(size1 * n);
         } else {
-            g1 = ins(g, "z", "mul i64 ".then(count).then(", 8"));
+            g1 = ins(g, "z", "mul i64 ".then(count).then(", ").then(showInt(size1)));
             bytes = g1.last;
         };
         return emit(g1, "call void @llvm.memset.p0.i64(ptr ".then(target).then(", i8 0, i64 ").then(bytes).then(", i1 false)"));
@@ -2838,7 +3011,7 @@ fn fromPart(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int, address: &St
     owns = ownsIn(cx, ty);
     target = slot(dest);
     if dropsOld && owns {
-        g1 = entryTemp(g, bytes / 8);
+        g1 = entryTemp(g, (bytes + 7) / 8);
         room = g1.last;
         g2 = copyWords(clone(g1), room, address, bytes);
         g3 = clone(g2);
@@ -2901,7 +3074,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         if op = 7 && n = 2 && arr.ok {
             // (an array that owns something is made in room of its own, then what the destination held is freed and the elements move in)
             if dropsOld && owns {
-                g1 = entryTemp(g, bytes / 8);
+                g1 = entryTemp(g, (bytes + 7) / 8);
                 room = g1.last;
                 g2 = fillElements(clone(g1), cx, f, room, arr.elem, showInt(arr.length), true, arr.length, get(args, 1));
                 g3 = freeOld(g2, cx, dropsOld, ty, dest);
@@ -2927,7 +3100,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             elementTy = Box::unbox((h.ty as Type::TArray).elem);
             g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
             count = g1.last;
-            stride = slotsIn(cx, elementTy);
+            stride = bytesIn(cx, elementTy);
             g2 = clone(g1);
             total = clone(count);
             if stride != 1 {
@@ -3058,7 +3231,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             i = i + 1;
         };
         g2 = freeOld(g1, cx, dropsOld, ty, dest);
-        if ctor.tagged { g2 = emit(g2, "store i64 ".then(showInt(ctor.tag)).then(", ptr ").then(target)); };
+        if ctor.tagged { g2 = emit(g2, "store i32 ".then(showInt(ctor.tag)).then(", ptr ").then(target)); };
         i = 0;
         while i < size(ctor.fields) && i < size(texts) [{ affirm i >= 0; affirm i <= size(ctor.fields); affirm i <= size(texts); }] ~ {
             g2 = storeSlot(g2, cx, get(ctor.fields, i).ty, target, fieldOffset(cx, ctor, i), get(texts, i));
@@ -3127,7 +3300,7 @@ fn cloneInto(g: Gen, cx: &Ctx, dest: Int, destType: &Type, o: &Operand) -> Gen ~
     if owns {
         // the copy is made before what the local held is freed, since it can be a part of it (`t = clone of t.next`)
         bytes = bytesIn(cx, destType);
-        g2 = entryTemp(clone(g1), bytes / 8);
+        g2 = entryTemp(clone(g1), (bytes + 7) / 8);
         room = g2.last;
         g3 = emit(clone(g2), "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(room).then(", ptr ").then(source).then(")"));
         g4 = dropSlot(g3, cx, destType, dest);

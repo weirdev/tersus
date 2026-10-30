@@ -26,6 +26,10 @@ module Mir
     , readersOfInput
     , functionsNamed
     , slotsOf
+    , layoutOf
+    , sizeOf
+    , alignOf
+    , fieldOffsets
     , ownerOf
     , successors
     , renderProgram
@@ -171,6 +175,8 @@ data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBox
     | -- Uninit<T>: an empty one, one that holds x, a view of what one holds, what one holds moved out, and an empty one used up. Natively
       -- an Uninit<T> is a T (see Pipeline.nativeProgram), an empty one its words cleared.
       UninitEmpty | UninitNew | UninitGet | UninitTake | UninitDiscard
+    | -- An Int as a fixed-width integer (signed, bits), with its range proved: the same number
+      Narrow Bool Integer
     deriving (Show, Eq)
 
 -- The operations that make a permission, which are erased with it
@@ -306,22 +312,76 @@ ownerOf program v =
         Just StructDecl{} -> Just v
         _ -> listToMaybe [n | (n, EnumDecl variants) <- Map.toList (progTypes program), v `elem` map fst variants]
 
--- The 8-byte words of a value held inline: an Int, a Bool or an address is one, and an array is its elements', a struct its fields' and
--- an enum a word and the widest of its variants'. A Box of an array of no size is two (the address and the number of elements).
-slotsOf :: Program -> Type -> Integer
-slotsOf program ty =
-    case ty of
-        TBox (TArrayOf _ SizeAny) -> 2
-        TArray t n -> n * slotsOf program t
-        TNamed n -> declaredWords n
-        TVariant v -> maybe 1 declaredWords (ownerOf program v)
-        _ -> 1
+-- The layout of a value held inline (POINTERS.md, Layout: C's rules), as its bytes and its alignment:
+--
+--   * an Int, an address, a function and a Box are 8 bytes, a Box of an array of no size 16 (the address and the number of elements);
+--   * a Byte and a Bool are 1 byte, and a fixed-width integer as many as it has bits over 8;
+--   * an array is its elements, each the size of one apart;
+--   * a struct is its fields in the order they are declared, each at an offset that is a multiple of its alignment, and its size is rounded
+--     up to the largest alignment, so a struct of fixed-width fields has the layout of the same struct of C;
+--   * an enum is a tag (a U32: the place of the variant in the enum) and then the fields of its variant, laid out as a struct from the first
+--     offset after the tag that every variant's fields can start at, with the room of the widest.
+layoutOf :: Program -> Type -> (Integer, Integer)
+layoutOf program = go (0 :: Int)
   where
-    declaredWords n =
-        case Map.lookup n (progTypes program) of
-            Just (StructDecl fields) -> sum [slotsOf program t | (_, t) <- fields]
-            Just (EnumDecl variants) -> 1 + maximum (0 : [sum [slotsOf program t | (_, t) <- fields] | (_, fields) <- variants])
-            Nothing -> 1
+    go depth ty
+        | depth > 64 = (8, 8)
+        | otherwise = case ty of
+            TByte -> (1, 1)
+            TBool -> (1, 1)
+            TWord _ bits -> (bits `div` 8, bits `div` 8)
+            TBox (TArrayOf _ SizeAny) -> (16, 8)
+            TArray t n -> let (size, align) = go (depth + 1) t in (n * size, align)
+            TNamed n -> declared depth n
+            TVariant v -> maybe (8, 8) (declared depth) (ownerOf program v)
+            TUninit t -> go (depth + 1) t
+            TBlock _ -> (0, 1)
+            _ -> (8, 8)
+    declared depth n = case Map.lookup n (progTypes program) of
+        Just (StructDecl fields) -> structLayout (map (go (depth + 1) . snd) fields)
+        Just (EnumDecl variants) ->
+            let layouts = [structLayout (map (go (depth + 1) . snd) fields) | (_, fields) <- variants]
+                payloadAlign = maximum (1 : map snd layouts)
+                start = roundUp 4 payloadAlign
+                align = max 4 payloadAlign
+             in (roundUp (start + maximum (0 : map fst layouts)) align, align)
+        Nothing -> (8, 8)
+
+-- The bytes and the alignment of a struct of fields of these layouts
+structLayout :: [(Integer, Integer)] -> (Integer, Integer)
+structLayout layouts =
+    let align = maximum (1 : map snd layouts)
+        end = foldl (\offset (size, a) -> roundUp offset a + size) 0 layouts
+     in (roundUp end align, align)
+
+-- The offset of each of fields of these layouts, from the start of the struct
+structOffsets :: [(Integer, Integer)] -> [Integer]
+structOffsets layouts = reverse (snd (foldl (\(offset, acc) (size, a) -> let at = roundUp offset a in (at + size, at : acc)) (0, []) layouts))
+
+roundUp :: Integer -> Integer -> Integer
+roundUp n a = if a <= 1 then n else ((n + a - 1) `div` a) * a
+
+sizeOf :: Program -> Type -> Integer
+sizeOf program = fst . layoutOf program
+
+alignOf :: Program -> Type -> Integer
+alignOf program = snd . layoutOf program
+
+-- The byte offset, from the start of the value, of each field of what builds it: a struct (from 0) or a variant of an enum (after the tag,
+-- from the start that every variant of the enum shares)
+fieldOffsets :: Program -> Name -> [Integer]
+fieldOffsets program name = case Map.lookup name (progTypes program) of
+    Just (StructDecl fields) -> structOffsets (map (layoutOf program . snd) fields)
+    _ -> case [(variants, fields) | EnumDecl variants <- Map.elems (progTypes program), (v, fields) <- variants, v == name] of
+        (variants, fields) : _ ->
+            let payloadAlign = maximum (1 : [snd (structLayout (map (layoutOf program . snd) fs)) | (_, fs) <- variants])
+                start = roundUp 4 payloadAlign
+             in map (+ start) (structOffsets (map (layoutOf program . snd) fields))
+        [] -> []
+
+-- The 8-byte words of room a value held inline takes in a frame: its bytes, rounded up
+slotsOf :: Program -> Type -> Integer
+slotsOf program ty = (sizeOf program ty + 7) `div` 8
 
 emptySpec :: FunctionSpec
 emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty
