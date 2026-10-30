@@ -900,24 +900,30 @@ buildAndRun input args file name ir expectation = do
     (exe, handle) <- openTempFile dir (file ++ ".")
     hClose handle
     removeFile exe
-    checked <- buildExecutableFast checkedBuild exe ir
-    case checked of
-        Error e -> pure (Just e)
-        Ok () -> do
-            plain <- runExecutableBytes exe args input
-            case testAssertEq plain expectation of
-                Just failure -> pure (Just failure)
-                Nothing -> do
-                    available <- if name `elem` valgrindCases then valgrindAvailable else pure False
-                    if not available
-                        then pure Nothing
-                        else do
-                            built <- buildExecutableFast [] (exe ++ "_plain") ir
-                            case built of
-                                Error e -> pure (Just e)
-                                Ok () -> do
-                                    result <- runExecutableBytes "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"] input
-                                    pure (fmap ("under valgrind:\n" ++) (testAssertEq result expectation))
+    buildAndRunHere exe `finally` (removeQuietly exe >> removeQuietly (exe ++ "_plain"))
+  where
+    removeQuietly path = do
+        _ <- try (removeFile path) :: IO (Either IOException ())
+        pure ()
+    buildAndRunHere exe = do
+        checked <- buildExecutableFast checkedBuild exe ir
+        case checked of
+            Error e -> pure (Just e)
+            Ok () -> do
+                plain <- runExecutableBytes exe args input
+                case testAssertEq plain expectation of
+                    Just failure -> pure (Just failure)
+                    Nothing -> do
+                        available <- if name `elem` valgrindCases then valgrindAvailable else pure False
+                        if not available
+                            then pure Nothing
+                            else do
+                                built <- buildExecutableFast [] (exe ++ "_plain") ir
+                                case built of
+                                    Error e -> pure (Just e)
+                                    Ok () -> do
+                                        result <- runExecutableBytes "valgrind" ["-q", "--error-exitcode=99", "--leak-check=full", "--errors-for-leak-kinds=definite,possible", exe ++ "_plain"] input
+                                        pure (fmap ("under valgrind:\n" ++) (testAssertEq result expectation))
 
 -- The one thing the MIR run does not know: a file that cannot be written (it keeps the file to itself and the command line writes it when the program has
 -- ended). Natively the write says -1.

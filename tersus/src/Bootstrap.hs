@@ -16,9 +16,12 @@ import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileEx
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import System.IO (hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openTempFile, stderr)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
+
+import qualified Data.Map.Strict as Map
 
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
@@ -101,8 +104,24 @@ cachedEmitter = cached "emitter" emitterHash "the emitter written in Tersus" $ \
 
 -- A program in the cache, named for what it is made of: made by the action if it is not there. It is made under another name and moved, so that a build that is cut
 -- short leaves nothing that looks like the program.
+-- One build of a cached program at a time in this process: callers that reach a cold cache together (the cases of a
+-- parallel test group) would otherwise each build it. A lock for each of them, since building one of them builds the
+-- other first (the emitter is made by the seed).
+{-# NOINLINE cacheLocks #-}
+cacheLocks :: MVar (Map.Map String (MVar ()))
+cacheLocks = unsafePerformIO (newMVar Map.empty)
+
+cacheLock :: String -> IO (MVar ())
+cacheLock key = modifyMVar cacheLocks $ \locks -> case Map.lookup key locks of
+    Just lock -> pure (locks, lock)
+    Nothing -> do
+        lock <- newMVar ()
+        pure (Map.insert key lock locks, lock)
+
 cached :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
 cached kind hash what build = do
+    lock <- cacheLock (kind ++ hash)
+    withMVar lock $ \_ -> do
     cache <- cacheDirectory
     case cache of
         Error e -> pure (Error e)
