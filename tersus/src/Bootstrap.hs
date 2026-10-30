@@ -122,23 +122,23 @@ cached :: String -> String -> String -> (FilePath -> IO (Result () String)) -> I
 cached kind hash what build = do
     lock <- cacheLock (kind ++ hash)
     withMVar lock $ \_ -> do
-    cache <- cacheDirectory
-    case cache of
-        Error e -> pure (Error e)
-        Ok dir -> do
-            let exe = dir </> (kind ++ "-" ++ hash)
-            present <- doesFileExist exe
-            if present
-                then pure (Ok exe)
-                else do
-                    hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
-                    (partial, handle) <- openTempFile dir (kind ++ ".tmp")
-                    hClose handle
-                    removeFile partial
-                    built <- build partial
-                    case built of
-                        Error e -> pure (Error e)
-                        Ok () -> renameFile partial exe >> pure (Ok exe)
+        cache <- cacheDirectory
+        case cache of
+            Error e -> pure (Error e)
+            Ok dir -> do
+                let exe = dir </> (kind ++ "-" ++ hash)
+                present <- doesFileExist exe
+                if present
+                    then pure (Ok exe)
+                    else do
+                        hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
+                        (partial, handle) <- openTempFile dir (kind ++ ".tmp")
+                        hClose handle
+                        removeFile partial
+                        built <- build partial
+                        case built of
+                            Error e -> pure (Error e)
+                            Ok () -> renameFile partial exe >> pure (Ok exe)
 
 -- Where the emitter is kept: the cache directory of the user. There is no fallback to a shared directory such as /tmp, where another user could have put a program
 -- of their own under the name of the emitter, which would be run as this user.
