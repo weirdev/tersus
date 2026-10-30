@@ -40,33 +40,13 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"type.StdList<String>" = private constant %tersus.type { i64 3, ptr @"data.StdList<String>", i64 24, i64 1 }
 @"type.Addr<String>" = private constant %tersus.type { i64 0, ptr @"type.String", i64 8, i64 0 }
 @"type.Bool" = private constant %tersus.type { i64 1, ptr null, i64 1, i64 0 }
-@"type.LT" = private constant %tersus.type { i64 3, ptr @"data.LT", i64 72, i64 1 }
-@"type.Gen" = private constant %tersus.type { i64 3, ptr @"data.Gen", i64 176, i64 1 }
-@"type.Operand" = private constant %tersus.type { i64 3, ptr @"data.Operand", i64 88, i64 1 }
 @"type.Constant" = private constant %tersus.type { i64 3, ptr @"data.Constant", i64 80, i64 1 }
 @"type.StdList<Constant>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Constant>", i64 24, i64 1 }
 @"type.Addr<Constant>" = private constant %tersus.type { i64 0, ptr @"type.Constant", i64 8, i64 0 }
-@"type.ArrayInfo" = private constant %tersus.type { i64 3, ptr @"data.ArrayInfo", i64 80, i64 1 }
-@"type.Held" = private constant %tersus.type { i64 3, ptr @"data.Held", i64 72, i64 1 }
-@"type.Rvalue" = private constant %tersus.type { i64 3, ptr @"data.Rvalue", i64 192, i64 1 }
-@"type.StdList<Operand>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Operand>", i64 24, i64 1 }
-@"type.Addr<Operand>" = private constant %tersus.type { i64 0, ptr @"type.Operand", i64 8, i64 0 }
-@"type.Field" = private constant %tersus.type { i64 3, ptr @"data.Field", i64 88, i64 1 }
 @"type.Ctor" = private constant %tersus.type { i64 3, ptr @"data.Ctor", i64 88, i64 1 }
 @"type.StdList<Field>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Field>", i64 24, i64 1 }
 @"type.Addr<Field>" = private constant %tersus.type { i64 0, ptr @"type.Field", i64 8, i64 0 }
-@"type.CtorAt" = private constant %tersus.type { i64 3, ptr @"data.CtorAt", i64 184, i64 1 }
-@"type.StdList<Statement>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Statement>", i64 24, i64 1 }
-@"type.Addr<Statement>" = private constant %tersus.type { i64 0, ptr @"type.Statement", i64 8, i64 0 }
-@"type.Statement" = private constant %tersus.type { i64 3, ptr @"data.Statement", i64 208, i64 1 }
-@"type.MirBlock" = private constant %tersus.type { i64 3, ptr @"data.MirBlock", i64 168, i64 1 }
-@"type.Terminator" = private constant %tersus.type { i64 3, ptr @"data.Terminator", i64 136, i64 1 }
-@"type.Line" = private constant %tersus.type { i64 3, ptr @"data.Line", i64 216, i64 1 }
-@"type.Parsed<Line>" = private constant %tersus.type { i64 3, ptr @"data.Parsed<Line>", i64 232, i64 1 }
-@"type.StdList<Token>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Token>", i64 24, i64 1 }
-@"type.Addr<Token>" = private constant %tersus.type { i64 0, ptr @"type.Token", i64 8, i64 0 }
-@"type.Token" = private constant %tersus.type { i64 3, ptr @"data.Token", i64 32, i64 1 }
-@"type.Parsed<MirBlock>" = private constant %tersus.type { i64 3, ptr @"data.Parsed<MirBlock>", i64 184, i64 1 }
+@"type.Field" = private constant %tersus.type { i64 3, ptr @"data.Field", i64 88, i64 1 }
 @"type.Function" = private constant %tersus.type { i64 3, ptr @"data.Function", i64 240, i64 1 }
 @"type.StdList<Int>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Int>", i64 24, i64 1 }
 @"type.Addr<Int>" = private constant %tersus.type { i64 0, ptr @"type.Int", i64 8, i64 0 }
@@ -75,18 +55,38 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"type.LocalDecl" = private constant %tersus.type { i64 3, ptr @"data.LocalDecl", i64 104, i64 1 }
 @"type.StdList<MirBlock>" = private constant %tersus.type { i64 3, ptr @"data.StdList<MirBlock>", i64 24, i64 1 }
 @"type.Addr<MirBlock>" = private constant %tersus.type { i64 0, ptr @"type.MirBlock", i64 8, i64 0 }
+@"type.MirBlock" = private constant %tersus.type { i64 3, ptr @"data.MirBlock", i64 168, i64 1 }
+@"type.StdList<Statement>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Statement>", i64 24, i64 1 }
+@"type.Addr<Statement>" = private constant %tersus.type { i64 0, ptr @"type.Statement", i64 8, i64 0 }
+@"type.Statement" = private constant %tersus.type { i64 3, ptr @"data.Statement", i64 208, i64 1 }
+@"type.Rvalue" = private constant %tersus.type { i64 3, ptr @"data.Rvalue", i64 192, i64 1 }
+@"type.Operand" = private constant %tersus.type { i64 3, ptr @"data.Operand", i64 88, i64 1 }
+@"type.StdList<Operand>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Operand>", i64 24, i64 1 }
+@"type.Addr<Operand>" = private constant %tersus.type { i64 0, ptr @"type.Operand", i64 8, i64 0 }
+@"type.Terminator" = private constant %tersus.type { i64 3, ptr @"data.Terminator", i64 136, i64 1 }
+@"type.Sig" = private constant %tersus.type { i64 3, ptr @"data.Sig", i64 120, i64 1 }
+@"type.StdList<Token>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Token>", i64 24, i64 1 }
+@"type.Addr<Token>" = private constant %tersus.type { i64 0, ptr @"type.Token", i64 8, i64 0 }
+@"type.Token" = private constant %tersus.type { i64 3, ptr @"data.Token", i64 32, i64 1 }
+@"type.TypeDecl" = private constant %tersus.type { i64 3, ptr @"data.TypeDecl", i64 56, i64 1 }
+@"type.StdList<Variant>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Variant>", i64 24, i64 1 }
+@"type.Addr<Variant>" = private constant %tersus.type { i64 0, ptr @"type.Variant", i64 8, i64 0 }
+@"type.Variant" = private constant %tersus.type { i64 3, ptr @"data.Variant", i64 48, i64 1 }
+@"type.LT" = private constant %tersus.type { i64 3, ptr @"data.LT", i64 72, i64 1 }
+@"type.Gen" = private constant %tersus.type { i64 3, ptr @"data.Gen", i64 176, i64 1 }
+@"type.ArrayInfo" = private constant %tersus.type { i64 3, ptr @"data.ArrayInfo", i64 80, i64 1 }
+@"type.Held" = private constant %tersus.type { i64 3, ptr @"data.Held", i64 72, i64 1 }
+@"type.CtorAt" = private constant %tersus.type { i64 3, ptr @"data.CtorAt", i64 184, i64 1 }
+@"type.Line" = private constant %tersus.type { i64 3, ptr @"data.Line", i64 216, i64 1 }
+@"type.Parsed<Line>" = private constant %tersus.type { i64 3, ptr @"data.Parsed<Line>", i64 232, i64 1 }
+@"type.Parsed<MirBlock>" = private constant %tersus.type { i64 3, ptr @"data.Parsed<MirBlock>", i64 184, i64 1 }
 @"type.StdList<Function>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Function>", i64 24, i64 1 }
 @"type.Addr<Function>" = private constant %tersus.type { i64 0, ptr @"type.Function", i64 8, i64 0 }
 @"type.Ctx" = private constant %tersus.type { i64 3, ptr @"data.Ctx", i64 192, i64 1 }
 @"type.StdList<TypeDecl>" = private constant %tersus.type { i64 3, ptr @"data.StdList<TypeDecl>", i64 24, i64 1 }
 @"type.Addr<TypeDecl>" = private constant %tersus.type { i64 0, ptr @"type.TypeDecl", i64 8, i64 0 }
-@"type.TypeDecl" = private constant %tersus.type { i64 3, ptr @"data.TypeDecl", i64 56, i64 1 }
-@"type.StdList<Variant>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Variant>", i64 24, i64 1 }
-@"type.Addr<Variant>" = private constant %tersus.type { i64 0, ptr @"type.Variant", i64 8, i64 0 }
-@"type.Variant" = private constant %tersus.type { i64 3, ptr @"data.Variant", i64 48, i64 1 }
 @"type.StdList<Sig>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Sig>", i64 24, i64 1 }
 @"type.Addr<Sig>" = private constant %tersus.type { i64 0, ptr @"type.Sig", i64 8, i64 0 }
-@"type.Sig" = private constant %tersus.type { i64 3, ptr @"data.Sig", i64 120, i64 1 }
 @"type.StdList<Bool>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Bool>", i64 24, i64 1 }
 @"type.Addr<Bool>" = private constant %tersus.type { i64 0, ptr @"type.Bool", i64 8, i64 0 }
 @"type.StdList<Ctor>" = private constant %tersus.type { i64 3, ptr @"data.StdList<Ctor>", i64 24, i64 1 }
@@ -142,26 +142,15 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"data.String" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.String", i64 0, ptr null }
 @"variants.String" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.String", i64 1, ptr @"fields.String" }]
 @"fields.String" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.bytes", ptr @"type.StdList<Byte>", i64 0 }]
-@"data.StdList<Byte>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Byte>", i64 2, ptr null }
+@"data.StdList<Byte>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Byte>", i64 2, ptr @"fn.<StdList<Byte> as Drop>::drop" }
 @"variants.StdList<Byte>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Byte>", i64 3, ptr @"fields.StdList<Byte>" }]
 @"fields.StdList<Byte>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Byte>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.StdList<Type>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Type>", i64 2, ptr null }
+@"data.StdList<Type>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Type>", i64 2, ptr @"fn.<StdList<Type> as Drop>::drop" }
 @"variants.StdList<Type>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Type>", i64 3, ptr @"fields.StdList<Type>" }]
 @"fields.StdList<Type>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Type>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.StdList<String>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<String>", i64 2, ptr null }
+@"data.StdList<String>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<String>", i64 2, ptr @"fn.<StdList<String> as Drop>::drop" }
 @"variants.StdList<String>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<String>", i64 3, ptr @"fields.StdList<String>" }]
 @"fields.StdList<String>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<String>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.LT" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.LT", i64 0, ptr null }
-@"variants.LT" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.LT", i64 2, ptr @"fields.LT" }]
-@"fields.LT" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 8 }]
-@"data.Gen" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Gen", i64 0, ptr null }
-@"variants.Gen" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Gen", i64 8, ptr @"fields.Gen" }]
-@"fields.Gen" = private constant [8 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.count", ptr @"type.Int", i64 0 }, { ptr, ptr, i64 } { ptr @"str.lines", ptr @"type.StdList<String>", i64 8 }, { ptr, ptr, i64 } { ptr @"str.types", ptr @"type.StdList<Type>", i64 32 }, { ptr, ptr, i64 } { ptr @"str.globals", ptr @"type.StdList<String>", i64 56 }, { ptr, ptr, i64 } { ptr @"str.temps", ptr @"type.StdList<String>", i64 80 }, { ptr, ptr, i64 } { ptr @"str.error", ptr @"type.String", i64 104 }, { ptr, ptr, i64 } { ptr @"str.last", ptr @"type.String", i64 128 }, { ptr, ptr, i64 } { ptr @"str.owner", ptr @"type.String", i64 152 }]
-@"data.Operand" = private constant { i64, ptr, i64, ptr } { i64 3, ptr @"variants.Operand", i64 1, ptr null }
-@"variants.Operand" = private constant [3 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Operand::Copy", i64 1, ptr @"fields.Operand::Copy" }, { ptr, i64, ptr } { ptr @"str.Operand::Move", i64 1, ptr @"fields.Operand::Move" }, { ptr, i64, ptr } { ptr @"str.Operand::Const", i64 1, ptr @"fields.Operand::Const" }]
-@"fields.Operand::Copy" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }]
-@"fields.Operand::Move" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }]
-@"fields.Operand::Const" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.value", ptr @"type.Constant", i64 8 }]
 @"data.Constant" = private constant { i64, ptr, i64, ptr } { i64 6, ptr @"variants.Constant", i64 1, ptr null }
 @"variants.Constant" = private constant [6 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Constant::CInt", i64 1, ptr @"fields.Constant::CInt" }, { ptr, i64, ptr } { ptr @"str.Constant::CBool", i64 1, ptr @"fields.Constant::CBool" }, { ptr, i64, ptr } { ptr @"str.Constant::CList", i64 1, ptr @"fields.Constant::CList" }, { ptr, i64, ptr } { ptr @"str.Constant::CArray", i64 1, ptr @"fields.Constant::CArray" }, { ptr, i64, ptr } { ptr @"str.Constant::CData", i64 3, ptr @"fields.Constant::CData" }, { ptr, i64, ptr } { ptr @"str.Constant::CFn", i64 1, ptr @"fields.Constant::CFn" }]
 @"fields.Constant::CInt" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.n", ptr @"type.Int", i64 8 }]
@@ -170,15 +159,44 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"fields.Constant::CArray" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.items", ptr @"type.StdList<Constant>", i64 8 }]
 @"fields.Constant::CData" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 8 }, { ptr, ptr, i64 } { ptr @"str.fields", ptr @"type.StdList<String>", i64 32 }, { ptr, ptr, i64 } { ptr @"str.values", ptr @"type.StdList<Constant>", i64 56 }]
 @"fields.Constant::CFn" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 8 }]
-@"data.StdList<Constant>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Constant>", i64 2, ptr null }
+@"data.StdList<Constant>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Constant>", i64 2, ptr @"fn.<StdList<Constant> as Drop>::drop" }
 @"variants.StdList<Constant>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Constant>", i64 3, ptr @"fields.StdList<Constant>" }]
 @"fields.StdList<Constant>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Constant>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.ArrayInfo" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.ArrayInfo", i64 0, ptr null }
-@"variants.ArrayInfo" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.ArrayInfo", i64 3, ptr @"fields.ArrayInfo" }]
-@"fields.ArrayInfo" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.length", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.elem", ptr @"type.Type", i64 16 }]
-@"data.Held" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Held", i64 0, ptr null }
-@"variants.Held" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Held", i64 2, ptr @"fields.Held" }]
-@"fields.Held" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 8 }]
+@"data.Ctor" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Ctor", i64 0, ptr null }
+@"variants.Ctor" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Ctor", i64 5, ptr @"fields.Ctor" }]
+@"fields.Ctor" = private constant [5 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.owner", ptr @"type.String", i64 24 }, { ptr, ptr, i64 } { ptr @"str.tag", ptr @"type.Int", i64 48 }, { ptr, ptr, i64 } { ptr @"str.tagged", ptr @"type.Bool", i64 56 }, { ptr, ptr, i64 } { ptr @"str.fields", ptr @"type.StdList<Field>", i64 64 }]
+@"data.StdList<Field>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Field>", i64 2, ptr @"fn.<StdList<Field> as Drop>::drop" }
+@"variants.StdList<Field>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Field>", i64 3, ptr @"fields.StdList<Field>" }]
+@"fields.StdList<Field>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Field>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
+@"data.Field" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Field", i64 0, ptr null }
+@"variants.Field" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Field", i64 2, ptr @"fields.Field" }]
+@"fields.Field" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 24 }]
+@"data.Function" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Function", i64 0, ptr null }
+@"variants.Function" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Function", i64 9, ptr @"fields.Function" }]
+@"fields.Function" = private constant [9 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.params", ptr @"type.StdList<Int>", i64 24 }, { ptr, ptr, i64 } { ptr @"str.hasReturn", ptr @"type.Bool", i64 48 }, { ptr, ptr, i64 } { ptr @"str.returns", ptr @"type.Type", i64 56 }, { ptr, ptr, i64 } { ptr @"str.sizeParams", ptr @"type.StdList<String>", i64 120 }, { ptr, ptr, i64 } { ptr @"str.typeParams", ptr @"type.StdList<String>", i64 144 }, { ptr, ptr, i64 } { ptr @"str.borrowed", ptr @"type.StdList<Int>", i64 168 }, { ptr, ptr, i64 } { ptr @"str.locals", ptr @"type.StdList<LocalDecl>", i64 192 }, { ptr, ptr, i64 } { ptr @"str.blocks", ptr @"type.StdList<MirBlock>", i64 216 }]
+@"data.StdList<Int>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Int>", i64 2, ptr @"fn.<StdList<Int> as Drop>::drop" }
+@"variants.StdList<Int>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Int>", i64 3, ptr @"fields.StdList<Int>" }]
+@"fields.StdList<Int>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Int>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
+@"data.StdList<LocalDecl>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<LocalDecl>", i64 2, ptr @"fn.<StdList<LocalDecl> as Drop>::drop" }
+@"variants.StdList<LocalDecl>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<LocalDecl>", i64 3, ptr @"fields.StdList<LocalDecl>" }]
+@"fields.StdList<LocalDecl>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<LocalDecl>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
+@"data.LocalDecl" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.LocalDecl", i64 0, ptr null }
+@"variants.LocalDecl" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.LocalDecl", i64 4, ptr @"fields.LocalDecl" }]
+@"fields.LocalDecl" = private constant [4 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.id", ptr @"type.Int", i64 0 }, { ptr, ptr, i64 } { ptr @"str.named", ptr @"type.Bool", i64 8 }, { ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 16 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 40 }]
+@"data.StdList<MirBlock>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<MirBlock>", i64 2, ptr @"fn.<StdList<MirBlock> as Drop>::drop" }
+@"variants.StdList<MirBlock>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<MirBlock>", i64 3, ptr @"fields.StdList<MirBlock>" }]
+@"fields.StdList<MirBlock>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<MirBlock>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
+@"data.MirBlock" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.MirBlock", i64 0, ptr null }
+@"variants.MirBlock" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.MirBlock", i64 3, ptr @"fields.MirBlock" }]
+@"fields.MirBlock" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.id", ptr @"type.Int", i64 0 }, { ptr, ptr, i64 } { ptr @"str.stmts", ptr @"type.StdList<Statement>", i64 8 }, { ptr, ptr, i64 } { ptr @"str.term", ptr @"type.Terminator", i64 32 }]
+@"data.StdList<Statement>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Statement>", i64 2, ptr @"fn.<StdList<Statement> as Drop>::drop" }
+@"variants.StdList<Statement>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Statement>", i64 3, ptr @"fields.StdList<Statement>" }]
+@"fields.StdList<Statement>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Statement>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
+@"data.Statement" = private constant { i64, ptr, i64, ptr } { i64 3, ptr @"variants.Statement", i64 1, ptr null }
+@"variants.Statement" = private constant [3 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Statement::Assign", i64 2, ptr @"fields.Statement::Assign" }, { ptr, i64, ptr } { ptr @"str.Statement::Peek", i64 2, ptr @"fields.Statement::Peek" }, { ptr, i64, ptr } { ptr @"str.Statement::Drop", i64 1, ptr @"fields.Statement::Drop" }]
+@"fields.Statement::Assign" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.rv", ptr @"type.Rvalue", i64 16 }]
+@"fields.Statement::Peek" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.rv", ptr @"type.Rvalue", i64 16 }]
+@"fields.Statement::Drop" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }]
 @"data.Rvalue" = private constant { i64, ptr, i64, ptr } { i64 13, ptr @"variants.Rvalue", i64 1, ptr null }
 @"variants.Rvalue" = private constant [13 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Rvalue::Use", i64 1, ptr @"fields.Rvalue::Use" }, { ptr, i64, ptr } { ptr @"str.Rvalue::BinaryOp", i64 3, ptr @"fields.Rvalue::BinaryOp" }, { ptr, i64, ptr } { ptr @"str.Rvalue::ListOp", i64 2, ptr @"fields.Rvalue::ListOp" }, { ptr, i64, ptr } { ptr @"str.Rvalue::MakeList", i64 1, ptr @"fields.Rvalue::MakeList" }, { ptr, i64, ptr } { ptr @"str.Rvalue::MakeBox", i64 1, ptr @"fields.Rvalue::MakeBox" }, { ptr, i64, ptr } { ptr @"str.Rvalue::Unbox", i64 1, ptr @"fields.Rvalue::Unbox" }, { ptr, i64, ptr } { ptr @"str.Rvalue::Unsize", i64 1, ptr @"fields.Rvalue::Unsize" }, { ptr, i64, ptr } { ptr @"str.Rvalue::MakeData", i64 3, ptr @"fields.Rvalue::MakeData" }, { ptr, i64, ptr } { ptr @"str.Rvalue::ReadField", i64 3, ptr @"fields.Rvalue::ReadField" }, { ptr, i64, ptr } { ptr @"str.Rvalue::IsVariant", i64 2, ptr @"fields.Rvalue::IsVariant" }, { ptr, i64, ptr } { ptr @"str.Rvalue::AsVariant", i64 2, ptr @"fields.Rvalue::AsVariant" }, { ptr, i64, ptr } { ptr @"str.Rvalue::Clone", i64 1, ptr @"fields.Rvalue::Clone" }, { ptr, i64, ptr } { ptr @"str.Rvalue::TakeField", i64 3, ptr @"fields.Rvalue::TakeField" }]
 @"fields.Rvalue::Use" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.o", ptr @"type.Operand", i64 8 }]
@@ -194,37 +212,53 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"fields.Rvalue::AsVariant" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.o", ptr @"type.Operand", i64 8 }, { ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 96 }]
 @"fields.Rvalue::Clone" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.o", ptr @"type.Operand", i64 8 }]
 @"fields.Rvalue::TakeField" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 16 }, { ptr, ptr, i64 } { ptr @"str.field", ptr @"type.String", i64 40 }]
-@"data.StdList<Operand>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Operand>", i64 2, ptr null }
+@"data.Operand" = private constant { i64, ptr, i64, ptr } { i64 3, ptr @"variants.Operand", i64 1, ptr null }
+@"variants.Operand" = private constant [3 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Operand::Copy", i64 1, ptr @"fields.Operand::Copy" }, { ptr, i64, ptr } { ptr @"str.Operand::Move", i64 1, ptr @"fields.Operand::Move" }, { ptr, i64, ptr } { ptr @"str.Operand::Const", i64 1, ptr @"fields.Operand::Const" }]
+@"fields.Operand::Copy" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }]
+@"fields.Operand::Move" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }]
+@"fields.Operand::Const" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.value", ptr @"type.Constant", i64 8 }]
+@"data.StdList<Operand>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Operand>", i64 2, ptr @"fn.<StdList<Operand> as Drop>::drop" }
 @"variants.StdList<Operand>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Operand>", i64 3, ptr @"fields.StdList<Operand>" }]
 @"fields.StdList<Operand>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Operand>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.Field" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Field", i64 0, ptr null }
-@"variants.Field" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Field", i64 2, ptr @"fields.Field" }]
-@"fields.Field" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 24 }]
-@"data.Ctor" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Ctor", i64 0, ptr null }
-@"variants.Ctor" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Ctor", i64 5, ptr @"fields.Ctor" }]
-@"fields.Ctor" = private constant [5 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.owner", ptr @"type.String", i64 24 }, { ptr, ptr, i64 } { ptr @"str.tag", ptr @"type.Int", i64 48 }, { ptr, ptr, i64 } { ptr @"str.tagged", ptr @"type.Bool", i64 56 }, { ptr, ptr, i64 } { ptr @"str.fields", ptr @"type.StdList<Field>", i64 64 }]
-@"data.StdList<Field>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Field>", i64 2, ptr null }
-@"variants.StdList<Field>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Field>", i64 3, ptr @"fields.StdList<Field>" }]
-@"fields.StdList<Field>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Field>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.CtorAt" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.CtorAt", i64 0, ptr null }
-@"variants.CtorAt" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.CtorAt", i64 2, ptr @"fields.CtorAt" }]
-@"fields.CtorAt" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.g", ptr @"type.Gen", i64 0 }, { ptr, ptr, i64 } { ptr @"str.i", ptr @"type.Int", i64 176 }]
-@"data.StdList<Statement>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Statement>", i64 2, ptr null }
-@"variants.StdList<Statement>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Statement>", i64 3, ptr @"fields.StdList<Statement>" }]
-@"fields.StdList<Statement>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Statement>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.Statement" = private constant { i64, ptr, i64, ptr } { i64 3, ptr @"variants.Statement", i64 1, ptr null }
-@"variants.Statement" = private constant [3 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Statement::Assign", i64 2, ptr @"fields.Statement::Assign" }, { ptr, i64, ptr } { ptr @"str.Statement::Peek", i64 2, ptr @"fields.Statement::Peek" }, { ptr, i64, ptr } { ptr @"str.Statement::Drop", i64 1, ptr @"fields.Statement::Drop" }]
-@"fields.Statement::Assign" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.rv", ptr @"type.Rvalue", i64 16 }]
-@"fields.Statement::Peek" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.rv", ptr @"type.Rvalue", i64 16 }]
-@"fields.Statement::Drop" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.local", ptr @"type.Int", i64 8 }]
-@"data.MirBlock" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.MirBlock", i64 0, ptr null }
-@"variants.MirBlock" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.MirBlock", i64 3, ptr @"fields.MirBlock" }]
-@"fields.MirBlock" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.id", ptr @"type.Int", i64 0 }, { ptr, ptr, i64 } { ptr @"str.stmts", ptr @"type.StdList<Statement>", i64 8 }, { ptr, ptr, i64 } { ptr @"str.term", ptr @"type.Terminator", i64 32 }]
 @"data.Terminator" = private constant { i64, ptr, i64, ptr } { i64 5, ptr @"variants.Terminator", i64 1, ptr null }
 @"variants.Terminator" = private constant [5 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Terminator::Goto", i64 1, ptr @"fields.Terminator::Goto" }, { ptr, i64, ptr } { ptr @"str.Terminator::Switch", i64 3, ptr @"fields.Terminator::Switch" }, { ptr, i64, ptr } { ptr @"str.Terminator::Call", i64 4, ptr @"fields.Terminator::Call" }, { ptr, i64, ptr } { ptr @"str.Terminator::Return", i64 0, ptr null }, { ptr, i64, ptr } { ptr @"str.Terminator::Unreachable", i64 0, ptr null }]
 @"fields.Terminator::Goto" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.block", ptr @"type.Int", i64 8 }]
 @"fields.Terminator::Switch" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.cond", ptr @"type.Operand", i64 8 }, { ptr, ptr, i64 } { ptr @"str.yes", ptr @"type.Int", i64 96 }, { ptr, ptr, i64 } { ptr @"str.no", ptr @"type.Int", i64 104 }]
 @"fields.Terminator::Call" = private constant [4 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.callee", ptr @"type.Operand", i64 8 }, { ptr, ptr, i64 } { ptr @"str.args", ptr @"type.StdList<Operand>", i64 96 }, { ptr, ptr, i64 } { ptr @"str.dest", ptr @"type.Int", i64 120 }, { ptr, ptr, i64 } { ptr @"str.next", ptr @"type.Int", i64 128 }]
+@"data.Sig" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Sig", i64 0, ptr null }
+@"variants.Sig" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Sig", i64 5, ptr @"fields.Sig" }]
+@"fields.Sig" = private constant [5 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.params", ptr @"type.StdList<Type>", i64 24 }, { ptr, ptr, i64 } { ptr @"str.paramsOk", ptr @"type.Bool", i64 48 }, { ptr, ptr, i64 } { ptr @"str.hasReturn", ptr @"type.Bool", i64 49 }, { ptr, ptr, i64 } { ptr @"str.returns", ptr @"type.Type", i64 56 }]
+@"data.StdList<Token>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Token>", i64 2, ptr @"fn.<StdList<Token> as Drop>::drop" }
+@"variants.StdList<Token>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Token>", i64 3, ptr @"fields.StdList<Token>" }]
+@"fields.StdList<Token>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Token>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
+@"data.Token" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Token", i64 0, ptr null }
+@"variants.Token" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Token", i64 2, ptr @"fields.Token" }]
+@"fields.Token" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.quoted", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.text", ptr @"type.String", i64 8 }]
+@"data.TypeDecl" = private constant { i64, ptr, i64, ptr } { i64 2, ptr @"variants.TypeDecl", i64 1, ptr null }
+@"variants.TypeDecl" = private constant [2 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.TypeDecl::DStruct", i64 2, ptr @"fields.TypeDecl::DStruct" }, { ptr, i64, ptr } { ptr @"str.TypeDecl::DEnum", i64 2, ptr @"fields.TypeDecl::DEnum" }]
+@"fields.TypeDecl::DStruct" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 8 }, { ptr, ptr, i64 } { ptr @"str.fields", ptr @"type.StdList<Field>", i64 32 }]
+@"fields.TypeDecl::DEnum" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 8 }, { ptr, ptr, i64 } { ptr @"str.variants", ptr @"type.StdList<Variant>", i64 32 }]
+@"data.StdList<Variant>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Variant>", i64 2, ptr @"fn.<StdList<Variant> as Drop>::drop" }
+@"variants.StdList<Variant>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Variant>", i64 3, ptr @"fields.StdList<Variant>" }]
+@"fields.StdList<Variant>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Variant>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
+@"data.Variant" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Variant", i64 0, ptr null }
+@"variants.Variant" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Variant", i64 2, ptr @"fields.Variant" }]
+@"fields.Variant" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.fields", ptr @"type.StdList<Field>", i64 24 }]
+@"data.LT" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.LT", i64 0, ptr null }
+@"variants.LT" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.LT", i64 2, ptr @"fields.LT" }]
+@"fields.LT" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 8 }]
+@"data.Gen" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Gen", i64 0, ptr null }
+@"variants.Gen" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Gen", i64 8, ptr @"fields.Gen" }]
+@"fields.Gen" = private constant [8 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.count", ptr @"type.Int", i64 0 }, { ptr, ptr, i64 } { ptr @"str.lines", ptr @"type.StdList<String>", i64 8 }, { ptr, ptr, i64 } { ptr @"str.types", ptr @"type.StdList<Type>", i64 32 }, { ptr, ptr, i64 } { ptr @"str.globals", ptr @"type.StdList<String>", i64 56 }, { ptr, ptr, i64 } { ptr @"str.temps", ptr @"type.StdList<String>", i64 80 }, { ptr, ptr, i64 } { ptr @"str.error", ptr @"type.String", i64 104 }, { ptr, ptr, i64 } { ptr @"str.last", ptr @"type.String", i64 128 }, { ptr, ptr, i64 } { ptr @"str.owner", ptr @"type.String", i64 152 }]
+@"data.ArrayInfo" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.ArrayInfo", i64 0, ptr null }
+@"variants.ArrayInfo" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.ArrayInfo", i64 3, ptr @"fields.ArrayInfo" }]
+@"fields.ArrayInfo" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.length", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.elem", ptr @"type.Type", i64 16 }]
+@"data.Held" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Held", i64 0, ptr null }
+@"variants.Held" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Held", i64 2, ptr @"fields.Held" }]
+@"fields.Held" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 8 }]
+@"data.CtorAt" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.CtorAt", i64 0, ptr null }
+@"variants.CtorAt" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.CtorAt", i64 2, ptr @"fields.CtorAt" }]
+@"fields.CtorAt" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.g", ptr @"type.Gen", i64 0 }, { ptr, ptr, i64 } { ptr @"str.i", ptr @"type.Int", i64 176 }]
 @"data.Line" = private constant { i64, ptr, i64, ptr } { i64 2, ptr @"variants.Line", i64 1, ptr null }
 @"variants.Line" = private constant [2 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Line::LStatement", i64 1, ptr @"fields.Line::LStatement" }, { ptr, i64, ptr } { ptr @"str.Line::LTerminator", i64 1, ptr @"fields.Line::LTerminator" }]
 @"fields.Line::LStatement" = private constant [1 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.s", ptr @"type.Statement", i64 8 }]
@@ -232,59 +266,25 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"data.Parsed<Line>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Parsed<Line>", i64 0, ptr null }
 @"variants.Parsed<Line>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Parsed<Line>", i64 3, ptr @"fields.Parsed<Line>" }]
 @"fields.Parsed<Line>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.value", ptr @"type.Line", i64 0 }, { ptr, ptr, i64 } { ptr @"str.pos", ptr @"type.Int", i64 216 }, { ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 224 }]
-@"data.StdList<Token>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Token>", i64 2, ptr null }
-@"variants.StdList<Token>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Token>", i64 3, ptr @"fields.StdList<Token>" }]
-@"fields.StdList<Token>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Token>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.Token" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Token", i64 0, ptr null }
-@"variants.Token" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Token", i64 2, ptr @"fields.Token" }]
-@"fields.Token" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.quoted", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.text", ptr @"type.String", i64 8 }]
 @"data.Parsed<MirBlock>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Parsed<MirBlock>", i64 0, ptr null }
 @"variants.Parsed<MirBlock>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Parsed<MirBlock>", i64 3, ptr @"fields.Parsed<MirBlock>" }]
 @"fields.Parsed<MirBlock>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.value", ptr @"type.MirBlock", i64 0 }, { ptr, ptr, i64 } { ptr @"str.pos", ptr @"type.Int", i64 168 }, { ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 176 }]
-@"data.Function" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Function", i64 0, ptr null }
-@"variants.Function" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Function", i64 9, ptr @"fields.Function" }]
-@"fields.Function" = private constant [9 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.params", ptr @"type.StdList<Int>", i64 24 }, { ptr, ptr, i64 } { ptr @"str.hasReturn", ptr @"type.Bool", i64 48 }, { ptr, ptr, i64 } { ptr @"str.returns", ptr @"type.Type", i64 56 }, { ptr, ptr, i64 } { ptr @"str.sizeParams", ptr @"type.StdList<String>", i64 120 }, { ptr, ptr, i64 } { ptr @"str.typeParams", ptr @"type.StdList<String>", i64 144 }, { ptr, ptr, i64 } { ptr @"str.borrowed", ptr @"type.StdList<Int>", i64 168 }, { ptr, ptr, i64 } { ptr @"str.locals", ptr @"type.StdList<LocalDecl>", i64 192 }, { ptr, ptr, i64 } { ptr @"str.blocks", ptr @"type.StdList<MirBlock>", i64 216 }]
-@"data.StdList<Int>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Int>", i64 2, ptr null }
-@"variants.StdList<Int>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Int>", i64 3, ptr @"fields.StdList<Int>" }]
-@"fields.StdList<Int>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Int>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.StdList<LocalDecl>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<LocalDecl>", i64 2, ptr null }
-@"variants.StdList<LocalDecl>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<LocalDecl>", i64 3, ptr @"fields.StdList<LocalDecl>" }]
-@"fields.StdList<LocalDecl>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<LocalDecl>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.LocalDecl" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.LocalDecl", i64 0, ptr null }
-@"variants.LocalDecl" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.LocalDecl", i64 4, ptr @"fields.LocalDecl" }]
-@"fields.LocalDecl" = private constant [4 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.id", ptr @"type.Int", i64 0 }, { ptr, ptr, i64 } { ptr @"str.named", ptr @"type.Bool", i64 8 }, { ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 16 }, { ptr, ptr, i64 } { ptr @"str.ty", ptr @"type.Type", i64 40 }]
-@"data.StdList<MirBlock>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<MirBlock>", i64 2, ptr null }
-@"variants.StdList<MirBlock>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<MirBlock>", i64 3, ptr @"fields.StdList<MirBlock>" }]
-@"fields.StdList<MirBlock>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<MirBlock>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.StdList<Function>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Function>", i64 2, ptr null }
+@"data.StdList<Function>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Function>", i64 2, ptr @"fn.<StdList<Function> as Drop>::drop" }
 @"variants.StdList<Function>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Function>", i64 3, ptr @"fields.StdList<Function>" }]
 @"fields.StdList<Function>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Function>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
 @"data.Ctx" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Ctx", i64 0, ptr null }
 @"variants.Ctx" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Ctx", i64 8, ptr @"fields.Ctx" }]
 @"fields.Ctx" = private constant [8 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.types", ptr @"type.StdList<TypeDecl>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.sigs", ptr @"type.StdList<Sig>", i64 24 }, { ptr, ptr, i64 } { ptr @"str.names", ptr @"type.StdList<String>", i64 48 }, { ptr, ptr, i64 } { ptr @"str.drops", ptr @"type.StdList<Bool>", i64 72 }, { ptr, ptr, i64 } { ptr @"str.sizes", ptr @"type.StdList<Int>", i64 96 }, { ptr, ptr, i64 } { ptr @"str.aligns", ptr @"type.StdList<Int>", i64 120 }, { ptr, ptr, i64 } { ptr @"str.ctors", ptr @"type.StdList<Ctor>", i64 144 }, { ptr, ptr, i64 } { ptr @"str.ctorNames", ptr @"type.StdList<String>", i64 168 }]
-@"data.StdList<TypeDecl>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<TypeDecl>", i64 2, ptr null }
+@"data.StdList<TypeDecl>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<TypeDecl>", i64 2, ptr @"fn.<StdList<TypeDecl> as Drop>::drop" }
 @"variants.StdList<TypeDecl>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<TypeDecl>", i64 3, ptr @"fields.StdList<TypeDecl>" }]
 @"fields.StdList<TypeDecl>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<TypeDecl>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.TypeDecl" = private constant { i64, ptr, i64, ptr } { i64 2, ptr @"variants.TypeDecl", i64 1, ptr null }
-@"variants.TypeDecl" = private constant [2 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.TypeDecl::DStruct", i64 2, ptr @"fields.TypeDecl::DStruct" }, { ptr, i64, ptr } { ptr @"str.TypeDecl::DEnum", i64 2, ptr @"fields.TypeDecl::DEnum" }]
-@"fields.TypeDecl::DStruct" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 8 }, { ptr, ptr, i64 } { ptr @"str.fields", ptr @"type.StdList<Field>", i64 32 }]
-@"fields.TypeDecl::DEnum" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 8 }, { ptr, ptr, i64 } { ptr @"str.variants", ptr @"type.StdList<Variant>", i64 32 }]
-@"data.StdList<Variant>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Variant>", i64 2, ptr null }
-@"variants.StdList<Variant>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Variant>", i64 3, ptr @"fields.StdList<Variant>" }]
-@"fields.StdList<Variant>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Variant>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.Variant" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Variant", i64 0, ptr null }
-@"variants.Variant" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Variant", i64 2, ptr @"fields.Variant" }]
-@"fields.Variant" = private constant [2 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.fields", ptr @"type.StdList<Field>", i64 24 }]
-@"data.StdList<Sig>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Sig>", i64 2, ptr null }
+@"data.StdList<Sig>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Sig>", i64 2, ptr @"fn.<StdList<Sig> as Drop>::drop" }
 @"variants.StdList<Sig>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Sig>", i64 3, ptr @"fields.StdList<Sig>" }]
 @"fields.StdList<Sig>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Sig>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.Sig" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Sig", i64 0, ptr null }
-@"variants.Sig" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Sig", i64 5, ptr @"fields.Sig" }]
-@"fields.Sig" = private constant [5 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.name", ptr @"type.String", i64 0 }, { ptr, ptr, i64 } { ptr @"str.params", ptr @"type.StdList<Type>", i64 24 }, { ptr, ptr, i64 } { ptr @"str.paramsOk", ptr @"type.Bool", i64 48 }, { ptr, ptr, i64 } { ptr @"str.hasReturn", ptr @"type.Bool", i64 49 }, { ptr, ptr, i64 } { ptr @"str.returns", ptr @"type.Type", i64 56 }]
-@"data.StdList<Bool>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Bool>", i64 2, ptr null }
+@"data.StdList<Bool>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Bool>", i64 2, ptr @"fn.<StdList<Bool> as Drop>::drop" }
 @"variants.StdList<Bool>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Bool>", i64 3, ptr @"fields.StdList<Bool>" }]
 @"fields.StdList<Bool>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Bool>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
-@"data.StdList<Ctor>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Ctor>", i64 2, ptr null }
+@"data.StdList<Ctor>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<Ctor>", i64 2, ptr @"fn.<StdList<Ctor> as Drop>::drop" }
 @"variants.StdList<Ctor>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<Ctor>", i64 3, ptr @"fields.StdList<Ctor>" }]
 @"fields.StdList<Ctor>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<Ctor>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
 @"data.Res" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Res", i64 0, ptr null }
@@ -329,7 +329,7 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"data.Parsed<StdList<Operand>>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Parsed<StdList<Operand>>", i64 0, ptr null }
 @"variants.Parsed<StdList<Operand>>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Parsed<StdList<Operand>>", i64 3, ptr @"fields.Parsed<StdList<Operand>>" }]
 @"fields.Parsed<StdList<Operand>>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.value", ptr @"type.StdList<Operand>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.pos", ptr @"type.Int", i64 24 }, { ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 32 }]
-@"data.StdList<StdList<Token>>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<StdList<Token>>", i64 2, ptr null }
+@"data.StdList<StdList<Token>>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<StdList<Token>>", i64 2, ptr @"fn.<StdList<StdList<Token>> as Drop>::drop" }
 @"variants.StdList<StdList<Token>>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<StdList<Token>>", i64 3, ptr @"fields.StdList<StdList<Token>>" }]
 @"fields.StdList<StdList<Token>>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<StdList<Token>>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
 @"data.Parsed<StdList<StdList<Token>>>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Parsed<StdList<StdList<Token>>>", i64 0, ptr null }
@@ -347,7 +347,7 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"data.Entry" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Entry", i64 0, ptr null }
 @"variants.Entry" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.Entry", i64 4, ptr @"fields.Entry" }]
 @"fields.Entry" = private constant [4 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.ok", ptr @"type.Bool", i64 0 }, { ptr, ptr, i64 } { ptr @"str.error", ptr @"type.String", i64 8 }, { ptr, ptr, i64 } { ptr @"str.lines", ptr @"type.StdList<String>", i64 32 }, { ptr, ptr, i64 } { ptr @"str.types", ptr @"type.StdList<Type>", i64 56 }]
-@"data.StdList<StdList<String>>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<StdList<String>>", i64 2, ptr null }
+@"data.StdList<StdList<String>>" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.StdList<StdList<String>>", i64 2, ptr @"fn.<StdList<StdList<String>> as Drop>::drop" }
 @"variants.StdList<StdList<String>>" = private constant [1 x { ptr, i64, ptr }] [{ ptr, i64, ptr } { ptr @"str.StdList<StdList<String>>", i64 3, ptr @"fields.StdList<StdList<String>>" }]
 @"fields.StdList<StdList<String>>" = private constant [3 x { ptr, ptr, i64 }] [{ ptr, ptr, i64 } { ptr @"str.addr", ptr @"type.Addr<StdList<String>>", i64 0 }, { ptr, ptr, i64 } { ptr @"str.len", ptr @"type.Int", i64 8 }, { ptr, ptr, i64 } { ptr @"str.cap", ptr @"type.Int", i64 16 }]
 @"data.Layout" = private constant { i64, ptr, i64, ptr } { i64 1, ptr @"variants.Layout", i64 0, ptr null }
@@ -399,22 +399,6 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"str.cap" = private constant [4 x i8] c"cap\00"
 @"str.StdList<Type>" = private constant [8 x i8] c"StdList\00"
 @"str.StdList<String>" = private constant [8 x i8] c"StdList\00"
-@"str.LT" = private constant [3 x i8] c"LT\00"
-@"str.ok" = private constant [3 x i8] c"ok\00"
-@"str.ty" = private constant [3 x i8] c"ty\00"
-@"str.Gen" = private constant [4 x i8] c"Gen\00"
-@"str.count" = private constant [6 x i8] c"count\00"
-@"str.lines" = private constant [6 x i8] c"lines\00"
-@"str.globals" = private constant [8 x i8] c"globals\00"
-@"str.temps" = private constant [6 x i8] c"temps\00"
-@"str.error" = private constant [6 x i8] c"error\00"
-@"str.last" = private constant [5 x i8] c"last\00"
-@"str.owner" = private constant [6 x i8] c"owner\00"
-@"str.Operand::Copy" = private constant [14 x i8] c"Operand::Copy\00"
-@"str.local" = private constant [6 x i8] c"local\00"
-@"str.Operand::Move" = private constant [14 x i8] c"Operand::Move\00"
-@"str.Operand::Const" = private constant [15 x i8] c"Operand::Const\00"
-@"str.value" = private constant [6 x i8] c"value\00"
 @"str.Constant::CInt" = private constant [15 x i8] c"Constant::CInt\00"
 @"str.Constant::CBool" = private constant [16 x i8] c"Constant::CBool\00"
 @"str.b" = private constant [2 x i8] c"b\00"
@@ -426,9 +410,37 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"str.values" = private constant [7 x i8] c"values\00"
 @"str.Constant::CFn" = private constant [14 x i8] c"Constant::CFn\00"
 @"str.StdList<Constant>" = private constant [8 x i8] c"StdList\00"
-@"str.ArrayInfo" = private constant [10 x i8] c"ArrayInfo\00"
-@"str.length" = private constant [7 x i8] c"length\00"
-@"str.Held" = private constant [5 x i8] c"Held\00"
+@"str.Ctor" = private constant [5 x i8] c"Ctor\00"
+@"str.owner" = private constant [6 x i8] c"owner\00"
+@"str.tag" = private constant [4 x i8] c"tag\00"
+@"str.tagged" = private constant [7 x i8] c"tagged\00"
+@"str.StdList<Field>" = private constant [8 x i8] c"StdList\00"
+@"str.Field" = private constant [6 x i8] c"Field\00"
+@"str.ty" = private constant [3 x i8] c"ty\00"
+@"str.Function" = private constant [9 x i8] c"Function\00"
+@"str.params" = private constant [7 x i8] c"params\00"
+@"str.hasReturn" = private constant [10 x i8] c"hasReturn\00"
+@"str.returns" = private constant [8 x i8] c"returns\00"
+@"str.sizeParams" = private constant [11 x i8] c"sizeParams\00"
+@"str.typeParams" = private constant [11 x i8] c"typeParams\00"
+@"str.borrowed" = private constant [9 x i8] c"borrowed\00"
+@"str.locals" = private constant [7 x i8] c"locals\00"
+@"str.blocks" = private constant [7 x i8] c"blocks\00"
+@"str.StdList<Int>" = private constant [8 x i8] c"StdList\00"
+@"str.StdList<LocalDecl>" = private constant [8 x i8] c"StdList\00"
+@"str.LocalDecl" = private constant [10 x i8] c"LocalDecl\00"
+@"str.id" = private constant [3 x i8] c"id\00"
+@"str.named" = private constant [6 x i8] c"named\00"
+@"str.StdList<MirBlock>" = private constant [8 x i8] c"StdList\00"
+@"str.MirBlock" = private constant [9 x i8] c"MirBlock\00"
+@"str.stmts" = private constant [6 x i8] c"stmts\00"
+@"str.term" = private constant [5 x i8] c"term\00"
+@"str.StdList<Statement>" = private constant [8 x i8] c"StdList\00"
+@"str.Statement::Assign" = private constant [18 x i8] c"Statement::Assign\00"
+@"str.local" = private constant [6 x i8] c"local\00"
+@"str.rv" = private constant [3 x i8] c"rv\00"
+@"str.Statement::Peek" = private constant [16 x i8] c"Statement::Peek\00"
+@"str.Statement::Drop" = private constant [16 x i8] c"Statement::Drop\00"
 @"str.Rvalue::Use" = private constant [12 x i8] c"Rvalue::Use\00"
 @"str.o" = private constant [2 x i8] c"o\00"
 @"str.Rvalue::BinaryOp" = private constant [17 x i8] c"Rvalue::BinaryOp\00"
@@ -446,24 +458,11 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"str.Rvalue::AsVariant" = private constant [18 x i8] c"Rvalue::AsVariant\00"
 @"str.Rvalue::Clone" = private constant [14 x i8] c"Rvalue::Clone\00"
 @"str.Rvalue::TakeField" = private constant [18 x i8] c"Rvalue::TakeField\00"
+@"str.Operand::Copy" = private constant [14 x i8] c"Operand::Copy\00"
+@"str.Operand::Move" = private constant [14 x i8] c"Operand::Move\00"
+@"str.Operand::Const" = private constant [15 x i8] c"Operand::Const\00"
+@"str.value" = private constant [6 x i8] c"value\00"
 @"str.StdList<Operand>" = private constant [8 x i8] c"StdList\00"
-@"str.Field" = private constant [6 x i8] c"Field\00"
-@"str.Ctor" = private constant [5 x i8] c"Ctor\00"
-@"str.tag" = private constant [4 x i8] c"tag\00"
-@"str.tagged" = private constant [7 x i8] c"tagged\00"
-@"str.StdList<Field>" = private constant [8 x i8] c"StdList\00"
-@"str.CtorAt" = private constant [7 x i8] c"CtorAt\00"
-@"str.g" = private constant [2 x i8] c"g\00"
-@"str.i" = private constant [2 x i8] c"i\00"
-@"str.StdList<Statement>" = private constant [8 x i8] c"StdList\00"
-@"str.Statement::Assign" = private constant [18 x i8] c"Statement::Assign\00"
-@"str.rv" = private constant [3 x i8] c"rv\00"
-@"str.Statement::Peek" = private constant [16 x i8] c"Statement::Peek\00"
-@"str.Statement::Drop" = private constant [16 x i8] c"Statement::Drop\00"
-@"str.MirBlock" = private constant [9 x i8] c"MirBlock\00"
-@"str.id" = private constant [3 x i8] c"id\00"
-@"str.stmts" = private constant [6 x i8] c"stmts\00"
-@"str.term" = private constant [5 x i8] c"term\00"
 @"str.Terminator::Goto" = private constant [17 x i8] c"Terminator::Goto\00"
 @"str.block" = private constant [6 x i8] c"block\00"
 @"str.Terminator::Switch" = private constant [19 x i8] c"Terminator::Switch\00"
@@ -476,31 +475,39 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"str.next" = private constant [5 x i8] c"next\00"
 @"str.Terminator::Return" = private constant [19 x i8] c"Terminator::Return\00"
 @"str.Terminator::Unreachable" = private constant [24 x i8] c"Terminator::Unreachable\00"
+@"str.Sig" = private constant [4 x i8] c"Sig\00"
+@"str.paramsOk" = private constant [9 x i8] c"paramsOk\00"
+@"str.StdList<Token>" = private constant [8 x i8] c"StdList\00"
+@"str.Token" = private constant [6 x i8] c"Token\00"
+@"str.quoted" = private constant [7 x i8] c"quoted\00"
+@"str.text" = private constant [5 x i8] c"text\00"
+@"str.TypeDecl::DStruct" = private constant [18 x i8] c"TypeDecl::DStruct\00"
+@"str.TypeDecl::DEnum" = private constant [16 x i8] c"TypeDecl::DEnum\00"
+@"str.variants" = private constant [9 x i8] c"variants\00"
+@"str.StdList<Variant>" = private constant [8 x i8] c"StdList\00"
+@"str.Variant" = private constant [8 x i8] c"Variant\00"
+@"str.LT" = private constant [3 x i8] c"LT\00"
+@"str.ok" = private constant [3 x i8] c"ok\00"
+@"str.Gen" = private constant [4 x i8] c"Gen\00"
+@"str.count" = private constant [6 x i8] c"count\00"
+@"str.lines" = private constant [6 x i8] c"lines\00"
+@"str.globals" = private constant [8 x i8] c"globals\00"
+@"str.temps" = private constant [6 x i8] c"temps\00"
+@"str.error" = private constant [6 x i8] c"error\00"
+@"str.last" = private constant [5 x i8] c"last\00"
+@"str.ArrayInfo" = private constant [10 x i8] c"ArrayInfo\00"
+@"str.length" = private constant [7 x i8] c"length\00"
+@"str.Held" = private constant [5 x i8] c"Held\00"
+@"str.CtorAt" = private constant [7 x i8] c"CtorAt\00"
+@"str.g" = private constant [2 x i8] c"g\00"
+@"str.i" = private constant [2 x i8] c"i\00"
 @"str.Line::LStatement" = private constant [17 x i8] c"Line::LStatement\00"
 @"str.s" = private constant [2 x i8] c"s\00"
 @"str.Line::LTerminator" = private constant [18 x i8] c"Line::LTerminator\00"
 @"str.t" = private constant [2 x i8] c"t\00"
 @"str.Parsed<Line>" = private constant [7 x i8] c"Parsed\00"
 @"str.pos" = private constant [4 x i8] c"pos\00"
-@"str.StdList<Token>" = private constant [8 x i8] c"StdList\00"
-@"str.Token" = private constant [6 x i8] c"Token\00"
-@"str.quoted" = private constant [7 x i8] c"quoted\00"
-@"str.text" = private constant [5 x i8] c"text\00"
 @"str.Parsed<MirBlock>" = private constant [7 x i8] c"Parsed\00"
-@"str.Function" = private constant [9 x i8] c"Function\00"
-@"str.params" = private constant [7 x i8] c"params\00"
-@"str.hasReturn" = private constant [10 x i8] c"hasReturn\00"
-@"str.returns" = private constant [8 x i8] c"returns\00"
-@"str.sizeParams" = private constant [11 x i8] c"sizeParams\00"
-@"str.typeParams" = private constant [11 x i8] c"typeParams\00"
-@"str.borrowed" = private constant [9 x i8] c"borrowed\00"
-@"str.locals" = private constant [7 x i8] c"locals\00"
-@"str.blocks" = private constant [7 x i8] c"blocks\00"
-@"str.StdList<Int>" = private constant [8 x i8] c"StdList\00"
-@"str.StdList<LocalDecl>" = private constant [8 x i8] c"StdList\00"
-@"str.LocalDecl" = private constant [10 x i8] c"LocalDecl\00"
-@"str.named" = private constant [6 x i8] c"named\00"
-@"str.StdList<MirBlock>" = private constant [8 x i8] c"StdList\00"
 @"str.StdList<Function>" = private constant [8 x i8] c"StdList\00"
 @"str.Ctx" = private constant [4 x i8] c"Ctx\00"
 @"str.sigs" = private constant [5 x i8] c"sigs\00"
@@ -510,14 +517,7 @@ declare void @tersus_drop_slots(ptr, i64, i64)
 @"str.ctors" = private constant [6 x i8] c"ctors\00"
 @"str.ctorNames" = private constant [10 x i8] c"ctorNames\00"
 @"str.StdList<TypeDecl>" = private constant [8 x i8] c"StdList\00"
-@"str.TypeDecl::DStruct" = private constant [18 x i8] c"TypeDecl::DStruct\00"
-@"str.TypeDecl::DEnum" = private constant [16 x i8] c"TypeDecl::DEnum\00"
-@"str.variants" = private constant [9 x i8] c"variants\00"
-@"str.StdList<Variant>" = private constant [8 x i8] c"StdList\00"
-@"str.Variant" = private constant [8 x i8] c"Variant\00"
 @"str.StdList<Sig>" = private constant [8 x i8] c"StdList\00"
-@"str.Sig" = private constant [4 x i8] c"Sig\00"
-@"str.paramsOk" = private constant [9 x i8] c"paramsOk\00"
 @"str.StdList<Bool>" = private constant [8 x i8] c"StdList\00"
 @"str.StdList<Ctor>" = private constant [8 x i8] c"StdList\00"
 @"str.Res" = private constant [4 x i8] c"Res\00"
@@ -576,6 +576,675 @@ bb0:
     store i64 0, ptr %l.0
     %v9 = load i64, ptr %l.0
     ret i64 %v9
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Bool> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    store i64 0, ptr %l.7
+    %v6 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v6)
+    store i64 0, ptr %l.0
+    %v7 = load i64, ptr %l.0
+    ret i64 %v7
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Byte> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    store i64 0, ptr %l.7
+    %v6 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v6)
+    store i64 0, ptr %l.0
+    %v7 = load i64, ptr %l.0
+    ret i64 %v7
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Constant> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 80
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Constant", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Ctor> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 88
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Ctor", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Field> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 88
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Field", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Function> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 240
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Function", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Int> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    store i64 0, ptr %l.7
+    %v6 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v6)
+    store i64 0, ptr %l.0
+    %v7 = load i64, ptr %l.0
+    ret i64 %v7
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<LocalDecl> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 104
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.LocalDecl", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<MirBlock> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 168
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.MirBlock", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Operand> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 88
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Operand", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Sig> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 120
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Sig", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Statement> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 208
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Statement", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<StdList<String>> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 24
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.StdList<String>", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<StdList<Token>> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 24
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.StdList<Token>", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<String> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 24
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.String", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Token> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 32
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Token", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Type> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 64
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Type", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<TypeDecl> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 56
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.TypeDecl", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
+overflow:
+    call void @tersus_overflow()
+    unreachable
+}
+
+define internal i64 @"fn.<StdList<Variant> as Drop>::drop"(ptr %p.1) {
+entry:
+    %l.0 = alloca i64
+    %l.1 = alloca [3 x i64]
+    %l.2 = alloca i64
+    %l.3 = alloca i64
+    %l.4 = alloca i64
+    %l.7 = alloca i64
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
+    br label %bb0
+bb0:
+    %p0 = getelementptr i8, ptr %l.1, i64 0
+    %v1 = load i64, ptr %p0
+    store i64 %v1, ptr %l.2
+    %p2 = getelementptr i8, ptr %l.1, i64 0
+    %v3 = load i64, ptr %p2
+    store i64 %v3, ptr %l.3
+    %p4 = getelementptr i8, ptr %l.1, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %v6 = load i64, ptr %l.3
+    %o7 = mul i64 0, 48
+    %a8 = add i64 %v6, %o7
+    %v9 = load i64, ptr %l.4
+    call void @tersus_drop_slots(ptr @"type.Variant", i64 %a8, i64 %v9)
+    store i64 0, ptr %l.7
+    %v10 = load i64, ptr %l.2
+    call void @tersus_addr_free(i64 %v10)
+    store i64 0, ptr %l.0
+    %v11 = load i64, ptr %l.0
+    ret i64 %v11
 overflow:
     call void @tersus_overflow()
     unreachable
@@ -178367,64 +179036,68 @@ define internal void @"fn.stdListPop<Type>"(ptr %ret, ptr %p.1) {
 entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
-    %l.2 = alloca i64
+    %l.2 = alloca [3 x i64]
     %l.3 = alloca i64
     %l.4 = alloca i64
     %l.5 = alloca i64
-    %l.6 = alloca i64
     %l.7 = alloca i64
     %l.8 = alloca i64
-    %l.11 = alloca i64
+    %l.10 = alloca i64
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 0
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.2
-    %p2 = getelementptr i8, ptr %l.1, i64 8
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.2)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.2, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.3
-    %v4 = load i64, ptr %l.3
-    %o5 = call {i64, i1} @llvm.ssub.with.overflow.i64(i64 %v4, i64 1)
-    %r6 = extractvalue {i64, i1} %o5, 0
-    %f7 = extractvalue {i64, i1} %o5, 1
-    br i1 %f7, label %overflow, label %ok8
-ok8:
-    store i64 %r6, ptr %l.4
-    %p9 = getelementptr i8, ptr %l.1, i64 16
-    %v10 = load i64, ptr %p9
-    store i64 %v10, ptr %l.5
-    %p11 = getelementptr i8, ptr %l.1, i64 0
-    %v12 = load i64, ptr %p11
-    store i64 %v12, ptr %l.6
-    %p13 = getelementptr i8, ptr %l.1, i64 8
-    %v14 = load i64, ptr %p13
-    store i64 %v14, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.ssub.with.overflow.i64(i64 %v15, i64 1)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %v20 = load i64, ptr %l.6
-    %v21 = load i64, ptr %l.8
-    %o22 = mul i64 %v21, 64
-    %a23 = add i64 %v20, %o22
-    %p24 = inttoptr i64 %a23 to ptr
-    call void @tersus_drop(ptr @"type.Type", ptr %p24)
-    store i64 0, ptr %l.11
-    %v25 = load i64, ptr %l.2
-    %v26 = load i64, ptr %l.4
-    %v27 = load i64, ptr %l.5
+    %p4 = getelementptr i8, ptr %l.2, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.4
+    %p6 = getelementptr i8, ptr %l.2, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.5
+    call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.4
+    %o9 = call {i64, i1} @llvm.ssub.with.overflow.i64(i64 %v8, i64 1)
+    %r10 = extractvalue {i64, i1} %o9, 0
+    %f11 = extractvalue {i64, i1} %o9, 1
+    br i1 %f11, label %overflow, label %ok12
+ok12:
+    store i64 %r10, ptr %l.7
+    %v13 = load i64, ptr %l.4
+    %o14 = call {i64, i1} @llvm.ssub.with.overflow.i64(i64 %v13, i64 1)
+    %r15 = extractvalue {i64, i1} %o14, 0
+    %f16 = extractvalue {i64, i1} %o14, 1
+    br i1 %f16, label %overflow, label %ok17
+ok17:
+    store i64 %r15, ptr %l.8
+    %v18 = load i64, ptr %l.3
+    %v19 = load i64, ptr %l.8
+    %o20 = mul i64 %v19, 64
+    %a21 = add i64 %v18, %o20
+    %p22 = inttoptr i64 %a21 to ptr
+    call void @tersus_drop(ptr @"type.Type", ptr %p22)
+    store i64 0, ptr %l.10
+    %v23 = load i64, ptr %l.3
+    %v24 = load i64, ptr %l.7
+    %v25 = load i64, ptr %l.5
     call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.0)
-    %p28 = getelementptr i8, ptr %l.0, i64 0
+    %p26 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v23, ptr %p26
+    %p27 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v24, ptr %p27
+    %p28 = getelementptr i8, ptr %l.0, i64 16
     store i64 %v25, ptr %p28
-    %p29 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v26, ptr %p29
-    %p30 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v27, ptr %p30
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.2)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -178437,67 +179110,66 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca i1
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     store i1 %p.2, ptr %l.2
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Bool>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 1)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -178506,84 +179178,67 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 1
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    %v43 = load i1, ptr %l.2
-    %w44 = zext i1 %v43 to i8
-    store i8 %w44, ptr %p42
-    store i64 0, ptr %l.28
-    %v45 = load i64, ptr %l.14
-    %v46 = load i64, ptr %l.17
-    %v47 = load i64, ptr %l.8
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 1
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    %v39 = load i1, ptr %l.2
+    %w40 = zext i1 %v39 to i8
+    store i8 %w40, ptr %p38
+    store i64 0, ptr %l.20
+    %v41 = load i64, ptr %l.14
+    %v42 = load i64, ptr %l.16
+    %v43 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Bool>", ptr %l.0)
-    %p48 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v46, ptr %p49
-    %p50 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v47, ptr %p50
+    %p44 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v42, ptr %p45
+    %p46 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v43, ptr %p46
+    call void @tersus_drop(ptr @"type.StdList<Bool>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Bool>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p51 = getelementptr i8, ptr %l.1, i64 0
-    %v52 = load i64, ptr %p51
-    store i64 %v52, ptr %l.20
-    %p53 = getelementptr i8, ptr %l.1, i64 8
-    %v54 = load i64, ptr %p53
-    store i64 %v54, ptr %l.21
-    %v55 = load i64, ptr %l.21
-    %o56 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v55, i64 1)
-    %r57 = extractvalue {i64, i1} %o56, 0
-    %f58 = extractvalue {i64, i1} %o56, 1
-    br i1 %f58, label %overflow, label %ok59
-ok59:
-    store i64 %r57, ptr %l.22
-    %p60 = getelementptr i8, ptr %l.1, i64 16
-    %v61 = load i64, ptr %p60
-    store i64 %v61, ptr %l.23
-    %p62 = getelementptr i8, ptr %l.1, i64 0
-    %v63 = load i64, ptr %p62
-    store i64 %v63, ptr %l.24
-    %p64 = getelementptr i8, ptr %l.1, i64 8
-    %v65 = load i64, ptr %p64
-    store i64 %v65, ptr %l.25
-    %v66 = load i64, ptr %l.24
-    %v67 = load i64, ptr %l.25
-    %o68 = mul i64 %v67, 1
-    %a69 = add i64 %v66, %o68
-    %p70 = inttoptr i64 %a69 to ptr
-    %v71 = load i1, ptr %l.2
-    %w72 = zext i1 %v71 to i8
-    store i8 %w72, ptr %p70
-    store i64 0, ptr %l.29
-    %v73 = load i64, ptr %l.20
-    %v74 = load i64, ptr %l.22
-    %v75 = load i64, ptr %l.23
+    %v47 = load i64, ptr %l.5
+    %o48 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v47, i64 1)
+    %r49 = extractvalue {i64, i1} %o48, 0
+    %f50 = extractvalue {i64, i1} %o48, 1
+    br i1 %f50, label %overflow, label %ok51
+ok51:
+    store i64 %r49, ptr %l.18
+    %v52 = load i64, ptr %l.4
+    %v53 = load i64, ptr %l.5
+    %o54 = mul i64 %v53, 1
+    %a55 = add i64 %v52, %o54
+    %p56 = inttoptr i64 %a55 to ptr
+    %v57 = load i1, ptr %l.2
+    %w58 = zext i1 %v57 to i8
+    store i8 %w58, ptr %p56
+    store i64 0, ptr %l.21
+    %v59 = load i64, ptr %l.4
+    %v60 = load i64, ptr %l.18
+    %v61 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Bool>", ptr %l.0)
-    %p76 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v73, ptr %p76
-    %p77 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v74, ptr %p77
-    %p78 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v75, ptr %p78
+    %p62 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v59, ptr %p62
+    %p63 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v60, ptr %p63
+    %p64 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v61, ptr %p64
+    call void @tersus_drop(ptr @"type.StdList<Bool>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Bool>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -178596,67 +179251,66 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca i64
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     store i64 %p.2, ptr %l.2
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 1)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -178665,84 +179319,67 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 1
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    %v43 = load i64, ptr %l.2
-    %w44 = trunc i64 %v43 to i8
-    store i8 %w44, ptr %p42
-    store i64 0, ptr %l.28
-    %v45 = load i64, ptr %l.14
-    %v46 = load i64, ptr %l.17
-    %v47 = load i64, ptr %l.8
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 1
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    %v39 = load i64, ptr %l.2
+    %w40 = trunc i64 %v39 to i8
+    store i8 %w40, ptr %p38
+    store i64 0, ptr %l.20
+    %v41 = load i64, ptr %l.14
+    %v42 = load i64, ptr %l.16
+    %v43 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.0)
-    %p48 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v46, ptr %p49
-    %p50 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v47, ptr %p50
+    %p44 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v42, ptr %p45
+    %p46 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v43, ptr %p46
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p51 = getelementptr i8, ptr %l.1, i64 0
-    %v52 = load i64, ptr %p51
-    store i64 %v52, ptr %l.20
-    %p53 = getelementptr i8, ptr %l.1, i64 8
-    %v54 = load i64, ptr %p53
-    store i64 %v54, ptr %l.21
-    %v55 = load i64, ptr %l.21
-    %o56 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v55, i64 1)
-    %r57 = extractvalue {i64, i1} %o56, 0
-    %f58 = extractvalue {i64, i1} %o56, 1
-    br i1 %f58, label %overflow, label %ok59
-ok59:
-    store i64 %r57, ptr %l.22
-    %p60 = getelementptr i8, ptr %l.1, i64 16
-    %v61 = load i64, ptr %p60
-    store i64 %v61, ptr %l.23
-    %p62 = getelementptr i8, ptr %l.1, i64 0
-    %v63 = load i64, ptr %p62
-    store i64 %v63, ptr %l.24
-    %p64 = getelementptr i8, ptr %l.1, i64 8
-    %v65 = load i64, ptr %p64
-    store i64 %v65, ptr %l.25
-    %v66 = load i64, ptr %l.24
-    %v67 = load i64, ptr %l.25
-    %o68 = mul i64 %v67, 1
-    %a69 = add i64 %v66, %o68
-    %p70 = inttoptr i64 %a69 to ptr
-    %v71 = load i64, ptr %l.2
-    %w72 = trunc i64 %v71 to i8
-    store i8 %w72, ptr %p70
-    store i64 0, ptr %l.29
-    %v73 = load i64, ptr %l.20
-    %v74 = load i64, ptr %l.22
-    %v75 = load i64, ptr %l.23
+    %v47 = load i64, ptr %l.5
+    %o48 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v47, i64 1)
+    %r49 = extractvalue {i64, i1} %o48, 0
+    %f50 = extractvalue {i64, i1} %o48, 1
+    br i1 %f50, label %overflow, label %ok51
+ok51:
+    store i64 %r49, ptr %l.18
+    %v52 = load i64, ptr %l.4
+    %v53 = load i64, ptr %l.5
+    %o54 = mul i64 %v53, 1
+    %a55 = add i64 %v52, %o54
+    %p56 = inttoptr i64 %a55 to ptr
+    %v57 = load i64, ptr %l.2
+    %w58 = trunc i64 %v57 to i8
+    store i8 %w58, ptr %p56
+    store i64 0, ptr %l.21
+    %v59 = load i64, ptr %l.4
+    %v60 = load i64, ptr %l.18
+    %v61 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.0)
-    %p76 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v73, ptr %p76
-    %p77 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v74, ptr %p77
-    %p78 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v75, ptr %p78
+    %p62 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v59, ptr %p62
+    %p63 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v60, ptr %p63
+    %p64 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v61, ptr %p64
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -178755,69 +179392,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [10 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [10 x i64]
-    %t.70 = alloca [10 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [10 x i64]
+    %t.56 = alloca [10 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 80, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Constant>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 80)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -178826,86 +179462,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 80
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 80, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 80
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 80, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 80, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 80, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 80, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Constant>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Constant>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Constant", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Constant>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 80
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 80, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 80
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 80, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 80, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 80, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 80, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Constant>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Constant>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Constant", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Constant>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -178918,69 +179537,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [11 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [11 x i64]
-    %t.70 = alloca [11 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [11 x i64]
+    %t.56 = alloca [11 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 88, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Ctor>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 88)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -178989,86 +179607,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 88
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 88, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 88
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 88, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 88, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 88, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 88, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Ctor>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Ctor>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Ctor", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Ctor>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 88
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 88, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 88
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 88, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 88, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 88, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 88, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Ctor>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Ctor>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Ctor", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Ctor>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -179081,69 +179682,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [11 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [11 x i64]
-    %t.70 = alloca [11 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [11 x i64]
+    %t.56 = alloca [11 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 88, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Field>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 88)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -179152,86 +179752,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 88
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 88, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 88
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 88, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 88, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 88, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 88, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Field>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Field>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Field", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Field>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 88
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 88, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 88
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 88, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 88, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 88, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 88, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Field>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Field>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Field", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Field>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -179244,69 +179827,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [30 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [30 x i64]
-    %t.70 = alloca [30 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [30 x i64]
+    %t.56 = alloca [30 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 240, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Function>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 240)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -179315,86 +179897,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 240
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 240, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 240
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 240, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 240, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 240, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 240, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Function>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Function>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Function", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Function>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 240
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 240, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 240
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 240, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 240, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 240, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 240, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Function>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Function>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Function", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Function>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -179407,67 +179972,66 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca i64
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     store i64 %p.2, ptr %l.2
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Int>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 8)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -179476,82 +180040,65 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 8
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    %v43 = load i64, ptr %l.2
-    store i64 %v43, ptr %p42
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 8
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    %v39 = load i64, ptr %l.2
+    store i64 %v39, ptr %p38
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Int>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Int>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Int>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 8
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    %v70 = load i64, ptr %l.2
-    store i64 %v70, ptr %p69
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 8
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    %v56 = load i64, ptr %l.2
+    store i64 %v56, ptr %p55
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Int>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Int>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Int>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -179564,69 +180111,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [13 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [13 x i64]
-    %t.70 = alloca [13 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [13 x i64]
+    %t.56 = alloca [13 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 104, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<LocalDecl>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 104)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -179635,86 +180181,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 104
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 104, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 104
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 104, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 104, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 104, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 104, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<LocalDecl>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<LocalDecl>", ptr %l.1)
     call void @tersus_drop(ptr @"type.LocalDecl", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<LocalDecl>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 104
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 104, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 104
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 104, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 104, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 104, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 104, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<LocalDecl>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<LocalDecl>", ptr %l.1)
     call void @tersus_drop(ptr @"type.LocalDecl", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<LocalDecl>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -179727,69 +180256,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [21 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [21 x i64]
-    %t.70 = alloca [21 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [21 x i64]
+    %t.56 = alloca [21 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 168, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<MirBlock>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 168)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -179798,86 +180326,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 168
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 168, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 168
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 168, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 168, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 168, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 168, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<MirBlock>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<MirBlock>", ptr %l.1)
     call void @tersus_drop(ptr @"type.MirBlock", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<MirBlock>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 168
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 168, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 168
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 168, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 168, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 168, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 168, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<MirBlock>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<MirBlock>", ptr %l.1)
     call void @tersus_drop(ptr @"type.MirBlock", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<MirBlock>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -179890,69 +180401,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [11 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [11 x i64]
-    %t.70 = alloca [11 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [11 x i64]
+    %t.56 = alloca [11 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 88, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Operand>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 88)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -179961,86 +180471,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 88
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 88, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 88
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 88, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 88, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 88, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 88, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Operand>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Operand>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Operand", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Operand>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 88
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 88, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 88
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 88, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 88, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 88, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 88, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Operand>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Operand>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Operand", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Operand>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -180053,69 +180546,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [15 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [15 x i64]
-    %t.70 = alloca [15 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [15 x i64]
+    %t.56 = alloca [15 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 120, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Sig>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 120)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -180124,86 +180616,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 120
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 120, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 120
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 120, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 120, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 120, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 120, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Sig>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Sig>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Sig", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Sig>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 120
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 120, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 120
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 120, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 120, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 120, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 120, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Sig>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Sig>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Sig", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Sig>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -180216,69 +180691,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [26 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [26 x i64]
-    %t.70 = alloca [26 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [26 x i64]
+    %t.56 = alloca [26 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 208, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Statement>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 208)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -180287,86 +180761,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 208
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 208, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 208
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 208, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 208, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 208, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 208, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Statement>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Statement>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Statement", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Statement>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 208
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 208, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 208
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 208, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 208, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 208, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 208, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Statement>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Statement>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Statement", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Statement>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -180379,69 +180836,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [3 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [3 x i64]
-    %t.70 = alloca [3 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [3 x i64]
+    %t.56 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 24, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<StdList<String>>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 24)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -180450,84 +180906,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 24
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 24, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 24
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 24, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 24, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 24, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<StdList<String>>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<StdList<String>>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<StdList<String>>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 24
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 24, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 24
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 24, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 24, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 24, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<StdList<String>>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<StdList<String>>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<StdList<String>>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -180540,69 +180981,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [3 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [3 x i64]
-    %t.70 = alloca [3 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [3 x i64]
+    %t.56 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 24, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<StdList<Token>>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 24)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -180611,84 +181051,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 24
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 24, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 24
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 24, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 24, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 24, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<StdList<Token>>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<StdList<Token>>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<StdList<Token>>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 24
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 24, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 24
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 24, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 24, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 24, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<StdList<Token>>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<StdList<Token>>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<StdList<Token>>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -180701,69 +181126,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [3 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [3 x i64]
-    %t.70 = alloca [3 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [3 x i64]
+    %t.56 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 24, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 24)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -180772,86 +181196,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 24
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 24, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 24
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 24, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 24, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 24, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.1)
     call void @tersus_drop(ptr @"type.String", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 24
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 24, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 24
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 24, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 24, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 24, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 24, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.1)
     call void @tersus_drop(ptr @"type.String", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<String>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -180864,69 +181271,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [4 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [4 x i64]
-    %t.70 = alloca [4 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [4 x i64]
+    %t.56 = alloca [4 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 32, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 32)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -180935,86 +181341,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 32
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 32, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 32
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 32, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 32, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 32, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 32, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Token", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 32
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 32, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 32
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 32, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 32, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 32, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 32, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Token", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Token>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -181027,69 +181416,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [8 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [8 x i64]
-    %t.70 = alloca [8 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [8 x i64]
+    %t.56 = alloca [8 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 64, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 64)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -181098,86 +181486,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 64
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 64, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 64
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 64, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 64, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 64, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 64, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Type", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 64
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 64, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 64
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 64, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 64, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 64, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 64, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Type", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Type>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -181190,69 +181561,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [7 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [7 x i64]
-    %t.70 = alloca [7 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [7 x i64]
+    %t.56 = alloca [7 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 56, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<TypeDecl>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 56)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -181261,86 +181631,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 56
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 56, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 56
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 56, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 56, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 56, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 56, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<TypeDecl>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<TypeDecl>", ptr %l.1)
     call void @tersus_drop(ptr @"type.TypeDecl", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<TypeDecl>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 56
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 56, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 56
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 56, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 56, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 56, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 56, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<TypeDecl>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<TypeDecl>", ptr %l.1)
     call void @tersus_drop(ptr @"type.TypeDecl", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<TypeDecl>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -181353,69 +181706,68 @@ entry:
     %l.0 = alloca [3 x i64]
     %l.1 = alloca [3 x i64]
     %l.2 = alloca [6 x i64]
-    %l.3 = alloca i64
+    %l.3 = alloca [3 x i64]
     %l.4 = alloca i64
-    %l.5 = alloca i1
+    %l.5 = alloca i64
     %l.6 = alloca i64
-    %l.7 = alloca i64
-    %l.8 = alloca i64
+    %l.8 = alloca i1
     %l.9 = alloca i64
+    %l.10 = alloca i64
     %l.11 = alloca i64
     %l.13 = alloca [1 x i64]
     %l.14 = alloca i64
     %l.16 = alloca i64
-    %l.17 = alloca i64
     %l.18 = alloca i64
     %l.20 = alloca i64
     %l.21 = alloca i64
-    %l.22 = alloca i64
-    %l.23 = alloca i64
-    %l.24 = alloca i64
-    %l.25 = alloca i64
-    %l.28 = alloca i64
-    %l.29 = alloca i64
-    %t.43 = alloca [6 x i64]
-    %t.70 = alloca [6 x i64]
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
+    %t.39 = alloca [6 x i64]
+    %t.56 = alloca [6 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.2, ptr %p.2, i64 48, i1 false)
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 8
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.3
-    %p2 = getelementptr i8, ptr %l.1, i64 16
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Variant>", ptr %l.3)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.3, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.3, i64 0
     %v3 = load i64, ptr %p2
     store i64 %v3, ptr %l.4
-    %v4 = load i64, ptr %l.3
-    %v5 = load i64, ptr %l.4
-    %c6 = icmp eq i64 %v4, %v5
-    store i1 %c6, ptr %l.5
-    %v7 = load i1, ptr %l.5
-    br i1 %v7, label %bb1, label %bb2
+    %p4 = getelementptr i8, ptr %l.3, i64 8
+    %v5 = load i64, ptr %p4
+    store i64 %v5, ptr %l.5
+    %p6 = getelementptr i8, ptr %l.3, i64 16
+    %v7 = load i64, ptr %p6
+    store i64 %v7, ptr %l.6
+    call void @llvm.memset.p0.i64(ptr %l.3, i8 0, i64 24, i1 false)
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.6
+    %c10 = icmp eq i64 %v8, %v9
+    store i1 %c10, ptr %l.8
+    %v11 = load i1, ptr %l.8
+    br i1 %v11, label %bb1, label %bb2
 bb1:
-    %p8 = getelementptr i8, ptr %l.1, i64 16
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.6
-    %v10 = load i64, ptr %l.6
-    %o11 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v10, i64 2)
-    %r12 = extractvalue {i64, i1} %o11, 0
-    %f13 = extractvalue {i64, i1} %o11, 1
-    br i1 %f13, label %overflow, label %ok14
-ok14:
-    store i64 %r12, ptr %l.7
-    %v15 = load i64, ptr %l.7
-    %o16 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v15, i64 4)
-    %r17 = extractvalue {i64, i1} %o16, 0
-    %f18 = extractvalue {i64, i1} %o16, 1
-    br i1 %f18, label %overflow, label %ok19
-ok19:
-    store i64 %r17, ptr %l.8
-    %p20 = getelementptr i8, ptr %l.1, i64 0
-    %v21 = load i64, ptr %p20
-    store i64 %v21, ptr %l.9
-    %v22 = load i64, ptr %l.9
-    %v23 = load i64, ptr %l.8
+    %v12 = load i64, ptr %l.6
+    %o13 = call {i64, i1} @llvm.smul.with.overflow.i64(i64 %v12, i64 2)
+    %r14 = extractvalue {i64, i1} %o13, 0
+    %f15 = extractvalue {i64, i1} %o13, 1
+    br i1 %f15, label %overflow, label %ok16
+ok16:
+    store i64 %r14, ptr %l.9
+    %v17 = load i64, ptr %l.9
+    %o18 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v17, i64 4)
+    %r19 = extractvalue {i64, i1} %o18, 0
+    %f20 = extractvalue {i64, i1} %o18, 1
+    br i1 %f20, label %overflow, label %ok21
+ok21:
+    store i64 %r19, ptr %l.10
+    %v22 = load i64, ptr %l.4
+    %v23 = load i64, ptr %l.10
     %m24 = call i64 @tersus_addr_resize(i64 %v22, i64 %v23, i64 48)
     store i64 %m24, ptr %l.11
     %v25 = load i64, ptr %l.11
@@ -181424,86 +181776,69 @@ ok19:
     %p27 = getelementptr i8, ptr %l.13, i64 0
     %v28 = load i64, ptr %p27
     store i64 %v28, ptr %l.14
-    %p29 = getelementptr i8, ptr %l.1, i64 8
-    %v30 = load i64, ptr %p29
-    store i64 %v30, ptr %l.16
-    %v31 = load i64, ptr %l.16
-    %o32 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v31, i64 1)
-    %r33 = extractvalue {i64, i1} %o32, 0
-    %f34 = extractvalue {i64, i1} %o32, 1
-    br i1 %f34, label %overflow, label %ok35
-ok35:
-    store i64 %r33, ptr %l.17
-    %p36 = getelementptr i8, ptr %l.1, i64 8
-    %v37 = load i64, ptr %p36
-    store i64 %v37, ptr %l.18
-    %v38 = load i64, ptr %l.14
-    %v39 = load i64, ptr %l.18
-    %o40 = mul i64 %v39, 48
-    %a41 = add i64 %v38, %o40
-    %p42 = inttoptr i64 %a41 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.43, ptr %l.2, i64 48, i1 false)
+    %v29 = load i64, ptr %l.5
+    %o30 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v29, i64 1)
+    %r31 = extractvalue {i64, i1} %o30, 0
+    %f32 = extractvalue {i64, i1} %o30, 1
+    br i1 %f32, label %overflow, label %ok33
+ok33:
+    store i64 %r31, ptr %l.16
+    %v34 = load i64, ptr %l.14
+    %v35 = load i64, ptr %l.5
+    %o36 = mul i64 %v35, 48
+    %a37 = add i64 %v34, %o36
+    %p38 = inttoptr i64 %a37 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.39, ptr %l.2, i64 48, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 48, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p42, ptr %t.43, i64 48, i1 false)
-    store i64 0, ptr %l.28
-    %v44 = load i64, ptr %l.14
-    %v45 = load i64, ptr %l.17
-    %v46 = load i64, ptr %l.8
+    call void @llvm.memcpy.p0.p0.i64(ptr %p38, ptr %t.39, i64 48, i1 false)
+    store i64 0, ptr %l.20
+    %v40 = load i64, ptr %l.14
+    %v41 = load i64, ptr %l.16
+    %v42 = load i64, ptr %l.10
     call void @tersus_drop(ptr @"type.StdList<Variant>", ptr %l.0)
-    %p47 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v44, ptr %p47
-    %p48 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v45, ptr %p48
-    %p49 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v46, ptr %p49
+    %p43 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v40, ptr %p43
+    %p44 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v41, ptr %p44
+    %p45 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v42, ptr %p45
+    call void @tersus_drop(ptr @"type.StdList<Variant>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Variant", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Variant>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 bb2:
     br label %bb3
 bb3:
-    %p50 = getelementptr i8, ptr %l.1, i64 0
-    %v51 = load i64, ptr %p50
-    store i64 %v51, ptr %l.20
-    %p52 = getelementptr i8, ptr %l.1, i64 8
-    %v53 = load i64, ptr %p52
-    store i64 %v53, ptr %l.21
-    %v54 = load i64, ptr %l.21
-    %o55 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v54, i64 1)
-    %r56 = extractvalue {i64, i1} %o55, 0
-    %f57 = extractvalue {i64, i1} %o55, 1
-    br i1 %f57, label %overflow, label %ok58
-ok58:
-    store i64 %r56, ptr %l.22
-    %p59 = getelementptr i8, ptr %l.1, i64 16
-    %v60 = load i64, ptr %p59
-    store i64 %v60, ptr %l.23
-    %p61 = getelementptr i8, ptr %l.1, i64 0
-    %v62 = load i64, ptr %p61
-    store i64 %v62, ptr %l.24
-    %p63 = getelementptr i8, ptr %l.1, i64 8
-    %v64 = load i64, ptr %p63
-    store i64 %v64, ptr %l.25
-    %v65 = load i64, ptr %l.24
-    %v66 = load i64, ptr %l.25
-    %o67 = mul i64 %v66, 48
-    %a68 = add i64 %v65, %o67
-    %p69 = inttoptr i64 %a68 to ptr
-    call void @llvm.memcpy.p0.p0.i64(ptr %t.70, ptr %l.2, i64 48, i1 false)
+    %v46 = load i64, ptr %l.5
+    %o47 = call {i64, i1} @llvm.sadd.with.overflow.i64(i64 %v46, i64 1)
+    %r48 = extractvalue {i64, i1} %o47, 0
+    %f49 = extractvalue {i64, i1} %o47, 1
+    br i1 %f49, label %overflow, label %ok50
+ok50:
+    store i64 %r48, ptr %l.18
+    %v51 = load i64, ptr %l.4
+    %v52 = load i64, ptr %l.5
+    %o53 = mul i64 %v52, 48
+    %a54 = add i64 %v51, %o53
+    %p55 = inttoptr i64 %a54 to ptr
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.56, ptr %l.2, i64 48, i1 false)
     call void @llvm.memset.p0.i64(ptr %l.2, i8 0, i64 48, i1 false)
-    call void @llvm.memcpy.p0.p0.i64(ptr %p69, ptr %t.70, i64 48, i1 false)
-    store i64 0, ptr %l.29
-    %v71 = load i64, ptr %l.20
-    %v72 = load i64, ptr %l.22
-    %v73 = load i64, ptr %l.23
+    call void @llvm.memcpy.p0.p0.i64(ptr %p55, ptr %t.56, i64 48, i1 false)
+    store i64 0, ptr %l.21
+    %v57 = load i64, ptr %l.4
+    %v58 = load i64, ptr %l.18
+    %v59 = load i64, ptr %l.6
     call void @tersus_drop(ptr @"type.StdList<Variant>", ptr %l.0)
-    %p74 = getelementptr i8, ptr %l.0, i64 0
-    store i64 %v71, ptr %p74
-    %p75 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v72, ptr %p75
-    %p76 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v73, ptr %p76
+    %p60 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v57, ptr %p60
+    %p61 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v58, ptr %p61
+    %p62 = getelementptr i8, ptr %l.0, i64 16
+    store i64 %v59, ptr %p62
+    call void @tersus_drop(ptr @"type.StdList<Variant>", ptr %l.1)
     call void @tersus_drop(ptr @"type.Variant", ptr %l.2)
+    call void @tersus_drop(ptr @"type.StdList<Variant>", ptr %l.3)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
@@ -181517,54 +181852,58 @@ entry:
     %l.1 = alloca [3 x i64]
     %l.2 = alloca i64
     %l.3 = alloca i64
-    %l.4 = alloca i64
+    %l.4 = alloca [3 x i64]
+    %l.5 = alloca i64
+    %l.6 = alloca i64
     %l.7 = alloca i64
-    %l.8 = alloca i64
-    %l.9 = alloca i64
-    %l.10 = alloca i64
+    %l.11 = alloca i64
     %l.12 = alloca i64
-    %l.13 = alloca i64
+    %t.0 = alloca [3 x i64]
+    %t.1 = alloca [3 x i64]
     call void @llvm.memset.p0.i64(ptr %l.0, i8 0, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.4, i8 0, i64 24, i1 false)
     call void @llvm.memcpy.p0.p0.i64(ptr %l.1, ptr %p.1, i64 24, i1 false)
     store i64 %p.2, ptr %l.2
     store i64 %p.3, ptr %l.3
     br label %bb0
 bb0:
-    %p0 = getelementptr i8, ptr %l.1, i64 0
-    %v1 = load i64, ptr %p0
-    store i64 %v1, ptr %l.4
-    store i64 0, ptr %l.12
-    %p2 = getelementptr i8, ptr %l.1, i64 0
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.0, ptr %l.1, i64 24, i1 false)
+    call void @llvm.memset.p0.i64(ptr %l.1, i8 0, i64 24, i1 false)
+    call void @llvm.memcpy.p0.p0.i64(ptr %t.1, ptr %t.0, i64 24, i1 false)
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.4)
+    call void @llvm.memcpy.p0.p0.i64(ptr %l.4, ptr %t.1, i64 24, i1 false)
+    %p2 = getelementptr i8, ptr %l.4, i64 0
     %v3 = load i64, ptr %p2
-    store i64 %v3, ptr %l.7
-    %p4 = getelementptr i8, ptr %l.1, i64 8
+    store i64 %v3, ptr %l.5
+    %p4 = getelementptr i8, ptr %l.4, i64 8
     %v5 = load i64, ptr %p4
-    store i64 %v5, ptr %l.8
-    %p6 = getelementptr i8, ptr %l.1, i64 16
+    store i64 %v5, ptr %l.6
+    %p6 = getelementptr i8, ptr %l.4, i64 16
     %v7 = load i64, ptr %p6
-    store i64 %v7, ptr %l.9
-    %p8 = getelementptr i8, ptr %l.1, i64 0
-    %v9 = load i64, ptr %p8
-    store i64 %v9, ptr %l.10
-    %v10 = load i64, ptr %l.10
-    %v11 = load i64, ptr %l.2
-    %o12 = mul i64 %v11, 1
-    %a13 = add i64 %v10, %o12
-    %p14 = inttoptr i64 %a13 to ptr
-    %v15 = load i64, ptr %l.3
-    %w16 = trunc i64 %v15 to i8
-    store i8 %w16, ptr %p14
-    store i64 0, ptr %l.13
+    store i64 %v7, ptr %l.7
+    call void @llvm.memset.p0.i64(ptr %l.4, i8 0, i64 24, i1 false)
+    store i64 0, ptr %l.11
+    %v8 = load i64, ptr %l.5
+    %v9 = load i64, ptr %l.2
+    %o10 = mul i64 %v9, 1
+    %a11 = add i64 %v8, %o10
+    %p12 = inttoptr i64 %a11 to ptr
+    %v13 = load i64, ptr %l.3
+    %w14 = trunc i64 %v13 to i8
+    store i8 %w14, ptr %p12
+    store i64 0, ptr %l.12
+    %v15 = load i64, ptr %l.5
+    %v16 = load i64, ptr %l.6
     %v17 = load i64, ptr %l.7
-    %v18 = load i64, ptr %l.8
-    %v19 = load i64, ptr %l.9
     call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.0)
-    %p20 = getelementptr i8, ptr %l.0, i64 0
+    %p18 = getelementptr i8, ptr %l.0, i64 0
+    store i64 %v15, ptr %p18
+    %p19 = getelementptr i8, ptr %l.0, i64 8
+    store i64 %v16, ptr %p19
+    %p20 = getelementptr i8, ptr %l.0, i64 16
     store i64 %v17, ptr %p20
-    %p21 = getelementptr i8, ptr %l.0, i64 8
-    store i64 %v18, ptr %p21
-    %p22 = getelementptr i8, ptr %l.0, i64 16
-    store i64 %v19, ptr %p22
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.1)
+    call void @tersus_drop(ptr @"type.StdList<Byte>", ptr %l.4)
     call void @llvm.memcpy.p0.p0.i64(ptr %ret, ptr %l.0, i64 24, i1 false)
     ret void
 overflow:
