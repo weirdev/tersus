@@ -15,7 +15,7 @@ import Mir
 import MirOwnership (insertOwnership, needsDrop)
 import MirVerify (verifyProgram)
 import Pretty (renderType)
-import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable, pattern TArray)
+import TersusTypes (Name, Rel (..), Type (..), Variable, pattern TArray)
 import Utils
 
 -- Lowers the MIR to LLVM IR as text (a .ll file), which clang compiles together with the runtime of LlvmRuntime.
@@ -96,7 +96,6 @@ declarations =
     , "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)"
     , "declare void @tersus_clone(ptr, ptr, ptr)"
     , "declare void @tersus_drop(ptr, ptr)"
-    , "declare ptr @tersus_box_new(i64)"
     , "declare void @tersus_box_free(ptr)"
     , "declare i64 @tersus_addr_alloc(i64, i64)"
     , "declare i64 @tersus_addr_resize(i64, i64, i64)"
@@ -147,7 +146,6 @@ entryPoint program fn =
                               ]
                                 ++ convert
                                 ++ ["call void @tersus_print(ptr " ++ typeSymbol program ty ++ ", i64 " ++ word ++ ")"]
-                                ++ concat [["%slot = alloca i64", "store ptr %v, ptr %slot", "call void @tersus_drop(ptr " ++ typeSymbol program ty ++ ", ptr %slot)"] | isPointer ty]
                                 ++ ["br label %done", "done:", "ret i32 0"]
                             )
                         , [ty]
@@ -170,8 +168,6 @@ closeTypes program = go [] . map (canonical program)
         | ty `elem` seen = go seen rest
         | otherwise = go (ty : seen) (parts ty ++ rest)
     parts (TArray t _) = [canonical program t]
-    parts (TBox (TArrayOf t SizeAny)) = [canonical program t]
-    parts (TBox t) = [canonical program t]
     parts (TAddr t) = [canonical program t]
     parts (TNamed n) = [canonical program t | (_, fields) <- variantsOf program n, (_, t) <- fields]
     parts _ = []
@@ -209,8 +205,6 @@ typeDescriptors program types =
     shape (TAddr t) = (0, typeSymbol program t)
     shape TBool = (1, "null")
     shape ty@TArray{} = (5, global "array." (renderType ty))
-    shape (TBox (TArrayOf t SizeAny)) = (7, typeSymbol program t)
-    shape (TBox t) = (6, typeSymbol program t)
     shape (TNamed n) = (3, global "data." n)
     shape (TFn _ _) = (4, "null")
     shape _ = (-1, "null")
@@ -356,8 +350,6 @@ emitFunction program entry symbol fn =
                             ["entry:"]
                                 ++ ["    " ++ slot l ++ " = alloca " ++ t | (l, t) <- localTypes, not (lentInline l)]
                                 ++ temps
-                                -- (a local that owns something holds nothing until it is given a value, so that it can be dropped)
-                                ++ ["    store ptr null, ptr " ++ slot l | (l, d) <- Map.toList (fnLocals fn), isPointer (localType d), l `notElem` fnParams fn]
                                 ++ [ "    call void @llvm.memset.p0.i64(ptr " ++ slot l ++ ", i8 0, i64 " ++ show (sizeOf program (localType d)) ++ ", i1 false)"
                                    | (l, d) <- Map.toList (fnLocals fn)
                                    , isAggregate (localType d)
@@ -453,26 +445,9 @@ rvalue :: Function -> Type -> Rvalue -> G String
 rvalue fn destType rv =
     case rv of
         Use o -> operandAt fn destType o
-        -- a Box has room of its own on the heap for what it holds, which is moved into it
-        MakeBox o -> case destType of
-            TBox held -> do
-                count <- bytesG held
-                block <- ins "x" ("call ptr @tersus_box_new(i64 " ++ show count ++ ")")
-                if isAggregate held
-                    then operandAddress fn held o >>= \from -> copyWords block from count
-                    else operandAt fn held o >>= storeAt held block
-                pure block
-            _ -> failG "A Box is made into a Box"
-        -- what a Box holds that is a word is read from its room, which is freed when the Box is moved
-        Unbox o -> do
-            held <- operandLocalType fn o
-            boxTy <- maybe (failG "Box::unbox was given a constant") pure held
-            block <- operandAt fn boxTy o
-            value <- loadAt destType block
-            case o of
-                Move _ -> emit ("call void @tersus_box_free(ptr " ++ block ++ ")")
-                _ -> pure ()
-            pure value
+        -- (native code has no Box: a Box is made into a struct of lib/box.tersus or lib/lists.tersus first, see MirLists)
+        MakeBox _ -> failG "Native code has no Box: a Box is made into the struct of lib/box.tersus first (see MirLists)"
+        Unbox _ -> failG "Native code has no Box: a Box is made into the struct of lib/box.tersus first (see MirLists)"
         BinaryOp op a b -> do
             ty <- sharedType fn [a, b]
             x <- operandAt fn ty a
@@ -659,13 +634,8 @@ isBoxStruct :: Type -> Bool
 isBoxStruct (TNamed n) = takeWhile (/= '<') n == "StdBox"
 isBoxStruct _ = False
 
--- A Box of an array, of a size or of any size: the array is on the heap, and the address of it is the first word of the Box
-isBoxedArray :: Type -> Bool
-isBoxedArray (TBox TArrayOf{}) = True
-isBoxedArray _ = False
-
 -- A list of native code: the struct StdList of lib/lists.tersus, whose first field is the address of the elements, so that an element is
--- read from the address that the struct starts with, as from a Box of an array
+-- read from the address that the struct starts with
 isListStruct :: Type -> Bool
 isListStruct (TNamed name) = takeWhile (/= '<') name == "StdList"
 isListStruct _ = False
@@ -681,13 +651,7 @@ isAggregate :: Type -> Bool
 isAggregate TArray{} = True
 isAggregate TNamed{} = True
 isAggregate TVariant{} = True
-isAggregate ty = isFat ty
-
--- A Box of an array of no size is two words held inline, as an aggregate: the address of the elements and how many there are. (A Box of
--- anything that has a size is the one word, the address of what it holds.)
-isFat :: Type -> Bool
-isFat (TBox (TArrayOf _ SizeAny)) = True
-isFat _ = False
+isAggregate _ = False
 
 slotsG :: Type -> G Integer
 slotsG ty = (`slotsOf` ty) <$> programG
@@ -695,10 +659,10 @@ slotsG ty = (`slotsOf` ty) <$> programG
 bytesG :: Type -> G Integer
 bytesG ty = (`sizeOf` ty) <$> programG
 
--- Whether a local of the type has something to free: a word that is the address of a list or a Box, or a value held inline that
--- holds one
+-- Whether a local of the type has something to free: a value held inline that holds something of the heap (a list or a Box of the
+-- library, which is a word of it)
 ownsG :: Type -> G Bool
-ownsG ty = (\program -> isPointer ty || (isAggregate ty && needsDrop program ty)) <$> programG
+ownsG ty = (\program -> isAggregate ty && needsDrop program ty) <$> programG
 
 memcpyText :: String -> String -> Integer -> String
 memcpyText to from bytes = "call void @llvm.memcpy.p0.p0.i64(ptr " ++ to ++ ", ptr " ++ from ++ ", i64 " ++ show bytes ++ ", i1 false)"
@@ -723,7 +687,7 @@ isArrayOperand fn o = case o of
     Const CArray{} -> True
     Const _ -> False
   where
-    arrayLocal l = maybe False (\d -> isArray (localType d) || isBoxedArray (localType d) || isListStruct (localType d)) (Map.lookup l (fnLocals fn))
+    arrayLocal l = maybe False (\d -> isArray (localType d) || isListStruct (localType d)) (Map.lookup l (fnLocals fn))
 
 -- The address of the words of an array operand: a local, or a constant that is a global
 arrayPtr :: Function -> Operand -> G String
@@ -734,8 +698,8 @@ arrayPtr fn o =
         Const (CArray cs) -> constantWords cs
         _ -> failG ("Not an array: " ++ renderOperand' o)
   where
-    -- (a Box of an array holds the address of the elements in its first word, whether it carries the size too or not)
-    ofLocal l = localTypeG fn l >>= \ty -> if isBoxedArray ty || isListStruct ty then ins "a" ("load ptr, ptr " ++ slot l) else pure (slot l)
+    -- (a list of native code holds the address of the elements in its first word)
+    ofLocal l = localTypeG fn l >>= \ty -> if isListStruct ty then ins "a" ("load ptr, ptr " ++ slot l) else pure (slot l)
 
 -- The address of the words of a value held inline that an operand is, ready for something to take: a value that is moved out of a
 -- local and owns something is copied to room of its own and the local is cleared, so that what takes it can copy it later with the
@@ -768,7 +732,6 @@ dataBase fn ty o =
     local l = do
         localTy <- localTypeG fn l
         case localTy of
-            TBox _ -> ins "b" ("load ptr, ptr " ++ slot l)
             -- (a Box of the library is the address of what it holds, as a Box is: lib/box.tersus; its own field is read from it)
             _ | isBoxStruct localTy, not (isBoxStruct ty) -> ins "b" ("load ptr, ptr " ++ slot l)
             _ -> pure (slot l)
@@ -916,43 +879,6 @@ assignAggregate dropsOld fn dest ty rv = do
             copyWords target src bytes
             dropElement elementTy target index
             writeElement elementTy target index value
-        -- Array::boxed(n, x): room on the heap for n elements, filled with x; the Box holds where it is and n
-        ListOp NewBoxed [n, x] | TBox (TArrayOf elementTy _) <- ty -> do
-            count <- operandAt fn TInt n
-            stride <- bytesG elementTy
-            total <- if stride == 1 then pure count else checked "smul" count (show stride)
-            block <- ins "x" ("call ptr @tersus_box_new(i64 " ++ total ++ ")")
-            fillElements fn block elementTy count Nothing x
-            freeOld
-            emit ("store ptr " ++ block ++ ", ptr " ++ target)
-            lengthSlot <- ins "p" ("getelementptr i8, ptr " ++ target ++ ", i64 8")
-            emit ("store i64 " ++ count ++ ", ptr " ++ lengthSlot)
-        -- Array::empty(): no room, and the size 0
-        ListOp NewEmptyBoxed [] | TBox (TArrayOf _ _) <- ty -> do
-            freeOld
-            emit ("store ptr null, ptr " ++ target)
-            lengthSlot <- ins "p" ("getelementptr i8, ptr " ++ target ++ ", i64 8")
-            emit ("store i64 0, ptr " ++ lengthSlot)
-        -- a Box of an array of a size as a Box of an array of any size: the address, and the size the type had
-        Unsize o -> do
-            held <- operandLocalType fn o
-            case held of
-                Just boxTy@(TBox (TArray _ n)) -> do
-                    block <- operandAt fn boxTy o
-                    freeOld
-                    emit ("store ptr " ++ block ++ ", ptr " ++ target)
-                    lengthSlot <- ins "p" ("getelementptr i8, ptr " ++ target ++ ", i64 8")
-                    emit ("store i64 " ++ show n ++ ", ptr " ++ lengthSlot)
-                _ -> failG "unsize was given something that is not a Box of an array of a size"
-        -- the elements of a Box that carries its size are changed where they are, and the Box is given back
-        ListOp Set [a, i, x] | TBox (TArrayOf elementTy _) <- ty -> do
-            src <- operandAddress fn ty a
-            block <- ins "a" ("load ptr, ptr " ++ src)
-            index <- operandAt fn TInt i
-            value <- elementValue fn elementTy x
-            dropElement elementTy block index
-            writeElement elementTy block index value
-            fromPart src False
         -- an Uninit of a value held inline: an empty one is the words cleared, and the others the value as it is
         ListOp UninitEmpty [] -> freeOld >> zeroWords target bytes
         ListOp op [o] | op `elem` [UninitNew, UninitGet, UninitTake] -> operandAddress fn ty o >>= \src -> fromPart src False
@@ -999,18 +925,11 @@ assignAggregate dropsOld fn dest ty rv = do
             freeOld
             if tagWords program name == 1 then emit ("store i32 " ++ show tag ++ ", ptr " ++ target) else pure ()
             mapM_ (\(i, (t, v)) -> fieldOffsetG name declared i >>= \offset -> storeSlot t target offset v) (zip [0 ..] values)
-        -- the same value, known to be that variant (a Box that is cast is taken out of its room, which is freed)
+        -- the same value, known to be that variant (a Box of the library that is cast is taken out of its room, which is freed with the value
+        -- moved out, so that its drop has nothing to do)
         AsVariant o _ -> do
             held <- operandLocalType fn o
             case (held, o) of
-                (Just boxTy@(TBox _), _) -> do
-                    block <- operandAt fn boxTy o
-                    freeOld
-                    copyWords target block bytes
-                    case o of
-                        Move _ -> emit ("call void @tersus_box_free(ptr " ++ block ++ ")")
-                        _ -> pure ()
-                -- (and so is a Box of the library, whose room is freed with the value moved out, so that its drop has nothing to do)
                 (Just boxTy, Copy l) | isBoxStruct boxTy -> do
                     block <- ins "b" ("load ptr, ptr " ++ slot l)
                     freeOld
@@ -1054,15 +973,6 @@ assignAggregate dropsOld fn dest ty rv = do
             p <- ins "p" ("load ptr, ptr " ++ slot l)
             freeOld
             copyWords target p bytes
-        Unbox o -> do
-            held <- operandLocalType fn o
-            boxTy <- maybe (failG "Box::unbox was given a constant") pure held
-            block <- operandAt fn boxTy o
-            freeOld
-            copyWords target block bytes
-            case o of
-                Move _ -> emit ("call void @tersus_box_free(ptr " ++ block ++ ")")
-                _ -> pure ()
         _ -> failG ("Native code does not support " ++ renderRvalue rv ++ " for a value held inline yet")
   where
     localType' l = localType <$> Map.lookup l (fnLocals fn)
@@ -1118,7 +1028,7 @@ fillElements fn target elementTy count known x
     zero _ = False
 
 -- The number of elements of an array operand
--- (the text of a number: a constant when the size is in the type, and what a Box of an array of no size carries otherwise)
+-- (the text of a number: a constant, as the size is in the type)
 arrayLength :: Function -> Operand -> G String
 arrayLength fn o = case o of
     Const (CArray cs) -> pure (show (length cs))
@@ -1128,8 +1038,6 @@ arrayLength fn o = case o of
   where
     ofLocal l = localTypeG fn l >>= \ty -> case ty of
         TArray _ n -> pure (show n)
-        TBox (TArray _ n) -> pure (show n)
-        TBox (TArrayOf _ SizeAny) -> ins "p" ("getelementptr i8, ptr " ++ slot l ++ ", i64 8") >>= \p -> ins "n" ("load i64, ptr " ++ p)
         _ -> failG ("Not an array: " ++ show l)
 
 -- The text of the index of the last element, given the text of the length
@@ -1148,14 +1056,6 @@ arrayRead fn destType op os =
             index <- arrayLength fn a >>= lastIndex
             base <- arrayPtr fn a
             bytesG destType >>= elementAddress base index >>= loadElement destType
-        -- the elements of a Box of an array are changed where they are, and the Box is given back (it is moved in, so nothing else has it)
-        (Set, [a, i, x]) | TBox (TArrayOf elementTy _) <- destType -> do
-            block <- operandAt fn destType a
-            index <- operandAt fn TInt i
-            value <- elementValue fn elementTy x
-            dropElement elementTy block index
-            writeElement elementTy block index value
-            pure block
         (Get, [a, i]) -> do
             base <- arrayPtr fn a
             index <- operandAt fn TInt i
@@ -1219,11 +1119,6 @@ memoryType t = case t of
     TWord _ bits -> "i" ++ show bits
     _ -> "i64"
 
--- Whether a value is the address of a value of the heap, which has one owner (a list, or a Box)
-isPointer :: Type -> Bool
-isPointer ty@TBox{} = not (isFat ty)
-isPointer _ = False
-
 -- A value as the word the runtime takes: an Int as it is, a Bool as 0 or 1, a list as its address
 toWord :: Type -> String -> G String
 toWord TInt value = pure value
@@ -1258,7 +1153,7 @@ binary Mod _ x y = do
     adjust <- roundsTheOtherWay r y
     shifted <- ins "r" ("add i64 " ++ r ++ ", " ++ y)
     ins "r" ("select i1 " ++ adjust ++ ", i64 " ++ shifted ++ ", i64 " ++ r)
-binary (Compare rel) ty x y | isPointer ty || isAggregate ty = do
+binary (Compare rel) ty x y | isAggregate ty = do
     -- structural equality, which the runtime does by the descriptor of the type
     d <- descriptor ty
     a <- toWord ty x
@@ -1445,12 +1340,12 @@ storeResult entry fn dest value = do
     store fn dest value
     if entry && dest == Local 0 then emit "store i1 true, ptr %returned" else pure ()
 
--- A local that owns a value frees the one it held when it is given another
+-- A local that is a word is given a value (a word owns nothing: what owns is held inline, and is freed where it is made, see
+-- assignAggregate)
 store :: Function -> Local -> String -> G ()
 store fn dest value = do
     ty <- localTypeG fn dest
     t <- typeG ty
-    if isPointer ty then dropSlot ty dest else pure ()
     emit ("store " ++ t ++ " " ++ value ++ ", ptr " ++ slot dest)
 
 -- Frees what the value a local holds owns (nothing, if it holds none), and leaves a list or a Box it held holding nothing
@@ -1481,7 +1376,6 @@ llvmType (TRef t) = llvmType t
 -- (an array is passed and held as the address of its words)
 llvmType (TArray t _) = llvmType t `bindResult` \_ -> Ok "ptr"
 llvmType TNamed{} = Ok "ptr"
-llvmType TBox{} = Ok "ptr"
 llvmType TVariant{} = Ok "ptr"
 llvmType TFn{} = Ok "ptr"
 llvmType ty = Error (unsupportedType ty)
