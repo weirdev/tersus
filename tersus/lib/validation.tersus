@@ -1667,6 +1667,116 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
     return state;
 };
 
+// Scaling preserves or reverses an operand's order around zero according to
+// the sign of the known integer factor.
+fn addScaleOrders(context: &ValidatorContext, result: Int, operand: Int, factor: Int) -> ValidatorContext {
+    zero = ValueLookup::Missing;
+    z = 0;
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    if zero is ValueLookup::Found {
+        z = (zero as ValueLookup::Found).term;
+    } else { return clone(context); };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    nonnegative = hasOrder(equalities, orders, z, operand, false);
+    positive = hasOrder(equalities, orders, z, operand, true);
+    nonpositive = hasOrder(equalities, orders, operand, z, false);
+    negative = hasOrder(equalities, orders, operand, z, true);
+    facts = clone(context.orders);
+    if factor > 0 {
+        if nonnegative { facts = push(facts, OrderFact { smaller: z, greater: result, strict: false }); };
+        if positive { facts = push(facts, OrderFact { smaller: z, greater: result, strict: true }); };
+        if nonpositive { facts = push(facts, OrderFact { smaller: result, greater: z, strict: false }); };
+        if negative { facts = push(facts, OrderFact { smaller: result, greater: z, strict: true }); };
+        if factor > 1 {
+            if nonnegative { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: false }); };
+            if positive { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: true }); };
+            if nonpositive { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: false }); };
+            if negative { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: true }); };
+        };
+    } else {
+        if nonnegative { facts = push(facts, OrderFact { smaller: result, greater: z, strict: false }); };
+        if positive { facts = push(facts, OrderFact { smaller: result, greater: z, strict: true }); };
+        if nonpositive { facts = push(facts, OrderFact { smaller: z, greater: result, strict: false }); };
+        if negative { facts = push(facts, OrderFact { smaller: z, greater: result, strict: true }); };
+        if nonnegative { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: false }); };
+        if positive { facts = push(facts, OrderFact { smaller: result, greater: operand, strict: true }); };
+        if nonpositive { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: false }); };
+        if negative { facts = push(facts, OrderFact { smaller: operand, greater: result, strict: true }); };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+// Integer remainder has the sign of its divisor and is strictly inside its
+// magnitude, even when the dividend is symbolic.
+fn addRemainderOrders(context: &ValidatorContext, result: Int, divisor: Int) -> ValidatorContext {
+    zero = ValueLookup::Missing;
+    z = 0;
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    if zero is ValueLookup::Found {
+        z = (zero as ValueLookup::Found).term;
+    } else { return clone(context); };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    positiveDivisor = hasOrder(equalities, orders, z, divisor, true);
+    negativeDivisor = hasOrder(equalities, orders, divisor, z, true);
+    facts = clone(context.orders);
+    if positiveDivisor {
+        facts = push(facts, OrderFact { smaller: z, greater: result, strict: false });
+        facts = push(facts, OrderFact { smaller: result, greater: divisor, strict: true });
+    };
+    if negativeDivisor {
+        facts = push(facts, OrderFact { smaller: result, greater: z, strict: false });
+        facts = push(facts, OrderFact { smaller: divisor, greater: result, strict: true });
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+// Integer division by a proved positive divisor stays between the dividend
+// and zero. A negative divisor reverses the result's sign.
+fn addDivisionOrders(context: &ValidatorContext, result: Int, dividend: Int, divisor: Int) -> ValidatorContext {
+    zero = ValueLookup::Missing;
+    z = 0;
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    if zero is ValueLookup::Found {
+        z = (zero as ValueLookup::Found).term;
+    } else { return clone(context); };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    positiveDivisor = hasOrder(equalities, orders, z, divisor, true);
+    negativeDivisor = hasOrder(equalities, orders, divisor, z, true);
+    nonnegativeDividend = hasOrder(equalities, orders, z, dividend, false);
+    nonpositiveDividend = hasOrder(equalities, orders, dividend, z, false);
+    facts = clone(context.orders);
+    if positiveDivisor {
+        if nonnegativeDividend {
+            facts = push(facts, OrderFact { smaller: z, greater: result, strict: false });
+            facts = push(facts, OrderFact { smaller: result, greater: dividend, strict: false });
+        };
+        if nonpositiveDividend {
+            facts = push(facts, OrderFact { smaller: dividend, greater: result, strict: false });
+            facts = push(facts, OrderFact { smaller: result, greater: z, strict: false });
+        };
+    };
+    if negativeDivisor {
+        if nonnegativeDividend { facts = push(facts, OrderFact { smaller: result, greater: z, strict: false }); };
+        if nonpositiveDividend { facts = push(facts, OrderFact { smaller: z, greater: result, strict: false }); };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
 fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
     if size(args) != 2 { return clone(context); };
     a = get(args, 0);
@@ -1705,6 +1815,15 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
             n = (av as IntegerLookup::Found).value;
             if n = 0 { return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: result, right: a }), ..clone(context) }; };
             if n = 1 { return ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: result, right: b }), ..clone(context) }; };
+            bv0 = integerValue(context, b);
+            if bv0 is IntegerLookup::Found {
+                product = safeProduct(n, (bv0 as IntegerLookup::Found).value);
+                if product is SumResult::Sum {
+                    constant = ConstantTerm { id: result, kind: 0, value: (product as SumResult::Sum).value };
+                    return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
+                };
+            };
+            return addScaleOrders(context, result, b, n);
         };
         bv = integerValue(context, b);
         if bv is IntegerLookup::Found {
@@ -1718,6 +1837,7 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
                     return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
                 };
             };
+            return addScaleOrders(context, result, a, n);
         };
     };
     if function = -4 {
@@ -1740,8 +1860,10 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
                         return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
                     };
                 };
+                return addDivisionOrders(context, result, a, b);
             };
         };
+        return addDivisionOrders(context, result, a, b);
     };
     if function = -5 {
         bv = integerValue(context, b);
@@ -1760,8 +1882,10 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
                     constant = ConstantTerm { id: result, kind: 0, value: remainder };
                     return ValidatorContext { constants: push(clone(context.constants), constant), ..clone(context) };
                 };
+                return addRemainderOrders(context, result, b);
             };
         };
+        return addRemainderOrders(context, result, b);
     };
     return clone(context);
 };
