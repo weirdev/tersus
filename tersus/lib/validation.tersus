@@ -2807,6 +2807,20 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                         yesLiteral = (trueValue as ValueLookup::Found).term;
                         noLiteral = (falseValue as ValueLookup::Found).term;
                         if branch.join >= 0 {
+                            joinYesKnown = booleanKnown(run.state.context, term, yesLiteral, true);
+                            if joinYesKnown {
+                                yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
+                                yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
+                                yesState = ExecutionState { context: yesContext, ..clone(run.state) };
+                                return walkExecution(blocks, branch.yes, yesState, fuel - 1, clone(loops));
+                            };
+                            joinNoKnown = booleanKnown(run.state.context, term, noLiteral, false);
+                            if joinNoKnown {
+                                noContext = assumeRelation(run.state.context, 0, term, noLiteral);
+                                noContext = assumeBooleanFact(noContext, term, noLiteral);
+                                noState = ExecutionState { context: noContext, ..clone(run.state) };
+                                return walkExecution(blocks, branch.no, noState, fuel - 1, clone(loops));
+                            };
                             yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..clone(run.state) };
