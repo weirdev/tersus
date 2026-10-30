@@ -5,6 +5,7 @@ module SelfHostedMir (validateMirSubset, validateByTersus) where
 
 import Control.Monad (foldM)
 import Data.List (isPrefixOf, nub)
+import Data.Maybe (mapMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
@@ -14,7 +15,7 @@ import MirLower (lowerElaborated)
 import MirVerify (verifyProgram)
 import Parse (parseStatementBlock)
 import PreludeSource (preludeSource, validationSource)
-import StdLib (builtinFunct)
+import StdLib (builtinFunct, eqVarProof, stdLibRuleCtx)
 import StdLibDefs (stdLibValCtx)
 import TersusTypes
 import TypeCheck (elaborate)
@@ -267,6 +268,85 @@ contractSteps assume env clauses b0 = foldM add ([], b0) clauses
     totalStep (MData "ExecutionStep::ApplyFresh" _) = True
     totalStep _ = False
 
+-- A rewrite rule: its parameters, input clauses, output clauses, and (for a
+-- proof, not an axiom) the body that is checked once, generically.
+type Rule = ([Variable], [ValidationStatement], [ValidationStatement], Maybe [ValidationStatement])
+
+type Rules = Map.Map Variable Rule
+
+collectRules :: M.Program -> Maybe Rules
+collectRules program
+    | length names /= length (nub names) = Nothing
+    | otherwise = Just (Map.union programRules stdRules)
+  where
+    fns = M.progMain program : Map.elems (M.progFunctions program)
+    found = [(name, rule) | fn <- fns, blk <- Map.elems (M.fnBlocks fn), stmt <- M.blockStatements blk, (name, rule) <- ruleOf stmt]
+    names = map fst found
+    programRules = Map.fromList found
+    ruleOf (M.Ghost _ (M.GhostProof name args ins outs body)) = [(name, (args, ins, outs, Just body))]
+    ruleOf (M.Ghost _ (M.GhostAxiom name args ins outs)) = [(name, (args, ins, outs, Nothing))]
+    ruleOf _ = []
+    stdRules = Map.fromList [(name, (args, ins, outs, Nothing)) | (name, AxiomRule args ins outs) <- Map.toList stdLibRuleCtx]
+
+substituteProof :: Map.Map Variable VariableProof -> VariableProof -> VariableProof
+substituteProof definitions proof = case proof of
+    ATerm name -> Map.findWithDefault proof name definitions
+    FApp function arguments -> FApp (substituteProof definitions function) (map (substituteProof definitions) arguments)
+    Forall index guards body ->
+        let scoped = Map.delete index definitions
+         in Forall index (map (substituteProof scoped) guards) (substituteProof scoped body)
+    _ -> proof
+
+-- Definitions in a clause list, expanded in order against the bindings in
+-- scope at their definition point (the semantics Ghost.defineProofRule gives
+-- exported facts, expressed as translation).
+buildSubst :: Map.Map Variable VariableProof -> [ValidationStatement] -> Map.Map Variable VariableProof
+buildSubst bindings clauses = foldl add bindings [(var, expr) | AssignProofVar var expr <- clauses]
+  where
+    add m (var, expr) = Map.insert var (substituteProof m (exprToProof expr)) m
+
+instantiate :: Map.Map Variable VariableProof -> [ValidationStatement] -> Maybe [ValidationStatement]
+instantiate subst = fmap concat . traverse clause
+  where
+    clause (ProofAssert proof) = Just [ProofAssert (substituteProof subst proof)]
+    clause (AssignProofVar _ _) = Just []
+    clause (Assume proof) = Just [ProofAssert (substituteProof subst proof)]
+    clause (Rewrite (CheckGtZero proof)) = Just [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [substituteProof subst proof, CTerm (VInt 0)])]
+    clause (Rewrite (CheckRel proof)) = Just [ProofAssert (substituteProof subst proof)]
+    clause (Rewrite _) = Nothing
+
+substituteRule :: Map.Map Variable VariableProof -> RwRule -> RwRule
+substituteRule subst (UserRewrite name args) = UserRewrite name (map (substituteProof subst) args)
+substituteRule subst (Refl proof) = Refl (substituteProof subst proof)
+substituteRule subst (CheckGtZero proof) = CheckGtZero (substituteProof subst proof)
+substituteRule subst (CheckRel proof) = CheckRel (substituteProof subst proof)
+substituteRule _ rule = rule
+
+rewriteSteps :: Rules -> M.Env -> RwRule -> Build -> Maybe ([MirValue], Build)
+rewriteSteps rules env (UserRewrite name args) b0 = do
+    (params, ins, outs, _) <- Map.lookup name rules
+    if length params == length args then Just () else Nothing
+    let substIn = buildSubst (Map.fromList (zip params args)) ins
+    inClauses <- instantiate substIn ins
+    (checks, b1) <- contractSteps False env inClauses b0
+    let substOut = buildSubst substIn outs
+    outClauses <- instantiate substOut outs
+    (assumptions, b2) <- contractSteps True env outClauses b1
+    pure (checks ++ assumptions, b2)
+rewriteSteps _ env (Refl proof) b0 = do
+    (prefix, checked, b1) <- proofCheck env (FApp eqVarProof [proof, proof]) b0
+    assumed <- case checked of
+        MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
+        _ -> Nothing
+    pure (prefix ++ [checked, assumed], b1)
+rewriteSteps _ env (CheckGtZero proof) b0 = do
+    (prefix, checked, b1) <- proofCheck env (FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]) b0
+    pure (prefix ++ [checked], b1)
+rewriteSteps _ env (CheckRel proof) b0 = do
+    (prefix, checked, b1) <- proofCheck env proof b0
+    pure (prefix ++ [checked], b1)
+rewriteSteps _ _ _ _ = Nothing
+
 -- Stable negative identifiers name pure builtin operations; all literals and
 -- fresh results use non-negative identifiers from the same allocation stream.
 functionId :: M.BinOp -> Integer
@@ -283,21 +363,21 @@ functionId op = case op of
     M.Compare Gt -> -10
     M.Compare GtEq -> -11
 
-statement :: M.Statement -> Build -> Maybe ([MirValue], Build)
-statement (M.Assign (M.Local dest) (M.Use source)) b = do
+statement :: Rules -> M.Statement -> Build -> Maybe ([MirValue], Build)
+statement rules (M.Assign (M.Local dest) (M.Use source)) b = do
     (v, b') <- operand source b
     pure ([step "Assign" [("local", MInt (toInteger dest)), ("value", v)]], b')
 -- Boxes and unsizing preserve the proof value, as in the reference MIR
 -- validator. Ownership and representation are handled by later passes.
-statement (M.Assign dest (M.MakeBox source)) b = statement (M.Assign dest (M.Use source)) b
-statement (M.Assign dest (M.Unbox source)) b = statement (M.Assign dest (M.Use source)) b
-statement (M.Assign dest (M.Unsize source)) b = statement (M.Assign dest (M.Use source)) b
-statement (M.Assign dest (M.Clone source)) b = statement (M.Assign dest (M.Use source)) b
+statement rules (M.Assign dest (M.MakeBox source)) b = statement rules (M.Assign dest (M.Use source)) b
+statement rules (M.Assign dest (M.Unbox source)) b = statement rules (M.Assign dest (M.Use source)) b
+statement rules (M.Assign dest (M.Unsize source)) b = statement rules (M.Assign dest (M.Use source)) b
+statement rules (M.Assign dest (M.Clone source)) b = statement rules (M.Assign dest (M.Use source)) b
 -- A reference to a whole local has the value of what it is to, as in the reference MIR validator; a reference
 -- to a part of one, a read through one and an assignment through one are outside this bridge's subset for now
-statement (M.Assign dest (M.Borrow root [] _)) b = statement (M.Assign dest (M.Use (M.Copy root))) b
-statement (M.Assign dest (M.Deref source)) b = statement (M.Assign dest (M.Use source)) b
-statement (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
+statement rules (M.Assign dest (M.Borrow root [] _)) b = statement rules (M.Assign dest (M.Use (M.Copy root))) b
+statement rules (M.Assign dest (M.Deref source)) b = statement rules (M.Assign dest (M.Use source)) b
+statement rules (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
     (snapshots, b1) <- foldM snapshot ([], b0) fields
     let (constructor, b2) = namedFunction ("ctor:" ++ name) b1
         destination = record "ValueRef::Local" [("local", MInt (toInteger dest))]
@@ -327,41 +407,41 @@ statement (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
             readField = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [destination])]
             known = step "Assume" [("relation", MInt 0), ("left", ref), ("right", original)]
         pure (acc ++ [readField, known], b2)
-statement (M.Assign (M.Local dest) (M.ReadField source _ field)) b0 = do
+statement rules (M.Assign (M.Local dest) (M.ReadField source _ field)) b0 = do
     (value, b1) <- operand source b0
     let (function, b2) = namedFunction ("field:" ++ field) b1
     pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [value])]], b2)
-statement (M.Assign (M.Local dest) (M.IsVariant source variantName)) b0 = do
+statement rules (M.Assign (M.Local dest) (M.IsVariant source variantName)) b0 = do
     (value, b1) <- operand source b0
     let (predicate, b2) = namedFunction ("isvariant:" ++ variantName) b1
     pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt predicate), ("arguments", MList [value])]], b2)
-statement (M.Assign (M.Local dest) (M.AsVariant source variantName)) b0 = do
+statement rules (M.Assign (M.Local dest) (M.AsVariant source variantName)) b0 = do
     (value, b1) <- operand source b0
     let assign = step "Assign" [("local", MInt (toInteger dest)), ("value", value)]
         (familyId, b2) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b1
         (constructorId, b3) = namedFunction ("variant:" ++ variantName) b2
         require = step "RequireVariant" [("object", record "ValueRef::Local" [("local", MInt (toInteger dest))]), ("family", MInt familyId), ("constructor", MInt constructorId)]
     pure ([assign, require], b3)
-statement (M.Assign (M.Local dest) (M.ListOp M.Length [source])) b = do
+statement rules (M.Assign (M.Local dest) (M.ListOp M.Length [source])) b = do
     (value, b') <- operand source b
     pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt (-13)), ("arguments", MList [value])]], b')
-statement (M.Assign (M.Local dest) (M.ListOp M.Get [source, index])) b0 = do
+statement rules (M.Assign (M.Local dest) (M.ListOp M.Get [source, index])) b0 = do
     (listRef, b1) <- operand source b0
     (indexRef, b2) <- operand index b1
     getSteps (toInteger dest) listRef indexRef b2
-statement (M.Assign (M.Local dest) (M.ListOp M.Push [source, value])) b0 = do
+statement rules (M.Assign (M.Local dest) (M.ListOp M.Push [source, value])) b0 = do
     (listRef, b1) <- operand source b0
     (valueRef, b2) <- operand value b1
     pushSteps (toInteger dest) listRef valueRef b2
-statement (M.Assign (M.Local dest) (M.ListOp M.Pop [source])) b0 = do
+statement rules (M.Assign (M.Local dest) (M.ListOp M.Pop [source])) b0 = do
     (listRef, b1) <- operand source b0
     popSteps (toInteger dest) listRef b1
-statement (M.Assign (M.Local dest) (M.ListOp operation [lengthValue, value])) b0
+statement rules (M.Assign (M.Local dest) (M.ListOp operation [lengthValue, value])) b0
     | operation == M.NewArray || operation == M.NewBoxed = do
         (lengthRef, b1) <- operand lengthValue b0
         (valueRef, b2) <- operand value b1
         arraySteps (toInteger dest) lengthRef valueRef b2
-statement (M.Assign (M.Local dest) (M.ListOp M.NewEmptyBoxed [])) b0 = do
+statement rules (M.Assign (M.Local dest) (M.ListOp M.NewEmptyBoxed [])) b0 = do
     (zero, b1) <- operand (M.Const (M.CInt 0)) b0
     let (i, b2) = fresh b1
         sizeLocal = negate i - 1
@@ -371,19 +451,19 @@ statement (M.Assign (M.Local dest) (M.ListOp M.NewEmptyBoxed [])) b0 = do
         size = step "ApplyFresh" [("local", MInt sizeLocal), ("function", MInt (-13)), ("arguments", MList [resultRef])]
         known = step "Assume" [("relation", MInt 0), ("left", sizeRef), ("right", zero)]
     pure ([make, size, known], b2)
-statement (M.Assign (M.Local dest) (M.ListOp M.Set [source, index, value])) b0 = do
+statement rules (M.Assign (M.Local dest) (M.ListOp M.Set [source, index, value])) b0 = do
     (listRef, b1) <- operand source b0
     (indexRef, b2) <- operand index b1
     (valueRef, b3) <- operand value b2
     setSteps (toInteger dest) listRef indexRef valueRef b3
-statement (M.Assign (M.Local dest) (M.ListOp operation [source])) b0
+statement rules (M.Assign (M.Local dest) (M.ListOp operation [source])) b0
     | operation == M.First || operation == M.Last = do
         (listRef, b1) <- operand source b0
         if operation == M.First then do
             (zero, b2) <- operand (M.Const (M.CInt 0)) b1
             getSteps (toInteger dest) listRef zero b2
           else lastSteps (toInteger dest) listRef b1
-statement (M.Assign (M.Local dest) (M.BinaryOp op a b)) b0 = do
+statement rules (M.Assign (M.Local dest) (M.BinaryOp op a b)) b0 = do
     (x, b1) <- operand a b0
     (y, b2) <- operand b b1
     (checks, b3) <- case op of
@@ -396,13 +476,19 @@ statement (M.Assign (M.Local dest) (M.BinaryOp op a b)) b0 = do
     nonzero y b' = do
         (zero, b'') <- operand (M.Const (M.CInt 0)) b'
         pure ([check 1 y zero], b'')
-statement (M.Ghost env (M.GhostValidation (ProofAssert proof))) b = do
+statement rules (M.Ghost env (M.GhostValidation (ProofAssert proof))) b = do
     (prefix, s, b') <- proofCheck env proof b
     pure (prefix ++ [s], b')
+statement rules (M.Ghost env (M.GhostValidation (Rewrite rule))) b = rewriteSteps rules env rule b
+statement rules (M.Ghost env (M.GhostValidation (Assume proof))) b = contractSteps True env [ProofAssert proof] b
+-- Definitions are skipped where they stand: a proof rule is checked once,
+-- generically (encodeRule), and an axiom is taken on trust.
+statement _ (M.Ghost _ (M.GhostProof _ _ _ _ _)) b = Just ([], b)
+statement _ (M.Ghost _ (M.GhostAxiom _ _ _ _)) b = Just ([], b)
 -- Function bodies are checked independently before the main graph. Function
 -- definitions have already been checked for uniqueness and placement.
-statement (M.Ghost _ M.GhostFunction{}) b = Just ([], b)
-statement _ _ = Nothing
+statement _ (M.Ghost _ M.GhostFunction{}) b = Just ([], b)
+statement _ _ _ = Nothing
 
 -- A direct call uses only contracts of bodies checked separately. Snapshot
 -- arguments before writing the result, and decline callees that reassign a
@@ -517,9 +603,9 @@ typeSteps types invariants fn local@(M.Local number) b0 = do
             apply = step "ApplyFresh" [("local", MInt (toInteger localId)), ("function", MInt function), ("arguments", MList [value])]
         pure (steps ++ [apply], Map.insert field (M.Copy fieldLocal) env, b2)
 
-block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Bool -> M.Function -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
-block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0 = do
-    (steps, b1, conditions) <- foldM add ([], b0, Map.empty) stmts
+block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
+block types invariants functions rules allowCalls fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0 = do
+    (steps, b1, conditions, _) <- foldM add ([], b0, Map.empty, Map.empty) stmts
     (extra, ending, b2) <- case (Map.lookup blockId (M.specLoops (M.fnSpec fn)), end) of
         (Just spec, M.SwitchBool (M.Copy local) yes no) -> do
             (loopEnd, b') <- encodeLoop spec local yes no conditions b1
@@ -552,7 +638,7 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
             let M.BlockId yesId = yes
                 M.BlockId noId = no
                 ending = record "ExecutionEnd::BooleanBranch"
-                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (joinFor yes no)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
+                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (-1)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
             Just ([required], ending, b3)
         (Nothing, M.Call (M.Const (M.CFn name)) args dest target) | allowCalls -> do
             callee <- Map.lookup name functions
@@ -621,7 +707,18 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
         pure (steps ++ more, b')
     asAssumption (MData "ExecutionStep::Check" fields) = Just (MData "ExecutionStep::Assume" fields)
     asAssumption _ = Nothing
-    add (steps, b, conditions) s = case s of
+    add (steps, b, conditions, penv) s = case s of
+        M.Ghost env (M.GhostValidation (AssignProofVar var expr)) ->
+            Just (steps, b, conditions, Map.insert var (substituteProof penv (exprToProof expr)) penv)
+        M.Ghost env (M.GhostValidation (ProofAssert proof)) -> do
+            (prefix, checked, b') <- proofCheck env (substituteProof penv proof) b
+            pure (steps ++ prefix ++ [checked], b', conditions, penv)
+        M.Ghost env (M.GhostValidation (Rewrite rule)) -> do
+            (more, b') <- rewriteSteps rules env (substituteRule penv rule) b
+            pure (steps ++ more, b', conditions, penv)
+        M.Ghost env (M.GhostValidation (Assume proof)) -> do
+            (more, b') <- contractSteps True env [ProofAssert (substituteProof penv proof)] b
+            pure (steps ++ more, b', conditions, penv)
         M.Assign dest (M.BinaryOp (M.Compare r) a c) -> do
             (left, b1) <- operand a b
             (right, b2) <- operand c b1
@@ -630,10 +727,10 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
                 leftLocal = negate x - 1
                 rightLocal = negate y - 1
                 save i v = step "Assign" [("local", MInt i), ("value", v)]
-            (more, b5) <- statement s b4
+            (more, b5) <- statement rules s b4
             (typeFacts, b6) <- typeSteps types invariants fn dest b5
             pure (steps ++ [save leftLocal left, save rightLocal right] ++ more ++ typeFacts, b6,
-                  Map.insert dest (r, localRef leftLocal, localRef rightLocal) conditions)
+                  Map.insert dest (r, localRef leftLocal, localRef rightLocal) conditions, penv)
         M.Assign dest (M.MakeData name fields) -> do
             let base = maybe name fst (instanceOf name)
                 clauses = Map.findWithDefault [] base invariants
@@ -641,9 +738,9 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
                 Just _ | not (null clauses) -> Nothing
                 _ -> Just ()
             (checks, b1) <- contractSteps False (Map.fromList fields) clauses b
-            (more, b2) <- statement s b1
+            (more, b2) <- statement rules s b1
             (typeFacts, b3) <- typeSteps types invariants fn dest b2
-            pure (steps ++ checks ++ more ++ typeFacts, b3, Map.delete dest conditions)
+            pure (steps ++ checks ++ more ++ typeFacts, b3, Map.delete dest conditions, penv)
         M.Assign dest (M.ListOp M.NewArray [lengthValue, _]) -> do
             decl <- Map.lookup dest (M.fnLocals fn)
             case M.localType decl of
@@ -652,16 +749,16 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
                         p : _ | lengthValue == M.Copy p -> Just ()
                         _ -> Nothing
                 _ -> Just ()
-            (more, b1) <- statement s b
+            (more, b1) <- statement rules s b
             (typeFacts, b2) <- typeSteps types invariants fn dest b1
-            pure (steps ++ more ++ typeFacts, b2, Map.delete dest conditions)
+            pure (steps ++ more ++ typeFacts, b2, Map.delete dest conditions, penv)
         M.Assign dest _ -> do
-            (more, b') <- statement s b
+            (more, b') <- statement rules s b
             (typeFacts, b'') <- typeSteps types invariants fn dest b'
-            pure (steps ++ more ++ typeFacts, b'', Map.delete dest conditions)
+            pure (steps ++ more ++ typeFacts, b'', Map.delete dest conditions, penv)
         _ -> do
-            (more, b') <- statement s b
-            pure (steps ++ more, b', conditions)
+            (more, b') <- statement rules s b
+            pure (steps ++ more, b', conditions, penv)
 
     localNumber (M.Local i) = toInteger i
     localRef i = record "ValueRef::Local" [("local", MInt i)]
@@ -722,8 +819,45 @@ loopRegions fn = Map.mapWithKey regionOf (M.specLoops (M.fnSpec fn))
         | Set.member b seen = go seen rest
         | otherwise = go (Set.insert b seen) (Map.findWithDefault [] b preds ++ rest)
 
-encodeFunction :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
-encodeFunction types invariants functions allowCalls fn
+contextOf :: Build -> MirValue
+contextOf b = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt i | (name, i) <- namedFunctions b, "field:" `isPrefixOf` name]), ("constructorFunctions", MList [MInt i | (name, i) <- namedFunctions b, "ctor:" `isPrefixOf` name]), ("constructorFields", MList [record "ConstructorField" [("constructor", MInt c), ("field", MInt f), ("index", MInt i)] | (c, f, i) <- ctorFields b]), ("differences", MList [])]
+
+-- A proof rule is checked once, generically: its input clauses are assumed
+-- over fresh parameter terms, then its body and output clauses are checked.
+-- An axiom has no body and is taken on trust, as `tersus assumptions` says.
+encodeRule :: Rules -> (Variable, Rule) -> Maybe (MirValue, MirValue, Integer)
+encodeRule rules (_, (params, ins, outs, Just body)) = do
+    let indexed = zip params [0 ..]
+        env0 = Map.fromList [(param, M.Copy (M.Local i)) | (param, i) <- indexed]
+        alloc (bindings, b) (_, i) = let (term, b') = fresh b in (bindings ++ [record "LocalBinding" [("local", MInt (toInteger i)), ("term", MInt term)]], b')
+        (paramBindings, b0) = foldl alloc ([], emptyBuild) indexed
+    (inSteps, b1, env1, next1) <- genericClauses rules True env0 ins b0 (length params)
+    (bodySteps, b2, env2, next2) <- genericClauses rules False env1 body b1 next1
+    (outSteps, b3, _, _) <- genericClauses rules False env2 outs b2 next2
+    let block' = record "ExecutionBlock" [("id", MInt 0), ("steps", MList (inSteps ++ bodySteps ++ outSteps)), ("end", record "ExecutionEnd::Done" [])]
+        initial = record "ExecutionState" [("context", contextOf b3), ("locals", MList paramBindings)]
+    pure (MList [block'], initial, 0)
+encodeRule _ _ = Nothing
+
+genericClauses :: Rules -> Bool -> M.Env -> [ValidationStatement] -> Build -> Int -> Maybe ([MirValue], Build, M.Env, Int)
+genericClauses rules assumeMode env0 clauses b0 next0 = foldM go ([], b0, env0, next0) clauses
+  where
+    go (steps, b, env, next) (ProofAssert proof) = do
+        (more, b') <- contractSteps assumeMode env [ProofAssert proof] b
+        pure (steps ++ more, b', env, next)
+    go (steps, b, env, next) (AssignProofVar var expr) = do
+        (prefix, ref, b') <- proofOperand env (exprToProof expr) b
+        let assign = step "Assign" [("local", MInt (toInteger next)), ("value", ref)]
+        pure (steps ++ prefix ++ [assign], b', Map.insert var (M.Copy (M.Local next)) env, next + 1)
+    go (steps, b, env, next) (Rewrite rule) = do
+        (more, b') <- rewriteSteps rules env rule b
+        pure (steps ++ more, b', env, next)
+    go (steps, b, env, next) (Assume proof) = do
+        (more, b') <- contractSteps True env [ProofAssert proof] b
+        pure (steps ++ more, b', env, next)
+
+encodeFunction :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
+encodeFunction types invariants functions rules allowCalls fn
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals fn)) = Nothing
     | length (M.fnParams fn) /= length (nub (M.fnParams fn)) = Nothing
     | M.Local 0 `elem` M.fnParams fn = Nothing
@@ -739,7 +873,7 @@ encodeFunction types invariants functions allowCalls fn
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires, withRequires) <- contractSteps True (M.specEnv spec) (M.specRequires spec) withSizes
         (blocks, b) <- foldM add ([], withRequires) (Map.toList (M.fnBlocks fn))
-        let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt i | (name, i) <- namedFunctions b, "field:" `isPrefixOf` name]), ("constructorFunctions", MList [MInt i | (name, i) <- namedFunctions b, "ctor:" `isPrefixOf` name]), ("constructorFields", MList [record "ConstructorField" [("constructor", MInt c), ("field", MInt f), ("index", MInt i)] | (c, f, i) <- ctorFields b]), ("differences", MList [])]
+        let context = contextOf b
             entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (paramFacts ++ sizeFacts ++ requires)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
         pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", localsMap params)], -1)
   where
@@ -768,7 +902,7 @@ encodeFunction types invariants functions allowCalls fn
         (more, b') <- typeSteps types invariants fn local b
         pure (steps ++ more, b')
     add (blocks, b) entry = do
-        (v, b') <- block types invariants functions allowCalls fn entry b
+        (v, b') <- block types invariants functions rules allowCalls fn entry b
         pure (blocks ++ [v], b')
 
 encode :: M.Program -> Maybe [(MirValue, MirValue, Integer)]
@@ -791,9 +925,11 @@ encode program
         let functions = M.progFunctions program
             invariants = M.progInvariants program
             types = M.progTypes program
-        checked <- traverse (encodeFunction types invariants functions True) (Map.elems functions)
-        main <- encodeFunction types invariants functions True (M.progMain program)
-        pure (checked ++ [main])
+        rules <- collectRules program
+        checked <- traverse (encodeFunction types invariants functions rules True) (Map.elems functions)
+        main <- encodeFunction types invariants functions rules True (M.progMain program)
+        ruleEntries <- pure (mapMaybe (encodeRule rules) (Map.toList rules))
+        pure (checked ++ ruleEntries ++ [main])
   where
     allFunctions = M.progMain program : Map.elems (M.progFunctions program)
     externFunction fn = "extern " `isPrefixOf` M.fnName fn
