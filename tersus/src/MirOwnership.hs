@@ -266,15 +266,9 @@ ownFunction program fn0 =
         (blocks, finalState) =
             runR (mapM (rewriteBlock cx outs) (Map.toList (fnBlocks fn))) (RS start Map.empty Set.empty)
         allLocals = Map.union (fnLocals fn) (rsNew finalState)
-        owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState, l `Set.notMember` cxBorrowed cx, not (givesItsMemory l d), not (dropped l)]
+        owned = [l | (l, d) <- Map.toList allLocals, needsDrop program (localType d), l /= Local 0, l `Set.notMember` rsAlias finalState, l `Set.notMember` cxBorrowed cx, not (dropped l)]
         -- (the drop of a type is given the value to free: native code frees what its fields own after it, so the drop does not free it)
         dropped l = isDropFunction (fnName fn) && take 1 (fnParams fn) == [l]
-        -- (a function of the library of lists, lib/lists.tersus, is given a list and returns one made of its memory: the memory at the address,
-        -- which a push may have moved, is the one it returns, so the list it is given is not freed)
-        givesItsMemory l d = take 7 (fnName fn) == "stdList" && l `elem` fnParams fn && takeWhile (/= '<') (typeName (localType d)) == "StdList"
-        typeName t = case t of
-            TNamed n -> n
-            _ -> ""
         withDrops (b, BasicBlock stmts term) =
             (b, BasicBlock (if term == Return then stmts ++ map Drop owned else stmts) term)
      in fn{fnLocals = allLocals, fnBlocks = Map.fromList (map withDrops blocks)}
