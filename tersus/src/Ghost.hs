@@ -555,7 +555,18 @@ defineProofRule st name args inputs outputs body = do
     assumed <- assumeStatements start inputs
     done <- runStatements assumed body
     exported <- exportOutputs done bindings inputs outputs
-    insertRule st name (ProofRule args inputs exported)
+    let definitions = Map.fromList [(var, exprToProof expr) | AssignProofVar var expr <- inputs]
+        exported' = map (substituteProofDefinitions definitions) exported
+    insertRule st name (ProofRule args inputs exported')
+
+substituteProofDefinitions :: Map Variable VariableProof -> VariableProof -> VariableProof
+substituteProofDefinitions definitions proof = case proof of
+    ATerm name -> Map.findWithDefault proof name definitions
+    FApp function arguments -> FApp (substituteProofDefinitions definitions function) (map (substituteProofDefinitions definitions) arguments)
+    Forall index guards body ->
+        let scoped = Map.delete index definitions
+         in Forall index (map (substituteProofDefinitions scoped) guards) (substituteProofDefinitions scoped body)
+    _ -> proof
 
 -- What a function or rule promises, as facts over the names it gives its parameters and result: the outputs are checked
 -- once more, and then the facts about those values are what is left.
