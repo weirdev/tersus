@@ -494,6 +494,8 @@ testLinearArithmetic =
             , -- Division by 1 is the number, and the result of a division is not assumed to be a multiple
               holds "affirm i = i;" "n / 1 = n"
             , fails "affirm n >= 0;" "n / 2 * 2 = n"
+            , parseValidateFailProgramHelper "x = -9223372036854775808 / -1; affirm x > 0;" "Could not prove: x > 0"
+            , parseValidProgramHelper "x = -9223372036854775808 % -1; affirm x = 0;"
             , -- Evaluation
               parseEvalProgramHelper "x = 7; y = x / 2 + x / -2; return y;" (Just (VInt (-1)))
             , -- Programs: a loop that moves from one variable to another keeps their sum
