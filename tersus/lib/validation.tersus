@@ -2456,7 +2456,7 @@ enum ExecutionEnd {
     Done,
     Jump { target: Int },
     Branch { yes: Int, no: Int, yesSteps: List<ExecutionStep>, noSteps: List<ExecutionStep> },
-    BooleanBranch { yes: Int, no: Int, value: ValueRef, trueValue: ValueRef, falseValue: ValueRef },
+    BooleanBranch { yes: Int, no: Int, join: Int, value: ValueRef, trueValue: ValueRef, falseValue: ValueRef },
     Condition { yes: Int, no: Int, relation: Int, left: ValueRef, right: ValueRef },
     // body is the block an iteration starts on, and region is the header and
     // every block that can get back to it; a block outside the region leaves
@@ -2541,6 +2541,18 @@ fn checkLoopBackEdge(initial: &ExecutionState, frame: &LoopFrame, id: Int) -> Ex
         return ExecutionFlowResult { status: 0, block: id, step: -1, state: preserved.state };
     };
     return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state };
+};
+
+fn stopAtJoin(blocks: &List<ExecutionBlock>, join: Int) -> List<ExecutionBlock> {
+    result = [];
+    for block in blocks {
+        if block.id = join {
+            result = push(result, ExecutionBlock { id: block.id, steps: [], end: ExecutionEnd::Done });
+        } else {
+            result = push(result, clone(block));
+        };
+    };
+    return result;
 };
 
 fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
@@ -2670,6 +2682,23 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                         term = (value as ValueLookup::Found).term;
                         yesLiteral = (trueValue as ValueLookup::Found).term;
                         noLiteral = (falseValue as ValueLookup::Found).term;
+                        if branch.join >= 0 {
+                            yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
+                            yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
+                            yesState = ExecutionState { context: yesContext, ..clone(run.state) };
+                            yesResult = walkExecution(stopAtJoin(blocks, branch.join), branch.yes, yesState, fuel - 1, clone(loops));
+                            if yesResult.status != 0 { return yesResult; };
+                            noContext = assumeRelation(run.state.context, 0, term, noLiteral);
+                            noContext = assumeBooleanFact(noContext, term, noLiteral);
+                            noState = ExecutionState { context: noContext, ..clone(run.state) };
+                            noResult = walkExecution(stopAtJoin(blocks, branch.join), branch.no, noState, fuel - 1, clone(loops));
+                            if noResult.status != 0 { return noResult; };
+                            merged = mergeStates(yesResult.state, noResult.state);
+                            if merged is StateMergeLookup::Found {
+                                return walkExecution(blocks, branch.join, (merged as StateMergeLookup::Found).state, fuel - 1, loops);
+                            };
+                            return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
+                        };
                         yesKnown = booleanKnown(run.state.context, term, yesLiteral, true);
                         if yesKnown {
                             yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);

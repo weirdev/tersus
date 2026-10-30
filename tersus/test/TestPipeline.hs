@@ -669,10 +669,19 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 checkBooleanBranch constantTerms destinations blocks expected =
                     let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                         initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
-                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
+                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("join", MInt (-1)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                      in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
                             result -> Just ("Unexpected boolean branch result: " ++ show result)
+                checkBooleanJoin rightValue expected =
+                    let joinConstants = boolConstants ++ [constant (30, 0, 3), constant (31, 0, rightValue), constant (32, 0, 3)]
+                        context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
+                        end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("join", MInt 3), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
+                        blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
+                     in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
+                            Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
+                            result -> Just ("Unexpected joined boolean branch result: " ++ show result)
                 boolConstants = [constant (20, 1, 1), constant (21, 1, 0)]
                 checkMirSubset input expected =
                     let lowered = parseSource input `bindResult` elaborate `bindResult` lowerElaborated
@@ -781,6 +790,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkBooleanBranch (boolConstants ++ [constant (0,0,1), constant (1,0,2)]) (1,99) [execBlock 1 [] execEndDone] 0
                       , checkBooleanBranch (boolConstants ++ [constant (0,0,2), constant (1,0,1)]) (99,1) [execBlock 1 [] execEndDone] 0
                       , checkBooleanBranch boolConstants (1,2) [execBlock 1 [] execEndDone, execBlock 2 [joinCheck] execEndDone] 2
+                      , checkBooleanJoin 3 0, checkBooleanJoin 4 1
                       , checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)
                       , checkMirSubset "x = 1; affirm x = 2; return x;" (Just False)
                       , checkMirSubset "x = 5; below = x < 6; affirm below = true; return 0;" (Just True)
