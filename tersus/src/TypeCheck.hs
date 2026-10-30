@@ -1571,6 +1571,12 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                 when (Set.member typeName (tcLinear s')) $ failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " is linear, so it is used by the program and not dropped")
                 when (Set.member ("Clone", typeName) (tcImpls s') || Set.member ("Copy", typeName) (tcImpls s')) $
                     failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " is Clone, and a copy of a value with a drop would be dropped twice")
+                -- (a drop frees the memory a value holds: native code tells a value that was moved out by its bytes being 0, which a value
+                -- that holds memory never is, since the address of an allocation is not 0, so a type with a drop holds a permission)
+                holding <- case Map.lookup typeName (tcGenerics s') of
+                    Just (_, fields) -> or <$> mapM (holdsGhost . snd) fields
+                    Nothing -> holdsGhost (TNamed typeName)
+                unless holding $ failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " holds no permission (Block<T>), and a drop is how a value frees the memory it holds; a value that has to be closed is a linear type, closed by a call")
                 putState s'{tcDrops = Set.insert typeName (tcDrops s')}
             return (found, params)
     (ctx', env', checked) <- definitions True (ctx, env, []) functions
