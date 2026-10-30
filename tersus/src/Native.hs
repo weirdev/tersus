@@ -1,5 +1,6 @@
 module Native
-    ( buildExecutable
+    ( cacheDirectory
+    , buildExecutable
     , buildExecutableWith
     , buildExecutableFast
     , runExecutable

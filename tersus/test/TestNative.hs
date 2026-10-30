@@ -7,6 +7,7 @@ module TestNative
     , runExecutableBytes
     ) where
 
+import Control.Concurrent.MVar (MVar, newMVar, withMVar)
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
@@ -15,6 +16,7 @@ import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFile
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO (IOMode (..), hClose, hGetContents, hPutStr, openTempFile, withBinaryFile)
+import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 
 import Bootstrap (llvmOfOwned, tersusLlvm)
@@ -970,7 +972,7 @@ sameAsMirFiles name initial source = do
                                     pure (maybe sameFiles Just sameStreams)
   where
     -- (the names of files are bytes here too)
-    withByteNames action = do
+    withByteNames action = withMVar encodingLock $ \_ -> do
         savedFs <- getFileSystemEncoding
         setFileSystemEncoding char8
         action `finally` setFileSystemEncoding savedFs
@@ -980,10 +982,17 @@ sameAsMirFiles name initial source = do
         (do contents <- withBinaryFile path ReadMode (\h -> hGetContents h >>= \c -> length c `seq` pure c)
             pure contents) `finally` setLocaleEncoding saved
 
+-- The encodings of this process are global (Bootstrap.emitWith sets them on its pipes instead, since the review of the test
+-- speedups): the two places here that set them take this lock between them, so that cases that run at the same time do not
+-- read or write each other's bytes.
+{-# NOINLINE encodingLock #-}
+encodingLock :: MVar ()
+encodingLock = unsafePerformIO (newMVar ())
+
 -- Runs a program and gives what it wrote as the text it is the UTF-8 of, whatever the locale is: the bytes are read as they are (a locale that is
 -- not UTF-8 refuses some of them) and decoded
 runExecutableBytes :: FilePath -> [String] -> String -> IO (ExitCode, String, String)
-runExecutableBytes exe args input = do
+runExecutableBytes exe args input = withMVar encodingLock $ \_ -> do
     saved <- getLocaleEncoding
     savedFs <- getFileSystemEncoding
     setLocaleEncoding char8

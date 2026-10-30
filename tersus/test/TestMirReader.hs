@@ -12,7 +12,7 @@ import Cli (Command (..), World (..), noWorld, runSourceIn)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import MirData (writeProgram)
-import Native (buildExecutable)
+import Native (buildExecutable, cacheDirectory)
 import Pipeline (ownedSource)
 import TestHarness
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
@@ -61,7 +61,7 @@ interpreted source = do
                 | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
 
 -- A program of the examples as an executable, built once for the tests that need it (clang is needed, and the tests pass without it).
--- The executable is kept in the temporary directory under a name made of the program, so that the groups that need the same one
+-- The executable is kept in the cache directory of the user under a name made of the program and of what it is compiled with, so that the groups that need the same one
 -- (each in a process of its own) build it once between them; a build that failed is not remembered, so the case that asked for it
 -- reports why, and a build that is cut short leaves nothing at the name.
 withProgram :: FilePath -> String -> (FilePath -> IO TestResult) -> IO TestResult
@@ -75,22 +75,25 @@ withProgram path name use = do
                     Just exe -> pure (built, Right exe)
                     Nothing -> do
                         source <- readFile path
-                        tmp <- getTemporaryDirectory
-                        let dir = tmp </> "tersus-test-programs"
-                            exe = dir </> (name ++ "-" ++ fingerprint [source, emitterHash, runtimeSource])
-                            partial = exe ++ ".building"
-                        createDirectoryIfMissing True dir
-                        present <- doesFileExist exe
-                        if present
-                            then pure (Map.insert name exe built, Right exe)
-                            else do
-                                ir <- tersusLlvm source
-                                result <- case ir of
-                                    Error e -> pure (Error e)
-                                    Ok text -> buildExecutable partial text
-                                case result of
-                                    Error e -> pure (built, Left e)
-                                    Ok () -> renameFile partial exe >> pure (Map.insert name exe built, Right exe)
+                        cache <- cacheDirectory
+                        case cache of
+                            Error e -> pure (built, Left e)
+                            Ok cacheDir -> do
+                                let dir = cacheDir </> "test-programs"
+                                    exe = dir </> (name ++ "-" ++ fingerprint [source, emitterHash, runtimeSource])
+                                    partial = exe ++ ".building"
+                                createDirectoryIfMissing True dir
+                                present <- doesFileExist exe
+                                if present
+                                    then pure (Map.insert name exe built, Right exe)
+                                    else do
+                                        ir <- tersusLlvm source
+                                        result <- case ir of
+                                            Error e -> pure (Error e)
+                                            Ok text -> buildExecutable partial text
+                                        case result of
+                                            Error e -> pure (built, Left e)
+                                            Ok () -> renameFile partial exe >> pure (Map.insert name exe built, Right exe)
             case built of
                 Left e -> pure (Just e)
                 Right exe -> use exe
