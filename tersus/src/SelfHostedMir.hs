@@ -87,6 +87,10 @@ proofOperand env (ATerm name) b = do
     o <- Map.lookup name env
     (v, b') <- operand o b
     pure ([], v, b')
+proofOperand env (BVar name) b = do
+    o <- Map.lookup name env
+    (v, b') <- operand o b
+    pure ([], v, b')
 proofOperand _ (CTerm (VInt n)) b = do
     (v, b') <- operand (M.Const (M.CInt n)) b
     pure ([], v, b')
@@ -248,6 +252,26 @@ proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel r)) _)) [a, b]) b0 
             Gt -> (2, y, x)
             GtEq -> (3, y, x)
     pure (leftSteps ++ rightSteps, check kind left right, b2)
+-- A bounded forall is checked by universal generalisation: the index is
+-- havoced to a fresh term, the guards are assumed for it, and the body is
+-- checked. (Using such a fact at a particular index is not modelled yet.)
+proofCheck env (Forall index guards body) b0 = do
+    let (i, b1) = fresh b0
+        local = negate i - 1
+        env' = Map.insert index (M.Copy (M.Local (fromInteger local))) env
+        havoc = step "Havoc" [("local", MInt local)]
+        assumeGuard (steps, b) guard = do
+            (prefix, checked, b') <- proofCheck env' guard b
+            if all totalStep prefix then Just () else Nothing
+            assumed <- case checked of
+                MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
+                _ -> Nothing
+            pure (steps ++ prefix ++ [assumed], b')
+        totalStep (MData "ExecutionStep::ApplyFresh" _) = True
+        totalStep _ = False
+    (guardSteps, b2) <- foldM assumeGuard ([], b1) guards
+    (bodyPrefix, checked, b3) <- proofCheck env' body b2
+    pure (havoc : guardSteps ++ bodyPrefix, checked, b3)
 proofCheck _ _ _ = Nothing
 
 -- Evaluate total expressions before assuming a clause. The reference can
