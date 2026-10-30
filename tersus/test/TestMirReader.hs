@@ -2,9 +2,10 @@ module TestMirReader (testMirReader, withProgram, sameText) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, renameFile)
+import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
+import System.IO (hClose, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 
 import Bootstrap (emitterHash, tersusLlvm)
@@ -81,12 +82,15 @@ withProgram path name use = do
                             Ok cacheDir -> do
                                 let dir = cacheDir </> "test-programs"
                                     exe = dir </> (name ++ "-" ++ fingerprint [source, emitterHash, runtimeSource])
-                                    partial = exe ++ ".building"
                                 createDirectoryIfMissing True dir
                                 present <- doesFileExist exe
                                 if present
                                     then pure (Map.insert name exe built, Right exe)
                                     else do
+                                        -- (a staging name of this build only: another group may be building the same executable)
+                                        (partial, handle) <- openTempFile dir (name ++ ".building")
+                                        hClose handle
+                                        removeFile partial
                                         ir <- tersusLlvm source
                                         result <- case ir of
                                             Error e -> pure (Error e)
