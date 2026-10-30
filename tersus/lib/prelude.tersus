@@ -31,3 +31,12 @@ trait Copy { };
 trait Drop {
     fn drop(self: Self) -> Int [{ }] [{ }];
 };
+
+// What a value that holds another is looked through to: `impl Deref<T> for W { fn deref(self: &Self) -> T { ... }; };` says that where a
+// struct or an enum is looked at (a field is read, `is`, `as`, a `match`, the base of an update, `shrinks`), a value of W is looked at
+// through the T its `deref` gives, as a Box is looked through to what it holds. The functions of T are not the functions of W: a method
+// is called on the value inside, as with a Box. A Box is the one Deref that no library can write, since what it holds is not a field of
+// it, so the language gives it itself (LANGUAGE.md, Box).
+trait Deref<T> {
+    fn deref(self: &Self) -> T [{ }] [{ }];
+};

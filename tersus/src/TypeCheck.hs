@@ -133,6 +133,9 @@ instance Monad TC where
 failTc :: String -> TC a
 failTc err = TC (\_ -> Left err)
 
+tryTc :: TC a -> TC (Maybe a)
+tryTc (TC f) = TC (\s -> Right (case f s of Left _ -> (Nothing, s); Right (a, s') -> (Just a, s')))
+
 getState :: TC TcState
 getState = TC (\s -> Right (s, s))
 
@@ -433,6 +436,51 @@ readField owner field structTy = do
         Just name -> expect ("base of an update of " ++ name) (TNamed name) held
         Nothing -> return ()
     fieldType field structTy
+
+-- The type a value is looked through to where a struct or an enum is looked at (a field, `is`, `as`, a `match`, the base of an
+-- update, `shrinks`): a Box to what it holds, which the language gives itself since what a Box holds is not a field of it, and a type
+-- with a `Deref` impl to the type the impl gives (LANGUAGE.md, Deref)
+derefTarget :: Type -> TC (Maybe Type)
+derefTarget ty = do
+    t <- zonk ty
+    case t of
+        TBox inner -> return (Just inner)
+        _ -> do
+            args <- traitArguments "Deref" t
+            return (case args of Just [target] -> Just target; _ -> Nothing)
+
+-- The type that owns the Deref impl of a type, whose `deref` a look-through calls
+derefOwner :: Type -> TC Name
+derefOwner ty = do
+    t <- zonk ty
+    case t of
+        TNamed name -> return (maybe name fst (instanceOf name))
+        TVariant variant -> fst <$> ctorInfo variant
+        other -> failTc ("Type error: " ++ renderType other ++ " has no Deref impl")
+
+-- An expression looked through to the value it holds, by a call of its type's `deref` where it has a Deref impl, and as it is for a
+-- Box (whose look-through the language gives) and for anything else. The result is the value that is looked at, so what is read from
+-- it, tested or taken apart is a view of a value the call gives, and the value it came from is only lent to the call.
+derefExpr :: Ctx -> Env -> (Type, Expression) -> TC (Type, Expression)
+derefExpr ctx env (ty, expr) = do
+    t <- zonk ty
+    case t of
+        TBox _ -> return (t, expr)
+        _ -> do
+            target <- derefTarget t
+            case target of
+                Just _ -> do
+                    owner <- derefOwner t
+                    (resultTy, call') <- inferExprR ctx env (F (Var (implFunctionName owner (Just "Deref") "deref")) [expr])
+                    derefExpr ctx env (resultTy, call')
+                Nothing -> return (t, expr)
+
+-- Whether a builtin looks at the struct or enum a value is of (tests its variant, casts it to one, reads a field of one)
+isLookThrough :: BuiltinFunct -> Bool
+isLookThrough (Is _) = True
+isLookThrough (Cast _) = True
+isLookThrough (Project _ _) = True
+isLookThrough _ = False
 
 -- The type of reading a field from a value of the given type
 fieldType :: Variable -> Type -> TC Type
@@ -1166,12 +1214,14 @@ notSize var = do
 resolveTermination :: Ctx -> Env -> Maybe Termination -> TC (Maybe Termination)
 resolveTermination ctx env (Just (Shrinks variant)) = do
     (ty', variant') <- inferExprR ctx env variant
-    ty <- zonk ty'
+    -- (what shrinks is what the value is looked through to, as for a Box: the parts of that are smaller)
+    (ty'', variant'') <- derefExpr ctx env (ty', variant')
+    ty <- zonk ty''
     case ty of
-        TInt -> return (Just (Counting variant'))
-        TNamed _ -> return (Just (Parts variant'))
-        TVariant _ -> return (Just (Parts variant'))
-        TBox _ -> return (Just (Parts variant'))
+        TInt -> return (Just (Counting variant''))
+        TNamed _ -> return (Just (Parts variant''))
+        TVariant _ -> return (Just (Parts variant''))
+        TBox _ -> return (Just (Parts variant''))
         _ -> failTc ("Type error: shrinks needs an Int, an enum or a struct, got " ++ renderType ty)
 resolveTermination _ _ term = return term
 
@@ -1227,8 +1277,14 @@ inferExprR ctx env expr =
                 _ -> return (t, expr)
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
             (structTy, struct') <- inferExprR ctx env struct
-            t <- readField owner field structTy
-            return (t, F funct [struct'])
+            -- (a field of the value itself is read as it is; a field it does not have is read from what it is looked through to)
+            direct <- tryTc (readField owner field structTy)
+            case direct of
+                Just t -> return (t, F funct [struct'])
+                Nothing -> do
+                    (targetTy, struct'') <- derefExpr ctx env (structTy, struct')
+                    t <- readField owner field targetTy
+                    return (t, F funct [struct''])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
             inferred0 <- mapM (inferExprR ctx env) args
             -- (a tuple's parts are what they are: it is made of their types)
@@ -1409,6 +1465,12 @@ inferExprR ctx env expr =
             (fname, Just struct) -> resolveAssociated struct fname >>= \full -> callResolved full inferred0
             _ -> ordinaryBuiltin funct funct' ft inferred0
     ordinaryBuiltin funct funct' ft inferred0 = do
+        -- (a value that is tested for its variant, cast to one or read for a field is looked through what it holds first, Box or Deref)
+        inferred0 <- case (builtinHead ctx env funct, inferred0) of
+            (Just b, first : rest) | isLookThrough b -> do
+                first' <- derefExpr ctx env first
+                return (first' : rest)
+            _ -> return inferred0
         -- (a builtin takes what it is given: it looks through a Box itself)
         inferred <- case builtinHead ctx env funct of
             -- (the builtins of bytes take a number written out as a Byte)
@@ -1646,8 +1708,13 @@ inferProofR ctx env proof =
         CTerm value -> (\t -> (t, proof)) <$> valueType value
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
             (structTy, struct') <- inferProofR ctx env struct
-            t <- readField owner field structTy
-            return (t, FApp funct [struct'])
+            direct <- tryTc (readField owner field structTy)
+            case direct of
+                Just t -> return (t, FApp funct [struct'])
+                Nothing -> do
+                    (targetTy, struct'') <- derefProof (structTy, struct')
+                    t <- readField owner field targetTy
+                    return (t, FApp funct [struct''])
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
             inferred <- mapM (inferProofR ctx env) args
             t <- checkConstruct name fields (map fst inferred)
@@ -1702,7 +1769,12 @@ inferProofR ctx env proof =
         FApp (ATerm name) args | not (shadowed name) -> ordinaryCall name args
         FApp funct args -> do
             (_, funct') <- inferProofR ctx env funct
-            inferred <- mapM (inferProofR ctx env) args
+            inferred0 <- mapM (inferProofR ctx env) args
+            inferred <- case (proofBuiltin funct', inferred0) of
+                (Just b, first : rest) | isLookThrough b -> do
+                    first' <- derefProof first
+                    return (first' : rest)
+                _ -> return inferred0
             owner <- case (proofBuiltin funct', inferred) of
                 (Just b, (xt, _) : _) | Just fname <- sequenceFunction b -> (,) fname <$> structOwner xt
                 _ -> return ("", Nothing)
@@ -1724,6 +1796,18 @@ inferProofR ctx env proof =
             expect "body of forall" TBool bt
             return (TBool, Forall index guards' body')
   where
+    -- A proof looked through to the value it holds, by a call of its type's `deref`, as an expression is (see derefExpr)
+    derefProof (ty, proof) = do
+        t <- zonk ty
+        case t of
+            TBox _ -> return (t, proof)
+            _ -> do
+                target <- derefTarget t
+                case target of
+                    Just _ -> do
+                        owner <- derefOwner t
+                        derefProof =<< ghostCall (implFunctionName owner (Just "Deref") "deref") [(t, proof)]
+                    Nothing -> return (t, proof)
     ordinaryCall name args = do
         inferred <- mapM (inferProofR ctx env) args
         s <- getState
