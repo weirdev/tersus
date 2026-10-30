@@ -7,9 +7,10 @@ import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO.Unsafe (unsafePerformIO)
 
-import Bootstrap (tersusLlvm)
+import Bootstrap (emitterHash, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runSourceIn)
 import Hash (fingerprint)
+import LlvmRuntime (runtimeSource)
 import MirData (writeProgram)
 import Native (buildExecutable)
 import Pipeline (ownedSource)
@@ -76,7 +77,7 @@ withProgram path name use = do
                         source <- readFile path
                         tmp <- getTemporaryDirectory
                         let dir = tmp </> "tersus-test-programs"
-                            exe = dir </> (name ++ "-" ++ fingerprint [source])
+                            exe = dir </> (name ++ "-" ++ fingerprint [source, emitterHash, runtimeSource])
                             partial = exe ++ ".building"
                         createDirectoryIfMissing True dir
                         present <- doesFileExist exe
