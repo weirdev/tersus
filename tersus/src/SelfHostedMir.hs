@@ -147,6 +147,18 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Pop) _)) [list]) b0 = 
 -- MIR environment does not bind that name to a program value.
 proofOperand env (FApp (ATerm "pop") [list]) b
     | Map.notMember "pop" env = proofOperand env (FApp (CTerm (builtinFunct Pop)) [list]) b
+-- Builtins also occur in proofs under their source names (size, get, ...);
+-- they denote the builtin only when the name is not a program value.
+proofOperand env (FApp (ATerm name) args) b
+    | Map.notMember name env = case name of
+        "size" -> proofOperand env (FApp (CTerm (builtinFunct Size)) args) b
+        "get" -> proofOperand env (FApp (CTerm (builtinFunct Get)) args) b
+        "first" -> proofOperand env (FApp (CTerm (builtinFunct First)) args) b
+        "last" -> proofOperand env (FApp (CTerm (builtinFunct Last)) args) b
+        "push" -> proofOperand env (FApp (CTerm (builtinFunct Push)) args) b
+        "set" -> proofOperand env (FApp (CTerm (builtinFunct Set)) args) b
+        "newArray" -> proofOperand env (FApp (CTerm (builtinFunct NewArray)) args) b
+        _ -> Nothing
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Set) _)) [list, index, value]) b0 = do
     (listSteps, listRef, b1) <- proofOperand env list b0
     (indexSteps, indexRef, b2) <- proofOperand env index b1
@@ -1020,5 +1032,5 @@ checkerProgram = case parseStatementBlock (preludeSource ++ "\n" ++ validationSo
 validateByTersus :: M.Program -> Result () String
 validateByTersus program = checkerProgram `bindResult` \checker -> validateMirSubset checker program `bindResult` \verdict -> case verdict of
     Just True -> Ok ()
-    Just False -> Error "an obligation could not be proved"
+    Just False -> Error "Could not prove: an obligation could not be proved by the Tersus validator"
     Nothing -> Error "the program uses a feature the Tersus validator does not model yet"
