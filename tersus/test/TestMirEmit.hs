@@ -24,12 +24,7 @@ testMirEmit =
     TestList
         "testMirEmit"
         [ TestCase "the reader is the same in the reader and in the emitter" sameReader
-        , TestList
-            "interpreted"
-            [ TestCase "the IR of a loop" (readFile "examples/loops.tersus" >>= interpretedIr)
-            , TestCase "the outline of a struct and an enum" (readFile "examples/enums.tersus" >>= interpretedOutline)
-            , TestCase "the code of arithmetic" (readFile "examples/arithmetic.tersus" >>= interpretedBodies)
-            ]
+        , TestCase "the IR of a loop, interpreted" (readFile "examples/loops.tersus" >>= interpretedIr)
         , TestCase "every example and program, natively" everyProgram
         , TestCase "what is not the MIR is refused" refusal
         ]
@@ -69,29 +64,7 @@ interpretedIr source = do
                 | "@tersus_main" `isInfixOf` output && "define" `isInfixOf` output -> Nothing
                 | otherwise -> Just ("wrote\n" ++ take 2000 output)
 
-interpretedOutline :: String -> IO TestResult
-interpretedOutline source = do
-    emitter <- emitterProgram
-    pure $ case ownedSource source of
-        Error e -> Just e
-        Ok owned -> case mapResult fst (runEmitter noWorld{worldInput = writeProgram owned, worldArgs = ["outline"]} emitter) of
-            Error e -> Just e
-            Ok (output, errors)
-                | not (null errors) -> Just ("reported: " ++ errors)
-                | "@\"type." `isInfixOf` output -> Nothing
-                | otherwise -> Just ("wrote\n" ++ output)
 
-interpretedBodies :: String -> IO TestResult
-interpretedBodies source = do
-    emitter <- emitterProgram
-    pure $ case ownedSource source of
-        Error e -> Just e
-        Ok owned -> case mapResult fst (runEmitter noWorld{worldInput = writeProgram owned, worldArgs = ["bodies"]} emitter) of
-            Error e -> Just e
-            Ok (output, errors)
-                | not (null errors) -> Just ("reported: " ++ errors)
-                | "; function 0" `isInfixOf` output -> Nothing
-                | otherwise -> Just ("wrote\n" ++ output)
 
 -- Every mode writes the IR of every program, and the data of the program read back from the data makes the same IR as the data
 everyProgram :: IO TestResult

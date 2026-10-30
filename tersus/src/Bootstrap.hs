@@ -6,6 +6,7 @@ module Bootstrap
     , cachedSeed
     , cachedEmitter
     , tersusLlvm
+    , llvmOfOwned
     , emitWith
     ) where
 
@@ -19,6 +20,7 @@ import System.Process (readProcessWithExitCode)
 
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
+import qualified Mir as M
 import MirData (writeProgram)
 import Native (buildExecutable)
 import Pipeline (ownedSource)
@@ -121,13 +123,18 @@ cacheDirectory = do
 tersusLlvm :: String -> IO (Result String String)
 tersusLlvm source = case ownedSource source of
     Error e -> pure (Error e)
-    Ok owned -> do
-        exe <- cachedEmitter
-        case exe of
-            Error e -> pure (Error e)
-            Ok path -> do
-                ir <- emitWith path (writeProgram owned)
-                pure (either' ir)
+    Ok owned -> llvmOfOwned owned
+
+-- The LLVM IR of a program that who owns each value has been made explicit in (the owned MIR of Pipeline), by the emitter in
+-- Tersus: what `tersusLlvm` does with what `ownedSource` gives, for a caller that has the program already.
+llvmOfOwned :: M.Program -> IO (Result String String)
+llvmOfOwned owned = do
+    exe <- cachedEmitter
+    case exe of
+        Error e -> pure (Error e)
+        Ok path -> do
+            ir <- emitWith path (writeProgram owned)
+            pure (either' ir)
   where
     either' (Error e) = Error ("Native code failed: " ++ e)
     either' ok = ok
