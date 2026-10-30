@@ -153,6 +153,7 @@ testSequence =
                 , testCase "nor is the struct" (errorHas "struct StdList { x: Int }; return 1;" "StdList is reserved")
                 , testCase "nor are those of the Box of native code" (errorHas "struct StdBox { x: Int }; return 1;" "StdBox is reserved")
                 , testCase "nor its functions" (errorHas "fn stdBoxNew(x: Int) -> Int { return x; }; return 1;" "stdBoxNew is reserved")
+                , testCase "a program that mentions Deref has the trait" (runsAs "struct P { x: Int, y: Int }; impl Clone for P { }; struct W { v: P }; impl Deref<P> for W { fn deref(self: &Self) -> P [{ }] [{ affirm return = self.v; }] { return clone(self.v); }; }; w = W { v: P { x: 4, y: 5 } }; return w.x + w.y;" "9")
                 , testCase "a program that mentions neither is as it was" (runsAs "return 4;" "4")
                 , testCase "the lines of an error are those of the program" (errorHas "\n\nreturn ( ;" "line 3")
                 , testCase "an error in the use of the library is the program's" (errorHas (counter ++ "x = Three { a: 1, n: 1 };\nreturn get(x, 5);") "Could not prove: i < <Three as Sequence>::size(self)")
