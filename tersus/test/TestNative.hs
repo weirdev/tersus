@@ -146,19 +146,26 @@ testNativeIr =
         , TestCase "a function with a non-ASCII name" $
             withIr "fn d\x00e9(n: Int) -> Int { return n + 1; }; return d\x00e9(1);" (\ir -> testAssertTrue (all isAscii ir && "@\"fn.d\\C3\\A9\"" `isInfixOf` ir))
         , TestCase "a program with non-ASCII names builds" $ buildsOnly "struct P { \x00e9: Int }; enum \x00d1 { \x00c4 { \x00f6: Int }, \x00dc }; fn d\x00e9(n: Int) -> Int { return n + 1; }; return \x00d1::\x00c4 { \x00f6: d\x00e9(1) };"
-        , TestCase "a function value is the address of the function" $
-            case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
-                Left e -> pure (Just e)
-                Right program -> do
-                    ir <- emitUnvalidated (nativeProgram program)
-                    pure $ case ir of
-                        Error e -> Just e
-                        Ok text -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` text && "call i64 %" `isInfixOf` text)
+        , TestCase "a function value is the address of the function" $ do
+            available <- clangAvailable
+            if not available
+                then pure Nothing
+                else case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
+                    Left e -> pure (Just e)
+                    Right program -> do
+                        ir <- emitUnvalidated (nativeProgram program)
+                        pure $ case ir of
+                            Error e -> Just e
+                            Ok text -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` text && "call i64 %" `isInfixOf` text)
         , TestCase "a function with a size is made for each size it is called with" $
             withIr "fn count<n>(a: Array<Int, n>) -> Int { return n; }; return count(#[1, 2, 3]) + count(#[1]) + count(#[4, 5, 6]);" (\ir -> testAssertTrue ("@\"fn.count<3>\"" `isInfixOf` ir && "@\"fn.count<1>\"" `isInfixOf` ir && not ("@\"fn.count\"" `isInfixOf` ir)))
         , TestCase "an array that a size makes too large for a frame is refused when the size is known" $ do
-            ir <- tersusLlvm "fn f<n>(a: Array<Int, n>) -> Int { b = array(n, a); return size(b); }; return f(array(8192, 0));"
-            pure (testAssertErrorContains "In f<8192>: " ir)
+            available <- clangAvailable
+            if not available
+                then pure Nothing
+                else do
+                    ir <- tersusLlvm "fn f<n>(a: Array<Int, n>) -> Int { b = array(n, a); return size(b); }; return f(array(8192, 0));"
+                    pure (testAssertErrorContains "In f<8192>: " ir)
         , TestCase "a list that is moved to the call is not copied" $
             withIr "fn total(a: List<Int>) -> Int { return size(a); }; l = push([], 1); return total(l);" (\ir -> testAssertTrue (not ("call void @tersus_clone" `isInfixOf` ir)))
         , TestCase "a list that is lent is not copied for the call" $
@@ -178,11 +185,16 @@ testNativeIr =
                 [Just (Llvm, "a.tersus"), Just (Build "a", "a.tersus"), Nothing, Just (Owned, "a.tersus")]
         ]
   where
+    -- (the IR is written by the emitter in Tersus, which is built with clang: without it these cases pass, as the other native ones do)
     withIr source check = do
-        ir <- tersusLlvm source
-        pure $ case ir of
-            Error e -> Just e
-            Ok text -> check text
+        available <- clangAvailable
+        if not available
+            then pure Nothing
+            else do
+                ir <- tersusLlvm source
+                pure $ case ir of
+                    Error e -> Just e
+                    Ok text -> check text
 
 arithmeticPrograms :: [(String, String)]
 arithmeticPrograms =
