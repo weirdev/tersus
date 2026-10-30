@@ -1,6 +1,6 @@
 # Raw pointers (design)
 
-> This is the design of step 25 of the roadmap in `README.md`, and of the part of step 29 that puts `Box` in the library. It replaces Part 3 of `DROPS.md`, and the `*T` that step 25 sketches. Most of it is built: see Status, at the end, for what is and how it differs from what is written here.
+> This is the design of step 25 of the roadmap in `README.md`, and of the part of step 29 that puts `Box` in the library. It replaces Part 3 of `DROPS.md`, and the `*T` that step 25 sketches. It is built: see Status, at the end, for how it differs from what is written here, and for what is left to step 29.
 
 ## The idea
 
@@ -385,4 +385,4 @@ Where the built form differs from the text above:
 
 10. **`Box` on an address (step 29, the native part)**: `lib/box.tersus` is the `Box<T>` of the section above as `StdBox<T>`, proved, with a drop that drops the value and frees the slot, and `MirLists` makes each `Box<T>` of a validated program (not of an array) one: `Box::new` and `Box::unbox` are calls of `stdBoxNew` and `stdBoxUnbox`, and a field read, a variant test or a cast through a Box stays one through the `StdBox`, which native code reads at its address (its only word) as it read a Box, so a `match` still takes the fields out of a Box that is not used again. A Box of an array, of a size or of any, is a `StdList` with as many elements as room (`Array::boxed` is `stdListFilled`, unsizing is the list as it is, and `Box::new` and `Box::unbox` of an array move the elements into memory of the list and out of it). Native code has no Box of its own any more: the runtime frees a `StdBox` by its drop, and prints, compares and copies it as the value at its address (`Variants.tagged` is 3).
 
-What is left is the rest of step 29: the checker and the validator still know `Box` by name (looking through it for fields and `match`, the recursion check, `=` on two Boxes, the unsizing coercion). Those are the language items of README step 29.
+What this design describes is built. What it leaves to README step 29 is the language items: the checker and the validator still know `Box` by name (looking through it for fields and `match`, the recursion check, `=` on two Boxes, the unsizing coercion), which step 29 turns into general rules (a deref for any type with one, a recursion check asked of `Addr<T>`, the equality and the coercion of the library), along with `List` as a struct of the prelude.
