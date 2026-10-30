@@ -30,8 +30,13 @@ impl<T> Growable<T> for List<T> {
     fn push(self: Self, x: T) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; affirm forall j in 0..size(self): get(return, j) = get(self, j); }] { return push(self, x); };
 };
 
-// A Box of an array is a sequence of its elements, by the same kind of impl, and it cannot grow. (An array is one too, as it was: a
-// trait impl's functions cannot yet be given the size of the array's type, so its Sequence is the language's, as an array is.)
+// An array is a sequence of its elements, by the same kind of impl, and it cannot grow, and a Box of one is too.
+impl<T, n> Sequence<T> for Array<T, n> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); };
+    fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self, i); }] { return clone(get(self, i)); };
+    fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }] { return set(self, i, x); };
+};
+
 impl<T> Sequence<T> for Box<Array<T>> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); };
     fn get(self: &Self, i: Int) -> T [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self, i); }] { return clone(get(self, i)); };
