@@ -215,6 +215,9 @@ testUserRewriteValidation =
         , parseValidateWEMatchHelper
             "{ proof definedPositive(x) [{ define next = x + 1; affirm next > x; }] [{ affirm x + 1 > x; }] { define next = x + 1; affirm next > x; }; x = 5; rewrite definedPositive x; affirm x + 1 > x; }"
             [FApp (CTerm (builtinFunct (Rel Gt))) [FApp (CTerm (builtinFunct Plus)) [ATerm "x", CTerm (VInt 1)], ATerm "x"]]
+        , parseValidateWEMatchHelper
+            "{ proof positiveSum(x, y) [{ define total = x + y; affirm total > 0; }] [{ affirm x + y > 0; }] { define total = x + y; affirm total > 0; }; fn f(flag: Bool) -> Int { x = 0; y = 0; if flag { x = 1; y = 0; } else { x = 0; y = 1; }; rewrite positiveSum x y; return 0; }; return f(true); }"
+            []
         ]
 
 testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult
