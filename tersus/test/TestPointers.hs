@@ -128,6 +128,7 @@ testPointers =
             , testCase "a permission moved out of a value with a drop" (rejected (dropper ++ "v = V::new(3); b = v.blk; return Addr::free(v.addr, b);") "which has a drop that would free the memory again")
             , testCase "a permission in a value that is lent is not used up" (rejected (dropper ++ "fn f(v: &V) -> Int { return Addr::free(v.addr, v.blk); }; v = V::new(2); return f(v);") "is a permission in a value that is lent (&T) to this function")
             , testCase "a drop uses a permission once" (rejected (owner ++ "impl Drop for V { fn drop(self: Self) -> Int { d = Addr::free(self.addr, self.blk); return d + Addr::free(self.addr, self.blk); }; }; v = V::new(2); return v.n;") "self.blk was moved")
+            , testCase "a type is recursive through an address, as through a Box" (runs "struct Node { v: Int, next: Addr<Node> }; enum T { Leaf, Node { l: Addr<T>, v: Int } }; n = Node { v: 1, next: Addr::null() }; return n.v;" "1")
             , testCase "a type with a drop holds a permission" (rejected "struct H { n: Int }; impl Drop for H { fn drop(self: Self) -> Int { return self.n; }; }; return 1;" "H holds no permission")
             , testCase "a drop is not called by the program" (rejected (dropper ++ "v = V::new(3); return v.drop();") "is a drop, which is called where a value goes out of scope")
             , testCase "a drop of the wrong type" (rejected (owner ++ "impl Drop for V { fn drop(self: Self) -> Bool { return true; }; }; return 0;") "but Drop declares fn(V) -> Int")
