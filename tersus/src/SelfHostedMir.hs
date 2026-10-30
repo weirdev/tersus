@@ -1,7 +1,7 @@
--- A conservative bridge from a supported MIR subset to the Tersus checker.
--- Unsupported instructions or proof forms are reported as Nothing, never
--- accepted. This is not used as the production validator.
-module SelfHostedMir (validateMirSubset) where
+-- The bridge from MIR to the validator written in Tersus
+-- (lib/validation.tersus): encode is a data-only translation, and anything it
+-- does not fully model is reported as Nothing, never accepted.
+module SelfHostedMir (validateMirSubset, validateByTersus) where
 
 import Control.Monad (foldM)
 import Data.List (isPrefixOf, nub)
@@ -9,10 +9,15 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
+import MirGhost (eraseGhosts)
+import MirLower (lowerElaborated)
 import MirVerify (verifyProgram)
+import Parse (parseStatementBlock)
+import PreludeSource (preludeSource, validationSource)
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibValCtx)
 import TersusTypes
+import TypeCheck (elaborate)
 import Utils (Result (..), bindResult, inIntRange)
 
 data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)] }
@@ -519,7 +524,7 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
             let M.BlockId yesId = yes
                 M.BlockId noId = no
                 ending = record "ExecutionEnd::BooleanBranch"
-                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (-1)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
+                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (joinFor yes no)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
             Just ([required], ending, b3)
         (Nothing, M.Call (M.Const (M.CFn name)) args dest target) | allowCalls -> do
             callee <- Map.lookup name functions
@@ -633,6 +638,25 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
     localNumber (M.Local i) = toInteger i
     localRef i = record "ValueRef::Local" [("local", MInt i)]
     jump (M.BlockId target) = record "ExecutionEnd::Jump" [("target", MInt (toInteger target))]
+    -- The join of a branch is the first block both successors reach by straight
+    -- jumps alone, when neither the branch nor the join is inside a loop region:
+    -- merging there is what the Tersus checker does at that block, and inside a
+    -- loop the per-path walk is kept instead, since a merged state can drop the
+    -- facts a loop invariant is checked against.
+    joinFor yes no
+        | any (Set.member blockId) regions = -1
+        | otherwise = case [n | c@(M.BlockId n) <- path yes, c `elem` path no, c /= blockId, not (Map.member c (M.specLoops (M.fnSpec fn))), not (any (Set.member c) regions)] of
+            n : _ -> toInteger n
+            [] -> -1
+      where
+        regions = Map.elems (loopRegions fn)
+        path start = go Set.empty start
+          where
+            go seen b
+                | Set.member b seen = []
+                | otherwise = b : case Map.lookup b (M.fnBlocks fn) of
+                    Just (M.BasicBlock _ (M.Goto target)) -> go (Set.insert b seen) target
+                    _ -> []
     normal r a b = case r of
                 Eq -> (0, a, b)
                 NotEq -> (1, a, b)
@@ -791,3 +815,21 @@ validateMirSubset checker program = verifyProgram program `bindResult` \_ -> cas
             Just (MInt _) -> Ok Nothing
             _ -> Error "Tersus validator returned an invalid status"
         _ -> Error "Tersus validator returned an invalid result"
+
+-- The validator written in Tersus, lowered once without passing through any
+-- validator (it is the bootstrap: the Tersus validator's own test in
+-- TestPipeline checks that it accepts its own MIR). Every program that is
+-- validated is validated by this program and nothing else.
+checkerProgram :: Result M.Program String
+checkerProgram = case parseStatementBlock (preludeSource ++ "\n" ++ validationSource) of
+    Left err -> Error ("Could not parse lib/validation.tersus: " ++ show err)
+    Right stmts -> elaborate stmts `bindResult` \elaborated -> lowerElaborated elaborated `bindResult` eraseGhosts
+
+-- Validate a program with the Tersus validator. A program the bridge does not
+-- model is refused, not waved through: there is no other validator to fall
+-- back to.
+validateByTersus :: M.Program -> Result () String
+validateByTersus program = checkerProgram `bindResult` \checker -> validateMirSubset checker program `bindResult` \verdict -> case verdict of
+    Just True -> Ok ()
+    Just False -> Error "an obligation could not be proved"
+    Nothing -> Error "the program uses a feature the Tersus validator does not model yet"
