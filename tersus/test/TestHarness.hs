@@ -24,8 +24,8 @@ module TestHarness
 import qualified Control.Exception as Exception
 import Control.Concurrent (forkIO)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
-import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, displayException, mask, throwIO, try)
+import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
+import Control.Exception (SomeException, bracket_, displayException, mask, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities)
 import qualified Data.Map.Strict as Map
@@ -72,8 +72,15 @@ forceTestResult (Just message) = forceString message
     forceString [] = ()
     forceString (c : cs) = c `seq` forceString cs
 
+-- The cases that run at once, in every parallel group at every depth between them: a parallel group inside another does
+-- not multiply the number, so the whole process stays within its capabilities (the child processes of TestTersus are given
+-- their share of the processors as theirs).
+{-# NOINLINE caseSlots #-}
+caseSlots :: QSem
+caseSlots = unsafePerformIO (getNumCapabilities >>= newQSem . max 1)
+
 runTest :: [String] -> Test -> IO TestSummary
-runTest prefixes (TestCase name resultIO) = do
+runTest prefixes (TestCase name resultIO) = bracket_ (waitQSem caseSlots) (signalQSem caseSlots) $ do
     let fullName = unwords (prefixes ++ [name])
     resultOrCrash <- try (resultIO >>= \result -> Exception.evaluate (forceTestResult result) >> pure result) :: IO (Either SomeException TestResult)
     case resultOrCrash of
@@ -95,11 +102,9 @@ runTest prefixes (TestList name tests) = do
     pure (foldr combineSummaries (testSummary 0 0) summaries)
 runTest prefixes (TestParallel name tests) = do
     putStrLn $ "Running " ++ unwords (prefixes ++ [name])
-    cores <- getNumCapabilities
-    slots <- newQSem (max 1 cores)
     vars <- forM tests $ \test -> do
         var <- newEmptyMVar
-        _ <- forkIO (mask (\restore -> waitQSem slots >> (try (restore (runTest (prefixes ++ [name]) test)) >>= \r -> signalQSem slots >> putMVar var r)))
+        _ <- forkIO (mask (\restore -> (try (restore (runTest (prefixes ++ [name]) test)) >>= \r -> putMVar var r)))
         pure var
     summaries <- forM vars (\var -> takeMVar var >>= either (\e -> throwIO (e :: SomeException)) pure)
     putStrLn ""
