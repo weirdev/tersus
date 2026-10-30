@@ -182,10 +182,12 @@ runInParallel jobs names = do
         _ <- forkIO $
             bracket_ (waitQSem sem) (signalQSem sem) $ do
                 started <- getMonotonicTime
-                -- (a group runs in one thread, so one capability is all its process can use: left to the package's -with-rtsopts=-N, every
+                -- (the processors are shared between the groups that run at once: left to the package's -with-rtsopts=-N, every
                 -- child would take as many capabilities as the machine has processors, so N children would make N times N of them and their
-                -- threads and parallel garbage collectors would compete for the same cores)
-                let arguments = [name, "--child", "+RTS", "-N1", "-RTS"]
+                -- threads and parallel garbage collectors would compete for the same cores. Each child is given its share of them,
+                -- which is also the number of cases of a TestParallel it runs at once)
+                processors <- getNumProcessors
+                let arguments = [name, "--child", "+RTS", "-N" ++ show (max 1 (processors `div` jobs)), "-RTS"]
                 outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
                 finished <- getMonotonicTime
                 putMVar done (name, finished - started, outcome)
