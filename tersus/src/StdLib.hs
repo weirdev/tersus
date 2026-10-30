@@ -445,6 +445,19 @@ builtinFunct BlockCast =
         , relProof Eq (blockCount (ATerm "return")) (CTerm (VInt 0))
         , allEmpty "return"
         ]
+-- Uninit<T>: whether one holds a value, and the value, are filled(u) and at(u)
+builtinFunct UninitEmpty = VFunct [] [] [] (BuiltinFunct UninitEmpty) [relProof Eq (uninitFilled (ATerm "return")) (CTerm (VBool False))]
+builtinFunct UninitNew =
+    VFunct ["x"] [] [] (BuiltinFunct UninitNew) [relProof Eq (uninitFilled (ATerm "return")) (CTerm (VBool True)), relProof Eq (ptrApp UninitAt [ATerm "return"]) (ATerm "x")]
+builtinFunct UninitGet =
+    VFunct ["u"] [ProofAssert (relProof Eq (uninitFilled (ATerm "u")) (CTerm (VBool True)))] [] (BuiltinFunct UninitGet) [relProof Eq (ATerm "return") (ptrApp UninitAt [ATerm "u"])]
+builtinFunct UninitTake =
+    VFunct ["u"] [ProofAssert (relProof Eq (uninitFilled (ATerm "u")) (CTerm (VBool True)))] [] (BuiltinFunct UninitTake) [relProof Eq (ATerm "return") (ptrApp UninitAt [ATerm "u"])]
+builtinFunct UninitDiscard =
+    VFunct ["u"] [ProofAssert (relProof Eq (uninitFilled (ATerm "u")) (CTerm (VBool False)))] [] (BuiltinFunct UninitDiscard) [relProof Eq (ATerm "return") (CTerm (VInt 0))]
+builtinFunct UninitFilled = VFunct ["u"] [] [] (BuiltinFunct UninitFilled) []
+builtinFunct UninitAt = VFunct ["u"] [] [] (BuiltinFunct UninitAt) []
+builtinFunct Replace = VFunct ["list", "index", "x"] [] [] (BuiltinFunct Replace) []
 -- (the forms a program writes, which the lowering takes apart, and the functions of a permission, which have no contract)
 builtinFunct b | b `elem` [AllocPair, TakePair, ResizePair, SplitPair, BlockBase, BlockCap, BlockFilled, BlockContents, BlockOrigin, BlockStart, BlockExtent, BlockCount] =
     VFunct (map (\i -> "a" ++ show i) [1 .. ptrArity b]) [] [] (BuiltinFunct b) []
@@ -622,6 +635,9 @@ ptrArity b = case b of
 -- (the term of a builtin applied: the symbol has no contract, as getSymbol)
 ptrApp :: BuiltinFunct -> [VariableProof] -> VariableProof
 ptrApp b args = FApp (CTerm (VFunct [] [] [] (BuiltinFunct b) [])) args
+
+uninitFilled :: VariableProof -> VariableProof
+uninitFilled u = ptrApp UninitFilled [u]
 
 blockBase, blockCap, blockOrigin, blockStart, blockCount :: VariableProof -> VariableProof
 blockCount b = ptrApp BlockCount [b]

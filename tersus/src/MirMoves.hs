@@ -46,6 +46,7 @@ isCopyType copies program = go (0 :: Int)
             TBool -> True
             TFn{} -> True
             TAddr _ -> True
+            TUninit t -> not (ownsHeap program t) && go (depth + 1) t
             TArrayOf t _ -> go (depth + 1) t
             TRef t -> go (depth + 1) t
             TNamed n -> declared depth n
@@ -58,6 +59,24 @@ isCopyType copies program = go (0 :: Int)
         Just (StructDecl fields) -> all (go (depth + 1) . snd) fields
         Just (EnumDecl variants) -> all (go (depth + 1) . snd) (concatMap snd variants)
         Nothing -> True
+
+-- Whether a value of the type owns something on the heap: a list or a Box, in it at any depth (before native code, a list is a list)
+ownsHeap :: Program -> Type -> Bool
+ownsHeap program = go Set.empty
+  where
+    go seen ty = case ty of
+        TList _ -> True
+        TBox _ -> True
+        TArrayOf t _ -> go seen t
+        TUninit t -> go seen t
+        TNamed n | Set.member n seen -> False
+        TNamed n -> declared (Set.insert n seen) n
+        TVariant v -> maybe False (declared seen) (ownerOf program v)
+        _ -> False
+    declared seen n = case Map.lookup n (progTypes program) of
+        Just (StructDecl fields) -> any (go seen . snd) fields
+        Just (EnumDecl variants) -> any (go seen . snd) (concatMap snd variants)
+        Nothing -> False
 
 -- A step from a value to a part of it: a field, an element of a list, the tag of an enum, or a slot of the memory a permission is for
 data Step = SField Name String | SElem | STag | SSlot
@@ -88,15 +107,20 @@ joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.un
 sameShape :: St -> St -> Bool
 sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b)
 
--- The parts of a value of the type that are permissions, as the steps to each from the value: the value itself for a Block, the fields
--- that are (or hold) one for a struct. An enum that holds one in a variant is taken as a whole.
-linearParts :: Program -> Type -> [[Step]]
-linearParts program = go (0 :: Int)
+-- The parts of a value of the type that are permissions or values of a linear type, as the steps to each from the value: the value itself
+-- for a Block or a linear struct or enum, the fields that are (or hold) one for any other struct. An enum that holds one in a variant is taken
+-- as a whole.
+linearParts :: Set Name -> Program -> Type -> [[Step]]
+linearParts linear program = go (0 :: Int)
   where
     go depth ty
         | depth > 8 = []
         | otherwise = case ty of
             TBlock _ -> [[]]
+            -- (an Uninit of a value that owns something is linear: what it holds is freed only by taking it out)
+            TUninit t | ownsHeap program t -> [[]]
+            TNamed n | maybe n fst (instanceOf n) `Set.member` linear -> [[]]
+            TVariant v | Just n <- ownerOf program v, maybe n fst (instanceOf n) `Set.member` linear -> [[]]
             TNamed n -> declared depth n
             TVariant v -> maybe [] (declared depth) (ownerOf program v)
             _ -> []
@@ -113,6 +137,7 @@ data Cx = Cx
     , cxCopies :: Set Name
     , cxFn :: Function
     , cxLent :: Set Local
+    , cxLinear :: Set Name
     }
 
 typeOf :: Cx -> Local -> Type
@@ -122,15 +147,15 @@ isCopy :: Cx -> Local -> Bool
 isCopy cx = isCopyType (cxCopies cx) (cxProgram cx) . typeOf cx
 
 -- The errors of a program: none if it never uses a value that was moved
-checkMoves :: Set Name -> Program -> [String]
-checkMoves copies program = concatMap (checkFunction copies program) (Map.elems (progFunctions program) ++ [progMain program])
+checkMoves :: Set Name -> Set Name -> Program -> [String]
+checkMoves copies linear program = concatMap (checkFunction copies linear program) (Map.elems (progFunctions program) ++ [progMain program])
 
-checkFunction :: Set Name -> Program -> Function -> [String]
-checkFunction copies program fn = nub (concat [snd (runBlock cx st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
+checkFunction :: Set Name -> Set Name -> Program -> Function -> [String]
+checkFunction copies linear program fn = nub (concat [snd (runBlock cx st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
   where
-    cx = Cx program copies fn (Set.fromList (fnBorrowed fn))
+    cx = Cx program copies fn (Set.fromList (fnBorrowed fn)) linear
     -- (a permission given to the function, and not lent, is the function's to use)
-    entry = emptySt{stHeld = Map.fromList [((p, steps), Nothing) | p <- fnParams fn, p `notElem` fnBorrowed fn, steps <- linearParts program (typeOf cx p)]}
+    entry = emptySt{stHeld = Map.fromList [((p, steps), Nothing) | p <- fnParams fn, p `notElem` fnBorrowed fn, steps <- linearParts linear program (typeOf cx p)]}
     ins = fixpoint (Map.singleton (BlockId 0) entry)
     fixpoint known =
         let outs = [(b, fst (runBlock cx st block)) | (b, st) <- Map.toList known, Just block <- [Map.lookup b (fnBlocks fn)]]
@@ -170,7 +195,19 @@ placesOf st l = case Map.lookup l (stViews st) of
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
 assign cx pos st0 d rv = (hold cx pos (define cx st1 d view) d view, errs ++ lost cx pos st1 d)
   where
-    (st1, errs) = foldl' (access cx pos) (st0, []) (if forLoopList then [(l, ps, Read) | (l, ps, _) <- accesses rv] else if tuplePart then [(l, ps, Consume) | (l, ps, _) <- accesses rv] else accesses rv)
+    (st1, errs) = takenApart (foldl' (access cx pos) (st0, []) (if forLoopList then [(l, ps, Read) | (l, ps, _) <- accesses rv] else if tuplePart then [(l, ps, Consume) | (l, ps, _) <- accesses rv] else accesses rv))
+    -- (a value of a linear type is used when a function of its own impl takes it apart: reads a field of it, or tests or casts its variant)
+    takenApart (st, es) = case rv of
+        ReadField o _ _ | Just l <- operandLocal o, ownImpl l -> (consumed st l, es)
+        IsVariant o _ | Just l <- operandLocal o, ownImpl l -> (consumed st l, es)
+        AsVariant o _ | Just l <- operandLocal o, ownImpl l -> (consumed st l, es)
+        _ -> (st, es)
+    ownImpl l = case typeOf cx l of
+        TNamed n -> owned n
+        TVariant v -> maybe False owned (ownerOf (cxProgram cx) v)
+        _ -> False
+    owned n = let base = maybe n fst (instanceOf n) in base `Set.member` cxLinear cx && implOwner (fnName (cxFn cx)) == Just base
+    consumed st l = let places = placesOf st l in st{stHeld = Map.filterWithKey (\h _ -> not (any (overlaps h) places)) (stHeld st)}
     ty = typeOf cx d
     -- (a part of a tuple that is taken apart, `(a, b) = e`, is taken out of it: the name has it, and not a view of the hidden tuple)
     tuplePart = case rv of
@@ -196,6 +233,7 @@ assign cx pos st0 d rv = (hold cx pos (define cx st1 d view) d view, errs ++ los
     stepOf r = case r of
         ReadField _ name field -> SField name field
         ListOp AddrGet _ -> SSlot
+        ListOp UninitGet _ -> SSlot
         _ -> SElem
 
 -- The effect of the use of a part of a local
@@ -216,7 +254,7 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs)
         | not taking = []
         | otherwise = concatMap moveError (places ++ [(r, ps ++ steps) | Just may <- [Map.lookup l (stMay st)], (r, ps) <- Set.toList may, (r, ps ++ steps) `notElem` places])
     moveError q@(root, ps)
-        | SSlot `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of the memory of a permission, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it, or take it out with Addr::take")]
+        | SSlot `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of the memory of a permission or an Uninit, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it, or take it out with Addr::take or Uninit::take")]
         | SElem `elem` ps = [message cx pos ("cannot move " ++ named q ++ " out of a list, which still holds it: write clone(" ++ fromMaybe (describe cx q) (localSource cx l) ++ ") to copy it")]
         | root `Set.member` cxLent cx = [message cx pos (describe cx q ++ " is lent (&T) to this function and can only be read: write clone(" ++ describe cx q ++ ") to get a value of its own")]
         | otherwise = []
@@ -233,7 +271,7 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs)
 -- A local that gets a value that is or holds a permission, of its own (not a view of one), holds it
 hold :: Cx -> Pos -> St -> Local -> [Place] -> St
 hold cx pos st d view
-    | null view = st{stHeld = foldl' (\m steps -> Map.insert (d, steps) pos m) (Map.filterWithKey (\(root, _) _ -> root /= d) (stHeld st)) (linearParts (cxProgram cx) (typeOf cx d))}
+    | null view = st{stHeld = foldl' (\m steps -> Map.insert (d, steps) pos m) (Map.filterWithKey (\(root, _) _ -> root /= d) (stHeld st)) (linearParts (cxLinear cx) (cxProgram cx) (typeOf cx d))}
     | otherwise = st{stHeld = Map.filterWithKey (\(root, _) _ -> root /= d) (stHeld st)}
 
 -- The permissions a local still holds when it is given another value, which are lost
@@ -246,11 +284,37 @@ unused :: Cx -> St -> Place -> Pos -> String
 unused cx st q@(root, steps) given =
     (case [v | (l, ps) <- Map.toList (stViews st), q `Set.member` ps, Just v <- [localSource cx l]] of
         -- (a part of a tuple that is taken apart, `(p, b) = Addr::alloc(n)`, is named by the name it was given)
-        v : _ | Nothing <- localSource cx root -> v ++ " is a permission"
-        _ | null steps -> describe cx q ++ " is a permission"
-        _ -> describe cx q ++ " is a permission (in " ++ describeLocal cx root ++ ")")
+        v : _ | Nothing <- localSource cx root -> v ++ what
+        _ | null steps -> describe cx q ++ what
+        _ -> describe cx q ++ what ++ " (in " ++ describeLocal cx root ++ ")")
+        ++ ""
         ++ maybe "" (\(line, column) -> " given at line " ++ show line ++ ":" ++ show column) given
-        ++ " that is not used: a permission is used exactly once, by the operation that frees or changes its memory (Addr::free, Addr::write, ...) or by giving it on"
+        ++ " that is not used: " ++ how
+  where
+    permission = case placeType cx q of
+        Just (TBlock _) -> True
+        _ -> False
+    what = if permission then " is a permission" else " is a value of a linear type"
+    how =
+        if permission
+            then "a permission is used exactly once, by the operation that frees or changes its memory (Addr::free, Addr::write, ...) or by giving it on"
+            else "a value of a linear type is used exactly once, by giving it on or by a function of its impl that takes it apart"
+
+-- The type of a part of a local
+placeType :: Cx -> Place -> Maybe Type
+placeType cx (root, steps) = foldl step (Just (typeOf cx root)) steps
+  where
+    step ty s = case (ty, s) of
+        (Just _, SField name field) -> case Map.lookup name (progTypes (cxProgram cx)) of
+            Just (StructDecl fields) -> lookup field fields
+            _ -> lookup field (concat [fs | EnumDecl variants <- Map.elems (progTypes (cxProgram cx)), (v, fs) <- variants, v == name])
+        _ -> Nothing
+
+-- The struct or enum whose impl a function is of (`<T>::f`, `<T<'U>>::f`, `<T as Trait>::f`)
+implOwner :: Name -> Maybe Name
+implOwner name = case name of
+    '<' : rest | owner@(_ : _) <- takeWhile (`notElem` "<> ") rest -> Just owner
+    _ -> Nothing
 
 -- The local gets a new value: nothing is moved out of it, and it is a view of the places the value comes from (if it is a view)
 define :: Cx -> St -> Local -> [Place] -> St

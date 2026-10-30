@@ -213,6 +213,11 @@ rvalueCall rv =
         M.BlockJoin -> BlockJoin
         M.BlockAssume -> BlockAssume
         M.BlockCast -> BlockCast
+        M.UninitEmpty -> UninitEmpty
+        M.UninitNew -> UninitNew
+        M.UninitGet -> UninitGet
+        M.UninitTake -> UninitTake
+        M.UninitDiscard -> UninitDiscard
 
 -- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
 wrapperInfo :: PState -> Name -> Maybe FnInfo

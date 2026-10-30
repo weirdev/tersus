@@ -316,15 +316,66 @@ What this proves, for a program that uses no assumption: every access is in boun
 - **A function given a block by value says what it keeps** of it in its contract (its base, size, origin and start, and which slots it changed), as a loop that changes one says in its invariant. What the validator knows of the block it was given can be named with `define` (`define o = origin(b);`). A function that only reads a block is lent it (`&Block<T>`) and keeps every fact without saying so.
 - **Natively** an address is a 64-bit number, a slot is a value as an element of an array is (8 bytes a word), `alloc`, `resize` and `free` call the runtime's allocator, and `dropValue` and `dropRange` free what the values own. `eval` keeps a heap of its own, and reports a read of an empty slot, a write over a filled one, a use of memory that was freed, and a free of memory that still holds a value: a proved program does none of them, so this checks what a program assumes.
 
+## Linear types
+
+`linear struct T { ... };` and `linear enum T { ... };` declare a type whose values are used exactly once, as a permission is: a handle that has to be closed, a request that has to be answered. A value of it is used by giving it on (to a call that takes it by value, into a struct or a tuple, or by returning it) or by a function of its own impl that takes it apart (reads a field of it, or matches it).
+
+```tersus
+linear struct Handle { fd: Int };
+
+impl Handle {
+    fn open(n: Int) -> Self { return Self { fd: n }; };
+    fn close(self: Self) -> Int { return self.fd; };
+};
+
+h = Handle::open(3);
+return h.close();   // without the close: `h is a value of a linear type given at line 8:1 that is not used`
+```
+
+- **The check is that of the moves** (`MirMoves`), with what a value holds followed along every path: a linear value still held at a `return`, or held by a local that is given another value, is an error, and so is a use of one after it was used (`h was moved`). A struct or a tuple that holds one is linear with it.
+- **It is never copied**: `impl Clone` and `impl Copy` for a linear type are errors, and it cannot be in a list, an array, a Box, a function value, or the type given to a type parameter (any of them could drop it without using it).
+- **It is an ordinary value otherwise**: held, moved and freed by native code as a struct is. A function that may not end (`~`) is not excused from using one.
+
+## Uninit
+
+`Uninit<T>` is room for one `T` that may hold nothing, laid out as a `T` with no tag: the empty slots of a buffer that needs no addresses.
+
+| Operation | Needs | Gives |
+|---|---|---|
+| `Uninit::empty()` | | an empty one |
+| `Uninit::new(x)` | | one that holds `x` |
+| `Uninit::get(u)` | `filled(u)` | what it holds, a view: `u` keeps it |
+| `Uninit::take(u)` | `filled(u)` | what it holds, moved out (`u` is used) |
+| `Uninit::discard(u)` | `filled(u) = false` | `0`; an empty one is used up |
+
+`filled(u)` and `at(u)` say what the validator knows of one. `array(n, Uninit::empty())` and `Array::uninit(n)` (a Box of an array of `n` empty slots) are arrays of them. An `Uninit` of a value that owns nothing (an `Int`, a struct of them) is copied as its bits; one of a value that owns something (a list) is linear, since nothing frees what it holds but taking it out, and so it is in no array. An `Uninit` is not compared. Natively an `Uninit<T>` is a `T`, and an empty one its words cleared; `eval` keeps an empty one as no value, and reports a read of it.
+
+`replace(a, i, x)` puts `x` in element `i` of a list or an array and gives `(set(a, i, x), get(a, i))`: the new list or array and the element that was there.
+
 ## Assumptions
 
-What the validator cannot prove, a program says, in one of three ways:
+What the validator cannot prove, a program says, in one of four ways:
 
 | Form | What is taken on trust |
 |---|---|
 | `assume e;` | a fact, which the rest of the path then knows, as after an `affirm` |
 | `Block::assume(p, n)` | the permission to `n` empty slots at `p`, a whole allocation of its own, for memory the program did not allocate |
+| `extern fn` | the contract of a function of C, which has no body: `extern fn labs(x: Int) -> Int [{ }] [{ affirm return >= 0; }];` |
 | `axiom` | a rule of proof (see Axioms And Proof Rules) |
+
+An `extern fn` takes and gives words that C has too (an `Int`, a `Byte`, a `Bool`, an address) and permissions, which are ghost and are not given to it. Native code declares the C function of its name and calls it (the program is linked with the C library, so `malloc`, `free` and the like are there); `eval` cannot run one, and says so. A call of one checks its input contract and assumes its output contract, as for any function. The memory that a C function gives is reached with `Block::assume`:
+
+```tersus
+extern fn malloc(bytes: Int) -> Addr<Int> [{ affirm bytes > 0; }] [{ }];
+extern fn free(p: Addr<Int>, ghost b: Block<Int>) -> Int [{ affirm count(b) = 0; }] [{ }];
+
+p = malloc(16);
+b = Block::assume(p, 2);
+b = Addr::write(p, 0, 7, b);
+(x, b) = Addr::take(p, 0, b);
+done = free(p, b);
+return x;
+```
 
 `tersus assumptions <file>` prints each of them in the program and the libraries in front of it, with its line: that list is everything the program's proofs rest on, besides the builtins. Memory the program did not allocate (from C, or the system) is reached with `Block::assume`, and a structure spread over many blocks (a linked list of nodes allocated one by one) needs one too, until the language has ghost collections of permissions.
 
@@ -1738,7 +1789,7 @@ return a;                             // [[1], [2, 3], [1]]
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
-- Addresses (see Addresses and permissions): a slot is a value of the word layout (an `Int`, a `Bool` and a `Byte` are 8 bytes each), not C's, so memory is not shared with C yet; there are no fixed-width integers, no `extern fn`, no ghost collections of permissions, no permissions finer than a slot and no address of a local (POINTERS.md, Order of work and Decisions). A fact that has a `forall` (a slot of a block that is filled, say) is not kept where two paths meet: a function that changes a block in one branch of an `if` returns in that branch, as `push` of the `Vec` in `examples/addresses.tersus` does.
+- Addresses (see Addresses and permissions): a slot is a value of the word layout (an `Int`, a `Bool` and a `Byte` are 8 bytes each), not C's, so memory is not shared with C yet; no ghost collections of permissions, no permissions finer than a slot and no address of a local (POINTERS.md, Order of work and Decisions). A fact that has a `forall` (a slot of a block that is filled, say) is not kept where two paths meet: a function that changes a block in one branch of an `if` returns in that branch, as `push` of the `Vec` in `examples/addresses.tersus` does.
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.

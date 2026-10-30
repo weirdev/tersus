@@ -106,6 +106,7 @@ roles rv =
         ListOp AddrFree [p, b] -> [(p, Read), (b, Consume)]
         ListOp op (b : rest) | op `elem` [BlockTaken, BlockResized, BlockSplitHi, BlockCast] -> (b, Consume) : [(o, Read) | o <- rest]
         ListOp BlockJoin os -> [(o, Consume) | o <- os]
+        ListOp op [u] | op `elem` [UninitNew, UninitTake, UninitDiscard] -> [(u, Consume)]
         ListOp _ os -> [(o, Read) | o <- os]
         MakeList os -> [(o, Consume) | o <- os]
         MakeBox o -> [(o, Consume)]
@@ -120,7 +121,7 @@ roles rv =
 
 -- The rvalues that read a part of a value
 isProjection :: Rvalue -> Bool
-isProjection (ListOp op _) = op `elem` [First, Last, Get, AddrGet]
+isProjection (ListOp op _) = op `elem` [First, Last, Get, AddrGet, UninitGet]
 isProjection ReadField{} = True
 isProjection _ = False
 

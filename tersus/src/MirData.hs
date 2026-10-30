@@ -199,6 +199,7 @@ listOps =
     , ("addrDropRange", AddrDropRange), ("addrResize", AddrResize), ("addrFree", AddrFree)
     , ("blockNew", BlockNew), ("blockTaken", BlockTaken), ("blockResized", BlockResized), ("blockSplitLo", BlockSplitLo)
     , ("blockSplitHi", BlockSplitHi), ("blockJoin", BlockJoin), ("blockAssume", BlockAssume), ("blockCast", BlockCast)
+    , ("uninitEmpty", UninitEmpty), ("uninitNew", UninitNew), ("uninitGet", UninitGet), ("uninitTake", UninitTake), ("uninitDiscard", UninitDiscard)
     ]
 
 listOpWord :: ListOp -> String

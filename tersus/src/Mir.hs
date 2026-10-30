@@ -168,6 +168,9 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
     | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree
     | BlockNew | BlockTaken | BlockResized | BlockSplitLo | BlockSplitHi | BlockJoin | BlockAssume | BlockCast
+    | -- Uninit<T>: an empty one, one that holds x, a view of what one holds, what one holds moved out, and an empty one used up. Natively
+      -- an Uninit<T> is a T (see Pipeline.nativeProgram), an empty one its words cleared.
+      UninitEmpty | UninitNew | UninitGet | UninitTake | UninitDiscard
     deriving (Show, Eq)
 
 -- The operations that make a permission, which are erased with it
@@ -269,6 +272,7 @@ completeInstancesWith erased program
         TBox t -> typeNames t
         TAddr t -> typeNames t
         TBlock t -> typeNames t
+        TUninit t -> typeNames t
         TFn args ret -> concatMap typeNames (ret : args)
         _ -> []
     rvalueNames rv = case rv of

@@ -20,7 +20,7 @@ module Parse
 import Text.Parsec
 import qualified Data.Map as Map
 
-import Control.Monad (void, when)
+import Control.Monad (unless, void, when)
 import Data.Char (isDigit, isLetter, isUpper)
 import Data.List (intercalate, isInfixOf, nub, (\\))
 import Data.Maybe (isJust)
@@ -128,7 +128,43 @@ located = do
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
-statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> assumeStatements <|> affirmStatements <|> (pure <$> statement)
+statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> assumeStatements <|> linearStatement <|> externStatement <|> affirmStatements <|> (pure <$> statement)
+
+-- `linear struct T { ... };` and `linear enum T { ... };`: a type whose values are used exactly once (the declaration, and the mark)
+linearStatement :: Parser [Statement]
+linearStatement = do
+    keyword "linear"
+    whitespace
+    declared <- structStatement <|> enumStatement
+    case declared of
+        StructDef name _ _ _ -> return [declared, LinearDef name]
+        EnumDef name _ -> return [declared, LinearDef name]
+        _ -> fail "linear is written before a struct or an enum"
+
+-- `extern fn name(parameters) -> T [{ in }] [{ out }];`: a function of C, with a contract the program takes on trust. What it takes and gives
+-- are words that C has too (an Int, a Byte, a Bool, an address), and permissions, which are ghost and so are not given to it.
+externStatement :: Parser [Statement]
+externStatement = do
+    keyword "extern"
+    whitespace
+    keyword "fn"
+    whitespace
+    name <- variable
+    whitespace
+    (params, returnType, inputReqs, outputReqs) <- functHeader
+    termination <- terminationClause
+    mapM_ (\(p, t) -> unless (cWord t) (fail ("the parameter " ++ p ++ " of extern fn " ++ name ++ " is not an Int, a Byte, a Bool, an address or a permission"))) params
+    unless (cWord returnType) $ fail ("extern fn " ++ name ++ " gives a value that is not an Int, a Byte, a Bool, an address or a permission")
+    return [ExternDef name, Assign name (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType [] []) termination []) []))]
+  where
+    cWord t = case t of
+        TInt -> True
+        TByte -> True
+        TBool -> True
+        TAddr _ -> True
+        TBlock _ -> True
+        TRef (TBlock _) -> True
+        _ -> False
 
 -- `assume e;`: e is known from here on without a proof (an assumption: see `tersus assumptions`). It is split as an affirm is.
 assumeStatements :: Parser [Statement]
@@ -397,7 +433,7 @@ structStatement = do
     invariant <- option [] (keyword "invariant" >> whitespace >> functContractReqs <* whitespace)
     modifyState (\d -> d{declTypeParams = outerParams})
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
-    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self", "Addr", "Block"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
+    when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self", "Addr", "Block", "Uninit"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
     modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
     return (StructDef name params fields invariant)
   where
@@ -859,6 +895,7 @@ typeAnnotation = do
             "Box" -> TBox <$> typeArgument
             "Addr" -> TAddr <$> typeArgument
             "Block" -> TBlock <$> typeArgument
+            "Uninit" -> TUninit <$> typeArgument
             "Array" -> do
                 whitespace
                 void (char '<')

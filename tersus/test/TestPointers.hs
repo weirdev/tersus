@@ -75,6 +75,44 @@ testPointers =
             , testCase "an allocation of a negative size" (rejected "(p, b) = Addr::alloc(0 - 1); return Addr::free(p, b);" "Could not prove: n >= 0")
             ]
         , TestList
+            "linear types"
+            [ testCase "a linear value is used by its impl" (runs (handle ++ "h = Handle::open(3); return h.close();") "3")
+            , testCase "a linear value given on" (runs (handle ++ "fn pass(h: Handle) -> Handle { return h; }; h = pass(Handle::open(4)); return h.close();") "4")
+            , testCase "a linear value in a struct" (runs (handle ++ "struct Two { a: Handle, n: Int }; t = Two { a: Handle::open(1), n: 2 }; return t.a.close() + t.n;") "3")
+            , testCase "a linear enum" (runs "linear enum Token { Some { n: Int }, None }; impl Token { fn spend(self: Self) -> Int { return match self { Token::Some { n: n } => n, Token::None => 0 }; }; }; t = Token::Some { n: 5 }; return t.spend();" "5")
+            , testCase "a linear value that is not used" (rejected (handle ++ "h = Handle::open(3); return 0;") "h is a value of a linear type given at line")
+            , testCase "a linear value used twice" (rejected (handle ++ "h = Handle::open(3); a = h.close(); return a + h.close();") "h was moved")
+            , testCase "a linear value taken apart outside its impl" (rejected (handle ++ "h = Handle::open(3); return h.fd;") "h is a value of a linear type")
+            , testCase "a linear value in a struct that is not used" (rejected (handle ++ "struct Two { a: Handle, n: Int }; t = Two { a: Handle::open(1), n: 2 }; return t.n;") "t.a is a value of a linear type (in t)")
+            , testCase "a linear type is not copied" (rejected (handle ++ "impl Clone for Handle { }; return 0;") "Handle is linear")
+            , testCase "a list of linear values" (rejected (handle ++ "fn f(l: List<Handle>) -> Int { return 0; }; return 0;") "a list cannot hold Handle")
+            , testCase "linear before something else" (rejected "linear fn f() -> Int { return 0; }; return 0;" "Parse error")
+            ]
+        , TestList
+            "uninit and replace"
+            [ testCase "an array of slots that may hold nothing" (runs "a = array(3, Uninit::empty()); a = set(a, 1, Uninit::new(7)); u = get(a, 1); affirm filled(u) = true; return Uninit::get(u);" "7")
+            , testCase "Array::uninit" (runs "a = Array::uninit(4); a = set(a, 3, Uninit::new(true)); u = get(a, 3); if Uninit::get(u) { return 1; }; return 0;" "1")
+            , testCase "a value that owns something is taken out" (runs "u = Uninit::new(push(push([], 1), 2)); l = Uninit::take(u); return size(l);" "2")
+            , testCase "an empty Uninit is discarded" (runs "u = Uninit::empty(); return Uninit::discard(u) + 1;" "1")
+            , testCase "what an Uninit holds is known" (valid "u = Uninit::new(5); affirm filled(u) = true; affirm at(u) = 5; x = Uninit::get(u); affirm x = 5; return x;")
+            , testCase "replace gives the element that was there" (runs "(l, old) = replace(push(push([], 1), 2), 0, 9); affirm old = 1; return get(l, 0) * 10 + old;" "91")
+            , testCase "replace on an array" (runs "(a, old) = replace(#[4, 5, 6], 2, 0); return old + get(a, 2);" "6")
+            , testCase "a read of an empty Uninit" (rejected "u = Uninit::empty(); return Uninit::get(u);" "Could not prove: filled(u) = true")
+            , testCase "a discard of a filled Uninit" (rejected "u = Uninit::new(1); return Uninit::discard(u);" "Could not prove: filled(u) = false")
+            , testCase "an Uninit of a value that owns something is linear" (rejected "u = Uninit::new(push([], 1)); return 0;" "u is a value of a linear type")
+            , testCase "it is not copied" (rejected "u = Uninit::new(push([], 1)); v = clone(u); l = Uninit::take(u); return size(l);" "it is not copied")
+            , testCase "an Uninit is not compared" (rejected "u = Uninit::new(1); v = Uninit::new(1); return u = v;" "an Uninit cannot be compared")
+            , testCase "a view of an Uninit after it was taken" (rejected "u = Uninit::new(push([], 1)); x = Uninit::get(u); l = Uninit::take(u); return size(x);" "u was moved")
+            ]
+        , TestList
+            "extern functions"
+            [ testCase "an extern function is assumed to keep its contract" (valid "extern fn labs(x: Int) -> Int [{ }] [{ affirm return >= 0; }]; a = labs(0 - 3); affirm a >= 0; return a;")
+            , testCase "its input contract is checked" (rejected "extern fn half(x: Int) -> Int [{ affirm x > 0; }] [{ }]; return half(0);" "Could not prove: x > 0")
+            , testCase "the interpreter does not run C" (testAssertErrorContains "is a function of C" (runSource Interpret "extern fn labs(x: Int) -> Int [{ }] [{ }]; return labs(1);"))
+            , testCase "it takes words" (rejected "extern fn f(l: List<Int>) -> Int [{ }] [{ }]; return 0;" "is not an Int, a Byte, a Bool, an address or a permission")
+            , testCase "it is an assumption" (testAssertEq (runSource Assumptions "extern fn labs(x: Int) -> Int [{ }] [{ }];\nreturn labs(1);") (Ok "line 1:1: extern fn labs"))
+            ]
+        , TestList
             "assumptions"
             [ testCase "assume gives a fact" (valid "fn f(x: Int) -> Int [{ }] [{ affirm return > 0; }] { assume x > 0; return x; }; return f(1);")
             , testCase "the assumptions of a program are listed" (testAssertEq (assumptionsOf "assume 1 > 0;\nfn f(n: Int) -> Int { assume n = n; return n; };\n(p, b) = Addr::alloc(1);\nc = Block::assume(p, 0);\naxiom twice(x) [{ }] [{ affirm x + x = 2 * x; }];\nd = Addr::free(p, b);\nreturn d;") (Ok ["line 1:1: assume 1 > 0", "line 2:23: assume n = n", "line 4:1: Block::assume(p, 0)", "line 5:1: axiom twice(x)"]))
@@ -91,6 +129,7 @@ testPointers =
         Error e
             | expected `isInfixOf` e -> Nothing
             | otherwise -> Just ("Expected an error with " ++ show expected ++ ", got: " ++ e)
+    handle = "linear struct Handle { fd: Int }; impl Handle { fn open(n: Int) -> Self { return Self { fd: n }; }; fn close(self: Self) -> Int { return self.fd; }; };"
     memory =
         unlines
             [ "(p, b) = Addr::alloc(2);"

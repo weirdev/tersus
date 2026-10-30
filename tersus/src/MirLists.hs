@@ -32,6 +32,7 @@ hasLists program =
         TArrayOf t _ -> mentionsList t
         TBox t -> mentionsList t
         TAddr t -> mentionsList t
+        TUninit t -> mentionsList t
         TRef t -> mentionsList t
         TFn args ret -> any mentionsList (ret : args)
         TNamed n | Just (_, args) <- instanceOf n -> or [mentionsList t | ArgType t <- args]
@@ -112,6 +113,7 @@ listType ty = case ty of
     TArrayOf t size -> TArrayOf (listType t) size
     TBox t -> TBox (listType t)
     TAddr t -> TAddr (listType t)
+    TUninit t -> TUninit (listType t)
     TRef t -> TRef (listType t)
     TFn args ret -> TFn (map listType args) (listType ret)
     TNamed n -> TNamed (renameName n)
@@ -350,6 +352,7 @@ lowerFunction original fn =
         TList e -> unknown e
         TBox e -> unknown e
         TAddr e -> unknown e
+        TUninit e -> unknown e
         TArrayOf e _ -> unknown e
         _ -> False
 

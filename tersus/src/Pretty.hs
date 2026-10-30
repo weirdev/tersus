@@ -162,6 +162,14 @@ builtinName BlockOrigin = "origin"
 builtinName BlockStart = "start"
 builtinName BlockExtent = "extent"
 builtinName BlockCount = "count"
+builtinName UninitEmpty = "Uninit::empty"
+builtinName UninitNew = "Uninit::new"
+builtinName UninitGet = "Uninit::get"
+builtinName UninitTake = "Uninit::take"
+builtinName UninitDiscard = "Uninit::discard"
+builtinName UninitFilled = "filled"
+builtinName UninitAt = "at"
+builtinName Replace = "replace"
 
 renderValue :: Value -> String
 renderValue (VInt i) = show i
@@ -187,6 +195,7 @@ renderType (TList t) = "List<" ++ renderType t ++ ">"
 renderType (TBox t) = "Box<" ++ renderType t ++ ">"
 renderType (TAddr t) = "Addr<" ++ renderType t ++ ">"
 renderType (TBlock t) = "Block<" ++ renderType t ++ ">"
+renderType (TUninit t) = "Uninit<" ++ renderType t ++ ">"
 renderType (TArrayOf t size) = "Array<" ++ renderType t ++ ", " ++ renderSize size ++ ">"
 renderType (TRef t) = "&" ++ renderType t
 renderType (TParam name) = name

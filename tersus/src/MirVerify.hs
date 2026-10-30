@@ -122,6 +122,7 @@ problems program fn =
     hasUnknown (TArray t _) = hasUnknown t
     hasUnknown (TBox t) = hasUnknown t
     hasUnknown (TAddr t) = hasUnknown t
+    hasUnknown (TUninit t) = hasUnknown t
     hasUnknown (TBlock t) = hasUnknown t
     hasUnknown (TRef t) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
@@ -220,6 +221,12 @@ rvalueProblems env localTy d rv =
         (AddrDropRange, p : i : n : rest) | length rest <= 1 -> Just (addressOf p (const []) ++ ints [i, n] ++ permissionOrZero rest)
         (AddrResize, p : n : rest) | length rest <= 1 -> Just (addressOf p (const []) ++ ints [n] ++ [expected' "the address" p | not (fits' d p)])
         (AddrFree, p : rest) | length rest <= 1 -> Just (addressOf p (const []) ++ result TInt)
+        -- (an Uninit<T> is a T in native code, so its types are not looked at closely)
+        (UninitEmpty, []) -> Just []
+        (UninitNew, [_]) -> Just []
+        (UninitGet, [_]) -> Just []
+        (UninitTake, [_]) -> Just []
+        (UninitDiscard, [_]) -> Just (result TInt)
         _ | op `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast] -> Just (case d of
             TBlock _ -> []
             _ -> ["the result is " ++ renderType d ++ ", not a permission"])
@@ -340,6 +347,7 @@ sub env wanted actual = case (wanted, actual) of
     (TArrayOf a SizeAny, TArrayOf b SizeAny) -> sub env a b
     (TBox a, TBox b) -> sub env a b
     (TAddr a, TAddr b) -> sub env a b
+    (TUninit a, TUninit b) -> sub env a b
     (TBlock a, TBlock b) -> sub env a b
     (TNamed a, TNamed b)
         | a == b -> True

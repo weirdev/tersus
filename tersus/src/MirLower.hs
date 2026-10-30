@@ -105,10 +105,12 @@ data LS = LS
     , lsInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets
     , lsChecking :: Bool -- whether the program is checked for values used after they were moved
     , lsCopies :: Set.Set Name -- the structs and enums that implement Copy
+    , lsLinear :: Set.Set Name -- the structs and enums that are linear
+    , lsExterns :: Set.Set Variable -- the functions that are extern
     }
 
 initialState :: [Statement] -> LS
-initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty
+initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty
 
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
@@ -234,7 +236,7 @@ program stmts = do
         result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s))
     case verifyProgram result of
         Error e -> failL ("Lowering produced a malformed program: " ++ e)
-        Ok () -> case if lsChecking s then checkMoves (lsCopies s) result else [] of
+        Ok () -> case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) result else [] of
             [] -> return (stripPositions result)
             errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
@@ -277,6 +279,7 @@ resolveType ty = defaultType <$> tc (zonk ty)
     defaultType (TVar _) = TInt
     defaultType (TNamed name) | Just (base, args) <- instanceOf name = TNamed (instanceName base (map defaultArg args))
     defaultType (TAddr t) = TAddr (defaultType t)
+    defaultType (TUninit t) = TUninit (defaultType t)
     defaultType (TBlock t) = TBlock (defaultType t)
     defaultType (TList t) = TList (defaultType t)
     defaultType (TArrayOf t n) = TArrayOf (defaultType t) n
@@ -348,6 +351,8 @@ lowerStatement stmt =
         Return expr -> lowerReturn expr
         ValidationStatement vs -> ghost (M.GhostValidation vs)
         CopyDef name -> modifyS (\s -> s{lsCopies = Set.insert name (lsCopies s)})
+        LinearDef name -> modifyS (\s -> s{lsLinear = Set.insert name (lsLinear s)})
+        ExternDef name -> modifyS (\s -> s{lsExterns = Set.insert name (lsExterns s)})
         Mark line column -> do
             modifyB (\b -> b{bPlace = Just (line, column)})
             emit (M.Ghost Map.empty (M.GhostPosition line column))
@@ -484,7 +489,9 @@ defineFunction var params ins outs (Signature ptys rty sizes types) term body = 
     enclosing <- builder
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
         fnTy = functionType sizes types ptys rty
-    name <- uniqueName (if atTop then var else bName enclosing ++ "::" ++ var)
+    -- (an extern function is named `extern f`, which no program can write: native code calls the C function f)
+    extern <- Set.member var . lsExterns <$> getS
+    name <- uniqueName (if extern then "extern " ++ var else if atTop then var else bName enclosing ++ "::" ++ var)
     -- (a function with sizes is called by name, which its sizes are given to: it has no value to put in a local)
     assigned <- (\s -> Set.member var (lsAssigned s) && null sizes) <$> getS
     -- (the bodies of the functions after it find a function at the top by name, whatever the program does to the variable)
@@ -621,9 +628,22 @@ lowerBuiltin b args = do
         (ArrayFrom, [(M.Const (M.CList items), TList elementTy)]) -> return (TArray elementTy (fromIntegral (length items)))
         (ArrayFrom, _) -> failL "an array literal was not made from a list of constants"
         _ -> builtinResult b tys
-    rv <- case pairParts b of
-        Just (first, second) -> pairRvalue b first second result (map fst operands)
-        Nothing -> builtinRvalue b tys (map fst operands)
+    rv <- case (pairParts b, b, map fst operands) of
+        (Just (first, second), _, ops) -> pairRvalue b first second result ops
+        -- replace(a, i, x): the element is copied out (it is what the list or array held, a value of its own), then x is put in its place
+        (_, Replace, [a, i, x]) -> do
+            resultTy <- tc (zonk result)
+            case tupleParts resultTy of
+                Just [containerTy, elementTy] -> do
+                    view <- newLocal Nothing elementTy
+                    emit (M.Assign view (M.ListOp M.Get [a, i]))
+                    old <- newLocal Nothing elementTy
+                    emit (M.Assign old (M.Clone (M.Copy view)))
+                    changed <- newLocal Nothing containerTy
+                    emit (M.Assign changed (M.ListOp M.Set [a, i, x]))
+                    return (M.MakeData (typeName resultTy) [("0", M.Copy changed), ("1", M.Copy old)])
+                _ -> failL "The result of replace is not a pair"
+        (_, _, ops) -> builtinRvalue b tys ops
     return (PRvalue rv, result)
   where
     builtinResult b' tys' = case (b', tys') of
@@ -726,6 +746,7 @@ pointerOp b = lookup b
     , (AddrDropRange, M.AddrDropRange), (AddrResize, M.AddrResize), (AddrFree, M.AddrFree)
     , (BlockNew, M.BlockNew), (BlockTaken, M.BlockTaken), (BlockResized, M.BlockResized), (BlockSplitLo, M.BlockSplitLo)
     , (BlockSplitHi, M.BlockSplitHi), (BlockJoin, M.BlockJoin), (BlockAssume, M.BlockAssume), (BlockCast, M.BlockCast)
+    , (UninitEmpty, M.UninitEmpty), (UninitNew, M.UninitNew), (UninitGet, M.UninitGet), (UninitTake, M.UninitTake), (UninitDiscard, M.UninitDiscard)
     ]
 
 -- The constructor that a struct type has, or the variant a value is known to be

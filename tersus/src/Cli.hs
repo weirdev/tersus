@@ -60,7 +60,7 @@ usage =
         , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
         , "  assumptions <file>"
-        , "                Print what the program takes on trust, which the validator does not prove: each assume, Block::assume and axiom"
+        , "                Print what the program takes on trust, which the validator does not prove: each assume, Block::assume, extern fn and axiom"
         , "  build <file> -o <output>"
         , "                Validate a program, then compile it to an executable with clang"
         , ""

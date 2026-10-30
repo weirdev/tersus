@@ -87,6 +87,7 @@ data TcState = TcState
     , tcInstances :: Map Name Type -- the functions that a template has been made into so far, with their types
     , tcEmitted :: [Statement] -- the instances made since the last statement of the program, which come before it
     , tcActive :: [Name] -- the templates that an instance is being checked of, which a call of one of them cannot make another instance of
+    , tcLinear :: Set.Set Name -- the structs and enums that are linear
     , tcGhost :: Bool -- whether the expression being checked is the validator's (of a `define`), where what is known of a permission can be read
     }
 
@@ -109,7 +110,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] False
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty False
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -187,6 +188,7 @@ zonk (TNamed name) | Just (base, args) <- instanceOf name = (\args' -> TNamed (i
     zonkArg (ArgType t) = ArgType <$> zonk t
 zonk (TBox t) = TBox <$> zonk t
 zonk (TAddr t) = TAddr <$> zonk t
+zonk (TUninit t) = TUninit <$> zonk t
 zonk (TBlock t) = TBlock <$> zonk t
 zonk (TRef t) = TRef <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
@@ -204,6 +206,7 @@ occurs n (TArrayOf t _) = occurs n t
 occurs n (TForall _ _ t) = occurs n t
 occurs n (TBox t) = occurs n t
 occurs n (TAddr t) = occurs n t
+occurs n (TUninit t) = occurs n t
 occurs n (TBlock t) = occurs n t
 occurs n (TNamed name) | Just (_, args) <- instanceOf name = or [occurs n t | ArgType t <- args]
 occurs n (TRef t) = occurs n t
@@ -236,6 +239,7 @@ unify a b = do
         (TArrayOf x n, TArrayOf y m) -> unifySize n m >>= \same -> if same then unify x y else return False
         (TBox x, TBox y) -> unify x y
         (TAddr x, TAddr y) -> unify x y
+        (TUninit x, TUninit y) -> unify x y
         (TBlock x, TBlock y) -> unify x y
         (TRef x, TRef y) -> unify x y
         (TParam x, TParam y) -> return (x == y)
@@ -463,6 +467,7 @@ selfExpands name ty = case ty of
     TList t -> selfExpands name t
     TBox t -> selfExpands name t
     TAddr t -> selfExpands name t
+    TUninit t -> selfExpands name t
     TBlock t -> selfExpands name t
     TRef t -> selfExpands name t
     TArrayOf t _ -> selfExpands name t
@@ -532,6 +537,7 @@ checkType (TList t) = noGhostIn "a list" t >> checkType t
 checkType (TBox t@(TArrayOf e SizeAny)) = checkType e >> arrayOk t
 checkType (TBox t) = noGhostIn "a Box" t >> checkType t
 checkType (TAddr t) = addressable t
+checkType (TUninit t) = noGhostIn "an Uninit" t >> checkType t
 checkType (TBlock t) = addressable t
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
 checkType ty@(TArrayOf t size) = noGhostIn "an array" t >> checkType t >> sizeInScope size >> arrayOk ty
@@ -549,9 +555,10 @@ noGhostIn :: String -> Type -> TC ()
 noGhostIn what t = do
     t' <- zonk t
     ghostly <- holdsGhost t'
-    when ghostly $ failTc ("Type error: a permission is a ghost value that has to be used exactly once, so " ++ what ++ " cannot hold " ++ renderType t' ++ ", which is or holds one")
+    when ghostly $ failTc ("Type error: a permission and a value of a linear type are used exactly once, so " ++ what ++ " cannot hold " ++ renderType t' ++ ", which is or holds one")
 
--- Whether a value of a type is or holds a permission, in a field or a part, at any depth. Such a value is linear: it is used exactly once.
+-- Whether a value of a type is or holds a permission or a value of a linear type, in a field or a part, at any depth. Such a value is linear:
+-- it is used exactly once.
 holdsGhost :: Type -> TC Bool
 holdsGhost ty0 = fst <$> go Set.empty ty0
   where
@@ -560,6 +567,7 @@ holdsGhost ty0 = fst <$> go Set.empty ty0
         ty <- zonk ty1
         case ty of
             TBlock _ -> return (True, seen)
+            TUninit t -> ownsHeap t >>= \owning -> if owning then return (True, seen) else go seen t
             TRef t -> go seen t
             TList t -> go seen t
             TBox t -> go seen t
@@ -568,6 +576,8 @@ holdsGhost ty0 = fst <$> go Set.empty ty0
             TNamed n
                 | Set.member n seen -> return (False, seen)
                 | otherwise -> do
+                  linear <- tcLinear <$> getState
+                  if Set.member (maybe n fst (instanceOf n)) linear then return (True, seen) else do
                     s0 <- getState
                     when (isJust (instanceOf n) && Map.notMember n (tcCtors s0)) (ensureInstance n)
                     s <- getState
@@ -583,6 +593,31 @@ holdsGhost ty0 = fst <$> go Set.empty ty0
     anyOf seen (t : ts) = do
         (found, seen') <- go seen t
         if found then return (True, seen') else anyOf seen' ts
+
+-- Whether a value of a type owns something on the heap (a list or a Box, in it at any depth): an Uninit of one is linear, since nothing
+-- frees what it holds but taking it out
+ownsHeap :: Type -> TC Bool
+ownsHeap = go Set.empty
+  where
+    go seen ty0 = do
+        ty <- zonk ty0
+        case ty of
+            TList _ -> return True
+            TBox _ -> return True
+            TArrayOf t _ -> go seen t
+            TUninit t -> go seen t
+            TNamed n | Set.member n seen -> return False
+            TNamed "Self" -> return False
+            TNamed n -> do
+                s0 <- getState
+                when (isJust (instanceOf n) && Map.notMember n (tcCtors s0)) (ensureInstance n)
+                s <- getState
+                let fields = concat [fs | c <- Map.findWithDefault [] n (tcTypes s), Just (_, fs) <- [Map.lookup c (tcCtors s)]]
+                or <$> mapM (go (Set.insert n seen) . snd) fields
+            TVariant v -> do
+                s <- getState
+                or <$> mapM (go seen . snd) (maybe [] snd (Map.lookup v (tcCtors s)))
+            _ -> return False
 
 -- What an address and a permission are of: a type with a size, which is what a slot holds, and not a permission (a permission is not in memory)
 addressable :: Type -> TC ()
@@ -698,6 +733,14 @@ builtinType funct =
         BlockStart -> list (\a -> TFn [TBlock a] TInt)
         BlockExtent -> return (TFn [TInt] TInt)
         BlockCount -> list (\a -> TFn [TBlock a] TInt)
+        UninitEmpty -> list (\a -> TFn [] (TUninit a))
+        UninitNew -> list (\a -> TFn [a] (TUninit a))
+        UninitGet -> list (\a -> TFn [TUninit a] a)
+        UninitTake -> list (\a -> TFn [TUninit a] a)
+        UninitDiscard -> list (\a -> TFn [TUninit a] TInt)
+        UninitFilled -> list (\a -> TFn [TUninit a] TBool)
+        UninitAt -> list (\a -> TFn [TUninit a] a)
+        Replace -> list (\a -> TFn [TList a, TInt, a] (tupleType [TList a, a]))
   where
     list build = build <$> freshVar
     arith = return (TFn [TInt, TInt] TInt)
@@ -711,7 +754,7 @@ builtinType funct =
 -- argument. (A builtin used as a value, such as `h = size`, is the one for lists.)
 checkBuiltinCall :: Maybe BuiltinFunct -> String -> Type -> [Type] -> TC Type
 checkBuiltinCall (Just b) name ft ats@(container : _)
-    | b `elem` [Size, First, Last, Get, Set] = do
+    | b `elem` [Size, First, Last, Get, Set, Replace] = do
         t <- zonk container
         case t of
             TArrayOf _ n -> arrayVersion (\a -> TArrayOf a n) b >>= \aft -> checkCall name aft ats
@@ -725,6 +768,7 @@ checkBuiltinCall (Just b) name ft ats@(container : _)
             Size -> TFn [sequenceOf a] TInt
             Get -> TFn [sequenceOf a, TInt] a
             Set -> TFn [sequenceOf a, TInt, a] (sequenceOf a)
+            Replace -> TFn [sequenceOf a, TInt, a] (tupleType [sequenceOf a, a])
             _ -> TFn [sequenceOf a] a
 -- (a Box is its contents wherever a struct or an enum is looked at: tested for its variant, cast to one, or read for a field)
 checkBuiltinCall (Just b) name ft (first : rest)
@@ -1037,6 +1081,10 @@ checkStatement top ctx env stmt =
         ProofDef{} -> return (ctx, env, stmt)
         Mark{} -> return (ctx, env, stmt)
         CopyDef{} -> return (ctx, env, stmt)
+        ExternDef _ -> return (ctx, env, stmt)
+        LinearDef name -> do
+            getState >>= \s -> putState s{tcLinear = Set.insert name (tcLinear s)}
+            return (ctx, env, stmt)
         TraitDef{} -> failTc "Type error: a trait can only be defined at the top of the program"
         ImplDef{} -> failTc "Type error: an impl can only be written at the top of the program"
         BoundedDef{} -> failTc "Type error: a function with bounds on its types cannot be written in an impl or a block"
@@ -1191,6 +1239,10 @@ inferExprR ctx env expr =
                 let ty = TArrayOf elementTy SizeAny
                 return (TBox ty, F (Val (builtinFunct NewEmptyArray)) [])
             _ -> failTc ("Type error: Array::empty takes no arguments, got " ++ show (length args))
+        -- Array::uninit(n): n slots that hold nothing, in a Box that carries the size
+        F (Var "Array::uninit") args -> case args of
+            [n] -> inferExprR ctx env (F (Var "Array::boxed") [n, F (Var "Uninit::empty") []])
+            _ -> failTc ("Type error: Array::uninit takes 1 argument, got " ++ show (length args))
         -- Array::boxed(n, x): n copies of x, n known only when the program runs, in a Box that carries the size
         F (Var "Array::boxed") args -> case args of
             [n, x] -> do
@@ -1247,6 +1299,11 @@ inferExprR ctx env expr =
                 inferred <- mapM (inferExprR ctx env) args
                 ft <- builtinType b
                 case (b, inferred) of
+                    _ | b `elem` [BlockFilled, BlockContents], [(ut, u')] <- inferred -> do
+                        let b' = if b == BlockFilled then UninitFilled else UninitAt
+                        ft' <- builtinType b'
+                        result <- checkCall name ft' [ut]
+                        return (result, F (Val (builtinFunct b')) [u'])
                     _ | b `elem` [BlockFilled, BlockContents] -> case inferred of
                         [(bt, b'), (it, i')] -> do
                             listTy <- checkCall name ft [bt]
@@ -1260,11 +1317,11 @@ inferExprR ctx env expr =
                         return (result, F (Val (builtinFunct b)) (map snd inferred))
         -- Addr::alloc(n), Addr::get(p, i, b), Block::split(b, i), ...: the operations on addresses and permissions (POINTERS.md)
         F (Var name) args
-            | Just b <- pointerBuiltin name, not (any (Map.member name) env) -> do
+            | Just b <- pointerBuiltin name, not (any (Map.member name) env), not (Map.member name (ctxFns ctx)) -> do
                 inferred0 <- mapM (inferExprR ctx env) args
                 ft <- builtinType b
                 inferred <- coerceArguments ft inferred0
-                result <- checkCall name ft (map fst inferred)
+                result <- checkBuiltinCall (Just b) name ft (map fst inferred)
                 return (result, F (Val (builtinFunct b)) (map snd inferred))
         F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
         F (Var name) args
@@ -1448,6 +1505,7 @@ substSelf owner (TList t) = TList (substSelf owner t)
 substSelf owner (TArrayOf t size) = TArrayOf (substSelf owner t) size
 substSelf owner (TBox t) = TBox (substSelf owner t)
 substSelf owner (TAddr t) = TAddr (substSelf owner t)
+substSelf owner (TUninit t) = TUninit (substSelf owner t)
 substSelf owner (TBlock t) = TBlock (substSelf owner t)
 substSelf owner (TRef t) = TRef (substSelf owner t)
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
@@ -1582,6 +1640,12 @@ inferProofR ctx env proof =
                 inferred <- mapM (inferProofR ctx env) args
                 ft <- builtinType b
                 case b of
+                    -- (filled(u) and at(u) of an Uninit)
+                    _ | b `elem` [BlockFilled, BlockContents], [(ut, u')] <- inferred -> do
+                        let b' = if b == BlockFilled then UninitFilled else UninitAt
+                        ft' <- builtinType b'
+                        result <- checkCall name ft' [ut]
+                        return (result, FApp (CTerm (builtinFunct b')) [u'])
                     -- (filled(b, i) and at(b, i) are elements of the two arrays of the block)
                     _ | b `elem` [BlockFilled, BlockContents] -> case inferred of
                         [(bt, b'), (it, i')] -> do
@@ -1683,6 +1747,8 @@ permissionArgument b args infer
             return $ case t' of
                 TBlock _ -> True
                 TRef (TBlock _) -> True
+                TUninit _ -> b `elem` [BlockFilled, BlockContents]
+                TRef (TUninit _) -> b `elem` [BlockFilled, BlockContents]
                 _ -> False
         [] -> return False
 
@@ -1708,6 +1774,12 @@ pointerBuiltin name =
         , ("Block::join", BlockJoin)
         , ("Block::assume", BlockAssume)
         , ("Block::cast", BlockCast)
+        , ("Uninit::empty", UninitEmpty)
+        , ("Uninit::new", UninitNew)
+        , ("Uninit::get", UninitGet)
+        , ("Uninit::take", UninitTake)
+        , ("Uninit::discard", UninitDiscard)
+        , ("replace", Replace)
         ]
 
 -- What a proof can say of a permission, and the operations on addresses a proof can use (they need no permission)
@@ -1774,6 +1846,7 @@ comparing (Val (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) (t : _)
         t' <- zonk t
         case t' of
             TFn{} -> failTc "Type error: functions cannot be compared"
+            TUninit _ -> failTc "Type error: an Uninit cannot be compared, since it may hold nothing: what it holds is compared, as in Uninit::get(a) = Uninit::get(b)"
             _ -> do
                 ghostly <- holdsGhost t'
                 when ghostly $ failTc ("Type error: " ++ renderType t' ++ " holds a permission, which cannot be compared: what a permission says is compared, as in at(a, 0) = at(b, 0)")
@@ -1801,6 +1874,7 @@ isExpanding scope ty = case ty of
         TList u -> usesParam u
         TBox u -> usesParam u
         TAddr u -> usesParam u
+        TUninit u -> usesParam u
         TBlock u -> usesParam u
         TRef u -> usesParam u
         TArrayOf u _ -> usesParam u
@@ -1815,6 +1889,7 @@ hasFunction ty = case ty of
     TList t -> hasFunction t
     TBox t -> hasFunction t
     TAddr t -> hasFunction t
+    TUninit t -> hasFunction t
     TBlock t -> hasFunction t
     TArrayOf t _ -> hasFunction t
     TRef t -> hasFunction t
@@ -1896,6 +1971,8 @@ implementsMarker trait = go (0 :: Int) False
                 -- (an address is a word, copied wherever it is wanted; a permission is never copied)
                 TAddr _ -> return True
                 TBlock _ -> return False
+                -- (an Uninit of a value that owns nothing is its bits, and is copied as they are; one of a value that owns something is linear)
+                TUninit e -> ownsHeap e >>= \owning -> if owning then return False else go (depth + 1) lenient e
                 TNamed "Self" -> return (trait == "Clone")
                 -- (a tuple has what all of its parts have)
                 TNamed name | Just (base, args) <- instanceOf name, Just _ <- tupleGeneric base -> allM' [go (depth + 1) lenient t | ArgType t <- args]
@@ -1926,6 +2003,7 @@ requireMarker trait ty = do
         t <- zonk ty >>= lacking
         case t of
             TBlock _ -> failTc ("Type error: " ++ renderType t ++ " is a permission, which is never copied: there is only ever one for a piece of memory")
+            TUninit _ -> failTc ("Type error: " ++ renderType t ++ " holds a value that owns something, or nothing, and native code cannot tell which: it is not copied (take the value out with Uninit::take, and copy that)")
             _ -> return ()
         failTc ("Type error: " ++ renderType t ++ " does not implement " ++ trait ++ (if trait == "Clone" then ", so a copy of it is not made: write impl Clone for " ++ describeOwner t ++ " { }; (its fields have to be Clone) if it should be" else ""))
   where
@@ -1947,6 +2025,8 @@ requireMarker trait ty = do
 checkMarkerImpl :: Name -> Name -> TC ()
 checkMarkerImpl trait typeName = do
     s <- getState
+    when (Set.member typeName (tcLinear s)) $
+        failTc ("Type error: impl " ++ trait ++ " for " ++ typeName ++ ": " ++ typeName ++ " is linear, so a value of it is used exactly once and is never copied")
     when (trait == "Copy" && not (Set.member ("Clone", typeName) (tcImpls s))) $
         failTc ("Type error: impl Copy for " ++ typeName ++ ": " ++ typeName ++ " is Copy only if it is Clone, so write impl Clone for " ++ typeName ++ " { }; first")
     fields <- case Map.lookup typeName (tcGenerics s) of
@@ -2071,6 +2151,7 @@ templateCall name template inferred = do
         TList u -> unknown u
         TBox u -> unknown u
         TAddr u -> unknown u
+        TUninit u -> unknown u
         TBlock u -> unknown u
         TNamed n | Just (_, args) <- instanceOf n -> or [unknown u | ArgType u <- args]
         TRef u -> unknown u
