@@ -1537,6 +1537,7 @@ ownerOfValue function ty = do
     case t of
         -- (a struct with types and sizes has the functions of its impl, whatever it is given)
         TNamed name -> return (maybe name fst (instanceOf name))
+        TList _ -> return "List"
         TVariant variant -> fst <$> ctorInfo variant
         TVar _ -> failTc ("Type error: the type of the value whose function " ++ function ++ " is called is not known yet; annotate it")
         other@TBox{} -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions: call it on the value inside, as in Box::unbox(b)." ++ function ++ "(...)")
@@ -1586,6 +1587,23 @@ checkTrait name params functions = do
 substTraitArgs :: [Variable] -> [Arg] -> Type -> Type
 substTraitArgs params args = substitute [] [(p, t) | (p, ArgType t) <- zip params args]
 
+-- Self as a type: the type an impl is for, which is a list for an impl for one (`impl<T> Sequence<T> for List<T>`, lib/prelude.tersus)
+substSelfAs :: Name -> Type -> Type -> Type
+substSelfAs selfName selfType ty = case ty of
+    TNamed "Self" -> selfType
+    TNamed name | name == selfName -> selfType
+    TList t -> TList (go t)
+    TArrayOf t size -> TArrayOf (go t) size
+    TBox t -> TBox (go t)
+    TAddr t -> TAddr (go t)
+    TUninit t -> TUninit (go t)
+    TBlock t -> TBlock (go t)
+    TRef t -> TRef (go t)
+    TFn args ret -> TFn (map go args) (go ret)
+    _ -> ty
+  where
+    go = substSelfAs selfName selfType
+
 substSelf :: Name -> Type -> Type
 substSelf owner (TNamed "Self") = TNamed owner
 substSelf owner (TList t) = TList (substSelf owner t)
@@ -1612,8 +1630,14 @@ substSelf _ t = t
 checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
 checkImpl ctx env trait traitArgs typeName selfName functions = do
     declared <- getState
-    -- (a struct with parameters has them in the impl, `impl<T> Vec<T>`, and its type is a different one for each)
-    unless (Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
+    -- (a struct with parameters has them in the impl, `impl<T> Vec<T>`, and its type is a different one for each; a list is the one
+    -- type with an impl that is not declared as a struct, and Self for it is a List of the type the impl names)
+    let selfType = case (typeName, instanceOf selfName) of
+            ("List", Just (_, [ArgType t])) -> TList t
+            _ -> TNamed selfName
+        asSelf = substSelfAs selfName selfType
+        functions' = map (rewriteSignature asSelf) functions
+    unless (typeName == "List" || Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
     -- (the type implements the trait from the first function on, so a function can call an earlier one through the trait; if the
     -- impl is not accepted the program is refused, so this is never seen)
     (required, traitParams) <- case trait of
@@ -1641,7 +1665,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                 unless holding $ failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " holds no permission (Block<T>), and a drop is how a value frees the memory it holds; a value that has to be closed is a linear type, closed by a call")
                 putState s'{tcDrops = Set.insert typeName (tcDrops s')}
             return (found, params)
-    (ctx', env', checked) <- definitions True (ctx, env, []) functions
+    (ctx', env', checked) <- definitions True (ctx, env, []) functions'
     case trait of
         Nothing -> return (ctx', env', checked)
         Just traitName -> do
@@ -1649,7 +1673,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                 defined = [(implFunctionPart name, (Signature ptys rty sizes types, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types) term _) _)) <- checked]
                 wanted = map traitFnName required
                 -- (what the trait asks for, with Self the type and the types of the trait the ones this impl gives)
-                inImpl = substTraitArgs traitParams traitArgs . substSelf selfName
+                inImpl = substTraitArgs traitParams traitArgs . substSelfAs selfName selfType
             case map fst defined \\ wanted of
                 extra : _ -> failTc ("Type error: " ++ here ++ " has a function " ++ extra ++ ", which " ++ traitName ++ " does not declare")
                 [] -> return ()
@@ -1682,6 +1706,11 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
         (c', e', stmt') <- checkStatement True c e stmt
         definitions own (c', e', done ++ [stmt']) rest
     renderSignature (Signature ptys rty _ _) = renderType (TFn ptys rty)
+    -- (Self in the signature of a function of the impl is the type the impl is for, as the parser wrote it and as it is)
+    rewriteSignature asSelf stmt = case stmt of
+        Assign name (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types) term body) proofs)) ->
+            Assign name (Val (VFunct params ins outs (NativeFunct (Signature (map asSelf ptys) (asSelf rty) sizes types) term body) proofs))
+        _ -> stmt
     wrapper traitName owner f signature term =
         Assign
             (implCheckName traitName owner (traitFnName f))
@@ -2205,7 +2234,11 @@ traitArgumentsOf trait ty = do
                         Nothing -> ([], [])
                 in Just [substitute sizesBound typesBound t | ArgType t <- given]
     case ty of
-        TList e -> return (builtin e ["Sequence", "Growable"] >>= nonEmpty)
+        -- (a list implements what an impl for it declares, which lib/prelude.tersus does for Sequence and Growable; with no impl
+        -- declared, as in a program that declares those traits itself, a list has them by being a list)
+        TList e -> case own "List" [ArgType e] of
+            Just args -> return (Just args)
+            Nothing -> return (builtin e ["Sequence", "Growable"] >>= nonEmpty)
         TArrayOf e _ -> return (builtin e ["Sequence"] >>= nonEmpty)
         TBox (TArrayOf e _) -> return (builtin e ["Sequence"] >>= nonEmpty)
         TNamed name -> return (maybe (own name []) (\(base, args) -> own base args) (instanceOf name))

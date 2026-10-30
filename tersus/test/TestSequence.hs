@@ -130,7 +130,7 @@ testSequence =
                 , testCase "pop is not a function of an array" (rejected "a = #[1, 2]; return size(pop(a));" "argument 1 of pop: expected List")
                 , testCase "an array has them too" (runs "a = #[1, 2]; a = a.set(0, 9); return a.get(0) * 10 + a.size();" (VInt 92))
                 , testCase "and a Box of an array" (runs "b = Array::boxed(3, 7); return b.size() + b.get(0);" (VInt 10))
-                , testCase "a method that is not one" (rejected "l = [1]; return l.nothing();" "nothing is called on a List<Int>, which has no functions")
+                , testCase "a method that is not one" (rejected "l = [1]; return l.nothing();" "List::nothing is not defined before this call")
                 , testCase "pop is a name of the language" (rejected "fn pop(l: List<Int>) -> List<Int> { return l; }; return 0;" "Function already defined: pop")
                 ]
             , TestList
@@ -141,6 +141,10 @@ testSequence =
                         library = lines vecLibrary
                     pure $ if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "examples/vec.tersus does not hold vecLibrary"
                 , testCase "a program that mentions Sequence has the trait" (runsAs (counter ++ "return Three { a: 4, n: 2 }.size() + get(Three { a: 4, n: 2 }, 0);") "6")
+                , testCase "a list is a Sequence by the impl in lib/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(push([], 3));" "1")
+                , testCase "and a Growable by it" (runsAs "fn add<S: Growable<Int>>(s: S, x: Int) -> S { return push(s, x); }; return size(add(push([], 3), 4));" "2")
+                , testCase "called through the trait by its path" (runsAs "return Sequence::size(push([], 3)) + Sequence::get(push([], 3), 0);" "4")
+                , testCase "an impl for a list is written for it" (runs "trait MySeq<E> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl<T> MySeq<T> for List<T> { fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return size(self); }; }; fn n<S: MySeq<Int>>(s: &S) -> Int { return size(s); }; return n(push([], 3));" (VInt 1))
                 , testCase "the trait is the one in lib/prelude.tersus" (errorHas (counter ++ "return get(Three { a: 4, n: 2 }, 3);") "Could not prove: i < <Three as Sequence>::size(self)")
                 , testCase "a program with a Sequence of its own does not" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
                 , testCase "the names that native code makes a list of are not a program's" (errorHas "fn stdListNew() -> Int { return 7; }; return [1];" "stdListNew is reserved")
