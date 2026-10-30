@@ -435,141 +435,218 @@ data DropAct
     | GroupAct OwnKey [DropAct]
     | VariantAct Local Name [DropAct]
 
--- Inserts the drops of a function at its returns, under what the states say: a drop of a part that holds nothing on
--- any path to the return is not inserted, and one that may hold a value is made under a test of its flag. The flags
--- are new locals, kept up to date where a part they stand for is given a value, is moved or taken from, or is dropped.
+-- Inserts the drops of a function: at its returns, and before a statement or a call that gives a local a new value
+-- while it still holds one, so that what a local held is dropped by the statements of the program and never by the
+-- code that is made for an assignment. A drop of a part that holds nothing on any path to the point is not inserted,
+-- and one that may hold a value is made under a test of its flag. Where the new value is made from the local it is
+-- given to (a copy of a part of it), the new value is made in a new local first, and the local is dropped between.
+-- The flags are new locals, kept up to date where a part they stand for is given a value, is moved or taken from,
+-- or is dropped.
 elaborateDrops :: Program -> Function -> Set Local -> Map Local LocalDecl -> Map BlockId BasicBlock -> Int -> Int -> (Map Local LocalDecl, Map BlockId BasicBlock)
 elaborateDrops program fn tracked locals blocks nextLocal nextBlock = (locals', blocks')
   where
-    (_, endStates) = blockStates fn tracked blocks
+    (insStates, endStates) = blockStates fn tracked blocks
+    entryStateOf b = Map.findWithDefault Map.empty b insStates
     endState b = Map.findWithDefault Map.empty b endStates
-    plans b = [(l, dropPlan program locals tracked (endState b) l) | l <- Set.toList tracked]
-    flagged =
-        Set.fromList
-            ( [ (l, Nothing)
-              | (b, BasicBlock _ term) <- Map.toList blocks
-              , term == Return
-              , l <- Set.toList tracked
-              , stateOf tracked (endState b) (l, Nothing) == MaybeOwned
-              ]
-                ++ [ (l, Just (ctor, f))
-                   | (b, BasicBlock _ term) <- Map.toList blocks
-                   , term == Return
-                   , (l, FieldsDrop shape) <- plans b
-                   , (_, fields) <- shape
-                   , (ctor, f, _) <- fields
-                   , fieldStateOf tracked (endState b) l (ctor, f) == MaybeOwned
-                   ]
-            )
+    -- The keys whose flag a drop at any point is made under, worked out before any flag is given a local
+    flagged = Set.fromList (concatMap neededAtBlock (Map.toList blocks))
+    neededAtBlock (b, BasicBlock stmts term) = go (entryStateOf b) stmts
+      where
+        go state [] = case term of
+            Return -> concatMap (\l -> neededKeys state l (dropPlan program locals tracked state l)) (Set.toList tracked)
+            Call _ _ dest _ | Just plan <- callPlan state term -> neededKeys state dest plan
+            _ -> []
+        go state (st : rest) =
+            (case assignPlan state st of
+                Just (d, plan) -> neededKeys state d plan
+                Nothing -> [])
+                ++ go (transferStatement tracked state st) rest
+    neededKeys state l plan =
+        case plan of
+            NoDrop -> []
+            WholeDrop -> [(l, Nothing) | stateOf tracked state (l, Nothing) == MaybeOwned]
+            FieldsDrop shape ->
+                [(l, Nothing) | stateOf tracked state (l, Nothing) == MaybeOwned]
+                    ++ [(l, Just (ctor, f)) | (_, fields) <- shape, (ctor, f, _) <- fields, fieldStateOf tracked state l (ctor, f) == MaybeOwned]
+    -- The drop a local is given before it is given a new value, if it still holds one and the new value does not
+    -- move it away itself
+    assignPlan state st =
+        case st of
+            Assign d rv
+                | d `Set.member` tracked
+                , stateOf tracked state (d, Nothing) /= Empty
+                , d `notElem` statementMoved st ->
+                    Just (d, dropPlan program locals tracked state d)
+            _ -> Nothing
+    callPlan state term =
+        case term of
+            Call _ _ dest _
+                | dest `Set.member` tracked
+                , stateOf tracked state (dest, Nothing) /= Empty
+                , dest `notElem` terminatorMoved term ->
+                    Just (dropPlan program locals tracked state dest)
+            _ -> Nothing
     flagOf = Map.fromList (zip (Set.toList flagged) (map Local [nextLocal ..]))
     nextLocal' = nextLocal + Map.size flagOf
     setFlag key value = Assign (flagOf Map.! key) (Use (Const (CBool value)))
     flagsOf l value = [setFlag key value | (key, _) <- Map.toList flagOf, fst key == l]
     flagClears ls = concatMap (\l -> flagsOf l False) ls
+    takeFieldClear st =
+        case st of
+            Assign _ (TakeField s name field) -> [setFlag (s, Just (name, field)) False | (s, Just (name, field)) `Map.member` flagOf]
+            _ -> []
     withStatementFlags st =
         [st]
             ++ flagClears (statementMoved st)
+            ++ takeFieldClear st
             ++ (case st of
-                    Assign d (TakeField s name field) ->
-                        [setFlag (s, Just (name, field)) False | (s, Just (name, field)) `Map.member` flagOf]
-                            ++ flagsOf d True
                     Assign d _ -> flagsOf d True
                     Drop l -> flagsOf l False
                     _ -> [])
-    withEntryFlags b stmts
-        | b == BlockId 0 = [Assign f (Use (Const (CBool (fst key `elem` fnParams fn)))) | (key, f) <- Map.toList flagOf] ++ stmts
-        | otherwise = stmts
-    (blocks', _, _, newDecls) = foldl step (Map.empty, nextBlock, nextLocal', []) (Map.toList blocks)
+    typeOfLocal l = maybe TInt localType (Map.lookup l locals)
+    (blocks', _, _, newDecls) = foldl processBlock (Map.empty, nextBlock, nextLocal', []) (Map.toList blocks)
     locals' = Map.union (Map.union locals (Map.fromList [(f, LocalDecl TBool Nothing) | f <- Map.elems flagOf])) (Map.fromList newDecls)
-    step (done, freshB, freshL, decls) (b, BasicBlock stmts term) =
-        let stmts' = withEntryFlags b (concatMap withStatementFlags stmts)
-         in case term of
-                Return ->
-                    let (acts, freshL', decls') = dropActs (endState b) freshL decls
-                        finalBlock = BlockId freshB
-                        (entry, (freshB', freshL'', blocks'', decls'')) = buildActs acts finalBlock (freshB + 1, freshL', done, decls')
-                     in ( Map.insert finalBlock (BasicBlock [] Return) (Map.insert b (BasicBlock stmts' (Goto entry)) blocks'')
-                        , freshB'
-                        , freshL''
-                        , decls''
-                        )
-                Call callee args dest next ->
-                    let updates = flagClears (terminatorMoved term) ++ flagsOf dest True
-                     in if null updates
-                            then (Map.insert b (BasicBlock stmts' term) done, freshB, freshL, decls)
-                            else
-                                let trampoline = BlockId freshB
-                                 in ( Map.insert trampoline (BasicBlock updates (Goto next)) (Map.insert b (BasicBlock stmts' (Call callee args dest trampoline)) done)
-                                    , freshB + 1
-                                    , freshL
-                                    , decls
-                                    )
-                _ -> (Map.insert b (BasicBlock stmts' term) done, freshB, freshL, decls)
-    -- The drops of every local at a return, as actions, with the new locals that the fields are taken into
-    dropActs state freshL decls = foldl one ([], freshL, decls) (plansHere)
+    -- The state of a local whose drop has just been inserted: it holds nothing
+    afterDrop l state = setState tracked (l, Nothing) Empty (clearFields l state)
+    processBlock acc (b, block@(BasicBlock stmts term)) =
+        segment b initialRev (entryStateOf b) Map.empty stmts term acc
       where
-        plansHere = [(l, dropPlan program locals tracked state l) | l <- Set.toList tracked]
-        one (acts, fresh, ds) (l, plan) =
-            case plan of
-                NoDrop -> (acts, fresh, ds)
-                WholeDrop
-                    | stateOf tracked state (l, Nothing) == MaybeOwned -> (acts ++ [Act (Just (l, Nothing)) [Drop l]], fresh, ds)
-                    | otherwise -> (acts ++ [Act Nothing [Drop l]], fresh, ds)
-                FieldsDrop shape ->
-                    let (sub, fresh', ds') = foldl variant ([], fresh, ds) shape
-                        variant (vacts, vf, vds) (ctor, fields) =
-                            let (facts, vf', vds') = foldl field ([], vf, vds) fields
-                                field (facts, ff, fds) (ctor', f, t)
-                                    | fieldStateOf tracked state l (ctor', f) == MaybeOwned =
-                                        let temp = Local ff
-                                         in (facts ++ [Act (Just (l, Just (ctor', f))) [Assign temp (TakeField l ctor' f), Drop temp]], ff + 1, (temp, LocalDecl t Nothing) : fds)
-                                    | otherwise =
-                                        let temp = Local ff
-                                         in (facts ++ [Act Nothing [Assign temp (TakeField l ctor' f), Drop temp]], ff + 1, (temp, LocalDecl t Nothing) : fds)
-                             in if null facts then (vacts, vf', vds') else (vacts ++ [if length shape == 1 then SpliceAct facts else VariantAct l ctor facts], vf', vds')
-                     in case stateOf tracked state (l, Nothing) of
-                            MaybeOwned -> (acts ++ [GroupAct (l, Nothing) (sub ++ [Act Nothing [Drop l]])], fresh', ds')
-                            _ -> (acts ++ sub ++ [Act Nothing [Drop l]], fresh', ds')
+        initialRev = [Assign f (Use (Const (CBool (fst key `elem` fnParams fn)))) | b == BlockId 0, (key, f) <- Map.toList flagOf]
+    -- One block, statement by statement: a statement that gives a local a new value while it holds one closes the
+    -- block, and the drops and the statement go in the blocks that follow
+    segment curBid rev state aliases [] term acc = finishTerm curBid rev state aliases term acc
+    segment curBid rev state aliases (st : rest) term acc =
+        case assignPlan state st of
+            Nothing -> segment curBid (reverse (withStatementFlags st) ++ rev) (transferStatement tracked state st) (afterStatement aliases st) rest term acc
+            Just (d, plan)
+                | routed st d ->
+                    let (temp, acc1) = allocLocal (typeOfLocal d) acc
+                        segA = [Assign temp rv | Assign _ rv <- [st]] ++ flagClears (statementMoved st) ++ takeFieldClear st
+                        (contBid, acc2) = allocBlock acc1
+                        (acts, acc3) = localActs state d plan acc2
+                        (entry, acc4) = buildActs acts contBid acc3
+                        (segABid, acc5) = allocBlock acc4
+                        acc6 = addBlock segABid segA (Goto entry) acc5
+                        acc7 = addBlock curBid (reverse rev) (Goto segABid) acc6
+                     in segment contBid (reverse ([Assign d (Use (Move temp))] ++ flagsOf d True)) (transferStatement tracked state st) (Map.delete d aliases) rest term acc7
+                | otherwise ->
+                    let (contBid, acc1) = allocBlock acc
+                        (acts, acc2) = localActs state d plan acc1
+                        (entry, acc3) = buildActs acts contBid acc2
+                        acc4 = addBlock curBid (reverse rev) (Goto entry) acc3
+                     in segment contBid (reverse (withStatementFlags st)) (transferStatement tracked (afterDrop d state) st) (Map.delete d aliases) rest term acc4
+      where
+        routed (Assign _ rv) dest = any (\o -> maybe False (Set.member dest . rootsOf aliases) (operandLocal o)) [o | (o, _) <- roles rv]
+        routed _ _ = False
+    -- What a local looks into, for a peek that only reads a part of it (the roots of what it was read from)
+    rootsOf aliases l = Set.insert l (Map.findWithDefault Set.empty l aliases)
+    afterStatement aliases st =
+        case st of
+            Peek d rv -> Map.insert d (Set.unions [rootsOf aliases l | (o, _) <- roles rv, Just l <- [operandLocal o]]) (Map.delete d aliases)
+            Assign d _ -> Map.delete d aliases
+            _ -> aliases
+    finishTerm curBid rev state aliases term acc =
+        case term of
+            Return ->
+                let (acts, acc1) = foldl one ([], acc) (Set.toList tracked)
+                    one (acts, a) l = let (more, a') = localActs state l (dropPlan program locals tracked state l) a in (acts ++ more, a')
+                 in if null acts
+                        then addBlock curBid (reverse rev) Return acc1
+                        else
+                            let (finalBid, acc2) = allocBlock acc1
+                                (entry, acc3) = buildActs acts finalBid acc2
+                                acc4 = addBlock finalBid [] Return acc3
+                             in addBlock curBid (reverse rev) (Goto entry) acc4
+            Call callee args dest next ->
+                case callPlan state term of
+                    Just plan
+                        | any (\o -> maybe False (Set.member dest . rootsOf aliases) (operandLocal o)) (terminatorOperandsOfCall term) ->
+                            let (temp, acc1) = allocLocal (typeOfLocal dest) acc
+                                (assignBid, acc2) = allocBlock acc1
+                                (acts, acc3) = localActs state dest plan acc2
+                                (entry, acc4) = buildActs acts assignBid acc3
+                                (flagsBid, acc5) = allocBlock acc4
+                                acc6 = addBlock assignBid ([Assign dest (Use (Move temp))] ++ flagsOf dest True) (Goto next) acc5
+                                acc7 = addBlock flagsBid (flagClears (terminatorMoved term)) (Goto entry) acc6
+                             in addBlock curBid (reverse rev) (Call callee args temp flagsBid) acc7
+                        | otherwise ->
+                            let (callBid, acc1) = allocBlock acc
+                                (acts, acc2) = localActs state dest plan acc1
+                                (entry, acc3) = buildActs acts callBid acc2
+                                acc4 = plainCall callBid callee args dest next acc3
+                             in addBlock curBid (reverse rev) (Goto entry) acc4
+                    Nothing -> plainCallHere curBid rev term acc
+            _ -> addBlock curBid (reverse rev) term acc
+    terminatorOperandsOfCall (Call callee args _ _) = callee : args
+    terminatorOperandsOfCall _ = []
+    -- A call block of its own, with the updates of the flags after it, as they were made before
+    plainCall bid callee args dest next acc =
+        let updates = flagClears (terminatorMoved (Call callee args dest next)) ++ flagsOf dest True
+         in if null updates
+                then addBlock bid [] (Call callee args dest next) acc
+                else
+                    let (trampoline, acc1) = allocBlock acc
+                        acc2 = addBlock trampoline updates (Goto next) acc1
+                     in addBlock bid [] (Call callee args dest trampoline) acc2
+    plainCallHere bid rev term@(Call callee args dest next) acc =
+        let updates = flagClears (terminatorMoved term) ++ flagsOf dest True
+         in if null updates
+                then addBlock bid (reverse rev) term acc
+                else
+                    let (trampoline, acc1) = allocBlock acc
+                        acc2 = addBlock trampoline updates (Goto next) acc1
+                     in addBlock bid (reverse rev) (Call callee args dest trampoline) acc2
+    plainCallHere bid rev term acc = addBlock bid (reverse rev) term acc
+    addBlock bid stmts term (done, freshB, freshL, decls) = (Map.insert bid (BasicBlock stmts term) done, freshB, freshL, decls)
+    allocBlock (done, freshB, freshL, decls) = (BlockId freshB, (done, freshB + 1, freshL, decls))
+    allocLocal ty (done, freshB, freshL, decls) = (Local freshL, (done, freshB, freshL + 1, (Local freshL, LocalDecl ty Nothing) : decls))
+    -- The drops of one local under a state, as actions, with the new locals that the fields are taken into
+    localActs state l plan acc =
+        case plan of
+            NoDrop -> ([], acc)
+            WholeDrop
+                | stateOf tracked state (l, Nothing) == MaybeOwned -> ([Act (Just (l, Nothing)) [Drop l]], acc)
+                | otherwise -> ([Act Nothing [Drop l]], acc)
+            FieldsDrop shape ->
+                let (sub, acc') = foldl variant ([], acc) shape
+                    variant (vacts, a) (ctor, fields) =
+                        let (facts, a') = foldl field ([], a) fields
+                            field (facts, a1) (ctor', f, t) =
+                                let (temp, a2) = allocLocal t a1
+                                    act
+                                        | fieldStateOf tracked state l (ctor', f) == MaybeOwned = Act (Just (l, Just (ctor', f))) [Assign temp (TakeField l ctor' f), Drop temp]
+                                        | otherwise = Act Nothing [Assign temp (TakeField l ctor' f), Drop temp]
+                                 in (facts ++ [act], a2)
+                         in if null facts then (vacts, a') else (vacts ++ [if length shape == 1 then SpliceAct facts else VariantAct l ctor facts], a')
+                 in case stateOf tracked state (l, Nothing) of
+                        MaybeOwned -> ([GroupAct (l, Nothing) (sub ++ [Act Nothing [Drop l]])], acc')
+                        _ -> (sub ++ [Act Nothing [Drop l]], acc')
     -- Runs the actions in order, each block going to the next, and then to the block it all ends at
     buildActs [] cont acc = (cont, acc)
     buildActs (SpliceAct sub : rest) cont acc = buildActs (sub ++ rest) cont acc
     buildActs (GroupAct key sub : rest) cont acc =
         let (restEntry, acc1) = buildActs rest cont acc
-            (subEntry, (freshB', freshL', done', decls')) = buildActs sub restEntry acc1
-            testB = BlockId freshB'
+            (subEntry, acc2) = buildActs sub restEntry acc1
+            (testB, acc3) = allocBlock acc2
+         in (testB, addBlock testB [] (SwitchBool (Copy (flagOf Map.! key)) subEntry restEntry) acc3)
+    buildActs (Act Nothing stmts : rest) cont acc =
+        let (restEntry, acc1) = buildActs rest cont acc
+            (bid, acc2) = allocBlock acc1
+         in (bid, addBlock bid stmts (Goto restEntry) acc2)
+    buildActs (Act (Just key) stmts : rest) cont acc =
+        let (restEntry, acc1) = buildActs rest cont acc
+            (dropB, acc2) = allocBlock acc1
+            (testB, acc3) = allocBlock acc2
          in ( testB
-            , ( freshB' + 1
-              , freshL'
-              , Map.insert testB (BasicBlock [] (SwitchBool (Copy (flagOf Map.! key)) subEntry restEntry)) done'
-              , decls'
-              )
+            , addBlock testB [] (SwitchBool (Copy (flagOf Map.! key)) dropB restEntry) (addBlock dropB stmts (Goto restEntry) acc3)
             )
-    buildActs (Act Nothing stmts : rest) cont (freshB, freshL, done, decls) =
-        let (restEntry, (freshB', freshL', done', decls')) = buildActs rest cont (freshB, freshL, done, decls)
-            bid = BlockId freshB'
-         in (bid, (freshB' + 1, freshL', Map.insert bid (BasicBlock stmts (Goto restEntry)) done', decls'))
-    buildActs (Act (Just key) stmts : rest) cont (freshB, freshL, done, decls) =
-        let (restEntry, (freshB', freshL', done', decls')) = buildActs rest cont (freshB, freshL, done, decls)
-            dropB = BlockId freshB'
-            testB = BlockId (freshB' + 1)
+    buildActs (VariantAct l ctor sub : rest) cont acc =
+        let (restEntry, acc1) = buildActs rest cont acc
+            (subEntry, acc2) = buildActs sub restEntry acc1
+            (temp, acc3) = allocLocal TBool acc2
+            (testB, acc4) = allocBlock acc3
          in ( testB
-            , ( freshB' + 2
-              , freshL'
-              , Map.insert testB (BasicBlock [] (SwitchBool (Copy (flagOf Map.! key)) dropB restEntry)) (Map.insert dropB (BasicBlock stmts (Goto restEntry)) done')
-              , decls'
-              )
-            )
-    buildActs (VariantAct l ctor sub : rest) cont (freshB, freshL, done, decls) =
-        let (restEntry, acc1) = buildActs rest cont (freshB, freshL, done, decls)
-            (subEntry, (freshB', freshL', done', decls')) = buildActs sub restEntry acc1
-            temp = Local freshL'
-            testB = BlockId freshB'
-         in ( testB
-            , ( freshB' + 1
-              , freshL' + 1
-              , Map.insert testB (BasicBlock [Assign temp (IsVariant (Copy l) ctor)] (SwitchBool (Copy temp) subEntry restEntry)) done'
-              , (temp, LocalDecl TBool Nothing) : decls'
-              )
+            , addBlock testB [Assign temp (IsVariant (Copy l) ctor)] (SwitchBool (Copy temp) subEntry restEntry) acc4
             )
 
 -- Forwards a cast to the reads that follow it in its block, so that `(x as V).f` reads the field of x itself, which is what

@@ -476,6 +476,10 @@ listPrograms =
     , ("a parameter assigned a part", "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);")
     , ("a parameter assigned a part that is kept", "fn f(row: List<Int>, rows: List<List<Int>>) -> List<Int> [{ affirm size(rows) > 0; }] [{ }] { row = clone(get(rows, 0)); return row; }; return f([1], [[2, 3]]);")
     , ("a parameter assigned a field", "struct P { xs: List<Int> }; fn f(xs: List<Int>, p: P) -> Int { xs = p.xs; return size(xs); }; return f([1], P { xs: [2, 3] });")
+    , ("a struct overwritten after a field is taken", "struct P { xs: List<Int>, ys: List<Int> }; p = P { xs: [1], ys: [2, 3] }; x = p.xs; p = P { xs: [4], ys: [5] }; return size(x) * 10 + size(p.ys);")
+    , ("a list overwritten in a loop", "xs = [0]; i = 0; while i < 3 [{ affirm i >= 0; }] shrinks 3 - i { xs = [7, 7]; i = i + 1; }; return size(xs);")
+    , ("a call result overwrites its argument", "fn grow(l: List<Int>) -> List<Int> { return push(l, size(l)); }; xs = [1]; xs = grow(xs); xs = grow(xs); return size(xs);")
+    , ("a list overwritten after an assignment in one branch", "xs = [0]; if size(xs) = 1 { xs = [9, 9]; }; xs = [1, 2, 3]; return size(xs);")
     , ("a list that is not returned", "x = [1, 2];")
     , ("returned in a branch only", "x = [1]; if size(x) > 5 { return x; };")
     ]
