@@ -2,13 +2,14 @@ module TestMirReader (testMirReader, withProgram, sameText) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
+import System.Directory (createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import System.IO.Unsafe (unsafePerformIO)
 
 import Bootstrap (tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runSourceIn)
+import Hash (fingerprint)
 import MirData (writeProgram)
 import Native (buildExecutable)
 import Pipeline (ownedSource)
@@ -58,7 +59,10 @@ interpreted source = do
                 | sameText output text -> Nothing
                 | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
 
--- A program of the examples as an executable, built once for the tests that need it (clang is needed, and the tests pass without it)
+-- A program of the examples as an executable, built once for the tests that need it (clang is needed, and the tests pass without it).
+-- The executable is kept in the temporary directory under a name made of the program, so that the groups that need the same one
+-- (each in a process of its own) build it once between them; a build that failed is not remembered, so the case that asked for it
+-- reports why, and a build that is cut short leaves nothing at the name.
 withProgram :: FilePath -> String -> (FilePath -> IO TestResult) -> IO TestResult
 withProgram path name use = do
     available <- clangAvailable
@@ -71,17 +75,21 @@ withProgram path name use = do
                     Nothing -> do
                         source <- readFile path
                         tmp <- getTemporaryDirectory
-                        let dir = tmp </> ("tersus-" ++ name ++ "-test")
-                            exe = dir </> name
+                        let dir = tmp </> "tersus-test-programs"
+                            exe = dir </> (name ++ "-" ++ fingerprint [source])
+                            partial = exe ++ ".building"
                         createDirectoryIfMissing True dir
-                        ir <- tersusLlvm source
-                        result <- case ir of
-                            Error e -> pure (Error e)
-                            Ok text -> buildExecutable exe text
-                        case result of
-                            -- (a build that failed is not remembered: the case that asked for it reports why)
-                            Error e -> pure (built, Left e)
-                            Ok () -> pure (Map.insert name exe built, Right exe)
+                        present <- doesFileExist exe
+                        if present
+                            then pure (Map.insert name exe built, Right exe)
+                            else do
+                                ir <- tersusLlvm source
+                                result <- case ir of
+                                    Error e -> pure (Error e)
+                                    Ok text -> buildExecutable partial text
+                                case result of
+                                    Error e -> pure (built, Left e)
+                                    Ok () -> renameFile partial exe >> pure (Map.insert name exe built, Right exe)
             case built of
                 Left e -> pure (Just e)
                 Right exe -> use exe

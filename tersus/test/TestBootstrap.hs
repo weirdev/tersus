@@ -77,17 +77,17 @@ bootstrap = do
     available <- clangAvailable
     if not available
         then pure Nothing
-        else withDirectory "tersus-bootstrap-test" $ \dir -> do
-            let zero = dir </> "stage0"
-                one = dir </> "stage1"
-            built0 <- stageZero zero
+        else do
+            -- (the stages as they are kept for the compiler itself: stageZero and stageOne built them, and a run of the tests
+            -- that finds them there does not build them again)
+            built0 <- cachedSeed
             case built0 of
                 Error e -> pure (Just ("stage 0: " ++ e))
-                Ok () -> do
-                    built1 <- stageOne zero one
+                Ok zero -> do
+                    built1 <- cachedEmitter
                     case built1 of
                         Error e -> pure (Just ("stage 1: " ++ e))
-                        Ok () -> do
+                        Ok one -> do
                             all' <- programs
                             fixpoint <- sameEmitter zero one
                             written <- parallelFor all' (writesIr one)

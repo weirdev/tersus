@@ -10,22 +10,21 @@ module TestNative
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
-import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile)
 import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFileSystemEncoding, setLocaleEncoding)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), hGetContents, hPutStr, withBinaryFile)
+import System.IO (IOMode (..), hClose, hGetContents, hPutStr, openTempFile, withBinaryFile)
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
 
-import Bootstrap (cachedEmitter, emitWith, tersusLlvm)
+import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Mir as M
-import MirData (writeProgram)
 import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
 import MirOwnership (insertOwnership)
 import MirVerify (verifyProgram)
-import Native (buildExecutable, buildExecutableWith, runExecutable)
+import Native (buildExecutableFast, runExecutable)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestHarness
@@ -37,30 +36,30 @@ import Utils
 
 testNative :: Test
 testNative =
-    TestList
+    TestParallel
         "testNative"
         [ testNativeIr
-        , TestList "examples" [testNativeProgram path | path <- nativeExamples]
-        , TestList "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
-        , TestList "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
-        , TestList "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
-        , TestList "bytes" [TestCase name (sameAsMir name source) | (name, source) <- bytePrograms]
-        , TestList "files" ([TestCase name (sameAsMirFiles name files source) | (name, files, source) <- filePrograms] ++ [testUnwritableFile])
-        , TestList "arguments" [TestCase name (sameAsMirWorld name (noWorld{worldArgs = map encodeUtf8 args}) source) | (name, args, source) <- argumentPrograms]
-        , TestList "error" [TestCase name (sameAsMir name source) | (name, source) <- errorPrograms]
-        , TestList "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
-        , TestList "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
-        , TestList "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
-        , TestList "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
-        , TestList "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
-        , TestList "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
-        , TestList "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
-        , TestList "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
+        , TestParallel "examples" [testNativeProgram path | path <- nativeExamples]
+        , TestParallel "arithmetic" [TestCase name (sameAsMir name source) | (name, source) <- arithmeticPrograms]
+        , TestParallel "lists" [TestCase name (sameAsMir name source) | (name, source) <- listPrograms]
+        , TestParallel "strings" [TestCase name (sameAsMir name source) | (name, source) <- stringPrograms]
+        , TestParallel "bytes" [TestCase name (sameAsMir name source) | (name, source) <- bytePrograms]
+        , TestParallel "files" ([TestCase name (sameAsMirFiles name files source) | (name, files, source) <- filePrograms] ++ [testUnwritableFile])
+        , TestParallel "arguments" [TestCase name (sameAsMirWorld name (noWorld{worldArgs = map encodeUtf8 args}) source) | (name, args, source) <- argumentPrograms]
+        , TestParallel "error" [TestCase name (sameAsMir name source) | (name, source) <- errorPrograms]
+        , TestParallel "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
+        , TestParallel "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
+        , TestParallel "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
+        , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
+        , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
+        , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
+        , TestParallel "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
+        , TestParallel "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
         , TestList "build" [testBuildKeepsFiles, testEveryExampleIsBuilt, testRunExecutable]
         , TestList "memory" memoryTests
-        , TestList "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
-        , TestList "layout" [TestCase name (sameAsMir name source) | (name, source) <- layoutPrograms]
-        , TestList "layout and C" [TestCase name (nativeOnly i name source expected) | (i, (name, source, expected)) <- zip [1 :: Int ..] cPrograms]
+        , TestParallel "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
+        , TestParallel "layout" [TestCase name (sameAsMir name source) | (name, source) <- layoutPrograms]
+        , TestParallel "layout and C" [TestCase name (nativeOnly i name source expected) | (i, (name, source, expected)) <- zip [1 :: Int ..] cPrograms]
         ]
 
 -- Values laid out as C lays them out (Mir.layoutOf): narrow numbers stored and loaded, structs and enums with their fields at aligned offsets, printed and
@@ -782,7 +781,7 @@ testBuildKeepsFiles = TestCase "an existing output.build directory is kept" $ do
                 ir <- tersusLlvm "return 1;"
                 case ir of
                     Error e -> pure (Error e)
-                    Ok text -> buildExecutable exe text
+                    Ok text -> buildExecutableFast [] exe text
             kept <- doesFileExist precious
             pure $ case built of
                 Error e -> Just e
@@ -804,13 +803,13 @@ sameAsMirWorld name world source = do
         then pure Nothing
         else case compileSource source of
             Error e -> pure (Just ("Does not compile: " ++ e))
-            Ok _ -> do
-                ir <- tersusLlvm source
+            Ok program -> do
+                ir <- emitUnvalidated (nativeProgram program)
                 case ir of
                     Error e -> pure (Just e)
-                    Ok text -> buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name text (expected (runSourceIn world Interpret source))
+                    Ok text -> buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name text (expected (runProgramIn world program))
   where
-    expected (Ok (output, errors)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
+    expected (Ok ((output, errors), _)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
 
 -- A list built by pushing, and changed by setting, is built in place: it needs memory in proportion to its length and not to its
@@ -845,7 +844,7 @@ memoryTests =
                         let dir = tmp </> "tersus-native-test"
                             exe = dir </> "memory_limit"
                         createDirectoryIfMissing True dir
-                        built <- buildExecutable exe text
+                        built <- buildExecutableFast [] exe text
                         case built of
                             Error e -> pure (Just e)
                             Ok () -> do
@@ -867,7 +866,7 @@ buildsOnly source = do
                     tmp <- getTemporaryDirectory
                     let dir = tmp </> "tersus-native-test"
                     createDirectoryIfMissing True dir
-                    built <- buildExecutable (dir </> "builds_only") text
+                    built <- buildExecutableFast [] (dir </> "builds_only") text
                     pure $ case built of
                         Error e -> Just e
                         Ok () -> Nothing
@@ -894,9 +893,12 @@ buildAndRun :: String -> [String] -> String -> String -> String -> (ExitCode, St
 buildAndRun input args file name ir expectation = do
     tmp <- getTemporaryDirectory
     let dir = tmp </> "tersus-native-test"
-        exe = dir </> file
     createDirectoryIfMissing True dir
-    checked <- buildExecutableWith checkedBuild exe ir
+    -- (a name of this build only: cases of the same name in other groups build at the same time, and each has its own executable)
+    (exe, handle) <- openTempFile dir (file ++ ".")
+    hClose handle
+    removeFile exe
+    checked <- buildExecutableFast checkedBuild exe ir
     case checked of
         Error e -> pure (Just e)
         Ok () -> do
@@ -908,7 +910,7 @@ buildAndRun input args file name ir expectation = do
                     if not available
                         then pure Nothing
                         else do
-                            built <- buildExecutable (exe ++ "_plain") ir
+                            built <- buildExecutableFast [] (exe ++ "_plain") ir
                             case built of
                                 Error e -> pure (Just e)
                                 Ok () -> do
@@ -938,11 +940,11 @@ sameAsMirFiles name initial source = do
         then pure Nothing
         else case compileSource source of
             Error e -> pure (Just ("Does not compile: " ++ e))
-            Ok _ -> do
-                ir <- tersusLlvm source
+            Ok program -> do
+                ir <- emitUnvalidated (nativeProgram program)
                 case ir of
                     Error e -> pure (Just e)
-                    Ok text -> case runSourceFiles noWorld{worldFile = \path -> lookup path initial} Interpret source of
+                    Ok text -> case runProgramIn noWorld{worldFile = \path -> lookup path initial} program of
                         Error e -> pure (Just ("The MIR run failed: " ++ e))
                         Ok ((out, err), files) -> withByteNames $ do
                             tmp <- getTemporaryDirectory
@@ -952,7 +954,7 @@ sameAsMirFiles name initial source = do
                             if exists then removeDirectoryRecursive dir else pure ()
                             createDirectoryIfMissing True dir
                             mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
-                            built <- buildExecutable exe text
+                            built <- buildExecutableFast [] exe text
                             case built of
                                 Error e -> pure (Just e)
                                 Ok () -> do
@@ -1017,13 +1019,9 @@ sameAsUnvalidated name source = do
 -- The IR of a program that is lowered without being validated, written by the emitter in Tersus: who owns each value is
 -- made explicit and checked, and the emitter is given the owned MIR as data
 emitUnvalidated :: M.Program -> IO (Result String String)
-emitUnvalidated program = do
-    exe <- cachedEmitter
-    case exe of
-        Error e -> pure (Error e)
-        Ok path -> case verifyProgram owned of
-            Error e -> pure (Error e)
-            Ok () -> emitWith path (writeProgram owned)
+emitUnvalidated program = case verifyProgram owned of
+    Error e -> pure (Error e)
+    Ok () -> llvmOfOwned owned
   where
     owned = insertOwnership (nativeProgram program)
 

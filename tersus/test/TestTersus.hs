@@ -137,6 +137,7 @@ allGroups =
 
 groupName :: Test -> String
 groupName (TestList name _) = name
+groupName (TestParallel name _) = name
 groupName (TestCase name _) = name
 
 data Arguments = Arguments

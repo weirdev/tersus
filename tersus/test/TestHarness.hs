@@ -22,8 +22,12 @@ module TestHarness
     ) where
 
 import qualified Control.Exception as Exception
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
-import Control.Exception (SomeException, displayException, try)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
+import Control.Exception (SomeException, displayException, mask, throwIO, try)
+import Control.Monad (forM)
+import GHC.Conc (getNumCapabilities)
 import qualified Data.Map.Strict as Map
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -36,7 +40,7 @@ import Utils
 
 type TestResult = Maybe String
 
-data Test = TestCase String (IO TestResult) | TestList String [Test]
+data Test = TestCase String (IO TestResult) | TestList String [Test] | TestParallel String [Test]
 
 data TestSummary = TestSummary
     { summaryPassed :: Int
@@ -87,6 +91,17 @@ runTest prefixes (TestCase name resultIO) = do
 runTest prefixes (TestList name tests) = do
     putStrLn $ "Running " ++ unwords (prefixes ++ [name])
     summaries <- mapM (runTest (prefixes ++ [name])) tests
+    putStrLn ""
+    pure (foldr combineSummaries (testSummary 0 0) summaries)
+runTest prefixes (TestParallel name tests) = do
+    putStrLn $ "Running " ++ unwords (prefixes ++ [name])
+    cores <- getNumCapabilities
+    slots <- newQSem (max 1 cores)
+    vars <- forM tests $ \test -> do
+        var <- newEmptyMVar
+        _ <- forkIO (mask (\restore -> waitQSem slots >> (try (restore (runTest (prefixes ++ [name]) test)) >>= \r -> signalQSem slots >> putMVar var r)))
+        pure var
+    summaries <- forM vars (\var -> takeMVar var >>= either (\e -> throwIO (e :: SomeException)) pure)
     putStrLn ""
     pure (foldr combineSummaries (testSummary 0 0) summaries)
 
