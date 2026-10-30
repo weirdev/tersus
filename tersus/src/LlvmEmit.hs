@@ -172,6 +172,7 @@ closeTypes program = go [] . map (canonical program)
     parts (TArray t _) = [canonical program t]
     parts (TBox (TArrayOf t SizeAny)) = [canonical program t]
     parts (TBox t) = [canonical program t]
+    parts (TAddr t) = [canonical program t]
     parts (TNamed n) = [canonical program t | (_, fields) <- variantsOf program n, (_, t) <- fields]
     parts _ = []
 
@@ -204,7 +205,8 @@ typeDescriptors program types =
     shape TInt = (0 :: Int, "null")
     shape TByte = (8, "null")
     shape (TWord signed _) = (if signed then 9 else 8, "null")
-    shape (TAddr _) = (0, "null")
+    -- (an address names the descriptor of what it is the address of, which is how the runtime walks the elements of a list)
+    shape (TAddr t) = (0, typeSymbol program t)
     shape TBool = (1, "null")
     shape ty@TArray{} = (5, global "array." (renderType ty))
     shape (TBox (TArrayOf t SizeAny)) = (7, typeSymbol program t)
@@ -657,8 +659,8 @@ isBoxedArray :: Type -> Bool
 isBoxedArray (TBox TArrayOf{}) = True
 isBoxedArray _ = False
 
--- A list of native code: the struct StdList of lib/lists.tersus, whose first field is the Box of the array that holds the elements, so
--- that the address of the struct is the address of that Box and an element is read from it as from one
+-- A list of native code: the struct StdList of lib/lists.tersus, whose first field is the address of the elements, so that an element is
+-- read from the address that the struct starts with, as from a Box of an array
 isListStruct :: Type -> Bool
 isListStruct (TNamed name) = takeWhile (/= '<') name == "StdList"
 isListStruct _ = False

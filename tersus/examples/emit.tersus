@@ -1379,6 +1379,8 @@ fn needsDrop(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
     if t is Type::TArray { return needsDrop(types, Box::unbox((t as Type::TArray).elem)); };
     n = declaredName(types, t);
     if !n.ok { return false; };
+    // (the struct that a list is made of owns the memory at its address)
+    if beforeAngle(n.text) = "StdList" { return true; };
     i = lookupDecl(types, n.text);
     if i < 0 { return false; };
     d = get(types, i);
@@ -1431,6 +1433,10 @@ fn typeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
 // The types the runtime needs a descriptor of, and the types inside them (a type that contains itself is there once)
 fn parts(types: &List<TypeDecl>, t: &Type) -> List<Type> ~ {
     out = noTypes();
+    if t is Type::TAddr {
+        out = push(out, canonical(types, Box::unbox((t as Type::TAddr).inner)));
+        return out;
+    };
     arr = sizedArray(t);
     if arr.ok {
         out = push(out, canonical(types, arr.elem));
@@ -1496,6 +1502,8 @@ fn descriptorShape(types: &List<TypeDecl>, t: &Type) -> Res ~ {
         if (t as Type::TWord).signed { return Res { ok: true, text: "9, ptr null" }; };
         return Res { ok: true, text: "8, ptr null" };
     };
+    // (an address names the descriptor of what it is the address of, which is how the runtime walks the elements of a list)
+    if t is Type::TAddr { return Res { ok: true, text: "0, ptr ".then(typeSymbol(types, Box::unbox((t as Type::TAddr).inner))) }; };
     if isNumberWord(t) { return Res { ok: true, text: "0, ptr null" }; };
     if t is Type::TBool { return Res { ok: true, text: "1, ptr null" }; };
     if isSizedArray(t) { return Res { ok: true, text: "5, ptr ".then(global("array.", renderType(t))) }; };
@@ -2026,8 +2034,8 @@ fn isBoxedArray(t: &Type) -> Bool [{ }] [{ }] {
     return h.ok && h.ty is Type::TArray;
 };
 
-// A list of native code: the struct StdList of lib/lists.tersus, whose first field is the Box of the array that holds the elements, so that the address of the struct is the
-// address of that Box and an element is read from it as from one
+// A list of native code: the struct StdList of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
+// starts with, as from a Box of an array
 fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
     if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdList"; };
     return false;

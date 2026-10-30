@@ -1,57 +1,65 @@
-// The native form of a list. A `List<T>` that is checked and validated as a list is made, for native code, of this: the elements in an array on
-// the heap, and how many of them are in use (see MirLists, which replaces each list operation of a validated program with a call of one of
-// these). The program that is checked is the one with lists, so the proofs about lists are those of the lists, and what is proved
-// here is that this form does what a list does: `get` gives what `set` put, `push` adds one at the end, and the rest is unchanged.
+// The native form of a list. A `List<T>` that is checked and validated as a list is made, for native code, of this: the elements in memory
+// at an address, with the permission to it, how many of them are in use and how many there is room for (see MirLists, which replaces each list
+// operation of a validated program with a call of one of these). The program that is checked is the one with lists, so the proofs about lists
+// are those of the lists, and what is proved here is that this form does what a list does: `get` gives what `set` put, `push` adds one at the
+// end, and the rest is unchanged, with every slot in use filled and every other empty (POINTERS.md: the memory is managed by hand, and
+// nothing is assumed).
 //
-// A push into a full array makes an array of twice the room and four more, and moves the elements over, so a list built by pushing is
-// built in time and room in proportion to its length.
+// A push into a full list moves the elements to memory with room for twice as many and four more, so a list built by pushing is built in time
+// and room in proportion to its length.
 //
-// The runtime and the emitter know this struct by its name and its fields, which have to stay as they are: `data` first (an element is
-// read from a list as from the Box that is its first field), then `len`; the runtime prints and compares a StdList as a list of its first
-// `len` elements.
+// The runtime and the emitter know this struct by its name and its fields, which have to stay as they are: `addr` first (an element is read
+// from a list at the address that is its first field), then `len`, then `cap`; the runtime prints, compares, copies and frees a StdList as a
+// list of its first `len` elements.
 struct StdList<T> {
-    data: Box<Array<T>>,
+    addr: Addr<T>,
     len: Int,
-} invariant [{ affirm len >= 0; affirm len <= size(data); }];
+    cap: Int,
+    ghost blk: Block<T>,
+} invariant [{
+    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len;
+    affirm len >= 0; affirm len <= cap;
+    affirm forall j in 0..len: filled(blk, j) = true;
+    affirm forall j in len..cap: filled(blk, j) = false;
+}];
 
 fn stdListNew<T>() -> StdList<T> [{ }] [{ affirm return.len = 0; }] {
-    return StdList<T> { data: Array::empty(), len: 0 };
+    (a, b) = Addr::alloc(0);
+    return StdList<T> { addr: a, len: 0, cap: 0, blk: b };
 };
 
 fn stdListLen<T>(l: &StdList<T>) -> Int [{ }] [{ affirm return = l.len; }] {
     return l.len;
 };
 
-fn stdListGet<T>(l: &StdList<T>, i: Int) -> T [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return = get(l.data, i); }] {
-    return get(l.data, i);
+fn stdListGet<T>(l: &StdList<T>, i: Int) -> T [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return = at(l.blk, i); }] {
+    return clone(Addr::get(l.addr, i, l.blk));
 };
 
-fn stdListFirst<T>(l: &StdList<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = get(l.data, 0); }] {
-    return get(l.data, 0);
+fn stdListFirst<T>(l: &StdList<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = at(l.blk, 0); }] {
+    return clone(Addr::get(l.addr, 0, l.blk));
 };
 
-fn stdListLast<T>(l: &StdList<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = get(l.data, l.len - 1); }] {
-    return get(l.data, l.len - 1);
+fn stdListLast<T>(l: &StdList<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = at(l.blk, l.len - 1); }] {
+    return clone(Addr::get(l.addr, l.len - 1, l.blk));
 };
 
-// The last element is taken out of use. It stays in the array until a push writes over it or the list is freed.
-fn stdListPop<T>(l: StdList<T>) -> StdList<T> [{ affirm l.len > 0; }] [{ affirm return.len = l.len - 1; affirm forall j in 0..return.len: get(return.data, j) = get(l.data, j); }] {
-    return StdList<T> { data: l.data, len: l.len - 1 };
+// The last element is dropped, and its slot is room for the next push
+fn stdListPop<T>(l: StdList<T>) -> StdList<T> [{ affirm l.len > 0; }] [{ affirm return.len = l.len - 1; affirm forall j in 0..return.len: at(return.blk, j) = at(l.blk, j); }] {
+    return StdList<T> { addr: l.addr, len: l.len - 1, cap: l.cap, blk: Addr::dropValue(l.addr, l.len - 1, l.blk) };
 };
 
-fn stdListSet<T>(l: StdList<T>, i: Int, x: T) -> StdList<T> [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return.len = l.len; affirm get(return.data, i) = x; affirm forall j where j >= 0, j < l.len, j != i: get(return.data, j) = get(l.data, j); }] {
-    return StdList<T> { data: set(l.data, i, x), len: l.len };
+// The element is dropped where it is, and x is written in its place
+fn stdListSet<T>(l: StdList<T>, i: Int, x: T) -> StdList<T> [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return.len = l.len; affirm at(return.blk, i) = x; affirm forall j where j >= 0, j < l.len, j != i: at(return.blk, j) = at(l.blk, j); }] {
+    b = Addr::dropValue(l.addr, i, l.blk);
+    return StdList<T> { addr: l.addr, len: l.len, cap: l.cap, blk: Addr::write(l.addr, i, x, b) };
 };
 
-fn stdListPush<T>(l: StdList<T>, x: T) -> StdList<T> [{ }] [{ affirm return.len = l.len + 1; affirm get(return.data, l.len) = x; affirm forall j in 0..l.len: get(return.data, j) = get(l.data, j); }] {
-    if l.len < size(l.data) {
-        return StdList<T> { data: set(l.data, l.len, x), len: l.len + 1 };
+fn stdListPush<T>(l: StdList<T>, x: T) -> StdList<T> [{ }] [{ affirm return.len = l.len + 1; affirm at(return.blk, l.len) = x; affirm forall j in 0..l.len: at(return.blk, j) = at(l.blk, j); }] {
+    if l.len = l.cap {
+        cap = l.cap * 2 + 4;
+        (a, b) = Addr::resize(l.addr, cap, l.blk);
+        return StdList<T> { addr: a, len: l.len + 1, cap: cap, blk: Addr::write(a, l.len, x, b) };
     };
-    big = Array::boxed(size(l.data) * 2 + 4, x);
-    i = 0;
-    while i < l.len [{ affirm i >= 0; affirm i <= l.len; affirm size(big) = size(l.data) * 2 + 4; affirm forall j in 0..i: get(big, j) = get(l.data, j); }] shrinks l.len - i {
-        big = set(big, i, get(l.data, i));
-        i = i + 1;
-    };
-    return StdList<T> { data: set(big, l.len, x), len: l.len + 1 };
+    return StdList<T> { addr: l.addr, len: l.len + 1, cap: l.cap, blk: Addr::write(l.addr, l.len, x, l.blk) };
 };
