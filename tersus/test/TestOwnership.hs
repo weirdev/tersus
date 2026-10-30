@@ -740,6 +740,8 @@ planTests =
         withOwned "l = [1]; m = l; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (not ("drop _1" `isInfixOf` m) && "drop _2" `isInfixOf` m))
     , TestCase "a value moved on one path is dropped under a test of its flag" . pure $
         withOwned "l = [1, 2]; m = [0]; if size(l) = 2 { m = l; }; return size(m);" (\t -> let m = functionText "main" t in testAssertTrue (count "drop _1" m == 1 && "drop _2;" `isInfixOf` m && "const false;" `isInfixOf` m))
+    , TestCase "a field taken on one path is dropped under a test of its flag" . pure $
+        withOwned "struct S { a: List<Int>, b: List<Int> }; s = S { a: [1, 2], b: [3, 4] }; n = 0; if size(s.b) = 2 { x = s.a; n = size(x); }; return n + size(s.b);" (\t -> let m = functionText "main" t in testAssertTrue ("take (_" `isInfixOf` m && "drop _" `isInfixOf` m && count "const false;" m >= 2))
     ]
   where
     withOwned source check = either Just check (ownedText source)
