@@ -2990,8 +2990,8 @@ fn elementOf(g: Gen, cx: &Ctx, f: &Function, ty: &Type, container: &Operand, ind
     return elementAddress(clone(g1), base, index, bytesIn(cx, ty));
 };
 
-// The statement that gives a value held inline to a local, made where the local is, with no pointer to it. The value that the local held is freed first if it owns something
-// (unless the local only looks at a value, as a Peek does). The contracts (an index in range) are assumed.
+// The statement that gives a value held inline to a local, made where the local is, with no pointer to it. What the local
+// held is dropped by the statements of the MIR before it (MirOwnership), never here. The contracts (an index in range) are assumed.
 fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty: &Type, rv: &Rvalue) -> Gen ~ {
     bytes = bytesIn(cx, ty);
     owns = ownsIn(cx, ty);
@@ -3235,8 +3235,7 @@ fn cloneInto(g: Gen, cx: &Ctx, dest: Int, destType: &Type, o: &Operand) -> Gen ~
         g2 = entryTemp(clone(g1), (bytes + 7) / 8);
         room = g2.last;
         g3 = emit(clone(g2), "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(room).then(", ptr ").then(source).then(")"));
-        g4 = dropSlot(g3, cx, destType, dest);
-        return copyWords(g4, slot(dest), room, bytes);
+        return copyWords(g3, slot(dest), room, bytes);
     };
     return emit(g1, "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(slot(dest)).then(", ptr ").then(source).then(")"));
 };
@@ -3278,7 +3277,7 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
         return g1;
     };
     if isAggregate(lt.ty) {
-        g1 = assignAggregate(g, cx, f, true, dest, lt.ty, rv);
+        g1 = assignAggregate(g, cx, f, false, dest, lt.ty, rv);
         if returned { return emit(g1, "store i1 true, ptr %returned"); };
         return g1;
     };
@@ -3325,7 +3324,6 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
             all = push(all, "ptr ".then(room));
             for a in arguments { all = push(all, clone(a)); };
             g3 = emit(g3, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
-            if owns { g3 = dropSlot(g3, cx, returnType, dest); };
             g3 = copyWords(clone(g3), slot(dest), room, bytesIn(cx, returnType));
         } else {
             all = noStrings();
