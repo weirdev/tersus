@@ -16,6 +16,7 @@ import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileEx
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
 import System.IO (hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openTempFile, stderr)
 import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
 
@@ -76,9 +77,14 @@ emitWith exe input = do
         (Just hin, Just hout, Just herr, process) <- createProcess (proc exe []){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
         mapM_ (`hSetEncoding` char8) [hin, hout, herr]
         _ <- forkIO (hPutStr hin input >> hClose hin)
-        out <- hGetContents hout
-        err <- hGetContents herr
-        code <- length out `seq` length err `seq` waitForProcess process
+        -- (each pipe is drained by a thread of its own: a program that fills one while the other is waited on would stop both)
+        written <- newEmptyMVar
+        reported <- newEmptyMVar
+        _ <- forkIO (hGetContents hout >>= \out -> length out `seq` putMVar written out)
+        _ <- forkIO (hGetContents herr >>= \err -> length err `seq` putMVar reported err)
+        code <- waitForProcess process
+        out <- takeMVar written
+        err <- takeMVar reported
         pure (code, out, err)
 
 -- Stage 0 in the cache, built if it is not there yet
