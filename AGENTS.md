@@ -1,5 +1,13 @@
 # Repository Guidelines
 
+## Language Evolution and Compatibility
+Tersus is in alpha. Breaking changes to syntax, semantics, APIs, and internal
+representations are fully allowed when they improve the language or implementation.
+Do not preserve compatibility through aliases, legacy paths, or extra complexity
+unless the task explicitly requires it. Update affected library code, examples,
+tests, documentation, and bootstrap artifacts as appropriate, and explain the
+resulting behavior and migration when a change is user-visible.
+
 ## Project Structure & Module Organization
 The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; the traits `Sequence`, `Growable`, `Clone` and `Copy` that every program that mentions any of them has is in `tersus/lib/prelude.tersus`, and the list that native code is made of in `tersus/lib/lists.tersus`, and the struct `String` that a string literal is a value of in `tersus/lib/string.tersus` (all embedded by `PreludeSource`); and regression tests are in `tersus/test/` (`TestTersus.hs` runs the groups, which live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`, `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`, `TestArrays`, `TestBox`, `TestBorrow`, `TestCopies`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`, `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirEmit` and `TestBootstrap`, with the shared harness in `TestHarness`). The `python/` directory contains older parser and proof prototypes plus `python/tests.py`. The `stack/tersus/` tree is a starter snapshot, not the main development target.
 
