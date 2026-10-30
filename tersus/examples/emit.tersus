@@ -2059,6 +2059,22 @@ fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
     return false;
 };
 
+// The type of the elements of a list of native code: what the address that is its first field is of
+fn listElement(cx: &Ctx, t: &Type) -> Held ~ {
+    if !(t is Type::TNamed) { return Held { ok: false, ty: Type::TInt }; };
+    i = lookupDecl(cx.types, (t as Type::TNamed).name);
+    if i < 0 || i >= size(cx.types) { return Held { ok: false, ty: Type::TInt }; };
+    d = get(cx.types, i);
+    if d is TypeDecl::DStruct {
+        fields = (d as TypeDecl::DStruct).fields;
+        if size(fields) > 0 {
+            first = get(fields, 0).ty;
+            if first is Type::TAddr { return Held { ok: true, ty: clone(Box::unbox((first as Type::TAddr).inner)) }; };
+        };
+    };
+    return Held { ok: false, ty: Type::TInt };
+};
+
 // A Box of native code: the struct StdBox of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
 fn isBoxStruct(t: &Type) -> Bool [{ }] [{ }] {
     if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdBox"; };
@@ -3305,6 +3321,56 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         src = g1.last;
         g2 = freeOld(clone(g1), cx, dropsOld, ty, dest);
         return copyWords(g2, target, src, bytes);
+    };
+    // Box::new of an inline array: a Box of an array is a list of native code (MirLists), so the elements move into memory of their own, with
+    // as many in use as there is room for
+    if rv is Rvalue::MakeBox && isListStruct(ty) {
+        o = (rv as Rvalue::MakeBox).o;
+        element = listElement(cx, ty);
+        if !element.ok { return failG(g, "a list of native code without its element type"); };
+        count = 0 - 1;
+        held = operandLocalType(f, o);
+        if held.ok && sizedArray(held.ty).ok { count = sizedArray(held.ty).length; };
+        if o is Operand::Const {
+            c = (o as Operand::Const).value;
+            if c is Constant::CArray { count = size((c as Constant::CArray).items); };
+        };
+        if count < 0 { return failG(g, "Box::new of an array that has no size"); };
+        elementBytes = bytesIn(cx, element.ty);
+        g1 = operandAddress(g, cx, f, Type::TArray { elem: Box::new(clone(element.ty)), size: Size::SConst { n: count } }, o);
+        src = clone(g1.last);
+        g2 = ins(g1, "m", "call i64 @tersus_addr_alloc(i64 ".then(showInt(count)).then(", i64 ").then(showInt(elementBytes)).then(")"));
+        m = clone(g2.last);
+        g3 = ins(g2, "p", "inttoptr i64 ".then(m).then(" to ptr"));
+        p = clone(g3.last);
+        g4 = copyWords(g3, p, src, count * elementBytes);
+        g5 = freeOld(g4, cx, dropsOld, ty, dest);
+        g6 = emit(g5, "store i64 ".then(m).then(", ptr ").then(target));
+        g7 = ins(g6, "q", "getelementptr i8, ptr ".then(target).then(", i64 8"));
+        g8 = emit(clone(g7), "store i64 ".then(showInt(count)).then(", ptr ").then(g7.last));
+        g9 = ins(g8, "q", "getelementptr i8, ptr ".then(target).then(", i64 16"));
+        return emit(clone(g9), "store i64 ".then(showInt(count)).then(", ptr ").then(g9.last));
+    };
+    // Box::unbox of a Box of an array: the elements move out of the memory of the list, which is freed
+    if rv is Rvalue::Unbox && isListStruct(operandLocalType(f, (rv as Rvalue::Unbox).o).ty) {
+        o = (rv as Rvalue::Unbox).o;
+        l = 0;
+        if o is Operand::Copy { l = (o as Operand::Copy).local; };
+        if o is Operand::Move { l = (o as Operand::Move).local; };
+        if o is Operand::Move {
+            g1 = ins(g, "m", "load i64, ptr ".then(slot(l)));
+            m = clone(g1.last);
+            g2 = ins(g1, "p", "inttoptr i64 ".then(m).then(" to ptr"));
+            p = clone(g2.last);
+            g3 = zeroWords(g2, slot(l), 24);
+            g4 = freeOld(g3, cx, dropsOld, ty, dest);
+            g5 = copyWords(g4, target, p, bytes);
+            return emit(g5, "call void @tersus_addr_free(i64 ".then(m).then(")"));
+        };
+        g1 = ins(g, "p", "load ptr, ptr ".then(slot(l)));
+        p = clone(g1.last);
+        g2 = freeOld(g1, cx, dropsOld, ty, dest);
+        return copyWords(g2, target, p, bytes);
     };
     if rv is Rvalue::Unbox {
         o = (rv as Rvalue::Unbox).o;

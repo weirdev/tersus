@@ -176,12 +176,20 @@ rvalueProblems env localTy d rv =
         MakeList os -> withElement (\e -> [expected e o | o <- os, not (fits' e o)])
         Unbox o -> case operandType env localTy o of
             Just (TBox held) -> ["the result is " ++ renderType d ++ ", not " ++ renderType held | not (sub env d held)]
+            -- (a Box of an array is a list of native code, lib/lists.tersus, which gives its elements to an inline array)
+            Just (TNamed n) | Just ("StdList", [ArgType e]) <- instanceOf n -> case d of
+                TArrayOf e' _ | sub env e' e -> []
+                _ -> ["the result is " ++ renderType d ++ ", not an array of " ++ renderType e]
             _ -> [expected' "a Box" o]
         Unsize o -> case (d, operandType env localTy o) of
             (TBox (TArrayOf e SizeAny), Just (TBox (TArrayOf e' size))) | size /= SizeAny -> [expected d o | not (sub env e e')]
             _ -> ["unsize needs a Box of an array, and a result that is a Box of an array of any size"]
         MakeBox o -> case d of
             TBox held -> [expected held o | not (fits' held o)]
+            TNamed n | Just ("StdList", [ArgType e]) <- instanceOf n -> case operandType env localTy o of
+                Just (TArrayOf e' (SizeConst _)) | sub env e e' -> []
+                Nothing | Const (CArray _) <- o -> []
+                _ -> [expected' ("an array of " ++ renderType e) o]
             _ -> ["the result is " ++ renderType d ++ ", not a Box"]
         MakeData name fields -> case Map.lookup name (envCtors env) of
             Nothing -> ["there is no constructor " ++ name]

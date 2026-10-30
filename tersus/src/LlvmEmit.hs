@@ -670,6 +670,13 @@ isListStruct :: Type -> Bool
 isListStruct (TNamed name) = takeWhile (/= '<') name == "StdList"
 isListStruct _ = False
 
+-- The type of the elements of a list of native code: what the address that is its first field is of
+listElement :: Program -> Type -> Maybe Type
+listElement program (TNamed name) = case Map.lookup name (progTypes program) of
+    Just (StructDecl ((_, TAddr element) : _)) -> Just element
+    _ -> Nothing
+listElement _ _ = Nothing
+
 isAggregate :: Type -> Bool
 isAggregate TArray{} = True
 isAggregate TNamed{} = True
@@ -1018,6 +1025,35 @@ assignAggregate dropsOld fn dest ty rv = do
                     src <- operandAddress fn ty o
                     freeOld
                     copyWords target src bytes
+        -- Box::new of an inline array: a Box of an array is a list of native code (MirLists), so the elements move into memory of their own,
+        -- with as many in use as there is room for
+        MakeBox o | isListStruct ty -> do
+            element <- maybe (failG "a list of native code without its element type") pure (listElement program ty)
+            held <- operandLocalType fn o
+            count <- case (held, o) of
+                (Just (TArray _ n), _) -> pure n
+                (_, Const (CArray cs)) -> pure (toInteger (length cs))
+                _ -> failG "Box::new of an array that has no size"
+            elementBytes <- bytesG element
+            src <- operandAddress fn (TArray element count) o
+            m <- ins "m" ("call i64 @tersus_addr_alloc(i64 " ++ show count ++ ", i64 " ++ show elementBytes ++ ")")
+            p <- ins "p" ("inttoptr i64 " ++ m ++ " to ptr")
+            copyWords p src (count * elementBytes)
+            freeOld
+            emit ("store i64 " ++ m ++ ", ptr " ++ target)
+            mapM_ (\offset -> ins "q" ("getelementptr i8, ptr " ++ target ++ ", i64 " ++ show (offset :: Integer)) >>= \q -> emit ("store i64 " ++ show count ++ ", ptr " ++ q)) [8, 16]
+        -- Box::unbox of a Box of an array: the elements move out of the memory of the list, which is freed
+        Unbox (Move l) | Just True <- isListStruct <$> localType' l -> do
+            m <- ins "m" ("load i64, ptr " ++ slot l)
+            p <- ins "p" ("inttoptr i64 " ++ m ++ " to ptr")
+            zeroWords (slot l) 24
+            freeOld
+            copyWords target p bytes
+            emit ("call void @tersus_addr_free(i64 " ++ m ++ ")")
+        Unbox (Copy l) | Just True <- isListStruct <$> localType' l -> do
+            p <- ins "p" ("load ptr, ptr " ++ slot l)
+            freeOld
+            copyWords target p bytes
         Unbox o -> do
             held <- operandLocalType fn o
             boxTy <- maybe (failG "Box::unbox was given a constant") pure held
@@ -1028,6 +1064,8 @@ assignAggregate dropsOld fn dest ty rv = do
                 Move _ -> emit ("call void @tersus_box_free(ptr " ++ block ++ ")")
                 _ -> pure ()
         _ -> failG ("Native code does not support " ++ renderRvalue rv ++ " for a value held inline yet")
+  where
+    localType' l = localType <$> Map.lookup l (fnLocals fn)
 
 -- n copies of an element: one store of zeros when it is a zero, and a loop otherwise
 fillArray :: Function -> String -> Type -> Integer -> Operand -> G ()
