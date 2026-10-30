@@ -458,22 +458,30 @@ derefOwner ty = do
         TVariant variant -> fst <$> ctorInfo variant
         other -> failTc ("Type error: " ++ renderType other ++ " has no Deref impl")
 
--- An expression looked through to the value it holds, by a call of its type's `deref` where it has a Deref impl, and as it is for a
--- Box (whose look-through the language gives) and for anything else. The result is the value that is looked at, so what is read from
--- it, tested or taken apart is a view of a value the call gives, and the value it came from is only lent to the call.
-derefExpr :: Ctx -> Env -> (Type, Expression) -> TC (Type, Expression)
-derefExpr ctx env (ty, expr) = do
+-- An expression looked through one step, by a call of its type's `deref` where it has a Deref impl. Nothing for a Box (whose
+-- look-through the language gives, in the type) and for anything that is not looked through.
+derefStepExpr :: Ctx -> Env -> (Type, Expression) -> TC (Maybe (Type, Expression))
+derefStepExpr ctx env (ty, expr) = do
     t <- zonk ty
     case t of
-        TBox _ -> return (t, expr)
+        TBox _ -> return Nothing
         _ -> do
             target <- derefTarget t
             case target of
                 Just _ -> do
                     owner <- derefOwner t
-                    (resultTy, call') <- inferExprR ctx env (F (Var (implFunctionName owner (Just "Deref") "deref")) [expr])
-                    derefExpr ctx env (resultTy, call')
-                Nothing -> return (t, expr)
+                    Just <$> inferExprR ctx env (F (Var (implFunctionName owner (Just "Deref") "deref")) [expr])
+                Nothing -> return Nothing
+
+-- An expression looked through to the value it holds, a step at a time (see derefStepExpr). The result is the value that is
+-- looked at, so what is read from it, tested or taken apart is a view of a value the calls give, and the value it came from is
+-- only lent to them.
+derefExpr :: Ctx -> Env -> (Type, Expression) -> TC (Type, Expression)
+derefExpr ctx env (ty, expr) = do
+    next <- derefStepExpr ctx env (ty, expr)
+    case next of
+        Just stepped -> derefExpr ctx env stepped
+        Nothing -> return (ty, expr)
 
 -- Whether a builtin looks at the struct or enum a value is of (tests its variant, casts it to one, reads a field of one)
 isLookThrough :: BuiltinFunct -> Bool
@@ -1277,14 +1285,21 @@ inferExprR ctx env expr =
                 _ -> return (t, expr)
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
             (structTy, struct') <- inferExprR ctx env struct
-            -- (a field of the value itself is read as it is; a field it does not have is read from what it is looked through to)
-            direct <- tryTc (readField owner field structTy)
-            case direct of
-                Just t -> return (t, F funct [struct'])
-                Nothing -> do
-                    (targetTy, struct'') <- derefExpr ctx env (structTy, struct')
-                    t <- readField owner field targetTy
-                    return (t, F funct [struct''])
+            -- (a field of the value itself is read as it is, and so is one of each value it is looked through to in turn; a field
+            -- none of them has is read from the last of them, which is where the error names it)
+            let go (ty, expr) = do
+                    direct <- tryTc (readField owner field ty)
+                    case direct of
+                        Just t -> return (t, expr)
+                        Nothing -> do
+                            next <- derefStepExpr ctx env (ty, expr)
+                            case next of
+                                Just stepped -> go stepped
+                                Nothing -> do
+                                    t <- readField owner field ty
+                                    return (t, expr)
+            (t, struct'') <- go (structTy, struct')
+            return (t, F funct [struct''])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
             inferred0 <- mapM (inferExprR ctx env) args
             -- (a tuple's parts are what they are: it is made of their types)
@@ -1543,6 +1558,16 @@ ownerOfValue function ty = do
         other@TBox{} -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions: call it on the value inside, as in Box::unbox(b)." ++ function ++ "(...)")
         other -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions")
 
+-- The type that owns an impl, for a call through a trait: a struct or enum, a list, an array and a Box, which are the types an
+-- impl can be written for. (A call of a method on a Box is refused by ownerOfValue instead, since it is called on what it holds.)
+traitOwner :: Name -> Type -> TC Name
+traitOwner function ty = do
+    t <- zonk ty
+    case t of
+        TArrayOf _ _ -> return "Array"
+        TBox _ -> return "Box"
+        _ -> ownerOfValue function ty
+
 -- Trait::function(x, ...) is the function of the type of the argument that the trait's signature gives the type Self. That
 -- type must implement the trait.
 ownerThroughTrait :: Name -> [TraitFn] -> Name -> [Type] -> TC Name
@@ -1557,7 +1582,9 @@ ownerThroughTrait trait functions function ats =
             case [i | (i, t) <- zip [0 :: Int ..] ptys, unref t == TNamed "Self"] of
                 [] -> failTc ("Type error: " ++ path ++ " has no Self parameter to tell the type by: call it on the type, as in Type::" ++ function ++ "(...)")
                 i : _ -> do
-                    owner <- ownerOfValue path (ats !! i)
+                    -- (through a trait an array and a Box of one have the impls written for them, as a list does; called as a
+                    -- method they are looked through or refused as they were)
+                    owner <- traitOwner path (ats !! i)
                     impls <- tcImpls <$> getState
                     unless (Set.member (trait, owner) impls) $ failTc ("Type error: " ++ owner ++ " does not implement " ++ trait)
                     return owner
@@ -1672,7 +1699,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
         Nothing -> return (ctx', env', checked)
         Just traitName -> do
             let here = "impl " ++ traitName ++ " for " ++ typeName
-                defined = [(implFunctionPart name, (Signature ptys rty sizes types, term)) | Assign name (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types) term _) _)) <- checked]
+                defined = [(implFunctionPart name, (params, Signature ptys rty sizes types, term)) | Assign name (Val (VFunct params _ _ (NativeFunct (Signature ptys rty sizes types) term _) _)) <- checked]
                 wanted = map traitFnName required
                 -- (what the trait asks for, with Self the type and the types of the trait the ones this impl gives)
                 inImpl = substTraitArgs traitParams traitArgs . substSelfAs selfName selfType
@@ -1686,12 +1713,14 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                 let Signature ptys rty _ _ = traitFnSignature f
                     expected = Signature (map inImpl ptys) (inImpl rty) [] []
                 case lookup (traitFnName f) defined of
-                    Just (Signature aptys arty asizes atypes, term) -> do
-                        let actual = Signature aptys arty [] []
+                    Just (implParams, Signature aptys arty asizes atypes, term) -> do
+                        -- (the sizes of the type, and any of the function, are given to it as its last parameters, which the
+                        -- trait does not declare, so they are not part of the type the trait asks for)
+                        let actual = Signature (take (length aptys - length asizes) aptys) arty [] []
                         when (actual /= expected) $
                             failTc ("Type error: " ++ here ++ ": " ++ traitFnName f ++ " is " ++ renderSignature actual ++ ", but " ++ traitName ++ " declares " ++ renderSignature expected)
                         -- (an impl of a struct with types is for any of them, and the check of it is too)
-                        return (wrapper traitName typeName f (Signature aptys arty asizes atypes) term)
+                        return (wrapper traitName typeName f (traitFnParams f ++ drop (length implParams - length asizes) implParams) (Signature aptys arty asizes atypes) term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
             (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
             return (ctx'', env'', [CopyDef typeName | traitName == "Copy", null required] ++ [DropDef typeName | traitName == "Drop"] ++ checked ++ wrapped)
@@ -1713,12 +1742,12 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
         Assign name (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types) term body) proofs)) ->
             Assign name (Val (VFunct params ins outs (NativeFunct (Signature (map asSelf ptys) (asSelf rty) sizes types) term body) proofs))
         _ -> stmt
-    wrapper traitName owner f signature term =
+    wrapper traitName owner f params signature term =
         Assign
             (implCheckName traitName owner (traitFnName f))
             ( Val
                 ( VFunct
-                    (traitFnParams f)
+                    params
                     (traitFnRequires f)
                     (traitFnEnsures f)
                     (NativeFunct signature (if term == Just MayDiverge then Just MayDiverge else Nothing) [Return (F (Var (implFunctionName owner (Just traitName) (traitFnName f))) (map Var (traitFnParams f)))])
@@ -1739,13 +1768,19 @@ inferProofR ctx env proof =
         CTerm value -> (\t -> (t, proof)) <$> valueType value
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
             (structTy, struct') <- inferProofR ctx env struct
-            direct <- tryTc (readField owner field structTy)
-            case direct of
-                Just t -> return (t, FApp funct [struct'])
-                Nothing -> do
-                    (targetTy, struct'') <- derefProof (structTy, struct')
-                    t <- readField owner field targetTy
-                    return (t, FApp funct [struct''])
+            let go (ty, proof) = do
+                    direct <- tryTc (readField owner field ty)
+                    case direct of
+                        Just t -> return (t, proof)
+                        Nothing -> do
+                            next <- derefStepProof (ty, proof)
+                            case next of
+                                Just stepped -> go stepped
+                                Nothing -> do
+                                    t <- readField owner field ty
+                                    return (t, proof)
+            (t, struct'') <- go (structTy, struct')
+            return (t, FApp funct [struct''])
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
             inferred <- mapM (inferProofR ctx env) args
             t <- checkConstruct name fields (map fst inferred)
@@ -1827,18 +1862,24 @@ inferProofR ctx env proof =
             expect "body of forall" TBool bt
             return (TBool, Forall index guards' body')
   where
-    -- A proof looked through to the value it holds, by a call of its type's `deref`, as an expression is (see derefExpr)
-    derefProof (ty, proof) = do
+    -- A proof looked through one step, by a call of its type's `deref`, as an expression is (see derefStepExpr)
+    derefStepProof (ty, proof) = do
         t <- zonk ty
         case t of
-            TBox _ -> return (t, proof)
+            TBox _ -> return Nothing
             _ -> do
                 target <- derefTarget t
                 case target of
                     Just _ -> do
                         owner <- derefOwner t
-                        derefProof =<< ghostCall (implFunctionName owner (Just "Deref") "deref") [(t, proof)]
-                    Nothing -> return (t, proof)
+                        Just <$> ghostCall (implFunctionName owner (Just "Deref") "deref") [(t, proof)]
+                    Nothing -> return Nothing
+    -- A proof looked through to the value it holds, a step at a time
+    derefProof (ty, proof) = do
+        next <- derefStepProof (ty, proof)
+        case next of
+            Just stepped -> derefProof stepped
+            Nothing -> return (ty, proof)
     ordinaryCall name args = do
         inferred <- mapM (inferProofR ctx env) args
         s <- getState
@@ -2230,20 +2271,32 @@ traitArgumentsOf trait ty = do
         builtin elementType traits = Just [elementType | trait `elem` traits, arity == 1]
         own name args = case Map.lookup (trait, name) (tcImplArgs s) of
             Nothing -> Nothing
-            Just (selfName, given) ->
-                let (sizesBound, typesBound) = case instanceOf selfName of
-                        Just (_, selfArgs) -> foldl collect ([], []) (zip selfArgs args)
-                        Nothing -> ([], [])
-                    collect (ss, ts) (ArgSize (SizeParam p), ArgSize sz) = ((p, sz) : ss, ts)
-                    collect (ss, ts) (ArgType pattern, ArgType t) = (ss, matchTypes pattern t ++ ts)
-                    collect bound _ = bound
-                    -- (the types of the impl's type, as `Array<T>` in `Box<Array<T>>`, give the parameters they are made of)
-                    matchTypes (TParam p) t = [(p, t)]
-                    matchTypes (TArrayOf a _) (TArrayOf b _) = matchTypes a b
-                    matchTypes (TList a) (TList b) = matchTypes a b
-                    matchTypes (TBox a) (TBox b) = matchTypes a b
-                    matchTypes _ _ = []
-                in Just [substitute sizesBound typesBound t | ArgType t <- given]
+            Just (selfName, given) -> case instanceOf selfName of
+                Just (_, selfArgs)
+                    | length selfArgs /= length args -> Nothing
+                    | otherwise -> do
+                        (sizesBound, typesBound) <- foldl collect (Just ([], [])) (zip selfArgs args)
+                        return [substitute sizesBound typesBound t | ArgType t <- given]
+                Nothing -> Just [t | ArgType t <- given]
+          where
+            collect Nothing _ = Nothing
+            collect (Just (ss, ts)) (ArgSize (SizeParam p), ArgSize sz) = Just ((p, sz) : ss, ts)
+            collect (Just bound) (ArgSize SizeAny, ArgSize _) = Just bound
+            collect (Just bound) (ArgSize a, ArgSize b) = if a == b then Just bound else Nothing
+            collect (Just (ss, ts)) (ArgType pattern, ArgType t) = fmap (\bound -> (ss, bound ++ ts)) (matchTypes pattern t)
+            collect _ _ = Nothing
+            -- (the types of the impl's type, as `Array<T>` in `Box<Array<T>>`, give the parameters they are made of; a part
+            -- written out in the impl, a type or a size, is not matched by another, so the impl is not one for this type)
+            matchTypes (TParam p) t = Just [(p, t)]
+            matchTypes (TList a) (TList b) = matchTypes a b
+            matchTypes (TBox a) (TBox b) = matchTypes a b
+            matchTypes (TArrayOf a sa) (TArrayOf b sb)
+                | sa == sb || sa == SizeAny || isParam sa = matchTypes a b
+                | otherwise = Nothing
+              where
+                isParam (SizeParam _) = True
+                isParam _ = False
+            matchTypes a b = if a == b then Just [] else Nothing
     case ty of
         -- (a list, an array and a Box of an array implement what an impl for them declares, which lib/prelude.tersus does for
         -- Sequence and Growable; with no impl declared, as in a program that declares those traits itself, they have them as before)
