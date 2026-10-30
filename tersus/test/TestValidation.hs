@@ -209,6 +209,12 @@ testUserRewriteValidation =
             , ProofDef "dupe" ["x"] [] [ProofAssert (FApp eqVarProof [ATerm "x", ATerm "x"])] [ProofAssert (FApp eqVarProof [ATerm "x", ATerm "x"])]
             ]
         , validationFailHelper [Assign "x" (Val (VInt 5)), ValidationStatement (Rewrite (UserRewrite "missing" [ATerm "x"]))]
+        , parseValidateWEMatchHelper
+            "{ proof definedPositive(x) [{ define next = x + 1; affirm next > x; }] [{ affirm next > x; }] { affirm next > x; }; x = 5; rewrite definedPositive x; affirm x + 1 > x; }"
+            [FApp (CTerm (builtinFunct (Rel Gt))) [FApp (CTerm (builtinFunct Plus)) [ATerm "x", CTerm (VInt 1)], ATerm "x"]]
+        , parseValidateWEMatchHelper
+            "{ proof definedPositive(x) [{ define next = x + 1; affirm next > x; }] [{ affirm x + 1 > x; }] { define next = x + 1; affirm next > x; }; x = 5; rewrite definedPositive x; affirm x + 1 > x; }"
+            [FApp (CTerm (builtinFunct (Rel Gt))) [FApp (CTerm (builtinFunct Plus)) [ATerm "x", CTerm (VInt 1)], ATerm "x"]]
         ]
 
 testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult
