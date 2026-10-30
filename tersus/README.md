@@ -116,6 +116,8 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 - Use `-` as the file to read the program from standard input.
 - Errors go to standard error, prefixed with `Parse error:`, `Validation failed:`, `Lowering failed:` (a bug: a program that type checks always lowers) or `Evaluation failed:`. The exit code is 1 for a failed program and 2 for bad command-line usage.
 
+References and borrowing are planned in [REFERENCES.md](REFERENCES.md): scoped read/update capabilities, escaping references, versioned proof state, and integration with raw-memory permissions and allocator regions. This is a draft, not implemented syntax.
+
 Next steps, roughly in priority order:
 1. Element-level facts about lists (mostly done)
     `forall j in lo..hi: P` is implemented (see LANGUAGE.md): it is a proof form `Forall index guards body` whose index is a `BVar`, proved for a fresh index and instantiated at the `get(L, t)` terms of the closure, and `push`/`set` export frame foralls, so `examples/parallel_sum.tersus` states that each result element is the sum of its pair
