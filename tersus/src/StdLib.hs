@@ -5,9 +5,8 @@ module StdLib
     , eqVarProof
     , evalBuiltinFunct
     , relProof
-    , stdLibCtx
     , stdLibRuleCtx
-    , stdLibValCtx
+    , stdlibBuiltinDecls
     ) where
 
 import Data.Map (Map, fromList, toList)
@@ -19,259 +18,40 @@ import Utils
 -- TODO: Write std lib as text to be parsed
 
 builtinFunct :: BuiltinFunct -> Value
-builtinFunct Size = VFunct ["list"] [] [] (BuiltinFunct Size) []
 -- first and last are get at the first and the last index, which is how element facts about the list reach them
-builtinFunct First =
-    VFunct
-        ["list"]
-        [ ProofAssert
-            ( FApp
-                (CTerm (builtinFunct (Rel Gt)))
-                [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 0)]
-            )
-        ]
-        []
-        (BuiltinFunct First)
-        [ FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ATerm "return", FApp (CTerm getSymbol) [ATerm "list", CTerm (VInt 0)]]
-        ]
-builtinFunct Last =
-    VFunct
-        ["list"]
-        [ ProofAssert
-            ( FApp
-                (CTerm (builtinFunct (Rel Gt)))
-                [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 0)]
-            )
-        ]
-        []
-        (BuiltinFunct Last)
-        [ FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ATerm "return", FApp (CTerm getSymbol) [ATerm "list", FApp (CTerm (builtinFunct Minus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)]]]
-        ]
 -- get requires a valid index, and its result is equal to the term get(list, index), which is what
 -- forall facts about the list are instantiated at. The contract is checked with checkRel so that a concrete
 -- list and index need no proof from the caller, while symbolic ones must already have
 -- 0 <= index < size(list) in the proof context.
-builtinFunct Get =
-    VFunct
-        ["list", "index"]
-        [ Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)]))
-        , Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]]))
-        , ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)])
-        , ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]])
-        ]
-        []
-        (BuiltinFunct Get)
-        [ FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ATerm "return", FApp (CTerm getSymbol) [ATerm "list", ATerm "index"]]
-        ]
 -- push adds an element at the end, so the result is one longer than the input list and its
 -- last element (at the old size) is x. The elements it already had are unchanged. The result is
 -- also equal to the term push(list, x).
-builtinFunct Push =
-    VFunct
-        ["list", "x"]
-        []
-        []
-        (BuiltinFunct Push)
-        [ FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ATerm "return", FApp (CTerm pushSymbol) [ATerm "list", ATerm "x"]]
-        , FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
-            , FApp (CTerm (builtinFunct Plus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)]
-            ]
-        , FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ FApp (CTerm (builtinFunct Get)) [ATerm "return", FApp (CTerm (builtinFunct Size)) [ATerm "list"]]
-            , ATerm "x"
-            ]
-        , -- The elements the list already had are unchanged
-          Forall
-            "j"
-            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
-            , relProof Lt (BVar "j") (FApp (CTerm (builtinFunct Size)) [ATerm "list"])
-            ]
-            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
-        ]
 -- pop takes the last element out, so the list must have one; the result is one shorter and keeps the others in their places. The
 -- result is also equal to the term pop(list).
-builtinFunct Pop =
-    VFunct
-        ["list"]
-        [ Rewrite (CheckRel (relProof Gt (FApp (CTerm (builtinFunct Size)) [ATerm "list"]) (CTerm (VInt 0))))
-        , ProofAssert (relProof Gt (FApp (CTerm (builtinFunct Size)) [ATerm "list"]) (CTerm (VInt 0)))
-        ]
-        []
-        (BuiltinFunct Pop)
-        [ relProof Eq (ATerm "return") (FApp (CTerm popSymbol) [ATerm "list"])
-        , relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (FApp (CTerm (builtinFunct Minus)) [FApp (CTerm (builtinFunct Size)) [ATerm "list"], CTerm (VInt 1)])
-        , Forall
-            "j"
-            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
-            , relProof Lt (BVar "j") (FApp (CTerm (builtinFunct Size)) [ATerm "return"])
-            ]
-            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
-        ]
 -- set replaces one element, so it needs a valid index like get, and the result has the same
 -- size as the input list, and x at that index. The list itself is not changed: the result is
 -- a new list. Every other element is unchanged. The result is also equal to the term
 -- set(list, index, x).
-builtinFunct Set =
-    VFunct
-        ["list", "index", "x"]
-        [ Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)]))
-        , Rewrite (CheckRel (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]]))
-        , ProofAssert (FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm "index", CTerm (VInt 0)])
-        , ProofAssert (FApp (CTerm (builtinFunct (Rel Lt))) [ATerm "index", FApp (CTerm (builtinFunct Size)) [ATerm "list"]])
-        ]
-        []
-        (BuiltinFunct Set)
-        [ FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ATerm "return", FApp (CTerm setSymbol) [ATerm "list", ATerm "index", ATerm "x"]]
-        , FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ FApp (CTerm (builtinFunct Size)) [ATerm "return"]
-            , FApp (CTerm (builtinFunct Size)) [ATerm "list"]
-            ]
-        , FApp
-            (CTerm (builtinFunct (Rel Eq)))
-            [ FApp (CTerm (builtinFunct Get)) [ATerm "return", ATerm "index"]
-            , ATerm "x"
-            ]
-        , -- Every other element is unchanged
-          Forall
-            "j"
-            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
-            , relProof Lt (BVar "j") (FApp (CTerm (builtinFunct Size)) [ATerm "list"])
-            , relProof NotEq (BVar "j") (ATerm "index")
-            ]
-            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (FApp (CTerm (builtinFunct Get)) [ATerm "list", BVar "j"]))
-        ]
 -- array(n, x) is an array of n copies of x, so it needs a size that is not negative. Its size is n and every element is x;
 -- the result is also equal to the term array(n, x). An array has no push: its size never changes, which is all that makes this
 -- a fact a caller can keep.
-builtinFunct NewArray =
-    VFunct
-        ["n", "x"]
-        [ Rewrite (CheckRel (relProof GtEq (ATerm "n") (CTerm (VInt 0))))
-        , ProofAssert (relProof GtEq (ATerm "n") (CTerm (VInt 0)))
-        ]
-        []
-        (BuiltinFunct NewArray)
-        [ relProof Eq (ATerm "return") (FApp (CTerm newArraySymbol) [ATerm "n", ATerm "x"])
-        , relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (ATerm "n")
-        , Forall
-            "j"
-            [ relProof GtEq (BVar "j") (CTerm (VInt 0))
-            , relProof Lt (BVar "j") (ATerm "n")
-            ]
-            (relProof Eq (FApp (CTerm (builtinFunct Get)) [ATerm "return", BVar "j"]) (ATerm "x"))
-        ]
 -- Array::boxed(n, x) promises what array(n, x) does, for an n that need not be a constant
-builtinFunct NewBoxedArray =
-    case builtinFunct NewArray of
-        VFunct params ins outs _ proofs -> VFunct params ins outs (BuiltinFunct NewBoxedArray) proofs
-        other -> other
 -- Array::empty() is the array of no elements
-builtinFunct NewEmptyArray =
-    VFunct
-        []
-        []
-        []
-        (BuiltinFunct NewEmptyArray)
-        [ relProof Eq (FApp (CTerm (builtinFunct Size)) [ATerm "return"]) (CTerm (VInt 0))
-        ]
 -- writeError(b) is writeByte(b) on the standard error
-builtinFunct WriteError =
-    VFunct
-        ["b"]
-        []
-        []
-        (BuiltinFunct WriteError)
-        [relProof Eq (ATerm "return") (ATerm "b")]
 -- writeByte(b) writes the Byte b to the standard output and is b
-builtinFunct WriteByte =
-    VFunct
-        ["b"]
-        []
-        []
-        (BuiltinFunct WriteByte)
-        [relProof Eq (ATerm "return") (ATerm "b")]
 -- toByte(x) is x as a Byte: x has to be from 0 to 255. toInt(b) is b as an Int.
-builtinFunct ToByte =
-    VFunct
-        ["x"]
-        [ Rewrite (CheckRel (relProof GtEq (ATerm "x") (CTerm (VInt 0))))
-        , ProofAssert (relProof GtEq (ATerm "x") (CTerm (VInt 0)))
-        , Rewrite (CheckRel (relProof Lt (ATerm "x") (CTerm (VInt 256))))
-        , ProofAssert (relProof Lt (ATerm "x") (CTerm (VInt 256)))
-        ]
-        []
-        (BuiltinFunct ToByte)
-        [relProof Eq (ATerm "return") (ATerm "x")]
-builtinFunct FromByte = VFunct ["b"] [] [] (BuiltinFunct FromByte) [relProof Eq (ATerm "return") (ATerm "b")]
 -- The List<Byte> of a list of Ints that is written out: the same list
-builtinFunct BytesFrom = VFunct ["list"] [] [] (BuiltinFunct BytesFrom) []
 -- argCount() is the number of arguments of the program, argByte(i, j) the byte j of argument i, or -1 when there is no such argument or byte
-builtinFunct ArgCount = VFunct [] [] [] (BuiltinFunct ArgCount) [relProof GtEq (ATerm "return") (CTerm (VInt 0))]
-builtinFunct ArgByte =
-    VFunct
-        ["i", "j"]
-        []
-        []
-        (BuiltinFunct ArgByte)
-        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
-        , relProof Lt (ATerm "return") (CTerm (VInt 256))
-        ]
 -- The files: a path is built a byte at a time (pathByte), and then the file at it is loaded (fileLoad: its size, or -1) and read a byte at a time
 -- (fileByte(i): the byte i, or -1), or a file is built a byte at a time (storeByte) and stored (fileStore: 0, or -1) in the file at the path
-builtinFunct PathByte = VFunct ["b"] [] [] (BuiltinFunct PathByte) [relProof GtEq (ATerm "return") (CTerm (VInt 0))]
-builtinFunct FileLoad = VFunct [] [] [] (BuiltinFunct FileLoad) [relProof GtEq (ATerm "return") (CTerm (VInt (-1)))]
-builtinFunct FileByte =
-    VFunct
-        ["i"]
-        []
-        []
-        (BuiltinFunct FileByte)
-        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
-        , relProof Lt (ATerm "return") (CTerm (VInt 256))
-        ]
-builtinFunct StoreByte = VFunct ["b"] [] [] (BuiltinFunct StoreByte) [relProof GtEq (ATerm "return") (CTerm (VInt 0))]
-builtinFunct FileStore =
-    VFunct
-        []
-        []
-        []
-        (BuiltinFunct FileStore)
-        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
-        , relProof LtEq (ATerm "return") (CTerm (VInt 0))
-        ]
 -- readByte() is the next byte of the standard input, or -1 at its end: it is not known beyond that, so a program has to test what it relies on
-builtinFunct ReadByte =
-    VFunct
-        []
-        []
-        []
-        (BuiltinFunct ReadByte)
-        [ relProof GtEq (ATerm "return") (CTerm (VInt (-1)))
-        , relProof Lt (ATerm "return") (CTerm (VInt 256))
-        ]
 -- Unsize b is b: the Box has the same value, it carries the size
-builtinFunct Unsize = VFunct ["box"] [] [] (BuiltinFunct Unsize) []
 -- The array that a literal makes is the list of its elements, read as an array: the same value
-builtinFunct ArrayFrom = VFunct ["list"] [] [] (BuiltinFunct ArrayFrom) []
 -- Box::new(x) is x: a Box has the value of what it holds
-builtinFunct NewBox = VFunct ["value"] [] [] (BuiltinFunct NewBox) []
-builtinFunct UnBox = VFunct ["box"] [] [] (BuiltinFunct UnBox) []
 -- clone(x) is x: a copy has the value of what it copies
-builtinFunct CloneOf = VFunct ["value"] [] [] (BuiltinFunct CloneOf) []
+-- The builtins lib/stdlib.tersus declares: their contracts are written there, and StdLibDefs is where
+-- they are read from. The value made here, which is how a proof names such a builtin, carries none.
+builtinFunct b | Just params <- lookup b stdlibDeclaredParams = VFunct params [] [] (BuiltinFunct b) []
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []
@@ -284,29 +64,8 @@ builtinFunct (Cast variant) =
         (BuiltinFunct (Cast variant))
         []
 builtinFunct (Project variant field) = VFunct ["value"] [] [] (BuiltinFunct (Project variant field)) []
-builtinFunct Plus = VFunct ["a", "b"] [] [] (BuiltinFunct Plus) []
-builtinFunct Minus = VFunct ["a", "b"] [] [] (BuiltinFunct Minus) []
-builtinFunct Times = VFunct ["a", "b"] [] [] (BuiltinFunct Times) []
 -- Division by zero is rejected, like an out of range index: the divisor must already be known to be non-zero
-builtinFunct Div =
-    VFunct
-        ["a", "b"]
-        [ Rewrite (CheckRel (relProof NotEq (ATerm "b") (CTerm (VInt 0))))
-        , ProofAssert (relProof NotEq (ATerm "b") (CTerm (VInt 0)))
-        ]
-        []
-        (BuiltinFunct Div)
-        []
 -- Modulo by zero is rejected the same way
-builtinFunct Mod =
-    VFunct
-        ["a", "b"]
-        [ Rewrite (CheckRel (relProof NotEq (ATerm "b") (CTerm (VInt 0))))
-        , ProofAssert (relProof NotEq (ATerm "b") (CTerm (VInt 0)))
-        ]
-        []
-        (BuiltinFunct Mod)
-        []
 -- Addresses (POINTERS.md). The address of an offset is the term offset(p, i), so the base of the upper part of a split block is that term too.
 builtinFunct AddrNull = VFunct [] [] [] (BuiltinFunct AddrNull) []
 builtinFunct AddrOffset = VFunct ["p", "i"] [] [] (BuiltinFunct AddrOffset) []
@@ -481,42 +240,6 @@ builtinFunct Or = VFunct ["a", "b"] [] [] (BuiltinFunct Or) []
 builtinFunct Not = VFunct ["a"] [] [] (BuiltinFunct Not) []
 builtinFunct (Rel rel) = VFunct ["a", "b"] [] [] (BuiltinFunct (Rel rel)) []
 builtinFunct Within = VFunct ["a", "b"] [] [] (BuiltinFunct Within) []
-
-stdLibCtx :: Map Variable Value
-stdLibCtx =
-    fromList
-        [ ("size", builtinFunct Size)
-        , ("first", builtinFunct First)
-        , ("last", builtinFunct Last)
-        , ("get", builtinFunct Get)
-        , ("push", builtinFunct Push)
-        , ("pop", builtinFunct Pop)
-        , ("set", builtinFunct Set)
-        , ("array", builtinFunct NewArray)
-        , ("writeByte", builtinFunct WriteByte)
-        , ("writeError", builtinFunct WriteError)
-        , ("readByte", builtinFunct ReadByte)
-        , ("argCount", builtinFunct ArgCount)
-        , ("argByte", builtinFunct ArgByte)
-        , ("pathByte", builtinFunct PathByte)
-        , ("fileLoad", builtinFunct FileLoad)
-        , ("fileByte", builtinFunct FileByte)
-        , ("storeByte", builtinFunct StoreByte)
-        , ("fileStore", builtinFunct FileStore)
-        , ("toByte", builtinFunct ToByte)
-        , ("toInt", builtinFunct FromByte)
-        , ("+", builtinFunct Plus)
-        , ("-", builtinFunct Minus)
-        , ("*", builtinFunct Times)
-        , ("/", builtinFunct Div)
-        , ("%", builtinFunct Mod)
-        , ("=", builtinFunct (Rel Eq))
-        , ("!=", builtinFunct (Rel NotEq))
-        , ("<", builtinFunct (Rel Lt))
-        , (">", builtinFunct (Rel Gt))
-        , ("<=", builtinFunct (Rel LtEq))
-        , (">=", builtinFunct (Rel GtEq))
-        ]
 
 -- Evaluates a builtin function on concrete arguments
 evalBuiltinFunct :: BuiltinFunct -> [Value] -> Result Value String
@@ -750,9 +473,6 @@ eqProof = CTerm (builtinFunct (Rel Eq))
 eqVarProof :: VariableProof
 eqVarProof = CTerm (builtinFunct (Rel Eq))
 
-stdLibValCtx :: (Map Variable Iota, [IotaProof])
-stdLibValCtx = stdLibCtxToValCtx stdLibCtx
-
 stdLibRuleCtx :: RuleContext
 stdLibRuleCtx =
     fromList
@@ -802,22 +522,6 @@ maxUnfolded = 1024
 relProof :: Rel -> VariableProof -> VariableProof -> VariableProof
 relProof rel lhs rhs = FApp (CTerm (builtinFunct (Rel rel))) [lhs, rhs]
 
--- NOTE: Could also take iotaseq as input here
-stdLibCtxToValCtx :: Map Variable Value -> (Map Variable Iota, [IotaProof])
-stdLibCtxToValCtx ctx =
-    let (varIotas, proofs) = stdLibCtxToValCtxHelper (toList ctx)
-     in (fromList varIotas, proofs)
-
-stdLibCtxToValCtxHelper :: [(Variable, Value)] -> ([(Variable, Iota)], [IotaProof])
-stdLibCtxToValCtxHelper [] = ([], [])
--- Seed validation with one fresh symbolic name per stdlib binding plus a proof that
--- the symbolic name is equal to the concrete builtin value.
-stdLibCtxToValCtxHelper ((var, functDef) : rest) =
-    let newVarIota = (var, Iota var)
-     in let newProof = FApp eqProof [ATerm (Iota var), CTerm functDef]
-         in let (restVarIota, restProof) = stdLibCtxToValCtxHelper rest
-             in (newVarIota : restVarIota, newProof : restProof)
-
 -- An Int result that does not fit in 64 bits is an error, as in compiled code (addition, subtraction and
 -- multiplication overflow, and so does minInt / -1)
 checkedInt :: Integer -> Result Value String
@@ -836,3 +540,57 @@ comparable (VBool _) (VBool _) = True
 comparable (VList _) (VList _) = True
 comparable (VData _ _) (VData _ _) = True
 comparable _ _ = False
+
+-- The builtins that lib/stdlib.tersus declares, by the name it declares each under. The contracts of these
+-- are written there, as text to be parsed (StdLibDefs); the ones not listed here are primitives, whose
+-- contracts are made in this module because they are built from the ghost terms of a permission or are
+-- made afresh for a type (Ctor, Field, Is, Cast, Project, ToWord), or have no contract to write.
+stdlibBuiltinDecls :: [(String, BuiltinFunct)]
+stdlibBuiltinDecls =
+    [ ("size", Size)
+    , ("first", First)
+    , ("last", Last)
+    , ("get", Get)
+    , ("push", Push)
+    , ("pop", Pop)
+    , ("set", Set)
+    , ("array", NewArray)
+    , ("arrayBoxed", NewBoxedArray)
+    , ("arrayEmpty", NewEmptyArray)
+    , ("writeByte", WriteByte)
+    , ("writeError", WriteError)
+    , ("readByte", ReadByte)
+    , ("argCount", ArgCount)
+    , ("argByte", ArgByte)
+    , ("pathByte", PathByte)
+    , ("fileLoad", FileLoad)
+    , ("fileByte", FileByte)
+    , ("storeByte", StoreByte)
+    , ("fileStore", FileStore)
+    , ("toByte", ToByte)
+    , ("toInt", FromByte)
+    , ("bytesFrom", BytesFrom)
+    , ("unsize", Unsize)
+    , ("arrayFrom", ArrayFrom)
+    , ("boxNew", NewBox)
+    , ("boxUnbox", UnBox)
+    , ("cloneOf", CloneOf)
+    , ("plus", Plus)
+    , ("minus", Minus)
+    , ("times", Times)
+    , ("div", Div)
+    , ("mod", Mod)
+    ]
+
+-- The parameters of the builtins lib/stdlib.tersus declares, as a proof names them
+stdlibDeclaredParams :: [(BuiltinFunct, [Variable])]
+stdlibDeclaredParams =
+    [ (Size, ["list"]), (First, ["list"]), (Last, ["list"]), (Get, ["list", "index"])
+    , (Push, ["list", "x"]), (Pop, ["list"]), (Set, ["list", "index", "x"]), (NewArray, ["n", "x"])
+    , (NewBoxedArray, ["n", "x"]), (NewEmptyArray, []), (WriteByte, ["b"]), (WriteError, ["b"])
+    , (ReadByte, []), (ArgCount, []), (ArgByte, ["i", "j"]), (PathByte, ["b"]), (FileLoad, [])
+    , (FileByte, ["i"]), (StoreByte, ["b"]), (FileStore, []), (ToByte, ["x"]), (FromByte, ["b"])
+    , (BytesFrom, ["list"]), (Unsize, ["box"]), (ArrayFrom, ["list"]), (NewBox, ["value"])
+    , (UnBox, ["box"]), (CloneOf, ["value"]), (Plus, ["a", "b"]), (Minus, ["a", "b"])
+    , (Times, ["a", "b"]), (Div, ["a", "b"]), (Mod, ["a", "b"])
+    ]

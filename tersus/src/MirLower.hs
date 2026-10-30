@@ -9,7 +9,7 @@ import qualified Data.Set as Set
 import qualified Mir as M
 import MirMoves (checkMoves, stripPositions)
 import MirVerify (verifyProgram)
-import StdLib (stdLibCtx)
+import StdLibDefs (stdLibCtx)
 import TersusTypes
 import TypeCheck
 import Utils

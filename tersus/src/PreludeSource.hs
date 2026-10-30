@@ -6,6 +6,7 @@ module PreludeSource
     , boxSource
     , stringSource
     , emitterSource
+    , stdlibSource
     , seedSource
     , seedFingerprint
     ) where
@@ -19,6 +20,15 @@ preludeSource =
     $( do
         addDependentFile "lib/prelude.tersus"
         contents <- runIO (readFile "lib/prelude.tersus")
+        lift contents
+     )
+
+-- The text of lib/stdlib.tersus: the standard library written in Tersus (see StdLibDefs)
+stdlibSource :: String
+stdlibSource =
+    $( do
+        addDependentFile "lib/stdlib.tersus"
+        contents <- runIO (readFile "lib/stdlib.tersus")
         lift contents
      )
 

@@ -35,6 +35,7 @@ import Data.Maybe (fromMaybe)
 import qualified Mir as M
 import qualified ProofEngine as Engine
 import StdLib
+import StdLibDefs (stdLibValCtx)
 import TersusTypes
 import Utils
 

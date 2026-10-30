@@ -42,6 +42,7 @@ import qualified Data.Set as Set
 
 import Pretty (renderType)
 import StdLib
+import StdLibDefs (stdLibCtx)
 import TersusTypes
 import Utils
 

@@ -10,7 +10,8 @@ import qualified Data.Set as Set
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
 import MirVerify (verifyProgram)
-import StdLib (builtinFunct, stdLibValCtx)
+import StdLib (builtinFunct)
+import StdLibDefs (stdLibValCtx)
 import TersusTypes
 import Utils (Result (..), bindResult, inIntRange)
 
