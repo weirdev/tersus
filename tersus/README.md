@@ -30,8 +30,14 @@ a disequality. `entailsRefinedOrder` also strengthens a non-strict bound to a
 strict one when its endpoints are known to differ. Other forms of contradiction
 are not yet covered.
 
-`entailsGoal` combines these facts in a proof context. `SelfHostedProof` interns
-Haskell proof terms and runs supported relation queries against that context;
+`entailsGoal` combines these facts in a proof context. The context also
+carries variant and constructor facts: values built with different variants
+of one enum are different, equal constructor values have equal fields, a
+field read of a constructor value is its corresponding argument, and a
+`Within` goal asks whether a term is reached by field reads from another.
+Scaling by a known factor, and division and remainder by a proved divisor,
+give order facts around zero. `SelfHostedProof` interns
+Haskell proof terms and runs supported relation and `Within` queries against that context;
 it declines unsupported goals and omits unsupported premises. It is a bridge
 for comparison with the Haskell engine, not the production validation path.
 A size is known to be at least 0, as in the reference engine, so a loop bound
@@ -43,7 +49,11 @@ the goal is false.
 steps are reserved for trusted premises and facts established by an operation;
 an assertion must be a `Check`. The result identifies the first unproved check.
 `validateExecution` also tracks local bindings and checks acyclic paths
-independently. `SelfHostedMir.validateMirSubset` translates a limited subset of
+independently. A boolean branch may name a join block: both paths are walked
+to it, their states are merged (facts common to both are kept, and a local
+bound to different terms gets a fresh one), and the walk continues from the
+join. The MIR bridge does not yet supply a join, so it walks each path
+through the join separately. `SelfHostedMir.validateMirSubset` translates a limited subset of
 typed MIR (copies, boxing, plain structs, pure binary operations, list and
 array literals, empty and repeated-element arrays, length, indexed reads and updates,
 first, last and list removal with known length, list append, assertions, jumps
@@ -79,7 +89,8 @@ disequality asks for the opposite value, so `below != false` is the same claim
 and `below != true` is its negation.
 The symbolic executor records multiplication by zero or one, division by one,
 and concrete products, quotients and remainders when they fit in a signed
-64-bit integer.
+64-bit integer. It also records the order of a scaled, divided or remainder
+result around zero when the factor or divisor is known or proved.
 
 `MirEval.runNamedFunction` lets the host invoke a lowered Tersus function with
 explicit MIR values. It executes code without checking its input contract or
