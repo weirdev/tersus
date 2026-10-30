@@ -20,10 +20,10 @@ import TersusTypes
 import TypeCheck (elaborate)
 import Utils (Result (..), bindResult, inIntRange)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)] }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)] }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] []
+emptyBuild = Build 0 [] [] [] [] []
 
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
@@ -299,7 +299,14 @@ statement (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
         destination = record "ValueRef::Local" [("local", MInt (toInteger dest))]
         create = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt constructor), ("arguments", MList [ref | (_, ref, _) <- snapshots])]
     (projections, b3) <- foldM (project destination) ([], b2) snapshots
-    pure ([saved | (_, _, saved) <- snapshots] ++ [create] ++ projections, b3)
+    let b4 = b3{ctorFields = nub ([(constructor, fieldId, toInteger index) | (index, (field, _, _)) <- zip [0 ..] snapshots, let (fieldId, _) = namedFunction ("field:" ++ field) b3] ++ ctorFields b3)}
+        (variantStep, b5) = case break (== ':') name of
+            (family, ':' : ':' : _) ->
+                let (familyId, b') = namedFunction ("enum:" ++ family) b4
+                    (constructorId, b'') = namedFunction ("variant:" ++ name) b'
+                 in ([step "AssumeVariant" [("object", destination), ("family", MInt familyId), ("constructor", MInt constructorId), ("matches", MBool True)]], b'')
+            _ -> ([], b4)
+    pure ([saved | (_, _, saved) <- snapshots] ++ [create] ++ variantStep ++ projections, b5)
   where
     snapshot (acc, b) (field, source) = do
         (value, b1) <- operand source b
@@ -320,6 +327,17 @@ statement (M.Assign (M.Local dest) (M.ReadField source _ field)) b0 = do
     (value, b1) <- operand source b0
     let (function, b2) = namedFunction ("field:" ++ field) b1
     pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [value])]], b2)
+statement (M.Assign (M.Local dest) (M.IsVariant source variantName)) b0 = do
+    (value, b1) <- operand source b0
+    let (predicate, b2) = namedFunction ("isvariant:" ++ variantName) b1
+    pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt predicate), ("arguments", MList [value])]], b2)
+statement (M.Assign (M.Local dest) (M.AsVariant source variantName)) b0 = do
+    (value, b1) <- operand source b0
+    let assign = step "Assign" [("local", MInt (toInteger dest)), ("value", value)]
+        (familyId, b2) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b1
+        (constructorId, b3) = namedFunction ("variant:" ++ variantName) b2
+        require = step "RequireVariant" [("object", record "ValueRef::Local" [("local", MInt (toInteger dest))]), ("family", MInt familyId), ("constructor", MInt constructorId)]
+    pure ([assign, require], b3)
 statement (M.Assign (M.Local dest) (M.ListOp M.Length [source])) b = do
     (value, b') <- operand source b
     pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt (-13)), ("arguments", MList [value])]], b')
@@ -512,6 +530,16 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
             Just (resultCheck ++ postconditions, record "ExecutionEnd::Done" [], b')
         (Nothing, M.Goto target) -> Just ([], jump target, b1)
         (Nothing, M.SwitchBool (M.Const (M.CBool choice)) yes no) -> Just ([], jump (if choice then yes else no), b1)
+        (Nothing, M.SwitchBool (M.Copy local) yes no) | Just (source, variantName) <- variantTest fn local -> do
+            (object, b') <- operand source b1
+            let (familyId, b2) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b'
+                (constructorId, b3) = namedFunction ("variant:" ++ variantName) b2
+                assume matches = step "AssumeVariant" [("object", object), ("family", MInt familyId), ("constructor", MInt constructorId), ("matches", MBool matches)]
+                M.BlockId yesId = yes
+                M.BlockId noId = no
+                ending = record "ExecutionEnd::Branch"
+                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("yesSteps", MList [assume True]), ("noSteps", MList [assume False])]
+            Just ([step "RequireDefined" [("value", localRef (localNumber local))]], ending, b3)
         (Nothing, M.SwitchBool (M.Copy local) yes no) -> do
             let ref = localRef (localNumber local)
                 required = step "RequireDefined" [("value", ref)]
@@ -653,6 +681,10 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
                 | otherwise = b : case Map.lookup b (M.fnBlocks fn) of
                     Just (M.BasicBlock _ (M.Goto target)) -> go (Set.insert b seen) target
                     _ -> []
+    variantTest :: M.Function -> M.Local -> Maybe (M.Operand, Name)
+    variantTest f local = case [(src, name) | blk <- Map.elems (M.fnBlocks f), M.Assign dest (M.IsVariant src name) <- M.blockStatements blk, dest == local] of
+        r : _ -> Just r
+        [] -> Nothing
     normal r a b = case r of
                 Eq -> (0, a, b)
                 NotEq -> (1, a, b)
@@ -696,7 +728,6 @@ encodeFunction types invariants functions allowCalls fn
     | any ambiguousSizeName (M.fnSizeParams fn) = Nothing
     | any parameterAssigned sizeParams = Nothing
     | any wrongSizeName (zip sizeParams (M.fnSizeParams fn)) = Nothing
-    | M.specTermination spec /= Nothing = Nothing
     | Map.member (M.BlockId (-1)) (M.fnBlocks fn) = Nothing
     | otherwise = do
         let (params, start) = foldl addParam ([], emptyBuild) (M.fnParams fn)
@@ -704,7 +735,7 @@ encodeFunction types invariants functions allowCalls fn
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires, withRequires) <- contractSteps True (M.specEnv spec) (M.specRequires spec) withSizes
         (blocks, b) <- foldM add ([], withRequires) (Map.toList (M.fnBlocks fn))
-        let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+        let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt i | (name, i) <- namedFunctions b, "field:" `isPrefixOf` name]), ("constructorFunctions", MList [MInt i | (name, i) <- namedFunctions b, "ctor:" `isPrefixOf` name]), ("constructorFields", MList [record "ConstructorField" [("constructor", MInt c), ("field", MInt f), ("index", MInt i)] | (c, f, i) <- ctorFields b]), ("differences", MList [])]
             entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (paramFacts ++ sizeFacts ++ requires)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
         pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", MList params)], -1)
   where
@@ -732,7 +763,6 @@ encodeFunction types invariants functions allowCalls fn
 
 encode :: M.Program -> Maybe [(MirValue, MirValue, Integer)]
 encode program
-    | any isEnum (Map.elems (M.progTypes program)) = Nothing
     | any externFunction allFunctions = Nothing
     | any unsupportedFunction allFunctions = Nothing
     | any unsupportedDecl (Map.elems (M.progTypes program)) = Nothing
@@ -747,7 +777,6 @@ encode program
     | length targets /= Map.size (M.progFunctions program) = Nothing
     | any (\name -> Map.notMember name (M.progFunctions program)) targets = Nothing
     | any (\(name, fn) -> name /= M.fnName fn) (Map.toList (M.progFunctions program)) = Nothing
-    | any invalidCall functionCalls = Nothing
     | otherwise = do
         let functions = M.progFunctions program
             invariants = M.progInvariants program
