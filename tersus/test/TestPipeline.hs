@@ -719,6 +719,20 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 leftValue = ATerm (Iota "left value")
                 rightValue = ATerm (Iota "right value")
                 checkSymbolicVariantBridge = testAssertEq (querySelfHosted program [FApp (CTerm (builtinFunct (Is "Option::None"))) [leftValue], FApp (CTerm (builtinFunct (Is "Option::Some"))) [rightValue]] (FApp (CTerm (builtinFunct (Rel NotEq))) [leftValue, rightValue])) (Ok (Just True))
+                mergeContext constants equalities = MData "ValidatorContext" [("equalities", MList equalities), ("applications", MList []), ("constants", MList constants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
+                mergeLeftState = MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", MList [MData "LocalBinding" [("local", MInt 1), ("term", MInt 10)]])]
+                mergeRightState = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", MList [MData "LocalBinding" [("local", MInt 1), ("term", MInt 11)]])]
+                checkCommonContext =
+                    let left = mergeContext [] [fact (0, 1), fact (2, 3)]
+                        right = mergeContext [] [fact (1, 0), fact (2, 4)]
+                        expected = mergeContext [] [fact (0, 1)]
+                     in testAssertEq (runNamedFunction program "commonContext" [left, right]) (Ok (Just expected))
+                checkMergeStates = case runNamedFunction program "mergeStates" [mergeLeftState, mergeRightState] of
+                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", MData "ValidatorContext" fields), ("locals", MList [MData "LocalBinding" [("local", MInt 1), ("term", MInt joined)]])])])) ->
+                        case lookup "constants" fields of
+                            Just (MList constants) -> testAssertEq constants [MData "ConstantTerm" [("id", MInt joined), ("kind", MInt 0), ("value", MInt 3)]]
+                            other -> Just ("Merged constants malformed: " ++ show other)
+                    result -> Just ("Unexpected mergeStates result: " ++ show result)
                 withinOuter = ATerm (Iota "outer value")
                 withinInner = FApp (CTerm (builtinFunct (Field Nothing "x"))) [withinOuter]
                 checkWithinBridge = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct Within)) [withinInner, withinOuter])) (Ok (Just True))
@@ -934,6 +948,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkVariantGoal "Different" 0 1 True, checkVariantGoal "Equal" 0 1 False
                       , checkConstructorGoal "Equal" 11 1 True, checkConstructorGoal "Equal" 11 0 False
                       , checkWithin 12 10 True, checkWithin 10 12 False, checkWithin 10 10 False
+                      , checkCommonContext, checkMergeStates
                       , checkVariantBridge, checkVariantBridgeEqual, checkSymbolicVariantBridge, checkWithinBridge
                       , checkBridge (lt 0 3), checkBridge (lt 3 0), checkBridge (ne 0 3), checkBridge (eq 0 1)
                       , testAssertEq (querySelfHosted program [] (BVar "i")) (Ok Nothing)
