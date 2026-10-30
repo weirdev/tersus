@@ -834,6 +834,8 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "fn f(x: Int) -> Int { affirm x = 0; return x; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { return 1 / x; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int, y: Int) -> Int { if x < y { affirm x < y; } else { affirm y <= x; }; return 0; }; return 0;" (Just True)
+                      , checkMirSubset "fn f(flag: Bool) -> Int { y = 0; if flag { y = 1; } else { y = 2; }; affirm y > 0; return y; }; return f(true);" (Just True)
+                      , checkMirSubset "fn f(flag: Bool) -> Int { y = 0; if flag { y = 1; } else { y = 2; }; affirm y > 1; return y; }; return f(true);" (Just False)
                       , checkMirSubset "fn f(x: Int, y: Int) -> Int { if x < y { return 0; } else { affirm x < y; }; return 0; }; return 0;" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] { return x; }; return 0;" (Just True)
                       , checkMirSubset "fn f(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return >= 0; }] { return x; }; return 0;" (Just True)
