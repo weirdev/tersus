@@ -86,6 +86,7 @@ testExamples =
         , testExampleFile "examples/linked_list.tersus" (ExpectReturn (VInt 9))
         , testExampleFile "examples/enums.tersus" (ExpectReturn (VInt 27))
         , testExampleFile "examples/traits.tersus" (ExpectReturn (VInt 55))
+        , testExampleFile "examples/addresses.tersus" (ExpectReturn (VInt 112))
         , testExampleFile "examples/rejected/trait_input_stronger.tersus" (ExpectRejected "impl Step for Counter: advance does not meet what Step declares")
         , testExampleFile "examples/rejected/trait_output_weaker.tersus" (ExpectRejected "impl Measure for Pair: measure does not meet what Measure declares")
         , testExampleFile "examples/rejected/body_not_exported.tersus" (ExpectRejected "Could not prove: return = n")

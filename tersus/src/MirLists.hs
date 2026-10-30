@@ -31,6 +31,7 @@ hasLists program =
         TList _ -> True
         TArrayOf t _ -> mentionsList t
         TBox t -> mentionsList t
+        TAddr t -> mentionsList t
         TRef t -> mentionsList t
         TFn args ret -> any mentionsList (ret : args)
         TNamed n | Just (_, args) <- instanceOf n -> or [mentionsList t | ArgType t <- args]
@@ -85,7 +86,7 @@ lowerLists :: Program -> Program -> Program
 lowerLists library program
     | not (hasLists program) = program
     | otherwise =
-        completeInstances
+        completeErasedInstances
             lowered
                 { progTypes = Map.union (progTypes lowered) (progTypes library)
                 , progFunctions = Map.union (progFunctions lowered) (progFunctions library)
@@ -110,6 +111,7 @@ listType ty = case ty of
     TList t -> TNamed (instanceName "StdList" [ArgType (listType t)])
     TArrayOf t size -> TArrayOf (listType t) size
     TBox t -> TBox (listType t)
+    TAddr t -> TAddr (listType t)
     TRef t -> TRef (listType t)
     TFn args ret -> TFn (map listType args) (listType ret)
     TNamed n -> TNamed (renameName n)
@@ -296,12 +298,17 @@ lowerFunction original fn =
             let ty = fromMaybe TInt (firstJust [nonConstant a ta, nonConstant b tb, ta, tb])
             BinaryOp op <$> operandFor ty a <*> operandFor ty b
         ListOp op os -> do
-            let element = case destTy of
-                    TArrayOf t _ -> t
-                    TBox (TArrayOf t _) -> t
+            -- (what is written to memory has the type of what the address is of)
+            addressTy <- case (op, os) of
+                (AddrWrite, p : _) -> operandType p
+                _ -> return Nothing
+            let element = case (destTy, addressTy) of
+                    (_, Just (TAddr t)) -> t
+                    (TArrayOf t _, _) -> t
+                    (TBox (TArrayOf t _), _) -> t
                     _ -> TInt
             -- (the element that an array is made of, or that is put in it, has the type of the elements of the array)
-            let isElement i = (i == (1 :: Int) && op `elem` [NewArray, NewBoxed]) || (i == 2 && op == Set)
+            let isElement i = (i == (1 :: Int) && op `elem` [NewArray, NewBoxed]) || (i == 2 && op `elem` [Set, AddrWrite])
             os' <- mapM (\(i, o) -> operandFor (if isElement i then element else TInt) o) (zip [0 ..] os)
             return (ListOp op os')
         MakeBox o -> MakeBox <$> operandFor (case destTy of TBox t -> t; t -> t) o
@@ -342,6 +349,7 @@ lowerFunction original fn =
         TVar _ -> True
         TList e -> unknown e
         TBox e -> unknown e
+        TAddr e -> unknown e
         TArrayOf e _ -> unknown e
         _ -> False
 

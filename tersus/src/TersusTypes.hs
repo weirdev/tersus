@@ -4,7 +4,7 @@ module TersusTypes where
 
 import qualified Data.IntMap.Strict as IntMap
 import Data.Char (isAlphaNum, isDigit, isLower, isUpper)
-import Data.List (intercalate, isPrefixOf)
+import Data.List (intercalate, isPrefixOf, stripPrefix)
 import Data.Map (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as S
@@ -55,6 +55,55 @@ data BuiltinFunct
       UnBox
     | -- CloneOf x: clone(x), a copy of x, which has its value. It is the one place a program says that a value is copied.
       CloneOf
+    | -- Addresses and permissions (POINTERS.md). An address is a word that allows nothing by itself; every operation on memory is given
+      -- the permission to it (a Block, a ghost value), and its contract says what the permission has to allow and what the new one says.
+      -- These need no permission: the null address, an address i slots further on, the same address of another type, and an address as
+      -- a number and back.
+      AddrNull
+    | AddrOffset
+    | AddrCast
+    | AddrToInt
+    | AddrFromInt
+    | -- The operations on memory, as the MIR has them: n new slots (the address; BlockNew is the permission), the value in a slot (a view of
+      -- the permission), a value written into an empty slot (the permission after), a value taken out of a slot (BlockTaken is the
+      -- permission after), the value in a slot or in a run of slots dropped where it is (the permission after), the slots moved to an
+      -- allocation of another size (the address; BlockResized is the permission), and an allocation given back (0).
+      AddrAlloc
+    | AddrGet
+    | AddrWrite
+    | AddrTake
+    | AddrDropValue
+    | AddrDropRange
+    | AddrResize
+    | AddrFree
+    | -- What a program writes for those that give two things, `(p, b) = Addr::alloc(n)`: the lowering makes each the two operations and a tuple.
+      -- Block::split is the same of two ghost operations.
+      AllocPair
+    | TakePair
+    | ResizePair
+    | SplitPair
+    | -- The ghost operations, which make a permission and do nothing when the program runs (they are erased with the permissions)
+      BlockNew
+    | BlockTaken
+    | BlockResized
+    | BlockSplitLo
+    | BlockSplitHi
+    | BlockJoin
+    | BlockAssume
+    | BlockCast
+    | -- What the validator knows of a permission, which a contract or an affirm says (`base(b)`, `cap(b)`, `filled(b, i)` is
+      -- get(BlockFilled(b), i) and `at(b, i)` get(BlockContents(b), i), so what is known of arrays is known of them, `origin(b)`, and the
+      -- place of the block in its allocation and the size of the allocation, of which `whole(b)` is made). They cannot be called in code.
+      BlockBase
+    | BlockCap
+    | BlockFilled
+    | BlockContents
+    | BlockOrigin
+    | BlockStart
+    | BlockExtent
+    | -- count(b): the number of slots of the block that are filled, which every operation keeps, so that a block known to have none
+      -- filled (to be freed) is a sum and not a forall
+      BlockCount
     | Rel Rel
     | -- a && b, a || b and !a: the connectives of a condition. The lowering turns them into the jumps they stand for (a && b does not
       -- evaluate b when a is false), so only the checker, the evaluation of a constant and the printer see them.
@@ -77,7 +126,12 @@ data BuiltinFunct
 -- The builtins whose value is something outside the program (the input, the arguments): a call of one is not a function of its arguments,
 -- so a validator does not say that two calls are the same value, and a proof may not call one
 readsWorld :: BuiltinFunct -> Bool
-readsWorld b = b `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore]
+-- An allocation is new each time, so a call of one that makes one is not a function of its arguments either (two blocks of 4 slots are not the same).
+readsWorld b = b `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileByte, StoreByte, FileStore, AddrAlloc, AddrResize, BlockAssume]
+
+-- The builtins of permissions that give a ghost value or speak of one: they are not in the program that runs
+ghostBuiltin :: BuiltinFunct -> Bool
+ghostBuiltin b = b `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast, BlockBase, BlockCap, BlockFilled, BlockContents, BlockOrigin, BlockStart, BlockExtent, BlockCount]
 
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
@@ -90,6 +144,11 @@ data Type = TInt | TByte | TBool | TList Type | TArrayOf Type Size | TBox Type |
       TForall [Variable] [Variable] Type
     | -- A type parameter of a function (`T` in `fn first<T>(a: &List<T>) -> T`): a type that the function knows nothing of, which a call gives
       TParam Name
+    | -- The address of a T, or null (POINTERS.md): a word that can be copied, compared, offset and kept anywhere, and allows nothing by itself
+      TAddr Type
+    | -- The permission to a run of slots of T: a ghost value, which only the validator has (it is erased before the program runs), and linear, so
+      -- there is only ever one for a piece of memory. Every operation on memory needs it.
+      TBlock Type
     | -- A parameter that the function only reads, so a call does not give it a copy (`fn sum(a: &List<Int>)`). Only a parameter has one:
       -- in the function it is its type, a value it cannot assign, and a call gives it the value as it is.
       TRef Type
@@ -137,6 +196,8 @@ typeText ty = case ty of
     TBool -> "Bool"
     TList t -> "List<" ++ typeText t ++ ">"
     TBox t -> "Box<" ++ typeText t ++ ">"
+    TAddr t -> "Addr<" ++ typeText t ++ ">"
+    TBlock t -> "Block<" ++ typeText t ++ ">"
     TRef t -> "&" ++ typeText t
     TArrayOf t size -> "Array<" ++ typeText t ++ ", " ++ sizeText size ++ ">"
     TFn args ret -> "fn(" ++ intercalate ", " (map typeText args) ++ ") -> " ++ typeText ret
@@ -151,6 +212,31 @@ bareLower :: Name -> Bool
 bareLower name = case name of
     c : rest -> isLower c && all isAlphaNum rest
     [] -> False
+
+-- A tuple, `(A, B)`, is an instance of a struct that the language declares for each number of parts, `Tuple2<A, B>`, whose fields are
+-- named by their places, `0` and `1` (read as `t.0`). Its literal `(a, b)` is a literal of that struct whose types are those of the parts.
+tupleBase :: Int -> Name
+tupleBase n = "Tuple" ++ show n
+
+tupleType :: [Type] -> Type
+tupleType parts = TNamed (instanceName (tupleBase (length parts)) (map ArgType parts))
+
+-- The parameters and fields of the struct of the tuples of a number of parts, by its name
+tupleGeneric :: Name -> Maybe ([Variable], [(Variable, Type)])
+tupleGeneric base = case stripPrefix "Tuple" base of
+    Just digits | not (null digits), all isDigit digits, take 1 digits /= "0", n <- read digits, n >= (2 :: Int), n <= 16 ->
+        let params = ["T" ++ show i | i <- [0 .. n - 1]]
+         in Just (params, [(show i, TParam p) | (i, p) <- zip [0 :: Int ..] params])
+    _ -> Nothing
+
+-- The types of the parts of a tuple type
+tupleParts :: Type -> Maybe [Type]
+tupleParts (TNamed name)
+    | Just (base, args) <- instanceOf name, Just _ <- tupleGeneric base = mapM argType args
+  where
+    argType (ArgType t) = Just t
+    argType _ = Nothing
+tupleParts _ = Nothing
 
 -- The struct and the arguments that a name is the instance of
 instanceOf :: Name -> Maybe (Name, [Arg])
@@ -204,6 +290,8 @@ readType text =
                         case name of
                             "List" -> readOne inner >>= \t -> Just (TList t, afterInner)
                             "Box" -> readOne inner >>= \t -> Just (TBox t, afterInner)
+                            "Addr" -> readOne inner >>= \t -> Just (TAddr t, afterInner)
+                            "Block" -> readOne inner >>= \t -> Just (TBlock t, afterInner)
                             "Array" -> readArray inner >>= \t -> Just (t, afterInner)
                             _ -> Just (TNamed full, afterInner)
                     _ -> case name of
@@ -268,6 +356,8 @@ mentionsParameter ty = case ty of
     TParam _ -> True
     TList t -> mentionsParameter t
     TBox t -> mentionsParameter t
+    TAddr t -> mentionsParameter t
+    TBlock t -> mentionsParameter t
     TRef t -> mentionsParameter t
     TArrayOf t size -> mentionsParameter t || sizeParam size
     TFn args ret -> any mentionsParameter (ret : args)
@@ -291,6 +381,8 @@ substitute sizes types = go
         TList t -> TList (go t)
         TArrayOf t size -> TArrayOf (go t) (sized size)
         TBox t -> TBox (go t)
+        TAddr t -> TAddr (go t)
+        TBlock t -> TBlock (go t)
         TRef t -> TRef (go t)
         TFn args ret -> TFn (map go args) (go ret)
         TParam name | Just t <- lookup name types -> t
@@ -374,6 +466,9 @@ data ValidationStatement
     = Rewrite RwRule
     | ProofAssert VariableProof
     | AssignProofVar Variable Expression
+    | -- assume e;: a fact that the rest of the path knows without a proof, as after an affirm. It is an assumption, which
+      -- `tersus assumptions` lists: what a program takes on trust, such as what a C function did to memory (POINTERS.md).
+      Assume VariableProof
     deriving (Show, Eq, Ord)
 data Statement
     = Assign Variable Expression

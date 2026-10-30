@@ -307,6 +307,147 @@ builtinFunct Mod =
         []
         (BuiltinFunct Mod)
         []
+-- Addresses (POINTERS.md). The address of an offset is the term offset(p, i), so the base of the upper part of a split block is that term too.
+builtinFunct AddrNull = VFunct [] [] [] (BuiltinFunct AddrNull) []
+builtinFunct AddrOffset = VFunct ["p", "i"] [] [] (BuiltinFunct AddrOffset) []
+builtinFunct AddrCast = VFunct ["p"] [] [] (BuiltinFunct AddrCast) [relProof Eq (ATerm "return") (ATerm "p")]
+builtinFunct AddrToInt = VFunct ["p"] [] [] (BuiltinFunct AddrToInt) []
+builtinFunct AddrFromInt = VFunct ["n"] [] [] (BuiltinFunct AddrFromInt) [relProof Eq (ptrApp AddrToInt [ATerm "return"]) (ATerm "n")]
+-- n new slots: the address is new (AddrAlloc reads the world), and nothing is known of it but what its permission, BlockNew, says
+builtinFunct AddrAlloc = VFunct ["n"] [atLeastZero (ATerm "n")] [] (BuiltinFunct AddrAlloc) []
+builtinFunct BlockNew = VFunct ["p", "n"] [] [] (BuiltinFunct BlockNew) (newBlock (ATerm "p") (ATerm "n"))
+-- the value in a filled slot, which is at(b, i) (a view: the slot keeps it)
+builtinFunct AddrGet =
+    VFunct ["p", "i", "b"] (slotOf "b" ++ [isFilled "b" (ATerm "i")]) [] (BuiltinFunct AddrGet) [relProof Eq (ATerm "return") (blockAt (ATerm "b") (ATerm "i"))]
+-- a value written into an empty slot: the permission after says it is filled with it, and is the same everywhere else
+builtinFunct AddrWrite =
+    VFunct
+        ["p", "i", "x", "b"]
+        (slotOf "b" ++ [isEmpty "b" (ATerm "i")])
+        []
+        (BuiltinFunct AddrWrite)
+        ( keeps "return" "b"
+            ++ [ relProof Eq (blockCount (ATerm "return")) (plusProof (blockCount (ATerm "b")) (CTerm (VInt 1)))
+               , relProof Eq (blockFilled (ATerm "return") (ATerm "i")) (CTerm (VBool True))
+               , relProof Eq (blockAt (ATerm "return") (ATerm "i")) (ATerm "x")
+               ]
+            ++ sameExcept "return" "b" (ATerm "i")
+        )
+-- the value of a filled slot, taken out: it is at(b, i), and BlockTaken is the permission with the slot empty
+builtinFunct AddrTake =
+    VFunct ["p", "i", "b"] (slotOf "b" ++ [isFilled "b" (ATerm "i")]) [] (BuiltinFunct AddrTake) [relProof Eq (ATerm "return") (blockAt (ATerm "b") (ATerm "i"))]
+builtinFunct BlockTaken = VFunct ["b", "i"] [] [] (BuiltinFunct BlockTaken) (emptied "return" "b" (ATerm "i"))
+builtinFunct AddrDropValue =
+    VFunct ["p", "i", "b"] (slotOf "b" ++ [isFilled "b" (ATerm "i")]) [] (BuiltinFunct AddrDropValue) (emptied "return" "b" (ATerm "i"))
+-- the values of the slots i to i + n - 1, all filled, dropped where they are
+builtinFunct AddrDropRange =
+    VFunct
+        ["p", "i", "n", "b"]
+        [ ProofAssert (relProof Eq (blockBase (ATerm "b")) (ATerm "p"))
+        , atLeastZero (ATerm "i")
+        , atLeastZero (ATerm "n")
+        , ProofAssert (relProof LtEq (plusProof (ATerm "i") (ATerm "n")) (blockCap (ATerm "b")))
+        , ProofAssert (indexIn "j" (ATerm "i") (plusProof (ATerm "i") (ATerm "n")) (relProof Eq (blockFilled (ATerm "b") (BVar "j")) (CTerm (VBool True))))
+        ]
+        []
+        (BuiltinFunct AddrDropRange)
+        ( keeps "return" "b"
+            ++ [ indexIn "j" (ATerm "i") (plusProof (ATerm "i") (ATerm "n")) (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (CTerm (VBool False)))
+               , indexIn "j" (CTerm (VInt 0)) (ATerm "i") (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "b") (BVar "j")))
+               , indexIn "j" (plusProof (ATerm "i") (ATerm "n")) (blockCap (ATerm "b")) (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "b") (BVar "j")))
+               , relProof Eq (ptrApp BlockContents [ATerm "return"]) (ptrApp BlockContents [ATerm "b"])
+               , relProof Eq (blockCount (ATerm "return")) (minusProof (blockCount (ATerm "b")) (ATerm "n"))
+               ]
+        )
+-- a whole allocation, moved to one of n slots (a new allocation, so a new address): the slots from n are empty, and the permission after,
+-- BlockResized, has the values of the slots below n and of the old size
+builtinFunct AddrResize =
+    VFunct ["p", "n", "b"] ([ProofAssert (relProof Eq (blockBase (ATerm "b")) (ATerm "p")), atLeastZero (ATerm "n")] ++ isWhole "b" ++ [ProofAssert (indexIn "j" (ATerm "n") (blockCap (ATerm "b")) (relProof Eq (blockFilled (ATerm "b") (BVar "j")) (CTerm (VBool False))))]) [] (BuiltinFunct AddrResize) []
+builtinFunct BlockResized =
+    VFunct
+        ["b", "q", "n"]
+        []
+        []
+        (BuiltinFunct BlockResized)
+        ( newBlockFacts (ATerm "q") (ATerm "n")
+            ++ [ relProof Eq (blockCount (ATerm "return")) (blockCount (ATerm "b"))
+               , Forall "j" [relProof GtEq (BVar "j") (CTerm (VInt 0)), relProof Lt (BVar "j") (ATerm "n"), relProof Lt (BVar "j") (blockCap (ATerm "b"))] (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "b") (BVar "j")))
+               , Forall "j" [relProof GtEq (BVar "j") (CTerm (VInt 0)), relProof Lt (BVar "j") (ATerm "n"), relProof Lt (BVar "j") (blockCap (ATerm "b"))] (relProof Eq (blockAt (ATerm "return") (BVar "j")) (blockAt (ATerm "b") (BVar "j")))
+               , Forall "j" [relProof GtEq (BVar "j") (blockCap (ATerm "b")), relProof Lt (BVar "j") (ATerm "n")] (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (CTerm (VBool False)))
+               ]
+        )
+-- an allocation given back: the whole of it, with nothing left in it
+builtinFunct AddrFree =
+    VFunct ["p", "b"] ([ProofAssert (relProof Eq (blockBase (ATerm "b")) (ATerm "p"))] ++ isWhole "b" ++ [noneFilled "b"]) [] (BuiltinFunct AddrFree) [relProof Eq (ATerm "return") (CTerm (VInt 0))]
+-- The parts of a block: slots 0 to i - 1 and i to the end, of the same allocation
+builtinFunct BlockSplitLo =
+    VFunct
+        ["b", "i"]
+        [atLeastZero (ATerm "i"), ProofAssert (relProof LtEq (ATerm "i") (blockCap (ATerm "b")))]
+        []
+        (BuiltinFunct BlockSplitLo)
+        [ relProof Eq (blockBase (ATerm "return")) (blockBase (ATerm "b"))
+        , relProof Eq (blockCap (ATerm "return")) (ATerm "i")
+        , relProof Eq (blockOrigin (ATerm "return")) (blockOrigin (ATerm "b"))
+        , relProof Eq (blockStart (ATerm "return")) (blockStart (ATerm "b"))
+        , relProof GtEq (blockCount (ATerm "return")) (CTerm (VInt 0))
+        , relProof LtEq (blockCount (ATerm "return")) (blockCount (ATerm "b"))
+        , indexIn "j" (CTerm (VInt 0)) (ATerm "i") (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "b") (BVar "j")))
+        , indexIn "j" (CTerm (VInt 0)) (ATerm "i") (relProof Eq (blockAt (ATerm "return") (BVar "j")) (blockAt (ATerm "b") (BVar "j")))
+        ]
+builtinFunct BlockSplitHi =
+    VFunct
+        ["b", "i"]
+        [atLeastZero (ATerm "i"), ProofAssert (relProof LtEq (ATerm "i") (blockCap (ATerm "b")))]
+        []
+        (BuiltinFunct BlockSplitHi)
+        [ relProof Eq (blockBase (ATerm "return")) (ptrApp AddrOffset [blockBase (ATerm "b"), ATerm "i"])
+        , relProof Eq (blockCap (ATerm "return")) (minusProof (blockCap (ATerm "b")) (ATerm "i"))
+        , relProof Eq (blockOrigin (ATerm "return")) (blockOrigin (ATerm "b"))
+        , relProof Eq (blockStart (ATerm "return")) (plusProof (blockStart (ATerm "b")) (ATerm "i"))
+        , relProof Eq (blockCount (ATerm "return")) (minusProof (blockCount (ATerm "b")) (blockCount (ptrApp BlockSplitLo [ATerm "b", ATerm "i"])))
+        , relProof GtEq (blockCount (ATerm "return")) (CTerm (VInt 0))
+        , indexIn "j" (CTerm (VInt 0)) (minusProof (blockCap (ATerm "b")) (ATerm "i")) (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "b") (plusProof (ATerm "i") (BVar "j"))))
+        , indexIn "j" (CTerm (VInt 0)) (minusProof (blockCap (ATerm "b")) (ATerm "i")) (relProof Eq (blockAt (ATerm "return") (BVar "j")) (blockAt (ATerm "b") (plusProof (ATerm "i") (BVar "j"))))
+        ]
+-- Two blocks that are next to each other in one allocation, as one
+builtinFunct BlockJoin =
+    VFunct
+        ["lo", "hi"]
+        [ ProofAssert (relProof Eq (blockOrigin (ATerm "lo")) (blockOrigin (ATerm "hi")))
+        , ProofAssert (relProof Eq (blockStart (ATerm "hi")) (plusProof (blockStart (ATerm "lo")) (blockCap (ATerm "lo"))))
+        ]
+        []
+        (BuiltinFunct BlockJoin)
+        [ relProof Eq (blockBase (ATerm "return")) (blockBase (ATerm "lo"))
+        , relProof Eq (blockCap (ATerm "return")) (plusProof (blockCap (ATerm "lo")) (blockCap (ATerm "hi")))
+        , relProof Eq (blockOrigin (ATerm "return")) (blockOrigin (ATerm "lo"))
+        , relProof Eq (blockStart (ATerm "return")) (blockStart (ATerm "lo"))
+        , relProof Eq (blockCount (ATerm "return")) (plusProof (blockCount (ATerm "lo")) (blockCount (ATerm "hi")))
+        , indexIn "j" (CTerm (VInt 0)) (blockCap (ATerm "lo")) (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "lo") (BVar "j")))
+        , indexIn "j" (CTerm (VInt 0)) (blockCap (ATerm "lo")) (relProof Eq (blockAt (ATerm "return") (BVar "j")) (blockAt (ATerm "lo") (BVar "j")))
+        , indexIn "j" (blockCap (ATerm "lo")) (plusProof (blockCap (ATerm "lo")) (blockCap (ATerm "hi"))) (relProof Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "hi") (minusProof (BVar "j") (blockCap (ATerm "lo")))))
+        , indexIn "j" (blockCap (ATerm "lo")) (plusProof (blockCap (ATerm "lo")) (blockCap (ATerm "hi"))) (relProof Eq (blockAt (ATerm "return") (BVar "j")) (blockAt (ATerm "hi") (minusProof (BVar "j") (blockCap (ATerm "lo")))))
+        ]
+-- The permission to memory the program did not allocate: an assumption (`tersus assumptions` lists it)
+builtinFunct BlockAssume = VFunct ["p", "n"] [atLeastZero (ATerm "n")] [] (BuiltinFunct BlockAssume) (newBlock (ATerm "p") (ATerm "n"))
+-- The same memory as slots of another type of the same size, with nothing in it
+builtinFunct BlockCast =
+    VFunct
+        ["b"]
+        [noneFilled "b"]
+        []
+        (BuiltinFunct BlockCast)
+        [ relProof Eq (blockBase (ATerm "return")) (ptrApp AddrCast [blockBase (ATerm "b")])
+        , relProof Eq (blockCap (ATerm "return")) (blockCap (ATerm "b"))
+        , relProof Eq (blockOrigin (ATerm "return")) (blockOrigin (ATerm "b"))
+        , relProof Eq (blockStart (ATerm "return")) (blockStart (ATerm "b"))
+        , relProof Eq (blockCount (ATerm "return")) (CTerm (VInt 0))
+        , allEmpty "return"
+        ]
+-- (the forms a program writes, which the lowering takes apart, and the functions of a permission, which have no contract)
+builtinFunct b | b `elem` [AllocPair, TakePair, ResizePair, SplitPair, BlockBase, BlockCap, BlockFilled, BlockContents, BlockOrigin, BlockStart, BlockExtent, BlockCount] =
+    VFunct (map (\i -> "a" ++ show i) [1 .. ptrArity b]) [] [] (BuiltinFunct b) []
 builtinFunct And = VFunct ["a", "b"] [] [] (BuiltinFunct And) []
 builtinFunct Or = VFunct ["a", "b"] [] [] (BuiltinFunct Or) []
 builtinFunct Not = VFunct ["a"] [] [] (BuiltinFunct Not) []
@@ -463,6 +604,111 @@ evalBuiltinFunct (Rel LtEq) [VInt v1, VInt v2] = Ok $ VBool (v1 <= v2)
 evalBuiltinFunct (Rel LtEq) _ = Error "LtEq only valid for two ints"
 evalBuiltinFunct (Rel GtEq) [VInt v1, VInt v2] = Ok $ VBool (v1 >= v2)
 evalBuiltinFunct (Rel GtEq) _ = Error "GtEq only valid for two ints"
+-- (an address is not a value a proof works out: it is new at each allocation, and memory is what a permission says)
+evalBuiltinFunct b _ = Error (show b ++ " is an operation on memory, so it has no value to evaluate")
+
+-- The parts of the contracts of addresses and permissions
+
+ptrArity :: BuiltinFunct -> Int
+ptrArity b = case b of
+    AllocPair -> 1
+    TakePair -> 3
+    ResizePair -> 3
+    SplitPair -> 2
+    BlockFilled -> 1
+    BlockContents -> 1
+    _ -> 1
+
+-- (the term of a builtin applied: the symbol has no contract, as getSymbol)
+ptrApp :: BuiltinFunct -> [VariableProof] -> VariableProof
+ptrApp b args = FApp (CTerm (VFunct [] [] [] (BuiltinFunct b) [])) args
+
+blockBase, blockCap, blockOrigin, blockStart, blockCount :: VariableProof -> VariableProof
+blockCount b = ptrApp BlockCount [b]
+blockBase b = ptrApp BlockBase [b]
+blockCap b = ptrApp BlockCap [b]
+blockOrigin b = ptrApp BlockOrigin [b]
+blockStart b = ptrApp BlockStart [b]
+
+-- filled(b, i) and at(b, i): elements of two ghost arrays, so that what the proof engine knows of arrays is known of them
+blockFilled, blockAt :: VariableProof -> VariableProof -> VariableProof
+blockFilled b i = FApp (CTerm getSymbol) [ptrApp BlockFilled [b], i]
+blockAt b i = FApp (CTerm getSymbol) [ptrApp BlockContents [b], i]
+
+plusProof, minusProof :: VariableProof -> VariableProof -> VariableProof
+plusProof x y = FApp (CTerm (builtinFunct Plus)) [x, y]
+minusProof x y = FApp (CTerm (builtinFunct Minus)) [x, y]
+
+atLeastZero :: VariableProof -> ValidationStatement
+atLeastZero x = ProofAssert (relProof GtEq x (CTerm (VInt 0)))
+
+-- forall j in lo..hi: body
+indexIn :: Variable -> VariableProof -> VariableProof -> VariableProof -> VariableProof
+indexIn j lo hi = Forall j [relProof GtEq (BVar j) lo, relProof Lt (BVar j) hi]
+
+-- The slot i of the block b, at the address p: p is the address b is the permission to, and i is one of its slots
+slotOf :: Variable -> [ValidationStatement]
+slotOf b =
+    [ ProofAssert (relProof Eq (blockBase (ATerm b)) (ATerm "p"))
+    , atLeastZero (ATerm "i")
+    , ProofAssert (relProof Lt (ATerm "i") (blockCap (ATerm b)))
+    ]
+
+isFilled, isEmpty :: Variable -> VariableProof -> ValidationStatement
+isFilled b i = ProofAssert (relProof Eq (blockFilled (ATerm b) i) (CTerm (VBool True)))
+isEmpty b i = ProofAssert (relProof Eq (blockFilled (ATerm b) i) (CTerm (VBool False)))
+
+-- whole(b): the block is all of its allocation, which starts at 0 and is as long as the allocation
+isWhole :: Variable -> [ValidationStatement]
+isWhole b =
+    [ ProofAssert (relProof Eq (blockStart (ATerm b)) (CTerm (VInt 0)))
+    , ProofAssert (relProof Eq (blockCap (ATerm b)) (ptrApp BlockExtent [blockOrigin (ATerm b)]))
+    ]
+
+allEmpty :: Variable -> VariableProof
+allEmpty b = indexIn "j" (CTerm (VInt 0)) (blockCap (ATerm b)) (relProof Eq (blockFilled (ATerm b) (BVar "j")) (CTerm (VBool False)))
+
+-- No slot of the block is filled
+noneFilled :: Variable -> ValidationStatement
+noneFilled b = ProofAssert (relProof Eq (blockCount (ATerm b)) (CTerm (VInt 0)))
+
+-- A new allocation of n slots at p: whole, and nothing in it
+newBlock :: VariableProof -> VariableProof -> [VariableProof]
+newBlock p n = newBlockFacts p n ++ [relProof Eq (blockCount (ATerm "return")) (CTerm (VInt 0)), allEmpty "return"]
+
+newBlockFacts :: VariableProof -> VariableProof -> [VariableProof]
+newBlockFacts p n =
+    [ relProof Eq (blockBase (ATerm "return")) p
+    , relProof Eq (blockCap (ATerm "return")) n
+    , relProof GtEq (blockCap (ATerm "return")) (CTerm (VInt 0))
+    , relProof Eq (blockStart (ATerm "return")) (CTerm (VInt 0))
+    , relProof Eq (ptrApp BlockExtent [blockOrigin (ATerm "return")]) n
+    ]
+
+-- The block r is the block b in what it is for
+keeps :: Variable -> Variable -> [VariableProof]
+keeps r b =
+    [ relProof Eq (blockBase (ATerm r)) (blockBase (ATerm b))
+    , relProof Eq (blockCap (ATerm r)) (blockCap (ATerm b))
+    , relProof Eq (blockOrigin (ATerm r)) (blockOrigin (ATerm b))
+    , relProof Eq (blockStart (ATerm r)) (blockStart (ATerm b))
+    ]
+
+-- Every slot but i is as it was
+sameExcept :: Variable -> Variable -> VariableProof -> [VariableProof]
+sameExcept r b i =
+    [ Forall "j" guards (relProof Eq (blockFilled (ATerm r) (BVar "j")) (blockFilled (ATerm b) (BVar "j")))
+    , Forall "j" guards (relProof Eq (blockAt (ATerm r) (BVar "j")) (blockAt (ATerm b) (BVar "j")))
+    ]
+  where
+    guards = [relProof GtEq (BVar "j") (CTerm (VInt 0)), relProof Lt (BVar "j") (blockCap (ATerm b)), relProof NotEq (BVar "j") i]
+
+-- The block b with the slot i empty
+emptied :: Variable -> Variable -> VariableProof -> [VariableProof]
+emptied r b i =
+    keeps r b
+        ++ [relProof Eq (blockFilled (ATerm r) i) (CTerm (VBool False)), relProof Eq (blockCount (ATerm r)) (minusProof (blockCount (ATerm b)) (CTerm (VInt 1)))]
+        ++ sameExcept r b i
 
 eqProof :: IotaProof
 eqProof = CTerm (builtinFunct (Rel Eq))

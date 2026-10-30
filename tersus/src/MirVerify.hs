@@ -121,6 +121,8 @@ problems program fn =
     hasUnknown (TList t) = hasUnknown t
     hasUnknown (TArray t _) = hasUnknown t
     hasUnknown (TBox t) = hasUnknown t
+    hasUnknown (TAddr t) = hasUnknown t
+    hasUnknown (TBlock t) = hasUnknown t
     hasUnknown (TRef t) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
     hasUnknown _ = False
@@ -167,6 +169,7 @@ rvalueProblems env localTy d rv =
         ListOp Pop [l] -> [expected d l | not (fits' d l)]
         ListOp Push [l, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ [expected e x | not (fits' e x)])
         ListOp Set [l, i, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ ints [i] ++ [expected e x | not (fits' e x)])
+        ListOp op os | Just problems <- pointerProblems op os -> problems
         ListOp op os -> [show op ++ " is applied to " ++ show (length os) ++ " operands"]
         MakeList os -> withElement (\e -> [expected e o | o <- os, not (fits' e o)])
         Unbox o -> case operandType env localTy o of
@@ -202,6 +205,36 @@ rvalueProblems env localTy d rv =
         TakeField l name field -> rvalueProblems env localTy d (ReadField (Copy l) name field)
   where
     fits' = fits env localTy
+    -- (the operations on addresses, with the permission they are given, or without it after it is erased; see MirGhost)
+    pointerProblems op os = case (op, os) of
+        (AddrNull, []) -> Just (anAddress d)
+        (AddrOffset, [p, i]) -> Just (addressOf p (\_ -> [expected' "the address" p | not (fits' d p)]) ++ ints [i])
+        (AddrCast, [p]) -> Just (addressOf p (const []) ++ anAddress d)
+        (AddrToInt, [p]) -> Just (addressOf p (const []) ++ result TInt)
+        (AddrFromInt, [n]) -> Just (ints [n] ++ anAddress d)
+        (AddrAlloc, [n]) -> Just (ints [n] ++ anAddress d)
+        (AddrGet, p : i : rest) | length rest <= 1 -> Just (addressOf p (\t -> ["the result is " ++ renderType d ++ ", not " ++ renderType t | not (sub env d t)]) ++ ints [i])
+        (AddrTake, p : i : rest) | length rest <= 1 -> Just (addressOf p (\t -> ["the result is " ++ renderType d ++ ", not " ++ renderType t | not (sub env d t)]) ++ ints [i])
+        (AddrWrite, p : i : x : rest) | length rest <= 1 -> Just (addressOf p (\t -> [expected t x | not (fits' t x)]) ++ ints [i] ++ permissionOrZero rest)
+        (AddrDropValue, p : i : rest) | length rest <= 1 -> Just (addressOf p (const []) ++ ints [i] ++ permissionOrZero rest)
+        (AddrDropRange, p : i : n : rest) | length rest <= 1 -> Just (addressOf p (const []) ++ ints [i, n] ++ permissionOrZero rest)
+        (AddrResize, p : n : rest) | length rest <= 1 -> Just (addressOf p (const []) ++ ints [n] ++ [expected' "the address" p | not (fits' d p)])
+        (AddrFree, p : rest) | length rest <= 1 -> Just (addressOf p (const []) ++ result TInt)
+        _ | op `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast] -> Just (case d of
+            TBlock _ -> []
+            _ -> ["the result is " ++ renderType d ++ ", not a permission"])
+        _ -> Nothing
+    anAddress t = case t of
+        TAddr _ -> []
+        _ -> ["the result is " ++ renderType t ++ ", not an address"]
+    addressOf p k = case operandType env localTy p of
+        Just (TAddr t) -> k t
+        _ -> [expected' "an address" p]
+    -- (an operation that gives the permission after gives 0 once the permissions are erased)
+    permissionOrZero rest = case (rest, d) of
+        ([_], TBlock _) -> []
+        ([], TInt) -> []
+        _ -> ["the result is " ++ renderType d ++ ", not " ++ (if null rest then "Int" else "a permission")]
     -- the sequence an element is read from is a list or an array
     fitsSequence e l = fits' (TList e) l || any (\ty -> fits' ty l) [t | Just t <- [arrayOf l e]] || arrayConstant l e
     arrayConstant l e = case l of
@@ -306,6 +339,8 @@ sub env wanted actual = case (wanted, actual) of
     (TArray a n, TArray b m) -> n == m && sub env a b
     (TArrayOf a SizeAny, TArrayOf b SizeAny) -> sub env a b
     (TBox a, TBox b) -> sub env a b
+    (TAddr a, TAddr b) -> sub env a b
+    (TBlock a, TBlock b) -> sub env a b
     (TNamed a, TNamed b)
         | a == b -> True
         -- two instances of one struct with parameters: their types agree, and a size parameter of the one that is wanted stands for a size

@@ -66,6 +66,7 @@ runStatement st (ProofAssert varProof) = do
         then return (addFacts st' [proof])
         else throwV ("Could not prove: " ++ renderVarProof varProof)
 runStatement st (AssignProofVar var expr) = assignProofVar st var expr
+runStatement st (Assume varProof) = assumeStatement st (ProofAssert varProof)
 
 -- Takes each statement as true: what a function or loop starts out with
 assumeStatements :: PState -> [ValidationStatement] -> V PState
@@ -79,6 +80,7 @@ assumeStatement st (ProofAssert varProof) = do
     st' <- evaluateCalls st [proof]
     return (addFacts st' [proof])
 assumeStatement st (AssignProofVar var expr) = assignProofVar st var expr
+assumeStatement st (Assume varProof) = assumeStatement st (ProofAssert varProof)
 
 -- A variable of a proof stands for the value of an expression
 assignProofVar :: PState -> Variable -> Expression -> V PState
@@ -190,6 +192,27 @@ rvalueCall rv =
         M.FileStore -> FileStore
         M.ToByte -> ToByte
         M.FromByte -> FromByte
+        M.AddrNull -> AddrNull
+        M.AddrOffset -> AddrOffset
+        M.AddrCast -> AddrCast
+        M.AddrToInt -> AddrToInt
+        M.AddrFromInt -> AddrFromInt
+        M.AddrAlloc -> AddrAlloc
+        M.AddrGet -> AddrGet
+        M.AddrWrite -> AddrWrite
+        M.AddrTake -> AddrTake
+        M.AddrDropValue -> AddrDropValue
+        M.AddrDropRange -> AddrDropRange
+        M.AddrResize -> AddrResize
+        M.AddrFree -> AddrFree
+        M.BlockNew -> BlockNew
+        M.BlockTaken -> BlockTaken
+        M.BlockResized -> BlockResized
+        M.BlockSplitLo -> BlockSplitLo
+        M.BlockSplitHi -> BlockSplitHi
+        M.BlockJoin -> BlockJoin
+        M.BlockAssume -> BlockAssume
+        M.BlockCast -> BlockCast
 
 -- A builtin used as a value is a function of the program that applies it, which promises what the builtin does
 wrapperInfo :: PState -> Name -> Maybe FnInfo
@@ -470,6 +493,7 @@ substituteValidationStatement :: Map Variable VariableProof -> ValidationStateme
 substituteValidationStatement bindings (Rewrite rule) = Rewrite (substituteRwRule bindings rule)
 substituteValidationStatement bindings (ProofAssert varProof) = ProofAssert (substituteVariableProof bindings varProof)
 substituteValidationStatement bindings (AssignProofVar var expr) = AssignProofVar var (substituteExpression bindings expr)
+substituteValidationStatement bindings (Assume varProof) = Assume (substituteVariableProof bindings varProof)
 
 substituteRwRule :: Map Variable VariableProof -> RwRule -> RwRule
 substituteRwRule bindings (Refl varProof) = Refl (substituteVariableProof bindings varProof)

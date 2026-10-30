@@ -99,6 +99,10 @@ declarations =
     , "declare void @tersus_drop(ptr, ptr)"
     , "declare ptr @tersus_box_new(i64)"
     , "declare void @tersus_box_free(ptr)"
+    , "declare i64 @tersus_addr_alloc(i64, i64)"
+    , "declare i64 @tersus_addr_resize(i64, i64, i64)"
+    , "declare void @tersus_addr_free(i64)"
+    , "declare void @tersus_drop_slots(ptr, i64, i64)"
     , ""
     ]
 
@@ -129,6 +133,7 @@ entryPoint program fn =
                 let result = resultStruct t
                     (convert, word) = case ty of
                         TInt -> ([], "%v")
+                        TAddr _ -> ([], "%v")
                         TByte -> ([], "%v")
                         TBool -> (["%w = zext i1 %v to i64"], "%w")
                         _ -> (["%w = ptrtoint ptr %v to i64"], "%w")
@@ -198,6 +203,7 @@ typeDescriptors program types =
         (kind, aux) -> "{ i64 " ++ show kind ++ ", ptr " ++ aux ++ ", i64 " ++ show (slotsOf program ty) ++ ", i64 " ++ (if needsDrop program ty then "1" else "0") ++ " }"
     shape TInt = (0 :: Int, "null")
     shape TByte = (0, "null")
+    shape (TAddr _) = (0, "null")
     shape TBool = (1, "null")
     shape ty@TArray{} = (5, global "array." (renderType ty))
     shape (TBox (TArrayOf t SizeAny)) = (7, typeSymbol program t)
@@ -470,6 +476,7 @@ rvalue fn destType rv =
             y <- operandAt fn ty b
             binary op ty x y
         MakeList _ -> failG "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"
+        ListOp op os | op `elem` [AddrNull, AddrOffset, AddrCast, AddrToInt, AddrFromInt, AddrAlloc, AddrResize, AddrFree, AddrGet, AddrTake, AddrWrite, AddrDropValue, AddrDropRange] -> addressOp fn destType op os
         ListOp ReadByte [] -> ins "r" "call i64 @tersus_readByte()"
         ListOp PathByte [b] -> operandAt fn TByte b >>= \x -> ins "p" ("call i64 @tersus_pathByte(i64 " ++ x ++ ")")
         ListOp FileLoad [] -> ins "l" "call i64 @tersus_fileLoad()"
@@ -520,6 +527,93 @@ rvalue fn destType rv =
                     emit ("store i64 0, ptr " ++ p)
                     pure taken
         _ -> failG ("Native code makes " ++ renderRvalue rv ++ " where it is held inline, not as a word")
+
+-- The operations on addresses (POINTERS.md), whose permissions are erased: an address is an i64, the memory of an allocation is slots of
+-- the bytes of a value of the type one after another, and a value is in a slot as it is in an element of an array. The runtime allocates,
+-- resizes and frees; what is in the slots is the program's, which the validator has proved is written before it is read and is empty
+-- when it is freed, so nothing here checks it.
+addressOp :: Function -> Type -> ListOp -> [Operand] -> G String
+addressOp fn destType op os =
+    case (op, os) of
+        (AddrNull, []) -> pure "0"
+        (AddrOffset, [p, i]) -> do
+            bytes <- strideOf p
+            a <- operandAt fn TInt p
+            x <- operandAt fn TInt i
+            o <- ins "o" ("mul i64 " ++ x ++ ", " ++ show bytes)
+            ins "a" ("add i64 " ++ a ++ ", " ++ o)
+        (AddrCast, [p]) -> operandAt fn TInt p
+        (AddrToInt, [p]) -> operandAt fn TInt p
+        (AddrFromInt, [n]) -> operandAt fn TInt n
+        (AddrAlloc, [n]) -> do
+            bytes <- case destType of
+                TAddr t -> bytesG t
+                _ -> failG "Addr::alloc gives an address"
+            x <- operandAt fn TInt n
+            ins "m" ("call i64 @tersus_addr_alloc(i64 " ++ x ++ ", i64 " ++ show bytes ++ ")")
+        (AddrResize, [p, n]) -> do
+            bytes <- strideOf p
+            a <- operandAt fn TInt p
+            x <- operandAt fn TInt n
+            ins "m" ("call i64 @tersus_addr_resize(i64 " ++ a ++ ", i64 " ++ x ++ ", i64 " ++ show bytes ++ ")")
+        (AddrFree, [p]) -> do
+            a <- operandAt fn TInt p
+            emit ("call void @tersus_addr_free(i64 " ++ a ++ ")")
+            pure "0"
+        (AddrGet, [p, i]) -> slotAddress fn p i >>= loadAt destType
+        (AddrTake, [p, i]) -> slotAddress fn p i >>= loadAt destType
+        (AddrWrite, [p, i, x]) -> do
+            t <- elementOf p
+            at <- slotAddress fn p i
+            value <- elementValue fn t x
+            bytes <- bytesG t
+            if isAggregate t then copyWords at value bytes else storeAt t at value
+            pure "0"
+        (AddrDropValue, [p, i]) -> do
+            t <- elementOf p
+            program <- programG
+            if needsDrop program t
+                then do
+                    at <- slotAddress fn p i
+                    d <- descriptor t
+                    emit ("call void @tersus_drop(ptr " ++ d ++ ", ptr " ++ at ++ ")")
+                else pure ()
+            pure "0"
+        (AddrDropRange, [p, i, n]) -> do
+            t <- elementOf p
+            program <- programG
+            if needsDrop program t
+                then do
+                    at <- slotNumber fn p i
+                    count <- operandAt fn TInt n
+                    d <- descriptor t
+                    emit ("call void @tersus_drop_slots(ptr " ++ d ++ ", i64 " ++ at ++ ", i64 " ++ count ++ ")")
+                else pure ()
+            pure "0"
+        _ -> failG ("Native code does not support " ++ renderRvalue (ListOp op os))
+  where
+    elementOf p = addressElement fn p
+    strideOf p = elementOf p >>= bytesG
+
+-- What the memory an address operand is the address of holds
+addressElement :: Function -> Operand -> G Type
+addressElement fn p = do
+    ty <- operandLocalType fn p
+    case ty of
+        Just (TAddr t) -> pure t
+        _ -> failG ("Not an address: " ++ renderOperand' p)
+
+-- The address of the slot i of the memory at p, as a number and as a pointer
+slotNumber :: Function -> Operand -> Operand -> G String
+slotNumber fn p i = do
+    bytes <- addressElement fn p >>= bytesG
+    a <- operandAt fn TInt p
+    x <- operandAt fn TInt i
+    o <- ins "o" ("mul i64 " ++ x ++ ", " ++ show bytes)
+    ins "a" ("add i64 " ++ a ++ ", " ++ o)
+
+slotAddress :: Function -> Operand -> Operand -> G String
+slotAddress fn p i = slotNumber fn p i >>= \n -> ins "p" ("inttoptr i64 " ++ n ++ " to ptr")
 
 -- The words that a struct or an enum takes, and the byte offset of the field at a position of a constructor: an enum value starts
 -- with a word that says the variant, a struct with its first field. A field is a word, or the words of a value held inline.
@@ -828,6 +922,9 @@ assignAggregate dropsOld fn dest ty rv = do
             dropElement elementTy block index
             writeElement elementTy block index value
             fromPart src False
+        -- the value held inline in a slot of memory, which is read or taken (the slot is empty after, which only the permission says)
+        ListOp AddrGet [p, i] -> slotAddress fn p i >>= \at -> fromPart at False
+        ListOp AddrTake [p, i] -> slotAddress fn p i >>= \at -> fromPart at False
         -- an element that is a value held inline, of an array or of a list
         ListOp Get [a, i] -> do
             index <- operandAt fn TInt i
@@ -1008,6 +1105,7 @@ storeAt t p value =
     case t of
         TInt -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
         TByte -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
+        TAddr _ -> emit ("store i64 " ++ value ++ ", ptr " ++ p)
         TBool -> do
             w <- ins "w" ("zext i1 " ++ value ++ " to i64")
             emit ("store i64 " ++ w ++ ", ptr " ++ p)
@@ -1018,6 +1116,7 @@ loadAt t p =
     case t of
         TInt -> ins "v" ("load i64, ptr " ++ p)
         TByte -> ins "v" ("load i64, ptr " ++ p)
+        TAddr _ -> ins "v" ("load i64, ptr " ++ p)
         TBool -> do
             w <- ins "w" ("load i64, ptr " ++ p)
             ins "b" ("icmp ne i64 " ++ w ++ ", 0")
@@ -1032,6 +1131,7 @@ isPointer _ = False
 toWord :: Type -> String -> G String
 toWord TInt value = pure value
 toWord TByte value = pure value
+toWord (TAddr _) value = pure value
 toWord TBool value = ins "w" ("zext i1 " ++ value ++ " to i64")
 toWord _ value = ins "w" ("ptrtoint ptr " ++ value ++ " to i64")
 
@@ -1276,6 +1376,7 @@ typeG ty = either failG pure (toEither (llvmType ty))
 llvmType :: Type -> Result String String
 llvmType TInt = Ok "i64"
 llvmType TByte = Ok "i64"
+llvmType (TAddr _) = Ok "i64"
 llvmType TBool = Ok "i1"
 llvmType (TRef t) = llvmType t
 -- (an array is passed and held as the address of its words)

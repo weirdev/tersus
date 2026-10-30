@@ -37,6 +37,7 @@ import Control.Monad (forM, forM_, unless, void, when)
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.List (intercalate, (\\))
+import Data.Maybe (isJust)
 import qualified Data.Set as Set
 
 import Pretty (renderType)
@@ -86,6 +87,7 @@ data TcState = TcState
     , tcInstances :: Map Name Type -- the functions that a template has been made into so far, with their types
     , tcEmitted :: [Statement] -- the instances made since the last statement of the program, which come before it
     , tcActive :: [Name] -- the templates that an instance is being checked of, which a call of one of them cannot make another instance of
+    , tcGhost :: Bool -- whether the expression being checked is the validator's (of a `define`), where what is known of a permission can be read
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -107,7 +109,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] []
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] False
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -184,6 +186,8 @@ zonk (TNamed name) | Just (base, args) <- instanceOf name = (\args' -> TNamed (i
     zonkArg (ArgSize size) = ArgSize <$> zonkSize size
     zonkArg (ArgType t) = ArgType <$> zonk t
 zonk (TBox t) = TBox <$> zonk t
+zonk (TAddr t) = TAddr <$> zonk t
+zonk (TBlock t) = TBlock <$> zonk t
 zonk (TRef t) = TRef <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
 zonk t = return t
@@ -199,6 +203,9 @@ occurs n (TList t) = occurs n t
 occurs n (TArrayOf t _) = occurs n t
 occurs n (TForall _ _ t) = occurs n t
 occurs n (TBox t) = occurs n t
+occurs n (TAddr t) = occurs n t
+occurs n (TBlock t) = occurs n t
+occurs n (TNamed name) | Just (_, args) <- instanceOf name = or [occurs n t | ArgType t <- args]
 occurs n (TRef t) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
@@ -228,6 +235,8 @@ unify a b = do
         (TList x, TList y) -> unify x y
         (TArrayOf x n, TArrayOf y m) -> unifySize n m >>= \same -> if same then unify x y else return False
         (TBox x, TBox y) -> unify x y
+        (TAddr x, TAddr y) -> unify x y
+        (TBlock x, TBlock y) -> unify x y
         (TRef x, TRef y) -> unify x y
         (TParam x, TParam y) -> return (x == y)
         (TFn xs x, TFn ys y)
@@ -344,12 +353,13 @@ ensureInstance name = do
     s <- getState
     unless (Map.member name (tcCtors s)) $
         case instanceOf name of
-            Just (base, args) | Just (params, fields) <- Map.lookup base (tcGenerics s) -> do
+            Just (base, args) | Just (params, fields) <- maybe (tupleGeneric base) Just (Map.lookup base (tcGenerics s)) -> do
                 when (length args /= length params) $
                     failTc ("Type error: " ++ base ++ " has " ++ show (length params) ++ " parameters (" ++ intercalate ", " params ++ "), got " ++ show (length args))
                 when (ArgSize SizeAny `elem` args) $
                     failTc ("Type error: " ++ name ++ " has a size that is not given: a struct with a size of ? cannot be held yet")
-                mapM_ argKnown (zip params args)
+                -- (a tuple is made of the types of values that are there already, which were checked where they were made)
+                unless (isJust (tupleGeneric base)) $ mapM_ argKnown (zip params args)
                 case instanceFields params args fields of
                     Nothing -> failTc ("Type error: " ++ name ++ " gives a size where " ++ base ++ " wants a type, or a type where it wants a size (" ++ intercalate ", " [p ++ (if isTypeName p then " is a type" else " is a size") | p <- params] ++ ")")
                     Just fields' -> do
@@ -388,6 +398,12 @@ typeCtors name = do
 
 -- A struct built from values for its fields, which are given in declaration order
 checkConstruct :: Name -> [Variable] -> [Type] -> TC Type
+-- (a tuple is the instance of its struct for the types of its parts)
+checkConstruct name fields argTys | Just _ <- tupleGeneric name = do
+    let ty = tupleType argTys
+    case ty of
+        TNamed instanceName' -> checkConstruct instanceName' fields argTys
+        _ -> return ty
 checkConstruct name fields argTys = do
     (typeName, declared) <- ctorInfo name
     if map fst declared /= fields || length fields /= length argTys
@@ -446,6 +462,8 @@ selfExpands :: Name -> Type -> Bool
 selfExpands name ty = case ty of
     TList t -> selfExpands name t
     TBox t -> selfExpands name t
+    TAddr t -> selfExpands name t
+    TBlock t -> selfExpands name t
     TRef t -> selfExpands name t
     TArrayOf t _ -> selfExpands name t
     TFn args ret -> any (selfExpands name) (ret : args)
@@ -509,19 +527,70 @@ unref t = t
 checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
 checkType (TVariant name) = () <$ ctorInfo name
-checkType (TList t) = checkType t
+checkType (TList t) = noGhostIn "a list" t >> checkType t
 -- (a Box holds any type that has a size; the one place an array of no size can be is behind it)
 checkType (TBox t@(TArrayOf e SizeAny)) = checkType e >> arrayOk t
-checkType (TBox t) = checkType t
+checkType (TBox t) = noGhostIn "a Box" t >> checkType t
+checkType (TAddr t) = addressable t
+checkType (TBlock t) = addressable t
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
-checkType ty@(TArrayOf t size) = checkType t >> sizeInScope size >> arrayOk ty
+checkType ty@(TArrayOf t size) = noGhostIn "an array" t >> checkType t >> sizeInScope size >> arrayOk ty
 checkType (TForall _ _ t) = checkType t
 checkType (TParam name) = do
     s <- getState
     unless (name `elem` tcTypeScope s) $ failTc ("Type error: " ++ name ++ " is not a type here: a function declares a type parameter, as in fn f<" ++ name ++ ">(a: " ++ name ++ ")")
-checkType (TFn args ret) = mapM_ checkType (ret : map unref args)
+checkType (TFn args ret) = mapM_ (noGhostIn "a function value") (ret : map unref args) >> mapM_ checkType (ret : map unref args)
 checkType (TRef _) = failTc "Type error: & is for the parameter of a function, as in fn f(a: &List<Int>), and a type is not a reference anywhere else"
 checkType _ = return ()
+
+-- A permission is a ghost value: it is erased before the program runs, so it can only be where it is erased with what holds it (a local, a
+-- parameter, a field, a part of a tuple), and not in a list, a Box, an array or a function value, which are in the program that runs
+noGhostIn :: String -> Type -> TC ()
+noGhostIn what t = do
+    t' <- zonk t
+    ghostly <- holdsGhost t'
+    when ghostly $ failTc ("Type error: a permission is a ghost value that has to be used exactly once, so " ++ what ++ " cannot hold " ++ renderType t' ++ ", which is or holds one")
+
+-- Whether a value of a type is or holds a permission, in a field or a part, at any depth. Such a value is linear: it is used exactly once.
+holdsGhost :: Type -> TC Bool
+holdsGhost ty0 = fst <$> go Set.empty ty0
+  where
+    -- (each struct or enum is looked into once: one that holds itself does so through a Box, and holds a permission if a field does)
+    go seen ty1 = do
+        ty <- zonk ty1
+        case ty of
+            TBlock _ -> return (True, seen)
+            TRef t -> go seen t
+            TList t -> go seen t
+            TBox t -> go seen t
+            TArrayOf t _ -> go seen t
+            TNamed "Self" -> return (False, seen)
+            TNamed n
+                | Set.member n seen -> return (False, seen)
+                | otherwise -> do
+                    s0 <- getState
+                    when (isJust (instanceOf n) && Map.notMember n (tcCtors s0)) (ensureInstance n)
+                    s <- getState
+                    let fields = concat [fs | c <- Map.findWithDefault [] n (tcTypes s), Just (_, fs) <- [Map.lookup c (tcCtors s)]]
+                    anyOf (Set.insert n seen) (map snd fields)
+            TVariant v
+                | Set.member v seen -> return (False, seen)
+                | otherwise -> do
+                    s <- getState
+                    anyOf (Set.insert v seen) (maybe [] (map snd . snd) (Map.lookup v (tcCtors s)))
+            _ -> return (False, seen)
+    anyOf seen [] = return (False, seen)
+    anyOf seen (t : ts) = do
+        (found, seen') <- go seen t
+        if found then return (True, seen') else anyOf seen' ts
+
+-- What an address and a permission are of: a type with a size, which is what a slot holds, and not a permission (a permission is not in memory)
+addressable :: Type -> TC ()
+addressable t = do
+    t' <- zonk t
+    case t' of
+        TBlock _ -> failTc "Type error: a permission is not held in memory, so there is no Addr<Block<T>> or Block<Block<T>>"
+        _ -> checkType t'
 
 -- A size parameter is a name that the function declares, as in fn dot<n>
 sizeInScope :: Size -> TC ()
@@ -589,6 +658,46 @@ builtinType funct =
             return (TFn [TNamed typeName] (TVariant variant))
         Project variant field -> projectType variant field
         Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
+        -- addresses and permissions (POINTERS.md)
+        AddrNull -> list (\a -> TFn [] (TAddr a))
+        AddrOffset -> list (\a -> TFn [TAddr a, TInt] (TAddr a))
+        AddrCast -> do
+            a <- freshVar
+            b <- freshVar
+            return (TFn [TAddr a] (TAddr b))
+        AddrToInt -> list (\a -> TFn [TAddr a] TInt)
+        AddrFromInt -> list (\a -> TFn [TInt] (TAddr a))
+        AllocPair -> list (\a -> TFn [TInt] (tupleType [TAddr a, TBlock a]))
+        AddrAlloc -> list (\a -> TFn [TInt] (TAddr a))
+        BlockNew -> list (\a -> TFn [TAddr a, TInt] (TBlock a))
+        AddrGet -> list (\a -> TFn [TAddr a, TInt, TBlock a] a)
+        AddrWrite -> list (\a -> TFn [TAddr a, TInt, a, TBlock a] (TBlock a))
+        TakePair -> list (\a -> TFn [TAddr a, TInt, TBlock a] (tupleType [a, TBlock a]))
+        AddrTake -> list (\a -> TFn [TAddr a, TInt, TBlock a] a)
+        BlockTaken -> list (\a -> TFn [TBlock a, TInt] (TBlock a))
+        AddrDropValue -> list (\a -> TFn [TAddr a, TInt, TBlock a] (TBlock a))
+        AddrDropRange -> list (\a -> TFn [TAddr a, TInt, TInt, TBlock a] (TBlock a))
+        ResizePair -> list (\a -> TFn [TAddr a, TInt, TBlock a] (tupleType [TAddr a, TBlock a]))
+        AddrResize -> list (\a -> TFn [TAddr a, TInt, TBlock a] (TAddr a))
+        BlockResized -> list (\a -> TFn [TBlock a, TAddr a, TInt] (TBlock a))
+        AddrFree -> list (\a -> TFn [TAddr a, TBlock a] TInt)
+        SplitPair -> list (\a -> TFn [TBlock a, TInt] (tupleType [TBlock a, TBlock a]))
+        BlockSplitLo -> list (\a -> TFn [TBlock a, TInt] (TBlock a))
+        BlockSplitHi -> list (\a -> TFn [TBlock a, TInt] (TBlock a))
+        BlockJoin -> list (\a -> TFn [TBlock a, TBlock a] (TBlock a))
+        BlockAssume -> list (\a -> TFn [TAddr a, TInt] (TBlock a))
+        BlockCast -> do
+            a <- freshVar
+            b <- freshVar
+            return (TFn [TBlock a] (TBlock b))
+        BlockBase -> list (\a -> TFn [TBlock a] (TAddr a))
+        BlockCap -> list (\a -> TFn [TBlock a] TInt)
+        BlockFilled -> list (\a -> TFn [TBlock a] (TList TBool))
+        BlockContents -> list (\a -> TFn [TBlock a] (TList a))
+        BlockOrigin -> list (\a -> TFn [TBlock a] TInt)
+        BlockStart -> list (\a -> TFn [TBlock a] TInt)
+        BlockExtent -> return (TFn [TInt] TInt)
+        BlockCount -> list (\a -> TFn [TBlock a] TInt)
   where
     list build = build <$> freshVar
     arith = return (TFn [TInt, TInt] TInt)
@@ -1012,8 +1121,16 @@ checkValidation ctx env vs =
             (t, proof') <- inferProofR ctx env proof
             expect "affirmed proof" TBool t
             return (env, ProofAssert proof')
+        Assume proof -> do
+            (t, proof') <- inferProofR ctx env proof
+            expect "assumed proof" TBool t
+            return (env, Assume proof')
         AssignProofVar var expr -> do
+            -- (a define is the validator's, so it can read what is known of a permission: `define o = origin(b);`)
+            outer <- tcGhost <$> getState
+            getState >>= \s -> putState s{tcGhost = True}
             (t, expr') <- inferExprR ctx env expr
+            getState >>= \s -> putState s{tcGhost = outer}
             env' <- assignVar ctx env var t
             return (env', AssignProofVar var expr')
         Rewrite rule -> do
@@ -1046,7 +1163,8 @@ inferExprR ctx env expr =
             return (t, F funct [struct'])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
             inferred0 <- mapM (inferExprR ctx env) args
-            (_, declared) <- ctorInfo name
+            -- (a tuple's parts are what they are: it is made of their types)
+            declared <- if isJust (tupleGeneric name) then return [] else snd <$> ctorInfo name
             inferred <- if length declared == length inferred0 then mapM (uncurry coerce) (zip (map snd declared) inferred0) else return inferred0
             t <- checkConstruct name fields (map fst inferred)
             return (t, F funct (map snd inferred))
@@ -1118,6 +1236,36 @@ inferExprR ctx env expr =
                     _ -> False
             if owned then methodCall "clone" args else cloneCall args
         F (Var ('.' : method)) (receiver : args) -> methodCall method (receiver : args)
+        -- what is known of a permission, in an expression of the validator (a define); in code it is not a value there is
+        F (Var name) args
+            | Just b <- ghostFunction name, b `notElem` [AddrNull, AddrOffset, AddrCast, AddrToInt, AddrFromInt], not (any (Map.member name) env), not (Map.member name (ctxFns ctx)) -> do
+              -- (only of a permission: a function of the program named `count`, as a template is, is the program's)
+              ofPermission <- permissionArgument b args (inferExprR ctx env)
+              if not ofPermission then general (Var name) args else do
+                ghostly <- tcGhost <$> getState
+                unless ghostly $ failTc ("Type error: " ++ name ++ " is what the validator knows of a permission, and is not a value the program has: it is written in an affirm, a contract, an invariant or a define")
+                inferred <- mapM (inferExprR ctx env) args
+                ft <- builtinType b
+                case (b, inferred) of
+                    _ | b `elem` [BlockFilled, BlockContents] -> case inferred of
+                        [(bt, b'), (it, i')] -> do
+                            listTy <- checkCall name ft [bt]
+                            expect ("argument 2 of " ++ name) TInt it
+                            elementTy <- freshVar
+                            expect name (TList elementTy) listTy
+                            return (elementTy, F (Val (builtinFunct Get)) [F (Val (builtinFunct b)) [b'], i'])
+                        _ -> failTc ("Type error: " ++ name ++ " takes a permission and a slot, as in " ++ name ++ "(b, i)")
+                    _ -> do
+                        result <- checkCall name ft (map fst inferred)
+                        return (result, F (Val (builtinFunct b)) (map snd inferred))
+        -- Addr::alloc(n), Addr::get(p, i, b), Block::split(b, i), ...: the operations on addresses and permissions (POINTERS.md)
+        F (Var name) args
+            | Just b <- pointerBuiltin name, not (any (Map.member name) env) -> do
+                inferred0 <- mapM (inferExprR ctx env) args
+                ft <- builtinType b
+                inferred <- coerceArguments ft inferred0
+                result <- checkCall name ft (map fst inferred)
+                return (result, F (Val (builtinFunct b)) (map snd inferred))
         F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
         F (Var name) args
             | Just (path, function) <- traitPath name -> traitCall path function args
@@ -1299,6 +1447,8 @@ substSelf owner (TNamed "Self") = TNamed owner
 substSelf owner (TList t) = TList (substSelf owner t)
 substSelf owner (TArrayOf t size) = TArrayOf (substSelf owner t) size
 substSelf owner (TBox t) = TBox (substSelf owner t)
+substSelf owner (TAddr t) = TAddr (substSelf owner t)
+substSelf owner (TBlock t) = TBlock (substSelf owner t)
 substSelf owner (TRef t) = TRef (substSelf owner t)
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
@@ -1424,19 +1574,30 @@ inferProofR ctx env proof =
                     literalOk e
                     return (ty, proof)
                 _ -> failTc "Type error: an array literal is made from a list"
+        -- what is known of a permission (base(b), cap(b), filled(b, i), at(b, i), ...) and the operations on addresses that need none
+        FApp (ATerm name) args
+            | not (shadowedByFunction name), not (Map.member name (ctxFns ctx)), Just b <- ghostFunction name -> do
+              ofPermission <- permissionArgument b args (inferProofR ctx env)
+              if not ofPermission then ordinaryCall name args else do
+                inferred <- mapM (inferProofR ctx env) args
+                ft <- builtinType b
+                case b of
+                    -- (filled(b, i) and at(b, i) are elements of the two arrays of the block)
+                    _ | b `elem` [BlockFilled, BlockContents] -> case inferred of
+                        [(bt, b'), (it, i')] -> do
+                            listTy <- checkCall name ft [bt]
+                            expect ("argument 2 of " ++ name) TInt it
+                            elementTy <- freshVar
+                            expect name (TList elementTy) listTy
+                            return (elementTy, FApp (CTerm (builtinFunct Get)) [FApp (CTerm (builtinFunct b)) [b'], i'])
+                        _ -> failTc ("Type error: " ++ name ++ " takes a permission and a slot, as in " ++ name ++ "(b, i)")
+                    _ -> do
+                        result <- checkCall name ft (map fst inferred)
+                        return (result, FApp (CTerm (builtinFunct b)) (map snd inferred))
+            | not (shadowed name), not (Map.member name (ctxFns ctx)), name == "whole" ->
+                failTc "Type error: whole(b) is a statement of its own, affirm whole(b); (it is two facts: start(b) = 0 and cap(b) = extent(origin(b)))"
         -- a function with bounds is the function made for the types of the arguments; any other function of the program is itself
-        FApp (ATerm name) args | not (shadowed name) -> do
-            inferred <- mapM (inferProofR ctx env) args
-            s <- getState
-            case Map.lookup name (tcTemplates s) of
-                Just template -> do
-                    (result, instance', _, sizes) <- templateCall name template [(t, Val (VInt 0)) | (t, _) <- inferred]
-                    return (result, FApp (ATerm instance') (map snd inferred ++ map exprToProof sizes))
-                Nothing -> do
-                    target <- ghostTarget name (map fst inferred)
-                    case target of
-                        Just full -> ghostCall full inferred
-                        Nothing -> general (ATerm name) inferred
+        FApp (ATerm name) args | not (shadowed name) -> ordinaryCall name args
         FApp funct args -> do
             (_, funct') <- inferProofR ctx env funct
             inferred <- mapM (inferProofR ctx env) args
@@ -1461,7 +1622,25 @@ inferProofR ctx env proof =
             expect "body of forall" TBool bt
             return (TBool, Forall index guards' body')
   where
+    ordinaryCall name args = do
+        inferred <- mapM (inferProofR ctx env) args
+        s <- getState
+        case Map.lookup name (tcTemplates s) of
+            Just template -> do
+                (result, instance', _, sizes) <- templateCall name template [(t, Val (VInt 0)) | (t, _) <- inferred]
+                return (result, FApp (ATerm instance') (map snd inferred ++ map exprToProof sizes))
+            Nothing -> do
+                target <- ghostTarget name (map fst inferred)
+                case target of
+                    Just full -> ghostCall full inferred
+                    Nothing -> general (ATerm name) inferred
     shadowed name = any (Map.member name) env
+    -- (a field or a variable named like a ghost function, `cap`, does not hide it: it is not called)
+    shadowedByFunction name = or [isFunction t | scope <- env, Just t <- [Map.lookup name scope]]
+    isFunction t = case t of
+        TFn{} -> True
+        TForall{} -> True
+        _ -> False
     signatureTypes f = let Signature ptys rty _ _ = traitFnSignature f in (ptys, rty)
     ghostCall full inferred = do
         ft <- lookupVar ctx env full
@@ -1491,6 +1670,65 @@ inferProofR ctx env proof =
                 _ -> return Nothing
         | Map.member name (ctxFns ctx) = return (Just name)
         | otherwise = return Nothing
+
+-- Whether a ghost function is applied to a permission, which is what makes it one: `count(v)` of a value that is not a permission is a call of
+-- a function of the program named count (the operations on addresses and `extent`, of an origin, are taken as they are)
+permissionArgument :: BuiltinFunct -> [a] -> (a -> TC (Type, a)) -> TC Bool
+permissionArgument b args infer
+    | b `elem` [AddrNull, AddrOffset, AddrCast, AddrToInt, AddrFromInt, BlockExtent] = return True
+    | otherwise = case args of
+        first : _ -> do
+            (t, _) <- infer first
+            t' <- zonk t
+            return $ case t' of
+                TBlock _ -> True
+                TRef (TBlock _) -> True
+                _ -> False
+        [] -> return False
+
+-- The operations on addresses and permissions, by the names a program calls them by
+pointerBuiltin :: Name -> Maybe BuiltinFunct
+pointerBuiltin name =
+    lookup
+        name
+        [ ("Addr::null", AddrNull)
+        , ("Addr::offset", AddrOffset)
+        , ("Addr::cast", AddrCast)
+        , ("Addr::toInt", AddrToInt)
+        , ("Addr::fromInt", AddrFromInt)
+        , ("Addr::alloc", AllocPair)
+        , ("Addr::get", AddrGet)
+        , ("Addr::write", AddrWrite)
+        , ("Addr::take", TakePair)
+        , ("Addr::dropValue", AddrDropValue)
+        , ("Addr::dropRange", AddrDropRange)
+        , ("Addr::resize", ResizePair)
+        , ("Addr::free", AddrFree)
+        , ("Block::split", SplitPair)
+        , ("Block::join", BlockJoin)
+        , ("Block::assume", BlockAssume)
+        , ("Block::cast", BlockCast)
+        ]
+
+-- What a proof can say of a permission, and the operations on addresses a proof can use (they need no permission)
+ghostFunction :: Name -> Maybe BuiltinFunct
+ghostFunction name =
+    lookup
+        name
+        [ ("base", BlockBase)
+        , ("cap", BlockCap)
+        , ("filled", BlockFilled)
+        , ("at", BlockContents)
+        , ("origin", BlockOrigin)
+        , ("start", BlockStart)
+        , ("extent", BlockExtent)
+        , ("count", BlockCount)
+        , ("Addr::null", AddrNull)
+        , ("Addr::offset", AddrOffset)
+        , ("Addr::cast", AddrCast)
+        , ("Addr::toInt", AddrToInt)
+        , ("Addr::fromInt", AddrFromInt)
+        ]
 
 -- The builtin that a method of a list or an array is
 listMethod :: Name -> Maybe BuiltinFunct
@@ -1536,7 +1774,9 @@ comparing (Val (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) (t : _)
         t' <- zonk t
         case t' of
             TFn{} -> failTc "Type error: functions cannot be compared"
-            _ -> return ()
+            _ -> do
+                ghostly <- holdsGhost t'
+                when ghostly $ failTc ("Type error: " ++ renderType t' ++ " holds a permission, which cannot be compared: what a permission says is compared, as in at(a, 0) = at(b, 0)")
 comparing _ _ = return ()
 
 proofHead :: VariableProof -> Expression
@@ -1560,6 +1800,8 @@ isExpanding scope ty = case ty of
         TParam p -> p `elem` scope
         TList u -> usesParam u
         TBox u -> usesParam u
+        TAddr u -> usesParam u
+        TBlock u -> usesParam u
         TRef u -> usesParam u
         TArrayOf u _ -> usesParam u
         TFn args ret -> any usesParam (ret : args)
@@ -1572,6 +1814,8 @@ hasFunction ty = case ty of
     TFn{} -> True
     TList t -> hasFunction t
     TBox t -> hasFunction t
+    TAddr t -> hasFunction t
+    TBlock t -> hasFunction t
     TArrayOf t _ -> hasFunction t
     TRef t -> hasFunction t
     _ -> False
@@ -1593,6 +1837,8 @@ genericCall name names types inner inferred = do
                 forM_ (zip types given') $ \(n, t) -> do
                     t' <- zonk t
                     when (hasFunction t') $ failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " would be " ++ renderType t' ++ ", and a type parameter is not a function")
+                    ghostly <- holdsGhost t'
+                    when ghostly $ failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " would be " ++ renderType t' ++ ", which holds a permission, and a type parameter is not one (a function that takes any type may drop or keep a value of it, and a permission is used exactly once)")
                     -- (a function that calls itself with a type made of its own, as f(push([], a), n - 1), would need a copy for each depth)
                     current <- tcCurrent <$> getState
                     scope <- tcTypeScope <$> getState
@@ -1647,10 +1893,17 @@ implementsMarker trait = go (0 :: Int) False
                 TArrayOf e _ -> go (depth + 1) lenient e
                 TList e -> if trait == "Clone" then go (depth + 1) lenient e else return False
                 TBox e -> if trait == "Clone" then go (depth + 1) lenient e else return False
+                -- (an address is a word, copied wherever it is wanted; a permission is never copied)
+                TAddr _ -> return True
+                TBlock _ -> return False
                 TNamed "Self" -> return (trait == "Clone")
+                -- (a tuple has what all of its parts have)
+                TNamed name | Just (base, args) <- instanceOf name, Just _ <- tupleGeneric base -> allM' [go (depth + 1) lenient t | ArgType t <- args]
                 TNamed name -> declared depth lenient name
                 TVariant variant -> ctorInfo variant >>= \(owner, _) -> declared depth lenient owner
                 _ -> return False
+    allM' [] = return True
+    allM' (m : ms) = m >>= \ok -> if ok then allM' ms else return False
     declared depth lenient name = do
         s <- getState
         let base = maybe name fst (instanceOf name)
@@ -1671,6 +1924,9 @@ requireMarker trait ty = do
     ok <- implementsMarker trait ty
     unless ok $ do
         t <- zonk ty >>= lacking
+        case t of
+            TBlock _ -> failTc ("Type error: " ++ renderType t ++ " is a permission, which is never copied: there is only ever one for a piece of memory")
+            _ -> return ()
         failTc ("Type error: " ++ renderType t ++ " does not implement " ++ trait ++ (if trait == "Clone" then ", so a copy of it is not made: write impl Clone for " ++ describeOwner t ++ " { }; (its fields have to be Clone) if it should be" else ""))
   where
     -- (the type inside a list, a Box or an array that is the one without it)
@@ -1814,6 +2070,9 @@ templateCall name template inferred = do
         TVar _ -> True
         TList u -> unknown u
         TBox u -> unknown u
+        TAddr u -> unknown u
+        TBlock u -> unknown u
+        TNamed n | Just (_, args) <- instanceOf n -> or [unknown u | ArgType u <- args]
         TRef u -> unknown u
         TArrayOf u _ -> unknown u
         TFn args r -> any unknown (r : args)

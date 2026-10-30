@@ -243,6 +243,91 @@ return sum(Box::new(Tree::Branch { left: leaf, value: 2, right: Box::new(Tree::L
 - **A Box of an array is looked through by `size`, `first`, `last`, `get` and `set`**, which work on it as on the array (`set` gives the Box back with the element changed, in place when nothing else has the Box).
 - **Where a Box lives.** Natively a struct or an enum is not on the heap: it is held where it is made, as the words of its fields (an enum a word that says the variant and then the fields of that variant), in the frame of a function, in a field, or in a list, and copied by value. A `Box` is what puts one on the heap, and the pointer to it is one word, so a type that holds itself holds it in a `Box`; the list is the other thing on the heap. A `Box` of an array of no size is two words held in line, the address and the number of elements (see Arrays).
 
+## Tuples
+
+A tuple is several values as one: `(A, B)` is a type (two parts or more), `(a, b)` a value, and `t.0`, `t.1` its parts. `(x, y) = e;` takes a tuple apart, each part to a name, and each part is moved on its own, so a tuple of values that are not Clone can be taken apart. A function returns several values as a tuple.
+
+```tersus
+fn divide(a: Int, b: Int) -> (Int, Int) [{ affirm b > 0; }] [{ affirm return.0 = a / b; }] {
+    return (a / b, a % b);
+};
+
+(q, r) = divide(17, 5);
+return q * 10 + r;   // 32
+```
+
+- **A tuple is a struct of the language**, `Tuple2<A, B>` for two parts and so on, with fields named `0`, `1`, ...: it is compared, cloned, moved and held as a struct is, and is Copy when all of its parts are. The name `Tuple2` cannot be declared by a program, and a tuple is printed as that struct (`Tuple2 { 0: 3, 1: 2 }`).
+- **A part can be `ghost`** (`(Addr<T>, ghost Block<T>)`): a part that is a permission is erased with it (see Addresses and permissions).
+
+## Addresses and permissions
+
+Memory can be managed by hand, and what makes it safe is proved in ordinary code, with no mark on the code that does it. A pointer is two values (see POINTERS.md):
+
+- **`Addr<T>`, the address** of a `T`: a word that is Copy, compared with `=`, kept anywhere and offset, and that allows nothing by itself;
+- **`Block<T>`, the permission** to a run of slots of `T` at an address: a *ghost* value, which only the validator has and which is erased before the program runs, and a *linear* one, which is used exactly once. Every operation on memory is given it.
+
+```tersus
+(p, b) = Addr::alloc(2);            // two empty slots, and the permission to them
+b = Addr::write(p, 0, 10, b);       // the permission after the write
+b = Addr::write(p, 1, 20, b);
+x = Addr::get(p, 1, b);             // 20: a view of the slot, which stays filled
+(y, b) = Addr::take(p, 0, b);       // 10, taken out: the slot is empty after
+b = Addr::dropValue(p, 1, b);       // the value of the slot dropped where it is
+return x + y + Addr::free(p, b);    // free gives 0
+```
+
+**What the validator knows of a permission** `b`, which a contract, an `affirm`, an invariant or a `define` says (the program cannot use them as values):
+
+| Function | Is |
+|---|---|
+| `base(b)` | the address of slot 0 |
+| `cap(b)` | the number of slots |
+| `filled(b, i)` | whether slot `i` holds a value (`filled(b, i) = false` says it is empty: a proof has no `!`) |
+| `at(b, i)` | the value in slot `i`, when it is filled |
+| `count(b)` | how many slots are filled |
+| `origin(b)` | the allocation the block is part of |
+| `start(b)`, `extent(origin(b))` | where the block starts in its allocation, and how long that is |
+
+`affirm whole(b);` says that the block is all of its allocation: it is the two facts `start(b) = 0` and `cap(b) = extent(origin(b))`, and is written as a statement of its own. `filled(b, i)` and `at(b, i)` are elements of two ghost arrays, so what the validator knows of arrays (`forall`, and what `set` keeps) it knows of them.
+
+**The operations.** `p` is the address the permission is for, and `i` a slot of it (each operation needs `base(b) = p` and `0 <= i < cap(b)`):
+
+| Operation | Needs besides | Gives |
+|---|---|---|
+| `Addr::alloc(n)` | `n >= 0` | `(p, b)`: `n` empty slots of a new allocation, whole |
+| `Addr::get(p, i, b)` | slot `i` filled | `at(b, i)`, a view: `b` is lent, and the view is gone once `b` is changed or freed |
+| `Addr::write(p, i, x, b)` | slot `i` empty | the permission with `x` in slot `i` |
+| `Addr::take(p, i, b)` | slot `i` filled | `(at(b, i), b2)`: the value, moved out, and the permission with the slot empty |
+| `Addr::dropValue(p, i, b)` | slot `i` filled | the permission with the slot empty; the value is dropped (what it owns is freed) |
+| `Addr::dropRange(p, i, n, b)` | slots `i..i + n` filled | the permission with them empty |
+| `Addr::resize(p, n, b)` | `whole(b)`, the slots from `n` empty | `(q, b2)`: the slots moved to a new allocation of `n`, at `q` |
+| `Addr::free(p, b)` | `whole(b)`, `count(b) = 0` | `0`; the memory is given back |
+| `Block::split(b, i)` | `0 <= i <= cap(b)` | `(lo, hi)`: slots `0..i` and `i..cap(b)` (at `Addr::offset(base(b), i)`), of the same allocation |
+| `Block::join(lo, hi)` | the same origin, `start(hi) = start(lo) + cap(lo)` | one block of both |
+| `Block::cast(b)` | `count(b) = 0`, slots of the same size | the permission to the same memory as slots of another type |
+
+`Addr::null()`, `Addr::offset(p, i)` (`i` slots further on), `Addr::cast(p)`, `Addr::toInt(p)` and `Addr::fromInt(n)` need no permission: an address alone can do no harm. Every operation that gives a permission back says the rest of what it knows: the same base, size, origin and start, and the other slots as they were.
+
+What this proves, for a program that uses no assumption: every access is in bounds, no slot is read before it is written or written over, nothing is used after it is freed or freed twice, the address given is the one the permission is for, and no value is lost when memory is freed (`free` needs every slot empty, since natively nothing records which are filled, so it cannot drop them).
+
+- **A permission is used exactly once**: by the operation that changes or frees its memory, by giving it to a call or returning it, or by putting it in a struct or a tuple that is. One that is still held at a `return`, or held by a local that is given another value, is an error (`b is a permission given at line 1:1 that is not used: ...`), and so is a use after it was used (`b was moved`). A struct or a tuple that holds one is used exactly once too. A permission is never copied (`clone(b)` is an error) or compared, and cannot be in a list, an array, a Box, a function value, or the type given to a type parameter.
+- **A permission is ghost.** It can be a local, a parameter (`ghost b: Block<T>`, or `ghost b: &Block<T>` to lend it to a function that only reads), a field (`ghost blk: Block<T>`) or a part of a tuple, and it is taken out of all of them after validation: a struct's layout is its other fields, a function that returns one returns `0`, and nothing of it runs. `ghost` is what the reader sees: the type `Block<T>` is what makes a value ghost, and `ghost` before any other type is an error.
+- **A library type holds the two together**, the equation as its invariant, so that a program that uses it never writes it (`struct Buffer<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm whole(blk); }]`). `examples/addresses.tersus` has such a buffer, a `Vec<T>` on an address (any element type, no filler value, `pop` gives the element back), a buffer split between two calls of a function that fills a block it is given, and a linked list in one block.
+- **A function given a block by value says what it keeps** of it in its contract (its base, size, origin and start, and which slots it changed), as a loop that changes one says in its invariant. What the validator knows of the block it was given can be named with `define` (`define o = origin(b);`). A function that only reads a block is lent it (`&Block<T>`) and keeps every fact without saying so.
+- **Natively** an address is a 64-bit number, a slot is a value as an element of an array is (8 bytes a word), `alloc`, `resize` and `free` call the runtime's allocator, and `dropValue` and `dropRange` free what the values own. `eval` keeps a heap of its own, and reports a read of an empty slot, a write over a filled one, a use of memory that was freed, and a free of memory that still holds a value: a proved program does none of them, so this checks what a program assumes.
+
+## Assumptions
+
+What the validator cannot prove, a program says, in one of three ways:
+
+| Form | What is taken on trust |
+|---|---|
+| `assume e;` | a fact, which the rest of the path then knows, as after an `affirm` |
+| `Block::assume(p, n)` | the permission to `n` empty slots at `p`, a whole allocation of its own, for memory the program did not allocate |
+| `axiom` | a rule of proof (see Axioms And Proof Rules) |
+
+`tersus assumptions <file>` prints each of them in the program and the libraries in front of it, with its line: that list is everything the program's proofs rest on, besides the builtins. Memory the program did not allocate (from C, or the system) is reached with `Block::assume`, and a structure spread over many blocks (a linked list of nodes allocated one by one) needs one too, until the language has ghost collections of permissions.
+
 ## Traits And Impls
 
 An `impl` gives a struct or enum functions of its own, and a `trait` names functions that several types provide, with the contracts every one of them must meet.
@@ -1653,6 +1738,7 @@ return a;                             // [[1], [2, 3], [1]]
 - The size of a list is known for a literal, after `push` and `set`, and after a loop that grows it by a constant amount per iteration of a counter (see Inferred invariants). A list that a loop builds in a way that is not a constant per iteration needs its size in the invariant.
 - `rewrite refl` adds a substituted copy of every fact, so it gets slow as the number of known facts grows (inside a loop body it took over a minute in one list-building program). `affirm` and loop invariants do not need it, so use it sparingly and on a context that is not large.
 - `forall` is only used at the elements a program reads with `get`; a body without a `get(l, j)` is never instantiated, and there is no `exists`. When a proof needs an element the program does not read, mention it in an `affirm` (see How Validation Works).
+- Addresses (see Addresses and permissions): a slot is a value of the word layout (an `Int`, a `Bool` and a `Byte` are 8 bytes each), not C's, so memory is not shared with C yet; there are no fixed-width integers, no `extern fn`, no ghost collections of permissions, no permissions finer than a slot and no address of a local (POINTERS.md, Order of work and Decisions). A fact that has a `forall` (a slot of a block that is filled, say) is not kept where two paths meet: a function that changes a block in one branch of an `if` returns in that branch, as `push` of the `Vec` in `examples/addresses.tersus` does.
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call only itself and the functions defined before it, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums only, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
