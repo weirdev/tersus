@@ -863,6 +863,24 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             (boolRef, b2) <- operand (M.Const (M.CBool value)) b1
             (extra, loopEnd, b') <- encodeLoop spec yes no (M.Local 0) (Eq, boolRef, boolRef, Nothing, b2)
             pure (extra, loopEnd, b')
+        (Just spec, M.Call calleeOp args dest target) | allowCalls -> do
+            next <- Map.lookup target (M.fnBlocks fn)
+            (yes, no, compare) <- case (M.blockStatements next, M.blockTerminator next) of
+                ([M.Assign condDest (M.BinaryOp (M.Compare r) a c)], M.SwitchBool (M.Copy condLocal) yes no)
+                    | condDest == condLocal -> Just (yes, no, (r, a, c))
+                _ -> Nothing
+            name <- case calleeOp of
+                M.Const (M.CFn n) -> Just n
+                M.Copy local -> Map.lookup local (fnValueLocals fn)
+                _ -> Nothing
+            (callSteps, b2) <- case Map.lookup name functions of
+                Just callee -> directCall fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+                _ -> builtinCall (stripBuiltin name) args dest b1
+            (left, b3) <- operand (let (_, a, _) = compare in a) b2
+            (right, b4) <- operand (let (_, _, c) = compare in c) b3
+            let (r, _, _) = compare
+            (loopExtra, loopEnd, b5) <- encodeLoop spec yes no (M.Local 0) (r, left, right, Nothing, b4)
+            Just (callSteps ++ loopExtra, loopEnd, b5)
         (Just _, _) -> Nothing
         (Nothing, M.Return) -> do
             let env = Map.insert "return" (M.Copy (M.Local 0)) (M.specEnv (M.fnSpec fn))
