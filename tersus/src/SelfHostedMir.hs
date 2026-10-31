@@ -179,6 +179,29 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) [list]) b0
             getSteps local listRef zero b3
           else lastSteps local listRef b2
         pure (prefix ++ steps, ref, b4)
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variantName)) _)) [arg]) b0 = do
+    (prefix, value, b1) <- proofOperand env arg b0
+    let (predicate, b2) = namedFunction ("isvariant:" ++ variantName) b1
+        (i, b3) = fresh b2
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+        apply = step "ApplyFresh" [("local", MInt local), ("function", MInt predicate), ("arguments", MList [value])]
+    pure (prefix ++ [apply], ref, b3)
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args) b0 = do
+    (prefixes, refs, b1) <- foldM evalArg ([], [], b0) args
+    let (constructor, b2) = namedFunction ("ctor:" ++ name) b1
+        (i, b3) = fresh b2
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+        apply = step "ApplyFresh" [("local", MInt local), ("function", MInt constructor), ("arguments", MList refs)]
+        (fieldIds, b4) = foldl register ([], b3) fields
+        b5 = b4{ctorFields = nub ([(constructor, fieldId, toInteger index) | (index, fieldId) <- zip [0 ..] fieldIds] ++ ctorFields b4)}
+    pure (prefixes ++ [apply], ref, b5)
+  where
+    evalArg (steps, refs, b) arg = do
+        (more, ref, b') <- proofOperand env arg b
+        pure (steps ++ more, refs ++ [ref], b')
+    register (ids, b) field = let (fieldId, b') = namedFunction ("field:" ++ field) b in (ids ++ [fieldId], b')
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) [a, b]) b0 = do
     op <- case f of
         Plus -> Just M.Add
@@ -284,6 +307,12 @@ proofCheck env (Forall index guards body) b0 = do
     (guardSteps, b2) <- foldM assumeGuard ([], b1) guards
     (bodyPrefix, checked, b3) <- proofCheck env' body b2
     pure (havoc : guardSteps ++ bodyPrefix, checked, b3)
+proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variantName)) _)) [arg]) b0 = do
+    (prefix, value, b1) <- proofOperand env arg b0
+    let (familyId, b2) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b1
+        (constructorId, b3) = namedFunction ("variant:" ++ variantName) b2
+        require = step "RequireVariant" [("object", value), ("family", MInt familyId), ("constructor", MInt constructorId)]
+    pure (prefix, require, b3)
 proofCheck _ _ _ = Nothing
 
 -- Evaluate total expressions before assuming a clause. The reference can
@@ -297,6 +326,7 @@ contractSteps assume env clauses b0 = foldM add ([], b0) clauses
         if not assume || all droppable prefix then Just () else Nothing
         encoded <- if assume then case checked of
             MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
+            MData "ExecutionStep::RequireVariant" fields -> Just (MData "ExecutionStep::AssumeVariant" (fields ++ [("matches", MBool True)]))
             _ -> Nothing
           else Just checked
         pure (steps ++ (if assume then filter keptStep prefix else prefix) ++ [encoded], b')

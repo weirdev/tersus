@@ -1274,6 +1274,45 @@ fn congruenceEqual(context: &ValidatorContext, left: Int, right: Int) -> Bool {
     return hasEquality(known, left, right);
 };
 
+// Two values of the same constructor with a pair of arguments that are
+// known to differ are themselves different: constructors are free.
+fn entailsConstructorArgumentDisequality(context: &ValidatorContext, equalities: &List<EqualityFact>, left: Int, right: Int) -> Bool {
+    for a in context.applications {
+        if containsValue(context.constructorFunctions, a.function) {
+            for b in context.applications {
+                if hasEquality(equalities, a.function, b.function) {
+                    if hasEquality(equalities, left, a.id) {
+                        if hasEquality(equalities, right, b.id) {
+                            if size(a.arguments) = size(b.arguments) {
+                                for i in 0..size(a.arguments) {
+                                    x = get(a.arguments, i);
+                                    y = get(b.arguments, i);
+                                    xv = integerValue(context, x);
+                                    yv = integerValue(context, y);
+                                    if xv is IntegerLookup::Found {
+                                        if yv is IntegerLookup::Found {
+                                            if (xv as IntegerLookup::Found).value != (yv as IntegerLookup::Found).value { return true; };
+                                        };
+                                    };
+                                    for d in context.different {
+                                        if hasEquality(equalities, d.left, x) {
+                                            if hasEquality(equalities, d.right, y) { return true; };
+                                        };
+                                        if hasEquality(equalities, d.left, y) {
+                                            if hasEquality(equalities, d.right, x) { return true; };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
 fn arithmeticTerm(context: &ValidatorContext, term: Int) -> Bool {
     for app in context.applications {
         if app.id = term {
@@ -1361,6 +1400,7 @@ fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool
         g = goal as ValidatorGoal::Different;
         if entailsConstructorDisequality(equalities, context.applications, context.constructorFunctions, g.left, g.right) { return true; };
         if entailsVariantDisequality(equalities, context.variants, g.left, g.right) { return true; };
+        if entailsConstructorArgumentDisequality(context, equalities, g.left, g.right) { return true; };
         if contextWithin(context, g.left, g.right) { return true; };
         if contextWithin(context, g.right, g.left) { return true; };
         return contextDifferent(equalities, context.applications, orders, context.different, differences, g.left, g.right);
