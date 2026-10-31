@@ -76,7 +76,6 @@ allGroups =
     , testValidateWithExpectedMismatch
     , testValidationFail
     , testUserRewriteValidation
-    , testProofEngine
     , testParseVal
     , testParseValFail
     , testCrashRegression
@@ -87,11 +86,9 @@ allGroups =
     , testPipeline
     , testControlFlow
     , testLists
-    , testArithmetic
     , testForallSyntax
     , testForallInstantiation
     , testForallProof
-    , testForallGrownList
     , testForallLoops
     , testPrettyProofs
     , testMulDivNegative

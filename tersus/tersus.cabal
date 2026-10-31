@@ -31,9 +31,7 @@ library
   exposed-modules:
       Bootstrap
       Cli
-      Ghost
       Hash
-      Linear
       LlvmRuntime
       Mir
       MirData
@@ -44,18 +42,13 @@ library
       MirMono
       MirMoves
       MirOwnership
-      MirValidate
       MirVerify
       Native
       Parse
       Pipeline
       PreludeSource
       Pretty
-      ProofEngine
-      ProofHelpers
-      ProofState
       SelfHostedMir
-      SelfHostedProof
       StdLib
       StdLibDefs
       TersusTypes

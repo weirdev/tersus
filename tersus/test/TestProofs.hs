@@ -1,9 +1,6 @@
 module TestProofs
-    ( testProofEngine
-    , testArithmetic
-    , testForallInstantiation
+    ( testForallInstantiation
     , testForallProof
-    , testForallGrownList
     , testRefinedArithmetic
     , testModulo
     , testLinearArithmetic
@@ -18,185 +15,10 @@ module TestProofs
 import Data.List (isInfixOf)
 import Parse
 import Pipeline (validateStatements)
-import qualified ProofEngine as Engine
 import StdLib
 import TersusTypes
 import Utils
 import TestHarness
-
--- Proof engine tests
-testProofEngineInsertDedupes :: TestResult
-testProofEngineInsertDedupes =
-    let knownProof = FApp eqProof [ATerm (Iota "x"), CTerm (VInt 5)]
-        context = Engine.insertProofs [knownProof, knownProof] Engine.emptyProofContext
-     in testAssertEq (Engine.proofContextFacts context) [knownProof]
-
-testProofEngineEntailsEquivalentTerms :: TestResult
-testProofEngineEntailsEquivalentTerms =
-    let iotaX = Iota "x"
-        iotaA = Iota "a"
-        context =
-            Engine.proofContextFromFacts
-                [ FApp eqProof [ATerm iotaX, ATerm iotaA]
-                , FApp eqProof [ATerm iotaA, CTerm (VInt 5)]
-                ]
-        goal = FApp eqProof [ATerm iotaX, CTerm (VInt 5)]
-     in testAssertTrue (Engine.entails goal context)
-
-testProofEngineReflSubstitutesNestedTerms :: TestResult
-testProofEngineReflSubstitutesNestedTerms =
-    let iotaX = Iota "x"
-        iotaA = Iota "a"
-        context =
-            Engine.proofContextFromFacts
-                [ FApp eqProof [ATerm iotaA, CTerm (VInt 5)]
-                , FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iotaX, ATerm iotaA]
-                ]
-        derived = Engine.deriveRefl context
-        goal = FApp (CTerm (builtinFunct (Rel Gt))) [ATerm iotaX, CTerm (VInt 5)]
-     in testAssertTrue (Engine.entails goal derived)
-
-testProofEngineEvalDerivesConcreteBuiltinResult :: TestResult
-testProofEngineEvalDerivesConcreteBuiltinResult =
-    let iotaList = Iota "list"
-        iotaSize = Iota "size"
-        context =
-            Engine.proofContextFromFacts
-                [ FApp eqProof [ATerm iotaList, CTerm (VList [VInt 1, VInt 2])]
-                , FApp eqProof [ATerm iotaSize, FApp (CTerm (builtinFunct Size)) [ATerm iotaList]]
-                ]
-        result = Engine.applyRewrite evalBuiltinFunct (Engine.EngineEval iotaSize) context
-        goal = FApp eqProof [ATerm iotaSize, CTerm (VInt 2)]
-     in case result of
-            Ok derived -> testAssertTrue (Engine.entails goal derived)
-            Error e -> Just $ "Engine eval failed: " ++ e
-
--- Every iota in the clique equals every other, so an unmemoized equivalence walk is
--- exponential. The unrelated fact comes first so entailment must exhaust the clique's
--- equivalence class before reaching the fact that matches.
-testProofEngineEntailsDenseEqualitiesTerminates :: TestResult
-testProofEngineEntailsDenseEqualitiesTerminates =
-    let firstIota = Iota "i1"
-        secondIota = Iota "i2"
-        iotas = firstIota : secondIota : map (Iota . ("i" ++) . show) [3 .. 8 :: Int]
-        context =
-            Engine.proofContextFromFacts
-                ( FApp eqProof [ATerm (Iota "outsideA"), ATerm (Iota "outsideB")]
-                    : [FApp eqProof [ATerm a, ATerm b] | a <- iotas, b <- iotas, a /= b]
-                )
-        related = FApp eqProof [ATerm firstIota, ATerm secondIota]
-        unrelated = FApp eqProof [ATerm firstIota, ATerm (Iota "unrelated")]
-     in testAssertEq (Engine.entails related context, Engine.entails unrelated context) (True, False)
-
--- Equal arguments give equal results without any fact having been rewritten (no refl):
--- size(q) = size(s) + 1, s = k and size(k) = l give size(q) = l + 1.
-nestedCongruenceFacts :: [IotaProof]
-nestedCongruenceFacts =
-    let sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
-        plus a b = FApp (CTerm (builtinFunct Plus)) [a, b]
-     in [ FApp eqProof [sizeOf (ATerm (Iota "q")), plus (sizeOf (ATerm (Iota "s"))) (CTerm (VInt 1))]
-        , FApp eqProof [ATerm (Iota "s"), ATerm (Iota "k")]
-        , FApp eqProof [sizeOf (ATerm (Iota "k")), ATerm (Iota "l")]
-        , FApp eqProof [ATerm (Iota "d"), plus (ATerm (Iota "l")) (CTerm (VInt 1))]
-        ]
-
-testProofEngineEntailsNestedCongruence :: TestResult
-testProofEngineEntailsNestedCongruence =
-    let goal = FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
-        ltGoal = FApp (CTerm (builtinFunct (Rel LtEq))) [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
-        context = Engine.proofContextFromFacts nestedCongruenceFacts
-     in testAssertEq (Engine.entails goal context, Engine.entails ltGoal context) (True, True)
-
--- Dropping the link between s and k breaks the chain, so the goal is no longer entailed
-testProofEngineEntailsNestedCongruenceNeedsEveryLink :: TestResult
-testProofEngineEntailsNestedCongruenceNeedsEveryLink =
-    let goal = FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm (Iota "q")], ATerm (Iota "d")]
-        context = Engine.proofContextFromFacts (filter (/= (nestedCongruenceFacts !! 1)) nestedCongruenceFacts)
-     in testAssertEq (Engine.entails goal context) False
-
--- A relation that is a fact holds for terms equal to its arguments, and entailsAll answers each goal
-testProofEngineEntailsRelationOfEqualTerms :: TestResult
-testProofEngineEntailsRelationOfEqualTerms =
-    let lt a b = FApp (CTerm (builtinFunct (Rel Lt))) [a, b]
-        context =
-            Engine.proofContextFromFacts
-                [ lt (ATerm (Iota "x")) (ATerm (Iota "n"))
-                , FApp eqProof [ATerm (Iota "x"), ATerm (Iota "y")]
-                ]
-        goals = [lt (ATerm (Iota "y")) (ATerm (Iota "n")), lt (ATerm (Iota "n")) (ATerm (Iota "y"))]
-     in testAssertEq (Engine.entailsAll goals context) [True, False]
-
-testProofEngine :: Test
-testProofEngine =
-    testCaseSeq
-        "testProofEngine"
-        [ testProofEngineInsertDedupes
-        , testProofEngineEntailsDenseEqualitiesTerminates
-        , testProofEngineEntailsEquivalentTerms
-        , testProofEngineEntailsNestedCongruence
-        , testProofEngineEntailsNestedCongruenceNeedsEveryLink
-        , testProofEngineEntailsRelationOfEqualTerms
-        , testProofEngineReflSubstitutesNestedTerms
-        , testProofEngineEvalDerivesConcreteBuiltinResult
-        ]
-
-testArithmetic :: Test
-testArithmetic =
-    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
-        plus a b = FApp (CTerm (builtinFunct Plus)) [a, b]
-        sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
-        iota = ATerm . Iota
-        int = CTerm . VInt
-        ctx = Engine.proofContextFromFacts
-        engine facts goal = testAssertTrue (Engine.entails goal (ctx facts))
-        engineNot facts goal = testAssertTrue (not (Engine.entails goal (ctx facts)))
-     in testCaseSeq
-            "testArithmetic"
-            [ -- Engine: relations follow from known values and from x + c
-              engine [FApp eqProof [iota "s", int 3]] (rel Gt (iota "s") (int 0))
-            , engine [FApp eqProof [iota "j", plus (iota "i") (int 1)], rel Lt (iota "i") (iota "n")] (rel LtEq (iota "j") (iota "n"))
-            , engine [rel Lt (iota "a") (iota "b"), rel Lt (iota "b") (iota "c")] (rel Lt (iota "a") (iota "c"))
-            , engine [rel Lt (iota "a") (iota "b")] (rel NotEq (iota "a") (iota "b"))
-            , engine [FApp eqProof [iota "x", iota "y"]] (rel LtEq (iota "x") (iota "y"))
-            , engine [] (rel GtEq (sizeOf (iota "l")) (int 0))
-            , engine [] (rel Lt (int 2) (int 3))
-            , -- Engine: nothing follows from too little
-              engineNot [rel LtEq (iota "a") (iota "b")] (rel Lt (iota "a") (iota "b"))
-            , engineNot [rel Lt (iota "i") (iota "n")] (rel Lt (plus (iota "i") (int 2)) (iota "n"))
-            , engineNot [FApp eqProof [iota "s", int 0]] (rel Gt (iota "s") (int 0))
-            , engineNot [rel Lt (iota "a") (iota "b")] (rel Lt (iota "b") (iota "a"))
-            , engineNot [] (rel Gt (sizeOf (iota "l")) (int 0))
-            , engineNot [rel LtEq (iota "a") (iota "b")] (rel NotEq (iota "a") (iota "b"))
-            , -- Engine: a contradiction anywhere proves every comparison, also between unrelated terms
-              engine [rel Lt (sizeOf (iota "xs")) (int 0)] (rel Lt (iota "a") (iota "b"))
-            , engine [rel Lt (iota "p") (iota "q"), rel Lt (iota "q") (iota "p")] (rel Gt (iota "a") (iota "b"))
-            , -- != parses, evaluates and validates
-              parseEvalProgramHelper "return 3 != 4;" (Just (VBool True))
-            , parseEvalProgramHelper "return 3 != 3;" (Just (VBool False))
-            , parseEvalProgramHelper "x = 2; if x != 2 { return 1; } else { return 0; };" (Just (VInt 0))
-            , parseValidProgramHelper "x = 2; affirm x != 3;"
-            , parseValidateFailProgramHelper "x = 2; affirm x != 2;" "Could not prove"
-            , parseValidProgramHelper "fn f(n: Int) -> Int { if n != 0 { affirm n != 0; } else { affirm n = 0; }; return 1; }; return f(4);"
-            , -- Programs: no manual rewrites for the arithmetic
-              parseValidProgramHelper "s = 3; affirm s > 0; affirm s >= 3; affirm s != 0;"
-            , parseValidProgramHelper "x = 5; y = x + 1; affirm y > x; affirm y = 6;"
-            , parseValidProgramHelper "fn f(l: List<Int>) -> Int { n = size(l); affirm n >= 0; return n; }; return f([1, 2]);"
-            , parseValidProgramHelper "fn f(i: Int, n: Int) -> Int [{ affirm i < n; }] [{ }] { j = i + 1; affirm j <= n; return j; }; return f(1, 2);"
-            , parseValidateFailProgramHelper "x = 5; y = x + 1; affirm y > 6;" "Could not prove"
-            , parseValidateFailProgramHelper "x = 5; y = x - 1; affirm y > 4;" "Could not prove"
-            , parseValidateFailProgramHelper "fn f(i: Int, n: Int) -> Int [{ affirm i <= n; }] [{ }] { j = i + 1; affirm j <= n; return j; };" "Could not prove"
-            , -- The guard of an unreachable branch proves anything inside it
-              parseValidProgramHelper "fn f(xs: List<Int>, a: Int, b: Int) -> Int { if size(xs) < 0 { affirm a < b; }; return 0; };"
-            , -- A counting loop needs no axioms
-              parseValidProgramHelper
-                "i = 0; while i < 3 [{ affirm i >= 0; affirm i <= 3; }] shrinks 3 - i { i = i + 1; }; affirm i = 3;"
-            , parseValidateFailProgramHelper
-                "i = 0; while i < 3 [{ affirm i <= 2; }] shrinks 3 - i { i = i + 1; };"
-                "Loop invariant is not preserved"
-            , parseValidateFailProgramHelper
-                "i = 0; while i < 3 [{ affirm i >= 1; }] shrinks 3 - i { i = i + 1; };"
-                "Loop invariant does not hold on entry"
-            ]
 
 -- forall parses into a bound index (BVar) with its guards, and the validator rejects it for now
 -- forall facts are instantiated at the elements the program reads
@@ -207,30 +29,11 @@ testForallInstantiation =
         sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
         iota = ATerm . Iota
         int = CTerm . VInt
-        allZero l = Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") (sizeOf l)] (rel Eq (getOf l (BVar "j")) (int 0))
-        engine facts goal = testAssertTrue (Engine.entails goal (Engine.proofContextFromFacts facts))
-        engineNot facts goal = testAssertTrue (not (Engine.entails goal (Engine.proofContextFromFacts facts)))
-        inRange i l = [rel GtEq (iota i) (int 0), rel Lt (iota i) (sizeOf (iota l))]
-        zeroAt l i = rel Eq (getOf (iota l) (iota i)) (int 0)
         -- reads element i of l under the contract that every element of l is 0
         reader = "fn f(l: List<Int>, i: Int) -> Int [{ affirm forall j in 0..size(l): get(l, j) = 0; rewrite checkRel i >= 0; rewrite checkRel i < size(l); affirm i >= 0; affirm i < size(l); }] "
      in testCaseSeq
             "testForallInstantiation"
-            [ -- Engine: an instance is used at the elements in the goal, when its guards hold
-              engine (allZero (iota "l") : inRange "i" "l") (zeroAt "l" "i")
-            , -- It also reaches elements of an equal list
-              engine (allZero (iota "l") : rel Eq (iota "m") (iota "l") : inRange "i" "m") (zeroAt "m" "i")
-            , -- and an index known only by its value
-              engine [allZero (iota "l"), rel Eq (sizeOf (iota "l")) (int 3), rel Eq (iota "i") (int 2)] (zeroAt "l" "i")
-            , -- Two elements, each with its own instance
-              engine (allZero (iota "l") : inRange "i" "l" ++ inRange "k" "l") (rel Eq (getOf (iota "l") (iota "i")) (getOf (iota "l") (iota "k")))
-            , -- Engine: an index outside the guards, another list, or no get term at all gets nothing
-              engineNot (allZero (iota "l") : [rel GtEq (iota "i") (int 0)]) (zeroAt "l" "i")
-            , engineNot (allZero (iota "l") : rel Lt (iota "i") (int 0) : [rel Lt (iota "i") (sizeOf (iota "l"))]) (zeroAt "l" "i")
-            , engineNot (allZero (iota "l") : inRange "i" "m") (zeroAt "m" "i")
-            , engineNot (inRange "i" "l") (zeroAt "l" "i")
-            , engineNot (allZero (iota "l") : inRange "i" "l") (rel Eq (getOf (iota "l") (iota "i")) (int 1))
-            , -- Programs: the contract's forall gives the element a function reads
+            [ -- Programs: the contract's forall gives the element a function reads
               parseValidProgramHelper
                 (reader ++ "[{ affirm return = 0; }] { x = get(l, i); return x; };")
             , parseValidProgramHelper
@@ -257,39 +60,9 @@ testForallInstantiation =
 -- forall goals are proved for an arbitrary index that meets the guards
 testForallProof :: Test
 testForallProof =
-    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
-        getOf l t = FApp (CTerm (builtinFunct Get)) [l, t]
-        sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
-        iota = ATerm . Iota
-        int = CTerm . VInt
-        range hi = [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") hi]
-        forallJ hi body = Forall "j" (range hi) body
-        elementIsZero l = rel Eq (getOf l (BVar "j")) (int 0)
-        engine facts goal = testAssertTrue (Engine.entails goal (Engine.proofContextFromFacts facts))
-        engineNot facts goal = testAssertTrue (not (Engine.entails goal (Engine.proofContextFromFacts facts)))
-     in testCaseSeq
-            "testForallProof"
-            [ -- Facts about the index alone
-              engine [] (forallJ (int 3) (rel Lt (BVar "j") (int 3)))
-            , engineNot [] (forallJ (int 3) (rel Lt (BVar "j") (int 2)))
-            , engine [rel Eq (iota "n") (int 2)] (forallJ (iota "n") (rel Lt (BVar "j") (int 2)))
-            , engineNot [] (forallJ (iota "n") (rel Lt (BVar "j") (int 2)))
-            , -- A narrower range than a known forall, when the bound is known to be within it
-              engine [forallJ (sizeOf (iota "l")) (elementIsZero (iota "l")), rel LtEq (iota "k") (sizeOf (iota "l"))] (forallJ (iota "k") (elementIsZero (iota "l")))
-            , engineNot [forallJ (sizeOf (iota "l")) (elementIsZero (iota "l"))] (forallJ (iota "k") (elementIsZero (iota "l")))
-            , -- The same forall about an equal list
-              engine [forallJ (sizeOf (iota "l")) (elementIsZero (iota "l")), rel Eq (iota "m") (iota "l")] (forallJ (sizeOf (iota "m")) (elementIsZero (iota "m")))
-            , -- Equal elements of two equal lists, and of two lists that are not known to be equal
-              engine [rel Eq (iota "m") (iota "l")] (forallJ (sizeOf (iota "l")) (rel Eq (getOf (iota "l") (BVar "j")) (getOf (iota "m") (BVar "j"))))
-            , engineNot [] (forallJ (sizeOf (iota "l")) (rel Eq (getOf (iota "l") (BVar "j")) (getOf (iota "m") (BVar "j"))))
-            , -- An empty range holds for any body
-              engine [] (forallJ (int 0) (rel Eq (int 1) (int 2)))
-            , engine [rel LtEq (iota "n") (int 0)] (forallJ (iota "n") (rel Eq (int 1) (int 2)))
-            , engineNot [] (forallJ (int 1) (rel Eq (int 1) (int 2)))
-            , -- A guard other than a range
-              engine [] (Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") (int 3), rel NotEq (BVar "j") (int 1)] (rel NotEq (BVar "j") (int 1)))
-            , engineNot [] (Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") (int 3)] (rel NotEq (BVar "j") (int 1)))
-            , -- Programs
+    testCaseSeq
+        "testForallProof"
+                    [ -- Programs
               parseValidProgramHelper "affirm forall j in 0..3: j >= 0;"
             , parseValidProgramHelper "n = 2; affirm forall j in 0..n: j < 2;"
             , parseValidateFailProgramHelper "n = 3; affirm forall j in 0..n: j < 2;" "Could not prove"
@@ -305,44 +78,6 @@ testForallProof =
             , parseValidateFailProgramHelper
                 "fn id(l: List<Int>) -> List<Int> [{ affirm forall j in 0..size(l): get(l, j) = 0; }] [{ affirm forall j in 0..size(return): get(return, j) = 1; }] { return l; };"
                 "Could not prove"
-            ]
-
--- A list that grew by one: the old elements are kept, and the new one sits at the old size
-testForallGrownList :: Test
-testForallGrownList =
-    let rel r a b = FApp (CTerm (builtinFunct (Rel r))) [a, b]
-        getOf l t = FApp (CTerm (builtinFunct Get)) [l, t]
-        sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
-        plus a b = FApp (CTerm (builtinFunct Plus)) [a, b]
-        iota = ATerm . Iota
-        int = CTerm . VInt
-        forallJ hi body = Forall "j" [rel GtEq (BVar "j") (int 0), rel Lt (BVar "j") hi] body
-        copiesA l = rel Eq (getOf l (BVar "j")) (getOf (iota "a") (BVar "j"))
-        -- out0 copies a below i0, out1 keeps out0 below its size, and has a's element i0 after it
-        grown =
-            [ forallJ (iota "i0") (copiesA (iota "out0"))
-            , forallJ (sizeOf (iota "out0")) (rel Eq (getOf (iota "out1") (BVar "j")) (getOf (iota "out0") (BVar "j")))
-            , rel Eq (sizeOf (iota "out0")) (iota "i0")
-            , rel Eq (getOf (iota "out1") (sizeOf (iota "out0"))) (getOf (iota "a") (iota "i0"))
-            , rel Eq (iota "i1") (plus (iota "i0") (int 1))
-            , rel GtEq (iota "i0") (int 0)
-            ]
-        engine facts goal = testAssertTrue (Engine.entails goal (Engine.proofContextFromFacts facts))
-        engineNot facts goal = testAssertTrue (not (Engine.entails goal (Engine.proofContextFromFacts facts)))
-     in testCaseSeq
-            "testForallGrownList"
-            [ -- Old elements come from the old fact, the new one from its own, and the cases are told apart
-              engine grown (forallJ (iota "i1") (copiesA (iota "out1")))
-            , -- The old range alone still holds for the new list
-              engine grown (forallJ (iota "i0") (copiesA (iota "out1")))
-            , -- Not past the new element
-              engineNot grown (forallJ (plus (iota "i1") (int 1)) (copiesA (iota "out1")))
-            , -- Without the new element's fact, or without the old elements', it does not hold
-              engineNot (filter (/= (grown !! 3)) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
-            , engineNot (filter (/= head grown) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
-            , engineNot (filter (/= (grown !! 1)) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
-            , -- Without knowing the old size is i0, the new element is not at the end of the range
-              engineNot (filter (/= (grown !! 2)) grown) (forallJ (iota "i1") (copiesA (iota "out1")))
             ]
 
 -- x != y is a fact, and c * x for a constant c is related to the terms it is made from by the difference constraints

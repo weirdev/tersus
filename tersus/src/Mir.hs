@@ -575,7 +575,7 @@ readersOfInput program = grow (Set.fromList [name | (name, fn) <- functions, any
          in if Set.null more then known else grow (Set.union known more)
 
 -- The functions of the program that a function names as values or callees in its statements (not those its contracts could name,
--- which are all the functions before it): the validator knows each as the value it is (see ProofState.withFunctions)
+-- which are all the functions before it): the validator knows each as the value it is
 functionsNamed :: Function -> Set.Set Name
 functionsNamed fn =
     Set.fromList
