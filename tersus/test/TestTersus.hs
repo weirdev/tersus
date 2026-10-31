@@ -38,6 +38,7 @@ import TestMirReader
 import TestMirEmit
 import TestBootstrap
 import TestBuiltinRegistry
+import TestParity
 
 main :: IO ()
 main = do
@@ -137,6 +138,7 @@ allGroups =
     , testMirEmit
     , testBootstrap
     , testBuiltinRegistry
+    , testParity
     ]
 
 groupName :: Test -> String
