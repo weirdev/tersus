@@ -74,8 +74,9 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
     reserved name = name `elem` ["StdList", "StdBox"] || take 7 name == "stdList" || take 6 name == "stdBox"
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
--- unchanged: lib/prelude.tersus (the traits `Sequence` and `Growable`) if it mentions either, and lib/string.tersus (the struct `String` that a string
--- literal is a value of, which needs the traits) if it mentions `String` or has a literal
+-- unchanged: lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`) if it mentions any of them (or
+-- `hashCombine`), lib/string.tersus (the struct `String` that a string literal is a value of, which needs the traits) if it mentions `String` or
+-- has a literal, and lib/map.tersus (the struct `HashMap`) if it mentions `HashMap`
 libraries :: String -> [(String, String)]
 libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps]
   where
