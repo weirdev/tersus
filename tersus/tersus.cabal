@@ -22,6 +22,8 @@ extra-source-files:
     bootstrap/emitter.ll
     lib/validation.tersus
     lib/stdlib.tersus
+    lib/box.tersus
+    lib/map.tersus
 
 source-repository head
   type: git
