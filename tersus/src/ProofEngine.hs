@@ -370,8 +370,30 @@ querySolver facts goals =
         -- negation when it is false.
         byParts goal = case goal of
             FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [lhs, rhs] -> refuted lhs rhs
-            FApp funct [lhs, rhs] | funct == eqProof -> relationResult lhs rhs || relationResult rhs lhs || extensional lhs rhs
+            FApp funct [lhs, rhs] | funct == eqProof -> relationResult lhs rhs || relationResult rhs lhs || equalParts (4 :: Int) lhs rhs
             _ -> False
+        -- (two values built by one constructor are equal when their fields are, each by any of the ways two values are equal)
+        equalParts depth lhs rhs =
+            let l = idOf table4 lhs
+                r = idOf table4 rhs
+             in sameClass l r
+                    || extensional lhs rhs
+                    || ( depth > 0
+                            && or
+                                [ and (zipWith (\a b -> equalParts (depth - 1) (termOf table4 a) (termOf table4 b)) argsA argsB)
+                                | (name, argsA) <- constructionsOf l
+                                , (name', argsB) <- constructionsOf r
+                                , name == name'
+                                , length argsA == length argsB
+                                ]
+                       )
+        constructionsOf c =
+            [ (name, argIds)
+            | (termId, (functId, argIds)) <- tableApps table4
+            , sameClass termId c
+            , Just (Ctor name fields) <- [Map.lookup (rep classes functId) builtinOfClass]
+            , length fields == length argIds
+            ]
         refuted lhs rhs =
             let (_, _, flags, _) = querySolver (solverAddFacts facts [FApp eqProof [lhs, rhs]]) [FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]]
              in and flags
@@ -393,10 +415,12 @@ querySolver facts goals =
         extensional lhs rhs =
             let l = idOf table4 lhs
                 r = idOf table4 rhs
-                sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
+                -- (the sizes of a list are the size terms there are of anything in its class)
+                sizesOf c = [termOf table4 termId | (termId, (functId, [argId])) <- tableApps table4, sameClass argId c, Just Size <- [Map.lookup (rep classes functId) builtinOfClass]]
                 holds goal = quick goal == Just True
+                sizesAgree upper = or [holds (FApp eqProof [sl, sr]) && holds (FApp eqProof [upper, sl]) | sl <- take 3 (sizesOf l), sr <- take 3 (sizesOf r)]
              in or
-                    [ holds (FApp eqProof [sizeOf lhs, sizeOf rhs]) && holds (FApp eqProof [upper, sizeOf lhs])
+                    [ sizesAgree upper
                     | (termId, (index, guardIds, bodyId)) <- tableForalls table4
                     , sameClass termId trueId
                     , FApp eq [FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [listA, BVar i1], FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [listB, BVar i2]] <- [termOf table4 bodyId]
@@ -592,14 +616,20 @@ partOf table classes inner outer =
     rep classes inner /= rep classes outer && Set.member (rep classes inner) (reached Set.empty [rep classes outer])
   where
     builtinOfClass = builtinsByClass table classes (const True)
+    -- (a field of a value is a part of it, and so is an element of a list it holds)
     children =
         Map.fromListWith
             (++)
-            [ (rep classes structId, [rep classes termId])
-            | (termId, (functId, [structId])) <- tableApps table
-            , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
-            , Just _ <- [fieldRead funct]
-            ]
+            ( [ (rep classes structId, [rep classes termId])
+              | (termId, (functId, [structId])) <- tableApps table
+              , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
+              , Just _ <- [fieldRead funct]
+              ]
+                ++ [ (rep classes listId, [rep classes termId])
+                   | (termId, (functId, [listId, _])) <- tableApps table
+                   , Just Get <- [Map.lookup (rep classes functId) builtinOfClass]
+                   ]
+            )
     reached seen [] = seen
     reached seen (next : rest) =
         let new = [child | child <- Map.findWithDefault [] next children, Set.notMember child seen]

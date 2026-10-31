@@ -162,8 +162,8 @@ testStructs =
             , -- Evaluation
               parseEvalProgramHelper (point ++ "p = Point { x: 1, y: 2 }; return p;") (Just (VData "Point" [("x", VInt 1), ("y", VInt 2)]))
             , parseEvalProgramHelper (point ++ "p = Point { x: 1, y: 2 }; q = Point { y: 9, ..p }; return q;") (Just (VData "Point" [("x", VInt 1), ("y", VInt 9)]))
-            , parseEvalProgramHelper (point ++ "return Point { x: 1, y: 2 } = Point { y: 2, x: 1 };") (Just (VBool True))
-            , parseEvalProgramHelper (point ++ "return Point { x: 1, y: 2 } = Point { x: 1, y: 3 };") (Just (VBool False))
+            , parseEvalProgramHelper (point ++ "impl Eq for Point { }; return Point { x: 1, y: 2 } = Point { y: 2, x: 1 };") (Just (VBool True))
+            , parseEvalProgramHelper (point ++ "impl Eq for Point { }; return Point { x: 1, y: 2 } = Point { x: 1, y: 3 };") (Just (VBool False))
             , parseEvalProgramHelper (point ++ "fn sum(p: Point) -> Int { return p.x + p.y; }; return sum(Point { x: 3, y: 4 });") (Just (VInt 7))
             , parseEvalProgramHelper (point ++ "l = push([], Point { x: 1, y: 2 }); return get(l, 0).y;") (Just (VInt 2))
             , -- Type checking
@@ -220,9 +220,9 @@ testEnums =
             [ -- Values
               parseEvalProgramHelper (shape ++ "return Shape::Circle { radius: 2 };") (Just (VData "Shape::Circle" [("radius", VInt 2)]))
             , parseEvalProgramHelper (shape ++ "return Shape::Empty;") (Just (VData "Shape::Empty" []))
-            , parseEvalProgramHelper (shape ++ "return Shape::Empty = Shape::Empty;") (Just (VBool True))
-            , parseEvalProgramHelper (shape ++ "return Shape::Empty = Shape::Circle { radius: 1 };") (Just (VBool False))
-            , parseEvalProgramHelper (shape ++ "return Shape::Circle { radius: 1 } != Shape::Circle { radius: 2 };") (Just (VBool True))
+            , parseEvalProgramHelper (shape ++ "impl Eq for Shape { }; return Shape::Empty = Shape::Empty;") (Just (VBool True))
+            , parseEvalProgramHelper (shape ++ "impl Eq for Shape { }; return Shape::Empty = Shape::Circle { radius: 1 };") (Just (VBool False))
+            , parseEvalProgramHelper (shape ++ "impl Eq for Shape { }; return Shape::Circle { radius: 1 } != Shape::Circle { radius: 2 };") (Just (VBool True))
             , -- is
               parseEvalProgramHelper (shape ++ "s = Shape::Rect { width: 1, height: 2 }; return s is Shape::Rect;") (Just (VBool True))
             , parseEvalProgramHelper (shape ++ "s = Shape::Rect { width: 1, height: 2 }; return s is Shape::Circle;") (Just (VBool False))

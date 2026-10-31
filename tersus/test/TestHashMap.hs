@@ -48,7 +48,7 @@ testHashMap =
             , TestList
                 "keys and values"
                 [ testCase "string keys" (runs "m = HashMap::new().insert(\"one\", 1).insert(\"two\", 2).insert(\"one\", 11); return m.lookup(\"one\", 0) * 100 + m.lookup(\"two\", 0) * 10 + m.size();" 1122)
-                , testCase "struct keys with their own Hash" (runs "struct Point { x: Int, y: Int }; impl Clone for Point { }; impl Hash for Point { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { return hashCombine(hashCombine(3, self.x), self.y); }; }; m = HashMap::new().insert(Point { x: 1, y: 2 }, 12).insert(Point { x: 3, y: 4 }, 34); return m.lookup(Point { x: 1, y: 2 }, 0) * 100 + m.lookup(Point { x: 3, y: 4 }, 0);" 1234)
+                , testCase "struct keys with their own Hash" (runs "struct Point { x: Int, y: Int }; impl Clone for Point { }; impl Eq for Point { }; impl Hash for Point { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { return hashCombine(hashCombine(3, self.x), self.y); }; }; m = HashMap::new().insert(Point { x: 1, y: 2 }, 12).insert(Point { x: 3, y: 4 }, 34); return m.lookup(Point { x: 1, y: 2 }, 0) * 100 + m.lookup(Point { x: 3, y: 4 }, 0);" 1234)
                 , testCase "values that own lists" (runs "m = HashMap::new().insert(1, push(push([], 10), 20)).insert(2, push([], 30)); a = m.lookup(1, []); b = m.lookup(2, []); return size(a) * 100 + size(b) * 10 + get(b, 0);" 240)
                 , testCase "a map in a map" (runs "inner = HashMap::new().insert(1, 5); m = HashMap::new().insert(9, inner); return m.lookup(9, HashMap::new()).lookup(1, 0);" 5)
                 ]

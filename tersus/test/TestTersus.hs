@@ -39,6 +39,7 @@ import TestMirVerify
 import TestMirErase
 import TestMirEmit
 import TestBootstrap
+import TestEq
 import TestHashMap
 
 main :: IO ()
@@ -143,6 +144,7 @@ allGroups =
     , testMirEmit
     , testMirEmitPrograms
     , testBootstrap
+    , testEq
     , testHashMap
     ]
 

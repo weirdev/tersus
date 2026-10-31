@@ -34,11 +34,11 @@ module TypeCheck
     , freshVar
     ) where
 
-import Control.Monad (forM, forM_, unless, void, when)
+import Control.Monad (filterM, forM, forM_, unless, void, when)
 import qualified Data.Map as Map
 import Data.Map (Map)
 import Data.List (intercalate, (\\))
-import Data.Maybe (isJust, fromMaybe)
+import Data.Maybe (isJust, isNothing, fromMaybe)
 import qualified Data.Set as Set
 
 import Pretty (renderType)
@@ -1826,8 +1826,81 @@ inferExprR ctx env expr =
         F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
         F (Var name) args
             | Just (path, function) <- traitPath name -> traitCall path function args
+        -- a = b and a != b in code: the words of a value of a primitive type are compared, and any other value is compared by its Eq
+        -- (lib/eq.tersus); in an expression of the validator (a define) it is the validator's equality, as in a proof
+        F funct@(Val (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [a, b]
+            | rel `elem` [Eq, NotEq] -> do
+                ghostly <- tcGhost <$> getState
+                if ghostly then general funct [a, b] else do
+                    inferred <- mapM (inferExprR ctx env) [a, b]
+                    let [at, bt] = map fst inferred
+                    at' <- unref <$> zonk at
+                    bt' <- unref <$> zonk bt
+                    expect "argument 2 of the comparison" at' bt'
+                    -- (an empty list compared before what it holds is known is a list of Int)
+                    zonk at' >>= defaultUnknown
+                    t0 <- zonk at'
+                    -- (a Box has the value of what it holds, so two Boxes are compared by what they hold: a function of a type that
+                    -- holds itself in a Box compares the parts by calling itself)
+                    let unboxed (TBox inner@(TArrayOf _ SizeAny)) operands = (TBox inner, operands)
+                        unboxed (TBox inner) operands = unboxed inner [(inner, F (Val (builtinFunct UnBox)) [e]) | (_, e) <- operands]
+                        unboxed other operands = (other, operands)
+                        (t, operands) = unboxed t0 inferred
+                    if primitiveEq t
+                        then do
+                            (ft, funct') <- inferExprR ctx env funct
+                            ordinaryBuiltin funct funct' ft operands
+                        else do
+                            comparing funct [t]
+                            call <- case t of
+                                TBox (TArrayOf _ SizeAny) -> do
+                                    gives <- traitArguments "Eq" t
+                                    when (isNothing gives) $ failTc ("Type error: " ++ renderType t ++ " is compared with =, which needs its elements to implement Eq")
+                                    snd <$> callResolved "eqBoxedArrays" operands
+                                _ -> equalityCall t operands
+                            return (TBool, if rel == NotEq then F (Val (builtinFunct Not)) [call] else call)
         F funct args -> general funct args
   where
+    defaultUnknown t = case t of
+        TVar _ -> void (unify t TInt)
+        TList u -> defaultUnknown u
+        TBox u -> defaultUnknown u
+        TArrayOf u _ -> defaultUnknown u
+        _ -> return ()
+    equalityCall t inferred = do
+        s <- getState
+        unless (Map.member "Eq" (tcTraits s)) $
+            failTc ("Type error: " ++ renderType t ++ " is compared with =, which needs the trait Eq of lib/eq.tersus, which a program has unless it declares a trait Eq of its own")
+        gives <- traitArguments "Eq" t
+        when (isNothing gives) $ case t of
+            TVar _ -> failTc "Type error: the type of the values compared is not known yet; annotate it"
+            TParam p -> failTc ("Type error: " ++ p ++ " is compared with =, which needs it to implement Eq: bound it, as in <" ++ p ++ ": Eq>")
+            _ -> do
+                lacking <- missingEq t
+                failTc ("Type error: " ++ renderType t ++ " is compared with =, which needs it to implement Eq, and " ++ lacking)
+        owner <- traitOwner "eq" t
+        snd <$> callResolved (implFunctionName owner (Just "Eq") "eq") inferred
+    -- (which part of a type has no Eq, to say what to write)
+    missingEq t = case t of
+        TList e -> inner t e
+        TBox e -> inner t e
+        TArrayOf e _ -> inner t e
+        TNamed name | Just (base, args) <- instanceOf name -> do
+            s <- getState
+            if Set.member ("Eq", base) (tcImpls s)
+                then do
+                    parts <- filterM (fmap isNothing . traitArguments "Eq") [u | ArgType u <- args]
+                    case parts of
+                        u : _ -> missingEq u
+                        [] -> return (renderType t ++ " does not")
+                else return (base ++ " does not: write impl Eq for " ++ base ++ " { }; to compare its fields")
+        TNamed name -> return (name ++ " does not: write impl Eq for " ++ name ++ " { }; to compare its fields")
+        TVariant variant -> ctorInfo variant >>= \(enum, _) -> return (enum ++ " does not: write impl Eq for " ++ enum ++ " { }; to compare its fields")
+        _ -> return (renderType t ++ " does not")
+      where
+        inner whole e = do
+            ok <- traitArguments "Eq" e
+            if isJust ok then return (renderType whole ++ " does not") else zonk e >>= missingEq
     borrowCall mutable place = do
         unless (placeForm place) $ failTc "Type error: & is to a place (a variable, a field of one, an element of one, or through a reference, as in &p.x, &get(xs, 0) or &*r): bind the value to a variable first if it needs borrowing"
         st <- getState
@@ -2216,6 +2289,7 @@ checkImpl ctx env trait traitArgs typeName selfName _bounds functions = do
             when (length params /= length traitArgs) $
                 failTc ("Type error: trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">, which impl " ++ traitName ++ " for " ++ typeName ++ " gives " ++ show (length traitArgs))
             when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
+            when (traitName == "Eq" && typeName `elem` ["Int", "Byte", "Bool"]) $ failTc ("Type error: " ++ typeName ++ " implements Eq by the language: its values are compared as words")
             putState s{tcImpls = Set.insert (traitName, typeName) (tcImpls s), tcImplArgs = Map.insert (traitName, typeName) (selfName, traitArgs) (tcImplArgs s)}
             when (traitName `elem` ["Clone", "Copy"] && null found && null params) $ checkMarkerImpl traitName typeName
             -- (a type with a drop is freed by it: it is not linear, and not copied, since each copy would be freed)
@@ -2819,7 +2893,20 @@ traitArguments trait ty = do
         then implementsMarker trait ty >>= \ok -> return (if ok then Just [] else Nothing)
         else traitArgumentsOf trait ty
 
+-- The types whose values are compared as the words they are: they implement Eq by the language (lib/eq.tersus)
+primitiveEq :: Type -> Bool
+primitiveEq t = case t of
+    TInt -> True
+    TByte -> True
+    TBool -> True
+    TWord _ _ -> True
+    TAddr _ -> True
+    _ -> False
+
 traitArgumentsOf :: Name -> Type -> TC (Maybe [Type])
+traitArgumentsOf "Eq" ty | primitiveEq ty = return (Just [])
+-- (a Box of an array of no size is compared by eqBoxedArrays of lib/eq.tersus when its elements are)
+traitArgumentsOf "Eq" (TBox (TArrayOf e SizeAny)) = fmap (const []) <$> traitArguments "Eq" e
 traitArgumentsOf trait ty = do
     s <- getState
     let arity = length (Map.findWithDefault [] trait (tcTraitParams s))
@@ -2842,6 +2929,8 @@ traitArgumentsOf trait ty = do
             collect _ _ = Nothing
             -- (the types of the impl's type, as `Array<T>` in `Box<Array<T>>`, give the parameters they are made of; a part
             -- written out in the impl, a type or a size, is not matched by another, so the impl is not one for this type)
+            -- (a type parameter is the type of a value, so never an array of no size, which is only behind a Box)
+            matchTypes (TParam _) (TArrayOf _ SizeAny) = Nothing
             matchTypes (TParam p) t = Just [(p, t)]
             matchTypes (TList a) (TList b) = matchTypes a b
             matchTypes (TBox a) (TBox b) = matchTypes a b
