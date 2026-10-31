@@ -13,7 +13,8 @@ import Pretty (renderType)
 import StdLib (stdLibCtx)
 import Types
 import Syntax
-import TypeCheck (Elaborated (..), arrayElement, elaborate, functionType)
+import TypeCheck (Elaborated (..), elaborate)
+import TypeCheckCore (arrayElement, functionType)
 import Utils
 
 -- Lowers a program that has passed validation to the MIR: control flow becomes blocks that jump, nested expressions

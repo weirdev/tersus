@@ -61,6 +61,7 @@ library
       Syntax
       Types
       TypeCheck
+      TypeCheckCore
       Utils
   other-modules:
       Paths_tersus
