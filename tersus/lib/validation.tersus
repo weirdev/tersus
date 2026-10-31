@@ -268,6 +268,29 @@ fn applicationFactsWithConstructors(facts: &List<EqualityFact>, terms: &List<App
                             };
                         };
                     };
+                    if a.function = -2 {
+                        if b.function = -1 {
+                            if size(a.arguments) = 2 {
+                                if size(b.arguments) = 2 {
+                                    subtrahend = get(a.arguments, 1);
+                                    leftPart = get(b.arguments, 0);
+                                    rightPart = get(b.arguments, 1);
+                                    if hasEquality(known, get(a.arguments, 0), b.id) {
+                                        if hasEquality(known, subtrahend, leftPart) {
+                                            if hasEquality(known, a.id, rightPart) = false {
+                                                known = push(known, EqualityFact { left: a.id, right: rightPart });
+                                            };
+                                        };
+                                        if hasEquality(known, subtrahend, rightPart) {
+                                            if hasEquality(known, a.id, leftPart) = false {
+                                                known = push(known, EqualityFact { left: a.id, right: leftPart });
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
                 };
             };
             if size(known) = before { finished = true; };
@@ -1117,8 +1140,28 @@ impl Clone for ProofRun { };
 
 // Return the first unproved obligation; -1 means that every check succeeded.
 // Assumptions made later in the list cannot justify an earlier assertion.
+fn deriveRefinedOrders(context: &ValidatorContext) -> ValidatorContext {
+    facts = clone(context.orders);
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    for order in context.orders {
+        if order.strict = false {
+            refined = false;
+            for d in context.different {
+                if hasEquality(equalities, d.left, order.smaller) && hasEquality(equalities, d.right, order.greater) { refined = true; };
+                if hasEquality(equalities, d.left, order.greater) && hasEquality(equalities, d.right, order.smaller) { refined = true; };
+            };
+            if refined {
+                if hasOrderFact(facts, order.smaller, order.greater) = false || true {
+                    facts = push(facts, OrderFact { smaller: order.smaller, greater: order.greater, strict: true });
+                };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
 fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
-    return entailsGoalWithFacts(deriveSumOrders(context), goal);
+    return entailsGoalWithFacts(deriveRefinedOrders(deriveSumOrders(context)), goal);
 };
 
 fn runProofSteps(initial: &ValidatorContext, steps: &List<ProofStep>) -> ProofRun {
