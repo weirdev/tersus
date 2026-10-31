@@ -29,13 +29,14 @@ import Utils
 
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
 --
---   source -> AST (parseSource) -> checked AST (elaborate: types checked, each `shrinks` resolved)
---          -> MIR (lowerElaborated) -> validated MIR (validateProgram) -> executed (runProgram)
+--   source -> AST (parseSource) -> checked AST with the type of every expression (elaborate: types checked,
+--          each `shrinks` resolved) -> MIR (lowerElaborated) -> validated MIR (validateProgram) -> executed (runProgram)
 --                                                                    or -> owned MIR (ownedSource) -> LLVM IR (the emitter written in Tersus, see Bootstrap)
 --
 -- The validated MIR has its permissions (ghost values, POINTERS.md) taken out by `eraseGhosts` before anything runs it or makes native code of it.
 --
--- The program is type checked once, by `elaborate`; the lowering takes its result and the validator the MIR. Errors name
+-- The program is type checked once, by `elaborate`; the lowering takes its result (the statements and the
+-- expression types, so it infers nothing itself) and the validator the MIR. Errors name
 -- the stage that refused the program, as the command line prints them.
 
 parseSource :: String -> Result [Statement] String

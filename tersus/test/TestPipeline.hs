@@ -26,7 +26,7 @@ import SelfHostedMir (validateMirSubset)
 import Parse
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
-import TypeCheck (elaborate)
+import TypeCheck (Elaborated (..), elaborate)
 import TersusTypes
 import Utils
 import TestHarness
@@ -1063,7 +1063,7 @@ testPipeline =
           testAssertErrorContains "Validation failed" (compileSource "x = 1; affirm x = 2;")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
           case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborate of
-            Ok stmts -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))
+            Ok (Elaborated stmts _) -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))
             Error e -> Just e
         , case compileSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" of
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program), Map.size (M.fnBlocks (M.progMain program))) (Ok (Just "3"), 4)
