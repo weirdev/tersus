@@ -1,5 +1,6 @@
 module MirData
     ( writeProgram
+    , writeProgramWithGhosts
     , readProgram
     , forNative
     ) where
@@ -36,6 +37,13 @@ import Utils
 -- `forall N "n"... N "n"... T`, `param "n"` and `ref T`, and of a size `c N`, `any`, `p "n"` and `v N`. An operand is `copy L`, `move L` or
 -- `const C`, a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. The statements are
 -- `assign L RVALUE`, `peek L RVALUE` and `drop L`; the terminators `goto B`, `switch O B B`, `call O N O... L B`, `return` and `unreachable`.
+--
+-- `writeProgramWithGhosts` writes `tersus-mir 2` instead: the program as it is before its ghosts are erased (MirGhost), for the
+-- eraser written in Tersus (examples/mir_erase.tersus). The only records it adds are the statements of the validator's part that
+-- the erasure acts on: `ghost` for a ghost statement (its contents do not survive erasure, and are not written), and
+-- `dissolve L` for the taking apart of the value of _L. The contracts and the specification of a function are not written
+-- either: the erasure only scrubs them, and the program it gives back is written as version 1. `readProgram` reads both
+-- versions; a ghost statement it reads back stands for itself with no contents.
 
 -- What native code uses of a program: the same without the validator's part
 forNative :: Program -> Program
@@ -65,6 +73,16 @@ writeProgram program =
   where
     native = forNative program
 
+-- The program before its ghosts are erased, as version 2 of the data (see the note at the head of this module)
+writeProgramWithGhosts :: Program -> String
+writeProgramWithGhosts program =
+    unlines
+        ( "tersus-mir 2"
+            : concatMap typeLines (Map.toList (progTypes program))
+            ++ concatMap (functionLinesWith statementTextWithGhosts "function") (Map.elems (progFunctions program))
+            ++ functionLinesWith statementTextWithGhosts "main" (progMain program)
+        )
+
 typeLines :: (Name, TypeDecl) -> [String]
 typeLines (name, StructDecl fields) = [unwords (["struct", quote name, show (length fields)] ++ concatMap fieldTokens fields)]
 typeLines (name, EnumDecl variants) =
@@ -74,7 +92,10 @@ fieldTokens :: (Variable, Type) -> [String]
 fieldTokens (f, t) = quote f : typeTokens t
 
 functionLines :: String -> Function -> [String]
-functionLines kind fn =
+functionLines = functionLinesWith statementText
+
+functionLinesWith :: (Statement -> String) -> String -> Function -> [String]
+functionLinesWith statementText kind fn =
     unwords
         ( [kind, quote (fnName fn), "params", show (length (fnParams fn))]
             ++ map localText (fnParams fn)
@@ -134,6 +155,12 @@ statementText s = case s of
     Drop l -> unwords ["drop", localText l]
     AssignRef root steps rv -> unwords ("assignref" : localText root : show (length steps) : concatMap refStepTokens steps ++ rvalueTokens rv)
     Ghost _ _ -> error "MirData: a ghost statement is not data (see forNative)"
+
+statementTextWithGhosts :: Statement -> String
+statementTextWithGhosts s = case s of
+    Ghost _ (GhostDissolve l) -> unwords ["dissolve", localText l]
+    Ghost _ _ -> "ghost"
+    _ -> statementText s
 
 terminatorText :: Terminator -> String
 terminatorText t = case t of
@@ -389,6 +416,8 @@ lineP = word >>= \w -> case w of
     "peek" -> LStatement <$> (Peek <$> local <*> rvalueP)
     "drop" -> LStatement . Drop <$> local
     "assignref" -> LStatement <$> (AssignRef <$> local <*> (int >>= \n -> replicateM n refStepP) <*> rvalueP)
+    "ghost" -> pure (LStatement (Ghost Map.empty (GhostPosition 0 0)))
+    "dissolve" -> LStatement . Ghost Map.empty . GhostDissolve <$> local
     "goto" -> LTerminator . Goto <$> block
     "switch" -> LTerminator <$> (SwitchBool <$> operandP <*> block <*> block)
     "call" -> do
@@ -430,9 +459,11 @@ localDeclP = do
 
 readProgram :: String -> Result Program String
 readProgram text = case lines text of
-    "tersus-mir 1" : rest ->
-        flatResultMap tokenize (filter (not . null) rest) `bindResult` \records -> fileFrom records ([], [], Nothing)
-    _ -> Error "not the MIR as data: the first line should be tersus-mir 1"
+    "tersus-mir 1" : rest -> readRecords rest
+    "tersus-mir 2" : rest -> readRecords rest
+    _ -> Error "not the MIR as data: the first line should be tersus-mir 1 or 2"
+  where
+    readRecords rest = flatResultMap tokenize (filter (not . null) rest) `bindResult` \records -> fileFrom records ([], [], Nothing)
 
 -- The records of the file, with the types, the functions and the main that were read (last first)
 fileFrom :: [[Token]] -> ([(Name, TypeDecl)], [Function], Maybe Function) -> Result Program String

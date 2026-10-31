@@ -1,5 +1,6 @@
 module Pipeline
     ( parseSource
+    , validatedSource
     , compileSource
     , ownedSource
     , nativeProgram
@@ -133,6 +134,16 @@ assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
     commas = foldr1' (\a b -> a ++ ", " ++ b)
     foldr1' _ [] = ""
     foldr1' f xs = foldr1 f xs
+
+-- The MIR of a program that passes every check, before its ghosts are erased: what the eraser written in Tersus
+-- (examples/mir_erase.tersus) is given, as `tersus mir --ghost-data` writes it
+validatedSource :: String -> Result M.Program String
+validatedSource source =
+    parseSourceWith True source `bindResult` \stmts ->
+        stage "Validation failed: " (elaborate stmts) `bindResult` \elaborated ->
+            stage "Lowering failed: " (lowerElaborated elaborated) `bindResult` \program ->
+                stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
+                    Ok program
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String

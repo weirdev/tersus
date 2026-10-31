@@ -1,0 +1,2498 @@
+// The ghosts of a program, erased by a program in Tersus: what MirGhost does in Haskell, written here so that the Haskell can go.
+// It reads the MIR as data before its ghosts are erased (`tersus mir --ghost-data`, version 2 of the data in MirData: the types
+// include `block T` and `uninit T`, and the statements include `ghost` and `dissolve L`), takes the permissions and the rest of
+// the validator's part out (MirGhost.eraseGhosts), makes each `Uninit<T>` a `T` (MirGhost.withoutUninit), refuses the
+// `Block::cast`s whose slots are not the same size, and writes the program as version 1 of the data, as `tersus mir --data` writes it.
+//
+//     tersus mir --ghost-data examples/addresses.tersus | tersus run examples/mir_erase.tersus | tersus run examples/emit.tersus
+//
+// A permission (`Block<T>`) is a ghost value: the validator has it, and the program that runs does not. A local, a parameter or a
+// result that is one (or a struct made only of them) is gone, and so is what gives one a value; a permission given to an operation
+// or a call is not given; an operation that runs and gives one after (Addr::write and its kin) gives 0 to a local of its own; and a
+// value taken apart (a `dissolve`) is the clearing of its bytes. The contracts and specifications of a function are not in the
+// data: the erasure only scrubs them, and nothing that is written keeps them.
+//
+// The reader below is the reader of examples/mir_reader.tersus with the records of version 2 added (the types `block`,
+// `uninit` and `mutref`, the statements `ghost`, `dissolve` and `assignref`, the reference rvalues `borrow`, `borrowmut`
+// and `deref`, and the eight block operations in the table of the list operations).
+
+// ---- the reader: the text up to the line 'end of the reader' is the same in examples/emit.tersus (a program is one file; TestMirEmit checks that it is) ----
+
+struct Token { quoted: Bool, text: String };
+
+impl Clone for Token { };
+
+struct Parsed<T> { value: T, pos: Int, ok: Bool };
+
+impl<T> Clone for Parsed<T> { };
+
+enum Size { SConst { n: Int }, SAny, SParam { name: String }, SVar { n: Int } };
+
+impl Clone for Size { };
+
+enum Type {
+    TInt,
+    TByte,
+    TBool,
+    TList { elem: Box<Type> },
+    TArray { elem: Box<Type>, size: Size },
+    TBox { inner: Box<Type> },
+    TFn { args: List<Type>, ret: Box<Type> },
+    TNamed { name: String },
+    TVariant { name: String },
+    TVar { n: Int },
+    TForall { sizes: List<String>, types: List<String>, body: Box<Type> },
+    TParam { name: String },
+    TRef { inner: Box<Type> },
+    TMutRef { inner: Box<Type> },
+    TAddr { inner: Box<Type> },
+    TBlock { inner: Box<Type> },
+    TUninit { inner: Box<Type> },
+    TWord { signed: Bool, bits: Int },
+};
+
+impl Clone for Type { };
+
+struct Field { name: String, ty: Type };
+
+impl Clone for Field { };
+
+struct Variant { name: String, fields: List<Field> };
+
+impl Clone for Variant { };
+
+enum TypeDecl { DStruct { name: String, fields: List<Field> }, DEnum { name: String, variants: List<Variant> } };
+
+impl Clone for TypeDecl { };
+
+enum Constant {
+    CInt { n: Int },
+    CBool { b: Bool },
+    CList { items: List<Constant> },
+    CArray { items: List<Constant> },
+    CData { name: String, fields: List<String>, values: List<Constant> },
+    CFn { name: String },
+};
+
+impl Clone for Constant { };
+
+enum Operand { Copy { local: Int }, Move { local: Int }, Const { value: Constant } };
+
+impl Clone for Operand { };
+
+enum RefStep { RefField { ctor: String, field: String }, RefIndex { o: Operand } };
+
+impl Clone for RefStep { };
+
+enum Rvalue {
+    Use { o: Operand },
+    BinaryOp { op: Int, a: Operand, b: Operand },
+    ListOp { op: Int, args: List<Operand> },
+    MakeList { items: List<Operand> },
+    MakeBox { o: Operand },
+    Unbox { o: Operand },
+    Unsize { o: Operand },
+    MakeData { name: String, fields: List<String>, values: List<Operand> },
+    ReadField { o: Operand, name: String, field: String },
+    IsVariant { o: Operand, name: String },
+    AsVariant { o: Operand, name: String },
+    Clone { o: Operand },
+    TakeField { local: Int, name: String, field: String },
+    Borrow { root: Int, steps: List<RefStep>, mutable: Bool },
+    Deref { o: Operand },
+};
+
+impl Clone for Rvalue { };
+
+enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, Ghost, Dissolve { local: Int }, AssignRef { root: Int, steps: List<RefStep>, rv: Rvalue } };
+
+impl Clone for Statement { };
+
+enum Terminator {
+    Goto { block: Int },
+    Switch { cond: Operand, yes: Int, no: Int },
+    Call { callee: Operand, args: List<Operand>, dest: Int, next: Int },
+    Return,
+    Unreachable,
+};
+
+impl Clone for Terminator { };
+
+struct MirBlock { id: Int, stmts: List<Statement>, term: Terminator };
+
+impl Clone for MirBlock { };
+
+struct LocalDecl { id: Int, named: Bool, name: String, ty: Type };
+
+impl Clone for LocalDecl { };
+
+struct Function {
+    name: String,
+    params: List<Int>,
+    hasReturn: Bool,
+    returns: Type,
+    sizeParams: List<String>,
+    typeParams: List<String>,
+    borrowed: List<Int>,
+    locals: List<LocalDecl>,
+    blocks: List<MirBlock>,
+};
+
+impl Clone for Function { };
+
+struct Program { types: List<TypeDecl>, functions: List<Function>, entry: Function };
+
+impl Clone for Program { };
+
+// The words of the binary operations and of the list operations, whose index is the operation
+fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
+    w = push([], "add");
+    w = push(w, "sub");
+    w = push(w, "mul");
+    w = push(w, "div");
+    w = push(w, "mod");
+    w = push(w, "eq");
+    w = push(w, "noteq");
+    w = push(w, "lt");
+    w = push(w, "lteq");
+    w = push(w, "gt");
+    w = push(w, "gteq");
+    return w;
+};
+
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 53; }] {
+    w = push([], "length");
+    w = push(w, "first");
+    w = push(w, "last");
+    w = push(w, "get");
+    w = push(w, "push");
+    w = push(w, "pop");
+    w = push(w, "set");
+    w = push(w, "newArray");
+    w = push(w, "newBoxed");
+    w = push(w, "newEmptyBoxed");
+    w = push(w, "writeByte");
+    w = push(w, "writeError");
+    w = push(w, "readByte");
+    w = push(w, "argCount");
+    w = push(w, "argByte");
+    w = push(w, "pathByte");
+    w = push(w, "fileLoad");
+    w = push(w, "fileByte");
+    w = push(w, "storeByte");
+    w = push(w, "fileStore");
+    w = push(w, "toByte");
+    w = push(w, "fromByte");
+    w = push(w, "addrNull");
+    w = push(w, "addrOffset");
+    w = push(w, "addrCast");
+    w = push(w, "addrToInt");
+    w = push(w, "addrFromInt");
+    w = push(w, "addrAlloc");
+    w = push(w, "addrGet");
+    w = push(w, "addrWrite");
+    w = push(w, "addrTake");
+    w = push(w, "addrDropValue");
+    w = push(w, "addrDropRange");
+    w = push(w, "addrResize");
+    w = push(w, "addrFree");
+    w = push(w, "blockNew");
+    w = push(w, "blockTaken");
+    w = push(w, "blockResized");
+    w = push(w, "blockSplitLo");
+    w = push(w, "blockSplitHi");
+    w = push(w, "blockJoin");
+    w = push(w, "blockAssume");
+    w = push(w, "blockCast");
+    w = push(w, "narrowI8");
+    w = push(w, "narrowI16");
+    w = push(w, "narrowI32");
+    w = push(w, "narrowU16");
+    w = push(w, "narrowU32");
+    w = push(w, "uninitEmpty");
+    w = push(w, "uninitNew");
+    w = push(w, "uninitGet");
+    w = push(w, "uninitTake");
+    w = push(w, "uninitDiscard");
+    return w;
+};
+
+// The index of a word in a table, or -1
+fn indexOf(table: &List<String>, word: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(table); }] {
+    i = 0;
+    while i < size(table) [{ affirm i >= 0; affirm i <= size(table); }] shrinks size(table) - i {
+        if get(table, i) = word { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The word at an index of a table (the empty string when there is none)
+fn wordOf(table: &List<String>, i: Int) -> String [{ }] [{ }] {
+    if i >= 0 && i < size(table) { return clone(get(table, i)); };
+    return "";
+};
+
+// What a parser gives when it could not read: the value it was given, which has no meaning, and the end of the line
+fn failed<T>(dummy: T, ts: &List<Token>) -> Parsed<T> [{ }] [{ affirm return.pos = size(ts); affirm return.ok = false; }] {
+    return Parsed<T> { value: dummy, pos: size(ts), ok: false };
+};
+
+fn done<T>(value: T, pos: Int) -> Parsed<T> [{ }] [{ affirm return.pos = pos; affirm return.ok = true; }] {
+    return Parsed<T> { value: value, pos: pos, ok: true };
+};
+
+fn noNames() -> List<String> [{ }] [{ }] {
+    return [];
+};
+
+fn noInts() -> List<Int> [{ }] [{ }] {
+    return [];
+};
+
+// (an empty list written as the argument of a generic function is a List<Int> in native code, whatever the result is used for: these give it its type)
+fn noFields() -> List<Field> [{ }] [{ }] {
+    return [];
+};
+
+fn noOperands() -> List<Operand> [{ }] [{ }] {
+    return [];
+};
+
+// Lines and tokens
+
+fn hexValue(c: Int) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return <= 15; }] {
+    if c >= 48 && c <= 57 { return c - 48; };
+    if c >= 65 && c <= 70 { return c - 55; };
+    return 0 - 1;
+};
+
+// The name that starts at the index `start` of a line, just after its opening quote: the bytes up to the closing quote, `\xHH` being the byte HH. The index
+// in the result is after the closing quote.
+fn quoted(line: &String, start: Int) -> Parsed<String> [{ affirm start >= 0; affirm start <= size(line.bytes); }] [{ affirm return.pos >= start; affirm return.pos <= size(line.bytes); }] {
+    bytes = [];
+    i = start;
+    while i < size(line.bytes) [{ affirm i >= start; affirm i <= size(line.bytes); }] shrinks size(line.bytes) - i {
+        c = toInt(get(line.bytes, i));
+        if c = 34 { return done(String { bytes: bytes }, i + 1); };
+        if c = 92 {
+            if i + 3 >= size(line.bytes) { return Parsed<String> { value: "", pos: size(line.bytes), ok: false }; };
+            h = hexValue(toInt(get(line.bytes, i + 2)));
+            l = hexValue(toInt(get(line.bytes, i + 3)));
+            if get(line.bytes, i + 1) != toByte(120) || h < 0 || l < 0 { return Parsed<String> { value: "", pos: size(line.bytes), ok: false }; };
+            bytes = push(bytes, toByte(16 * h + l));
+            i = i + 4;
+        } else {
+            bytes = push(bytes, toByte(c));
+            i = i + 1;
+        };
+    };
+    return Parsed<String> { value: "", pos: size(line.bytes), ok: false };
+};
+
+// The tokens of a line: words and names in quotes, separated by spaces
+fn tokenize(line: &String) -> Parsed<List<Token>> [{ }] [{ }] {
+    tokens = [];
+    i = 0;
+    while i < size(line.bytes) [{ affirm i >= 0; affirm i <= size(line.bytes); }] shrinks size(line.bytes) - i {
+        c = toInt(get(line.bytes, i));
+        if c = 32 {
+            i = i + 1;
+        } else {
+            if c = 34 {
+                q = quoted(line, i + 1);
+                if !q.ok { return Parsed<List<Token>> { value: [], pos: 0, ok: false }; };
+                tokens = push(tokens, Token { quoted: true, text: q.value });
+                i = q.pos;
+            } else {
+                // a word runs to the next space
+                j = i + 1;
+                while j < size(line.bytes) && get(line.bytes, j) != toByte(32) [{ affirm j >= i + 1; affirm j <= size(line.bytes); }] shrinks size(line.bytes) - j {
+                    j = j + 1;
+                };
+                tokens = push(tokens, Token { quoted: false, text: line.slice(i, j) });
+                i = j;
+            };
+        };
+    };
+    return Parsed<List<Token>> { value: tokens, pos: size(line.bytes), ok: true };
+};
+
+// Numbers, words and names of a line. The first four read one token at an index that is in the line, and give the index after it.
+
+// The Int that a word is: an optional minus and digits, the least Int too
+fn parseInt(text: &String) -> Parsed<Int> [{ }] [{ }] {
+    n = size(text.bytes);
+    negative = n > 0 && get(text.bytes, 0) = toByte(45);
+    i = 0;
+    if negative { i = 1; };
+    if i >= n { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+    // the digits are accumulated as a negative number, since the least Int has no positive
+    acc = 0;
+    while i < n [{ affirm i >= 0; affirm i <= n; affirm acc <= 0; }] shrinks n - i {
+        c = toInt(get(text.bytes, i));
+        d = c - 48;
+        if d < 0 || d > 9 { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+        if acc < 0 - 922337203685477580 || (acc = 0 - 922337203685477580 && d > 8) { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+        acc = acc * 10 - d;
+        i = i + 1;
+    };
+    if negative { return Parsed<Int> { value: acc, pos: 0, ok: true }; };
+    if acc = 0 - 9223372036854775807 - 1 { return Parsed<Int> { value: 0, pos: 0, ok: false }; };
+    return Parsed<Int> { value: 0 - acc, pos: 0, ok: true };
+};
+
+fn wordAt(ts: &List<Token>, pos: Int) -> Parsed<String> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
+    t = get(ts, pos);
+    if t.quoted { return Parsed<String> { value: "", pos: pos + 1, ok: false }; };
+    return done(clone(t.text), pos + 1);
+};
+
+fn nameAt(ts: &List<Token>, pos: Int) -> Parsed<String> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
+    t = get(ts, pos);
+    if !t.quoted { return Parsed<String> { value: "", pos: pos + 1, ok: false }; };
+    return done(clone(t.text), pos + 1);
+};
+
+fn intAt(ts: &List<Token>, pos: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; }] {
+    w = wordAt(ts, pos);
+    if !w.ok { return Parsed<Int> { value: 0, pos: pos + 1, ok: false }; };
+    n = parseInt(w.value);
+    return Parsed<Int> { value: n.value, pos: pos + 1, ok: n.ok };
+};
+
+// A number of things that follow: not negative, and no more than there are tokens in the line (so a loop over them ends)
+fn countAt(ts: &List<Token>, pos: Int) -> Parsed<Int> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos = pos + 1; affirm return.value >= 0; affirm return.value <= size(ts); }] {
+    n = intAt(ts, pos);
+    if !n.ok || n.value < 0 || n.value > size(ts) { return Parsed<Int> { value: 0, pos: pos + 1, ok: false }; };
+    return Parsed<Int> { value: n.value, pos: pos + 1, ok: true };
+};
+
+// The n names from an index (that may be the end of the line, when n is 0)
+fn namesAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<String>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    names = noNames();
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noNames(), ts); };
+        s = nameAt(ts, p);
+        if !s.ok { return failed(noNames(), ts); };
+        names = push(names, s.value);
+        p = s.pos;
+    };
+    return done(names, p);
+};
+
+fn intsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<Int>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    ints = noInts();
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noInts(), ts); };
+        v = intAt(ts, p);
+        if !v.ok { return failed(noInts(), ts); };
+        ints = push(ints, v.value);
+        p = v.pos;
+    };
+    return done(ints, p);
+};
+
+fn sizeAt(ts: &List<Token>, pos: Int) -> Parsed<Size> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(Size::SAny, ts);
+    w = wordAt(ts, pos);
+    if !w.ok { return bad; };
+    next = w.pos;
+    if w.value = "any" { return done(Size::SAny, next); };
+    if next >= size(ts) { return bad; };
+    if w.value = "c" || w.value = "v" {
+        n = intAt(ts, next);
+        if !n.ok { return bad; };
+        if w.value = "c" { return done(Size::SConst { n: n.value }, n.pos); };
+        return done(Size::SVar { n: n.value }, n.pos);
+    };
+    if w.value = "p" {
+        s = nameAt(ts, next);
+        if !s.ok { return bad; };
+        return done(Size::SParam { name: s.value }, s.pos);
+    };
+    return bad;
+};
+
+// A type. The words are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+// `forall N "n"... N "n"... T`, `param "n"`, `ref T` and `mutref T`.
+fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
+    bad = failed(Type::TInt, ts);
+    w = wordAt(ts, pos);
+    if !w.ok { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "int" { return done(Type::TInt, next); };
+    if kw = "byte" { return done(Type::TByte, next); };
+    if kw = "bool" { return done(Type::TBool, next); };
+    if kw = "i8" { return done(Type::TWord { signed: true, bits: 8 }, next); };
+    if kw = "i16" { return done(Type::TWord { signed: true, bits: 16 }, next); };
+    if kw = "i32" { return done(Type::TWord { signed: true, bits: 32 }, next); };
+    if kw = "u16" { return done(Type::TWord { signed: false, bits: 16 }, next); };
+    if kw = "u32" { return done(Type::TWord { signed: false, bits: 32 }, next); };
+    if next >= size(ts) { return bad; };
+    if kw = "list" || kw = "box" || kw = "ref" || kw = "mutref" || kw = "addr" || kw = "block" || kw = "uninit" {
+        e = typeAt(ts, next);
+        if !e.ok { return bad; };
+        if kw = "addr" { return done(Type::TAddr { inner: Box::new(e.value) }, e.pos); };
+        if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
+        if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
+        if kw = "block" { return done(Type::TBlock { inner: Box::new(e.value) }, e.pos); };
+        if kw = "uninit" { return done(Type::TUninit { inner: Box::new(e.value) }, e.pos); };
+        if kw = "mutref" { return done(Type::TMutRef { inner: Box::new(e.value) }, e.pos); };
+        return done(Type::TRef { inner: Box::new(e.value) }, e.pos);
+    };
+    if kw = "array" {
+        e = typeAt(ts, next);
+        if !e.ok || e.pos >= size(ts) { return bad; };
+        s = sizeAt(ts, e.pos);
+        if !s.ok { return bad; };
+        return done(Type::TArray { elem: Box::new(e.value), size: s.value }, s.pos);
+    };
+    if kw = "named" || kw = "variant" || kw = "param" {
+        s = nameAt(ts, next);
+        if !s.ok { return bad; };
+        if kw = "named" { return done(Type::TNamed { name: s.value }, s.pos); };
+        if kw = "variant" { return done(Type::TVariant { name: s.value }, s.pos); };
+        return done(Type::TParam { name: s.value }, s.pos);
+    };
+    if kw = "var" {
+        n = intAt(ts, next);
+        if !n.ok { return bad; };
+        return done(Type::TVar { n: n.value }, n.pos);
+    };
+    if kw = "fn" {
+        c = countAt(ts, next);
+        if !c.ok { return bad; };
+        args = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            a = typeAt(ts, p);
+            if !a.ok { return bad; };
+            args = push(args, a.value);
+            p = a.pos;
+        };
+        if p >= size(ts) { return bad; };
+        r = typeAt(ts, p);
+        if !r.ok { return bad; };
+        return done(Type::TFn { args: args, ret: Box::new(r.value) }, r.pos);
+    };
+    if kw = "forall" {
+        c1 = countAt(ts, next);
+        if !c1.ok { return bad; };
+        sizes = namesAt(ts, c1.pos, c1.value);
+        if !sizes.ok || sizes.pos >= size(ts) { return bad; };
+        c2 = countAt(ts, sizes.pos);
+        if !c2.ok { return bad; };
+        types = namesAt(ts, c2.pos, c2.value);
+        if !types.ok || types.pos >= size(ts) { return bad; };
+        body = typeAt(ts, types.pos);
+        if !body.ok { return bad; };
+        return done(Type::TForall { sizes: sizes.value, types: types.value, body: Box::new(body.value) }, body.pos);
+    };
+    return bad;
+};
+
+// Constants, operands and rvalues. A constant is `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`; an operand `copy L`, `move L`
+// or `const C`.
+
+fn noConstant() -> Constant [{ }] [{ }] {
+    return Constant::CInt { n: 0 };
+};
+
+fn noOperand() -> Operand [{ }] [{ }] {
+    return Operand::Move { local: 0 };
+};
+
+fn constantAt(ts: &List<Token>, pos: Int) -> Parsed<Constant> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
+    bad = failed(noConstant(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "int" {
+        n = intAt(ts, next);
+        if !n.ok { return bad; };
+        return done(Constant::CInt { n: n.value }, n.pos);
+    };
+    if kw = "bool" {
+        b = wordAt(ts, next);
+        if !b.ok { return bad; };
+        if b.value = "true" { return done(Constant::CBool { b: true }, b.pos); };
+        if b.value = "false" { return done(Constant::CBool { b: false }, b.pos); };
+        return bad;
+    };
+    if kw = "fn" {
+        s = nameAt(ts, next);
+        if !s.ok { return bad; };
+        return done(Constant::CFn { name: s.value }, s.pos);
+    };
+    if kw = "list" || kw = "array" {
+        c = countAt(ts, next);
+        if !c.ok { return bad; };
+        items = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            item = constantAt(ts, p);
+            if !item.ok { return bad; };
+            items = push(items, item.value);
+            p = item.pos;
+        };
+        if kw = "list" { return done(Constant::CList { items: items }, p); };
+        return done(Constant::CArray { items: items }, p);
+    };
+    if kw = "data" {
+        s = nameAt(ts, next);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        c = countAt(ts, s.pos);
+        if !c.ok { return bad; };
+        names = noNames();
+        values = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            f = nameAt(ts, p);
+            if !f.ok || f.pos >= size(ts) { return bad; };
+            v = constantAt(ts, f.pos);
+            if !v.ok { return bad; };
+            names = push(names, f.value);
+            values = push(values, v.value);
+            p = v.pos;
+        };
+        return done(Constant::CData { name: s.value, fields: names, values: values }, p);
+    };
+    return bad;
+};
+
+fn operandAt(ts: &List<Token>, pos: Int) -> Parsed<Operand> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(noOperand(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    if w.value = "const" {
+        c = constantAt(ts, w.pos);
+        if !c.ok { return bad; };
+        return done(Operand::Const { value: c.value }, c.pos);
+    };
+    if w.value = "copy" || w.value = "move" {
+        l = intAt(ts, w.pos);
+        if !l.ok { return bad; };
+        if w.value = "copy" { return done(Operand::Copy { local: l.value }, l.pos); };
+        return done(Operand::Move { local: l.value }, l.pos);
+    };
+    return bad;
+};
+
+fn operandsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<Operand>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    items = [];
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noOperands(), ts); };
+        o = operandAt(ts, p);
+        if !o.ok { return failed(noOperands(), ts); };
+        items = push(items, o.value);
+        p = o.pos;
+    };
+    return done(items, p);
+};
+
+fn noRefStep() -> RefStep [{ }] [{ }] {
+    return RefStep::RefField { ctor: "", field: "" };
+};
+
+fn noRefSteps() -> List<RefStep> [{ }] [{ }] {
+    return [];
+};
+
+fn refStepAt(ts: &List<Token>, pos: Int) -> Parsed<RefStep> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(noRefStep(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    next = w.pos;
+    if w.value = "index" {
+        o = operandAt(ts, next);
+        if !o.ok { return bad; };
+        return done(RefStep::RefIndex { o: o.value }, o.pos);
+    };
+    if w.value = "field" {
+        s = nameAt(ts, next);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        f = nameAt(ts, s.pos);
+        if !f.ok { return bad; };
+        return done(RefStep::RefField { ctor: s.value, field: f.value }, f.pos);
+    };
+    return bad;
+};
+
+fn refStepsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<RefStep>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    items = [];
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noRefSteps(), ts); };
+        o = refStepAt(ts, p);
+        if !o.ok { return failed(noRefSteps(), ts); };
+        items = push(items, o.value);
+        p = o.pos;
+    };
+    return done(items, p);
+};
+
+fn noRvalue() -> Rvalue [{ }] [{ }] {
+    return Rvalue::Use { o: noOperand() };
+};
+
+// `use O`, `binary OP O O`, `listop OP N O...`, `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`,
+// `isvariant O "n"`, `asvariant O "n"`, `clone O`, `takefield L "n" "f"`, `borrow L N STEP...`, `borrowmut L N STEP...` and `deref O`
+fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(noRvalue(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "use" || kw = "makebox" || kw = "unbox" || kw = "unsize" || kw = "clone" || kw = "deref" {
+        o = operandAt(ts, next);
+        if !o.ok { return bad; };
+        if kw = "use" { return done(Rvalue::Use { o: o.value }, o.pos); };
+        if kw = "makebox" { return done(Rvalue::MakeBox { o: o.value }, o.pos); };
+        if kw = "unbox" { return done(Rvalue::Unbox { o: o.value }, o.pos); };
+        if kw = "unsize" { return done(Rvalue::Unsize { o: o.value }, o.pos); };
+        if kw = "deref" { return done(Rvalue::Deref { o: o.value }, o.pos); };
+        return done(Rvalue::Clone { o: o.value }, o.pos);
+    };
+    if kw = "binary" {
+        op = wordAt(ts, next);
+        if !op.ok || op.pos >= size(ts) { return bad; };
+        code = indexOf(binaryWords(), op.value);
+        a = operandAt(ts, op.pos);
+        if code < 0 || !a.ok || a.pos >= size(ts) { return bad; };
+        b = operandAt(ts, a.pos);
+        if !b.ok { return bad; };
+        return done(Rvalue::BinaryOp { op: code, a: a.value, b: b.value }, b.pos);
+    };
+    if kw = "listop" {
+        op = wordAt(ts, next);
+        if !op.ok || op.pos >= size(ts) { return bad; };
+        code = indexOf(listWords(), op.value);
+        c = countAt(ts, op.pos);
+        if code < 0 || !c.ok { return bad; };
+        args = operandsAt(ts, c.pos, c.value);
+        if !args.ok { return bad; };
+        return done(Rvalue::ListOp { op: code, args: args.value }, args.pos);
+    };
+    if kw = "makelist" {
+        c = countAt(ts, next);
+        if !c.ok { return bad; };
+        items = operandsAt(ts, c.pos, c.value);
+        if !items.ok { return bad; };
+        return done(Rvalue::MakeList { items: items.value }, items.pos);
+    };
+    if kw = "makedata" {
+        s = nameAt(ts, next);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        c = countAt(ts, s.pos);
+        if !c.ok { return bad; };
+        names = noNames();
+        values = [];
+        p = c.pos;
+        count = c.value;
+        for i in 0..count [{ affirm p >= pos + 1; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            f = nameAt(ts, p);
+            if !f.ok || f.pos >= size(ts) { return bad; };
+            v = operandAt(ts, f.pos);
+            if !v.ok { return bad; };
+            names = push(names, f.value);
+            values = push(values, v.value);
+            p = v.pos;
+        };
+        return done(Rvalue::MakeData { name: s.value, fields: names, values: values }, p);
+    };
+    if kw = "readfield" {
+        o = operandAt(ts, next);
+        if !o.ok || o.pos >= size(ts) { return bad; };
+        s = nameAt(ts, o.pos);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        f = nameAt(ts, s.pos);
+        if !f.ok { return bad; };
+        return done(Rvalue::ReadField { o: o.value, name: s.value, field: f.value }, f.pos);
+    };
+    if kw = "isvariant" || kw = "asvariant" {
+        o = operandAt(ts, next);
+        if !o.ok || o.pos >= size(ts) { return bad; };
+        s = nameAt(ts, o.pos);
+        if !s.ok { return bad; };
+        if kw = "isvariant" { return done(Rvalue::IsVariant { o: o.value, name: s.value }, s.pos); };
+        return done(Rvalue::AsVariant { o: o.value, name: s.value }, s.pos);
+    };
+    if kw = "takefield" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        s = nameAt(ts, l.pos);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        f = nameAt(ts, s.pos);
+        if !f.ok { return bad; };
+        return done(Rvalue::TakeField { local: l.value, name: s.value, field: f.value }, f.pos);
+    };
+    if kw = "borrow" || kw = "borrowmut" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        c = countAt(ts, l.pos);
+        if !c.ok { return bad; };
+        steps = refStepsAt(ts, c.pos, c.value);
+        if !steps.ok { return bad; };
+        return done(Rvalue::Borrow { root: l.value, steps: steps.value, mutable: kw = "borrowmut" }, steps.pos);
+    };
+    return bad;
+};
+
+// A line of a block: a statement (`assign L RVALUE`, `peek L RVALUE`, `drop L`, `assignref L N STEP... RVALUE`) or the terminator that ends the block (`goto B`, `switch O B B`,
+// `call O N O... L B`, `return`, `unreachable`)
+enum Line { LStatement { s: Statement }, LTerminator { t: Terminator } };
+
+impl Clone for Line { };
+
+fn noLine() -> Line [{ }] [{ }] {
+    return Line::LTerminator { t: Terminator::Unreachable };
+};
+
+fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(noLine(), ts);
+    w = wordAt(ts, pos);
+    if !w.ok { return bad; };
+    next = w.pos;
+    kw = w.value;
+    if kw = "return" { return done(Line::LTerminator { t: Terminator::Return }, next); };
+    if kw = "unreachable" { return done(Line::LTerminator { t: Terminator::Unreachable }, next); };
+    if kw = "ghost" { return done(Line::LStatement { s: Statement::Ghost }, next); };
+    if next >= size(ts) { return bad; };
+    if kw = "assign" || kw = "peek" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        rv = rvalueAt(ts, l.pos);
+        if !rv.ok { return bad; };
+        if kw = "assign" { return done(Line::LStatement { s: Statement::Assign { local: l.value, rv: rv.value } }, rv.pos); };
+        return done(Line::LStatement { s: Statement::Peek { local: l.value, rv: rv.value } }, rv.pos);
+    };
+    if kw = "drop" {
+        l = intAt(ts, next);
+        if !l.ok { return bad; };
+        return done(Line::LStatement { s: Statement::Drop { local: l.value } }, l.pos);
+    };
+    if kw = "dissolve" {
+        l = intAt(ts, next);
+        if !l.ok { return bad; };
+        return done(Line::LStatement { s: Statement::Dissolve { local: l.value } }, l.pos);
+    };
+    if kw = "assignref" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        c = countAt(ts, l.pos);
+        if !c.ok { return bad; };
+        steps = refStepsAt(ts, c.pos, c.value);
+        if !steps.ok || steps.pos >= size(ts) { return bad; };
+        rv = rvalueAt(ts, steps.pos);
+        if !rv.ok { return bad; };
+        return done(Line::LStatement { s: Statement::AssignRef { root: l.value, steps: steps.value, rv: rv.value } }, rv.pos);
+    };
+    if kw = "goto" {
+        b = intAt(ts, next);
+        if !b.ok { return bad; };
+        return done(Line::LTerminator { t: Terminator::Goto { block: b.value } }, b.pos);
+    };
+    if kw = "switch" {
+        o = operandAt(ts, next);
+        if !o.ok || o.pos >= size(ts) { return bad; };
+        yes = intAt(ts, o.pos);
+        if !yes.ok || yes.pos >= size(ts) { return bad; };
+        no = intAt(ts, yes.pos);
+        if !no.ok { return bad; };
+        return done(Line::LTerminator { t: Terminator::Switch { cond: o.value, yes: yes.value, no: no.value } }, no.pos);
+    };
+    if kw = "call" {
+        callee = operandAt(ts, next);
+        if !callee.ok || callee.pos >= size(ts) { return bad; };
+        c = countAt(ts, callee.pos);
+        if !c.ok { return bad; };
+        args = operandsAt(ts, c.pos, c.value);
+        if !args.ok || args.pos >= size(ts) { return bad; };
+        dest = intAt(ts, args.pos);
+        if !dest.ok || dest.pos >= size(ts) { return bad; };
+        after = intAt(ts, dest.pos);
+        if !after.ok { return bad; };
+        return done(Line::LTerminator { t: Terminator::Call { callee: callee.value, args: args.value, dest: dest.value, next: after.value } }, after.pos);
+    };
+    return bad;
+};
+
+// Records. A type declaration is `struct "n" N ("f" T)...` or `enum "n" N ("v" N ("f" T)...)...`, a function starts with `function "n" params N L... returns none|some T
+// sizeparams N "n"... typeparams N "n"... borrowed N L...` (`main` for the entry point), then `local L none|some "n" T` for each local, `block B`, its statements and its terminator
+// for each block, and `end`.
+
+// Whether the token at an index is the word w
+fn isWord(ts: &List<Token>, pos: Int, w: &String) -> Bool [{ }] [{ }] {
+    if pos < 0 || pos >= size(ts) { return false; };
+    t = get(ts, pos);
+    return !t.quoted && t.text = w;
+};
+
+// The word that a record starts with (the empty string when there is none)
+fn keywordOf(ts: &List<Token>) -> String [{ }] [{ }] {
+    if size(ts) > 0 {
+        t = get(ts, 0);
+        if !t.quoted { return clone(t.text); };
+    };
+    return "";
+};
+
+fn fieldsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<Field>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    fields = [];
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noFields(), ts); };
+        f = nameAt(ts, p);
+        if !f.ok || f.pos >= size(ts) { return failed(noFields(), ts); };
+        t = typeAt(ts, f.pos);
+        if !t.ok { return failed(noFields(), ts); };
+        fields = push(fields, Field { name: f.value, ty: t.value });
+        p = t.pos;
+    };
+    return done(fields, p);
+};
+
+fn noDecl() -> TypeDecl [{ }] [{ }] {
+    return TypeDecl::DStruct { name: "", fields: [] };
+};
+
+// A struct or an enum, from a whole line
+fn declAt(ts: &List<Token>) -> Parsed<TypeDecl> [{ }] [{ }] {
+    bad = failed(noDecl(), ts);
+    if size(ts) < 3 { return bad; };
+    name = nameAt(ts, 1);
+    if !name.ok { return bad; };
+    c = countAt(ts, 2);
+    if !c.ok { return bad; };
+    if isWord(ts, 0, "struct") {
+        fields = fieldsAt(ts, 3, c.value);
+        if !fields.ok || fields.pos != size(ts) { return bad; };
+        return done(TypeDecl::DStruct { name: name.value, fields: fields.value }, fields.pos);
+    };
+    if isWord(ts, 0, "enum") {
+        variants = [];
+        p = 3;
+        count = c.value;
+        for i in 0..count [{ affirm p >= 3; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            v = nameAt(ts, p);
+            if !v.ok || v.pos >= size(ts) { return bad; };
+            n = countAt(ts, v.pos);
+            if !n.ok { return bad; };
+            fields = fieldsAt(ts, n.pos, n.value);
+            if !fields.ok { return bad; };
+            variants = push(variants, Variant { name: v.value, fields: fields.value });
+            p = fields.pos;
+        };
+        if p != size(ts) { return bad; };
+        return done(TypeDecl::DEnum { name: name.value, variants: variants }, p);
+    };
+    return bad;
+};
+
+fn noFunction() -> Function [{ }] [{ }] {
+    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], locals: [], blocks: [] };
+};
+
+// The header of a function, from a whole line (the locals and the blocks are filled in by the caller)
+fn headerAt(ts: &List<Token>) -> Parsed<Function> [{ }] [{ }] {
+    bad = failed(noFunction(), ts);
+    if size(ts) < 3 { return bad; };
+    name = nameAt(ts, 1);
+    if !name.ok || !isWord(ts, 2, "params") || 3 >= size(ts) { return bad; };
+    np = countAt(ts, 3);
+    if !np.ok { return bad; };
+    params = intsAt(ts, np.pos, np.value);
+    if !params.ok || !isWord(ts, params.pos, "returns") || params.pos + 1 >= size(ts) { return bad; };
+    hasReturn = isWord(ts, params.pos + 1, "some");
+    p = params.pos + 2;
+    returns = Type::TInt;
+    if hasReturn {
+        if p >= size(ts) { return bad; };
+        t = typeAt(ts, p);
+        if !t.ok { return bad; };
+        returns = t.value;
+        p = t.pos;
+        affirm p >= 0;
+    } else {
+        if !isWord(ts, params.pos + 1, "none") { return bad; };
+        affirm p >= 0;
+    };
+    if !isWord(ts, p, "sizeparams") || p + 1 >= size(ts) { return bad; };
+    ns = countAt(ts, p + 1);
+    if !ns.ok { return bad; };
+    sizeParams = namesAt(ts, ns.pos, ns.value);
+    if !sizeParams.ok || !isWord(ts, sizeParams.pos, "typeparams") || sizeParams.pos + 1 >= size(ts) { return bad; };
+    nt = countAt(ts, sizeParams.pos + 1);
+    if !nt.ok { return bad; };
+    typeParams = namesAt(ts, nt.pos, nt.value);
+    if !typeParams.ok || !isWord(ts, typeParams.pos, "borrowed") || typeParams.pos + 1 >= size(ts) { return bad; };
+    nb = countAt(ts, typeParams.pos + 1);
+    if !nb.ok { return bad; };
+    borrowed = intsAt(ts, nb.pos, nb.value);
+    if !borrowed.ok || borrowed.pos != size(ts) { return bad; };
+    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, locals: [], blocks: [] }, borrowed.pos);
+};
+
+fn noLocalDecl() -> LocalDecl [{ }] [{ }] {
+    return LocalDecl { id: 0, named: false, name: "", ty: Type::TInt };
+};
+
+// `local L none T` or `local L some "n" T`, from a whole line
+fn localDeclAt(ts: &List<Token>) -> Parsed<LocalDecl> [{ }] [{ }] {
+    bad = failed(noLocalDecl(), ts);
+    if size(ts) < 4 { return bad; };
+    l = intAt(ts, 1);
+    w = wordAt(ts, 2);
+    if !l.ok || !w.ok { return bad; };
+    named = w.value = "some";
+    name = "";
+    p = 3;
+    if named {
+        n = nameAt(ts, 3);
+        if !n.ok || n.pos >= size(ts) { return bad; };
+        name = n.value;
+        p = n.pos;
+        affirm p >= 0;
+        affirm p < size(ts);
+    } else {
+        if w.value != "none" { return bad; };
+        affirm p >= 0;
+        affirm p < size(ts);
+    };
+    t = typeAt(ts, p);
+    if !t.ok || t.pos != size(ts) { return bad; };
+    return done(LocalDecl { id: l.value, named: named, name: name, ty: t.value }, t.pos);
+};
+
+fn noBlock() -> MirBlock [{ }] [{ }] {
+    return MirBlock { id: 0, stmts: [], term: Terminator::Unreachable };
+};
+
+// The block that starts at the line li (`block B`): its statements and the terminator that ends it. The index in the result is the line after the terminator.
+fn blockAt(lines: &List<List<Token>>, li: Int) -> Parsed<MirBlock> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
+    bad = Parsed<MirBlock> { value: noBlock(), pos: size(lines), ok: false };
+    head = get(lines, li);
+    if size(head) != 2 { return bad; };
+    id = intAt(head, 1);
+    if !id.ok { return bad; };
+    stmts = [];
+    j = li + 1;
+    while j < size(lines) [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        ts = get(lines, j);
+        if size(ts) = 0 { return bad; };
+        l = lineAt(ts, 0);
+        if !l.ok || l.pos != size(ts) { return bad; };
+        match l.value {
+            Line::LStatement { s: st } => {
+                stmts = push(stmts, st);
+                j = j + 1;
+            },
+            Line::LTerminator { t: term } => {
+                return done(MirBlock { id: id.value, stmts: stmts, term: term }, j + 1);
+            },
+        };
+    };
+    return bad;
+};
+
+fn functionKeyword(lines: &List<List<Token>>, li: Int) -> String [{ }] [{ }] {
+    if li >= 0 && li < size(lines) { return keywordOf(get(lines, li)); };
+    return "";
+};
+
+// The function that starts at the line li, up to its `end` line. The index in the result is the line after that.
+fn functionAt(lines: &List<List<Token>>, li: Int) -> Parsed<Function> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
+    bad = Parsed<Function> { value: noFunction(), pos: size(lines), ok: false };
+    h = headerAt(get(lines, li));
+    if !h.ok { return bad; };
+    j = li + 1;
+    locals = [];
+    while j < size(lines) && functionKeyword(lines, j) = "local" [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        d = localDeclAt(get(lines, j));
+        if !d.ok { return bad; };
+        locals = push(locals, d.value);
+        j = j + 1;
+    };
+    blocks = [];
+    while j < size(lines) && functionKeyword(lines, j) = "block" [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        b = blockAt(lines, j);
+        if !b.ok { return bad; };
+        blocks = push(blocks, b.value);
+        j = b.pos;
+    };
+    if j >= size(lines) || functionKeyword(lines, j) != "end" || size(get(lines, j)) != 1 { return bad; };
+    return done(Function { locals: locals, blocks: blocks, ..h.value }, j + 1);
+};
+
+fn noProgram() -> Program [{ }] [{ }] {
+    return Program { types: [], functions: [], entry: noFunction() };
+};
+
+// The program in the lines of a file: `tersus-mir 2`, the types, the functions and `main`
+fn programAt(lines: &List<List<Token>>) -> Parsed<Program> [{ }] [{ }] {
+    bad = Parsed<Program> { value: noProgram(), pos: size(lines), ok: false };
+    if size(lines) < 1 { return bad; };
+    first = get(lines, 0);
+    if size(first) != 2 || !isWord(first, 0, "tersus-mir") || !isWord(first, 1, "2") { return bad; };
+    j = 1;
+    types = [];
+    while j < size(lines) && (functionKeyword(lines, j) = "struct" || functionKeyword(lines, j) = "enum") [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        d = declAt(get(lines, j));
+        if !d.ok { return bad; };
+        types = push(types, d.value);
+        j = j + 1;
+    };
+    functions = [];
+    while j < size(lines) && functionKeyword(lines, j) = "function" [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
+        f = functionAt(lines, j);
+        if !f.ok { return bad; };
+        functions = push(functions, f.value);
+        j = f.pos;
+    };
+    if j >= size(lines) || functionKeyword(lines, j) != "main" { return bad; };
+    m = functionAt(lines, j);
+    if !m.ok || m.pos != size(lines) { return bad; };
+    return done(Program { types: types, functions: functions, entry: m.value }, m.pos);
+};
+
+// The lines of the standard input, as tokens, up to the end of the input or the first empty line. A line not longer than lineLimit.
+fn lineLimit() -> Int [{ }] [{ affirm return >= 0; }] {
+    return 1000000;
+};
+
+fn readLines() -> Parsed<List<List<Token>>> [{ }] [{ }] {
+    lines = [];
+    n = 0;
+    while n < 10000000 [{ affirm n >= 0; affirm n <= 10000000; }] shrinks 10000000 - n {
+        line = String::readLine(lineLimit());
+        if size(line.bytes) = 0 { return done(lines, n); };
+        t = tokenize(line);
+        if !t.ok { return Parsed<List<List<Token>>> { value: [], pos: n, ok: false }; };
+        lines = push(lines, t.value);
+        n = n + 1;
+    };
+    return done(lines, n);
+};
+
+// ---- end of the reader ----
+
+// Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
+
+fn hexDigit(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
+    if d < 10 { return toByte(48 + d); };
+    return toByte(55 + d);
+};
+
+fn printInt(n: Int) -> Int [{ }] [{ }] {
+    return " ".print() + String::fromInt(n).print();
+};
+
+fn printWord(w: &String) -> Int [{ }] [{ }] {
+    return " ".print() + w.print();
+};
+
+// A name in quotes: the bytes that are printable ASCII as they are, and the others, `"` and `\` as `\xHH`
+fn printName(name: &String) -> Int [{ }] [{ }] {
+    n = " \"".print();
+    for i in 0..size(name.bytes) {
+        c = toInt(get(name.bytes, i));
+        if c >= 32 && c < 127 && c != 34 && c != 92 {
+            writeByte(toByte(c));
+            n = n + 1;
+        } else {
+            writeByte(toByte(92));
+            writeByte(toByte(120));
+            writeByte(hexDigit(c / 16));
+            writeByte(hexDigit(c % 16));
+            n = n + 4;
+        };
+    };
+    writeByte(toByte(34));
+    return n + 1;
+};
+
+fn printNames(names: &List<String>) -> Int [{ }] [{ }] {
+    n = printInt(size(names));
+    for name in names {
+        n = n + printName(name);
+    };
+    return n;
+};
+
+fn printInts(ints: &List<Int>) -> Int [{ }] [{ }] {
+    n = printInt(size(ints));
+    for v in ints {
+        n = n + printInt(v);
+    };
+    return n;
+};
+
+fn newLine() -> Int [{ }] [{ }] {
+    writeByte(toByte(10));
+    return 1;
+};
+
+fn printSize(s: &Size) -> Int [{ }] [{ }] {
+    return match s {
+        Size::SConst { n: n } => " c".print() + printInt(n),
+        Size::SAny => " any".print(),
+        Size::SParam { name: name } => " p".print() + printName(name),
+        Size::SVar { n: n } => " v".print() + printInt(n),
+    };
+};
+
+fn printType(t: &Type) -> Int ~ {
+    n = 0;
+    match t {
+        Type::TInt => { n = " int".print(); },
+        Type::TByte => { n = " byte".print(); },
+        Type::TBool => { n = " bool".print(); },
+        Type::TList { elem: e } => { n = " list".print() + printType(Box::unbox(e)); },
+        Type::TArray { elem: e, size: s } => { n = " array".print() + printType(Box::unbox(e)) + printSize(s); },
+        Type::TBox { inner: e } => { n = " box".print() + printType(Box::unbox(e)); },
+        Type::TFn { args: args, ret: r } => {
+            n = " fn".print() + printInt(size(args));
+            i = 0;
+            while i < size(args) [{ affirm i >= 0; affirm i <= size(args); }] ~ {
+                n = n + printType(get(args, i));
+                i = i + 1;
+            };
+            n = n + printType(Box::unbox(r));
+        },
+        Type::TNamed { name: name } => { n = " named".print() + printName(name); },
+        Type::TVariant { name: name } => { n = " variant".print() + printName(name); },
+        Type::TVar { n: v } => { n = " var".print() + printInt(v); },
+        Type::TForall { sizes: sizes, types: types, body: body } => {
+            n = " forall".print() + printNames(sizes) + printNames(types) + printType(Box::unbox(body));
+        },
+        Type::TParam { name: name } => { n = " param".print() + printName(name); },
+        Type::TRef { inner: e } => { n = " ref".print() + printType(Box::unbox(e)); },
+        Type::TMutRef { inner: e } => { n = " mutref".print() + printType(Box::unbox(e)); },
+        Type::TAddr { inner: e } => { n = " addr".print() + printType(Box::unbox(e)); },
+        Type::TBlock { inner: e } => { n = " block".print() + printType(Box::unbox(e)); },
+        Type::TUninit { inner: e } => { n = " uninit".print() + printType(Box::unbox(e)); },
+        Type::TWord { signed: signed, bits: bits } => {
+            w = " u32";
+            if signed && bits = 8 { w = " i8"; };
+            if signed && bits = 16 { w = " i16"; };
+            if signed && bits = 32 { w = " i32"; };
+            if !signed && bits = 16 { w = " u16"; };
+            n = w.print();
+        },
+    };
+    return n;
+};
+
+fn printConstant(c: &Constant) -> Int ~ {
+    n = 0;
+    match c {
+        Constant::CInt { n: v } => { n = " int".print() + printInt(v); },
+        Constant::CBool { b: b } => {
+            if b { n = " bool true".print(); } else { n = " bool false".print(); };
+        },
+        Constant::CList { items: items } => {
+            n = " list".print() + printInt(size(items));
+            i = 0;
+            while i < size(items) [{ affirm i >= 0; affirm i <= size(items); }] ~ {
+                n = n + printConstant(get(items, i));
+                i = i + 1;
+            };
+        },
+        Constant::CArray { items: items } => {
+            n = " array".print() + printInt(size(items));
+            i = 0;
+            while i < size(items) [{ affirm i >= 0; affirm i <= size(items); }] ~ {
+                n = n + printConstant(get(items, i));
+                i = i + 1;
+            };
+        },
+        Constant::CData { name: name, fields: fields, values: values } => {
+            n = " data".print() + printName(name) + printInt(size(fields));
+            i = 0;
+            while i < size(fields) && i < size(values) [{ affirm i >= 0; affirm i <= size(fields); affirm i <= size(values); }] ~ {
+                n = n + printName(get(fields, i)) + printConstant(get(values, i));
+                i = i + 1;
+            };
+        },
+        Constant::CFn { name: name } => { n = " fn".print() + printName(name); },
+    };
+    return n;
+};
+
+fn printOperand(o: &Operand) -> Int ~ {
+    return match o {
+        Operand::Copy { local: l } => " copy".print() + printInt(l),
+        Operand::Move { local: l } => " move".print() + printInt(l),
+        Operand::Const { value: c } => " const".print() + printConstant(c),
+    };
+};
+
+fn printRefStep(s: &RefStep) -> Int ~ {
+    return match s {
+        RefStep::RefField { ctor: ctor, field: field } => " field".print() + printName(ctor) + printName(field),
+        RefStep::RefIndex { o: o } => " index".print() + printOperand(o),
+    };
+};
+
+fn printRefSteps(steps: &List<RefStep>) -> Int ~ {
+    n = printInt(size(steps));
+    i = 0;
+    while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+        n = n + printRefStep(get(steps, i));
+        i = i + 1;
+    };
+    return n;
+};
+
+fn printOperands(os: &List<Operand>) -> Int ~ {
+    n = printInt(size(os));
+    i = 0;
+    while i < size(os) [{ affirm i >= 0; affirm i <= size(os); }] ~ {
+        n = n + printOperand(get(os, i));
+        i = i + 1;
+    };
+    return n;
+};
+
+fn printRvalue(rv: &Rvalue) -> Int ~ {
+    n = 0;
+    match rv {
+        Rvalue::Use { o: o } => { n = " use".print() + printOperand(o); },
+        Rvalue::BinaryOp { op: op, a: a, b: b } => {
+            n = " binary".print() + printWord(wordOf(binaryWords(), op)) + printOperand(a) + printOperand(b);
+        },
+        Rvalue::ListOp { op: op, args: args } => {
+            n = " listop".print() + printWord(wordOf(listWords(), op)) + printOperands(args);
+        },
+        Rvalue::MakeList { items: items } => { n = " makelist".print() + printOperands(items); },
+        Rvalue::MakeBox { o: o } => { n = " makebox".print() + printOperand(o); },
+        Rvalue::Unbox { o: o } => { n = " unbox".print() + printOperand(o); },
+        Rvalue::Unsize { o: o } => { n = " unsize".print() + printOperand(o); },
+        Rvalue::MakeData { name: name, fields: fields, values: values } => {
+            n = " makedata".print() + printName(name) + printInt(size(fields));
+            i = 0;
+            while i < size(fields) && i < size(values) [{ affirm i >= 0; affirm i <= size(fields); affirm i <= size(values); }] ~ {
+                n = n + printName(get(fields, i)) + printOperand(get(values, i));
+                i = i + 1;
+            };
+        },
+        Rvalue::ReadField { o: o, name: name, field: field } => {
+            n = " readfield".print() + printOperand(o) + printName(name) + printName(field);
+        },
+        Rvalue::IsVariant { o: o, name: name } => { n = " isvariant".print() + printOperand(o) + printName(name); },
+        Rvalue::AsVariant { o: o, name: name } => { n = " asvariant".print() + printOperand(o) + printName(name); },
+        Rvalue::Clone { o: o } => { n = " clone".print() + printOperand(o); },
+        Rvalue::TakeField { local: l, name: name, field: field } => {
+            n = " takefield".print() + printInt(l) + printName(name) + printName(field);
+        },
+        Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => {
+            if mutable { n = " borrowmut".print() + printInt(root) + printRefSteps(steps); }
+            else { n = " borrow".print() + printInt(root) + printRefSteps(steps); };
+        },
+        Rvalue::Deref { o: o } => { n = " deref".print() + printOperand(o); },
+    };
+    return n;
+};
+
+fn printStatement(st: &Statement) -> Int ~ {
+    n = 0;
+    match st {
+        Statement::Assign { local: l, rv: rv } => { n = "assign".print() + printInt(l) + printRvalue(rv); },
+        Statement::Peek { local: l, rv: rv } => { n = "peek".print() + printInt(l) + printRvalue(rv); },
+        Statement::Drop { local: l } => { n = "drop".print() + printInt(l); },
+        Statement::Ghost => { n = "ghost".print(); },
+        Statement::Dissolve { local: l } => { n = "dissolve".print() + printInt(l); },
+        Statement::AssignRef { root: root, steps: steps, rv: rv } => { n = "assignref".print() + printInt(root) + printRefSteps(steps) + printRvalue(rv); },
+    };
+    return n + newLine();
+};
+
+fn printTerminator(t: &Terminator) -> Int ~ {
+    n = 0;
+    match t {
+        Terminator::Goto { block: b } => { n = "goto".print() + printInt(b); },
+        Terminator::Switch { cond: c, yes: yes, no: no } => { n = "switch".print() + printOperand(c) + printInt(yes) + printInt(no); },
+        Terminator::Call { callee: callee, args: args, dest: dest, next: after } => {
+            n = "call".print() + printOperand(callee) + printOperands(args) + printInt(dest) + printInt(after);
+        },
+        Terminator::Return => { n = "return".print(); },
+        Terminator::Unreachable => { n = "unreachable".print(); },
+    };
+    return n + newLine();
+};
+
+fn printBlock(b: &MirBlock) -> Int ~ {
+    n = "block".print() + printInt(b.id) + newLine();
+    i = 0;
+    while i < size(b.stmts) [{ affirm i >= 0; affirm i <= size(b.stmts); }] ~ {
+        n = n + printStatement(get(b.stmts, i));
+        i = i + 1;
+    };
+    return n + printTerminator(b.term);
+};
+
+fn printLocal(d: &LocalDecl) -> Int ~ {
+    n = "local".print() + printInt(d.id);
+    if d.named { n = n + " some".print() + printName(d.name); } else { n = n + " none".print(); };
+    return n + printType(d.ty) + newLine();
+};
+
+fn printFunction(kind: &String, f: &Function) -> Int ~ {
+    n = kind.print() + printName(f.name) + " params".print() + printInts(f.params) + " returns".print();
+    if f.hasReturn { n = n + " some".print() + printType(f.returns); } else { n = n + " none".print(); };
+    n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed) + newLine();
+    i = 0;
+    while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] ~ {
+        n = n + printLocal(get(f.locals, i));
+        i = i + 1;
+    };
+    j = 0;
+    while j < size(f.blocks) [{ affirm j >= 0; affirm j <= size(f.blocks); }] ~ {
+        n = n + printBlock(get(f.blocks, j));
+        j = j + 1;
+    };
+    return n + "end".print() + newLine();
+};
+
+fn printFields(fields: &List<Field>) -> Int ~ {
+    n = printInt(size(fields));
+    for f in fields {
+        n = n + printName(f.name) + printType(f.ty);
+    };
+    return n;
+};
+
+fn printDecl(d: &TypeDecl) -> Int ~ {
+    n = 0;
+    match d {
+        TypeDecl::DStruct { name: name, fields: fields } => { n = "struct".print() + printName(name) + printFields(fields); },
+        TypeDecl::DEnum { name: name, variants: variants } => {
+            n = "enum".print() + printName(name) + printInt(size(variants));
+            for v in variants {
+                n = n + printName(v.name) + printFields(v.fields);
+            };
+        },
+    };
+    return n + newLine();
+};
+
+fn printProgram(p: &Program) -> Int ~ {
+    n = "tersus-mir 1".print() + newLine();
+    for d in p.types {
+        n = n + printDecl(d);
+    };
+    for f in p.functions {
+        n = n + printFunction("function", f);
+    };
+    return n + printFunction("main", p.entry);
+};
+
+impl String {
+    fn then(self: Self, other: &String) -> Self [{ }] [{ }] {
+        return self.concat(other);
+    };
+};
+
+struct Res { ok: Bool, text: String };
+
+impl Clone for Res { };
+
+fn showInt(n: Int) -> String [{ }] [{ }] {
+    return String::fromInt(n);
+};
+
+fn joinWith(sep: &String, parts: &List<String>) -> String [{ }] [{ }] {
+    out = "";
+    for i in 0..size(parts) {
+        if i > 0 { out = out.then(sep); };
+        out = out.then(get(parts, i));
+    };
+    return out;
+};
+
+fn beforeAngle(name: &String) -> String [{ }] [{ }] {
+    i = name.find(toByte(60), 0);
+    return name.slice(0, i);
+};
+
+fn declName(d: &TypeDecl) -> String [{ }] [{ }] {
+    return match d {
+        TypeDecl::DStruct { name: name, fields: fields } => clone(name),
+        TypeDecl::DEnum { name: name, variants: variants } => clone(name),
+    };
+};
+
+fn lookupDecl(types: &List<TypeDecl>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(types); }] {
+    i = 0;
+    while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
+        d = get(types, i);
+        if declName(d) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn variantNamed(variants: &List<Variant>, name: &String) -> Bool [{ }] [{ }] {
+    for v in variants {
+        if v.name = name { return true; };
+    };
+    return false;
+};
+
+fn ownerOf(types: &List<TypeDecl>, v: &String) -> Res [{ }] [{ }] {
+    i = lookupDecl(types, v);
+    if i >= 0 {
+        d = get(types, i);
+        if d is TypeDecl::DStruct { return Res { ok: true, text: clone(v) }; };
+    };
+    for d in types {
+        match d {
+            TypeDecl::DStruct { name: name, fields: fields } => { },
+            TypeDecl::DEnum { name: name, variants: variants } => {
+                if variantNamed(variants, v) { return Res { ok: true, text: clone(name) }; };
+            },
+        };
+    };
+    return Res { ok: false, text: "" };
+};
+
+fn declaredName(types: &List<TypeDecl>, t: &Type) -> Res [{ }] [{ }] {
+    if t is Type::TNamed { return Res { ok: true, text: clone((t as Type::TNamed).name) }; };
+    if t is Type::TVariant { return ownerOf(types, (t as Type::TVariant).name); };
+    return Res { ok: false, text: "" };
+};
+
+struct ArrayInfo { ok: Bool, length: Int, elem: Type };
+
+impl Clone for ArrayInfo { };
+
+fn notArray() -> ArrayInfo [{ }] [{ }] {
+    return ArrayInfo { ok: false, length: 0, elem: Type::TInt };
+};
+
+fn sizedArray(t: &Type) -> ArrayInfo [{ }] [{ }] {
+    if t is Type::TArray {
+        s = (t as Type::TArray).size;
+        if s is Size::SConst {
+            return ArrayInfo { ok: true, length: (s as Size::SConst).n, elem: clone(Box::unbox((t as Type::TArray).elem)) };
+        };
+    };
+    return notArray();
+};
+
+struct Layout { size: Int, align: Int };
+
+impl Clone for Layout { };
+
+fn roundUp(n: Int, a: Int) -> Int [{ }] [{ }] {
+    if a <= 1 { return n; };
+    return (n + a - 1) / a * a;
+};
+
+fn wordLayout() -> Layout [{ }] [{ }] {
+    return Layout { size: 8, align: 8 };
+};
+
+struct Simple { ok: Bool, layout: Layout };
+
+impl Clone for Simple { };
+
+fn simpleLayout(t: &Type) -> Simple [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TBool { return Simple { ok: true, layout: Layout { size: 1, align: 1 } }; };
+    if t is Type::TWord {
+        b = (t as Type::TWord).bits / 8;
+        return Simple { ok: true, layout: Layout { size: b, align: b } };
+    };
+    return Simple { ok: false, layout: wordLayout() };
+};
+
+fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
+    if t is Type::TBlock { return Layout { size: 0, align: 1 }; };
+    if t is Type::TUninit { return layoutOf(types, Box::unbox((t as Type::TUninit).inner)); };
+    simple = simpleLayout(t);
+    if simple.ok { return clone(simple.layout); };
+    if t is Type::TList { return Layout { size: 24, align: 8 }; };
+    if t is Type::TBox && Box::unbox((t as Type::TBox).inner) is Type::TArray { return Layout { size: 24, align: 8 }; };
+    arr = sizedArray(t);
+    if arr.ok {
+        e = layoutOf(types, arr.elem);
+        return Layout { size: arr.length * e.size, align: e.align };
+    };
+    n = declaredName(types, t);
+    if !n.ok { return wordLayout(); };
+    i = lookupDecl(types, n.text);
+    if i < 0 { return wordLayout(); };
+    r = wordLayout();
+    match get(types, i) {
+        TypeDecl::DStruct { name: name, fields: fields } => {
+            align = 1;
+            end = 0;
+            for f in fields {
+                l = layoutOf(types, f.ty);
+                if l.align > align { align = l.align; };
+                end = roundUp(end, l.align) + l.size;
+            };
+            r = Layout { size: roundUp(end, align), align: align };
+        },
+        TypeDecl::DEnum { name: name, variants: variants } => {
+            payload = 1;
+            widest = 0;
+            for v in variants {
+                align = 1;
+                end = 0;
+                for f in v.fields {
+                    l = layoutOf(types, f.ty);
+                    if l.align > align { align = l.align; };
+                    end = roundUp(end, l.align) + l.size;
+                };
+                if align > payload { payload = align; };
+                if roundUp(end, align) > widest { widest = roundUp(end, align); };
+            };
+            start = roundUp(4, payload);
+            align = payload;
+            if align < 4 { align = 4; };
+            r = Layout { size: roundUp(start + widest, align), align: align };
+        },
+    };
+    return r;
+};
+
+fn fieldsLayout(types: &List<TypeDecl>, fields: &List<Field>) -> Layout ~ {
+    align = 1;
+    end = 0;
+    for f in fields {
+        l = layoutOf(types, f.ty);
+        if l.align > align { align = l.align; };
+        end = roundUp(end, l.align) + l.size;
+    };
+    return Layout { size: roundUp(end, align), align: align };
+};
+
+fn safeSlice(s: &String, from: Int, to: Int) -> String [{ }] [{ }] {
+    f = from;
+    if f < 0 { f = 0; };
+    if f > size(s.bytes) { f = size(s.bytes); };
+    e = to;
+    if e < f { e = f; };
+    if e > size(s.bytes) { e = size(s.bytes); };
+    return s.slice(f, e);
+};
+
+fn instanceArgs(name: &String) -> List<String> [{ }] [{ }] {
+    args = [];
+    depth = 0;
+    start = 0;
+    open = 0 - 1;
+    i = 0;
+    bytes = clone(name.bytes);
+    n = size(bytes);
+    while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
+        c = toInt(get(bytes, i));
+        if c = 60 && open < 0 { open = i; start = i + 1; };
+        if c = 60 || c = 40 { depth = depth + 1; };
+        if c = 62 && i > 0 && toInt(get(bytes, i - 1)) != 45 { depth = depth - 1; };
+        if c = 41 { depth = depth - 1; };
+        if c = 44 && depth = 1 && open >= 0 {
+            args = push(args, safeSlice(name, start, i));
+            start = i + 1;
+            if start < n {
+                if toInt(get(bytes, start)) = 32 { start = start + 1; };
+            };
+        };
+        i = i + 1;
+    };
+    if open >= 0 && n > 0 { args = push(args, safeSlice(name, start, n - 1)); };
+    return args;
+};
+
+fn isSizeText(s: &String) -> Bool [{ }] [{ }] {
+    if s = "?" { return true; };
+    if size(s.bytes) = 0 { return false; };
+    digits = true;
+    lower = true;
+    for b in s.bytes {
+        c = toInt(b);
+        if c < 48 || c > 57 { digits = false; };
+        if !((c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c = 95) { lower = false; };
+    };
+    if digits { return true; };
+    if size(s.bytes) > 1 && toInt(get(s.bytes, 0)) = 95 { return true; };
+    return lower;
+};
+
+fn isParamText(s: &String) -> Bool [{ }] [{ }] {
+    if size(s.bytes) > 0 {
+        c = toInt(get(s.bytes, 0));
+        if c < 97 || c > 122 { return false; };
+    };
+    if size(s.bytes) = 0 { return false; };
+    return isSizeText(s);
+};
+
+struct TyRes { ok: Bool, ty: Type };
+
+impl Clone for TyRes { };
+
+fn noTy() -> TyRes [{ }] [{ }] {
+    return TyRes { ok: false, ty: Type::TInt };
+};
+
+fn noTypes() -> List<Type> [{ }] [{ }] {
+    return [];
+};
+
+struct TextParse { ok: Bool, ty: Type, pos: Int };
+
+impl Clone for TextParse { };
+
+fn textSize(text: &String) -> Size [{ }] [{ }] {
+    if text = "?" { return Size::SAny; };
+    if size(text.bytes) > 1 {
+        if toInt(get(text.bytes, 0)) = 95 {
+            rest = safeSlice(text, 1, size(text.bytes));
+            n = parseInt(rest);
+            if n.ok { return Size::SVar { n: n.value }; };
+        };
+    };
+    n = parseInt(text);
+    if n.ok { return Size::SConst { n: n.value }; };
+    if size(text.bytes) = 0 { return Size::SAny; };
+    return Size::SParam { name: clone(text) };
+};
+
+fn textTypeAt(s: &String, pos: Int) -> TextParse ~ {
+    bad = TextParse { ok: false, ty: Type::TInt, pos: pos };
+    if pos < 0 { return bad; };
+    if pos >= size(s.bytes) { return bad; };
+    rest = safeSlice(s, pos, size(s.bytes));
+    if rest.startsWith("Int") { return TextParse { ok: true, ty: Type::TInt, pos: pos + 3 }; };
+    if rest.startsWith("Byte") { return TextParse { ok: true, ty: Type::TByte, pos: pos + 4 }; };
+    if rest.startsWith("Bool") { return TextParse { ok: true, ty: Type::TBool, pos: pos + 4 }; };
+    if rest.startsWith("List<") {
+        inner = textTypeAt(s, pos + 5);
+        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        return TextParse { ok: true, ty: Type::TList { elem: Box::new(inner.ty) }, pos: inner.pos + 1 };
+    };
+    if rest.startsWith("Box<") {
+        inner = textTypeAt(s, pos + 4);
+        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        return TextParse { ok: true, ty: Type::TBox { inner: Box::new(inner.ty) }, pos: inner.pos + 1 };
+    };
+    if rest.startsWith("Block<") {
+        inner = textTypeAt(s, pos + 6);
+        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        return TextParse { ok: true, ty: Type::TBlock { inner: Box::new(inner.ty) }, pos: inner.pos + 1 };
+    };
+    if rest.startsWith("Uninit<") {
+        inner = textTypeAt(s, pos + 7);
+        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        return TextParse { ok: true, ty: Type::TUninit { inner: Box::new(inner.ty) }, pos: inner.pos + 1 };
+    };
+    if rest.startsWith("Addr<") {
+        inner = textTypeAt(s, pos + 5);
+        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        return TextParse { ok: true, ty: Type::TAddr { inner: Box::new(inner.ty) }, pos: inner.pos + 1 };
+    };
+    if rest.startsWith("&mut ") {
+        inner = textTypeAt(s, pos + 5);
+        if !inner.ok { return bad; };
+        return TextParse { ok: true, ty: Type::TMutRef { inner: Box::new(inner.ty) }, pos: inner.pos };
+    };
+    if rest.startsWith("&") {
+        inner = textTypeAt(s, pos + 1);
+        if !inner.ok { return bad; };
+        return TextParse { ok: true, ty: Type::TRef { inner: Box::new(inner.ty) }, pos: inner.pos };
+    };
+    if rest.startsWith("'") {
+        end = pos + 1;
+        while end < size(s.bytes) && toInt(get(s.bytes, end)) != 44 && toInt(get(s.bytes, end)) != 62 [{ affirm end >= 0; affirm end <= size(s.bytes); }] ~ { end = end + 1; };
+        return TextParse { ok: true, ty: Type::TParam { name: safeSlice(s, pos + 1, end) }, pos: end };
+    };
+    if rest.startsWith("Array<") {
+        inner = textTypeAt(s, pos + 6);
+        if !inner.ok { return bad; };
+        end = inner.pos;
+        if end < 0 { end = 0; };
+        if end > size(s.bytes) { end = size(s.bytes); };
+        depth = 1;
+        while end < size(s.bytes) && depth > 0 [{ affirm end >= 0; affirm end <= size(s.bytes); }] ~ {
+            c = toInt(get(s.bytes, end));
+            if c = 60 { depth = depth + 1; };
+            if c = 62 { depth = depth - 1; };
+            end = end + 1;
+        };
+        // The size after the comma is part of the type (`Array<Int, 2>` is not `Array<Int, 3>`)
+        arrSize = Size::SAny;
+        if inner.pos >= 0 && inner.pos < size(s.bytes) {
+            if toInt(get(s.bytes, inner.pos)) = 44 {
+                start = inner.pos + 1;
+                stop = end;
+                if stop > start { stop = stop - 1; };
+                while start < stop && toInt(get(s.bytes, start)) = 32 [{ affirm start >= 0; affirm start <= size(s.bytes); }] ~ { start = start + 1; };
+                while stop > start && toInt(get(s.bytes, stop - 1)) = 32 [{ affirm stop >= 0; affirm stop <= size(s.bytes); }] ~ { stop = stop - 1; };
+                arrSize = textSize(safeSlice(s, start, stop));
+            };
+        };
+        return TextParse { ok: true, ty: Type::TArray { elem: Box::new(inner.ty), size: arrSize }, pos: end };
+    };
+    // a name, possibly an instance or a variant: kept whole, as the data keeps it
+    end = pos;
+    depth = 0;
+    while end < size(s.bytes) [{ affirm end >= 0; affirm end <= size(s.bytes); }] ~ {
+        c = toInt(get(s.bytes, end));
+        if c = 60 { depth = depth + 1; };
+        if c = 62 { if depth = 0 { return TextParse { ok: true, ty: Type::TNamed { name: safeSlice(s, pos, end) }, pos: end }; }; depth = depth - 1; };
+        if c = 44 && depth = 0 { return TextParse { ok: true, ty: Type::TNamed { name: safeSlice(s, pos, end) }, pos: end }; };
+        end = end + 1;
+    };
+    return TextParse { ok: true, ty: Type::TNamed { name: safeSlice(s, pos, end) }, pos: end };
+};
+
+fn textType(s: &String) -> TyRes ~ {
+    r = textTypeAt(s, 0);
+    if r.ok && r.pos = size(s.bytes) { return TyRes { ok: true, ty: r.ty }; };
+    return noTy();
+};
+
+fn renderSize(s: &Size) -> String [{ }] [{ }] {
+    return match s {
+        Size::SConst { n: n } => showInt(n),
+        Size::SAny => "?",
+        Size::SParam { name: name } => clone(name),
+        Size::SVar { n: n } => "_".then(showInt(n)),
+    };
+};
+
+// A name that starts with a small letter and is letters and digits after it
+fn bareLower(name: &String) -> Bool [{ }] [{ }] {
+    if size(name.bytes) = 0 { return false; };
+    c = toInt(get(name.bytes, 0));
+    if c < 97 || c > 122 { return false; };
+    for b in name.bytes {
+        ch = toInt(b);
+        if !((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57)) { return false; };
+    };
+    return true;
+};
+// A type as the name of an instance writes it (TersusTypes.typeText)
+fn typeText(t: &Type) -> String ~ {
+    r = "";
+    match clone(t) {
+        Type::TInt => { r = "Int"; },
+        Type::TByte => { r = "Byte"; },
+        Type::TBool => { r = "Bool"; },
+        Type::TList { elem: e } => { r = "List<".then(typeText(Box::unbox(e))).then(">"); },
+        Type::TBox { inner: e } => { r = "Box<".then(typeText(Box::unbox(e))).then(">"); },
+        Type::TAddr { inner: e } => { r = "Addr<".then(typeText(Box::unbox(e))).then(">"); },
+        Type::TBlock { inner: e } => { r = "Block<".then(typeText(Box::unbox(e))).then(">"); },
+        Type::TUninit { inner: e } => { r = "Uninit<".then(typeText(Box::unbox(e))).then(">"); },
+        Type::TRef { inner: e } => { r = "&".then(typeText(Box::unbox(e))); },
+        Type::TMutRef { inner: e } => { r = "&mut ".then(typeText(Box::unbox(e))); },
+        Type::TArray { elem: e, size: s } => { r = "Array<".then(typeText(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
+        Type::TFn { args: args, ret: ret } => {
+            parts = [];
+            for a in args { parts = push(parts, typeText(a)); };
+            r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(typeText(Box::unbox(ret)));
+        },
+        Type::TNamed { name: name } => {
+            r = clone(name);
+            if bareLower(name) { r = "`".then(clone(name)); };
+        },
+        Type::TVariant { name: name } => { r = clone(name); },
+        Type::TParam { name: name } => { r = "'".then(clone(name)); },
+        Type::TVar { n: n } => { r = "?".then(showInt(n)); },
+        Type::TForall { sizes: sizes, types: types, body: body } => { r = typeText(Box::unbox(body)); },
+        Type::TWord { signed: signed, bits: bits } => {
+            if signed { r = "I".then(showInt(bits)); };
+            if !signed { r = "U".then(showInt(bits)); };
+        },
+    };
+    return r;
+};
+
+
+
+// ---- the erasure (MirGhost) ----
+
+// The operations that make a permission, whose indices in the table of the list operations are 35 to 42
+fn ghostOp(op: Int) -> Bool [{ }] [{ }] {
+    return op >= 35 && op <= 42;
+};
+
+// The local of a function with an index, or nothing
+struct LocalRes { ok: Bool, decl: LocalDecl };
+
+impl Clone for LocalRes { };
+
+fn noLocalRes() -> LocalRes [{ }] [{ }] {
+    return LocalRes { ok: false, decl: LocalDecl { id: 0, named: false, name: "", ty: Type::TInt } };
+};
+
+fn localRes(f: &Function, id: Int) -> LocalRes [{ }] [{ }] {
+    for d in f.locals {
+        if d.id = id { return LocalRes { ok: true, decl: clone(d) }; };
+    };
+    return noLocalRes();
+};
+
+// Whether a type is only for the validator: a permission, or a struct made only of them (and that has some)
+fn ghostTypeAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
+    if depth > 16 { return false; };
+    if t is Type::TBlock { return true; };
+    if t is Type::TNamed {
+        i = lookupDecl(types, (t as Type::TNamed).name);
+        if i >= 0 {
+            d = get(types, i);
+            if d is TypeDecl::DStruct {
+                fields = (d as TypeDecl::DStruct).fields;
+                if size(fields) = 0 { return false; };
+                for fd in fields {
+                    if !ghostTypeAt(types, fd.ty, depth + 1) { return false; };
+                };
+                return true;
+            };
+        };
+    };
+    return false;
+};
+
+fn ghostType(types: &List<TypeDecl>, t: &Type) -> Bool ~ {
+    return ghostTypeAt(types, t, 0);
+};
+
+fn isGhostLocal(types: &List<TypeDecl>, f: &Function, id: Int) -> Bool ~ {
+    r = localRes(f, id);
+    return r.ok && ghostType(types, r.decl.ty);
+};
+
+fn ghostOperand(types: &List<TypeDecl>, f: &Function, o: &Operand) -> Bool ~ {
+    r = false;
+    match clone(o) {
+        Operand::Copy { local: l } => { r = isGhostLocal(types, f, l); },
+        Operand::Move { local: l } => { r = isGhostLocal(types, f, l); },
+        Operand::Const { value: c } => { },
+    };
+    return r;
+};
+
+fn runtimeOperands(types: &List<TypeDecl>, f: &Function, os: &List<Operand>) -> List<Operand> ~ {
+    out = [];
+    for o in os {
+        if !ghostOperand(types, f, o) { out = push(out, clone(o)); };
+    };
+    return out;
+};
+
+fn eraseRvalue(types: &List<TypeDecl>, f: &Function, rv: &Rvalue) -> Rvalue ~ {
+    r = clone(rv);
+    match clone(rv) {
+        Rvalue::ListOp { op: op, args: args } => { r = Rvalue::ListOp { op: op, args: runtimeOperands(types, f, args) }; },
+        Rvalue::MakeData { name: name, fields: fields, values: values } => {
+            names = [];
+            vals = [];
+            i = 0;
+            while i < size(values) && i < size(fields) [{ affirm i >= 0; affirm i <= size(values); affirm i <= size(fields); }] ~ {
+                if i < size(fields) {
+                    if !ghostOperand(types, f, get(values, i)) {
+                        names = push(names, clone(get(fields, i)));
+                        vals = push(vals, clone(get(values, i)));
+                    };
+                };
+                i = i + 1;
+            };
+            r = Rvalue::MakeData { name: clone(name), fields: names, values: vals };
+        },
+        Rvalue::Use { o: o } => { },
+        Rvalue::BinaryOp { op: op, a: a, b: b } => { },
+        Rvalue::MakeList { items: items } => { },
+        Rvalue::MakeBox { o: o } => { },
+        Rvalue::Unbox { o: o } => { },
+        Rvalue::Unsize { o: o } => { },
+        Rvalue::ReadField { o: o, name: name, field: field } => { },
+        Rvalue::IsVariant { o: o, name: name } => { },
+        Rvalue::AsVariant { o: o, name: name } => { },
+        Rvalue::Clone { o: o } => { },
+        Rvalue::TakeField { local: l, name: name, field: field } => { },
+        Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => { },
+        Rvalue::Deref { o: o } => { },
+    };
+    return r;
+};
+
+fn eraseStatement(types: &List<TypeDecl>, f: &Function, st: &Statement) -> List<Statement> ~ {
+    out = [];
+    match clone(st) {
+        Statement::Assign { local: l, rv: rv } => {
+            if l = 0 && isGhostLocal(types, f, 0) {
+                handled = false;
+                if rv is Rvalue::ListOp {
+                    op = (rv as Rvalue::ListOp).op;
+                    if !ghostOp(op) {
+                        out = push(out, Statement::Assign { local: 0, rv: Rvalue::ListOp { op: op, args: runtimeOperands(types, f, (rv as Rvalue::ListOp).args) } });
+                        handled = true;
+                    };
+                };
+                if !handled { out = push(out, Statement::Assign { local: 0, rv: Rvalue::Use { o: Operand::Const { value: Constant::CInt { n: 0 } } } }); };
+            } else if !isGhostLocal(types, f, l) {
+                out = push(out, Statement::Assign { local: l, rv: eraseRvalue(types, f, rv) });
+            };
+        },
+        Statement::Peek { local: l, rv: rv } => { out = push(out, clone(st)); },
+        Statement::Drop { local: l } => { out = push(out, clone(st)); },
+        Statement::AssignRef { root: root, steps: steps, rv: rv } => { out = push(out, clone(st)); },
+        Statement::Ghost => { },
+        Statement::Dissolve { local: l } => {
+            if !isGhostLocal(types, f, l) {
+                out = push(out, Statement::Peek { local: l, rv: Rvalue::ListOp { op: 48, args: [] } });
+            };
+        },
+    };
+    return out;
+};
+
+fn retargetId(oldIds: &List<Int>, newIds: &List<Int>, id: Int) -> Int ~ {
+    i = 0;
+    while i < size(oldIds) && i < size(newIds) [{ affirm i >= 0; affirm i <= size(oldIds); affirm i <= size(newIds); }] ~ {
+        if i < size(newIds) {
+            if get(oldIds, i) = id { return get(newIds, i); };
+        };
+        i = i + 1;
+    };
+    return id;
+};
+
+fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
+    // A new local for each operation or call that gives a permission to a ghost local: it gives 0 there instead
+    firstFree = 1;
+    for d in f.locals {
+        if d.id >= firstFree { firstFree = d.id + 1; };
+    };
+    oldIds = [];
+    newIds = [];
+    newDecls = [];
+    blocks1 = [];
+    for b in f.blocks {
+        stmts1 = [];
+        for st in b.stmts {
+            ns = clone(st);
+            if st is Statement::Assign {
+                l = (st as Statement::Assign).local;
+                rv = (st as Statement::Assign).rv;
+                if rv is Rvalue::ListOp && l != 0 && isGhostLocal(types, f, l) {
+                    if !ghostOp((rv as Rvalue::ListOp).op) {
+                        nid = firstFree + size(newIds);
+                        oldIds = push(oldIds, l);
+                        newIds = push(newIds, nid);
+                        newDecls = push(newDecls, LocalDecl { id: nid, named: false, name: "", ty: Type::TInt });
+                        ns = Statement::Assign { local: nid, rv: clone(rv) };
+                    };
+                };
+            };
+            stmts1 = push(stmts1, ns);
+        };
+        term1 = clone(b.term);
+        if b.term is Terminator::Call {
+            dest = (b.term as Terminator::Call).dest;
+            if dest != 0 && isGhostLocal(types, f, dest) {
+                nid = firstFree + size(newIds);
+                oldIds = push(oldIds, dest);
+                newIds = push(newIds, nid);
+                newDecls = push(newDecls, LocalDecl { id: nid, named: false, name: "", ty: Type::TInt });
+                term1 = Terminator::Call { callee: clone((b.term as Terminator::Call).callee), args: clone((b.term as Terminator::Call).args), dest: nid, next: (b.term as Terminator::Call).next };
+            };
+        };
+        blocks1 = push(blocks1, MirBlock { id: b.id, stmts: stmts1, term: term1 });
+    };
+    locals = [];
+    for d in f.locals {
+        if !isGhostLocal(types, f, d.id) || d.id = 0 {
+            nd = clone(d);
+            if d.id = 0 && isGhostLocal(types, f, d.id) { nd = LocalDecl { id: d.id, named: d.named, name: clone(d.name), ty: Type::TInt }; };
+            locals = push(locals, nd);
+        };
+    };
+    for d in newDecls { locals = push(locals, clone(d)); };
+    params = [];
+    for pid in f.params {
+        if !isGhostLocal(types, f, pid) { params = push(params, pid); };
+    };
+    borrowed = [];
+    for pid in f.borrowed {
+        if !isGhostLocal(types, f, pid) { borrowed = push(borrowed, pid); };
+    };
+    blocks = [];
+    for b in blocks1 {
+        stmts = [];
+        for st in b.stmts {
+            for es in eraseStatement(types, f, st) { stmts = push(stmts, clone(es)); };
+        };
+        term = clone(b.term);
+        if b.term is Terminator::Call {
+            term = Terminator::Call { callee: clone((b.term as Terminator::Call).callee), args: runtimeOperands(types, f, (b.term as Terminator::Call).args), dest: (b.term as Terminator::Call).dest, next: (b.term as Terminator::Call).next };
+        };
+        blocks = push(blocks, MirBlock { id: b.id, stmts: stmts, term: term });
+    };
+    returns = clone(f.returns);
+    if f.hasReturn && ghostType(types, f.returns) { returns = Type::TInt; };
+    return Function {
+        name: clone(f.name), params: params, hasReturn: f.hasReturn, returns: returns,
+        sizeParams: clone(f.sizeParams), typeParams: clone(f.typeParams), borrowed: borrowed,
+        locals: locals, blocks: blocks,
+    };
+};
+
+fn eraseDecls(types: &List<TypeDecl>) -> List<TypeDecl> ~ {
+    out = [];
+    for d in types {
+        match clone(d) {
+            TypeDecl::DStruct { name: name, fields: fields } => {
+                kept = [];
+                for fd in fields {
+                    if !ghostType(types, fd.ty) { kept = push(kept, clone(fd)); };
+                };
+                out = push(out, TypeDecl::DStruct { name: clone(name), fields: kept });
+            },
+            TypeDecl::DEnum { name: name, variants: variants } => {
+                keptVars = [];
+                for v in variants {
+                    kept = [];
+                    for fd in v.fields {
+                        if !ghostType(types, fd.ty) { kept = push(kept, clone(fd)); };
+                    };
+                    keptVars = push(keptVars, Variant { name: clone(v.name), fields: kept });
+                };
+                out = push(out, TypeDecl::DEnum { name: clone(name), variants: keptVars });
+            },
+        };
+    };
+    return out;
+};
+
+// ---- Uninit<T> is a T (withoutUninit) ----
+
+fn isSizeArgText(arg: &String) -> Bool ~ {
+    if arg = "?" { return true; };
+    if size(arg.bytes) = 0 { return false; };
+    digits = true;
+    for b in arg.bytes {
+        c = toInt(b);
+        if c < 48 || c > 57 { digits = false; };
+    };
+    if digits { return true; };
+    if size(arg.bytes) > 1 && toInt(get(arg.bytes, 0)) = 95 {
+        rest = true;
+        i = 1;
+        while i < size(arg.bytes) [{ affirm i >= 0; affirm i <= size(arg.bytes); }] ~ {
+            c = toInt(get(arg.bytes, i));
+            if c < 48 || c > 57 { rest = false; };
+            i = i + 1;
+        };
+        if rest { return true; };
+    };
+    first = toInt(get(arg.bytes, 0));
+    if first < 97 || first > 122 { return false; };
+    for b in arg.bytes {
+        c = toInt(b);
+        if !((c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57)) { return false; };
+    };
+    return true;
+};
+
+// The text of a type with each Uninit<T> a T, as the name of an instance writes it
+fn plainRendered(t: &Type) -> String ~ {
+    r = "";
+    match clone(t) {
+        Type::TUninit { inner: e } => { r = plainRendered(Box::unbox(e)); },
+        Type::TNamed { name: name } => {
+            base = beforeAngle(name);
+            args = instanceArgs(name);
+            if size(args) = 0 { r = clone(name); }
+            else {
+                out = clone(base).then("<");
+                i = 0;
+                badName = false;
+                while i < size(args) [{ affirm i >= 0; affirm i <= size(args); }] ~ {
+                    if i > 0 { out = out.then(", "); };
+                    arg = get(args, i);
+                    if isSizeArgText(arg) { out = out.then(clone(arg)); }
+                    else {
+                        pt = textType(arg);
+                        if pt.ok { out = out.then(plainRendered(pt.ty)); };
+                        if !pt.ok { badName = true; };
+                    };
+                    i = i + 1;
+                };
+                if badName { r = clone(name); };
+                if !badName { r = out.then(">"); };
+            };
+        },
+        Type::TInt => { r = "Int"; },
+        Type::TByte => { r = "Byte"; },
+        Type::TBool => { r = "Bool"; },
+        Type::TList { elem: e } => { r = "List<".then(plainRendered(Box::unbox(e))).then(">"); },
+        Type::TBox { inner: e } => { r = "Box<".then(plainRendered(Box::unbox(e))).then(">"); },
+        Type::TAddr { inner: e } => { r = "Addr<".then(plainRendered(Box::unbox(e))).then(">"); },
+        Type::TBlock { inner: e } => { r = "Block<".then(plainRendered(Box::unbox(e))).then(">"); },
+        Type::TRef { inner: e } => { r = "&".then(plainRendered(Box::unbox(e))); },
+        Type::TMutRef { inner: e } => { r = "&mut ".then(plainRendered(Box::unbox(e))); },
+        Type::TArray { elem: e, size: s } => { r = "Array<".then(plainRendered(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
+        Type::TFn { args: args, ret: ret } => {
+            parts = [];
+            for a in args { parts = push(parts, plainRendered(a)); };
+            r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(plainRendered(Box::unbox(ret)));
+        },
+        Type::TVariant { name: name } => { r = clone(name); },
+        Type::TParam { name: name } => { r = "'".then(clone(name)); },
+        Type::TVar { n: n } => { r = "?".then(showInt(n)); },
+        Type::TForall { sizes: sizes, types: types, body: body } => { r = plainRendered(Box::unbox(body)); },
+        Type::TWord { signed: signed, bits: bits } => {
+            if signed { r = "I".then(showInt(bits)); };
+            if !signed { r = "U".then(showInt(bits)); };
+        },
+    };
+    return r;
+};
+
+fn plainName(name: &String) -> String ~ {
+    return plainRendered(Type::TNamed { name: clone(name) });
+};
+
+// The type with each Uninit<T> a T
+fn plainType(t: &Type) -> Type ~ {
+    r = clone(t);
+    match clone(t) {
+        Type::TUninit { inner: e } => { r = plainType(Box::unbox(e)); },
+        Type::TList { elem: e } => { r = Type::TList { elem: Box::new(plainType(Box::unbox(e))) }; },
+        Type::TArray { elem: e, size: s } => { r = Type::TArray { elem: Box::new(plainType(Box::unbox(e))), size: clone(s) }; },
+        Type::TBox { inner: e } => { r = Type::TBox { inner: Box::new(plainType(Box::unbox(e))) }; },
+        Type::TAddr { inner: e } => { r = Type::TAddr { inner: Box::new(plainType(Box::unbox(e))) }; },
+        Type::TBlock { inner: e } => { r = Type::TBlock { inner: Box::new(plainType(Box::unbox(e))) }; },
+        Type::TRef { inner: e } => { r = Type::TRef { inner: Box::new(plainType(Box::unbox(e))) }; },
+        Type::TMutRef { inner: e } => { r = Type::TMutRef { inner: Box::new(plainType(Box::unbox(e))) }; },
+        Type::TFn { args: args, ret: ret } => {
+            na = [];
+            for a in args { na = push(na, plainType(a)); };
+            r = Type::TFn { args: na, ret: Box::new(plainType(Box::unbox(ret))) };
+        },
+        Type::TForall { sizes: sizes, types: types, body: body } => { r = Type::TForall { sizes: clone(sizes), types: clone(types), body: Box::new(plainType(Box::unbox(body))) }; },
+        Type::TNamed { name: name } => { r = Type::TNamed { name: plainName(name) }; },
+        Type::TInt => { },
+        Type::TByte => { },
+        Type::TBool => { },
+        Type::TVariant { name: name } => { },
+        Type::TVar { n: n } => { },
+        Type::TParam { name: name } => { },
+        Type::TWord { signed: signed, bits: bits } => { },
+    };
+    return r;
+};
+
+fn plainConstant(c: &Constant) -> Constant ~ {
+    r = clone(c);
+    match clone(c) {
+        Constant::CList { items: items } => {
+            out = [];
+            for v in items { out = push(out, plainConstant(v)); };
+            r = Constant::CList { items: out };
+        },
+        Constant::CArray { items: items } => {
+            out = [];
+            for v in items { out = push(out, plainConstant(v)); };
+            r = Constant::CArray { items: out };
+        },
+        Constant::CData { name: name, fields: fields, values: values } => {
+            out = [];
+            for v in values { out = push(out, plainConstant(v)); };
+            r = Constant::CData { name: plainName(name), fields: clone(fields), values: out };
+        },
+        Constant::CInt { n: n } => { },
+        Constant::CBool { b: b } => { },
+        Constant::CFn { name: name } => { },
+    };
+    return r;
+};
+
+fn plainOperand(o: &Operand) -> Operand ~ {
+    r = clone(o);
+    match clone(o) {
+        Operand::Const { value: c } => { r = Operand::Const { value: plainConstant(c) }; },
+        Operand::Copy { local: l } => { },
+        Operand::Move { local: l } => { },
+    };
+    return r;
+};
+
+fn plainRefStep(s: &RefStep) -> RefStep ~ {
+    r = clone(s);
+    match clone(s) {
+        RefStep::RefIndex { o: o } => { r = RefStep::RefIndex { o: plainOperand(o) }; },
+        RefStep::RefField { ctor: ctor, field: field } => { r = RefStep::RefField { ctor: plainName(ctor), field: clone(field) }; },
+    };
+    return r;
+};
+
+fn plainRefSteps(steps: &List<RefStep>) -> List<RefStep> ~ {
+    out = [];
+    for s in steps { out = push(out, plainRefStep(s)); };
+    return out;
+};
+
+fn plainRvalue(rv: &Rvalue) -> Rvalue ~ {
+    r = clone(rv);
+    match clone(rv) {
+        Rvalue::Use { o: o } => { r = Rvalue::Use { o: plainOperand(o) }; },
+        Rvalue::BinaryOp { op: op, a: a, b: b } => { r = Rvalue::BinaryOp { op: op, a: plainOperand(a), b: plainOperand(b) }; },
+        Rvalue::ListOp { op: op, args: args } => {
+            out = [];
+            for o in args { out = push(out, plainOperand(o)); };
+            r = Rvalue::ListOp { op: op, args: out };
+        },
+        Rvalue::MakeList { items: items } => {
+            out = [];
+            for o in items { out = push(out, plainOperand(o)); };
+            r = Rvalue::MakeList { items: out };
+        },
+        Rvalue::MakeBox { o: o } => { r = Rvalue::MakeBox { o: plainOperand(o) }; },
+        Rvalue::Unbox { o: o } => { r = Rvalue::Unbox { o: plainOperand(o) }; },
+        Rvalue::Unsize { o: o } => { r = Rvalue::Unsize { o: plainOperand(o) }; },
+        Rvalue::MakeData { name: name, fields: fields, values: values } => {
+            out = [];
+            for o in values { out = push(out, plainOperand(o)); };
+            r = Rvalue::MakeData { name: plainName(name), fields: clone(fields), values: out };
+        },
+        Rvalue::ReadField { o: o, name: name, field: field } => { r = Rvalue::ReadField { o: plainOperand(o), name: plainName(name), field: clone(field) }; },
+        Rvalue::IsVariant { o: o, name: name } => { r = Rvalue::IsVariant { o: plainOperand(o), name: plainName(name) }; },
+        Rvalue::AsVariant { o: o, name: name } => { r = Rvalue::AsVariant { o: plainOperand(o), name: plainName(name) }; },
+        Rvalue::Clone { o: o } => { r = Rvalue::Clone { o: plainOperand(o) }; },
+        Rvalue::TakeField { local: l, name: name, field: field } => { r = Rvalue::TakeField { local: l, name: plainName(name), field: clone(field) }; },
+        Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => { r = Rvalue::Borrow { root: root, steps: plainRefSteps(steps), mutable: mutable }; },
+        Rvalue::Deref { o: o } => { r = Rvalue::Deref { o: plainOperand(o) }; },
+    };
+    return r;
+};
+
+fn plainFunction(f: &Function) -> Function ~ {
+    locals = [];
+    for d in f.locals {
+        locals = push(locals, LocalDecl { id: d.id, named: d.named, name: clone(d.name), ty: plainType(d.ty) });
+    };
+    blocks = [];
+    for b in f.blocks {
+        stmts = [];
+        for st in b.stmts {
+            ns = clone(st);
+            match clone(st) {
+                Statement::Assign { local: l, rv: rv } => { ns = Statement::Assign { local: l, rv: plainRvalue(rv) }; },
+                Statement::Peek { local: l, rv: rv } => { ns = Statement::Peek { local: l, rv: plainRvalue(rv) }; },
+                Statement::AssignRef { root: root, steps: steps, rv: rv } => { ns = Statement::AssignRef { root: root, steps: plainRefSteps(steps), rv: plainRvalue(rv) }; },
+                Statement::Drop { local: l } => { },
+                Statement::Ghost => { },
+                Statement::Dissolve { local: l } => { },
+            };
+            stmts = push(stmts, ns);
+        };
+        term = clone(b.term);
+        match clone(b.term) {
+            Terminator::Switch { cond: c, yes: yes, no: no } => { term = Terminator::Switch { cond: plainOperand(c), yes: yes, no: no }; },
+            Terminator::Call { callee: callee, args: args, dest: dest, next: next } => {
+                out = [];
+                for o in args { out = push(out, plainOperand(o)); };
+                term = Terminator::Call { callee: plainOperand(callee), args: out, dest: dest, next: next };
+            },
+            Terminator::Goto { block: blk } => { },
+            Terminator::Return => { },
+            Terminator::Unreachable => { },
+        };
+        blocks = push(blocks, MirBlock { id: b.id, stmts: stmts, term: term });
+    };
+    returns = clone(f.returns);
+    if f.hasReturn { returns = plainType(f.returns); };
+    return Function {
+        name: clone(f.name), params: clone(f.params), hasReturn: f.hasReturn, returns: returns,
+        sizeParams: clone(f.sizeParams), typeParams: clone(f.typeParams), borrowed: clone(f.borrowed),
+        locals: locals, blocks: blocks,
+    };
+};
+
+fn plainProgram(p: &Program) -> Program ~ {
+    types = [];
+    for d in p.types {
+        match clone(d) {
+            TypeDecl::DStruct { name: name, fields: fields } => {
+                kept = [];
+                for fd in fields { kept = push(kept, Field { name: clone(fd.name), ty: plainType(fd.ty) }); };
+                types = push(types, TypeDecl::DStruct { name: plainName(name), fields: kept });
+            },
+            TypeDecl::DEnum { name: name, variants: variants } => {
+                keptVars = [];
+                for v in variants {
+                    kept = [];
+                    for fd in v.fields { kept = push(kept, Field { name: clone(fd.name), ty: plainType(fd.ty) }); };
+                    keptVars = push(keptVars, Variant { name: clone(v.name), fields: kept });
+                };
+                types = push(types, TypeDecl::DEnum { name: plainName(name), variants: keptVars });
+            },
+        };
+    };
+    functions = [];
+    for f in p.functions { functions = push(functions, plainFunction(f)); };
+    return Program { types: types, functions: functions, entry: plainFunction(p.entry) };
+};
+
+fn eraseProgram(p: &Program) -> Program ~ {
+    types = eraseDecls(p.types);
+    functions = [];
+    for f in p.functions { functions = push(functions, eraseFunction(p.types, f)); };
+    erased = Program { types: types, functions: functions, entry: eraseFunction(p.types, p.entry) };
+    return plainProgram(erased);
+};
+
+// ---- the casts of permissions (checkCasts of MirGhost) ----
+
+fn constSizeText(arg: &String) -> Bool [{ }] [{ }] {
+    if size(arg.bytes) = 0 { return false; };
+    for b in arg.bytes {
+        c = toInt(b);
+        if c < 48 || c > 57 { return false; };
+    };
+    return true;
+};
+
+fn knownLayoutAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
+    if depth > 16 { return true; };
+    r = true;
+    match clone(t) {
+        Type::TParam { name: name } => { r = false; },
+        Type::TArray { elem: e, size: s } => { r = s is Size::SConst && knownLayoutAt(types, Box::unbox(e), depth + 1); },
+        Type::TList { elem: e } => { r = knownLayoutAt(types, Box::unbox(e), depth + 1); },
+        Type::TBox { inner: e } => { r = knownLayoutAt(types, Box::unbox(e), depth + 1); },
+        Type::TAddr { inner: e } => { r = knownLayoutAt(types, Box::unbox(e), depth + 1); },
+        Type::TBlock { inner: e } => { r = knownLayoutAt(types, Box::unbox(e), depth + 1); },
+        Type::TUninit { inner: e } => { r = knownLayoutAt(types, Box::unbox(e), depth + 1); },
+        Type::TNamed { name: name } => {
+            args = instanceArgs(name);
+            if size(args) = 0 {
+                i = lookupDecl(types, name);
+                if i >= 0 {
+                    d = get(types, i);
+                    match clone(d) {
+                        TypeDecl::DStruct { name: dn, fields: fields } => {
+                            for fd in fields {
+                                if !knownLayoutAt(types, fd.ty, depth + 1) { r = false; };
+                            };
+                        },
+                        TypeDecl::DEnum { name: dn, variants: variants } => {
+                            for v in variants {
+                                for fd in v.fields {
+                                    if !knownLayoutAt(types, fd.ty, depth + 1) { r = false; };
+                                };
+                            };
+                        },
+                    };
+                };
+            } else {
+                for arg in args {
+                    if isSizeArgText(arg) {
+                        if !constSizeText(arg) { r = false; };
+                    } else {
+                        pt = textType(arg);
+                        if !pt.ok || !knownLayoutAt(types, pt.ty, depth + 1) { r = false; };
+                    };
+                };
+            };
+        },
+        Type::TInt => { },
+        Type::TByte => { },
+        Type::TBool => { },
+        Type::TFn { args: args, ret: ret } => { },
+        Type::TVariant { name: name } => { },
+        Type::TVar { n: n } => { },
+        Type::TRef { inner: e } => { },
+        Type::TMutRef { inner: e } => { },
+        Type::TForall { sizes: sizes, types: types2, body: body } => { },
+        Type::TWord { signed: signed, bits: bits } => { },
+    };
+    return r;
+};
+
+fn castProblemIn(types: &List<TypeDecl>, f: &Function) -> String ~ {
+    for b in f.blocks {
+        for st in b.stmts {
+            if st is Statement::Assign {
+                l = (st as Statement::Assign).local;
+                rv = (st as Statement::Assign).rv;
+                if rv is Rvalue::ListOp && (rv as Rvalue::ListOp).op = 42 && size((rv as Rvalue::ListOp).args) = 1 {
+                    dt = localRes(f, l);
+                    srcOperand = get((rv as Rvalue::ListOp).args, 0);
+                    srcLocal = 0 - 1;
+                    match clone(srcOperand) {
+                        Operand::Copy { local: sl } => { srcLocal = sl; },
+                        Operand::Move { local: sl } => { srcLocal = sl; },
+                        Operand::Const { value: c } => { },
+                    };
+                    if srcLocal >= 0 {
+                        src = localRes(f, srcLocal);
+                        if dt.ok && src.ok && dt.decl.ty is Type::TBlock && src.decl.ty is Type::TBlock {
+                            to = Box::unbox((dt.decl.ty as Type::TBlock).inner);
+                            from = Box::unbox((src.decl.ty as Type::TBlock).inner);
+                            if !knownLayoutAt(types, from, 0) || !knownLayoutAt(types, to, 0) {
+                                return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", where the layout of a type parameter or a size parameter is not known");
+                            };
+                            lf = layoutOf(types, plainType(from));
+                            lt = layoutOf(types, plainType(to));
+                            if lf.size != lt.size || lt.align > lf.align {
+                                return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", whose slots are not the same size, or are aligned more strictly");
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return "";
+};
+
+fn castProblem(p: &Program) -> String ~ {
+    r = castProblemIn(p.types, p.entry);
+    if r != "" { return r; };
+    for f in p.functions {
+        r = castProblemIn(p.types, f);
+        if r != "" { return r; };
+    };
+    return "";
+};
+
+// The program is read from the standard input (version 2 of the data), its ghosts are erased, and it is written again as
+// version 1. What cannot be read is refused as the reader refuses it, and a cast of a permission whose slots are not the
+// same size is refused with the problem on the standard error.
+read = readLines();
+if !read.ok {
+    "the input is not the MIR as data: a bad name\n".printError();
+    return 1;
+};
+program = programAt(read.value);
+if !program.ok {
+    "the input is not the MIR as data\n".printError();
+    return 1;
+};
+problem = castProblem(program.value);
+if problem != "" {
+    problem.printError();
+    writeError(toByte(10));
+    return 1;
+};
+printProgram(eraseProgram(program.value));
