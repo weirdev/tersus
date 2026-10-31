@@ -22,6 +22,7 @@
 struct Token { quoted: Bool, text: String };
 
 impl Clone for Token { };
+impl Eq for Token { };
 
 struct Parsed<T> { value: T, pos: Int, ok: Bool };
 
@@ -40,7 +41,7 @@ enum Type {
     TArray { elem: Box<Type>, size: Size },
     TBox { inner: Box<Type> },
     TFn { args: List<Type>, ret: Box<Type> },
-    TNamed { name: String },
+    TNamed { name: String, base: String, argc: Int, argTokens: List<Token> },
     TVariant { name: String },
     TVar { n: Int },
     TForall { sizes: List<String>, types: List<String>, body: Box<Type> },
@@ -417,7 +418,74 @@ fn sizeAt(ts: &List<Token>, pos: Int) -> Parsed<Size> [{ affirm pos >= 0; affirm
     return bad;
 };
 
-// A type. The words are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+
+fn catStrings(a: &String, b: &String) -> String [{ }] [{ }] {
+    out = clone(a);
+    for i in 0..size(b.bytes) {
+        out = push(out, get(b.bytes, i));
+    };
+    return out;
+};
+
+// A size as the rendered name of an instance writes it
+fn renderSizeForName(s: &Size) -> String [{ }] [{ }] {
+    return match s {
+        Size::SConst { n: n } => String::fromInt(n),
+        Size::SAny => "?",
+        Size::SParam { name: name } => clone(name),
+        Size::SVar { n: n } => catStrings("_", String::fromInt(n)),
+    };
+};
+
+fn isBareLowerName(name: &String) -> Bool [{ }] [{ }] {
+    if size(name.bytes) = 0 { return false; };
+    c = toInt(get(name.bytes, 0));
+    if c < 97 || c > 122 { return false; };
+    for i in 0..size(name.bytes) {
+        b = toInt(get(name.bytes, i));
+        if !((b >= 48 && b <= 57) || (b >= 65 && b <= 90) || (b >= 97 && b <= 122)) { return false; };
+    };
+    return true;
+};
+
+// A type as the rendered name of an instance writes it (a type parameter has a ' before it, and an unknown its number).
+// The fuel is the number of tokens the type was read from, which bounds how deep it can be.
+fn renderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+    if fuel <= 0 { return ""; };
+    r = "";
+    match t {
+        Type::TInt => { r = "Int"; },
+        Type::TByte => { r = "Byte"; },
+        Type::TBool => { r = "Bool"; },
+        Type::TList { elem: e } => { r = catStrings(catStrings("List<", renderTypeForName(Box::unbox(e), fuel - 1)), ">"); },
+        Type::TBox { inner: e } => { r = catStrings(catStrings("Box<", renderTypeForName(Box::unbox(e), fuel - 1)), ">"); },
+        Type::TArray { elem: e, size: s } => { r = catStrings(catStrings(catStrings(catStrings("Array<", renderTypeForName(Box::unbox(e), fuel - 1)), ", "), renderSizeForName(s)), ">"); },
+        Type::TRef { inner: e } => { r = catStrings("&", renderTypeForName(Box::unbox(e), fuel - 1)); },
+        Type::TMutRef { inner: e } => { r = catStrings("&mut ", renderTypeForName(Box::unbox(e), fuel - 1)); },
+        Type::TAddr { inner: e } => { r = catStrings(catStrings("Addr<", renderTypeForName(Box::unbox(e), fuel - 1)), ">"); },
+        Type::TWord { signed: signed, bits: bits } => {
+            if signed { r = catStrings("I", String::fromInt(bits)); } else { r = catStrings("U", String::fromInt(bits)); };
+        },
+        Type::TParam { name: name } => { r = catStrings("'", clone(name)); },
+        Type::TForall { sizes: sizes, types: types, body: body } => { r = renderTypeForName(Box::unbox(body), fuel - 1); },
+        Type::TFn { args: args, ret: ret } => {
+            parts = "fn(";
+            for i in 0..size(args) {
+                if i > 0 { parts = catStrings(parts, ", "); };
+                parts = catStrings(parts, renderTypeForName(get(args, i), fuel - 1));
+            };
+            r = catStrings(catStrings(parts, ") -> "), renderTypeForName(Box::unbox(ret), fuel - 1));
+        },
+        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
+            if isBareLowerName(name) { r = catStrings("`", clone(name)); } else { r = clone(name); };
+        },
+        Type::TVariant { name: name } => { r = clone(name); },
+        Type::TVar { n: n } => { r = catStrings("?", String::fromInt(n)); },
+    };
+    return r;
+};
+
+// A type. The words are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`,
 // `forall N "n"... N "n"... T`, `param "n"` and `ref T`.
 fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
     bad = failed(Type::TInt, ts);
@@ -450,10 +518,51 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
         if !s.ok { return bad; };
         return done(Type::TArray { elem: Box::new(e.value), size: s.value }, s.pos);
     };
-    if kw = "named" || kw = "variant" || kw = "param" {
+    if kw = "named" {
         s = nameAt(ts, next);
         if !s.ok { return bad; };
-        if kw = "named" { return done(Type::TNamed { name: s.value }, s.pos); };
+        if s.pos >= size(ts) { return bad; };
+        c = countAt(ts, s.pos);
+        if !c.ok { return bad; };
+        parts = [];
+        argTokens = [];
+        p = c.pos;
+        for i in 0..c.value [{ affirm p >= next; affirm p <= size(ts); }] {
+            if p >= size(ts) { return bad; };
+            argStart = p;
+            w2 = wordAt(ts, p);
+            if !w2.ok { return bad; };
+            if w2.pos >= size(ts) { return bad; };
+            if w2.value = "size" {
+                sz = sizeAt(ts, w2.pos);
+                if !sz.ok { return bad; };
+                parts = push(parts, renderSizeForName(sz.value));
+                p = sz.pos;
+            } else {
+                if w2.value != "type" { return bad; };
+                a = typeAt(ts, w2.pos);
+                if !a.ok { return bad; };
+                parts = push(parts, renderTypeForName(a.value, size(ts)));
+                p = a.pos;
+            };
+            affirm argStart <= p;
+            j = argStart;
+            while j < p [{ affirm j >= argStart; affirm j <= p; affirm p <= size(ts); }] shrinks p - j {
+                argTokens = push(argTokens, clone(get(ts, j)));
+                j = j + 1;
+            };
+        };
+        if c.value = 0 { return done(Type::TNamed { name: clone(s.value), base: s.value, argc: 0, argTokens: argTokens }, p); };
+        joined = "";
+        for i in 0..size(parts) {
+            if i > 0 { joined = catStrings(joined, ", "); };
+            joined = catStrings(joined, get(parts, i));
+        };
+        return done(Type::TNamed { name: catStrings(catStrings(catStrings(s.value, "<"), joined), ">"), base: s.value, argc: c.value, argTokens: argTokens }, p);
+    };
+    if kw = "variant" || kw = "param" {
+        s = nameAt(ts, next);
+        if !s.ok { return bad; };
         if kw = "variant" { return done(Type::TVariant { name: s.value }, s.pos); };
         return done(Type::TParam { name: s.value }, s.pos);
     };
@@ -1172,7 +1281,16 @@ fn printType(t: &Type) -> Int ~ {
             };
             n = n + printType(Box::unbox(r));
         },
-        Type::TNamed { name: name } => { n = " named".print() + printName(name); },
+        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
+            n = " named".print() + printName(base) + printInt(argc);
+            for tok in argTokens {
+                if tok.quoted {
+                    n = n + printName(tok.text);
+                } else {
+                    n = n + printWord(tok.text);
+                };
+            };
+        },
         Type::TVariant { name: name } => { n = " variant".print() + printName(name); },
         Type::TVar { n: v } => { n = " var".print() + printInt(v); },
         Type::TForall { sizes: sizes, types: types, body: body } => {

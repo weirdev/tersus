@@ -9,8 +9,8 @@ import qualified Data.Map.Strict as Map
 import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
-import TypeCheck (functionType, maxArraySlots)
-import TersusTypes (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, instanceOf, pattern TArray, substSizes, wordRange)
+import TypeCheck (functionType, maxArraySlots, solveInstanceArgs)
+import TersusTypes (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, baseNameOf, instanceName, namedMatches, pattern TArray, substSizes, tupleGeneric, tupleType, wordRange)
 import Utils (Result (..))
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and function
@@ -28,6 +28,7 @@ verifyProgram program =
 data Env = Env
     { envCtors :: Map Name (Name, [(Variable, Type)])
     , envFns :: Map Name Type
+    , envGenerics :: Map Name ([Variable], [(Variable, Type)])
     }
 
 environment :: Program -> Env
@@ -35,6 +36,7 @@ environment program =
     Env
         { envCtors = Map.fromList (concatMap ctors (Map.toList (progTypes program)))
         , envFns = Map.fromList [(fnName f, fnType f) | f <- Map.elems (progFunctions program)]
+        , envGenerics = progGenerics program
         }
   where
     ctors (name, StructDecl fields) = [(name, (name, fields))]
@@ -129,6 +131,7 @@ problems program fn =
     hasUnknown (TRef t) = hasUnknown t
     hasUnknown (TMutRef t) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
+    hasUnknown (TNamed _ args) = or [hasUnknown u | ArgType u <- args]
     hasUnknown _ = False
 
 -- Why the rvalue cannot give a value of the type of the local it is assigned to
@@ -174,7 +177,7 @@ rvalueProblems env localTy d rv =
         ListOp Pop [l] -> [expected d l | not (fits' d l)]
         ListOp FromList [l] -> case (d, operandType env localTy l) of
             -- (a list of native code is a StdList, lib/lists.tersus, whose elements move into the array)
-            (TArrayOf e _, Just (TNamed n)) | Just ("StdList", [ArgType e']) <- instanceOf n -> ["the result is " ++ renderType d ++ ", not an array of " ++ renderType e' | not (sub env e e')]
+            (TArrayOf e _, Just (TNamed "StdList" [ArgType e'])) -> ["the result is " ++ renderType d ++ ", not an array of " ++ renderType e' | not (sub env e e')]
             (TArrayOf e _, _) -> [expected (TList e) l | not (fits' (TList e) l)]
             _ -> ["Array::fromList needs a result that is an array"]
         ListOp Push [l, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ [expected e x | not (fits' e x)])
@@ -185,7 +188,7 @@ rvalueProblems env localTy d rv =
         Unbox o -> case operandType env localTy o of
             Just (TBox held) -> ["the result is " ++ renderType d ++ ", not " ++ renderType held | not (sub env d held)]
             -- (a Box of an array is a list of native code, lib/lists.tersus, which gives its elements to an inline array)
-            Just (TNamed n) | Just ("StdList", [ArgType e]) <- instanceOf n -> case d of
+            Just (TNamed "StdList" [ArgType e]) -> case d of
                 TArrayOf e' _ | sub env e' e -> []
                 _ -> ["the result is " ++ renderType d ++ ", not an array of " ++ renderType e]
             _ -> [expected' "a Box" o]
@@ -194,7 +197,7 @@ rvalueProblems env localTy d rv =
             _ -> ["unsize needs a Box of an array, and a result that is a Box of an array of any size"]
         MakeBox o -> case d of
             TBox held -> [expected held o | not (fits' held o)]
-            TNamed n | Just ("StdList", [ArgType e]) <- instanceOf n -> case operandType env localTy o of
+            TNamed "StdList" [ArgType e] -> case operandType env localTy o of
                 Just (TArrayOf e' (SizeConst _)) | sub env e e' -> []
                 Nothing | Const (CArray _) <- o -> []
                 _ -> [expected' ("an array of " ++ renderType e) o]
@@ -203,7 +206,7 @@ rvalueProblems env localTy d rv =
             Nothing -> ["there is no constructor " ++ name]
             Just (typeName, declared)
                 | map fst declared /= map fst fields -> [name ++ " is built with the wrong fields"]
-                | otherwise -> ["the result is " ++ renderType d ++ ", not " ++ typeName | d /= TNamed typeName] ++ [expected t o | ((_, t), (_, o)) <- zip declared fields, not (fits' t o)]
+                | otherwise -> ["the result is " ++ renderType d ++ ", not " ++ typeName | not (namedMatches d typeName)] ++ [expected t o | ((_, t), (_, o)) <- zip declared fields, not (fits' t o)]
         ReadField o name field -> case Map.lookup name (envCtors env) of
             Nothing -> ["there is no constructor " ++ name]
             Just (typeName, declared) ->
@@ -273,8 +276,8 @@ rvalueProblems env localTy d rv =
     fitsSequence e l = fits' (TList e) l || fits' (TRef (TList e)) l || fits' (TMutRef (TList e)) l || stdListRef l || any (\ty -> fits' ty l) [t | Just t <- [arrayOf l e]] || arrayConstant l e
       where
         stdListRef o = case operandType env localTy o of
-            Just (TRef (TNamed n)) | Just ("StdList", [ArgType e']) <- instanceOf n -> sub env e e'
-            Just (TMutRef (TNamed n)) | Just ("StdList", [ArgType e']) <- instanceOf n -> sub env e e'
+            Just (TRef (TNamed "StdList" [ArgType e'])) -> sub env e e'
+            Just (TMutRef (TNamed "StdList" [ArgType e'])) -> sub env e e'
             _ -> False
     arrayConstant l e = case l of
         Const (CArray cs) -> all (constantFits env e) cs
@@ -284,7 +287,7 @@ rvalueProblems env localTy d rv =
         Just ty@(TArrayOf e' _) | sub env e e' -> Just ty
         Just ty@(TBox (TArrayOf e' _)) | sub env e e' -> Just ty
         -- (a list of native code is read as the array it holds)
-        Just ty@(TNamed name) | Just ("StdList", [ArgType e']) <- instanceOf name, sub env e e' -> Just ty
+        Just ty@(TNamed "StdList" [ArgType e']) | sub env e e' -> Just ty
         _ -> Nothing
     -- the result of set is the array it was given; the result of array(n, x) is an array
     arrayResult = case rv of
@@ -323,8 +326,8 @@ rvalueProblems env localTy d rv =
         Just (TList _) -> True
         Just (TRef (TList _)) -> True
         Just (TMutRef (TList _)) -> True
-        Just (TRef (TNamed n)) | Just ("StdList", _) <- instanceOf n -> True
-        Just (TMutRef (TNamed n)) | Just ("StdList", _) <- instanceOf n -> True
+        Just (TRef (TNamed "StdList" _)) -> True
+        Just (TMutRef (TNamed "StdList" _)) -> True
         Just (TRef TArrayOf{}) -> True
         Just (TMutRef TArrayOf{}) -> True
         Just TArrayOf{} -> True
@@ -337,10 +340,20 @@ rvalueProblems env localTy d rv =
     -- a value of the type with this name, or of one of its variants
     isValueOf typeName o = case operandType env localTy o of
         -- (a Box is looked into, and so is the struct a Box is made of in native code, lib/box.tersus)
-        Just (TBox t) -> sub env (TNamed typeName) t
-        Just t@(TNamed n) | Just ("StdBox", [ArgType held]) <- instanceOf n -> sub env (TNamed typeName) t || sub env (TNamed typeName) held
-        Just t -> sub env (TNamed typeName) t
+        Just (TBox t) -> namedMatches t typeName || sub env (TNamed typeName []) t
+        Just t@(TNamed "StdBox" [ArgType held]) -> namedMatches t typeName || sub env (TNamed typeName []) t || sub env (TNamed typeName []) held
+        Just t -> namedMatches t typeName || sub env (TNamed typeName []) t
         Nothing -> False
+
+-- The type a constructor builds, from its owner name and declared fields
+ctorType :: Env -> (Name, [(Variable, Type)]) -> Type
+ctorType env (typeName, declared) =
+    let base = baseNameOf typeName
+     in case tupleGeneric base of
+            Just _ -> tupleType (map snd declared)
+            Nothing -> case Map.lookup base (envGenerics env) of
+                Just (params, template) -> TNamed base (solveInstanceArgs params template (map snd declared))
+                Nothing -> TNamed typeName []
 
 -- The type an operand is known to have; none for a list constant, whose element type is not in it
 operandType :: Env -> (Local -> Maybe Type) -> Operand -> Maybe Type
@@ -352,7 +365,7 @@ operandType env localTy o = case o of
         CBool _ -> Just TBool
         CList _ -> Nothing
         CArray _ -> Nothing
-        CData name _ -> TNamed . fst <$> Map.lookup name (envCtors env)
+        CData name _ -> ctorType env <$> Map.lookup name (envCtors env)
         CFn name -> Map.lookup name (envFns env)
 
 -- Whether the operand can be used where the type is wanted
@@ -378,7 +391,7 @@ constantFits env wanted c = case c of
     CData name fields -> case Map.lookup name (envCtors env) of
         Nothing -> False
         Just (typeName, declared) ->
-            sub env wanted (TNamed typeName)
+            sub env wanted (ctorType env (typeName, declared))
                 && map fst declared == map fst fields
                 && and [constantFits env t v | ((_, t), (_, v)) <- zip declared fields]
     CFn name -> maybe False (sub env wanted) (Map.lookup name (envFns env))
@@ -387,7 +400,7 @@ constantFits env wanted c = case c of
 -- where the enum is wanted (but not the other way), also inside a list
 sub :: Env -> Type -> Type -> Bool
 sub env wanted actual = case (wanted, actual) of
-    (TNamed t, TVariant v) -> maybe False ((== t) . fst) (Map.lookup v (envCtors env))
+    (TNamed base args, TVariant v) -> maybe False ((== instanceName base args) . fst) (Map.lookup v (envCtors env))
     (TList a, TList b) -> sub env a b
     (TArray a n, TArray b m) -> n == m && sub env a b
     (TArrayOf a SizeAny, TArrayOf b SizeAny) -> sub env a b
@@ -395,10 +408,8 @@ sub env wanted actual = case (wanted, actual) of
     (TAddr a, TAddr b) -> sub env a b
     (TUninit a, TUninit b) -> sub env a b
     (TBlock a, TBlock b) -> sub env a b
-    (TNamed a, TNamed b)
-        | a == b -> True
-        -- two instances of one struct with parameters: their types agree, and a size parameter of the one that is wanted stands for a size
-        | Just (c, as) <- instanceOf a, Just (d, bs) <- instanceOf b, c == d, length as == length bs -> and (zipWith argSub as bs)
+    (TNamed bx xs, TNamed by ys)
+        | bx == by, length xs == length ys -> and (zipWith argSub xs ys)
     (TRef a, b) -> sub env a b
     (a, TRef b) -> sub env a b
     (TMutRef a, b) -> sub env a b

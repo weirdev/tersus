@@ -47,8 +47,8 @@ renderProof name = go 0
     go prec (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variant)) _)) [value]) =
         let text = go 1 value ++ " is " ++ variant
          in if prec > 0 then "(" ++ text ++ ")" else text
-    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _)) _)) []) = name
-    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args)
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _ _)) _)) []) = name
+    go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _ fields)) _)) args)
         | length fields == length args = name ++ " { " ++ intercalate ", " (zipWith (\f a -> f ++ ": " ++ go 0 a) fields args) ++ " }"
     -- (what a permission says of a slot is read as the program writes it)
     go _ (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [FApp (CTerm (VFunct _ _ _ (BuiltinFunct BlockFilled) _)) [blk], i]) = "filled(" ++ go 0 blk ++ ", " ++ go 0 i ++ ")"
@@ -127,7 +127,7 @@ builtinName And = "&&"
 builtinName Or = "||"
 builtinName Not = "!"
 builtinName (Rel r) = relName r
-builtinName (Ctor name _) = name
+builtinName (Ctor name _ _) = name
 builtinName (Field _ field) = "." ++ field
 builtinName (Project _ field) = "." ++ field
 builtinName (Cast variant) = "as " ++ variant
@@ -208,6 +208,6 @@ renderType (TMutRef t) = "&mut " ++ renderType t
 renderType (TParam name) = name
 renderType (TForall sizes types t) = "<" ++ intercalate ", " (types ++ sizes) ++ ">" ++ renderType t
 renderType (TFn args ret) = "fn(" ++ intercalate ", " (map renderType args) ++ ") -> " ++ renderType ret
-renderType (TNamed name) = filter (/= '`') name
+renderType (TNamed base args) = instanceName base args
 renderType (TVariant name) = name
 renderType (TVar _) = "?"
