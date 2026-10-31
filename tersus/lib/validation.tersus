@@ -1267,6 +1267,39 @@ fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) 
     return linContradiction(facts, vars);
 };
 
+
+// Whether a term is built by arithmetic (or is not an application at all):
+// the linear solver may prove equalities of those, but an equality between
+// data applications (a get, a field read) needs a congruence fact.
+
+// Equality of data applications by congruence over the stated equalities
+// alone: bounds that happen to pin two indices together do not make a get
+// of one a get of the other until the program states that equality.
+fn congruenceEqual(context: &ValidatorContext, left: Int, right: Int) -> Bool {
+    known = semanticFacts(context.equalities, context.applications, context.constants);
+    for round in 0..2 * size(context.equalities) + 8 * size(context.applications) + 8 {
+        next = applicationFactsWithConstructors(known, context.applications, context.constructorFunctions, context.constructorFields);
+        if size(next) = size(known) { return hasEquality(next, left, right); };
+        known = next;
+    };
+    return hasEquality(known, left, right);
+};
+
+fn arithmeticTerm(context: &ValidatorContext, term: Int) -> Bool {
+    for app in context.applications {
+        if app.id = term {
+            if app.function = -1 { return true; };
+            if app.function = -2 { return true; };
+            if app.function = -3 { return true; };
+            if app.function = -4 { return true; };
+            if app.function = -5 { return true; };
+            if app.function = -13 { return true; };
+            return false;
+        };
+    };
+    return true;
+};
+
 fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     recognized = false;
     if goal is ValidatorGoal::Equal { recognized = true; };
@@ -1322,14 +1355,25 @@ fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool
     };
     if goal is ValidatorGoal::Equal {
         g = goal as ValidatorGoal::Equal;
-        if contextEqual(equalities, differences, g.left, g.right) { return true; };
-        if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
+        bothArithmetic = arithmeticTerm(context, g.left) && arithmeticTerm(context, g.right);
+        if bothArithmetic {
+            if contextEqual(equalities, differences, g.left, g.right) { return true; };
+        } else {
+            if congruenceEqual(context, g.left, g.right) { return true; };
+        };
+        if arithmeticTerm(context, g.left) {
+            if arithmeticTerm(context, g.right) {
+                if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
+            };
+        };
         return false;
     };
     if goal is ValidatorGoal::Different {
         g = goal as ValidatorGoal::Different;
         if entailsConstructorDisequality(equalities, context.applications, context.constructorFunctions, g.left, g.right) { return true; };
         if entailsVariantDisequality(equalities, context.variants, g.left, g.right) { return true; };
+        if contextWithin(context, g.left, g.right) { return true; };
+        if contextWithin(context, g.right, g.left) { return true; };
         return contextDifferent(equalities, context.applications, orders, context.different, differences, g.left, g.right);
     };
     if goal is ValidatorGoal::Less {
@@ -2254,6 +2298,7 @@ enum ExecutionStep {
     Assume { relation: Int, left: ValueRef, right: ValueRef },
     AssumeVariant { object: ValueRef, family: Int, constructor: Int, matches: Bool },
     RequireVariant { object: ValueRef, family: Int, constructor: Int },
+    CheckWithin { inner: ValueRef, outer: ValueRef },
     Proof { step: ProofStep },
 };
 
@@ -2872,6 +2917,11 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     if ok = false {
                         return ExecutionResult { status: 1, failedAt: i, state: state };
                     };
+                    context = assumeRelation(state.context, check.relation, a, b);
+                    if check.relation = 0 {
+                        context = assumeBooleanFact(context, a, b);
+                    };
+                    state = ExecutionState { context: context, ..state };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
@@ -2889,6 +2939,19 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                         context = assumeBooleanFact(context, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
                     };
                     state = ExecutionState { context: context, ..state };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::CheckWithin {
+            handled = true;
+            cw = step as ExecutionStep::CheckWithin;
+            inner = resolveValue(state, cw.inner);
+            outer = resolveValue(state, cw.outer);
+            if inner is ValueLookup::Found {
+                if outer is ValueLookup::Found {
+                    if entailsGoal(state.context, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
+                        return ExecutionResult { status: 1, failedAt: i, state: state };
+                    };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
@@ -2956,7 +3019,7 @@ enum ExecutionEnd {
     // body is the block an iteration starts on, and region is the header and
     // every block that can get back to it; a block outside the region leaves
     // the loop and is walked after it.
-    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef },
+    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef, variantObject: ValueRef, variantFamily: Int, variantConstructor: Int },
     Unsupported,
 };
 
@@ -3018,14 +3081,24 @@ fn checkLoopBackEdge(initial: &ExecutionState, frame: &LoopFrame, id: Int) -> Ex
                 return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
             };
         } else {
-            otherAfter = resolveValue(preserved.state, frame.variantOther);
-            if otherAfter is ValueLookup::Found {
-                if entailsGoal(preserved.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
+            if frame.variantMode = 1 {
+                otherAfter = resolveValue(preserved.state, frame.variantOther);
+                if otherAfter is ValueLookup::Found {
+                    if entailsGoal(preserved.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
+                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+                    };
+                } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state }; };
+                if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
                     return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
                 };
-            } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state }; };
-            if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
-                return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+            };
+            if frame.variantMode = 3 {
+                if entailsGoal(preserved.state.context, ValidatorGoal::Within { inner: nextTerm, outer: frame.prior }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+                };
+                if entailsGoal(preserved.state.context, ValidatorGoal::Different { left: nextTerm, right: frame.prior }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+                };
             };
         };
         return ExecutionFlowResult { status: 0, block: id, step: -1, state: preserved.state };
@@ -3067,7 +3140,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
             if loop.relation < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.variantMode < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            if loop.variantMode > 1 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
+            if loop.variantMode > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             arbitrary = clone(initial);
             for local in loop.havoc {
                 changed = executeSteps(arbitrary, push([], ExecutionStep::Havoc { local: local }));
@@ -3098,13 +3171,21 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                     if (zeroValue as IntegerLookup::Found).value != 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
                                 } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
                                 yesContext = assumeRelation(header.state.context, loop.relation, a, b);
+                                if loop.variantFamily >= 0 {
+                                    variantObject = resolveValue(header.state, loop.variantObject);
+                                    if variantObject is ValueLookup::Found {
+                                        yesContext = ValidatorContext { variants: push(clone(yesContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: true }), ..yesContext };
+                                    };
+                                };
                                 if loop.variantMode = 0 {
                                     if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
                                         return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
                                     };
                                 } else {
-                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
-                                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
+                                    if loop.variantMode = 1 {
+                                        if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
+                                            return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
+                                        };
                                     };
                                 };
                                 // Keep the prior variant live even if its local is overwritten.
@@ -3117,6 +3198,12 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                 if bodyResult.status != 0 { return bodyResult; };
                                 inverse = negateRelation(loop.relation, a, b);
                                 noContext = assumeRelation(header.state.context, inverse.relation, inverse.left, inverse.right);
+                                if loop.variantFamily >= 0 {
+                                    variantObject = resolveValue(header.state, loop.variantObject);
+                                    if variantObject is ValueLookup::Found {
+                                        noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
+                                    };
+                                };
                                 noState = ExecutionState { context: noContext, ..header.state };
                                 return walkExecution(blocks, loop.exit, noState, fuel - 1, loops);
                             };
