@@ -137,6 +137,7 @@ test-suite tersus-test
       TestMirData
       TestMirEmit
       TestMirReader
+      TestMirVerify
       TestNative
       TestOwnership
       TestPipeline

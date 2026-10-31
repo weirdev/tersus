@@ -111,6 +111,7 @@ testExamples =
         , testExampleFile "examples/upper.tersus" (ExpectReturn (VInt 0))
         , testExampleFile "examples/text.tersus" (ExpectReturn (VInt 504))
         , testExampleFile "examples/mir_reader.tersus" (ExpectReturn (VInt 1))
+        , testExampleFile "examples/mir_verify.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "examples/emit.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "examples/vec.tersus" (ExpectReturn (VInt 2491212381))
         , testExampleFile "examples/spec_functions.tersus" (ExpectReturn (VInt 25070))
