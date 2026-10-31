@@ -1,38 +1,13 @@
 module TypeCheck
     ( typeCheck
     , elaborate
+    , Elaborated (..)
     , renderType
-      -- What MirLower needs to give every local of the MIR its type: the checker's monad and the steps of inferExpr
-    , TC
-    , TcState
-    , initialTcState
-    , runTcState
-    , valueType
-    , builtinType
-    , checkCall
+      -- Pure facts about types that the MIR passes use
     , functionType
-    , arraySlots
     , maxArraySlots
-    , withSizes
-    , withGenerics
-    , plainElement
-    , arrayElement
-    , checkBuiltinCall
-    , checkConstruct
-    , ensureInstance
     , solveInstanceArgs
-    , readField
-    , typeCtors
-    , ctorInfo
-    , declareType
-    , declareTypeWith
-    , declareGeneric
-    , registerCtors
-    , checkType
-    , unify
-    , expect
-    , zonk
-    , freshVar
+    , arrayElement
     ) where
 
 import Control.Monad (forM, forM_, unless, void, when)
@@ -56,11 +31,41 @@ typeCheck stmts = mapResult (const ()) (elaborate stmts)
 
 -- Checks the program and gives it back with each `shrinks e` resolved by the type of e: an Int counts down to 0 (Counting),
 -- an enum or struct loses a field at a time (Parts). The validator only sees the resolved clauses.
-elaborate :: [Statement] -> Result [Statement] String
+--
+-- The result also carries the type of every expression of the program's code, fully resolved, in the order the
+-- lowering visits those expressions: an expression, then the expression it applies when that is itself computed
+-- (not a name or a value), then its arguments, statement by statement (a function's body where it is defined).
+-- That is all the lowering needs to give every local and temporary its type, so it never infers a type itself.
+data Elaborated = Elaborated [Statement] [Type]
+    deriving (Show)
+
+elaborate :: [Statement] -> Result Elaborated String
 elaborate stmts =
-    case runTc (checkProgram stmts) of
+    case runTcState checked initialTcState of
         Left err -> Error err
-        Right stmts' -> Ok stmts'
+        Right (elaborated, _) -> Ok elaborated
+  where
+    checked = do
+        (stmts', types) <- checkProgram stmts
+        resolved <- mapM zonk types
+        return (Elaborated stmts' resolved)
+
+-- An expression with the type the checker gave it, and the typed expressions inside it that the lowering
+-- visits (see Elaborated): for an application whose head is a name or a value, the head is not one of them.
+data TExpr = TExpr Type Expression [TExpr]
+
+tType :: TExpr -> Type
+tType (TExpr t _ _) = t
+
+tExpr :: TExpr -> Expression
+tExpr (TExpr _ e _) = e
+
+-- The types of an expression and of the typed expressions inside it, in the order the lowering visits them
+tTypes :: TExpr -> [Type]
+tTypes (TExpr t _ inner) = t : concatMap tTypes inner
+
+tLeaf :: Type -> Expression -> TExpr
+tLeaf t e = TExpr t e []
 
 
 -- The checking monad: a substitution for the type variables, a counter for new ones, and failure
@@ -87,7 +92,7 @@ data TcState = TcState
     , tcImplArgs :: Map (Name, Name) (Type, [Arg]) -- for a trait and a type that implements it, the impl's type (`Vec<T>`) and the types it gives the trait
     , tcTemplates :: Map Name Template -- the functions with bounds on their types, each checked for the types it is called with
     , tcInstances :: Map Name Type -- the functions that a template has been made into so far, with their types
-    , tcEmitted :: [Statement] -- the instances made since the last statement of the program, which come before it
+    , tcEmitted :: [(Statement, [Type])] -- the instances made since the last statement of the program, which come before it, with the types of their expressions
     , tcActive :: [Name] -- the templates that an instance is being checked of, which a call of one of them cannot make another instance of
     , tcLinear :: Set.Set Name -- the structs and enums that are linear
     , tcDrops :: Set.Set Name -- the structs and enums that have a drop
@@ -108,9 +113,6 @@ data Template = Template
     }
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
-
-runTc :: TC a -> Either String a
-runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
 initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False
@@ -271,37 +273,39 @@ variantOf typeName variant = do
 -- Where a value is given to something that has a type (an argument, a field, a returned value, a variable that has one), a Box of an
 -- array of a size can be given where a Box of an array of any size is wanted: the unsizing conversion, which keeps the value and
 -- makes the size part of the Box. It is written into the expression, since the Box is not the same in memory afterwards.
-coerce :: Type -> (Type, Expression) -> TC (Type, Expression)
-coerce wanted (actual, expr) = do
+coerce :: Type -> TExpr -> TC TExpr
+coerce wanted texpr = do
+    let actual = tType texpr
+        expr = tExpr texpr
     w <- zonk wanted
     a <- zonk actual
     case (w, a) of
         (TBox (TArrayOf x SizeAny), TBox (TArrayOf y size)) | size /= SizeAny -> do
             same <- unify x y
-            return (if same then (w, F (Val (builtinFunct Unsize)) [expr]) else (actual, expr))
+            return (if same then TExpr w (F (Val (builtinFunct Unsize)) [expr]) [texpr] else texpr)
         -- an integer written out where a fixed-width integer is wanted is that integer, if it is in its range
         (TWord signed bits, TInt) | Val (VInt n) <- expr ->
             let (low, high) = wordRange signed bits
              in if n >= low && n < high
-                    then return (w, F (Val (builtinFunct (ToWord signed bits))) [expr])
+                    then return (TExpr w (F (Val (builtinFunct (ToWord signed bits))) [expr]) [texpr])
                     else failTc ("Type error: " ++ show n ++ " is not a " ++ wordName signed bits ++ ": a " ++ wordName signed bits ++ " is from " ++ show low ++ " to " ++ show (high - 1))
         -- an integer written out where a Byte is wanted is that Byte, if it is from 0 to 255 (`writeByte(104)`)
         (TByte, TInt) | Val (VInt n) <- expr ->
             if n >= 0 && n < 256
-                then return (TByte, F (Val (builtinFunct ToByte)) [expr])
+                then return (TExpr TByte (F (Val (builtinFunct ToByte)) [expr]) [texpr])
                 else failTc ("Type error: " ++ show n ++ " is not a Byte: a Byte is from 0 to 255")
         -- and a list of them written out is a list of Bytes (`String { bytes: ... }` is not written so, but a field of a list of Bytes can be)
         (TList TByte, TList TInt) | Val (VList items) <- expr, Just ns <- mapM literalInt items ->
             if all (\n -> n >= 0 && n < 256) ns
-                then return (TList TByte, F (Val (builtinFunct BytesFrom)) [expr])
+                then return (TExpr (TList TByte) (F (Val (builtinFunct BytesFrom)) [expr]) [texpr])
                 else failTc "Type error: a list of Bytes is written with numbers from 0 to 255"
-        _ -> return (actual, expr)
+        _ -> return texpr
   where
     literalInt (VInt n) = Just n
     literalInt _ = Nothing
 
 -- The arguments of a call of a function of the program, given the unsizing conversions its parameters ask for
-coerceArguments :: Type -> [(Type, Expression)] -> TC [(Type, Expression)]
+coerceArguments :: Type -> [TExpr] -> TC [TExpr]
 coerceArguments ft inferred = do
     ft' <- zonk ft
     case ft' of
@@ -517,9 +521,9 @@ derefOwner ty = do
 
 -- An expression looked through one step, by a call of its type's `deref` where it has a Deref impl. Nothing for a Box (whose
 -- look-through the language gives, in the type) and for anything that is not looked through.
-derefStepExpr :: Ctx -> Env -> (Type, Expression) -> TC (Maybe (Type, Expression))
-derefStepExpr ctx env (ty, expr) = do
-    t <- zonk ty
+derefStepExpr :: Ctx -> Env -> TExpr -> TC (Maybe TExpr)
+derefStepExpr ctx env texpr = do
+    t <- zonk (tType texpr)
     case t of
         TBox _ -> return Nothing
         _ -> do
@@ -527,18 +531,18 @@ derefStepExpr ctx env (ty, expr) = do
             case target of
                 Just _ -> do
                     owner <- derefOwner t
-                    Just <$> inferExprR ctx env (F (Var (implFunctionName owner (Just "Deref") "deref")) [expr])
+                    Just <$> inferExprR ctx env (F (Var (implFunctionName owner (Just "Deref") "deref")) [tExpr texpr])
                 Nothing -> return Nothing
 
 -- An expression looked through to the value it holds, a step at a time (see derefStepExpr). The result is the value that is
 -- looked at, so what is read from it, tested or taken apart is a view of a value the calls give, and the value it came from is
 -- only lent to them.
-derefExpr :: Ctx -> Env -> (Type, Expression) -> TC (Type, Expression)
-derefExpr ctx env (ty, expr) = do
-    next <- derefStepExpr ctx env (ty, expr)
+derefExpr :: Ctx -> Env -> TExpr -> TC TExpr
+derefExpr ctx env texpr = do
+    next <- derefStepExpr ctx env texpr
     case next of
         Just stepped -> derefExpr ctx env stepped
-        Nothing -> return (ty, expr)
+        Nothing -> return texpr
 
 -- Whether a builtin looks at the struct or enum a value is of (tests its variant, casts it to one, reads a field of one)
 isLookThrough :: BuiltinFunct -> Bool
@@ -1113,21 +1117,24 @@ functionType sizes types ptys rty = TForall sizes types (TFn ptys rty)
 
 -- Programs
 
-checkProgram :: [Statement] -> TC [Statement]
-checkProgram stmts = snd <$> checkStatements True (Ctx Map.empty Nothing) [Map.empty] stmts
+checkProgram :: [Statement] -> TC ([Statement], [Type])
+checkProgram stmts = do
+    (_, stmts', types) <- checkStatements True (Ctx Map.empty Nothing) [Map.empty] stmts
+    return (stmts', types)
 
 -- Statements run in order; a top-level function is visible to the functions after it, and the
 -- returned environment holds the variables the statements defined in the innermost scope.
-checkStatements :: Bool -> Ctx -> Env -> [Statement] -> TC (Env, [Statement])
-checkStatements _ _ env [] = return (env, [])
+checkStatements :: Bool -> Ctx -> Env -> [Statement] -> TC (Env, [Statement], [Type])
+checkStatements _ _ env [] = return (env, [], [])
 checkStatements top ctx env (stmt : rest) = do
-    (ctx', env', stmts') <- checkItem top ctx env stmt
+    (ctx', env', stmts', types) <- checkItem top ctx env stmt
     -- (the functions that templates were made into while it was checked come before it)
     made <- if top then takeEmitted else return []
-    (envAfter, rest') <- checkStatements top ctx' env' rest
-    return (envAfter, made ++ stmts' ++ rest')
+    let (madeStmts, madeTypes) = unzip made
+    (envAfter, rest', restTypes) <- checkStatements top ctx' env' rest
+    return (envAfter, madeStmts ++ stmts' ++ rest', concat madeTypes ++ types ++ restTypes)
 
-takeEmitted :: TC [Statement]
+takeEmitted :: TC [(Statement, [Type])]
 takeEmitted = do
     s <- getState
     putState s{tcEmitted = []}
@@ -1135,29 +1142,28 @@ takeEmitted = do
 
 -- A trait is taken apart here and an impl becomes the functions it defines (and the checks of the trait's contracts, see
 -- implementation), so each statement gives back the statements that stand for it
-checkItem :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, [Statement])
+checkItem :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, [Statement], [Type])
 checkItem top ctx env stmt =
     case stmt of
         TraitDef name params functions
-            | top -> checkTrait name params functions >> return (ctx, env, [])
+            | top -> checkTrait name params functions >> return (ctx, env, [], [])
             | otherwise -> failTc "Type error: a trait can only be defined at the top of the program"
         ImplDef trait traitArgs typeName selfName functions
-            | top -> do
-                (ctx', env', functions') <- checkImpl ctx env trait traitArgs typeName selfName functions
-                return (ctx', env', functions')
+            | top -> checkImpl ctx env trait traitArgs typeName selfName functions
             | otherwise -> failTc "Type error: an impl can only be written at the top of the program"
         BoundedDef bounds (Assign name (Val (VFunct params ins outs (NativeFunct signature term body) _)))
             | top -> do
                 declareTemplate ctx name bounds params signature ins outs term body
-                return (ctx, env, [])
+                return (ctx, env, [], [])
             | otherwise -> failTc "Type error: a function with bounds on its types can only be defined at the top of the program"
         BoundedDef{} -> failTc "Type error: only a function can have bounds on its types"
         _ -> do
-            (ctx', env', stmt') <- checkStatement top ctx env stmt
-            return (ctx', env', [stmt'])
+            (ctx', env', stmt', types) <- checkStatement top ctx env stmt
+            return (ctx', env', [stmt'], types)
 
--- Also gives the statement back with its termination clauses resolved
-checkStatement :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, Statement)
+-- Also gives the statement back with its termination clauses resolved, and the types of its code
+-- expressions in the order the lowering visits them (a function's body where it is defined)
+checkStatement :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, Statement, [Type])
 checkStatement top ctx env stmt =
     case stmt of
         Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types) term body) proofs)) -> do
@@ -1166,26 +1172,27 @@ checkStatement top ctx env stmt =
             let fnTy = functionType sizes types ptys rty
                 ctx' = if top then ctx{ctxFns = Map.insert var fnTy (ctxFns ctx)} else ctx
             env' <- assignVar ctx env var fnTy
-            (term', ins', outs', body') <- checkFunction ctx' var params ptys rty sizes types ins outs term body
-            return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty sizes types) term' body') proofs)))
+            (term', ins', outs', body', bodyTypes) <- checkFunction ctx' var params ptys rty sizes types ins outs term body
+            return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty sizes types) term' body') proofs)), bodyTypes)
         Assign var expr -> do
             notSize var
             inferred <- inferExprR ctx env expr
             -- (a variable that has a type already is given a value of it)
-            (t, expr') <- case [existing | scope <- env, Just existing <- [Map.lookup var scope]] of
+            texpr <- case [existing | scope <- env, Just existing <- [Map.lookup var scope]] of
                 existing : _ -> coerce existing inferred
                 [] -> return inferred
-            env' <- assignVar ctx env var t
-            return (ctx, env', Assign var expr')
+            env' <- assignVar ctx env var (tType texpr)
+            return (ctx, env', Assign var (tExpr texpr), tTypes texpr)
         Let var expr -> do
             notSize var
-            (t, expr') <- inferExprR ctx env expr
+            texpr <- inferExprR ctx env expr
             case env of
-                scope : outer -> return (ctx, Map.insert var t scope : outer, Let var expr')
-                [] -> return (ctx, [Map.singleton var t], Let var expr')
+                scope : outer -> return (ctx, Map.insert var (tType texpr) scope : outer, Let var (tExpr texpr), tTypes texpr)
+                [] -> return (ctx, [Map.singleton var (tType texpr)], Let var (tExpr texpr), tTypes texpr)
         Return expr -> do
             inferred <- inferExprR ctx env expr
-            (t, expr') <- maybe (return inferred) (\rty -> coerce rty inferred) (ctxReturn ctx)
+            texpr <- maybe (return inferred) (\rty -> coerce rty inferred) (ctxReturn ctx)
+            let t = tType texpr
             case ctxReturn ctx of
                 Just rty -> expect "returned value" rty t
                 -- the program has no declared type: every return in it has the type of the first
@@ -1194,61 +1201,61 @@ checkStatement top ctx env stmt =
                     case tcProgramReturn s of
                         Nothing -> putState s{tcProgramReturn = Just t}
                         Just first -> expect "returned value of the program" first t
-            return (ctx, env, Return expr')
+            return (ctx, env, Return (tExpr texpr), tTypes texpr)
         ValidationStatement vs -> do
             (env', vs') <- checkValidation ctx env vs
-            return (ctx, env', ValidationStatement vs')
+            return (ctx, env', ValidationStatement vs', [])
         StructDef name params fields invariant
             | not (null params) -> do
                 declareGeneric name params fields
                 invariant' <- withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (checkInvariant ctx fields invariant)
-                return (ctx, env, StructDef name params fields invariant')
+                return (ctx, env, StructDef name params fields invariant', [])
         StructDef name _ fields invariant -> do
             declareType name
             mapM_ (checkType . snd) fields
             registerCtors name [(name, fields)]
             checkFinite name [fields]
             invariant' <- checkInvariant ctx fields invariant
-            return (ctx, env, StructDef name [] fields invariant')
+            return (ctx, env, StructDef name [] fields invariant', [])
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
             mapM_ (mapM_ (checkType . snd) . snd) variants
             registerCtors name variants
             checkFinite name (map snd variants)
-            return (ctx, env, stmt)
-        AxiomDef{} -> return (ctx, env, stmt)
-        ProofDef{} -> return (ctx, env, stmt)
-        Mark{} -> return (ctx, env, stmt)
-        Dissolve var -> lookupVar ctx env var >> return (ctx, env, stmt)
-        CopyDef{} -> return (ctx, env, stmt)
-        DropDef{} -> return (ctx, env, stmt)
-        ExternDef _ -> return (ctx, env, stmt)
+            return (ctx, env, stmt, [])
+        AxiomDef{} -> return (ctx, env, stmt, [])
+        ProofDef{} -> return (ctx, env, stmt, [])
+        Mark{} -> return (ctx, env, stmt, [])
+        Dissolve var -> lookupVar ctx env var >> return (ctx, env, stmt, [])
+        CopyDef{} -> return (ctx, env, stmt, [])
+        DropDef{} -> return (ctx, env, stmt, [])
+        ExternDef _ -> return (ctx, env, stmt, [])
         LinearDef name -> do
             getState >>= \s -> putState s{tcLinear = Set.insert name (tcLinear s)}
-            return (ctx, env, stmt)
+            return (ctx, env, stmt, [])
         TraitDef{} -> failTc "Type error: a trait can only be defined at the top of the program"
         ImplDef{} -> failTc "Type error: an impl can only be written at the top of the program"
         BoundedDef{} -> failTc "Type error: a function with bounds on its types cannot be written in an impl or a block"
         Block stmts -> do
-            (_, stmts') <- checkStatements False ctx (Map.empty : env) stmts
-            return (ctx, env, Block stmts')
+            (_, stmts', types) <- checkStatements False ctx (Map.empty : env) stmts
+            return (ctx, env, Block stmts', types)
         If cond thenStmts elseStmts -> do
-            (condTy, cond') <- inferExprR ctx env cond
-            expect "condition of if" TBool condTy
-            (_, thenStmts') <- checkStatements False ctx (Map.empty : env) thenStmts
-            (_, elseStmts') <- checkStatements False ctx (Map.empty : env) elseStmts
-            return (ctx, env, If cond' thenStmts' elseStmts')
+            cond' <- inferExprR ctx env cond
+            expect "condition of if" TBool (tType cond')
+            (_, thenStmts', thenTypes) <- checkStatements False ctx (Map.empty : env) thenStmts
+            (_, elseStmts', elseTypes) <- checkStatements False ctx (Map.empty : env) elseStmts
+            return (ctx, env, If (tExpr cond') thenStmts' elseStmts', tTypes cond' ++ thenTypes ++ elseTypes)
         While cond invariant term body -> do
-            (condTy, cond') <- inferExprR ctx env cond
-            expect "condition of while" TBool condTy
+            cond' <- inferExprR ctx env cond
+            expect "condition of while" TBool (tType cond')
             (_, invariant') <- checkValidations ctx env invariant
             term' <- resolveTermination ctx env term
-            (_, body') <- checkStatements False ctx (Map.empty : env) body
-            return (ctx, env, While cond' invariant' term' body')
+            (_, body', bodyTypes) <- checkStatements False ctx (Map.empty : env) body
+            return (ctx, env, While (tExpr cond') invariant' term' body', tTypes cond' ++ bodyTypes)
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
-checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement])
+checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement], [Type])
 checkFunction ctx name params ptys rty sizes types ins outs term body = do
     outer <- getState
     -- the sizes and types the function declares are the names its types may use, and the sizes are the last parameters (Ints)
@@ -1267,11 +1274,11 @@ checkFunction ctx name params ptys rty sizes types ins outs term body = do
     (inEnv, ins') <- checkValidations bodyCtx paramEnv ins
     term' <- resolveTermination bodyCtx inEnv term
     (_, outs') <- checkValidations bodyCtx (Map.insert "return" rty (head inEnv) : tail inEnv) outs
-    (_, body') <- checkStatements False bodyCtx (Map.empty : paramEnv) body
+    (_, body', bodyTypes) <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     -- (the sizes of the function end with it)
     after <- getState
     putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcCurrent = tcCurrent outer}
-    return (term', ins', outs', body')
+    return (term', ins', outs', body', bodyTypes)
   where
     nub' = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
@@ -1287,15 +1294,16 @@ notSize var = do
 -- What shrinks is an integer, which counts down to 0, or a struct or enum value, which loses a field at a time
 resolveTermination :: Ctx -> Env -> Maybe Termination -> TC (Maybe Termination)
 resolveTermination ctx env (Just (Shrinks variant)) = do
-    (ty', variant') <- inferExprR ctx env variant
+    variant0 <- inferExprR ctx env variant
     -- (what shrinks is what the value is looked through to, as for a Box: the parts of that are smaller)
-    (ty'', variant'') <- derefExpr ctx env (ty', variant')
-    ty <- zonk ty''
+    variant'' <- derefExpr ctx env variant0
+    ty <- zonk (tType variant'')
+    let variant' = tExpr variant''
     case ty of
-        TInt -> return (Just (Counting variant''))
-        TNamed _ _ -> return (Just (Parts variant''))
-        TVariant _ -> return (Just (Parts variant''))
-        TBox _ -> return (Just (Parts variant''))
+        TInt -> return (Just (Counting variant'))
+        TNamed _ _ -> return (Just (Parts variant'))
+        TVariant _ -> return (Just (Parts variant'))
+        TBox _ -> return (Just (Parts variant'))
         _ -> failTc ("Type error: shrinks needs an Int, an enum or a struct, got " ++ renderType ty)
 resolveTermination _ _ term = return term
 
@@ -1321,10 +1329,10 @@ checkValidation ctx env vs =
             -- (a define is the validator's, so it can read what is known of a permission: `define o = origin(b);`)
             outer <- tcGhost <$> getState
             getState >>= \s -> putState s{tcGhost = True}
-            (t, expr') <- inferExprR ctx env expr
+            texpr <- inferExprR ctx env expr
             getState >>= \s -> putState s{tcGhost = outer}
-            env' <- assignVar ctx env var t
-            return (env', AssignProofVar var expr')
+            env' <- assignVar ctx env var (tType texpr)
+            return (env', AssignProofVar var (tExpr texpr))
         Rewrite rule -> do
             rule' <- case rule of
                 Refl proof -> Refl . snd <$> inferProofR ctx env proof
@@ -1339,55 +1347,55 @@ checkValidation ctx env vs =
 
 -- The type of an expression, and the expression with each call of a function that belongs to a type resolved: x.f(a) and
 -- Trait::f(x, a) are calls of Type::f for the type of x, and nothing after the checker sees anything else.
-inferExprR :: Ctx -> Env -> Expression -> TC (Type, Expression)
+inferExprR :: Ctx -> Env -> Expression -> TC TExpr
 inferExprR ctx env expr =
     case expr of
-        Val value -> (\t -> (t, expr)) <$> valueType value
+        Val value -> (\t -> tLeaf t expr) <$> valueType value
         Var var -> do
             t <- lookupVar ctx env var
             t' <- zonk t
             case t' of
                 TForall sizes types _ -> failTc ("Type error: " ++ var ++ " has parameters <" ++ intercalate ", " (types ++ sizes) ++ ">, so it is called, as in " ++ var ++ "(...), and cannot be used as a value")
-                _ -> return (t, expr)
+                _ -> return (tLeaf t expr)
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
-            (structTy, struct') <- inferExprR ctx env struct
+            struct0 <- inferExprR ctx env struct
             -- (a field of the value itself is read as it is, and so is one of each value it is looked through to in turn; a field
             -- none of them has is read from the last of them, which is where the error names it)
-            let go (ty, expr) = do
-                    direct <- tryTc (readField owner field ty)
+            let go texpr = do
+                    direct <- tryTc (readField owner field (tType texpr))
                     case direct of
-                        Just t -> return (t, expr)
+                        Just t -> return (t, texpr)
                         Nothing -> do
-                            next <- derefStepExpr ctx env (ty, expr)
+                            next <- derefStepExpr ctx env texpr
                             case next of
                                 Just stepped -> go stepped
                                 Nothing -> do
-                                    t <- readField owner field ty
-                                    return (t, expr)
-            (t, struct'') <- go (structTy, struct')
-            return (t, F funct [struct''])
+                                    t <- readField owner field (tType texpr)
+                                    return (t, texpr)
+            (t, struct'') <- go struct0
+            return (TExpr t (F funct [tExpr struct'']) [struct''])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
             inferred0 <- mapM (inferExprR ctx env) args
             -- (a tuple's parts are what they are: it is made of their types)
             unless (isJust (tupleGeneric (baseNameOf name))) $ ensureInstance (TNamed (baseNameOf name) ctorArgs)
             declared <- if isJust (tupleGeneric (baseNameOf name)) then return [] else snd <$> ctorInfo name
             inferred <- if length declared == length inferred0 then mapM (uncurry coerce) (zip (map snd declared) inferred0) else return inferred0
-            t <- checkConstruct (TNamed (baseNameOf name) ctorArgs) fields (map fst inferred)
-            return (t, F funct (map snd inferred))
+            t <- checkConstruct (TNamed (baseNameOf name) ctorArgs) fields (map tType inferred)
+            return (TExpr t (F funct (map tExpr inferred)) inferred)
         -- Box::new(x): x held in a Box, which has its value
         F (Var "Box::new") args -> case args of
             [x] -> do
-                (xt, x') <- inferExprR ctx env x
-                return (TBox xt, F (Val (builtinFunct NewBox)) [x'])
+                x' <- inferExprR ctx env x
+                return (TExpr (TBox (tType x')) (F (Val (builtinFunct NewBox)) [tExpr x']) [x'])
             _ -> failTc ("Type error: Box::new takes 1 argument, got " ++ show (length args))
         -- Box::unbox(b): the value that b holds
         F (Var "Box::unbox") args -> case args of
             [b] -> do
-                (bt, b') <- inferExprR ctx env b
-                t <- zonk bt
+                b' <- inferExprR ctx env b
+                t <- zonk (tType b')
                 case t of
                     TBox (TArrayOf _ SizeAny) -> failTc "Type error: Box::unbox cannot take an array of no size out of its Box, since it would not know how much to take: read its elements with get and size"
-                    TBox inner -> return (inner, F (Val (builtinFunct UnBox)) [b'])
+                    TBox inner -> return (TExpr inner (F (Val (builtinFunct UnBox)) [tExpr b']) [b'])
                     _ -> failTc ("Type error: Box::unbox takes a Box, got " ++ renderType t)
             _ -> failTc ("Type error: Box::unbox takes 1 argument, got " ++ show (length args))
         -- Array::empty(): an array of no elements, of the element type that the program decides
@@ -1395,7 +1403,7 @@ inferExprR ctx env expr =
             [] -> do
                 elementTy <- freshVar
                 let ty = TArrayOf elementTy SizeAny
-                return (TBox ty, F (Val (builtinFunct NewEmptyArray)) [])
+                return (TExpr (TBox ty) (F (Val (builtinFunct NewEmptyArray)) []) [])
             _ -> failTc ("Type error: Array::empty takes no arguments, got " ++ show (length args))
         -- Array::uninit(n): n slots that hold nothing, in a Box that carries the size
         F (Var "Array::uninit") args -> case args of
@@ -1404,25 +1412,25 @@ inferExprR ctx env expr =
         -- Array::boxed(n, x): n copies of x, n known only when the program runs, in a Box that carries the size
         F (Var "Array::boxed") args -> case args of
             [n, x] -> do
-                (nt, n') <- inferExprR ctx env n
-                expect "argument 1 of Array::boxed" TInt nt
-                (xt, x') <- inferExprR ctx env x
-                let ty = TArrayOf xt SizeAny
+                n' <- inferExprR ctx env n
+                expect "argument 1 of Array::boxed" TInt (tType n')
+                x' <- inferExprR ctx env x
+                let ty = TArrayOf (tType x') SizeAny
                 arrayOk ty
-                requireMarker "Clone" xt
-                return (TBox ty, F (Val (builtinFunct NewBoxedArray)) [n', x'])
+                requireMarker "Clone" (tType x')
+                return (TExpr (TBox ty) (F (Val (builtinFunct NewBoxedArray)) [tExpr n', tExpr x']) [n', x'])
             _ -> failTc ("Type error: Array::boxed takes 2 arguments, got " ++ show (length args))
         F funct args
             | Just NewArray <- builtinHead ctx env funct -> case args of
                 [n, x] -> do
-                    (nt, n') <- inferExprR ctx env n
-                    expect "argument 1 of array" TInt nt
-                    (xt, x') <- inferExprR ctx env x
-                    (size, sizeArg) <- arraySize (constantInt n') n'
-                    let ty = TArrayOf xt size
+                    n' <- inferExprR ctx env n
+                    expect "argument 1 of array" TInt (tType n')
+                    x' <- inferExprR ctx env x
+                    (size, sizeArg) <- arraySize (constantInt (tExpr n')) (tExpr n')
+                    let ty = TArrayOf (tType x') size
                     arrayOk ty
-                    requireMarker "Clone" xt
-                    return (ty, F funct [sizeArg, x'])
+                    requireMarker "Clone" (tType x')
+                    return (TExpr ty (F funct [sizeArg, tExpr x']) [tLeaf TInt sizeArg, x'])
                 _ -> failTc ("Type error: array takes 2 arguments, got " ++ show (length args))
         F (Val (VFunct _ _ _ (BuiltinFunct ArrayFrom) _)) [Val literal@(VList items)] -> do
             listTy <- valueType literal
@@ -1431,15 +1439,15 @@ inferExprR ctx env expr =
                     let ty = TArray e (fromIntegral (length items))
                     arrayOk ty
                     literalOk e
-                    return (ty, expr)
+                    return (TExpr ty expr [tLeaf listTy (Val literal)])
                 _ -> failTc "Type error: an array literal is made from a list"
         F (Val (VFunct _ _ _ (BuiltinFunct CloneOf) _)) args -> cloneCall args
         -- clone(x) and x.clone(): a copy of x, which has its value (unless the program has a function of that name)
         F (Var "clone") args
             | not (Map.member "clone" (ctxFns ctx)), not (any (Map.member "clone") env) -> cloneCall args
         F (Var ".clone") args@[receiver] -> do
-            (receiverTy, _) <- inferExprR ctx env receiver
-            t <- zonk receiverTy
+            receiver' <- inferExprR ctx env receiver
+            t <- zonk (tType receiver')
             s <- getState
             let owned = case t of
                     TNamed base _ -> Map.member (base, "clone") (tcAssoc s)
@@ -1450,37 +1458,38 @@ inferExprR ctx env expr =
         F (Var name) args
             | Just b <- ghostFunction name, b `notElem` [AddrNull, AddrOffset, AddrCast, AddrToInt, AddrFromInt], not (any (Map.member name) env), not (Map.member name (ctxFns ctx)) -> do
               -- (only of a permission: a function of the program named `count`, as a template is, is the program's)
-              ofPermission <- permissionArgument b args (inferExprR ctx env)
+              ofPermission <- permissionArgument b args (\e -> (\te -> (tType te, e)) <$> inferExprR ctx env e)
               if not ofPermission then general (Var name) args else do
                 ghostly <- tcGhost <$> getState
                 unless ghostly $ failTc ("Type error: " ++ name ++ " is what the validator knows of a permission, and is not a value the program has: it is written in an affirm, a contract, an invariant or a define")
                 inferred <- mapM (inferExprR ctx env) args
                 ft <- builtinType b
                 case (b, inferred) of
-                    _ | b `elem` [BlockFilled, BlockContents], [(ut, u')] <- inferred -> do
+                    _ | b `elem` [BlockFilled, BlockContents], [u'] <- inferred -> do
                         let b' = if b == BlockFilled then UninitFilled else UninitAt
                         ft' <- builtinType b'
-                        result <- checkCall name ft' [ut]
-                        return (result, F (Val (builtinFunct b')) [u'])
+                        result <- checkCall name ft' [tType u']
+                        return (TExpr result (F (Val (builtinFunct b')) [tExpr u']) [u'])
                     _ | b `elem` [BlockFilled, BlockContents] -> case inferred of
-                        [(bt, b'), (it, i')] -> do
-                            listTy <- checkCall name ft [bt]
-                            expect ("argument 2 of " ++ name) TInt it
+                        [b', i'] -> do
+                            listTy <- checkCall name ft [tType b']
+                            expect ("argument 2 of " ++ name) TInt (tType i')
                             elementTy <- freshVar
                             expect name (TList elementTy) listTy
-                            return (elementTy, F (Val (builtinFunct Get)) [F (Val (builtinFunct b)) [b'], i'])
+                            let inner = TExpr listTy (F (Val (builtinFunct b)) [tExpr b']) [b']
+                            return (TExpr elementTy (F (Val (builtinFunct Get)) [tExpr inner, tExpr i']) [inner, i'])
                         _ -> failTc ("Type error: " ++ name ++ " takes a permission and a slot, as in " ++ name ++ "(b, i)")
                     _ -> do
-                        result <- checkCall name ft (map fst inferred)
-                        return (result, F (Val (builtinFunct b)) (map snd inferred))
+                        result <- checkCall name ft (map tType inferred)
+                        return (TExpr result (F (Val (builtinFunct b)) (map tExpr inferred)) inferred)
         -- Addr::alloc(n), Addr::get(p, i, b), Block::split(b, i), ...: the operations on addresses and permissions (POINTERS.md)
         F (Var name) args
             | Just b <- pointerBuiltin name, not (any (Map.member name) env), not (Map.member name (ctxFns ctx)) -> do
                 inferred0 <- mapM (inferExprR ctx env) args
                 ft <- builtinType b
                 inferred <- coerceArguments ft inferred0
-                result <- checkBuiltinCall (Just b) name ft (map fst inferred)
-                return (result, F (Val (builtinFunct b)) (map snd inferred))
+                result <- checkBuiltinCall (Just b) name ft (map tType inferred)
+                return (TExpr result (F (Val (builtinFunct b)) (map tExpr inferred)) inferred)
         F (Var name@('<' : _)) args -> mapM (inferExprR ctx env) args >>= callResolved name
         F (Var name) args
             | Just (path, function) <- traitPath name -> traitCall path function args
@@ -1488,22 +1497,22 @@ inferExprR ctx env expr =
   where
     cloneCall args = case args of
         [x] -> do
-            (xt, x') <- inferExprR ctx env x
-            requireMarker "Clone" xt
-            return (xt, F (Val (builtinFunct CloneOf)) [x'])
+            x' <- inferExprR ctx env x
+            requireMarker "Clone" (tType x')
+            return (TExpr (tType x') (F (Val (builtinFunct CloneOf)) [tExpr x']) [x'])
         _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
     methodCall method (receiver : args) = do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
-            receiverTy <- zonk (fst (head inferred))
+            receiverTy <- zonk (tType (head inferred))
             case (listMethod method, receiverTy) of
                 -- l.push(x), l.size(), a.get(i): the function of that name on a list or an array
                 -- (with the arguments that are inferred already: a chain of them is inferred once)
                 (Just b, ty) | sequenceType ty -> do
                     let funct = Val (builtinFunct b)
-                    (ft, funct') <- inferExprR ctx env funct
-                    ordinaryBuiltin funct funct' ft inferred
+                    funct' <- inferExprR ctx env funct
+                    ordinaryBuiltin funct funct' (tType funct') inferred
                 _ -> do
-                    owner <- ownerOfValue method (fst (head inferred))
+                    owner <- ownerOfValue method (tType (head inferred))
                     resolveAssociated owner method >>= \name -> callResolved name inferred
     methodCall _ [] = failTc "Type error: a method is called on a value"
     -- Trait::f(x) and Type::f(x)
@@ -1512,7 +1521,7 @@ inferExprR ctx env expr =
                 case (Map.lookup path (tcTraits s), Map.member path (tcTypes s) || Map.member path (tcGenerics s)) of
                     (Just functions, _) -> do
                         inferred <- mapM (inferExprR ctx env) args
-                        owner <- ownerThroughTrait path functions function (map fst inferred)
+                        owner <- ownerThroughTrait path functions function (map tType inferred)
                         callResolved (implFunctionName owner (Just path) function) inferred
                     (Nothing, True) -> do
                         inferred <- mapM (inferExprR ctx env) args
@@ -1524,24 +1533,27 @@ inferExprR ctx env expr =
             Var name | Just template <- Map.lookup name (tcTemplates s), not (any (Map.member name) env) -> do
                 inferred <- mapM (inferExprR ctx env) args
                 (result, instance', args', sizes) <- templateCall name template inferred
-                return (result, F (Var instance') (args' ++ sizes))
+                return (TExpr result (F (Var instance') (map tExpr (args' ++ sizes))) (args' ++ sizes))
             _ -> generalCall funct args
     generalCall funct args = do
         (ft, funct') <- case funct of
-            Var name | Nothing <- builtinHead ctx env funct -> (\t -> (t, funct)) <$> lookupVar ctx env name
-            _ -> inferExprR ctx env funct
+            Var name | Nothing <- builtinHead ctx env funct -> (\t -> (t, tLeaf t funct)) <$> lookupVar ctx env name
+            _ -> (\te -> (tType te, te)) <$> inferExprR ctx env funct
         ftz <- zonk ft
         case ftz of
             TForall sizes types inner -> do
                 inferredG <- mapM (inferExprR ctx env) args
                 (result, args') <- genericCall (describe funct) sizes types inner inferredG
-                return (result, F funct' args')
+                return (TExpr result (F (tExpr funct') (map tExpr args')) (headTExpr funct' ++ args'))
             _ -> ordinary funct funct' ft args
+    headTExpr funct' = case tExpr funct' of
+        F{} -> [funct']
+        _ -> []
     ordinary funct funct' ft args = do
         inferred0 <- mapM (inferExprR ctx env) args
         -- (size(v), get(v, i), ... on a value of a struct are the functions of its impl)
         owner <- case (builtinHead ctx env funct, inferred0) of
-            (Just b, (xt, _) : _) | Just fname <- sequenceFunction b -> (,) fname <$> structOwner xt
+            (Just b, xt : _) | Just fname <- sequenceFunction b -> (,) fname <$> structOwner (tType xt)
             _ -> return ("", Nothing)
         case owner of
             (fname, Just struct) -> resolveAssociated struct fname >>= \full -> callResolved full inferred0
@@ -1559,10 +1571,10 @@ inferExprR ctx env expr =
             Just b | b `elem` [WriteByte, WriteError, PathByte, StoreByte] -> coerceArguments ft inferred0
             Just _ -> return inferred0
             Nothing -> coerceArguments ft inferred0
-        let ats = map fst inferred
+        let ats = map tType inferred
         result <- checkBuiltinCall (builtinHead ctx env funct) (describe funct) ft ats
         comparing funct ats
-        return (result, F funct' (map snd inferred))
+        return (TExpr result (F (tExpr funct') (map tExpr inferred)) (headTExpr funct' ++ inferred))
     describe (Var name) = name
     describe _ = "call"
     isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
@@ -1580,11 +1592,11 @@ inferExprR ctx env expr =
             -- (a function of `impl<T> Vec<T>` has the types and sizes of the impl: the arguments decide them)
             TForall sizes types inner -> do
                 (result, args') <- genericCall name sizes types inner inferred0
-                return (result, F (Var name) args')
+                return (TExpr result (F (Var name) (map tExpr args')) args')
             _ -> do
                 inferred <- coerceArguments ft inferred0
-                result <- checkCall name ft (map fst inferred)
-                return (result, F (Var name) (map snd inferred))
+                result <- checkCall name ft (map tType inferred)
+                return (TExpr result (F (Var name) (map tExpr inferred)) inferred)
 
 -- The function that Type::f means: the one function of that name that the impls of Type define. If several do, the call has
 -- to say which, with Trait::f(x), <Type as Trait>::f(...) or <Type>::f(...).
@@ -1721,7 +1733,7 @@ substSelf _ t = t
 -- The validator checks it like any function, and what it proves is that the impl may be used wherever the trait is: the
 -- trait's input contract must give the impl's (the call is checked against the impl's input contract), and the impl's
 -- output contract must give the trait's (the return is checked against it).
-checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Type -> [Statement] -> TC (Ctx, Env, [Statement])
+checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Type -> [Statement] -> TC (Ctx, Env, [Statement], [Type])
 checkImpl ctx env trait traitArgs typeName selfTypeInput functions = do
     let selfName = case selfTypeInput of TNamed b a -> instanceName b a; other -> renderType other
     declared <- getState
@@ -1762,9 +1774,9 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput functions = do
                 unless holding $ failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " holds no permission (Block<T>), and a drop is how a value frees the memory it holds; a value that has to be closed is a linear type, closed by a call")
                 putState s'{tcDrops = Set.insert typeName (tcDrops s')}
             return (found, params)
-    (ctx', env', checked) <- definitions True (ctx, env, []) functions'
+    (ctx', env', checked, checkedTypes) <- definitions True (ctx, env, [], []) functions'
     case trait of
-        Nothing -> return (ctx', env', checked)
+        Nothing -> return (ctx', env', checked, checkedTypes)
         Just traitName -> do
             let here = "impl " ++ traitName ++ " for " ++ typeName
                 defined = [(implFunctionPart name, (params, Signature ptys rty sizes types, term)) | Assign name (Val (VFunct params _ _ (NativeFunct (Signature ptys rty sizes types) term _) _)) <- checked]
@@ -1790,20 +1802,20 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput functions = do
                         -- (an impl of a struct with types is for any of them, and the check of it is too)
                         return (wrapper traitName typeName f (traitFnParams f ++ drop (length implParams - length asizes) implParams) (Signature aptys arty asizes atypes) term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
-            (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
-            return (ctx'', env'', [CopyDef typeName | traitName == "Copy", null required] ++ [DropDef typeName | traitName == "Drop"] ++ checked ++ wrapped)
+            (ctx'', env'', wrapped, wrappedTypes) <- definitions False (ctx', env', [], []) wrappers
+            return (ctx'', env'', [CopyDef typeName | traitName == "Copy", null required] ++ [DropDef typeName | traitName == "Drop"] ++ checked ++ wrapped, checkedTypes ++ wrappedTypes)
   where
     -- The functions of the impl can be called as Type::f from the next one on, itself included; the functions that check
     -- the impl against its trait cannot
     definitions _ state [] = return state
-    definitions own (c, e, done) (stmt : rest) = do
+    definitions own (c, e, done, doneTypes) (stmt : rest) = do
         case stmt of
             Assign name _ | own -> do
                 s <- getState
                 putState s{tcAssoc = Map.insertWith (\new old -> old ++ new) (typeName, implFunctionPart name) [trait] (tcAssoc s)}
             _ -> return ()
-        (c', e', stmt') <- checkStatement True c e stmt
-        definitions own (c', e', done ++ [stmt']) rest
+        (c', e', stmt', types) <- checkStatement True c e stmt
+        definitions own (c', e', done ++ [stmt'], doneTypes ++ types) rest
     renderSignature (Signature ptys rty _ _) = renderType (TFn ptys rty)
     -- (Self in the signature of a function of the impl is the type the impl is for, as the parser wrote it and as it is)
     rewriteSignature asSelf stmt = case stmt of
@@ -1953,8 +1965,8 @@ inferProofR ctx env proof =
         s <- getState
         case Map.lookup name (tcTemplates s) of
             Just template -> do
-                (result, instance', _, sizes) <- templateCall name template [(t, Val (VInt 0)) | (t, _) <- inferred]
-                return (result, FApp (ATerm instance') (map snd inferred ++ map exprToProof sizes))
+                (result, instance', _, sizes) <- templateCall name template [tLeaf t (Val (VInt 0)) | (t, _) <- inferred]
+                return (result, FApp (ATerm instance') (map snd inferred ++ map (exprToProof . tExpr) sizes))
             Nothing -> do
                 target <- ghostTarget name (map fst inferred)
                 case target of
@@ -1973,8 +1985,8 @@ inferProofR ctx env proof =
         ftz <- zonk ft
         case ftz of
             TForall sizes types inner -> do
-                (result, args') <- genericCall full sizes types inner [(t, Val (VInt 0)) | (t, _) <- inferred]
-                return (result, FApp (ATerm full) (map snd inferred ++ map exprToProof (drop (length inferred) args')))
+                (result, args') <- genericCall full sizes types inner [tLeaf t (Val (VInt 0)) | (t, _) <- inferred]
+                return (result, FApp (ATerm full) (map snd inferred ++ map (exprToProof . tExpr) (drop (length inferred) args')))
             _ -> do
                 result <- checkCall full ft (map fst inferred)
                 return (result, FApp (ATerm full) (map snd inferred))
@@ -2165,7 +2177,7 @@ hasFunction ty = case ty of
 -- A call of a function with size parameters, from the types of the arguments that are written: the type of the result, and the
 -- sizes the call gives, which the arguments decide and which come to be the last arguments of the call (a constant, or a size
 -- parameter of the function that calls)
-genericCall :: String -> [Variable] -> [Variable] -> Type -> [(Type, Expression)] -> TC (Type, [Expression])
+genericCall :: String -> [Variable] -> [Variable] -> Type -> [TExpr] -> TC (Type, [TExpr])
 genericCall name names types inner inferred = do
     (instantiated, sizes, given') <- instantiateGenerics names types inner
     case instantiated of
@@ -2173,7 +2185,7 @@ genericCall name names types inner inferred = do
             | length pts - length names /= length inferred ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts - length names) ++ " arguments, got " ++ show (length inferred))
             | otherwise -> do
-                args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at >> return arg') (zip3 [1 ..] pts inferred)
+                args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \arg' -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) (tType arg') >> return arg') (zip3 [1 ..] pts inferred)
                 given <- mapM (\(n, size) -> zonkSize size >>= sizeArgument name n) (zip names sizes)
                 -- (a type parameter is a type of value: not a function, which native code has no copy of the function for)
                 forM_ (zip types given') $ \(n, t) -> do
@@ -2187,7 +2199,7 @@ genericCall name names types inner inferred = do
                     when (current == Just name && isExpanding scope t') $
                         failTc ("Type error: " ++ name ++ " calls itself with the type " ++ renderType t' ++ " for " ++ n ++ ", which is made of its own type parameters: a call of itself gives each type parameter as it is, or a type that does not use them, since a copy of the function is made for each type and would be needed for each depth")
                 result <- zonk rty
-                return (result, args ++ given)
+                return (result, args ++ map (tLeaf TInt) given)
         _ -> failTc ("Type error: " ++ name ++ " is not a function")
 
 -- The argument that a call gives a size parameter of a function: a constant, or a size parameter of the function that calls
@@ -2385,7 +2397,7 @@ traitArgumentsOf trait ty = do
 
 -- A call of a function with bounds: the types of the arguments give the types of the function, each of which has to implement what its bounds say,
 -- and the function is checked for those types, once (it is a function of the program named after them: total[Vec<Int>]). The call is a call of that.
-templateCall :: Name -> Template -> [(Type, Expression)] -> TC (Type, Name, [Expression], [Expression])
+templateCall :: Name -> Template -> [TExpr] -> TC (Type, Name, [TExpr], [TExpr])
 templateCall name template inferred = do
     let Signature ptys rty sizes types = tmplSignature template
     (instantiated, sizeVars, typeVars) <- instantiateGenerics sizes types (TFn ptys rty)
@@ -2394,7 +2406,7 @@ templateCall name template inferred = do
             | length pts - length sizes /= length inferred ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts - length sizes) ++ " arguments, got " ++ show (length inferred))
             | otherwise -> do
-                args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at >> return arg') (zip3 [1 ..] pts inferred)
+                args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \arg' -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) (tType arg') >> return arg') (zip3 [1 ..] pts inferred)
                 let given = zip types typeVars
                 -- (a bound on a type that another bound decides waits until that one has: the passes end when all are met, or none can be)
                 let attempt pending = do
@@ -2426,7 +2438,7 @@ templateCall name template inferred = do
                     makeInstance instanceName' (zip types concrete)
                 sizeGiven <- mapM (\(n, size) -> zonkSize size >>= sizeArgument name n) (zip sizes sizeVars)
                 resultTy <- zonk result
-                return (resultTy, instanceName', args, sizeGiven)
+                return (resultTy, instanceName', args, map (tLeaf TInt) sizeGiven)
         _ -> failTc ("Type error: " ++ name ++ " is not a function")
   where
     -- the type meets the bound: it implements the trait, with the types that the bound writes
@@ -2466,10 +2478,10 @@ templateCall name template inferred = do
             ctx = (tmplCtx template){ctxFns = Map.insert instanceName' fnTy (ctxFns (tmplCtx template))}
         s <- getState
         putState s{tcInstances = Map.insert instanceName' fnTy (tcInstances s), tcActive = name : tcActive s}
-        (term', ins', outs', body') <- checkFunction ctx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) (tmplTermination template) (tmplBody template)
+        (term', ins', outs', body', bodyTypes) <- checkFunction ctx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) (tmplTermination template) (tmplBody template)
         let function = Assign instanceName' (Val (VFunct (tmplParams template) ins' outs' (NativeFunct (Signature ptys' rty' sizes []) term' body') []))
         s' <- getState
-        putState s'{tcEmitted = tcEmitted s' ++ [function], tcActive = tcActive s}
+        putState s'{tcEmitted = tcEmitted s' ++ [(function, bodyTypes)], tcActive = tcActive s}
 
 -- The result of applying a function type to argument types
 checkCall :: String -> Type -> [Type] -> TC Type
