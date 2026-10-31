@@ -580,6 +580,43 @@ proofNames (Forall index guards body) = filter (/= index) (concatMap proofNames 
 mayDivergeFn :: M.Function -> Bool
 mayDivergeFn fn = M.fnName fn == "main" || M.specTermination (M.fnSpec fn) == Just MayDiverge
 
+-- A call through a local that holds a builtin (h = size; h(xs)): the pure
+-- sequence operations have no contract to check, only safety conditions.
+stripBuiltin :: Name -> Name
+stripBuiltin name
+    | "builtin::" `isPrefixOf` name = drop 9 name
+    | otherwise = name
+
+builtinCall :: Name -> [M.Operand] -> M.Local -> Build -> Maybe ([MirValue], Build)
+builtinCall name args (M.Local dest) b0 = case (name, args) of
+    ("size", [source]) -> do
+        (value, b1) <- operand source b0
+        pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt (-13)), ("arguments", MList [value])]], b1)
+    ("get", [source, index]) -> do
+        (listRef, b1) <- operand source b0
+        (indexRef, b2) <- operand index b1
+        getSteps (toInteger dest) listRef indexRef b2
+    ("push", [source, value]) -> do
+        (listRef, b1) <- operand source b0
+        (valueRef, b2) <- operand value b1
+        pushSteps (toInteger dest) listRef valueRef b2
+    ("set", [source, index, value]) -> do
+        (listRef, b1) <- operand source b0
+        (indexRef, b2) <- operand index b1
+        (valueRef, b3) <- operand value b2
+        setSteps (toInteger dest) listRef indexRef valueRef b3
+    ("pop", [source]) -> do
+        (listRef, b1) <- operand source b0
+        popSteps (toInteger dest) listRef b1
+    ("last", [source]) -> do
+        (listRef, b1) <- operand source b0
+        lastSteps (toInteger dest) listRef b1
+    ("first", [source]) -> do
+        (listRef, b1) <- operand source b0
+        (zero, b2) <- operand (M.Const (M.CInt 0)) b1
+        getSteps (toInteger dest) listRef zero b2
+    _ -> Nothing
+
 -- A direct call uses only contracts of bodies checked separately. Snapshot
 -- arguments before writing the result, and decline callees that reassign a
 -- parameter: their postconditions can refer to its final value.
@@ -803,7 +840,24 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     (steps, b1, conditions, _) <- foldM add ([], b0, Map.empty, Map.empty) stmts
     (extra, ending, b2) <- case (Map.lookup blockId (M.specLoops (M.fnSpec fn)), end) of
         (Just spec, M.SwitchBool (M.Copy local) yes no) -> do
-            (extra, loopEnd, b') <- encodeLoop spec local yes no conditions b1
+            resolution <- case Map.lookup local conditions of
+                Just (r0, a0, c0) -> Just (r0, a0, c0, Nothing, b1)
+                Nothing -> case variantTest fn local of
+                    Just (source, variantName) -> do
+                        (object, b2) <- operand source b1
+                        let (familyId, b3) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b2
+                            (constructorId, b4) = namedFunction ("variant:" ++ variantName) b3
+                        (trueRef, b5) <- operand (M.Const (M.CBool True)) b4
+                        Just (Eq, localRef (localNumber local), trueRef, Just (object, familyId, constructorId), b5)
+                    Nothing -> do
+                        value <- constBoolTest fn local
+                        (boolRef, b2) <- operand (M.Const (M.CBool value)) b1
+                        Just (Eq, localRef (localNumber local), boolRef, Nothing, b2)
+            (extra, loopEnd, b') <- encodeLoop spec yes no local resolution
+            pure (extra, loopEnd, b')
+        (Just spec, M.SwitchBool (M.Const (M.CBool value)) yes no) -> do
+            (boolRef, b2) <- operand (M.Const (M.CBool value)) b1
+            (extra, loopEnd, b') <- encodeLoop spec yes no (M.Local 0) (Eq, boolRef, boolRef, Nothing, b2)
             pure (extra, loopEnd, b')
         (Just _, _) -> Nothing
         (Nothing, M.Return) -> do
@@ -840,8 +894,9 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 M.Const (M.CFn n) -> Just n
                 M.Copy local -> Map.lookup local (fnValueLocals fn)
                 _ -> Nothing
-            callee <- Map.lookup name functions
-            (callSteps, b') <- directCall fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+            (callSteps, b') <- case Map.lookup name functions of
+                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+                _ -> builtinCall (stripBuiltin name) args dest b1
             (typeFacts, b'') <- typeSteps types invariants fn dest b'
             Just (callSteps ++ typeFacts, jump target, b'')
         _ -> Nothing
@@ -852,17 +907,8 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     -- variant. A block that leaves the loop (a return, or an exit from inside
     -- the body) is not in the region and is walked as an exit, as the reference
     -- validator does.
-    encodeLoop spec local yes no conditions b = do
+    encodeLoop spec yes no dummyLocal (r, a, c, variantTestInfo, withCondition) = do
         if yes == M.loopBody spec && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
-        (r, a, c, variantTestInfo, withCondition) <- case Map.lookup local conditions of
-            Just (r0, a0, c0) -> Just (r0, a0, c0, Nothing, b)
-            Nothing -> do
-                (source, variantName) <- variantTest fn local
-                (object, b1) <- operand source b
-                let (familyId, b2) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b1
-                    (constructorId, b3) = namedFunction ("variant:" ++ variantName) b2
-                (trueRef, b4) <- operand (M.Const (M.CBool True)) b3
-                Just (Eq, localRef (localNumber local), trueRef, Just (object, familyId, constructorId), b4)
         (mode, variant, variantLocal, upper) <- case M.loopTermination spec of
             Just (Counting (Var name)) -> case Map.lookup name (M.loopEnv spec) of
                 Just op@(M.Copy v) -> Just (0, op, v, Val (VInt 0))
@@ -873,7 +919,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             Just (Parts (Var name)) -> case Map.lookup name (M.loopEnv spec) of
                 Just op@(M.Copy v) -> Just (3, op, v, Val (VInt 0))
                 _ -> Nothing
-            Just MayDiverge -> Just (2, M.Const (M.CInt 0), local, Val (VInt 0))
+            Just MayDiverge -> Just (2, M.Const (M.CInt 0), dummyLocal, Val (VInt 0))
             _ -> Nothing
         decl <- Map.lookup variantLocal (M.fnLocals fn)
         if mode >= 2 || M.localType decl == TInt then Just () else Nothing
@@ -899,7 +945,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
              ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map (MInt . localNumber) assigned)),
              ("relation", MInt kind), ("left", left), ("right", right), ("variant", variantRef), ("variantMode", MInt mode),
              ("variantOther", upperRef), ("zero", zeroRef),
-             ("variantObject", maybe (localRef (localNumber local)) (\(object, _, _) -> object) variantTestInfo),
+             ("variantObject", maybe (localRef (localNumber dummyLocal)) (\(object, _, _) -> object) variantTestInfo),
              ("variantFamily", MInt (maybe (-1) (\(_, familyId, _) -> familyId) variantTestInfo)),
              ("variantConstructor", MInt (maybe (-1) (\(_, _, constructorId) -> constructorId) variantTestInfo))], b4)
     expressionVars expr = case expr of
@@ -1003,6 +1049,9 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     variantTest :: M.Function -> M.Local -> Maybe (M.Operand, Name)
     variantTest f local = case [(src, name) | blk <- Map.elems (M.fnBlocks f), M.Assign dest (M.IsVariant src name) <- M.blockStatements blk, dest == local] of
         r : _ -> Just r
+        [] -> Nothing
+    constBoolTest f local = case [value | blk <- Map.elems (M.fnBlocks f), M.Assign dest (M.Use (M.Const (M.CBool value))) <- M.blockStatements blk, dest == local] of
+        value : _ -> Just value
         [] -> Nothing
     normal r a b = case r of
                 Eq -> (0, a, b)
@@ -1139,7 +1188,7 @@ encode program
     | length names /= length (nub names) = Nothing
     | any (\name -> Map.member name (fst stdLibValCtx)) names = Nothing
     | length targets /= length (nub targets) = Nothing
-    | length targets /= Map.size (M.progFunctions program) = Nothing
+    | length targets /= length [() | name <- Map.keys (M.progFunctions program), not ("builtin::" `isPrefixOf` name)] = Nothing
     | any (\name -> Map.notMember name (M.progFunctions program)) targets = Nothing
     | any (\(name, fn) -> name /= M.fnName fn) (Map.toList (M.progFunctions program)) = Nothing
     | otherwise = do
