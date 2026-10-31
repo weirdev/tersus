@@ -590,12 +590,10 @@ checked n
     | inIntRange n = Ok (MInt n)
     | otherwise = Error "Integer overflow"
 
--- Equality is structural, for any two values that are not functions
+-- Only words are compared: any other value is compared by its Eq, which the checker calls in its place (lib/eq.tersus)
 comparable :: MirValue -> MirValue -> Bool
 comparable (MInt _) (MInt _) = True
 comparable (MBool _) (MBool _) = True
-comparable (MList _) (MList _) = True
-comparable (MData _ _) (MData _ _) = True
 comparable _ _ = False
 
 listOp :: ListOp -> [MirValue] -> Result MirValue String

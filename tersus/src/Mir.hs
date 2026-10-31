@@ -174,7 +174,8 @@ data Rvalue
 data RefStep = RefField Name Variable | RefIndex Operand
     deriving (Show, Eq)
 
--- Div and Mod need a divisor that is not 0. Compare Eq and NotEq are structural, and the other comparisons are of Ints.
+-- Div and Mod need a divisor that is not 0. Compare Eq and NotEq are of two words of one type (an Int, a Byte, a Bool, a fixed-width
+-- integer or an address: anything else is compared by its Eq, which the checker calls), and the other comparisons are of Ints.
 data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
     deriving (Show, Eq)
 

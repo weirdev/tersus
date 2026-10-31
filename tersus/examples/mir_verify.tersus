@@ -1631,6 +1631,11 @@ fn textType(s: &String) -> TyRes ~ {
     return noTy();
 };
 
+// An Int, a Byte, a Bool, a fixed-width integer or an address: the values that are compared as they are
+fn isWordType(t: &Type) -> Bool {
+    return t is Type::TInt || t is Type::TByte || t is Type::TBool || t is Type::TWord || t is Type::TAddr;
+};
+
 fn sub(p: &Program, wanted: &Type, actual: &Type) -> Bool ~ {
     if wanted is Type::TParam { return true; };
     if actual is Type::TParam { return true; };
@@ -2279,7 +2284,8 @@ fn rvalueWhy(p: &Program, f: &Function, d: &Type, rv: &Rvalue) -> List<String> ~
                 ta = operandTy(p, f, a);
                 tb = operandTy(p, f, b);
                 if ta.ok && tb.ok {
-                    if ta.ty is Type::TFn || tb.ty is Type::TFn { out = push(out, "functions cannot be compared"); }
+                    // (only words are compared: any other value is compared by its Eq, which the checker calls in its place)
+                    if !isWordType(ta.ty) || !isWordType(tb.ty) { out = push(out, "only words are compared, and the operands are ".then(renderType(ta.ty)).then(" and ").then(renderType(tb.ty))); }
                     else if !sub(p, ta.ty, tb.ty) && !sub(p, tb.ty, ta.ty) {
                         out = push(out, "the operands are ".then(renderType(ta.ty)).then(" and ").then(renderType(tb.ty)));
                     };

@@ -294,15 +294,21 @@ rvalueProblems env localTy d rv =
         TArrayOf e _ | arrayResult -> k e
         TBox (TArrayOf e _) | arrayResult -> k e
         _ -> ["the result is " ++ renderType d ++ ", not a list"]
+    -- (only words are compared: any other value is compared by its Eq, which the checker calls in its place)
     comparison a b =
         result TBool
             ++ case (operandType env localTy a, operandType env localTy b) of
                 (Just x, Just y)
-                    | isFn x || isFn y -> ["functions cannot be compared"]
+                    | not (isWord x && isWord y) -> ["only words are compared, and the operands are " ++ renderType x ++ " and " ++ renderType y]
                     | not (sub env x y || sub env y x) -> ["the operands are " ++ renderType x ++ " and " ++ renderType y]
                 _ -> []
-    isFn TFn{} = True
-    isFn _ = False
+    isWord t = case t of
+        TInt -> True
+        TByte -> True
+        TBool -> True
+        TWord _ _ -> True
+        TAddr _ -> True
+        _ -> False
     isList o = case operandType env localTy o of
         Just (TList _) -> True
         Just TArrayOf{} -> True
