@@ -156,7 +156,7 @@ validatedSource source =
     parseSourceWith True source `bindResult` \stmts ->
         stage "Validation failed: " (elaborate stmts) `bindResult` \elaborated ->
             stage "Lowering failed: " (lowerElaborated elaborated) `bindResult` \program ->
-                stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
+                stage "Validation failed: " (validateByTersus program) `bindResult` \_ ->
                     Ok program
 
 -- The MIR of a program that passes every check
