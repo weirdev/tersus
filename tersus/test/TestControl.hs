@@ -274,17 +274,17 @@ testTermination =
               case parseStatementBlock "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborate stmts of
-                    Ok [_, While _ _ (Just (Counting _)) _] -> Nothing
+                    Ok (Elaborated [_, While _ _ (Just (Counting _)) _] _) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , case parseStatementBlock (tree ++ "t = Box::new(Tree::Leaf); while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; };") of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborate stmts of
-                    Ok [_, _, While _ _ (Just (Parts _)) _] -> Nothing
+                    Ok (Elaborated [_, _, While _ _ (Just (Parts _)) _] _) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , case parseStatementBlock "fn f(n: Int) -> Int shrinks n { return 0; };" of
                 Left err -> Just ("Parse error: " ++ show err)
                 Right stmts -> case elaborate stmts of
-                    Ok [Assign _ (Val (VFunct _ _ _ (NativeFunct _ (Just (Counting _)) _) _))] -> Nothing
+                    Ok (Elaborated [Assign _ (Val (VFunct _ _ _ (NativeFunct _ (Just (Counting _)) _) _))] _) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
             , parseValidateFailProgramHelper "x = [1]; while x = x shrinks x { x = x; };" "shrinks needs an Int, an enum or a struct, got List<Int>"
             , parseValidateFailProgramHelper "fn f(b: Bool) -> Int shrinks b { return 0; };" "shrinks needs an Int, an enum or a struct, got Bool"
