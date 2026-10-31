@@ -29,7 +29,9 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `rules.tersus` | User-defined `axiom` and `proof` rewrite rules | validates |
 | `branching.tersus` | `if`/`else if`/`else`, and a guard that makes `first` safe for a list only known at runtime | returns `106` |
 | `arithmetic.tersus` | `*`, `/` (rounding down, with a non-zero divisor contract), operator precedence and negative literals | returns `6` |
-| `helper_functions.tersus` | Functions calling the functions defined before them, with each call checked against the callee's contract | returns `11` |
+| `helper_functions.tersus` | Functions calling other functions, with each call checked against the callee's contract | returns `11` |
+| `call_forward.tersus` | A function calling a function defined after it | returns `42` |
+| `mutual_recursion.tersus` | Functions that call each other, each saying what shrinks | returns `2` |
 | `recursion.tersus` | A function calling itself, validated assuming its own output contract, including recursion over a list; each says what shrinks | returns `26` |
 | `termination.tersus` | How code says it ends: `shrinks` on loops and recursive functions (an integer counting down, or a tree losing a field), and `~` for code that is not shown to end, including a call in unreachable code | returns `23` |
 | `generic_lists.tersus` | Lists of `Bool` and of lists, built by a `for` loop over the elements, and a contract about a pushed row | returns `[[1, 2], [3, 4], [1, 2]]` |
@@ -149,7 +151,10 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 | `rejected/array_push.tersus` | An array has no `push`: its size never changes |
 | `rejected/type_return_mismatch.tersus` | A function declared to return an `Int` returns a list |
 | `rejected/type_argument_mismatch.tersus` | `size` is applied to an `Int` |
-| `rejected/call_before_definition.tersus` | A function calls one defined after it |
+| `rejected/call_undefined.tersus` | A function calls one defined nowhere in the program |
+| `rejected/mutual_without_variant.tersus` | Functions that call each other and say neither what shrinks nor `~` |
+| `rejected/mutual_variant_not_shrinking.tersus` | A call between functions that call each other does not shrink the variant |
+| `rejected/mutual_diverging_peer.tersus` | One function of a pair that call each other is declared `~` |
 | `rejected/division_by_zero.tersus` | A function divides by an argument that nothing shows is non-zero |
 | `rejected/push_size.tersus` | An output contract claims `push` leaves the size unchanged |
 | `rejected/forall_wrong_element.tersus` | An output contract claims each element is one more than the sum the loop builds |
@@ -184,7 +189,7 @@ Each of these parses, but fails validation (a few also fail concrete evaluation)
 
 - Infix operators bind in three levels, tightest first: `*` and `/`, then `+` and `-`, then the relations, so `affirm y = x + 1` means `y = (x + 1)`. Each level associates left.
 - Validation knows what rewrites and contracts have told it, plus integer comparisons and adding or subtracting a known constant, for example `s > 0` from `s = 3`. It also understands sums of variables, `x * c` and `x / c` for a known `c` (linear arithmetic, see LANGUAGE.md), and folds `*` and `/` on known values.
-- A function body sees its arguments, the standard library, the functions defined before it, and itself, so functions can call earlier functions and recurse (see `helper_functions.tersus` and `recursion.tersus`).
+- A function body sees its arguments, the standard library, the functions defined at the top of the program and itself, so functions can call each other and recurse (see `helper_functions.tersus`, `recursion.tersus` and `mutual_recursion.tersus`).
 - A variable first assigned inside an `if` branch is local to that branch, so declare it before the `if` (`r = fallback;`) if you want it afterwards.
 - Lists can be read with `get`, extended with `push` and updated with `set`, which returns a new list (`a = set(a, i, x)`). `push` and `set` say which element they wrote (`element_facts.tersus`) and the frame rules say the others are unchanged (`frame_facts.tersus`), one index at a time. A `forall` states a fact about every index (`forall_facts.tersus`, `parallel_sum.tersus`), and with lists of structs it expresses the linked-list motivating case, whose link invariants are proved by `linked_list.tersus`.
 - `get` and `set` need `0 <= index < size(list)` proved at the call. Concrete lists and indexes are checked directly, and a symbolic index needs a contract or loop invariant that says so (`rewrite checkRel` establishes the fact for concrete arguments at the call).
