@@ -52,6 +52,9 @@ emptyDecls = Decls Map.empty Map.empty Nothing Nothing [] Map.empty [] False Fal
 locating :: Decls -> Decls
 locating decls = decls{declLocate = True}
 
+shadowedCtors :: Name -> Decls -> Map.Map Name [Variable]
+shadowedCtors name d = foldr Map.delete (declCtors d) (name : Map.findWithDefault [] name (declTypes d))
+
 type Parser = Parsec String Decls
 
 -- https://github.com/JakeWheat/intro_to_parsing/blob/master/VerySimpleExpressions.lhs
@@ -432,7 +435,7 @@ enumStatement = do
     modifyState
         ( \d ->
             d
-                { declCtors = foldr (\(v, fields) m -> Map.insert v (map fst fields) m) (declCtors d) variants
+                { declCtors = foldr (\(v, fields) m -> Map.insert v (map fst fields) m) (shadowedCtors name d) variants
                 , declTypes = Map.insert name (map fst variants) (declTypes d)
                 , declGenerics = Map.delete name (declGenerics d)
                 }
@@ -468,7 +471,7 @@ structStatement = do
     modifyState (\d -> d{declTypeParams = outerParams})
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self", "Addr", "Block", "Uninit", "I8", "I16", "I32", "I64", "U8", "U16", "U32"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
-    modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
+    modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (shadowedCtors name d), declTypes = Map.insert name [name] (declTypes d)})
     return (StructDef name params fields invariant)
   where
     nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
@@ -795,7 +798,7 @@ traitStatement = do
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a trait name")
     when (any (not . isTypeParameter) params) $ fail ("trait " ++ name ++ " has a size parameter: a trait has types only")
     outerParams <- declTypeParams <$> getState
-    modifyState (\d -> d{declTypeParams = params, declGenerics = if null params then Map.delete name (declGenerics d) else Map.insert name params (declGenerics d)})
+    modifyState (\d -> d{declTypeParams = params, declCtors = shadowedCtors name d, declTypes = Map.delete name (declTypes d), declGenerics = if null params then Map.delete name (declGenerics d) else Map.insert name params (declGenerics d)})
     functions <- curlyBracesParse (genericStatementBlock traitFunction)
     modifyState (\d -> d{declTypeParams = outerParams})
     whitespace
