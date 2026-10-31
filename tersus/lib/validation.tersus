@@ -20,25 +20,127 @@ fn containsValue(values: &List<Int>, value: Int) -> Bool {
 // Equalities form an undirected graph. Starting at left, each pass visits every
 // edge and adds its other endpoint when one endpoint is already reachable.
 // A path never needs more edges than there are facts, so this many passes are
-// sufficient, including when the facts are ordered against the path. Duplicate
-// facts and cycles do not add duplicate values to the reachable set.
+// sufficient, including when the facts are ordered against the path; a pass
+// that adds nothing has reached the fixpoint, and reaching right decides the
+// question. Equivalence classes are small, so the reachable values are a list.
 fn hasEquality(facts: &List<EqualityFact>, left: Int, right: Int) -> Bool {
-    reachable = HashSet::new().insert(left);
+    if left = right { return true; };
+    reachable = push([], left);
+    changed = true;
     for round in 0..size(facts) {
-        for fact in facts {
-            if reachable.contains(fact.left) {
-                if reachable.contains(fact.right) = false {
-                    reachable = reachable.insert(fact.right);
+        if changed {
+            changed = false;
+            for fact in facts {
+                if containsValue(reachable, fact.left) {
+                    if containsValue(reachable, fact.right) = false {
+                        if fact.right = right { return true; };
+                        reachable = push(reachable, fact.right);
+                        changed = true;
+                    };
                 };
-            };
-            if reachable.contains(fact.right) {
-                if reachable.contains(fact.left) = false {
-                    reachable = reachable.insert(fact.left);
+                if containsValue(reachable, fact.right) {
+                    if containsValue(reachable, fact.left) = false {
+                        if fact.left = right { return true; };
+                        reachable = push(reachable, fact.left);
+                        changed = true;
+                    };
                 };
             };
         };
     };
-    return reachable.contains(right);
+    return containsValue(reachable, right);
+};
+
+// The equivalence class of a term under the equalities (the values hasEquality
+// reaches from it), and each class named by its least member, so a search
+// that asks many times whether two terms are equal compares two integers.
+fn equalityClass(facts: &List<EqualityFact>, start: Int) -> List<Int> {
+    reachable = push([], start);
+    changed = true;
+    for round in 0..size(facts) {
+        if changed {
+            changed = false;
+            for fact in facts {
+                if containsValue(reachable, fact.left) {
+                    if containsValue(reachable, fact.right) = false {
+                        reachable = push(reachable, fact.right);
+                        changed = true;
+                    };
+                };
+                if containsValue(reachable, fact.right) {
+                    if containsValue(reachable, fact.left) = false {
+                        reachable = push(reachable, fact.left);
+                        changed = true;
+                    };
+                };
+            };
+        };
+    };
+    return reachable;
+};
+
+struct Representative { term: Int, rep: Int };
+
+impl Clone for Representative { };
+
+impl Copy for Representative { };
+
+fn representativeOf(reps: &List<Representative>, term: Int) -> Int {
+    for r in reps {
+        if r.term = term { return r.rep; };
+    };
+    return term;
+};
+
+fn withRepresentative(facts: &List<EqualityFact>, reps: List<Representative>, term: Int) -> List<Representative> {
+    for r in reps {
+        if r.term = term { return reps; };
+    };
+    members = equalityClass(facts, term);
+    least = term;
+    for m in members {
+        if m < least { least = m; };
+    };
+    result = reps;
+    for m in members {
+        result = push(result, Representative { term: m, rep: least });
+    };
+    return result;
+};
+
+// A term no equality mentions is its own representative.
+fn equalityRepresentatives(facts: &List<EqualityFact>) -> List<Representative> {
+    reps = [];
+    for fact in facts {
+        reps = withRepresentative(facts, reps, fact.left);
+        reps = withRepresentative(facts, reps, fact.right);
+    };
+    return reps;
+};
+
+// The representatives after an equality between a and b: their two classes
+// become one.
+fn mergeRepresentatives(reps: &List<Representative>, a: Int, b: Int) -> List<Representative> {
+    ra = representativeOf(reps, a);
+    rb = representativeOf(reps, b);
+    if ra = rb { return clone(reps); };
+    least = ra;
+    if rb < least { least = rb; };
+    result = [];
+    seenA = false;
+    seenB = false;
+    for r in reps {
+        if r.term = a { seenA = true; };
+        if r.term = b { seenB = true; };
+        if r.rep = ra || r.rep = rb {
+            result = push(result, Representative { term: r.term, rep: least });
+        } else {
+            result = push(result, r);
+        };
+    };
+    if seenA = false { result = push(result, Representative { term: a, rep: least }); };
+    if seenB = false { result = push(result, Representative { term: b, rep: least }); };
+    return result;
 };
 
 // A binary application of an uninterpreted operator to two term identifiers.
@@ -411,28 +513,6 @@ impl Clone for SumResult { };
 
 impl Copy for SumResult { };
 
-fn findDistance(equalities: &List<EqualityFact>, distances: &List<Distance>, node: Int) -> DistanceResult {
-    for d in distances {
-        if hasEquality(equalities, d.node, node) {
-            return DistanceResult::Found { value: d.value };
-        };
-    };
-    return DistanceResult::Missing;
-};
-
-fn improveDistance(equalities: &List<EqualityFact>, distances: List<Distance>, node: Int, value: Int) -> List<Distance> {
-    for i in 0..size(distances) {
-        d = get(distances, i);
-        if hasEquality(equalities, d.node, node) {
-            if value < d.value {
-                return set(distances, i, Distance { node: d.node, value: value });
-            };
-            return distances;
-        };
-    };
-    return push(distances, Distance { node: node, value: value });
-};
-
 // The proof engine uses mathematical integers, while a running Tersus program
 // uses checked 64-bit integers. Reject an unrepresentable intermediate path
 // instead of overflowing or silently changing the bound.
@@ -450,36 +530,70 @@ fn safeBoundSum(a: Int, b: Int) -> SumResult {
     return SumResult::Sum { value: a + b };
 };
 
+fn canonicalDifferences(reps: &List<Representative>, facts: &List<DifferenceFact>) -> List<DifferenceFact> {
+    result = [];
+    for fact in facts {
+        result = push(result, DifferenceFact { left: representativeOf(reps, fact.left), right: representativeOf(reps, fact.right), bound: fact.bound });
+    };
+    return result;
+};
+
+// The distances below are kept by class representative, so a node is found
+// by its integer.
+fn findPlainDistance(distances: &List<Distance>, node: Int) -> DistanceResult {
+    for d in distances {
+        if d.node = node {
+            return DistanceResult::Found { value: d.value };
+        };
+    };
+    return DistanceResult::Missing;
+};
+
+fn improvePlainDistance(distances: List<Distance>, node: Int, value: Int) -> List<Distance> {
+    for i in 0..size(distances) {
+        d = get(distances, i);
+        if d.node = node {
+            if value < d.value {
+                return set(distances, i, Distance { node: d.node, value: value });
+            };
+            return distances;
+        };
+    };
+    return push(distances, Distance { node: node, value: value });
+};
+
 // Search paths from right to left. A simple path has at most size(facts)
 // edges; omitting overflowed paths can lose a proof but cannot invent one.
-// Negative cycles are not yet used to prove unrelated goals.
-fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
+// Negative cycles are not yet used to prove unrelated goals. Equal terms are
+// one node, named by its class representative.
+// hasDifference over edges whose nodes are already class representatives.
+fn canonicalHasDifference(edges: &List<DifferenceFact>, target: Int, source: Int, bound: Int) -> Bool {
     if bound >= 0 {
-        if hasEquality(equalities, left, right) { return true; };
+        if target = source { return true; };
     };
-    distances = push([], Distance { node: right, value: 0 });
+    distances = push([], Distance { node: source, value: 0 });
     finished = false;
-    for round in 0..size(facts) {
+    for round in 0..size(edges) {
       if finished = false {
         changed = false;
-        for edge in facts {
-            found = findDistance(equalities, distances, edge.right);
+        for edge in edges {
+            found = findPlainDistance(distances, edge.right);
             if found is DistanceResult::Found {
                 distance = (found as DistanceResult::Found).value;
                 sum = safeBoundSum(distance, edge.bound);
                 if sum is SumResult::Sum {
                     candidate = (sum as SumResult::Sum).value;
                     if candidate <= bound {
-                        if hasEquality(equalities, edge.left, left) { return true; };
+                        if edge.left = target { return true; };
                     };
-                    previous = findDistance(equalities, distances, edge.left);
+                    previous = findPlainDistance(distances, edge.left);
                     if previous is DistanceResult::Found {
                         if candidate < (previous as DistanceResult::Found).value {
-                            distances = improveDistance(equalities, distances, edge.left, candidate);
+                            distances = improvePlainDistance(distances, edge.left, candidate);
                             changed = true;
                         };
                     } else {
-                        distances = improveDistance(equalities, distances, edge.left, candidate);
+                        distances = improvePlainDistance(distances, edge.left, candidate);
                         changed = true;
                     };
                 };
@@ -488,38 +602,45 @@ fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, 
         if changed = false { finished = true; };
       };
     };
-    found = findDistance(equalities, distances, left);
+    found = findPlainDistance(distances, target);
     if found is DistanceResult::Found {
         return (found as DistanceResult::Found).value <= bound;
     };
     return false;
 };
 
+fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
+    reps = equalityRepresentatives(equalities);
+    return canonicalHasDifference(canonicalDifferences(reps, facts), representativeOf(reps, left), representativeOf(reps, right), bound);
+};
+
 struct DistanceTable { source: Int, distances: List<Distance> };
 
 impl Clone for DistanceTable { };
 
-fn differenceDistances(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, source: Int) -> List<Distance> {
+// The shortest distances from a source over edges whose nodes are class
+// representatives, as hasDifference finds them.
+fn canonicalDistances(edges: &List<DifferenceFact>, source: Int) -> List<Distance> {
     distances = push([], Distance { node: source, value: 0 });
     finished = false;
-    for round in 0..size(facts) {
+    for round in 0..size(edges) {
       if finished = false {
         changed = false;
-        for edge in facts {
-            found = findDistance(equalities, distances, edge.right);
+        for edge in edges {
+            found = findPlainDistance(distances, edge.right);
             if found is DistanceResult::Found {
                 distance = (found as DistanceResult::Found).value;
                 sum = safeBoundSum(distance, edge.bound);
                 if sum is SumResult::Sum {
                     candidate = (sum as SumResult::Sum).value;
-                    previous = findDistance(equalities, distances, edge.left);
+                    previous = findPlainDistance(distances, edge.left);
                     if previous is DistanceResult::Found {
                         if candidate < (previous as DistanceResult::Found).value {
-                            distances = improveDistance(equalities, distances, edge.left, candidate);
+                            distances = improvePlainDistance(distances, edge.left, candidate);
                             changed = true;
                         };
                     } else {
-                        distances = improveDistance(equalities, distances, edge.left, candidate);
+                        distances = improvePlainDistance(distances, edge.left, candidate);
                         changed = true;
                     };
                 };
@@ -531,10 +652,17 @@ fn differenceDistances(equalities: &List<EqualityFact>, facts: &List<DifferenceF
     return distances;
 };
 
-fn distanceAtMost(equalities: &List<EqualityFact>, tables: &List<DistanceTable>, from: Int, to: Int, bound: Int) -> Bool {
+fn hasDistanceTable(tables: &List<DistanceTable>, source: Int) -> Bool {
+    for table in tables {
+        if table.source = source { return true; };
+    };
+    return false;
+};
+
+fn tableDistanceAtMost(tables: &List<DistanceTable>, from: Int, to: Int, bound: Int) -> Bool {
     for table in tables {
         if table.source = from {
-            found = findDistance(equalities, table.distances, to);
+            found = findPlainDistance(table.distances, to);
             if found is DistanceResult::Found {
                 return (found as DistanceResult::Found).value <= bound;
             };
@@ -739,12 +867,19 @@ fn contradictoryDifferences(equalities: &List<EqualityFact>, facts: &List<Differ
         if fact.bound < 0 { negative = true; };
     };
     if negative = false { return false; };
-    for fact in facts {
-        // Every negative cycle contains a negative edge. Checking only its
-        // endpoints avoids repeating the same search for nonnegative edges.
-        if fact.bound < 0 {
-            if hasDifference(equalities, facts, fact.left, fact.left, -1) {
-                return true;
+    reps = equalityRepresentatives(equalities);
+    edges = canonicalDifferences(reps, facts);
+    // Every negative cycle contains a negative edge. Checking only its
+    // endpoints avoids repeating the same search for nonnegative edges, and
+    // the endpoints of one class are one search.
+    searched = [];
+    for edge in edges {
+        if edge.bound < 0 {
+            if containsValue(searched, edge.left) = false {
+                searched = push(searched, edge.left);
+                if canonicalHasDifference(edges, edge.left, edge.left, -1) {
+                    return true;
+                };
             };
         };
     };
@@ -799,16 +934,26 @@ fn contextNodes(context: &ValidatorContext) -> List<Int> {
 
 fn boundEqualities(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
     known = clone(equalities);
+    reps = equalityRepresentatives(equalities);
+    edges = canonicalDifferences(reps, differences);
+    // (nodes of one class have the same distances, so each class gets one table)
     tables = [];
     for node in nodes {
-        tables = push(tables, DistanceTable { source: node, distances: differenceDistances(equalities, differences, node) });
+        r = representativeOf(reps, node);
+        if hasDistanceTable(tables, r) = false {
+            tables = push(tables, DistanceTable { source: r, distances: canonicalDistances(edges, r) });
+        };
     };
+    knownReps = clone(reps);
     for a in nodes {
         for b in nodes {
-            if hasEquality(known, a, b) = false {
-                if distanceAtMost(equalities, tables, b, a, 0) {
-                    if distanceAtMost(equalities, tables, a, b, 0) {
+            if representativeOf(knownReps, a) != representativeOf(knownReps, b) {
+                ra = representativeOf(reps, a);
+                rb = representativeOf(reps, b);
+                if tableDistanceAtMost(tables, rb, ra, 0) {
+                    if tableDistanceAtMost(tables, ra, rb, 0) {
                         known = push(known, EqualityFact { left: a, right: b });
+                        knownReps = mergeRepresentatives(knownReps, a, b);
                     };
                 };
             };
@@ -1318,7 +1463,7 @@ fn linContradictionOrdered(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
             if c < 0 { neg = push(neg, clone(f)); };
             if c = 0 { zero = push(zero, clone(f)); };
         };
-        next = clone(zero);
+        next = zero;
         for f in pos {
             for g in neg {
                 cf = linCoeff(f.terms, v);
@@ -1378,7 +1523,7 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
             if c < 0 { neg = push(neg, clone(f)); };
             if c = 0 { zero = push(zero, clone(f)); };
         };
-        next = clone(zero);
+        next = zero;
         for f in pos {
             for g in neg {
                 cf = linCoeff(f.terms, v);
@@ -1392,7 +1537,9 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
                 if f.bound < 0 { return true; };
             };
         };
-        remaining = linRemoveTerm(remaining, v);
+        nextVars = [];
+        for t in remaining { if t != v { nextVars = push(nextVars, t); }; };
+        remaining = nextVars;
     };
     return false;
 };
@@ -1484,15 +1631,18 @@ fn arithmeticTerm(context: &ValidatorContext, term: Int) -> Bool {
     return true;
 };
 
-fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
-    recognized = false;
-    if goal is ValidatorGoal::Equal { recognized = true; };
-    if goal is ValidatorGoal::Different { recognized = true; };
-    if goal is ValidatorGoal::Less { recognized = true; };
-    if goal is ValidatorGoal::AtMost { recognized = true; };
-    if goal is ValidatorGoal::Difference { recognized = true; };
-    if goal is ValidatorGoal::Within { recognized = true; };
-    if recognized = false { return false; };
+fn recognizedGoal(goal: ValidatorGoal) -> Bool {
+    if goal is ValidatorGoal::Equal { return true; };
+    if goal is ValidatorGoal::Different { return true; };
+    if goal is ValidatorGoal::Less { return true; };
+    if goal is ValidatorGoal::AtMost { return true; };
+    if goal is ValidatorGoal::Difference { return true; };
+    if goal is ValidatorGoal::Within { return true; };
+    return false;
+};
+
+// What a goal needs no closure of the context for.
+fn entailsGoalDirectly(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     if goal is ValidatorGoal::Equal {
         g = goal as ValidatorGoal::Equal;
         direct = semanticFacts(context.equalities, context.applications, context.constants);
@@ -1523,25 +1673,80 @@ fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool
             };
         };
     };
+    return false;
+};
+
+// What a context gives every goal asked of it: the closed equalities, the
+// orders and differences, and whether the facts contradict each other.
+struct ContextAnalysis { equalities: List<EqualityFact>, orders: List<OrderFact>, differences: List<DifferenceFact>, contradictory: Bool };
+
+impl Clone for ContextAnalysis { };
+
+fn analyzeContext(context: &ValidatorContext) -> ContextAnalysis {
     equalities = closeContext(context);
-    if contradictoryVariants(equalities, context.variants) { return true; };
-    if contradictoryConstructors(equalities, context.applications, context.constructorFunctions) { return true; };
-    if contradictoryConstants(equalities, context.constants) {
-        return true;
+    contradictory = false;
+    if contradictoryVariants(equalities, context.variants) { contradictory = true; };
+    if contradictory = false {
+        if contradictoryConstructors(equalities, context.applications, context.constructorFunctions) { contradictory = true; };
     };
-    if contradictoryDisequalities(equalities, context.different) {
-        return true;
+    if contradictory = false {
+        if contradictoryConstants(equalities, context.constants) { contradictory = true; };
+    };
+    if contradictory = false {
+        if contradictoryDisequalities(equalities, context.different) { contradictory = true; };
     };
     orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
     differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
-    if contradictoryDifferences(equalities, differences) {
-        return true;
+    if contradictory = false {
+        if contradictoryDifferences(equalities, differences) { contradictory = true; };
     };
+    return ContextAnalysis { equalities: equalities, orders: orders, differences: differences, contradictory: contradictory };
+};
+
+// Two values differ when some part of them differs: if f(a) and f(b) are
+// known different, a and b are (congruence read backwards).
+fn entailsPartDisequality(context: &ValidatorContext, equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int, right: Int) -> Bool {
+    for a in context.applications {
+        for b in context.applications {
+            if a.function = b.function {
+                if size(a.arguments) = size(b.arguments) {
+                    uses = false;
+                    matches = true;
+                    for i in 0..size(a.arguments) {
+                        x = get(a.arguments, i);
+                        y = get(b.arguments, i);
+                        if hasEquality(equalities, x, left) {
+                            if hasEquality(equalities, y, right) { uses = true; } else if hasEquality(equalities, x, y) = false { matches = false; };
+                        } else if hasEquality(equalities, x, right) {
+                            if hasEquality(equalities, y, left) { uses = true; } else if hasEquality(equalities, x, y) = false { matches = false; };
+                        } else if hasEquality(equalities, x, y) = false { matches = false; };
+                    };
+                    if uses {
+                        if matches {
+                            if entailsApplicationDisequality(equalities, context.applications, orders, context.different, a.id, b.id) { return true; };
+                            av = integerValue(context, a.id);
+                            bv = integerValue(context, b.id);
+                            if av is IntegerLookup::Found {
+                                if bv is IntegerLookup::Found {
+                                    if (av as IntegerLookup::Found).value != (bv as IntegerLookup::Found).value { return true; };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, goal: ValidatorGoal) -> Bool {
+    if analysis.contradictory { return true; };
     if goal is ValidatorGoal::Equal {
         g = goal as ValidatorGoal::Equal;
         bothArithmetic = arithmeticTerm(context, g.left) && arithmeticTerm(context, g.right);
         if bothArithmetic {
-            if contextEqual(equalities, differences, g.left, g.right) { return true; };
+            if contextEqual(analysis.equalities, analysis.differences, g.left, g.right) { return true; };
         } else {
             if congruenceEqual(context, g.left, g.right) { return true; };
         };
@@ -1550,26 +1755,27 @@ fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool
     };
     if goal is ValidatorGoal::Different {
         g = goal as ValidatorGoal::Different;
-        if entailsConstructorDisequality(equalities, context.applications, context.constructorFunctions, g.left, g.right) { return true; };
-        if entailsVariantDisequality(equalities, context.variants, g.left, g.right) { return true; };
-        if entailsConstructorArgumentDisequality(context, equalities, g.left, g.right) { return true; };
+        if entailsConstructorDisequality(analysis.equalities, context.applications, context.constructorFunctions, g.left, g.right) { return true; };
+        if entailsVariantDisequality(analysis.equalities, context.variants, g.left, g.right) { return true; };
+        if entailsConstructorArgumentDisequality(context, analysis.equalities, g.left, g.right) { return true; };
         if contextWithin(context, g.left, g.right) { return true; };
         if contextWithin(context, g.right, g.left) { return true; };
-        return contextDifferent(equalities, context.applications, orders, context.different, differences, g.left, g.right);
+        if entailsPartDisequality(context, analysis.equalities, analysis.orders, g.left, g.right) { return true; };
+        return contextDifferent(analysis.equalities, context.applications, analysis.orders, context.different, analysis.differences, g.left, g.right);
     };
     if goal is ValidatorGoal::Less {
         g = goal as ValidatorGoal::Less;
-        if hasDifference(equalities, differences, g.left, g.right, -1) { return true; };
+        if hasDifference(analysis.equalities, analysis.differences, g.left, g.right, -1) { return true; };
         return linearEntails(context, g.left, g.right, -1);
     };
     if goal is ValidatorGoal::AtMost {
         g = goal as ValidatorGoal::AtMost;
-        if hasDifference(equalities, differences, g.left, g.right, 0) { return true; };
+        if hasDifference(analysis.equalities, analysis.differences, g.left, g.right, 0) { return true; };
         return linearEntails(context, g.left, g.right, 0);
     };
     if goal is ValidatorGoal::Difference {
         g = goal as ValidatorGoal::Difference;
-        return hasDifference(equalities, differences, g.left, g.right, g.bound);
+        return hasDifference(analysis.equalities, analysis.differences, g.left, g.right, g.bound);
     };
     if goal is ValidatorGoal::Within {
         g = goal as ValidatorGoal::Within;
@@ -1622,9 +1828,75 @@ fn deriveRefinedOrders(context: &ValidatorContext) -> ValidatorContext {
     return ValidatorContext { orders: facts, ..clone(context) };
 };
 
+// A goal holds of a context when it holds of the context's facts, or of them
+// with the sum and refined orders derived. Several goals asked of one context
+// share its analysis and its derived context through the cache.
+enum AnalysisLookup { Missing, Found { analysis: ContextAnalysis } };
+
+impl Clone for AnalysisLookup { };
+
+struct EntailmentCache { plain: ValidatorContext, plainAnalysis: AnalysisLookup, derivedMade: Bool, derived: ValidatorContext, derivedAnalysis: AnalysisLookup };
+
+impl Clone for EntailmentCache { };
+
+struct CachedAnswer { holds: Bool, cache: EntailmentCache };
+
+impl Clone for CachedAnswer { };
+
+fn entailmentCache(context: &ValidatorContext) -> EntailmentCache {
+    return EntailmentCache { plain: clone(context), plainAnalysis: AnalysisLookup::Missing, derivedMade: false, derived: clone(context), derivedAnalysis: AnalysisLookup::Missing };
+};
+
+// Whether any of the goals holds: each is tried on the context, then each on
+// the derived context, which is made only when none held on the first.
+fn entailsAnyCached(cache: EntailmentCache, goals: &List<ValidatorGoal>) -> CachedAnswer {
+    c = cache;
+    recognized = false;
+    for g in goals {
+        if recognizedGoal(g) {
+            recognized = true;
+            if entailsGoalDirectly(c.plain, g) { return CachedAnswer { holds: true, cache: c }; };
+        };
+    };
+    if recognized {
+        if c.plainAnalysis is AnalysisLookup::Missing {
+            c = EntailmentCache { plainAnalysis: AnalysisLookup::Found { analysis: analyzeContext(c.plain) }, ..c };
+        };
+        plainAnalysis = (clone(c.plainAnalysis) as AnalysisLookup::Found).analysis;
+        for g in goals {
+            if recognizedGoal(g) {
+                if entailsGoalAnalyzed(c.plain, plainAnalysis, g) { return CachedAnswer { holds: true, cache: c }; };
+            };
+        };
+    };
+    if recognized {
+        if c.derivedMade = false {
+            c = EntailmentCache { derived: deriveRefinedOrders(deriveSumOrders(c.plain)), derivedMade: true, ..c };
+        };
+        for g in goals {
+            if recognizedGoal(g) {
+                if entailsGoalDirectly(c.derived, g) { return CachedAnswer { holds: true, cache: c }; };
+            };
+        };
+        if c.derivedAnalysis is AnalysisLookup::Missing {
+            c = EntailmentCache { derivedAnalysis: AnalysisLookup::Found { analysis: analyzeContext(c.derived) }, ..c };
+        };
+        derivedAnalysis = (clone(c.derivedAnalysis) as AnalysisLookup::Found).analysis;
+        for g in goals {
+            if recognizedGoal(g) {
+                if entailsGoalAnalyzed(c.derived, derivedAnalysis, g) { return CachedAnswer { holds: true, cache: c }; };
+            };
+        };
+    };
+    return CachedAnswer { holds: false, cache: c };
+};
+
+fn entailsGoalCached(cache: EntailmentCache, goal: ValidatorGoal) -> CachedAnswer {
+    return entailsAnyCached(cache, push([], goal));
+};
+
 fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
-    if entailsGoalWithFacts(context, goal) { return true; };
-    return entailsGoalWithFacts(deriveRefinedOrders(deriveSumOrders(context)), goal);
+    return entailsGoalCached(entailmentCache(context), goal).holds;
 };
 
 fn runProofSteps(initial: &ValidatorContext, steps: &List<ProofStep>) -> ProofRun {
@@ -2116,6 +2388,131 @@ fn addRangeBound(state: &ExecutionState, term: Int, value: Int, low: Bool) -> Ex
     return ExecutionState { context: context, ..owned };
 };
 
+fn addOrderToState(state: &ExecutionState, smaller: Int, greater: Int) -> ExecutionState {
+    for order in state.context.orders {
+        if order.smaller = smaller {
+            if order.greater = greater { return clone(state); };
+        };
+    };
+    context = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: smaller, greater: greater, strict: false }), ..clone(state.context) };
+    return ExecutionState { context: context, ..clone(state) };
+};
+
+fn addStrictOrderToState(state: &ExecutionState, smaller: Int, greater: Int) -> ExecutionState {
+    for order in state.context.orders {
+        if order.smaller = smaller {
+            if order.greater = greater {
+                if order.strict { return clone(state); };
+            };
+        };
+    };
+    context = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: smaller, greater: greater, strict: true }), ..clone(state.context) };
+    return ExecutionState { context: context, ..clone(state) };
+};
+
+// A bound that both branches give the joined term, though neither branch
+// states it of that term: on one side it may follow from the value the term
+// was before the join (0 <= 0 - n from n < 0), so each side is asked with the
+// solver, not matched as a fact. The bounds tried are the constants the join
+// keeps and the terms both sides compare against.
+fn constantTermWithValue(context: &ValidatorContext, value: Int) -> ValueLookup {
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = value { return ValueLookup::Found { term: constant.id }; };
+        };
+    };
+    return ValueLookup::Missing;
+};
+
+fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &ExecutionState, right: &ExecutionState) -> ExecutionState {
+    result = clone(state);
+    leftCache = entailmentCache(left.context);
+    rightCache = entailmentCache(right.context);
+    for pair in pairs {
+        mergedCandidates = [];
+        leftCandidates = [];
+        rightCandidates = [];
+        for constant in result.context.constants {
+            if constant.kind = 0 {
+                lc = constantTermWithValue(left.context, constant.value);
+                rc = constantTermWithValue(right.context, constant.value);
+                if lc is ValueLookup::Found {
+                    if rc is ValueLookup::Found {
+                        if containsValue(mergedCandidates, constant.id) = false {
+                            mergedCandidates = push(mergedCandidates, constant.id);
+                            leftCandidates = push(leftCandidates, (lc as ValueLookup::Found).term);
+                            rightCandidates = push(rightCandidates, (rc as ValueLookup::Found).term);
+                        };
+                    };
+                };
+            };
+        };
+        for binding in result.locals.entries() {
+            if binding.value != pair.joined {
+                lc = lookupLocal(left.locals, binding.key);
+                rc = lookupLocal(right.locals, binding.key);
+                if lc is ValueLookup::Found {
+                    if rc is ValueLookup::Found {
+                        if containsValue(mergedCandidates, binding.value) = false {
+                            mergedCandidates = push(mergedCandidates, binding.value);
+                            leftCandidates = push(leftCandidates, (lc as ValueLookup::Found).term);
+                            rightCandidates = push(rightCandidates, (rc as ValueLookup::Found).term);
+                        };
+                    };
+                };
+            };
+        };
+        for i in 0..size(mergedCandidates) {
+            candidate = get(mergedCandidates, i);
+            lc = get(leftCandidates, i);
+            rc = get(rightCandidates, i);
+            lowerLeft = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: lc, right: pair.left });
+            leftCache = lowerLeft.cache;
+            if lowerLeft.holds {
+                lowerRight = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: rc, right: pair.right });
+                rightCache = lowerRight.cache;
+                if lowerRight.holds { result = addOrderToState(result, candidate, pair.joined); };
+            };
+            upperLeft = entailsGoalCached(leftCache, ValidatorGoal::AtMost { left: pair.left, right: lc });
+            leftCache = upperLeft.cache;
+            if upperLeft.holds {
+                upperRight = entailsGoalCached(rightCache, ValidatorGoal::AtMost { left: pair.right, right: rc });
+                rightCache = upperRight.cache;
+                if upperRight.holds { result = addOrderToState(result, pair.joined, candidate); };
+            };
+        };
+    };
+    for p in pairs {
+        for q in pairs {
+            if p.joined != q.joined {
+                a = integerValue(left.context, p.left);
+                b = integerValue(left.context, q.left);
+                c = integerValue(right.context, p.right);
+                d = integerValue(right.context, q.right);
+                if a is IntegerLookup::Found {
+                    if b is IntegerLookup::Found {
+                        if c is IntegerLookup::Found {
+                            if d is IntegerLookup::Found {
+                                av = (a as IntegerLookup::Found).value;
+                                bv = (b as IntegerLookup::Found).value;
+                                cv = (c as IntegerLookup::Found).value;
+                                dv = (d as IntegerLookup::Found).value;
+                                if av <= bv {
+                                    if cv <= dv { result = addOrderToState(result, p.joined, q.joined); };
+                                };
+                                if av < bv {
+                                    if cv < dv { result = addStrictOrderToState(result, p.joined, q.joined); };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return result;
+};
+
 fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
     poolContext = unionContexts(left.context, right.context);
     poolEqualities = clone(poolContext.equalities);
@@ -2193,6 +2590,7 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
             };
         };
     };
+    state = addJoinedBounds(state, pairs, left, right);
     return StateMergeLookup::Found { state: state };
 };
 
@@ -2981,7 +3379,8 @@ fn negateRelation(relation: Int, left: Int, right: Int) -> NegatedRelation {
 
 // The comparison that produced the term, negated when the term has to be
 // false. The application keeps the operands from the time of the comparison.
-fn booleanRelationKnown(context: &ValidatorContext, term: Int, truth: Bool) -> Bool {
+fn relationGoals(context: &ValidatorContext, term: Int, truth: Bool) -> List<ValidatorGoal> {
+    goals = [];
     for app in context.applications {
         if app.id = term {
             if size(app.arguments) = 2 {
@@ -3003,20 +3402,24 @@ fn booleanRelationKnown(context: &ValidatorContext, term: Int, truth: Bool) -> B
                         left = opposite.left;
                         right = opposite.right;
                     };
-                    if entailsGoal(context, localGoal(relation, left, right)) { return true; };
+                    goals = push(goals, localGoal(relation, left, right));
                 };
             };
         };
     };
-    return false;
+    return goals;
 };
 
 // Recognize a boolean directly or through the comparison that produced it.
 // The literal is the term for the truth value being asked about, so `truth` and
 // `literal` always agree.
+fn booleanKnownCached(cache: EntailmentCache, term: Int, literal: Int, truth: Bool) -> CachedAnswer {
+    goals = push(relationGoals(cache.plain, term, truth), ValidatorGoal::Equal { left: term, right: literal });
+    return entailsAnyCached(cache, goals);
+};
+
 fn booleanKnown(context: &ValidatorContext, term: Int, literal: Int, truth: Bool) -> Bool {
-    if booleanRelationKnown(context, term, truth) { return true; };
-    return entailsGoal(context, ValidatorGoal::Equal { left: term, right: literal });
+    return booleanKnownCached(entailmentCache(context), term, literal, truth).holds;
 };
 
 // A boolean term that the context knows to be a literal: kind 1 is a boolean,
@@ -3046,14 +3449,14 @@ fn booleanConstant(context: &ValidatorContext, value: Int) -> ValueLookup {
 // can; a plain constant needs the term for that value, which the program may
 // not mention at all.
 fn booleanOpposite(context: &ValidatorContext, term: Int, truth: Bool) -> Bool {
-    if booleanRelationKnown(context, term, truth) { return true; };
+    goals = relationGoals(context, term, truth);
     value = 0;
     if truth { value = 1; };
     literal = booleanConstant(context, value);
     if literal is ValueLookup::Found {
-        return entailsGoal(context, ValidatorGoal::Equal { left: term, right: (literal as ValueLookup::Found).term });
+        goals = push(goals, ValidatorGoal::Equal { left: term, right: (literal as ValueLookup::Found).term });
     };
-    return false;
+    return entailsAnyCached(entailmentCache(context), goals).holds;
 };
 
 // `term` has to be the literal `value` when the operands are equal and the
@@ -3585,8 +3988,9 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                     a = (left as ValueLookup::Found).term;
                     b = (right as ValueLookup::Found).term;
                     inverse = negateRelation(condition.relation, a, b);
-                    yesKnown = entailsGoal(run.state.context, localGoal(condition.relation, a, b));
-                    noKnown = entailsGoal(run.state.context, localGoal(inverse.relation, inverse.left, inverse.right));
+                    yesAnswer = entailsGoalCached(entailmentCache(run.state.context), localGoal(condition.relation, a, b));
+                    yesKnown = yesAnswer.holds;
+                    noKnown = entailsGoalCached(yesAnswer.cache, localGoal(inverse.relation, inverse.left, inverse.right)).holds;
                     if noKnown = false {
                         yesContext = assumeRelation(run.state.context, condition.relation, a, b);
                         yesState = ExecutionState { context: yesContext, ..clone(run.state) };
@@ -3613,14 +4017,15 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                         yesLiteral = (trueValue as ValueLookup::Found).term;
                         noLiteral = (falseValue as ValueLookup::Found).term;
                         if branch.join >= 0 {
-                            joinYesKnown = booleanKnown(run.state.context, term, yesLiteral, true);
+                            joinYesAnswer = booleanKnownCached(entailmentCache(run.state.context), term, yesLiteral, true);
+                            joinYesKnown = joinYesAnswer.holds;
                             if joinYesKnown {
                                 yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
                                 yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                                 yesState = ExecutionState { context: yesContext, ..clone(run.state) };
                                 return walkExecution(blocks, branch.yes, yesState, fuel - 1, clone(loops));
                             };
-                            joinNoKnown = booleanKnown(run.state.context, term, noLiteral, false);
+                            joinNoKnown = booleanKnownCached(joinYesAnswer.cache, term, noLiteral, false).holds;
                             if joinNoKnown {
                                 noContext = assumeRelation(run.state.context, 0, term, noLiteral);
                                 noContext = assumeBooleanFact(noContext, term, noLiteral);
@@ -3644,14 +4049,15 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                             };
                             return ExecutionFlowResult { status: 2, block: id, step: -1, state: run.state };
                         };
-                        yesKnown = booleanKnown(run.state.context, term, yesLiteral, true);
+                        yesAnswer = booleanKnownCached(entailmentCache(run.state.context), term, yesLiteral, true);
+                        yesKnown = yesAnswer.holds;
                         if yesKnown {
                             yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..run.state };
                             return walkExecution(blocks, branch.yes, yesState, fuel - 1, loops);
                         };
-                        noKnown = booleanKnown(run.state.context, term, noLiteral, false);
+                        noKnown = booleanKnownCached(yesAnswer.cache, term, noLiteral, false).holds;
                         if noKnown = false {
                             yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
