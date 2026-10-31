@@ -12,7 +12,6 @@ module TestValidation
 import qualified Data.Map as Map
 import Parse
 import Pipeline (compileSource, validateStatements)
-import ProofState (allFacts, initialPState)
 import StdLib
 import TersusTypes
 import Utils
@@ -517,8 +516,6 @@ testCallsUseContracts =
               -- (which made the time to validate grow with the square of the number of functions; the proofs here are of 80 functions)
               parseValidProgramHelper chainOfFunctions
             , parseValidProgramHelper "fn id(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; g = id; x = g(3); affirm x = 3;"
-            , -- (what is known before anything is validated does not grow with the functions of the program)
-              factsAtStart "fn f0(n: Int) -> Int { return n; }; return f0(1);" chainOfFunctions
             ]
 
 testRecursion :: Test
@@ -558,12 +555,3 @@ chainOfFunctions =
             ]
         ++ "x = f79(3); affirm x = 3;"
 
--- The facts at the start do not depend on how many functions the program has
-factsAtStart :: String -> String -> TestResult
-factsAtStart small large =
-    case (compileSource small, compileSource large) of
-        (Ok a, Ok b)
-            | length (allFacts (initialPState a)) == length (allFacts (initialPState b)) -> Nothing
-            | otherwise -> Just "the facts at the start grow with the number of functions"
-        (Error e, _) -> Just e
-        (_, Error e) -> Just e

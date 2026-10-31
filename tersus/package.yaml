@@ -61,11 +61,6 @@ executables:
     - -with-rtsopts=-N
     dependencies:
     - tersus
-  parity:
-    main:                Parity.hs
-    source-dirs:         dev/parity
-    dependencies:
-    - tersus
 
 tests:
   tersus-test:

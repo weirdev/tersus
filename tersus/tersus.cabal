@@ -35,9 +35,7 @@ library
   exposed-modules:
       Bootstrap
       Cli
-      Ghost
       Hash
-      Linear
       LlvmRuntime
       Mir
       MirData
@@ -48,18 +46,13 @@ library
       MirMono
       MirMoves
       MirOwnership
-      MirValidate
       MirVerify
       Native
       Parse
       Pipeline
       PreludeSource
       Pretty
-      ProofEngine
-      ProofHelpers
-      ProofState
       SelfHostedMir
-      SelfHostedProof
       StdLib
       StdLibDefs
       TersusTypes
@@ -80,26 +73,6 @@ library
     , parsec
     , process
     , template-haskell
-  default-language: Haskell2010
-
-executable parity
-  main-is: Parity.hs
-  other-modules:
-      Paths_tersus
-  autogen-modules:
-      Paths_tersus
-  hs-source-dirs:
-      dev/parity
-  ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
-  build-depends:
-      base >=4.7 && <5
-    , containers
-    , directory
-    , filepath
-    , parsec
-    , process
-    , template-haskell
-    , tersus
   default-language: Haskell2010
 
 executable tersus-exe
