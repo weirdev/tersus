@@ -111,6 +111,7 @@ data PState = PState
     , psProgram :: M.Program
     , psReaders :: Set.Set Name -- the functions of the program that read the standard input
     , psBorrows :: Map M.Local (M.Local, [M.RefStep]) -- the place each reference local is to, so that an assignment to the root re-versions what reads through it see it as
+    , psValidated :: Set.Set Name -- the top-level functions whose bodies have been checked (a mutually recursive group is checked together)
     }
 
 -- The name of a function of the program as a value in proofs
@@ -140,6 +141,7 @@ initialPState program =
             , psProgram = program
             , psReaders = M.readersOfInput program
             , psBorrows = Map.empty
+            , psValidated = Set.empty
             }
 
 -- The functions that a function names are known by their value too (`f = $f` is `VFnRef f`), so that what returns one can be
