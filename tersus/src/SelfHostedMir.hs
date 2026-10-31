@@ -299,14 +299,20 @@ contractSteps assume env clauses b0 = foldM add ([], b0) clauses
             MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
             _ -> Nothing
           else Just checked
-        pure (steps ++ (if assume then filter totalStep prefix else prefix) ++ [encoded], b')
+        pure (steps ++ (if assume then filter keptStep prefix else prefix) ++ [encoded], b')
     add _ _ = Nothing
     totalStep (MData "ExecutionStep::ApplyFresh" _) = True
     totalStep _ = False
     -- An assumed clause may mention a partial expression (a get, a division):
     -- the reference assumes it without proving it safe, so its safety checks
-    -- are dropped rather than required. Anything else unmodelled declines.
-    droppable value = totalStep value || case value of
+    -- are dropped rather than required. A forall is assumed through the
+    -- havoced index its check introduces: that fresh term is one nothing
+    -- else can name, so the assumed body cannot be used at another index.
+    -- Anything else unmodelled declines.
+    keptStep (MData "ExecutionStep::Havoc" _) = True
+    keptStep (MData "ExecutionStep::Assume" _) = True
+    keptStep value = totalStep value
+    droppable value = keptStep value || case value of
         MData "ExecutionStep::Check" _ -> True
         _ -> False
 
@@ -801,7 +807,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             let M.BlockId yesId = yes
                 M.BlockId noId = no
                 ending = record "ExecutionEnd::BooleanBranch"
-                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (-1)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
+                    [("yes", MInt (toInteger yesId)), ("no", MInt (toInteger noId)), ("join", MInt (joinFor yes no)), ("value", ref), ("trueValue", trueRef), ("falseValue", falseRef)]
             Just ([required], ending, b3)
         (Nothing, M.Call calleeOp args dest target) | allowCalls -> do
             name <- case calleeOp of
