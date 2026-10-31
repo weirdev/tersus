@@ -6,7 +6,8 @@ import qualified Data.Map as Map
 import BuiltinRegistry
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibCtx)
-import TersusTypes
+import Types
+import Syntax
 import TestHarness
 
 -- One representative of every BuiltinFunct constructor. A new constructor needs a representative

@@ -36,7 +36,9 @@ import qualified Mir as M
 import qualified ProofEngine as Engine
 import StdLib
 import StdLibDefs (stdLibValCtx)
-import TersusTypes
+import Types
+import Syntax
+import Solver
 import Utils
 
 -- The validator draws fresh iotas from one sequence, so that the states of different paths never share an iota

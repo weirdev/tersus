@@ -12,7 +12,10 @@ resulting behavior and migration when a change is user-visible.
 The active implementation lives in `tersus/`, a Stack-based Haskell package.
 
 - `tersus/src/`: core language, parser, type checker, MIR, proof, and utility
-  modules. The CLI entry point is `tersus/app/Main.hs` (logic in `src/Cli.hs`).
+  modules (the shared definitions are split by concern: `Types` is the core
+  type language, `Syntax` is the AST and proof terms, and `Solver` is the
+  proof solver state). The CLI entry point is `tersus/app/Main.hs` (logic in
+  `src/Cli.hs`).
 - `tersus/lib/` (Tersus sources the Haskell implementation depends on):
   - `eq.tersus`: the trait `Eq` that `=` and `!=` call, and its impls for lists, arrays and Boxes, put in front of every program that does not
     declare a trait `Eq` (`Pipeline.libraries`). Embedded by `PreludeSource`.

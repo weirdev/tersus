@@ -47,7 +47,8 @@ import qualified Mir as M
 import ProofState
 import StdLib
 import StdLibDefs (stdlibBuiltin)
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- Statements for the validator: affirm, define and rewrite, which the program writes, and the rules it defines

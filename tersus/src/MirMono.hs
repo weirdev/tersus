@@ -9,7 +9,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Arg (..), Name, Size (..), Type (..), Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), Name, Size (..), Type (..), Variable, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the

@@ -4,7 +4,8 @@ import Data.List (isInfixOf, tails)
 
 import Cli (Command (..), runSource)
 import Pipeline (compileSource)
-import TersusTypes
+import Types
+import Syntax
 import TestHarness
 import Utils
 

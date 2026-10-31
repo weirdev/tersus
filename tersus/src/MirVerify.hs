@@ -10,7 +10,7 @@ import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
 import TypeCheck (functionType, maxArraySlots, solveInstanceArgs)
-import TersusTypes (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, baseNameOf, instanceName, namedMatches, pattern TArray, substSizes, tupleGeneric, tupleType, wordRange)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, baseNameOf, instanceName, namedMatches, pattern TArray, substSizes, tupleGeneric, tupleType, wordRange)
 import Utils (Result (..))
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and function
