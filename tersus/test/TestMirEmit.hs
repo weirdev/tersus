@@ -1,4 +1,4 @@
-module TestMirEmit (testMirEmit) where
+module TestMirEmit (testMirEmit, testMirEmitPrograms) where
 
 import Data.List (isInfixOf, isPrefixOf)
 import System.Exit (ExitCode (..))
@@ -25,12 +25,18 @@ testMirEmit =
         [ TestCase "the reader is the same in the reader and in the emitter" sameReader
         , TestCase "the IR of a loop, interpreted" (readFile "examples/loops.tersus" >>= interpretedIr)
         , TestParallel
-            "every example and program, natively"
-            ( [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
-                ++ [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
-            )
+            "every example, natively"
+            [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
         , TestCase "what is not the MIR is refused" refusal
         ]
+
+-- The validated programs of the sweep as a group of their own, so the suite's group processes balance: this sweep
+-- and testMirVerify's were the longest groups, and a group is a process.
+testMirEmitPrograms :: Test
+testMirEmitPrograms =
+    TestParallel
+        "testMirEmitPrograms"
+        [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
 
 -- The text of the reader between its two marker lines
 readerOf :: String -> String

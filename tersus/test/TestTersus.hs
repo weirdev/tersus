@@ -137,7 +137,9 @@ allGroups =
     , testMirReader
     , testMirVerify
     , testMirErase
+    , testMirVerifyPrograms
     , testMirEmit
+    , testMirEmitPrograms
     , testBootstrap
     ]
 
