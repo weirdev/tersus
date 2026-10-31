@@ -1149,7 +1149,7 @@ During validation, arguments are symbolic values. Proofs the caller has establis
 
 #### References
 
-A *reference* is a local or a parameter that stands for a place (a variable, a field of one, an element of one, or through another reference) instead of holding a value of its own. `&T` is a reference that only reads the place; `&mut T` is one that may also update it. A reference is made with `&place` or `&mut place`, and the value at the place is read with `*r`. A reference is never a result, a field or an element, so one cannot outlive the function that makes it.
+A *reference* is a local or a parameter that stands for a place (a variable, a field of one, an element of one, or through another reference) instead of holding a value of its own. `&T` is a reference that only reads the place; `&mut T` is one that may also update it. A reference is made with `&place` or `&mut place`, and the value at the place is read with `*r`. A reference may be a field of a struct or a variant of an enum, an element of a list, array or `Box`, and — under a `from` bound — a result; what keeps it sound is that the place it is to is frozen while it is live, wherever it is held.
 
 ```tersus
 xs = [1, 2, 3];
@@ -1158,7 +1158,7 @@ a = size(*r);         // the last use of r
 xs = push(xs, 4);     // xs is the program's again
 ```
 
-- **A borrow ends at the last use of the reference**, including uses through what is borrowed from it (`&*r` is a *reborrow*). While a borrow is live, what it is to cannot be moved, assigned, or borrowed incompatibly: read borrows may coexist; borrowing for updating, or moving or assigning the place, waits until every live borrow of it has ended. Two borrows of two fields of one struct are of different places, so both may update.
+- **A borrow ends at the last use of the reference**, including uses through what is borrowed from it (`&*r` is a *reborrow*). While a borrow is live, what it is to cannot be moved, assigned, or borrowed incompatibly: read borrows may coexist; borrowing for updating, or moving or assigning the place, waits until every live borrow of it has ended. Two borrows of two fields of one struct are of different places, so both may update. So are borrows of two different elements of one list when both indices are known (`&get(xs, 0)` and `&mut get(xs, 1)` may be live together); an index that is not known counts as any element.
 - **Reading through a reference is a view** of the place (as a field read is): it is not a move, and taking the value for itself (returning `*r`, giving it where a value is taken) is an error for a value that is not Copy: write `clone(*r)`, or replace it through an update reference.
 - **Method receivers are the one place a call does not write the borrow**: `x.size()` borrows `x` as the signature of `size` declares (`self: &Self`), as it did before references could be held by locals.
 
@@ -1178,7 +1178,7 @@ fn increment(n: &mut Int) -> Int writes(n)
 
 - **`writes(...)`** after the return type says which places of the update parameters a function may change (`writes(n)`, `writes(p.x)`). Without it, every update parameter may be changed whole. An assignment through a reference anywhere else is an error that names the clause.
 - **`old(place)`** in a postcondition is the value the place had when the function was entered. It is the only way a promise relates the new value to the old one, and it may only name what an update parameter is to.
-- **An update makes a new version.** Facts proved about a value are about a version of it: after `*r = v;` or a call through `&mut`, what was proved about the place before is about its old version, not a fact about the new one (an `affirm` of the old fact is refused), and facts about a different field of the same struct are kept. In the interpreter the caller gets the new value when the call returns. Native code takes a reference held by a local (making `&place`, reading `*r` through it, and the assignment through an update reference that `expandRefWrites` makes of it), but a function with an update parameter is refused by `run` and `build` with that reason: native code has no writeback for it yet, while `eval` and `check` take it.
+- **An update makes a new version.** Facts proved about a value are about a version of it: after `*r = v;` or a call through `&mut`, what was proved about the place before is about its old version, not a fact about the new one (an `affirm` of the old fact is refused), and facts about a different field of the same struct are kept. In the interpreter the caller gets the new value when the call returns. Native code passes an update parameter by address, so an assignment through it writes the caller's place directly; there is no writeback step.
 
 #### Returning a reference
 
@@ -1196,7 +1196,7 @@ return *r;   // 10; ys cannot be assigned or moved while r is live
 
 - **`from` names the parameters the result may be from** (`from xs`, or `from (a, b)` when the body chooses between them). With exactly one reference parameter it may be left out; with several it is required. Every place the function returns has to be of one of them: returning a reference to a local is refused. With several candidates, all of them are frozen while the result is live, since which one it is is the callee's choice.
 - **In a contract, `return` is what the reference is to** (`*return` is the same thing written as a place), so a promise about the result is a promise about the caller's place.
-- A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. It cannot be given through a function value or returned by the program, and an update reference (`&mut T`) cannot be returned yet. Native code does not take a program with a function that returns a reference yet (`run` and `build` say so): a native result is a value, and a reference to a place of a parameter is not one it can hand back; see Updating through a reference for what native code does take.
+- A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. An update reference (`&mut T`) can be returned too (`-> &mut T from xs`), and the caller may then assign through it. The origin of a result may come through a trait method (`Trait::getr(...)` uses the trait's own `from`) and through a function value that is a named function held by a local (`g = headOf; r = g(ys);`); through any other function value it cannot be told and is refused. It cannot be returned by the program. Native code returns a reference as the address of the place, since a borrowed parameter is passed by address. A reference to an unsized value (`&Array<T>`, made by borrowing through a `Box`, as in `&*b` for `b: Box<Array<Int>>`) works in the interpreter — its size is the size of what it is to — but native code does not carry the size with the address yet and refuses it.
 
 #### Holding references in a struct
 
@@ -1217,7 +1217,7 @@ return *f;     // 10; ys is frozen while w, or a reference read out of it, is li
 
 - **The holder freezes the places**, as a reference local does: while the struct is held (or a reference read out of it is live), what its fields are to cannot be assigned or moved. A field read gives the reference the field holds, with its own last use from there.
 - **Returning one is under the same `from`**: every field of the returned value has to be from a named parameter (one bound covers all the fields), and the caller's holder freezes those places.
-- **For now, such a value stays local**: it is made, held by a local, read out of, and returned — it is not given to a function (as a parameter or an argument), put in a list, an array or a `Box`, or held in another struct, and a field cannot be an update reference (`&mut T`) or be in an enum variant yet.
+- **Such a value goes anywhere a value goes**: it can be given to a function, put in a list, an array or a `Box`, and held in another struct, and the places its fields are to stay frozen while any of those is live. A field may be an update reference (`&mut T`), which the holder may then assign through (`*w.r = v;`), and a variant of an enum may hold a reference in the same way. A reference cannot be made from raw memory: an `Addr` and its `Block` permission confer no reference permission, so the two never alias — `Addr::write`, `take`, `free`, splits and joins are governed by the permission alone, and references by loans alone.
 
 ## Moves, Clone And Copy
 

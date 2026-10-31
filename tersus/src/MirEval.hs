@@ -89,7 +89,7 @@ runProgramEnv :: RunEnv -> Program -> Result Outcome String
 runProgramEnv env program =
     mapResult
         (\(value, (out, err), s) -> Outcome out err [(spelling, Map.findWithDefault "" key (sFiles s)) | (key, spelling) <- sOrder s] value)
-        (runE (fmap fst (runFunction program (progMain program) [])) env (startState (envInput env)))
+        (runE (fmap fst (runFunction program (progMain program) [] Map.empty)) env (startState (envInput env)))
 
 -- What a program has written to the standard output and to the standard error
 type Written = (String, String)
@@ -190,7 +190,7 @@ newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
 runNamedFunction :: Program -> Name -> [MirValue] -> Result (Maybe MirValue) String
 runNamedFunction program name args = case Map.lookup name (progFunctions program) of
     Nothing -> Error ("Function does not exist: " ++ name)
-    Just fn -> mapResult (\((value, _), _, _) -> value) (runE (runFunction program fn args) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState ""))
+    Just fn -> mapResult (\((value, _), _, _) -> value) (runE (runFunction program fn args Map.empty) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState ""))
 
 instance Functor E where
     fmap f (E r) = E (\env s -> mapResult (\(a, output, s') -> (f a, output, s')) (r env s))
@@ -293,11 +293,11 @@ fileStore = E (\_ s ->
                        }
                     ))
 
-runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue, Frame)
-runFunction program fn args
+runFunction :: Program -> Function -> [MirValue] -> Frame -> E (Maybe MirValue, Frame)
+runFunction program fn args extra
     | length args /= length (fnParams fn) =
         failE ("Function expected " ++ show (length (fnParams fn)) ++ " arguments, got " ++ show (length args))
-    | otherwise = runBlock program fn (BlockId 0) (Map.fromList (zip (fnParams fn) args))
+    | otherwise = runBlock program fn (BlockId 0) (Map.union extra (Map.fromList (zip (fnParams fn) args)))
 
 type Frame = Map Local MirValue
 
@@ -319,7 +319,12 @@ runBlock program fn block frame =
                     f <- liftE (operandValue frame' callee)
                     argValues <- liftE (mapResults (operandValue frame') args)
                     resolved <- liftE (mapResults (resolveRef frame') argValues)
-                    (result, calleeFrame) <- callFunction program f resolved
+                    let normArgs = map (normaliseRefs frame') resolved
+                        synthRoots = refRootClosure frame' normArgs
+                        synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
+                        calleeArgs = map (rewriteRefRoots synthMap) normArgs
+                        synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
+                    (result, calleeFrame) <- callFunction program f calleeArgs synthFrame
                     -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
                     -- the same place in this frame. References to the callee's own places cannot be returned,
                     -- which the checker has already refused.)
@@ -330,7 +335,10 @@ runBlock program fn block frame =
                             MFn name | Just callee <- Map.lookup name (progFunctions program) -> [Map.findWithDefault MEmpty p calleeFrame | p <- fnParams callee]
                             _ -> []
                     frame'' <- liftE (writeBack program frame' f args finalParams)
-                    runBlock program fn next (Map.insert dest result' frame'')
+                    let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
+                        result2 = rewriteRefRoots invSynth result'
+                    frame3 <- liftE (foldl (\acc (root, synth) -> acc `bindResult` \fr -> case Map.lookup synth calleeFrame of Just v -> writePlace fr root [] (rewriteRefRoots invSynth v); Nothing -> Ok fr) (Ok frame'') (Map.toList synthMap))
+                    runBlock program fn next (Map.insert dest result2 frame3)
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
 
@@ -410,17 +418,48 @@ writeBack program frame (MFn name) args finalParams = case Map.lookup name (prog
          in foldl (\acc i -> acc `bindResult` \f -> write (f, i)) (Ok frame) muts
 writeBack _ frame _ _ _ = Ok frame
 
-callFunction :: Program -> MirValue -> [MirValue] -> E (MirValue, Frame)
-callFunction _ (MFn name) _
+callFunction :: Program -> MirValue -> [MirValue] -> Frame -> E (MirValue, Frame)
+callFunction _ (MFn name) _ _
     | take 7 name == "extern " = failE ("The extern function " ++ drop 7 name ++ " is a function of C, which only native code can call")
-callFunction program (MFn name) args =
+callFunction program (MFn name) args extra =
     case Map.lookup name (progFunctions program) of
         Nothing -> failE ("Call of a function that does not exist: " ++ name)
         Just fn -> do
-            (result, frame) <- runFunction program fn args
+            (result, frame) <- runFunction program fn args extra
             value <- maybe (failE "Function did not return a value") return result
             return (value, frame)
-callFunction _ _ _ = failE "Object being called must be a function"
+callFunction _ _ _ _ = failE "Object being called must be a function"
+
+normaliseRefs :: Frame -> MirValue -> MirValue
+normaliseRefs frame value = case value of
+    MRef l steps -> case Map.lookup l frame of
+        Just (MRef l2 steps2) -> normaliseRefs frame (MRef l2 (steps2 ++ steps))
+        _ -> MRef l steps
+    MData name fields -> MData name [(f, normaliseRefs frame v) | (f, v) <- fields]
+    MList values -> MList (map (normaliseRefs frame) values)
+    _ -> value
+
+refRoots :: MirValue -> [Local]
+refRoots value = case value of
+    MRef l _ -> [l]
+    MData _ fields -> concatMap (refRoots . snd) fields
+    MList values -> concatMap refRoots values
+    _ -> []
+
+refRootClosure :: Frame -> [MirValue] -> [Local]
+refRootClosure frame args = go [] (concatMap refRoots args)
+  where
+    go seen [] = seen
+    go seen (r : rest)
+        | r `elem` seen = go seen rest
+        | otherwise = go (seen ++ [r]) (rest ++ maybe [] (refRoots . normaliseRefs frame) (Map.lookup r frame))
+
+rewriteRefRoots :: Map Local Local -> MirValue -> MirValue
+rewriteRefRoots m value = case value of
+    MRef l steps -> MRef (Map.findWithDefault l l m) steps
+    MData name fields -> MData name [(f, rewriteRefRoots m v) | (f, v) <- fields]
+    MList values -> MList (map (rewriteRefRoots m) values)
+    _ -> value
 
 mapResults :: (a -> Result b String) -> [a] -> Result [b] String
 mapResults = flatResultMap

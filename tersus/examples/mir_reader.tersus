@@ -106,7 +106,7 @@ enum Rvalue {
 
 impl Clone for Rvalue { };
 
-enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int } };
+enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, AssignRef { local: Int, steps: List<RefStep>, rv: Rvalue } };
 
 impl Clone for Statement { };
 
@@ -136,6 +136,8 @@ struct Function {
     sizeParams: List<String>,
     typeParams: List<String>,
     borrowed: List<Int>,
+    mutBorrowed: List<Int>,
+    from: List<Int>,
     locals: List<LocalDecl>,
     blocks: List<MirBlock>,
 };
@@ -770,6 +772,17 @@ fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm
         if kw = "assign" { return done(Line::LStatement { s: Statement::Assign { local: l.value, rv: rv.value } }, rv.pos); };
         return done(Line::LStatement { s: Statement::Peek { local: l.value, rv: rv.value } }, rv.pos);
     };
+    if kw = "assignref" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        n = countAt(ts, l.pos);
+        if !n.ok { return bad; };
+        steps = refStepsAt(ts, n.pos, n.value);
+        if !steps.ok || steps.pos >= size(ts) { return bad; };
+        rv = rvalueAt(ts, steps.pos);
+        if !rv.ok { return bad; };
+        return done(Line::LStatement { s: Statement::AssignRef { local: l.value, steps: steps.value, rv: rv.value } }, rv.pos);
+    };
     if kw = "drop" {
         l = intAt(ts, next);
         if !l.ok { return bad; };
@@ -879,7 +892,7 @@ fn declAt(ts: &List<Token>) -> Parsed<TypeDecl> [{ }] [{ }] {
 };
 
 fn noFunction() -> Function [{ }] [{ }] {
-    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], locals: [], blocks: [] };
+    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], mutBorrowed: [], from: [], locals: [], blocks: [] };
 };
 
 // The header of a function, from a whole line (the locals and the blocks are filled in by the caller)
@@ -918,8 +931,18 @@ fn headerAt(ts: &List<Token>) -> Parsed<Function> [{ }] [{ }] {
     nb = countAt(ts, typeParams.pos + 1);
     if !nb.ok { return bad; };
     borrowed = intsAt(ts, nb.pos, nb.value);
-    if !borrowed.ok || borrowed.pos != size(ts) { return bad; };
-    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, locals: [], blocks: [] }, borrowed.pos);
+    if !borrowed.ok { return bad; };
+    if borrowed.pos = size(ts) { return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: [], from: [], locals: [], blocks: [] }, borrowed.pos); };
+    if !isWord(ts, borrowed.pos, "mutborrowed") || borrowed.pos + 1 >= size(ts) { return bad; };
+    nm = countAt(ts, borrowed.pos + 1);
+    if !nm.ok { return bad; };
+    mutBorrowed = intsAt(ts, nm.pos, nm.value);
+    if !mutBorrowed.ok || !isWord(ts, mutBorrowed.pos, "from") || mutBorrowed.pos + 1 >= size(ts) { return bad; };
+    nf = countAt(ts, mutBorrowed.pos + 1);
+    if !nf.ok { return bad; };
+    fromList = intsAt(ts, nf.pos, nf.value);
+    if !fromList.ok || fromList.pos != size(ts) { return bad; };
+    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: mutBorrowed.value, from: fromList.value, locals: [], blocks: [] }, fromList.pos);
 };
 
 fn noLocalDecl() -> LocalDecl [{ }] [{ }] {
@@ -1285,6 +1308,15 @@ fn printStatement(st: &Statement) -> Int ~ {
         Statement::Assign { local: l, rv: rv } => { n = "assign".print() + printInt(l) + printRvalue(rv); },
         Statement::Peek { local: l, rv: rv } => { n = "peek".print() + printInt(l) + printRvalue(rv); },
         Statement::Drop { local: l } => { n = "drop".print() + printInt(l); },
+        Statement::AssignRef { local: l, steps: steps, rv: rv } => {
+            n = "assignref".print() + printInt(l) + printInt(size(steps));
+            i = 0;
+            while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+                n = n + printRefStep(get(steps, i));
+                i = i + 1;
+            };
+            n = n + printRvalue(rv);
+        },
     };
     return n + newLine();
 };

@@ -311,6 +311,8 @@ buildFunction requires ensures term env b =
         , M.fnSizeParams = bSizes b
         , M.fnTypeParams = bTypeParams b
         , M.fnBorrowed = bBorrowed b
+        , M.fnMutBorrowed = bMutBorrowed b
+        , M.fnFrom = []
         , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
         , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env [] [] []
         }
@@ -436,6 +438,11 @@ lowerReturn expr = do
             case binding of
                 Just (BLocal l _) | l `elem` bBorrowed b0 || l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] False), TRef rt)
                 _ -> lowerLast expr
+        (Just (TMutRef rt), Var v) -> do
+            binding <- lookupBinding v
+            case binding of
+                Just (BLocal l _) | l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] True), TMutRef rt)
+                _ -> lowerLast expr
         _ -> lowerLast expr
     b <- builder
     case bReturns b of
@@ -542,7 +549,7 @@ defineFunction var params ins outs (Signature ptys rty sizes types writes sigFro
     inner <- builder
     modifyB (const outer)
     let fn0 = buildFunction ins outs term env inner
-        fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys], M.specFrom = sigFrom}}
+        fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys], M.specFrom = sigFrom}, M.fnFrom = [l | (p, l, _) <- paramLocals, p `elem` sigFrom]}
     modifyS (\s -> s{lsFunctions = Map.insert name fn (lsFunctions s)})
 
 unrefType :: Type -> Type
@@ -554,6 +561,10 @@ isRefType :: Type -> Bool
 isRefType (TRef _) = True
 isRefType (TMutRef _) = True
 isRefType _ = False
+
+isMutRefType :: Type -> Bool
+isMutRefType (TMutRef _) = True
+isMutRefType _ = False
 
 -- Expressions
 
@@ -674,6 +685,7 @@ lowerRefRoot (Var name) = do
     case binding of
         Just (BLocal l ty)
             | isRefType ty -> return (l, unrefType ty)
+            | TBox inner <- ty -> return (l, inner)
             | l `elem` bBorrowed b -> return (l, ty)
             | otherwise -> failL ("Lowering failed: " ++ name ++ " is not a reference")
         _ -> failL ("Lowering failed: " ++ name ++ " is not a reference")
@@ -754,7 +766,9 @@ lowerDerefPlace expr = case expr of
                     | l `elem` bMutBorrowed b -> return (l, [], ty)
                     | isRefType ty -> case Map.lookup l (bRefTargets b) of
                         Just (root, steps) -> return (root, steps, unrefType ty)
-                        Nothing -> failL ("Lowering failed: the place that " ++ name ++ " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter")
+                        Nothing
+                            | isMutRefType ty -> return (l, [], unrefType ty)
+                            | otherwise -> failL ("Lowering failed: the place that " ++ name ++ " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter")
                     | otherwise -> failL ("Lowering failed: " ++ name ++ " is not a reference")
                 _ -> failL ("Lowering failed: " ++ name ++ " is not a reference")
         _ -> do

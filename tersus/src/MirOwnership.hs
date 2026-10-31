@@ -751,6 +751,9 @@ rewriteStatement :: Ctx -> BlockId -> Int -> Live -> Statement -> R [Statement]
 rewriteStatement _ _ _ _ st@Ghost{} = pure [st]
 rewriteStatement _ _ _ _ st@Drop{} = pure [st]
 rewriteStatement _ _ _ _ st@Peek{} = pure [st]
+rewriteStatement cx _ _ after (AssignRef root steps rv) = do
+    (pre, post, operands) <- rewriteOperands cx after (roles rv)
+    pure (pre ++ [AssignRef root steps (withOperands rv operands)] ++ post)
 rewriteStatement cx b k after (Assign d rv)
     | isProjection rv && heap cx (typeOf cx d) = projection
     | otherwise = do
@@ -886,6 +889,12 @@ expandRefWrites program = program{progFunctions = Map.map expandFn (progFunction
             let (here, next', locals') = expandStmt next locals stmt
                 (rest', next'', locals'') = expandStmts next' locals' rest
              in (here ++ rest', next'', locals'')
+        expandStmt next locals (AssignRef root steps rv)
+            | isRefRoot root = ([AssignRef root steps rv], next, locals)
+          where
+            isRefRoot l = case Map.lookup l (fnLocals fn) of
+                Just d -> case localType d of TRef _ -> True; TMutRef _ -> True; _ -> False
+                Nothing -> False
         expandStmt next locals (AssignRef root steps rv) =
             let (valueOp, before, next1, locals1) = case rv of
                     Use o -> (o, [], next, locals)

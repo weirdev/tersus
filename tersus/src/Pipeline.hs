@@ -23,7 +23,7 @@ import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
 import PreludeSource (eqSource, boxSource, listsSource, mapSource, preludeSource, stringSource)
 import Pretty (renderVarProof)
-import TersusTypes (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
+import TersusTypes (Expression (..), FunctBody (..), Size (..), Statement (..), Type (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
 import Utils
 
@@ -173,20 +173,21 @@ compileWith reserving source =
 ownedSource :: String -> Result M.Program String
 ownedSource source =
     compileSource source `bindResult` \program ->
-        -- (an update parameter is written back by the executor; native code does not do that yet, so a function
-        -- that has one is refused here rather than miscompiled. A reference that a result is (`-> &T from xs`)
-        -- is likewise refused: making one is a borrow of a place of a parameter, which native code cannot
-        -- hand back yet. A reference held by a local is native: assignment through one is an assignment of
-        -- its root by then (expandRefWrites), and making one (&place) and reading through one (*r) are rows
-        -- of the emitter.)
-        if any (not . null . M.specMutParams . M.fnSpec) (M.progMain program : Map.elems (M.progFunctions program))
-            then Error "a function with an update parameter (&mut T) is not in native code yet: run it with eval, or check it"
+        -- (a reference to an unsized value is a pointer and a size together, which the emitter does not
+        -- carry yet, so it is refused here rather than miscompiled)
+        if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
+            then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
             else
-                if any (not . null . M.specFrom . M.fnSpec) (M.progMain program : Map.elems (M.progFunctions program))
-                    then Error "a function that returns a reference (-> &T from ...) is not in native code yet: run it with eval, or check it"
-                    else
-                        let owned = insertOwnership (nativeProgram program)
-                         in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
+                let owned = insertOwnership (nativeProgram program)
+                 in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
+  where
+    unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)
+    hasUnsizedRef ty = case ty of
+        TRef inner -> isUnsized inner
+        TMutRef inner -> isUnsized inner
+        _ -> False
+    isUnsized (TArrayOf _ SizeAny) = True
+    isUnsized _ = False
 
 -- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists), and each
 -- Uninit<T> a T (it is laid out as one: an empty one is the words of a T cleared, which own nothing)

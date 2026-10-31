@@ -104,5 +104,7 @@ roundTripsNames =
             , fnSizeParams = []
             , fnTypeParams = []
             , fnBorrowed = []
+            , fnMutBorrowed = []
+            , fnFrom = []
             , fnSpec = emptySpec
             }
