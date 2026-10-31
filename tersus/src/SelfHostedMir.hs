@@ -644,8 +644,8 @@ block types invariants functions rules allowCalls fn (blockId@(M.BlockId n), M.B
     (steps, b1, conditions, _) <- foldM add ([], b0, Map.empty, Map.empty) stmts
     (extra, ending, b2) <- case (Map.lookup blockId (M.specLoops (M.fnSpec fn)), end) of
         (Just spec, M.SwitchBool (M.Copy local) yes no) -> do
-            (loopEnd, b') <- encodeLoop spec local yes no conditions b1
-            pure ([], loopEnd, b')
+            (extra, loopEnd, b') <- encodeLoop spec local yes no conditions b1
+            pure (extra, loopEnd, b')
         (Just _, _) -> Nothing
         (Nothing, M.Return) -> do
             let env = Map.insert "return" (M.Copy (M.Local 0)) (M.specEnv (M.fnSpec fn))
@@ -694,12 +694,11 @@ block types invariants functions rules allowCalls fn (blockId@(M.BlockId n), M.B
         (r, a, c) <- Map.lookup local conditions
         (mode, variant, variantLocal, upper) <- case M.loopTermination spec of
             Just (Counting (Var name)) -> case Map.lookup name (M.loopEnv spec) of
-                Just op@(M.Copy v) -> Just (0, op, v, M.Const (M.CInt 0))
+                Just op@(M.Copy v) -> Just (0, op, v, Val (VInt 0))
                 _ -> Nothing
             Just (Counting (F (Val (VFunct _ _ _ (BuiltinFunct Minus) _)) [upperExpr, Var name])) -> do
                 counter <- Map.lookup name (M.loopEnv spec)
-                upperOperand <- expressionOperand (M.loopEnv spec) upperExpr
-                case counter of M.Copy v -> Just (1, counter, v, upperOperand); _ -> Nothing
+                case counter of M.Copy v -> Just (1, counter, v, upperExpr); _ -> Nothing
             _ -> Nothing
         decl <- Map.lookup variantLocal (M.fnLocals fn)
         if M.localType decl == TInt then Just () else Nothing
@@ -710,29 +709,79 @@ block types invariants functions rules allowCalls fn (blockId@(M.BlockId n), M.B
                 , Just (M.BasicBlock blockStmts term) <- [Map.lookup member (M.fnBlocks fn)]
                 , v <- [d | M.Assign d _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> [])
                 ]
-        case upper of
-            M.Copy v -> do
-                upperDecl <- Map.lookup v (M.fnLocals fn)
-                if M.localType upperDecl == TInt && v `notElem` assigned then Just () else Nothing
-            M.Const (M.CInt _) -> Just ()
-            _ -> Nothing
+        if all (upperStable (M.loopEnv spec) assigned) (expressionVars upper) then Just () else Nothing
         (variantRef, b1) <- operand variant b
-        (upperRef, b2) <- operand upper b1
+        (upperSteps, upperRef, b2) <- exprOperand (M.loopEnv spec) upper b1
         (zeroRef, b3) <- operand (M.Const (M.CInt 0)) b2
         (typeAssumptions, withTypes) <- foldM (loopType fn) ([], b3) assigned
         (checks, assumptions, b4) <- foldM (invariant (M.loopEnv spec)) ([], typeAssumptions, withTypes) (M.loopInvariant spec)
         let (kind, left, right) = normal r a c
             M.BlockId exitId = no
             M.BlockId bodyId = yes
-        pure (record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
+        pure (upperSteps, record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
              ("region", MList [MInt (toInteger number) | M.BlockId number <- Set.toList region]),
              ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map (MInt . localNumber) assigned)),
              ("relation", MInt kind), ("left", left), ("right", right), ("variant", variantRef), ("variantMode", MInt mode),
              ("variantOther", upperRef), ("zero", zeroRef)], b4)
+    expressionVars expr = case expr of
+        Var name -> [name]
+        F (Var _) args -> concatMap expressionVars args
+        F f args -> expressionVars f ++ concatMap expressionVars args
+        _ -> []
+    upperStable env assigned name = case Map.lookup name env of
+        Just (M.Copy v) -> v `notElem` assigned
+        Just (M.Const _) -> True
+        _ -> False
     expressionOperand env expr = case expr of
         Var name -> Map.lookup name env
         Val (VInt value) -> Just (M.Const (M.CInt value))
         _ -> Nothing
+    -- Evaluate a pure expression (as inferred loop bounds are written) into
+    -- steps and a reference, mirroring proofOperand for proof terms.
+    exprOperand :: M.Env -> Expression -> Build -> Maybe ([MirValue], MirValue, Build)
+    exprOperand env expr b0 = case expr of
+        Var name -> do
+            o <- Map.lookup name env
+            (v, b1) <- operand o b0
+            pure ([], v, b1)
+        Val (VInt value) -> do
+            (v, b1) <- operand (M.Const (M.CInt value)) b0
+            pure ([], v, b1)
+        Val (VBool value) -> do
+            (v, b1) <- operand (M.Const (M.CBool value)) b0
+            pure ([], v, b1)
+        F (Var "size") [arg] -> apply1 "size" (-13) arg
+        F (Val (VFunct _ _ _ (BuiltinFunct Size) _)) [arg] -> apply1 "size" (-13) arg
+        F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [arg] -> do
+            (steps, value, b1) <- exprOperand env arg b0
+            let (function, b2) = namedFunction ("field:" ++ field) b1
+                (i, b3) = fresh b2
+                local = negate i - 1
+                ref = record "ValueRef::Local" [("local", MInt local)]
+                apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [value])]
+            pure (steps ++ [apply], ref, b3)
+        F (Val (VFunct _ _ _ (BuiltinFunct f) _)) [a, b] -> do
+            op <- case f of
+                Plus -> Just M.Add
+                Minus -> Just M.Sub
+                Times -> Just M.Mul
+                _ -> Nothing
+            (leftSteps, x, b1) <- exprOperand env a b0
+            (rightSteps, y, b2) <- exprOperand env b b1
+            let (i, b3) = fresh b2
+                local = negate i - 1
+                ref = record "ValueRef::Local" [("local", MInt local)]
+                apply = step "ApplyFresh" [("local", MInt local), ("function", MInt (functionId op)), ("arguments", MList [x, y])]
+            pure (leftSteps ++ rightSteps ++ [apply], ref, b3)
+        _ -> Nothing
+      where
+        apply1 _ function arg = do
+            (steps, value, b1) <- exprOperand env arg b0
+            let (i, b2) = fresh b1
+                local = negate i - 1
+                ref = record "ValueRef::Local" [("local", MInt local)]
+                apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [value])]
+            pure (steps ++ [apply], ref, b2)
     invariant env (checks, assumptions, b) (ProofAssert p) = do
         (prefix, checkStep, b') <- proofCheck env p b
         assumption <- asAssumption checkStep
