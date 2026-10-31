@@ -1,0 +1,8 @@
+// Rejected: functions that call each other have to say what shrinks, or be declared ~.
+fn isOdd(n: Int) -> Int [{ affirm n >= 0; }] [{ }] {
+    if n = 0 { return 0; } else { return isEven(n - 1); };
+};
+fn isEven(n: Int) -> Int [{ affirm n >= 0; }] [{ }] {
+    if n = 0 { return 1; } else { return isOdd(n - 1); };
+};
+return isEven(3);

@@ -101,6 +101,7 @@ data TcState = TcState
     , tcRefOrigins :: Map Variable [Variable] -- what each local that holds references (or a value that holds them) is from: the roots of its places
     , tcImplBounds :: Map (Name, Name) [Bound] -- for a trait and a type whose impl of it has bounds (`impl<T: Eq> Eq for List<T>`), the bounds
     , tcCompanions :: Map Name [Name] -- for a function of an impl with bounds, the template of the check of it against its trait, made with it
+    , tcDefined :: Set.Set Variable -- the top-level functions whose bodies have been checked (every top-level function is visible from the start)
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -122,7 +123,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty Set.empty
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -1367,7 +1368,13 @@ functionType sizes types ptys rty = TForall sizes types (TFn ptys rty)
 -- Programs
 
 checkProgram :: [Statement] -> TC [Statement]
-checkProgram stmts = snd <$> checkStatements True (Ctx Map.empty Nothing) [Map.empty] stmts
+checkProgram stmts = snd <$> checkStatements True (Ctx gathered Nothing) [Map.empty] stmts
+  where
+    -- the signature of every function defined at the top is known before any body is checked, so a function
+    -- can call the ones defined after it (and they can call it back). A name the language itself gives a
+    -- meaning (a builtin, or a ghost function of proofs such as `filled`) is not gathered: in a proof
+    -- before its definition such a name is the language's, as it was when it was only seen after it.
+    gathered = Map.fromList [(var, functionType sizes types ptys rty) | Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _)) <- stmts, not (Map.member var stdLibCtx), ghostFunction var == Nothing]
 
 -- Statements run in order; a top-level function is visible to the functions after it, and the
 -- returned environment holds the variables the statements defined in the innermost scope.
@@ -1416,12 +1423,15 @@ checkStatement top ctx env stmt =
         Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types _writes _from) term body) proofs)) -> do
             templates <- tcTemplates <$> getState
             when (Map.member var templates) $ failTc ("Type error: " ++ var ++ " is already defined")
+            defined <- tcDefined <$> getState
+            when (top && Set.member var defined) $ failTc ("Type error: " ++ var ++ " is already defined")
             let fnTy = functionType sizes types ptys rty
                 ctx' = if top then ctx{ctxFns = Map.insert var fnTy (ctxFns ctx)} else ctx
             env' <- assignVar ctx env var fnTy
             (term', ins', outs', body', from) <- checkFunction ctx' var params ptys rty sizes types ins outs _writes _from term body
             st <- getState
             unless (null from) $ putState st{tcRefResults = Map.insert var (params, from) (tcRefResults st)}
+            when top $ getState >>= \st2 -> putState st2{tcDefined = Set.insert var (tcDefined st2)}
             return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty sizes types _writes from) term' body') proofs)))
         AssignDeref lhs expr -> do
             -- (the place must be through an update reference; the value is evaluated before the replacement, which
