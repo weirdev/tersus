@@ -260,8 +260,8 @@ testTermination =
             , -- Calling itself through another name is still a call to itself
               parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] { h = f; return h(n); };" "Not guaranteed to terminate: it calls itself"
             , parseValidProgramHelper "fn f(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { h = f; if n < 1 { return 0; } else { return h(n - 1); }; };"
-            , -- A function sees only the functions before it, so two cannot call each other
-              parseValidateFailProgramHelper "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return a(n); };" "Undefined variable: b"
+            , -- Two functions can call each other, but the cycle has to say what shrinks or be declared ~
+              parseValidateFailProgramHelper "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return a(n); };" "Mutually recursive functions must say what shrinks"
             , -- The program itself may call one
               parseValidProgramHelper (settle ++ "x = settle(3);")
             , -- Code that cannot be reached is not counted
