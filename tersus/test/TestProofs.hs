@@ -9,6 +9,7 @@ module TestProofs
     , testLinearArithmetic
     , testSolverCache
     , testListProofs
+    , testEqualityByParts
     , testMulDivNegative
     , testPrettyProofs
     , testForallLoops
@@ -745,4 +746,32 @@ testForallSyntax =
             , -- A forall is not a rule argument
               parseValidateFailProgramHelper (zeroAxiom ++ "rewrite zeros forall j in 0..2: j < 2;") "cannot take a forall"
             , parseValidProgramHelper "x = 1; affirm x = 1;"
+            ]
+
+testEqualityByParts :: Test
+testEqualityByParts =
+    let point = "struct P { x: Int, y: Int };"
+        shape = "enum S { A { v: Int }, B, C { w: Int, z: Bool } };"
+     in testCaseSeq
+            "testEqualityByParts"
+            [ -- A struct is equal to another whose fields are all equal to its own, and differs from one with a field that differs
+              parseValidProgramHelper (point ++ "fn f(a: &P, b: &P) -> Int [{ affirm a.x = b.x; affirm a.y = b.y; }] [{ }] { affirm a = b; return 1; };")
+            , parseValidateFailProgramHelper (point ++ "fn f(a: &P, b: &P) -> Int [{ affirm a.x = b.x; }] [{ }] { affirm a = b; return 1; };") "Could not prove: a = b"
+            , parseValidProgramHelper (point ++ "fn f(a: &P, b: &P) -> Int [{ affirm a.x != b.x; }] [{ }] { affirm a != b; return 1; };")
+            , parseValidateFailProgramHelper (point ++ "fn f(a: &P, b: &P) -> Int [{ }] [{ }] { affirm a != b; return 1; };") "Could not prove: a != b"
+            , -- Lists differ by their sizes or by an element, and are equal when their sizes are and every element is
+              parseValidProgramHelper "fn f(a: &List<Int>, b: &List<Int>) -> Int [{ affirm size(a) != size(b); }] [{ }] { affirm a != b; return 1; };"
+            , parseValidProgramHelper "fn f(a: &List<Int>, b: &List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(a); affirm i < size(b); affirm get(a, i) != get(b, i); }] [{ }] { affirm a != b; return 1; };"
+            , parseValidProgramHelper "fn f(a: &List<Int>, b: &List<Int>) -> Int [{ affirm size(a) = size(b); affirm forall j in 0..size(a): get(a, j) = get(b, j); }] [{ }] { affirm a = b; return 1; };"
+            , parseValidateFailProgramHelper "fn f(a: &List<Int>, b: &List<Int>) -> Int [{ affirm size(a) = size(b); affirm forall j in 0..size(a) - 1: get(a, j) = get(b, j); }] [{ }] { affirm a = b; return 1; };" "Could not prove: a = b"
+            , -- The frame of a set leaves out the element it sets, so it does not make the list equal to the one it was set in
+              parseValidateFailProgramHelper "fn f(l: List<Int>, i: Int) -> Int [{ affirm i >= 0; affirm i < size(l); }] [{ }] { m = set(l, i, 5); affirm m = l; return 1; };" "Could not prove: m = l"
+            , -- Values known to be different variants differ, and a value that is none of the other variants is the one left
+              parseValidProgramHelper (shape ++ "fn f(a: &S, b: &S) -> Int [{ affirm a is S::A; affirm b is S::B; }] [{ }] { affirm a != b; return 1; };")
+            , parseValidProgramHelper (shape ++ "fn f(a: &S) -> Int { if a is S::A { return 0; }; if a is S::B { return 1; }; return (a as S::C).w; };")
+            , -- A Bool that is the result of a comparison says the comparison holds, or does not: what Eq::eq promises
+              parseValidProgramHelper (point ++ "fn same(a: &P, b: &P) -> Bool [{ }] [{ affirm return = (a = b); }] { if a.x != b.x { return false; }; if a.y != b.y { return false; }; return true; };")
+            , parseValidateFailProgramHelper (point ++ "fn same(a: &P, b: &P) -> Bool [{ }] [{ affirm return = (a = b); }] { if a.x != b.x { return false; }; return true; };") "Could not prove: return = (a = b)"
+            , parseValidProgramHelper (shape ++ "fn same(a: &S, b: &S) -> Bool [{ }] [{ affirm return = (a = b); }] { if a is S::A { if b is S::A { if (a as S::A).v != (b as S::A).v { return false; }; return true; }; return false; }; if a is S::B { if b is S::B { return true; }; return false; }; if b is S::C { if (a as S::C).w != (b as S::C).w { return false; }; if (a as S::C).z != (b as S::C).z { return false; }; return true; }; return false; };")
+            , parseValidProgramHelper "fn same(a: &List<Int>, b: &List<Int>) -> Bool [{ }] [{ affirm return = (a = b); }] { if size(a) != size(b) { return false; }; i = 0; while i < size(a) [{ affirm i >= 0; affirm i <= size(a); affirm forall j in 0..i: get(a, j) = get(b, j); }] shrinks size(a) - i { if get(a, i) != get(b, i) { return false; }; i = i + 1; }; return true; };"
             ]

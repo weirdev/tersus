@@ -353,8 +353,66 @@ querySolver facts goals =
         valuesByClass = constantsByClass table4 classes
         namesByClass = constructorNames table4 classes
         distinct = provablyDistinct classes valuesByClass namesByClass
-        clash = constructorClash table4 classes valuesByClass namesByClass trueId
-        entailed goal goalId =
+        builtinOfClass = builtinsByClass table4 classes (const True)
+        -- (a fact that two terms differ, about terms that are equal, is a contradiction too)
+        notEqualClash =
+            or
+                [ sameClass l r
+                | (termId, (functId, [l, r])) <- tableApps table4
+                , sameClass termId trueId
+                , Just (Rel NotEq) <- [Map.lookup (rep classes functId) builtinOfClass]
+                ]
+        clash = constructorClash table4 classes valuesByClass namesByClass trueId || notEqualClash
+        entailed goal goalId = entailedDirectly goal goalId || byParts goal
+        -- Equality by parts: two values differ when supposing them equal contradicts the facts (a field, a size, an element,
+        -- or the variant of one differs from the other's), and two lists or arrays are equal when their sizes are and a
+        -- `forall` says every element is. A Bool that is the result of a relation holds what the relation says, or its
+        -- negation when it is false.
+        byParts goal = case goal of
+            FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [lhs, rhs] -> refuted lhs rhs
+            FApp funct [lhs, rhs] | funct == eqProof -> relationResult lhs rhs || relationResult rhs lhs || extensional lhs rhs
+            _ -> False
+        refuted lhs rhs =
+            let (_, _, flags, _) = querySolver (solverAddFacts facts [FApp eqProof [lhs, rhs]]) [FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]]
+             in and flags
+        relationResult result relation@(FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel rel)) _)) [a, b])
+            | sameClass (idOf table4 result) trueId = entailed relation (idOf table4 relation)
+            | Just values <- Map.lookup (rep classes (idOf table4 result)) valuesByClass
+            , VBool False `elem` values =
+                let negated = FApp (CTerm (builtinFunct (Rel (negated' rel)))) [a, b]
+                 in entailed negated (idOf table4 negated)
+          where
+            negated' r = case r of
+                Eq -> NotEq
+                NotEq -> Eq
+                Lt -> GtEq
+                GtEq -> Lt
+                Gt -> LtEq
+                LtEq -> Gt
+        relationResult _ _ = False
+        extensional lhs rhs =
+            let l = idOf table4 lhs
+                r = idOf table4 rhs
+                sizeOf t = FApp (CTerm (builtinFunct Size)) [t]
+                holds goal = quick goal == Just True
+             in or
+                    [ holds (FApp eqProof [sizeOf lhs, sizeOf rhs]) && holds (FApp eqProof [upper, sizeOf lhs])
+                    | (termId, (index, guardIds, bodyId)) <- tableForalls table4
+                    , sameClass termId trueId
+                    , FApp eq [FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [listA, BVar i1], FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [listB, BVar i2]] <- [termOf table4 bodyId]
+                    , eq == eqProof
+                    , i1 == index
+                    , i2 == index
+                    , let a = idOf table4 listA
+                          b = idOf table4 listB
+                    , (sameClass a l && sameClass b r) || (sameClass a r && sameClass b l)
+                    , let guards = map (termOf table4) guardIds
+                    -- (a forall with another guard, as the frame of a set has, says nothing of the elements it leaves out)
+                    , length guards == 2
+                    , or [sameClass (idOf table4 lower) zeroId | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel GtEq)) _)) [BVar g, lower] <- guards, g == index]
+                    , upper <- [u | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Lt)) _)) [BVar g, u] <- guards, g == index]
+                    ]
+        entailedDirectly goal goalId =
             clash
                 || sameClass goalId trueId
                 || or [sameClass (idOf table4 lhs) (idOf table4 rhs) | FApp funct [lhs, rhs] <- [goal], funct == eqProof]
