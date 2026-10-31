@@ -1,0 +1,200 @@
+// The library a program has when it mentions `HashMap` and does not declare it itself (see Pipeline.parseSource): it is parsed
+// before the program, after the prelude and the string library, so the program's line numbers are its own.
+//
+// A HashMap<K, V> is the entries with one key in buckets chosen by the hash of the key: `hash(k) % size(buckets)` is the bucket,
+// and the entries of a bucket are scanned with `=` on their keys, so a key type needs an impl of Hash (lib/prelude.tersus) and
+// the structural equality every type has. A map is a value like a list: insert and remove give a new map, lookup clones the value
+// out, and the map owns its entries. When the count reaches four times the number of buckets the entries are spread over twice
+// as many, so a map built by inserting is built in time in proportion to its count.
+//
+// What a caller can rely on today is the contracts on the count (insert adds at most one, remove takes at most one) and
+// contains saying the same as the scan it is. That lookup of a key that was inserted finds it is true when a map runs, and
+// the tests say so, but a caller cannot prove it from these contracts: the facts a proof has of a list are of its elements
+// by index (get and size), and no contract here can say that the scan of a bucket built by bucketPut finds the key, since
+// that is a fact about every entry of the bucket at once. A ghost model of the entries, as a list has its Block, is what
+// would let a caller prove it (see LANGUAGE.md, HashMap).
+
+struct Entry<K, V> {
+    key: K,
+    value: V,
+};
+
+impl<K, V> Clone for Entry<K, V> { };
+
+struct HashMap<K, V> {
+    buckets: List<List<Entry<K, V>>>,
+    count: Int,
+} invariant [{
+    affirm size(buckets) >= 1;
+}];
+
+impl<K, V> Clone for HashMap<K, V> { };
+
+// The index of the entry with this key in the bucket, or -1: the scan every lookup is
+fn findIn<K, V>(entries: &List<Entry<K, V>>, k: &K) -> Int [{ }] [{ affirm return >= -1; affirm return < size(entries); }] {
+    i = 0;
+    while i < size(entries) [{
+        affirm i >= 0; affirm i <= size(entries);
+    }] shrinks size(entries) - i {
+        if get(entries, i).key = clone(k) {
+            return i;
+        };
+        i = i + 1;
+    };
+    return -1;
+};
+
+// The buckets with the entry for (k, v) in the bucket idx (in the place of the entry the key already has, or at its end)
+fn bucketPut<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, k: K, v: V) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); }] [{
+    affirm size(return) = size(buckets);
+}] {
+    entries = clone(get(buckets, idx));
+    i = findIn(entries, k);
+    if i >= 0 {
+        return set(buckets, idx, set(entries, i, Entry<K, V> { key: k, value: v }));
+    };
+    return set(buckets, idx, push(entries, Entry<K, V> { key: k, value: v }));
+};
+
+// The buckets with the entry at `at` taken out of the bucket idx (the bucket rebuilt without it; the others are the lists they were)
+fn bucketRemove<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= 0; affirm at < size(get(buckets, idx)); }] [{ affirm size(return) = size(buckets); }] {
+    entries = clone(get(buckets, idx));
+    kept = [];
+    i = 0;
+    for e in entries {
+        if i != at {
+            kept = push(kept, clone(e));
+        };
+        i = i + 1;
+    };
+    return set(buckets, idx, kept);
+};
+
+// n empty buckets
+fn emptyBuckets<K, V>(n: Int) -> List<List<Entry<K, V>>> [{ affirm n >= 0; }] [{ affirm size(return) = n; }] {
+    buckets = [];
+    i = 0;
+    while i < n [{
+        affirm i >= 0; affirm i <= n; affirm size(buckets) = i;
+    }] shrinks n - i {
+        buckets = push(buckets, []);
+        i = i + 1;
+    };
+    return buckets;
+};
+
+impl<K, V> HashMap<K, V> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return = self.count; }] {
+        return self.count;
+    };
+
+    // (the types of an empty map are decided by what is put in it, as the types of an empty list are; a map that is
+    // only made and measured has Int keys and values, as a list that is only made has Int elements)
+    fn new() -> Self [{ }] [{ affirm size(return) = 0; }] {
+        buckets = [];
+        i = 0;
+        while i < 8 [{
+            affirm i >= 0; affirm i <= 8; affirm size(buckets) = i;
+        }] shrinks 8 - i {
+            buckets = push(buckets, []);
+            i = i + 1;
+        };
+        return Self { buckets: buckets, count: 0 };
+    };
+};
+
+// The map with these buckets and this count (the way a map is made in the functions below, whose types are decided by a call)
+fn makeMap<K, V>(buckets: List<List<Entry<K, V>>>, count: Int) -> HashMap<K, V> [{ affirm size(buckets) >= 1; }] [{ affirm size(return) = count; affirm return.count = count; affirm return.buckets = buckets; }] {
+    return HashMap<K, V> { buckets: buckets, count: count };
+};
+
+// The bucket a key is in, of this many buckets
+fn indexFor<K: Hash>(buckets: Int, k: &K) -> Int [{ affirm buckets >= 1; }] [{ affirm return = Hash::hash(k) % buckets; affirm return >= 0; affirm return < buckets; }] {
+    return Hash::hash(k) % buckets;
+};
+
+impl<K: Hash, V> HashMap<K, V> {
+    fn contains(self: &Self, k: &K) -> Bool [{ }] [{
+        affirm return = (findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0);
+    }] {
+        entries = clone(get(self.buckets, indexFor(size(self.buckets), k)));
+        return findIn(entries, k) >= 0;
+    };
+
+    // The value at k, or the fallback when there is none
+    fn lookup(self: &Self, k: &K, fallback: V) -> V [{ }] [{ }] {
+        entries = clone(get(self.buckets, indexFor(size(self.buckets), k)));
+        i = findIn(entries, k);
+        if i >= 0 {
+            return clone(get(entries, i).value);
+        };
+        return fallback;
+    };
+
+    // The value at k, which the caller says is there
+    fn fetch(self: &Self, k: &K) -> V [{ affirm findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0; }] [{ }] {
+        entries = clone(get(self.buckets, indexFor(size(self.buckets), k)));
+        i = findIn(entries, k);
+        return clone(get(entries, i).value);
+    };
+
+    fn insert(self: Self, k: K, v: V) -> Self [{ }] [{
+        affirm return.count >= self.count;
+        affirm return.count <= self.count + 1;
+    }] {
+        idx = indexFor(size(self.buckets), k);
+        if findIn(get(self.buckets, idx), k) >= 0 {
+            return makeMap(bucketPut(self.buckets, idx, k, v), self.count);
+        };
+        if self.count + 1 >= size(self.buckets) * 4 {
+            grown = self.spread();
+            return makeMap(bucketPut(grown.buckets, indexFor(size(grown.buckets), k), k, v), grown.count + 1);
+        };
+        return makeMap(bucketPut(self.buckets, idx, k, v), self.count + 1);
+    };
+
+    fn remove(self: Self, k: &K) -> Self [{ }] [{
+        affirm return.count <= self.count;
+        affirm return.count >= self.count - 1;
+    }] {
+        idx = indexFor(size(self.buckets), k);
+        at = findIn(get(self.buckets, idx), k);
+        if at < 0 {
+            return self;
+        };
+        return makeMap(bucketRemove(self.buckets, idx, at), self.count - 1);
+    };
+
+    // The same entries in twice as many buckets
+    fn spread(self: Self) -> Self [{ }] [{ affirm return.count = self.count; affirm size(return) = size(self); }] {
+        fresh = [];
+        f = 0;
+        while f < size(self.buckets) * 2 [{
+            affirm f >= 0; affirm f <= size(self.buckets) * 2; affirm size(fresh) = f;
+        }] shrinks size(self.buckets) * 2 - f {
+            fresh = push(fresh, []);
+            f = f + 1;
+        };
+        wide = makeMap(fresh, self.count);
+        b = 0;
+        while b < size(self.buckets) [{
+            affirm b >= 0; affirm b <= size(self.buckets);
+            affirm size(wide) = size(self);
+        }] shrinks size(self.buckets) - b {
+            entries = clone(get(self.buckets, b));
+            i = 0;
+            while i < size(entries) [{
+                affirm i >= 0; affirm i <= size(entries);
+                affirm size(wide) = size(self);
+            }] shrinks size(entries) - i {
+                Entry { key: ek, value: ev } = clone(get(entries, i));
+                wb = wide.buckets;
+                wc = wide.count;
+                wide = makeMap(bucketPut(wb, indexFor(size(wb), ek), ek, ev), wc);
+                i = i + 1;
+            };
+            b = b + 1;
+        };
+        return wide;
+    };
+};

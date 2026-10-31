@@ -1910,7 +1910,7 @@ inferExprR ctx env expr =
         case funct of
             Var name | Just template <- Map.lookup name (tcTemplates s), not (any (Map.member name) env) -> do
                 inferred <- mapM (inferExprR ctx env) args
-                (result, instance', args', sizes) <- templateCall name template inferred
+                (result, instance', args', sizes) <- templateCall ctx name template inferred
                 return (result, F (Var instance') (args' ++ sizes))
             _ -> generalCall funct args
     generalCall funct args = do
@@ -1962,7 +1962,7 @@ inferExprR ctx env expr =
         templates <- tcTemplates <$> getState
         case Map.lookup name templates of
             Just template -> do
-                (result, instanceName', args', sizeGiven) <- templateCall name template inferred0
+                (result, instanceName', args', sizeGiven) <- templateCall ctx name template inferred0
                 return (result, F (Var instanceName') (args' ++ sizeGiven))
             Nothing -> do
                 unless (Map.member name (ctxFns ctx)) $
@@ -2396,7 +2396,7 @@ inferProofR ctx env proof =
         s <- getState
         case Map.lookup name (tcTemplates s) of
             Just template -> do
-                (result, instance', _, sizes) <- templateCall name template [(t, Val (VInt 0)) | (t, _) <- inferred]
+                (result, instance', _, sizes) <- templateCall ctx name template [(t, Val (VInt 0)) | (t, _) <- inferred]
                 return (result, FApp (ATerm instance') (map snd inferred ++ map exprToProof sizes))
             Nothing -> do
                 target <- ghostTarget name (map fst inferred)
@@ -2835,8 +2835,8 @@ traitArgumentsOf trait ty = do
 
 -- A call of a function with bounds: the types of the arguments give the types of the function, each of which has to implement what its bounds say,
 -- and the function is checked for those types, once (it is a function of the program named after them: total[Vec<Int>]). The call is a call of that.
-templateCall :: Name -> Template -> [(Type, Expression)] -> TC (Type, Name, [Expression], [Expression])
-templateCall name template inferred = do
+templateCall :: Ctx -> Name -> Template -> [(Type, Expression)] -> TC (Type, Name, [Expression], [Expression])
+templateCall ctx name template inferred = do
     let Signature ptys rty sizes types _writes _from = tmplSignature template
     (instantiated, sizeVars, typeVars) <- instantiateGenerics sizes types (TFn ptys rty)
     case instantiated of
@@ -2914,10 +2914,10 @@ templateCall name template inferred = do
             ptys' = map (substitute [] bindings) ptys
             rty' = substitute [] bindings rty
             fnTy = functionType sizes [] ptys' rty'
-            ctx = (tmplCtx template){ctxFns = Map.insert instanceName' fnTy (ctxFns (tmplCtx template))}
+            instanceCtx = (tmplCtx template){ctxFns = Map.insert instanceName' fnTy (Map.union (ctxFns ctx) (ctxFns (tmplCtx template)))}
         s <- getState
         putState s{tcInstances = Map.insert instanceName' fnTy (tcInstances s), tcActive = name : tcActive s}
-        (term', ins', outs', body', from) <- checkFunction ctx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) [] _from (tmplTermination template) (tmplBody template)
+        (term', ins', outs', body', from) <- checkFunction instanceCtx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) [] _from (tmplTermination template) (tmplBody template)
         let function = Assign instanceName' (Val (VFunct (tmplParams template) ins' outs' (NativeFunct (Signature ptys' rty' sizes [] [] from) term' body') []))
         s' <- getState
         putState s'{tcEmitted = tcEmitted s' ++ [function], tcActive = tcActive s, tcRefResults = if null from then tcRefResults s' else Map.insert instanceName' (tmplParams template, from) (tcRefResults s')}

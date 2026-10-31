@@ -115,6 +115,7 @@ testExamples =
         , testExampleFile "examples/mir_erase.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "examples/emit.tersus" (ExpectReturn (VInt 1))
         , testExampleFile "examples/vec.tersus" (ExpectReturn (VInt 2491212381))
+        , testExampleFile "examples/hashmap.tersus" (ExpectReturn (VInt 218420))
         , testExampleFile "examples/spec_functions.tersus" (ExpectReturn (VInt 25070))
         , testExampleFile "examples/list_methods.tersus" (ExpectReturn (VInt 508221))
         , testExampleFile "examples/array_owners.tersus" (ExpectReturn (VInt 207))

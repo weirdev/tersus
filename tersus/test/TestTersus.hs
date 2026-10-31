@@ -39,6 +39,7 @@ import TestMirVerify
 import TestMirErase
 import TestMirEmit
 import TestBootstrap
+import TestHashMap
 
 main :: IO ()
 main = do
@@ -141,6 +142,7 @@ allGroups =
     , testMirEmit
     , testMirEmitPrograms
     , testBootstrap
+    , testHashMap
     ]
 
 groupName :: Test -> String

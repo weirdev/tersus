@@ -20,7 +20,7 @@ import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
-import PreludeSource (boxSource, listsSource, preludeSource, stringSource)
+import PreludeSource (boxSource, listsSource, mapSource, preludeSource, stringSource)
 import Pretty (renderVarProof)
 import TersusTypes (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
@@ -77,7 +77,7 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
 -- unchanged: lib/prelude.tersus (the traits `Sequence` and `Growable`) if it mentions either, and lib/string.tersus (the struct `String` that a string
 -- literal is a value of, which needs the traits) if it mentions `String` or has a literal
 libraries :: String -> [(String, String)]
-libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings]
+libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps]
   where
     code = withoutText source
     ws = names code
@@ -85,7 +85,8 @@ libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string l
     declares candidates = any (\(keyword, name) -> keyword `elem` ["struct", "enum", "trait"] && name `elem` candidates) ws'
     preludeFree = not (declares ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash"])
     strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || '"' `elem` code)
-    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash", "hashCombine"])
+    maps = preludeFree && not (declares ["HashMap"]) && "HashMap" `elem` ws
+    prelude = preludeFree && (strings || maps || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash", "hashCombine"])
     -- (the names in a text: runs of letters, digits and underscores)
     names text = case dropWhile (not . isNameChar) text of
         "" -> []

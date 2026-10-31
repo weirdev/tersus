@@ -5,6 +5,7 @@ module PreludeSource
     , listsSource
     , boxSource
     , stringSource
+    , mapSource
     , emitterSource
     , stdlibSource
     , seedSource
@@ -56,6 +57,15 @@ stringSource =
     $( do
         addDependentFile "lib/string.tersus"
         contents <- runIO (readFile "lib/string.tersus")
+        lift contents
+     )
+
+-- The text of lib/map.tersus: the HashMap a program has when it mentions one
+mapSource :: String
+mapSource =
+    $( do
+        addDependentFile "lib/map.tersus"
+        contents <- runIO (readFile "lib/map.tersus")
         lift contents
      )
 
