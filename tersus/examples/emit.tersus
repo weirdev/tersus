@@ -1416,6 +1416,12 @@ fn dropSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
     return global("drop.", renderType(canonical(types, t)));
 };
 
+// The symbol of the function that prints a value of the type, made for the type below
+fn printSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("print.", renderType(canonical(types, t)));
+};
+
+
 // The symbol of the function that frees what each of a run of values of the type owns
 fn dropRangeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
     return global("droprange.", renderType(canonical(types, t)));
@@ -1772,7 +1778,6 @@ fn declarations() -> List<String> [{ }] [{ }] {
     out = push(out, "declare i64 @tersus_fileByte(i64)");
     out = push(out, "declare i64 @tersus_storeByte(i64)");
     out = push(out, "declare i64 @tersus_fileStore()");
-    out = push(out, "declare void @tersus_print(ptr, i64)");
     out = push(out, "declare i32 @tersus_equal(ptr, i64, i64)");
     out = push(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
     out = push(out, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)");
@@ -1833,7 +1838,8 @@ fn entryPoint(types: &List<TypeDecl>, fns: &List<String>, main: &Function) -> En
         body = push(body, "br i1 %ok, label %print, label %done");
         body = push(body, "print:");
         body = push(body, "%w = ptrtoint ptr %out to i64");
-        body = push(body, "call void @tersus_print(ptr ".then(sym).then(", i64 %w)"));
+        body = push(body, "call void ".then(printSymbol(types, ty)).then("(i64 %w)"));
+        body = push(body, "%nl = call i64 @tersus_writeByte(i64 10)");
         if needsDrop(types, fns, ty) {
             body = push(body, "call void ".then(dropSymbol(types, ty)).then("(ptr %out)"));
         };
@@ -1861,7 +1867,8 @@ fn entryPoint(types: &List<TypeDecl>, fns: &List<String>, main: &Function) -> En
     body = push(body, "print:");
     body = push(body, "%v = extractvalue ".then(result).then(" %r, 0"));
     for c in convert { body = push(body, clone(c)); };
-    body = push(body, "call void @tersus_print(ptr ".then(sym).then(", i64 ").then(word).then(")"));
+    body = push(body, "call void ".then(printSymbol(types, ty)).then("(i64 ").then(word).then(")"));
+    body = push(body, "%nl = call i64 @tersus_writeByte(i64 10)");
     body = push(body, "br label %done");
     body = push(body, "done:");
     body = push(body, "ret i32 0");
@@ -3756,6 +3763,301 @@ fn bodies(program: &Program) -> List<String> ~ {
     return out;
 };
 
+// The lines that write a text, a byte at a time (tersus_writeByte is the byte of the runtime)
+fn printTextLines(tagIn: &String, text: &String) -> List<String> ~ {
+    tag = clone(tagIn);
+    out = noStrings();
+    i = 0;
+    for b in text.bytes {
+        out = push(out, "    %t".then(clone(tag)).then(".").then(showInt(i)).then(" = call i64 @tersus_writeByte(i64 ").then(showInt(toInt(b))).then(")"));
+        i = i + 1;
+    };
+    return out;
+};
+
+// The lines that make the word a slot holds (slot_value of the runtime) in %<tag>w, from its address in %<tag>p
+fn printWordLines(types: &List<TypeDecl>, tagIn: &String, ty: &Type) -> List<String> ~ {
+    tag = clone(tagIn);
+    out = noStrings();
+    p = "%".then(clone(tag)).then("p");
+    w = "%".then(clone(tag)).then("w");
+    if isAggregate(ty) || sizedArray(ty).ok {
+        out = push(out, "    ".then(w).then(" = ptrtoint ptr ").then(p).then(" to i64"));
+        return out;
+    };
+    if ty is Type::TBool {
+        out = push(out, "    %".then(clone(tag)).then("b = load i8, ptr ").then(p));
+        out = push(out, "    %".then(clone(tag)).then("c = icmp ne i8 %".then(clone(tag)).then("b, 0")));
+        out = push(out, "    ".then(w).then(" = zext i1 %".then(clone(tag)).then("c to i64")));
+        return out;
+    };
+    simple = simpleLayout(ty);
+    if simple.ok && simple.layout.size < 8 {
+        bits = showInt(simple.layout.size * 8);
+        out = push(out, "    %".then(clone(tag)).then("v = load i").then(bits).then(", ptr ").then(p));
+        ext = "zext";
+        if ty is Type::TWord && (ty as Type::TWord).signed { ext = "sext"; };
+        out = push(out, "    ".then(w).then(" = ").then(ext).then(" i").then(bits).then(" %".then(clone(tag)).then("v to i64")));
+        return out;
+    };
+    out = push(out, "    ".then(w).then(" = load i64, ptr ").then(p));
+    return out;
+};
+
+// The lines that print the value of the type at %<tag>p
+fn printCallLines(types: &List<TypeDecl>, tagIn: &String, ty: &Type) -> List<String> ~ {
+    tag = clone(tagIn);
+    out = noStrings();
+    for l in printWordLines(types, tag, ty) { out = push(out, clone(l)); };
+    out = push(out, "    call void ".then(printSymbol(types, ty)).then("(i64 %").then(clone(tag)).then("w)"));
+    return out;
+};
+
+// The lines of the loop that prints elements (of the type at %<tag>p offsets in %base, their number in %count), between the brackets
+fn printElementsLines(types: &List<TypeDecl>, tagIn: &String, elem: &Type) -> List<String> ~ {
+    tag = clone(tagIn);
+    out = noStrings();
+    step = layoutOf(types, elem).size;
+    for l in printTextLines(clone(tag).then("o"), "[") { out = push(out, clone(l)); };
+    out = push(out, "    br label %".then(clone(tag)).then("head"));
+    out = push(out, clone(tag).then("head:"));
+    out = push(out, "    %".then(clone(tag)).then("i = phi i64 [0, %entry], [%").then(clone(tag)).then("next, %").then(clone(tag)).then("elem]"));
+    out = push(out, "    %".then(clone(tag)).then("cond = icmp eq i64 %").then(clone(tag)).then("i, %count"));
+    out = push(out, "    br i1 %".then(clone(tag)).then("cond, label %").then(clone(tag)).then("done, label %").then(clone(tag)).then("sepq"));
+    out = push(out, clone(tag).then("sepq:"));
+    out = push(out, "    %".then(clone(tag)).then("first = icmp eq i64 %").then(clone(tag)).then("i, 0"));
+    out = push(out, "    br i1 %".then(clone(tag)).then("first, label %").then(clone(tag)).then("elem, label %").then(clone(tag)).then("sep"));
+    out = push(out, clone(tag).then("sep:"));
+    for l in printTextLines(clone(tag).then("s"), ", ") { out = push(out, clone(l)); };
+    out = push(out, "    br label %".then(clone(tag)).then("elem"));
+    out = push(out, clone(tag).then("elem:"));
+    out = push(out, "    %".then(clone(tag)).then("off = mul i64 %").then(clone(tag)).then("i, ").then(showInt(step)));
+    out = push(out, "    %e".then(clone(tag)).then("p = getelementptr i8, ptr %base, i64 %").then(clone(tag)).then("off"));
+    for l in printCallLines(types, "e".then(clone(tag)), elem) { out = push(out, clone(l)); };
+    out = push(out, "    %".then(clone(tag)).then("next = add i64 %").then(clone(tag)).then("i, 1"));
+    out = push(out, "    br label %".then(clone(tag)).then("head"));
+    out = push(out, clone(tag).then("done:"));
+    for l in printTextLines(clone(tag).then("c"), "]") { out = push(out, clone(l)); };
+    return out;
+};
+
+// The lines that print the number in %w, in decimal (the digits are made from the end of a room of the frame)
+fn printDecimalLines(signed: Bool) -> List<String> ~ {
+    out = noStrings();
+    if signed {
+        out = push(out, "    %negc = icmp slt i64 %w, 0");
+        out = push(out, "    br i1 %negc, label %neg, label %conv0");
+        out = push(out, "neg:");
+        for l in printTextLines("m", "-") { out = push(out, clone(l)); };
+        out = push(out, "    %mag0 = sub i64 0, %w");
+        out = push(out, "    br label %conv");
+        out = push(out, "conv0:");
+        out = push(out, "    br label %conv");
+        out = push(out, "conv:");
+        out = push(out, "    %mag = phi i64 [%mag0, %neg], [%w, %conv0]");
+    } else {
+        out = push(out, "    %mag = add i64 %w, 0");
+    };
+    out = push(out, "    %buf = alloca [20 x i8]");
+    out = push(out, "    %vp = alloca i64");
+    out = push(out, "    store i64 %mag, ptr %vp");
+    out = push(out, "    %cp = alloca i64");
+    out = push(out, "    store i64 0, ptr %cp");
+    out = push(out, "    %iszero = icmp eq i64 %mag, 0");
+    out = push(out, "    br i1 %iszero, label %zero, label %dhead");
+    out = push(out, "zero:");
+    for l in printTextLines("z", "0") { out = push(out, clone(l)); };
+    out = push(out, "    ret void");
+    out = push(out, "dhead:");
+    out = push(out, "    %v = load i64, ptr %vp");
+    out = push(out, "    %ddone = icmp eq i64 %v, 0");
+    out = push(out, "    br i1 %ddone, label %ohead, label %dbody");
+    out = push(out, "dbody:");
+    out = push(out, "    %d = urem i64 %v, 10");
+    out = push(out, "    %ch = add i64 %d, 48");
+    out = push(out, "    %chi = trunc i64 %ch to i8");
+    out = push(out, "    %c = load i64, ptr %cp");
+    out = push(out, "    %pos = sub i64 19, %c");
+    out = push(out, "    %bp = getelementptr i8, ptr %buf, i64 %pos");
+    out = push(out, "    store i8 %chi, ptr %bp");
+    out = push(out, "    %nv = udiv i64 %v, 10");
+    out = push(out, "    store i64 %nv, ptr %vp");
+    out = push(out, "    %nc = add i64 %c, 1");
+    out = push(out, "    store i64 %nc, ptr %cp");
+    out = push(out, "    br label %dhead");
+    out = push(out, "ohead:");
+    out = push(out, "    %c2 = load i64, ptr %cp");
+    out = push(out, "    %odone = icmp eq i64 %c2, 0");
+    out = push(out, "    br i1 %odone, label %fin, label %obody");
+    out = push(out, "obody:");
+    out = push(out, "    %pos2 = sub i64 20, %c2");
+    out = push(out, "    %bp2 = getelementptr i8, ptr %buf, i64 %pos2");
+    out = push(out, "    %ch2 = load i8, ptr %bp2");
+    out = push(out, "    %chw = zext i8 %ch2 to i64");
+    out = push(out, "    %wr = call i64 @tersus_writeByte(i64 %chw)");
+    out = push(out, "    %nc2 = sub i64 %c2, 1");
+    out = push(out, "    store i64 %nc2, ptr %cp");
+    out = push(out, "    br label %ohead");
+    out = push(out, "fin:");
+    out = push(out, "    ret void");
+    return out;
+};
+
+// The offset of each field of a variant, as the descriptor makes them (after the tag of an enum)
+fn printFieldStart(types: &List<TypeDecl>, variants: &List<Variant>, isEnumKind: Bool) -> Int ~ {
+    payload = 1;
+    for v in variants {
+        l = fieldsLayout(types, v.fields);
+        if l.align > payload { payload = l.align; };
+    };
+    if isEnumKind { return roundUp(4, payload); };
+    return 0;
+};
+
+// The function that prints a value of the type, as the runtime's print_word did by walking its descriptor
+fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
+    out = noStrings();
+    out = push(out, "define internal void ".then(printSymbol(types, t)).then("(i64 %w) {"));
+    out = push(out, "entry:");
+    if t is Type::TInt || t is Type::TAddr {
+        for l in printDecimalLines(true) { out = push(out, clone(l)); };
+        out = push(out, "}");
+        return out;
+    };
+    if t is Type::TWord && (t as Type::TWord).signed {
+        for l in printDecimalLines(true) { out = push(out, clone(l)); };
+        out = push(out, "}");
+        return out;
+    };
+    if t is Type::TByte || t is Type::TWord {
+        for l in printDecimalLines(false) { out = push(out, clone(l)); };
+        out = push(out, "}");
+        return out;
+    };
+    if t is Type::TBool {
+        out = push(out, "    %cond = icmp ne i64 %w, 0");
+        out = push(out, "    br i1 %cond, label %bt, label %bf");
+        out = push(out, "bt:");
+        for l in printTextLines("t", "true") { out = push(out, clone(l)); };
+        out = push(out, "    br label %bend");
+        out = push(out, "bf:");
+        for l in printTextLines("f", "false") { out = push(out, clone(l)); };
+        out = push(out, "    br label %bend");
+        out = push(out, "bend:");
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    if t is Type::TFn {
+        for l in printTextLines("u", "<function>") { out = push(out, clone(l)); };
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    arr = sizedArray(t);
+    if arr.ok {
+        out = push(out, "    %base = inttoptr i64 %w to ptr");
+        out = push(out, "    %count = add i64 ".then(showInt(arr.length)).then(", 0"));
+        for l in printElementsLines(types, "a", arr.elem) { out = push(out, clone(l)); };
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    n = declaredName(types, t);
+    if !n.ok {
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    variants = variantsOf(types, n.text);
+    enumKind = isEnum(types, n.text);
+    start = printFieldStart(types, variants, enumKind);
+    out = push(out, "    %slot = inttoptr i64 %w to ptr");
+    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "StdList" || beforeAngle(n.text) = "StdBox") {
+        fields = get(variants, 0).fields;
+        offset0 = 0;
+        lenOffset = 0;
+        offset = 0;
+        i = 0;
+        for f in fields {
+            l = layoutOf(types, f.ty);
+            offset = roundUp(offset, l.align);
+            if i = 0 { offset0 = start + offset; };
+            if i = 1 { lenOffset = start + offset; };
+            offset = offset + l.size;
+            i = i + 1;
+        };
+        held = get(fields, 0).ty;
+        if held is Type::TAddr {
+            elem = Box::unbox((held as Type::TAddr).inner);
+            out = push(out, "    %addrp = getelementptr i8, ptr %slot, i64 ".then(showInt(offset0)));
+            out = push(out, "    %addr = load i64, ptr %addrp");
+            if beforeAngle(n.text) = "StdList" {
+                out = push(out, "    %lenp = getelementptr i8, ptr %slot, i64 ".then(showInt(lenOffset)));
+                out = push(out, "    %count = load i64, ptr %lenp");
+                out = push(out, "    %base = inttoptr i64 %addr to ptr");
+                for l in printElementsLines(types, "l", elem) { out = push(out, clone(l)); };
+            } else {
+                out = push(out, "    %eheldp = inttoptr i64 %addr to ptr");
+                for l in printCallLines(types, "eheld", elem) { out = push(out, clone(l)); };
+            };
+            out = push(out, "    ret void");
+            out = push(out, "}");
+            return out;
+        };
+    };
+    if enumKind {
+        out = push(out, "    %tag = load i32, ptr %slot");
+        cases = "";
+        j = 0;
+        for v in variants {
+            cases = cases.then(" i32 ").then(showInt(j)).then(", label %v").then(showInt(j));
+            j = j + 1;
+        };
+        out = push(out, "    switch i32 %tag, label %done [".then(cases).then(" ]"));
+    };
+    j = 0;
+    for v in variants {
+        if enumKind { out = push(out, "v".then(showInt(j)).then(":")); };
+        for l in printTextLines("n".then(showInt(j)), beforeAngle(v.name)) { out = push(out, clone(l)); };
+        if size(v.fields) > 0 {
+            for l in printTextLines("o".then(showInt(j)), " { ") { out = push(out, clone(l)); };
+            offset = 0;
+            i = 0;
+            for f in v.fields {
+                l = layoutOf(types, f.ty);
+                offset = roundUp(offset, l.align);
+                if i > 0 {
+                    for l2 in printTextLines("s".then(showInt(j)).then(".").then(showInt(i)), ", ") { out = push(out, clone(l2)); };
+                };
+                for l2 in printTextLines("f".then(showInt(j)).then(".").then(showInt(i)), beforeAngle(f.name).then(": ")) { out = push(out, clone(l2)); };
+                tag = "x".then(showInt(j)).then(".").then(showInt(i));
+                out = push(out, "    %".then(tag).then("p = getelementptr i8, ptr %slot, i64 ").then(showInt(start + offset)));
+                for l2 in printCallLines(types, tag, f.ty) { out = push(out, clone(l2)); };
+                offset = offset + l.size;
+                i = i + 1;
+            };
+            for l in printTextLines("c".then(showInt(j)), " }") { out = push(out, clone(l)); };
+        };
+        if enumKind { out = push(out, "    br label %done"); };
+        j = j + 1;
+    };
+    if enumKind { out = push(out, "done:"); };
+    out = push(out, "    ret void");
+    out = push(out, "}");
+    return out;
+};
+
+// A print function for every type the program holds a value of
+fn printFunctions(types: &List<TypeDecl>, closed: &List<Type>) -> List<String> ~ {
+    out = noStrings();
+    for t in closed {
+        for l in printFunctionLines(types, t) { out = push(out, clone(l)); };
+        out = push(out, "");
+    };
+    return out;
+};
+
 // The whole IR of the program: the declarations, the descriptors of the types that the code asks for and the types inside them, the functions in order,
 // main, and the entry point
 fn ir(program: &Program) -> Entry ~ {
@@ -3785,6 +4087,7 @@ fn ir(program: &Program) -> Entry ~ {
     for l in m.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
+    for l in printFunctions(program.types, closed) { lines = push(lines, clone(l)); };
     for l in e.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     return Entry { ok: true, error: "", lines: lines, types: closed };
@@ -3804,6 +4107,7 @@ fn outline(program: &Program) -> Entry ~ {
     lines = declarations();
     for l in typeDescriptors(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
     for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
+    for l in printFunctions(program.types, closed) { lines = push(lines, clone(l)); };
     for l in entry.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     return Entry { ok: true, error: "", lines: lines, types: closed };
