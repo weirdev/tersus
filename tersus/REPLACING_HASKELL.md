@@ -120,10 +120,17 @@ modeled. The plan for each, in the order to do them:
    test cases.
 
 The validator itself now uses `HashMap` and `HashSet`, so every
-validation runs those libraries interpreted, and is several times
-slower than it was before the rebase; and its own self-check needs
-item 3. Performance comes before the three items, since each test run
-is gated on it.
+validation runs those libraries interpreted. Since the rebase the
+solver has been sped up without changing its verdicts (equality and
+difference searches work on class representatives, one context
+analysis serves every goal asked of a context at a branch, and the
+interpreter skips its reference bookkeeping at calls when the program
+makes no reference), and a joined term now keeps the bounds both
+branches give it, including one that follows from a branch value
+(`0 <= 0 - n` from `n < 0`), which the `String::fromInt` shape needs.
+What still blocks it is item 1's other half: proving a list equality
+from a `forall` over its elements, which the bridge assumes only for
+one fresh index. The validator's own self-check needs item 3.
 
 ### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
 
