@@ -13,8 +13,8 @@ import MirEval (MirValue (..), runNamedFunction)
 import MirGhost (eraseGhosts)
 import MirLower (lowerElaborated)
 import MirVerify (verifyProgram)
-import Parse (parseStatementBlock)
-import PreludeSource (preludeSource, validationSource)
+import Libraries (parseSourceWith)
+import PreludeSource (validationSource)
 import StdLib (builtinFunct, eqVarProof, stdLibRuleCtx)
 import StdLibDefs (stdLibValCtx)
 import TersusTypes
@@ -1368,9 +1368,9 @@ validateMirSubset checker program = verifyProgram program `bindResult` \_ -> cas
 -- TestPipeline checks that it accepts its own MIR). Every program that is
 -- validated is validated by this program and nothing else.
 checkerProgram :: Result M.Program String
-checkerProgram = case parseStatementBlock (preludeSource ++ "\n" ++ validationSource) of
-    Left err -> Error ("Could not parse lib/validation.tersus: " ++ show err)
-    Right stmts -> elaborate stmts `bindResult` \elaborated -> lowerElaborated elaborated `bindResult` eraseGhosts
+checkerProgram = case parseSourceWith True validationSource of
+    Error err -> Error ("Could not parse lib/validation.tersus: " ++ err)
+    Ok stmts -> elaborate stmts `bindResult` \elaborated -> lowerElaborated elaborated `bindResult` eraseGhosts
 
 -- Validate a program with the Tersus validator. A program the bridge does not
 -- model is refused, not waved through: there is no other validator to fall
