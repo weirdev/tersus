@@ -1839,7 +1839,6 @@ fn declarations() -> List<String> [{ }] [{ }] {
     out = push(out, "declare i64 @tersus_fileByte(i64)");
     out = push(out, "declare i64 @tersus_storeByte(i64)");
     out = push(out, "declare i64 @tersus_fileStore()");
-    out = push(out, "declare i32 @tersus_equal(ptr, i64, i64)");
     out = push(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
     out = push(out, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)");
     out = push(out, "declare void @tersus_clone(ptr, ptr, ptr)");
@@ -2831,20 +2830,6 @@ fn binary(g: Gen, cx: &Ctx, op: Int, ty: &Type, x: &String, y: &String) -> Gen ~
         g5 = ins(clone(g4), "r", "add i64 ".then(r).then(", ").then(y));
         shifted = g5.last;
         return ins(g5, "r", "select i1 ".then(adjust).then(", i64 ").then(shifted).then(", i64 ").then(r));
-    };
-    if isAggregate(ty) {
-        // structural equality, which the runtime does by the descriptor of the type
-        g1 = descriptor(g, cx, ty);
-        d = g1.last;
-        g2 = toWord(clone(g1), ty, x);
-        a = g2.last;
-        g3 = toWord(clone(g2), ty, y);
-        b = g3.last;
-        g4 = ins(g3, "e", "call i32 @tersus_equal(ptr ".then(d).then(", i64 ").then(a).then(", i64 ").then(b).then(")"));
-        r = g4.last;
-        cmp = "ne";
-        if predicate(op) = "ne" { cmp = "eq"; };
-        return ins(g4, "c", "icmp ".then(cmp).then(" i32 ").then(r).then(", 0"));
     };
     g1 = typeText(g, ty);
     t = g1.last;
