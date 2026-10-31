@@ -196,8 +196,9 @@ testStructs =
               parseValidProgramHelper (node ++ "fn f(nodes: List<Node>, i: Int) -> List<Node> [{ affirm i >= 0; affirm i < size(nodes); }] [{ affirm get(return, i).next = 5; affirm get(return, i).value = get(nodes, i).value; affirm forall j where j >= 0, j < size(nodes), j != i: get(return, j) = get(nodes, j); }] { return set(nodes, i, Node { next: 5, ..get(nodes, i) }); };")
             , parseValidateFailProgramHelper (node ++ "fn f(nodes: List<Node>, i: Int) -> List<Node> [{ affirm i >= 0; affirm i < size(nodes); }] [{ affirm get(return, i).prev = 5; }] { return set(nodes, i, Node { next: 5, ..get(nodes, i) }); };") "Could not prove: get(return, i).prev = 5"
             , parseValidProgramHelper (node ++ "fn f(nodes: List<Node>) -> List<Node> [{ }] [{ affirm size(return) = size(nodes) + 1; affirm get(return, size(nodes)).value = 7; }] { return push(nodes, Node { value: 7, prev: 0, next: 0 }); };")
-            , -- Eta is not known: a struct is not equal to a rebuilt copy of its fields
-              parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Int [{ }] [{ }] { affirm Point { x: p.x, y: p.y } = p; return 0; };") "Could not prove: Point { x: p.x, y: p.y } = p"
+            , -- A struct is equal to a rebuilt copy of its fields, and not to a copy with a field changed
+              parseValidProgramHelper (point ++ "fn f(p: Point) -> Int [{ }] [{ }] { affirm Point { x: p.x, y: p.y } = p; return 0; };")
+            , parseValidateFailProgramHelper (point ++ "fn f(p: Point) -> Int [{ }] [{ }] { affirm Point { x: p.x, y: p.y + 1 } = p; return 0; };") "Could not prove: Point { x: p.x, y: p.y + 1 } = p"
             ]
   where
     parseFailsWith source expected =

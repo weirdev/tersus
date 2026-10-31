@@ -101,6 +101,7 @@ allGroups =
     , testCrlf
     , testEnumCast
     , testListProofs
+    , testEqualityByParts
     , testEnums
     , testStructs
     , testGenericLists
