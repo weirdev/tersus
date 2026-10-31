@@ -89,7 +89,7 @@ runProgramEnv :: RunEnv -> Program -> Result Outcome String
 runProgramEnv env program =
     mapResult
         (\(value, (out, err), s) -> Outcome out err [(spelling, Map.findWithDefault "" key (sFiles s)) | (key, spelling) <- sOrder s] value)
-        (runE (fmap fst (runFunction program (progMain program) [] Map.empty)) env (startState (envInput env)))
+        (runE (fmap fst (runFunction program (progMain program) [] Map.empty)) env (startState program (envInput env)))
 
 -- What a program has written to the standard output and to the standard error
 type Written = (String, String)
@@ -108,6 +108,7 @@ data S = S
     , sOrder :: [(FilePath, FilePath)] -- the files written, by that path and the way the program first spelled it
     , sHeap :: Map Integer Allocation -- the memory that Addr::alloc gave, by the number of each allocation
     , sNextAllocation :: Integer
+    , sReferences :: Bool -- whether the program can make a reference at all: when it cannot, a call passes and returns values as they are
     }
 
 -- The memory of an allocation: its slots, each holding a value or nothing (POINTERS.md). An address is a number: allocation k starts at
@@ -117,8 +118,16 @@ data S = S
 -- this is a check of what a program assumes (Block::assume).
 data Allocation = Allocation {allocSize :: Integer, allocSlots :: Map Integer MirValue}
 
-startState :: String -> S
-startState input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1}
+startState :: Program -> String -> S
+startState program input = S{sInput = input, sPath = "", sLoaded = "", sStore = "", sFiles = Map.empty, sOrder = [], sHeap = Map.empty, sNextAllocation = 1, sReferences = makesReferences program}
+
+-- A reference value (MRef) comes only from a Borrow, and an update parameter is only given one, so a program with neither has no
+-- reference to resolve, rebase or write back at a call
+makesReferences :: Program -> Bool
+makesReferences program = any function (progMain program : Map.elems (progFunctions program))
+  where
+    function fn = not (null (specMutParams (fnSpec fn))) || any borrows (Map.elems (fnBlocks fn))
+    borrows (BasicBlock stmts _) = or [True | Assign _ Borrow{} <- stmts]
 
 allocationSpan :: Integer
 allocationSpan = 2 ^ (32 :: Integer)
@@ -190,7 +199,7 @@ newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
 runNamedFunction :: Program -> Name -> [MirValue] -> Result (Maybe MirValue) String
 runNamedFunction program name args = case Map.lookup name (progFunctions program) of
     Nothing -> Error ("Function does not exist: " ++ name)
-    Just fn -> mapResult (\((value, _), _, _) -> value) (runE (runFunction program fn args Map.empty) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState ""))
+    Just fn -> mapResult (\((value, _), _, _) -> value) (runE (runFunction program fn args Map.empty) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState program ""))
 
 instance Functor E where
     fmap f (E r) = E (\env s -> mapResult (\(a, output, s') -> (f a, output, s')) (r env s))
@@ -316,29 +325,35 @@ runBlock program fn block frame =
                         MBool False -> runBlock program fn no frame'
                         _ -> failE "Condition must be a boolean"
                 Call callee args dest next -> do
+                    references <- E (\_ s -> Ok (sReferences s, none, s))
                     f <- liftE (operandValue frame' callee)
                     argValues <- liftE (mapResults (operandValue frame') args)
-                    resolved <- liftE (mapResults (resolveRef frame') argValues)
-                    let normArgs = map (normaliseRefs frame') resolved
-                        synthRoots = refRootClosure frame' normArgs
-                        synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
-                        calleeArgs = map (rewriteRefRoots synthMap) normArgs
-                        synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
-                    (result, calleeFrame) <- callFunction program f calleeArgs synthFrame
-                    -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
-                    -- the same place in this frame. References to the callee's own places cannot be returned,
-                    -- which the checker has already refused.)
-                    result' <- liftE $ case f of
-                        MFn name | Just callee <- Map.lookup name (progFunctions program) -> rebaseRefs program callee calleeFrame args frame' result
-                        _ -> Ok result
-                    let finalParams = case f of
-                            MFn name | Just callee <- Map.lookup name (progFunctions program) -> [Map.findWithDefault MEmpty p calleeFrame | p <- fnParams callee]
-                            _ -> []
-                    frame'' <- liftE (writeBack program frame' f args finalParams)
-                    let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
-                        result2 = rewriteRefRoots invSynth result'
-                    frame3 <- liftE (foldl (\acc (root, synth) -> acc `bindResult` \fr -> case Map.lookup synth calleeFrame of Just v -> writePlace fr root [] (rewriteRefRoots invSynth v); Nothing -> Ok fr) (Ok frame'') (Map.toList synthMap))
-                    runBlock program fn next (Map.insert dest result2 frame3)
+                    if not references
+                        then do
+                            (result, _) <- callFunction program f argValues Map.empty
+                            runBlock program fn next (Map.insert dest result frame')
+                        else do
+                            resolved <- liftE (mapResults (resolveRef frame') argValues)
+                            let normArgs = map (normaliseRefs frame') resolved
+                                synthRoots = refRootClosure frame' normArgs
+                                synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
+                                calleeArgs = map (rewriteRefRoots synthMap) normArgs
+                                synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
+                            (result, calleeFrame) <- callFunction program f calleeArgs synthFrame
+                            -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
+                            -- the same place in this frame. References to the callee's own places cannot be returned,
+                            -- which the checker has already refused.)
+                            result' <- liftE $ case f of
+                                MFn name | Just callee <- Map.lookup name (progFunctions program) -> rebaseRefs program callee calleeFrame args frame' result
+                                _ -> Ok result
+                            let finalParams = case f of
+                                    MFn name | Just callee <- Map.lookup name (progFunctions program) -> [Map.findWithDefault MEmpty p calleeFrame | p <- fnParams callee]
+                                    _ -> []
+                            frame'' <- liftE (writeBack program frame' f args finalParams)
+                            let invSynth = Map.fromList [(s, r) | (r, s) <- Map.toList synthMap]
+                                result2 = rewriteRefRoots invSynth result'
+                            frame3 <- liftE (foldl (\acc (root, synth) -> acc `bindResult` \fr -> case Map.lookup synth calleeFrame of Just v -> writePlace fr root [] (rewriteRefRoots invSynth v); Nothing -> Ok fr) (Ok frame'') (Map.toList synthMap))
+                            runBlock program fn next (Map.insert dest result2 frame3)
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
 
