@@ -58,6 +58,7 @@ testNative =
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
         , TestParallel "function values" [TestCase name (sameAsUnvalidated name source) | (name, source) <- functionPrograms]
         , TestParallel "control flow" [TestCase name (sameAsMir name source) | (name, source) <- controlPrograms]
+        , TestParallel "references" [TestCase name (sameAsMir name source) | (name, source) <- referencePrograms]
         , TestList "build" [testBuildKeepsFiles, testEveryExampleIsBuilt, testRunExecutable]
         , TestList "memory" memoryTests
         , TestParallel "stops" [TestCase name (sameAsMir name source) | (name, source) <- stopPrograms]
@@ -732,6 +733,22 @@ controlPrograms =
     , ("recursion", "fn fact(n: Int) -> Int [{ affirm n >= 0; }] shrinks n { if n = 0 { return 1; }; return n * fact(n - 1); }; return fact(10);")
     , ("boolean result", "fn even(n: Int) -> Bool { return n % 2 = 0; }; return even(10);")
     , ("boolean parameter", "fn pick(c: Bool, a: Int, b: Int) -> Int { if c { return a; }; return b; }; return pick(1 < 2, 10, 20);")
+    ]
+
+referencePrograms :: [(String, String)]
+referencePrograms =
+    [ ("a reference to a local is read", "x = 1; r = &x; return *r;")
+    , ("a reference to a local is updated through", "x = 1; r = &mut x; *r = 41; return x;")
+    , ("a reference is given on", "x = 1; r = &x; q = r; return *q;")
+    , ("a read twice through one reference", "x = 1; r = &mut x; *r = *r + 1; *r = *r + 1; return x;")
+    , ("a reference to a field is read", "struct P { a: Int, b: Int }; p = P { a: 1, b: 7 }; r = &p.b; return *r;")
+    , ("a field's value is read through a reference into a local", "struct P { a: Int, b: Int }; p = P { a: 1, b: 7 }; r = &p.b; s = *r; return s;")
+    , ("a field is updated through a reference", "struct P { a: Int, b: Int }; p = P { a: 1, b: 2 }; r = &mut p; (*r).b = 41; return p.b;")
+    , ("a reference to an element is updated through", "xs = [10, 20, 30]; r = &mut get(xs, 1); *r = 41; return get(xs, 0) + get(xs, 1);")
+    , ("a reborrow reads what the first reference is to", "x = 4; r = &x; s = &*r; return *s;")
+    , ("a local reference is given to a read parameter", "fn id(n: &Int) -> Int { return n; }; x = 4; r = &x; return id(r);")
+    , ("a reference to a list is given to a read parameter", "fn sz(a: &List<Int>) -> Int { return size(a); }; xs = [1, 2, 3]; r = &xs; return sz(r);")
+    , ("a borrowed field of a generic struct with a list", "struct S<T> { n: Int, value: T }; s = S<List<Int>> { n: 7, value: [1] }; r = &s.n; return *r;")
     ]
 
 -- Every program of these tests that validates, and every one that is lowered without being validated

@@ -164,26 +164,19 @@ ownedSource :: String -> Result M.Program String
 ownedSource source =
     compileSource source `bindResult` \program ->
         -- (an update parameter is written back by the executor; native code does not do that yet, so a function
-        -- that has one is refused here rather than miscompiled. A reference held by a local is likewise not in
-        -- native code yet: assignment through one is an assignment of its root by then (expandRefWrites), but
-        -- making one (&place) and reading through one (*r) are rows the emitter does not have.)
+        -- that has one is refused here rather than miscompiled. A reference that a result is (`-> &T from xs`)
+        -- is likewise refused: making one is a borrow of a place of a parameter, which native code cannot
+        -- hand back yet. A reference held by a local is native: assignment through one is an assignment of
+        -- its root by then (expandRefWrites), and making one (&place) and reading through one (*r) are rows
+        -- of the emitter.)
         if any (not . null . M.specMutParams . M.fnSpec) (M.progMain program : Map.elems (M.progFunctions program))
             then Error "a function with an update parameter (&mut T) is not in native code yet: run it with eval, or check it"
             else
-                if any localReference (M.progMain program : Map.elems (M.progFunctions program))
-                    then Error "a reference held by a local (&place, read or updated through *) is not in native code yet: run it with eval, or check it"
+                if any (not . null . M.specFrom . M.fnSpec) (M.progMain program : Map.elems (M.progFunctions program))
+                    then Error "a function that returns a reference (-> &T from ...) is not in native code yet: run it with eval, or check it"
                     else
                         let owned = insertOwnership (nativeProgram program)
                          in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
-  where
-    localReference fn = any statementHas (concatMap M.blockStatements (Map.elems (M.fnBlocks fn)))
-      where
-        statementHas (M.Assign _ rv) = rvalueHas rv
-        statementHas (M.Peek _ rv) = rvalueHas rv
-        statementHas _ = False
-        rvalueHas (M.Borrow {}) = True
-        rvalueHas (M.Deref _) = True
-        rvalueHas _ = False
 
 -- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists), and each
 -- Uninit<T> a T (it is laid out as one: an empty one is the words of a T cleared, which own nothing)

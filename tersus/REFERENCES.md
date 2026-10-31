@@ -494,18 +494,24 @@ mid-implementation:
    at an update call, so a stale fact is refused and a disjoint field's facts
    are kept. The interpreter gives the caller the new value when the call
    returns (copy-in/copy-out). A function with an update *parameter* is
-   refused for native code (`run`/`build` name the gap) until native
-   writeback lands, and a reference held by a local is refused at the same
-   place: assignment through one is expanded to root assignments before
-   ownership (`expandRefWrites`), but making one (`&place`) and reading
-   through one (`*r`) are rows the Tersus emitter does not have yet. The self-hosted bridge
+   still refused for native code (`run`/`build` name the gap) until native
+   writeback lands, as is a function that returns a reference (below).
+   A reference held by a local is native since 2026-10-31: assignment
+   through one is expanded to root assignments before ownership
+   (`expandRefWrites`), and the Tersus emitter has the two other rows —
+   making one (`&place`) computes the address of the place (a field step
+   is the field's offset in the layout, an index step walks to the
+   element, whose index was fixed when the borrow was made), and reading
+   through one (`*r`) loads through that address; a reference's LLVM
+   type is `ptr` for both `&T` and `&mut T`. The self-hosted bridge
    (`SelfHostedMir`) handles a borrow of a whole local and a read through a
    reference at the value level and refuses the rest as outside its subset;
    the Tersus reader/validator of step 33 does not model references yet.
    The MIR-as-data format (`MirData`) carries `mutref`, `borrow`,
-   `borrowmut`, `deref` and `assignref` rows; `examples/mir_reader.tersus`
-   does not model references yet (a program with an update parameter is
-   refused earlier, with the native error above).
+   `borrowmut`, `deref` and `assignref` rows, and
+   `examples/mir_reader.tersus` reads and prints them (it shares the
+   reader with the emitter, which `TestMirEmit` keeps identical);
+   `examples/mir_verify.tersus` does not model references yet.
 
    **Checkpoint after stage 3.** Stages 1 to 3 are self-contained and are
    where most of the value is (no copies for reads, checked in-place update,

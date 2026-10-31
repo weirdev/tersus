@@ -45,6 +45,7 @@ enum Type {
     TForall { sizes: List<String>, types: List<String>, body: Box<Type> },
     TParam { name: String },
     TRef { inner: Box<Type> },
+    TMutRef { inner: Box<Type> },
     TAddr { inner: Box<Type> },
     TWord { signed: Bool, bits: Int },
 };
@@ -78,6 +79,11 @@ enum Operand { Copy { local: Int }, Move { local: Int }, Const { value: Constant
 
 impl Clone for Operand { };
 
+// A step from the root of a borrowed place to the place itself: a field of a struct or variant, or an element at an index
+enum RefStep { Field { ctor: String, field: String }, Index { o: Operand } };
+
+impl Clone for RefStep { };
+
 enum Rvalue {
     Use { o: Operand },
     BinaryOp { op: Int, a: Operand, b: Operand },
@@ -92,6 +98,8 @@ enum Rvalue {
     AsVariant { o: Operand, name: String },
     Clone { o: Operand },
     TakeField { local: Int, name: String, field: String },
+    Borrow { root: Int, steps: List<RefStep>, mutable: Bool },
+    Deref { o: Operand },
 };
 
 impl Clone for Rvalue { };
@@ -240,6 +248,10 @@ fn noFields() -> List<Field> [{ }] [{ }] {
 };
 
 fn noOperands() -> List<Operand> [{ }] [{ }] {
+    return [];
+};
+
+fn noRefSteps() -> List<RefStep> [{ }] [{ }] {
     return [];
 };
 
@@ -417,12 +429,13 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
     if kw = "u16" { return done(Type::TWord { signed: false, bits: 16 }, next); };
     if kw = "u32" { return done(Type::TWord { signed: false, bits: 32 }, next); };
     if next >= size(ts) { return bad; };
-    if kw = "list" || kw = "box" || kw = "ref" || kw = "addr" {
+    if kw = "list" || kw = "box" || kw = "ref" || kw = "mutref" || kw = "addr" {
         e = typeAt(ts, next);
         if !e.ok { return bad; };
         if kw = "addr" { return done(Type::TAddr { inner: Box::new(e.value) }, e.pos); };
         if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
         if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
+        if kw = "mutref" { return done(Type::TMutRef { inner: Box::new(e.value) }, e.pos); };
         return done(Type::TRef { inner: Box::new(e.value) }, e.pos);
     };
     if kw = "array" {
@@ -587,8 +600,41 @@ fn noRvalue() -> Rvalue [{ }] [{ }] {
     return Rvalue::Use { o: noOperand() };
 };
 
+// A step of a borrowed place: `field "n" "f"` or `index O`
+fn refStepAt(ts: &List<Token>, pos: Int) -> Parsed<RefStep> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(RefStep::Index { o: noOperand() }, ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    if w.value = "index" {
+        o = operandAt(ts, w.pos);
+        if !o.ok { return bad; };
+        return done(RefStep::Index { o: o.value }, o.pos);
+    };
+    if w.value = "field" {
+        s = nameAt(ts, w.pos);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        f = nameAt(ts, s.pos);
+        if !f.ok { return bad; };
+        return done(RefStep::Field { ctor: s.value, field: f.value }, f.pos);
+    };
+    return bad;
+};
+
+fn refStepsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<RefStep>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    items = noRefSteps();
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noRefSteps(), ts); };
+        o = refStepAt(ts, p);
+        if !o.ok { return failed(noRefSteps(), ts); };
+        items = push(items, o.value);
+        p = o.pos;
+    };
+    return done(items, p);
+};
+
 // `use O`, `binary OP O O`, `listop OP N O...`, `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`,
-// `isvariant O "n"`, `asvariant O "n"`, `clone O` and `takefield L "n" "f"`
+// `isvariant O "n"`, `asvariant O "n"`, `clone O`, `takefield L "n" "f"`, `borrow L N ("field" "n" "f" | "index" O)...`, `borrowmut` likewise and `deref O`
 fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
     bad = failed(noRvalue(), ts);
     w = wordAt(ts, pos);
@@ -677,6 +723,20 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
         f = nameAt(ts, s.pos);
         if !f.ok { return bad; };
         return done(Rvalue::TakeField { local: l.value, name: s.value, field: f.value }, f.pos);
+    };
+    if kw = "borrow" || kw = "borrowmut" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        c = countAt(ts, l.pos);
+        if !c.ok { return bad; };
+        steps = refStepsAt(ts, c.pos, c.value);
+        if !steps.ok { return bad; };
+        return done(Rvalue::Borrow { root: l.value, steps: steps.value, mutable: kw = "borrowmut" }, steps.pos);
+    };
+    if kw = "deref" {
+        o = operandAt(ts, next);
+        if !o.ok { return bad; };
+        return done(Rvalue::Deref { o: o.value }, o.pos);
     };
     return bad;
 };
@@ -1094,6 +1154,7 @@ fn printType(t: &Type) -> Int ~ {
         },
         Type::TParam { name: name } => { n = " param".print() + printName(name); },
         Type::TRef { inner: e } => { n = " ref".print() + printType(Box::unbox(e)); },
+        Type::TMutRef { inner: e } => { n = " mutref".print() + printType(Box::unbox(e)); },
         Type::TAddr { inner: e } => { n = " addr".print() + printType(Box::unbox(e)); },
         Type::TWord { signed: signed, bits: bits } => {
             w = " u32";
@@ -1161,6 +1222,15 @@ fn printOperands(os: &List<Operand>) -> Int ~ {
     return n;
 };
 
+fn printRefStep(step: &RefStep) -> Int ~ {
+    n = 0;
+    match step {
+        RefStep::Field { ctor: ctor, field: field } => { n = " field".print() + printName(ctor) + printName(field); },
+        RefStep::Index { o: o } => { n = " index".print() + printOperand(o); },
+    };
+    return n;
+};
+
 fn printRvalue(rv: &Rvalue) -> Int ~ {
     n = 0;
     match rv {
@@ -1192,6 +1262,17 @@ fn printRvalue(rv: &Rvalue) -> Int ~ {
         Rvalue::TakeField { local: l, name: name, field: field } => {
             n = " takefield".print() + printInt(l) + printName(name) + printName(field);
         },
+        Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => {
+            kw = " borrow";
+            if mutable { kw = " borrowmut"; };
+            n = kw.print() + printInt(root) + printInt(size(steps));
+            i = 0;
+            while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+                n = n + printRefStep(get(steps, i));
+                i = i + 1;
+            };
+        },
+        Rvalue::Deref { o: o } => { n = " deref".print() + printOperand(o); },
     };
     return n;
 };

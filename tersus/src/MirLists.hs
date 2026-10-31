@@ -93,6 +93,8 @@ operandsOf rv = case rv of
     AsVariant o _ -> [o]
     Clone o -> [o]
     TakeField{} -> []
+    Borrow _ steps _ -> [o | RefIndex o <- steps]
+    Deref o -> [o]
 
 -- The program with lists and Boxes made of the library's structs and functions. The first program is the library (lib/lists.tersus and
 -- lib/box.tersus compiled).
@@ -373,6 +375,7 @@ lowerFunction original fn =
             return (ReadField o' (renameName name) f)
         IsVariant o name -> return (IsVariant (renameOperand o) (renameName name))
         AsVariant o name -> return (AsVariant (renameOperand o) (renameName name))
+        Borrow root steps upd -> return (Borrow root (map renameBorrowStep steps) upd)
         other -> return other
 
     nonConstant o ty = case o of
@@ -411,6 +414,10 @@ lowerFunction original fn =
         Copy l -> localTypeOf l >>= \t -> return (case t of Just (TFn ps _) -> ps; _ -> [])
         Move l -> localTypeOf l >>= \t -> return (case t of Just (TFn ps _) -> ps; _ -> [])
         _ -> return []
+
+    renameBorrowStep step = case step of
+        RefField name field -> RefField (renameName name) field
+        RefIndex o -> RefIndex (renameOperand o)
 
     renameOperand o = case o of
         Const c -> Const (renameConstant c)
