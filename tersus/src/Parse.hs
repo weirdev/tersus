@@ -434,6 +434,7 @@ enumStatement = do
             d
                 { declCtors = foldr (\(v, fields) m -> Map.insert v (map fst fields) m) (declCtors d) variants
                 , declTypes = Map.insert name (map fst variants) (declTypes d)
+                , declGenerics = Map.delete name (declGenerics d)
                 }
         )
     return (EnumDef name variants)
@@ -456,7 +457,7 @@ structStatement = do
     params <- option [] (try (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace))
     outerParams <- declTypeParams <$> getState
     -- (the struct may hold itself, as Name<T, n>, in a Box)
-    modifyState (\d -> d{declTypeParams = filter isTypeParameter params, declGenerics = if null params then declGenerics d else Map.insert name params (declGenerics d)})
+    modifyState (\d -> d{declTypeParams = filter isTypeParameter params, declGenerics = if null params then Map.delete name (declGenerics d) else Map.insert name params (declGenerics d)})
     void (char '{')
     whitespace
     fields <- structField `sepEndBy` (char ',' >> whitespace)
@@ -794,7 +795,7 @@ traitStatement = do
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self"]) $ fail (name ++ " is a builtin type and cannot be a trait name")
     when (any (not . isTypeParameter) params) $ fail ("trait " ++ name ++ " has a size parameter: a trait has types only")
     outerParams <- declTypeParams <$> getState
-    modifyState (\d -> d{declTypeParams = params, declGenerics = if null params then declGenerics d else Map.insert name params (declGenerics d)})
+    modifyState (\d -> d{declTypeParams = params, declGenerics = if null params then Map.delete name (declGenerics d) else Map.insert name params (declGenerics d)})
     functions <- curlyBracesParse (genericStatementBlock traitFunction)
     modifyState (\d -> d{declTypeParams = outerParams})
     whitespace
