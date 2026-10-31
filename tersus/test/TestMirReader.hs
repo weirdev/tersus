@@ -12,9 +12,7 @@ import Bootstrap (emitterHash, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runSourceIn)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import MirData (writeProgram)
 import Native (buildExecutable, cacheDirectory)
-import Pipeline (ownedSource)
 import TestHarness
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
@@ -43,9 +41,10 @@ testMirReader =
 readerSource :: IO String
 readerSource = readFile "examples/mir_reader.tersus"
 
--- The data of a program, or the reason it has none
-dataOf :: String -> Result String String
-dataOf source = mapResult writeProgram (ownedSource source)
+-- The data of a program, or the reason it has none (the harness's shared cache: these programs are compiled once
+-- between the groups that check them)
+dataOf :: String -> IO (Result String String)
+dataOf = mirDataOf
 
 -- The text of a file is the same, but for the new lines at its end
 sameText :: String -> String -> Bool
@@ -56,7 +55,8 @@ sameText a b = trim a == trim b
 interpreted :: String -> IO TestResult
 interpreted source = do
     reader <- readerSource
-    pure $ case dataOf source of
+    dataText <- dataOf source
+    pure $ case dataText of
         Error e -> Just e
         Ok text -> case runSourceIn noWorld{worldInput = text} Interpret reader of
             Error e -> Just e
@@ -122,11 +122,13 @@ nativeCheck name source = withReader $ \exe -> do
         [] -> Nothing
         bad -> Just (unlines bad)
   where
-    check exe (name, source) = case dataOf source of
-        Error e -> pure [name ++ ": " ++ e]
-        Ok text -> do
-            (code, output, errors) <- runExecutableBytes exe [] text
-            pure [name ++ ": " ++ describe code output errors text | code /= ExitSuccess || not (null errors) || not (sameText output text)]
+    check exe (name, source) = do
+        dataText <- dataOf source
+        case dataText of
+            Error e -> pure [name ++ ": " ++ e]
+            Ok text -> do
+                (code, output, errors) <- runExecutableBytes exe [] text
+                pure [name ++ ": " ++ describe code output errors text | code /= ExitSuccess || not (null errors) || not (sameText output text)]
     describe code output errors text =
         "exit " ++ show code ++ ", wrote " ++ show (length output) ++ " bytes for " ++ show (length text) ++ ", " ++ take 200 errors
 

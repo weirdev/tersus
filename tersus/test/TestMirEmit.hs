@@ -1,7 +1,6 @@
 module TestMirEmit (testMirEmit) where
 
 import Data.List (isInfixOf, isPrefixOf)
-import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
@@ -72,37 +71,38 @@ interpretedIr source = do
 
 -- Every mode writes the IR of a program, and the data of the program read back from the data makes the same IR
 -- as the data. One case per program, so the sweep runs at the harness's parallelism instead of one program
--- after another inside a single case (withProgram builds the emitter executable once for the process).
+-- after another inside a single case (withProgram builds the emitter executable once for the process). The data
+-- comes from the harness's shared cache (mirDataOf): the groups between them compile these programs once.
 nativeCheck :: String -> String -> IO TestResult
 nativeCheck name source = withProgram "examples/emit.tersus" "emit" $ \exe -> do
-    (bad, _) <- check exe (name, source)
+    bad <- check exe (name, source)
     pure $ case bad of
         [] -> Nothing
         problems -> Just (unlines problems)
   where
-    check exe (name, source) = case ownedSource source of
-        Error e -> pure ([name ++ ": " ++ e], 0)
-        Ok owned -> do
-            let dataText = writeProgram owned
-                count = Map.size (progFunctions owned) + 1
-            outline <- runExecutableBytes exe ["outline"] dataText
-            bodies <- runExecutableBytes exe ["bodies"] dataText
-            everything <- runExecutableBytes exe [] dataText
-            roundTrip <- case readProgram dataText of
-                Error e -> pure (["the data does not read back: " ++ e], 0)
-                Ok back -> do
-                    again <- runExecutableBytes exe [] (writeProgram back)
-                    pure $ case (everything, again) of
-                        ((ExitSuccess, output, ""), (ExitSuccess, output', "")) | output == output' -> ([], count)
-                        ((ExitSuccess, _, ""), (code, _, errors)) -> (["the IR of the program read back: exit " ++ show code ++ ", " ++ take 200 errors], 0)
-                        _ -> ([], 0)
-            let modeProblems =
-                    [ name ++ ": the " ++ mode ++ ": exit " ++ show code ++ ", " ++ take 200 errors
-                    | (mode, (code, _, errors)) <- [("outline", outline), ("bodies", bodies), ("IR", everything)]
-                    , code /= ExitSuccess || not (null errors)
-                    ]
-                    ++ [name ++ ": the IR has no entry point" | (code, output, _) <- [everything], code == ExitSuccess, not ("@tersus_main" `isInfixOf` output)]
-            pure (modeProblems ++ fst roundTrip, snd roundTrip)
+    check exe (name, source) = do
+        dataOf <- mirDataOf source
+        case dataOf of
+            Error e -> pure [name ++ ": " ++ e]
+            Ok dataText -> do
+                outline <- runExecutableBytes exe ["outline"] dataText
+                bodies <- runExecutableBytes exe ["bodies"] dataText
+                everything <- runExecutableBytes exe [] dataText
+                roundTrip <- case readProgram dataText of
+                    Error e -> pure ["the data does not read back: " ++ e]
+                    Ok back -> do
+                        again <- runExecutableBytes exe [] (writeProgram back)
+                        pure $ case (everything, again) of
+                            ((ExitSuccess, output, ""), (ExitSuccess, output', "")) | output == output' -> []
+                            ((ExitSuccess, _, ""), (code, _, errors)) -> ["the IR of the program read back: exit " ++ show code ++ ", " ++ take 200 errors]
+                            _ -> []
+                let modeProblems =
+                        [ name ++ ": the " ++ mode ++ ": exit " ++ show code ++ ", " ++ take 200 errors
+                        | (mode, (code, _, errors)) <- [("outline", outline), ("bodies", bodies), ("IR", everything)]
+                        , code /= ExitSuccess || not (null errors)
+                        ]
+                        ++ [name ++ ": the IR has no entry point" | (code, output, _) <- [everything], code == ExitSuccess, not ("@tersus_main" `isInfixOf` output)]
+                pure (modeProblems ++ roundTrip)
 
 refusal :: IO TestResult
 refusal = withProgram "examples/emit.tersus" "emit" $ \exe -> do
