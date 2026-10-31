@@ -138,7 +138,7 @@ data GhostStatement
       -- moves reads them (and takes them out), so no other pass sees one.
       GhostPosition Int Int
     | -- The value of the local has been taken apart into its fields (`S { a: x, ... } = v;`): it is used up, and a drop of its type is not run
-      -- on it. MirGhost makes it the clearing of the local's bytes, which native code takes for a value that was moved out.
+      -- on it. The ghost erasure makes it the clearing of the local's bytes, which native code takes for a value that was moved out.
       GhostDissolve Local
     deriving (Show, Eq)
 
@@ -189,7 +189,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 -- into an empty slot), AddrTake p i b (the value moved out of a slot), AddrDropValue p i b and AddrDropRange p i n b (the values of slots
 -- dropped where they are), AddrResize p n b (the slots moved to an allocation of n) and AddrFree p b (the allocation given back) are given
 -- the permission b too, which only the validator reads. The Block operations make a permission and are ghost: the validator has them, and
--- they are erased (see MirGhost) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
+-- they are erased (by the ghost erasure, `examples/mir_erase.tersus`) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
 -- and AddrDropRange, which give the permission after, give 0.
 data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
     | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree
@@ -257,7 +257,7 @@ data LoopSpec = LoopSpec
 completeInstances :: Program -> Program
 completeInstances = completeInstancesWith False
 
--- The same after the permissions are erased (MirGhost): an instance that is declared now (by a copy of a function for its types, `(T, Block<T>)`
+-- The same after the permissions are erased (the ghost erasure): an instance that is declared now (by a copy of a function for its types, `(T, Block<T>)`
 -- for an Int) has no field that is a permission either
 completeErasedInstances :: Program -> Program
 completeErasedInstances = completeInstancesWith True

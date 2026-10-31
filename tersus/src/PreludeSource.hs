@@ -9,6 +9,8 @@ module PreludeSource
     , mapSource
     , setSource
     , emitterSource
+    , mirVerifySource
+    , mirEraseSource
     , stdlibSource
     , seedSha256
     ) where
@@ -103,4 +105,22 @@ seedSha256 =
         addDependentFile "bootstrap/emitter.sha256"
         contents <- runIO (readFile "bootstrap/emitter.sha256")
         lift (head (words contents))
+     )
+
+-- The text of examples/mir_verify.tersus: the check of the MIR written in Tersus (see MirHousekeeping)
+mirVerifySource :: String
+mirVerifySource =
+    $( do
+        addDependentFile "examples/mir_verify.tersus"
+        contents <- runIO (readFile "examples/mir_verify.tersus")
+        lift contents
+     )
+
+-- The text of examples/mir_erase.tersus: the erasure of the ghosts of a program, written in Tersus (see MirHousekeeping)
+mirEraseSource :: String
+mirEraseSource =
+    $( do
+        addDependentFile "examples/mir_erase.tersus"
+        contents <- runIO (readFile "examples/mir_erase.tersus")
+        lift contents
      )

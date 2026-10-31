@@ -584,7 +584,7 @@ data Statement
       -- scope: the checker hands it to the lowering, for the check of moves (a type with a drop is not linear)
       DropDef Name
     | -- The value of the variable has been taken apart into its fields (`Vec { addr: a, len: n, blk: b } = v;`, which the parser makes into
-      -- the reads of the fields and this): it is used up, so a drop it has is not run. Only native code needs it (MirGhost).
+      -- the reads of the fields and this): it is used up, so a drop it has is not run. Only native code needs it (the ghost erasure).
       Dissolve Variable
     deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 

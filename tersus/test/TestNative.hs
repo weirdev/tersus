@@ -26,7 +26,7 @@ import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
 import MirLower (lowerProgram)
 import MirOwnership (insertOwnership)
-import MirVerify (verifyProgram)
+import MirHousekeeping (verifyProgram)
 import Native (buildExecutableFast, runExecutable)
 import Parse (parseStatementBlock)
 import Pipeline

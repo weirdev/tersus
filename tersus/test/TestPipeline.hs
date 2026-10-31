@@ -18,7 +18,7 @@ import qualified Mir as M
 import MirEval
 import MirLower
 import qualified MirValidate as Reference
-import MirVerify
+import MirHousekeeping (verifyProgram)
 import Pipeline
 import qualified ProofEngine as Engine
 import SelfHostedProof (querySelfHosted)
