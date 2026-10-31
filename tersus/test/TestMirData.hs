@@ -18,8 +18,8 @@ testMirData :: Test
 testMirData =
     TestList
         "testMirData"
-        [ TestParallel "examples" [TestCase path (roundTripsAndIr <$> readFile path) | path <- nativeExamples]
-        , TestParallel "programs" [TestCase name (pure (roundTripsAndIr source)) | (name, source) <- validatedPrograms]
+        [ TestParallel "examples" [TestCase path (readFile path >>= roundTripsAndIr) | path <- nativeExamples]
+        , TestParallel "programs" [TestCase name (roundTripsAndIr source) | (name, source) <- validatedPrograms]
         , TestList
             "format"
             [ testCase "the command prints it" $
@@ -60,19 +60,19 @@ testMirData =
 
 -- The data of a program reads back as the same program, and is written the same way again. That the data the emitter is
 -- given and the data of the program read back from it make the same IR is checked with the emitter itself in TestMirEmit.
-roundTripsAndIr :: String -> TestResult
-roundTripsAndIr source = case ownedSource source of
-    Error e -> Just ("does not compile: " ++ e)
-    Ok program ->
-        let text = writeProgram program
-            native = forNative program
-         in case readProgram text of
-                Error e -> Just ("cannot be read back: " ++ e)
-                Ok back
-                    | not (all isAscii text) -> Just "the data is not ASCII"
-                    | back /= native -> Just "reads back as another program"
-                    | writeProgram back /= text -> Just "is written differently after it was read"
-                    | otherwise -> Nothing
+-- The data comes from the harness's shared cache (mirDataOf): the groups between them compile these programs once.
+roundTripsAndIr :: String -> IO TestResult
+roundTripsAndIr source = do
+    dataOf <- mirDataOf source
+    pure $ case dataOf of
+        Error e -> Just ("does not compile: " ++ e)
+        Ok text -> case readProgram text of
+            Error e -> Just ("cannot be read back: " ++ e)
+            Ok back
+                | not (all isAscii text) -> Just "the data is not ASCII"
+                | back /= forNative back -> Just "reads back as another program"
+                | writeProgram back /= text -> Just "is written differently after it was read"
+                | otherwise -> Nothing
 
 -- Names with a space, quotes, a backslash, a newline and letters of every width
 names :: Program -> TestResult

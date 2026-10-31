@@ -6,7 +6,7 @@ import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
 import Mir
-import MirData (forNative, writeProgram)
+import MirData (forNative, readProgram, writeProgram)
 import MirVerify (verifyProgram)
 import Pipeline (ownedSource)
 import TersusTypes (Type (..))
@@ -158,7 +158,8 @@ withVerifier :: (FilePath -> IO TestResult) -> IO TestResult
 withVerifier = withProgram "examples/mir_verify.tersus" "mir-verify"
 
 -- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
--- inside a single case (withVerifier builds the verifier executable once for the process).
+-- inside a single case (withVerifier builds the verifier executable once for the process). The data comes from
+-- the harness's shared cache (mirDataOf), and the Haskell verdict is taken on the program read back from it.
 nativeCheck :: String -> String -> IO TestResult
 nativeCheck name source = withVerifier $ \exe -> do
     failures <- check exe (name, source)
@@ -166,15 +167,18 @@ nativeCheck name source = withVerifier $ \exe -> do
         [] -> Nothing
         bad -> Just (unlines bad)
   where
-    check exe (name, source) = case ownedSource source of
-        Error e -> pure [name ++ ": " ++ e]
-        Ok program -> do
-            let text = writeProgram program
-                expected = referenceAccepts program
-            (code, output, errors) <- runExecutableBytes exe [] text
-            let accepted = code == ExitSuccess && sameText output "OK"
-                refusedIt = code /= ExitSuccess && output == "1\n" && not (null errors)
-            pure
-                [ name ++ ": expected " ++ (if expected then "acceptance" else "refusal") ++ ", got exit " ++ show code ++ ", output " ++ show output ++ ", errors " ++ take 200 errors
-                | (expected && not accepted) || (not expected && not refusedIt)
-                ]
+    check exe (name, source) = do
+        dataOf <- mirDataOf source
+        case dataOf of
+            Error e -> pure [name ++ ": " ++ e]
+            Ok text -> case readProgram text of
+                Error e -> pure [name ++ ": the data does not read back: " ++ e]
+                Ok program -> do
+                    let expected = referenceAccepts program
+                    (code, output, errors) <- runExecutableBytes exe [] text
+                    let accepted = code == ExitSuccess && sameText output "OK"
+                        refusedIt = code /= ExitSuccess && output == "1\n" && not (null errors)
+                    pure
+                        [ name ++ ": expected " ++ (if expected then "acceptance" else "refusal") ++ ", got exit " ++ show code ++ ", output " ++ show output ++ ", errors " ++ take 200 errors
+                        | (expected && not accepted) || (not expected && not refusedIt)
+                        ]

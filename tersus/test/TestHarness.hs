@@ -19,23 +19,31 @@ module TestHarness
     , nativeInts
     , vecLibrary
     , compileOnce
+    , mirDataOf
     ) where
 
 import qualified Control.Exception as Exception
 import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, bracket_, displayException, mask, throwIO, try)
+import Control.Exception (IOException, SomeException, bracket_, displayException, mask, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
+import System.Directory (createDirectoryIfMissing, doesFileExist, getFileSize, getModificationTime, removeFile, renameFile)
+import System.Environment (getExecutablePath)
+import System.FilePath ((</>))
+import System.IO (hClose, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 
+import Hash (fingerprint)
 import Mir (Program)
+import MirData (writeProgram)
 import MirEval (fromMirValue)
+import Native (cacheDirectory)
 import Parse
-import Pipeline (compileSource, runStatements, validateStatements)
+import Pipeline (compileSource, ownedSource, runStatements, validateStatements)
 import TersusTypes
 import Utils
 
@@ -192,6 +200,72 @@ compileOnce source = modifyMVar compiledSources $ \cache ->
 {-# NOINLINE compiledSources #-}
 compiledSources :: MVar (Map.Map String (Result Program String))
 compiledSources = unsafePerformIO (newMVar Map.empty)
+
+-- The MIR of a program as data (what MirData writes of Pipeline.ownedSource), shared between the groups that check
+-- the same programs (TestMirData, TestMirReader, TestMirEmit, TestMirVerify): each group runs in a process of its
+-- own, so without this every one of them pays the full type check and validation of every example and program again.
+-- An entry is the data a validated compile wrote, kept in the cache directory under a name made of the source and of
+-- the test binary as built (its size and modification time): a rebuild that changes the compiler or the harness
+-- misses the cache and validates afresh, so an entry is only ever used by the binary whose validation produced its
+-- kind. A source that does not compile is not remembered, so the case that asked reports why. Without a cache
+-- directory the data is simply computed.
+mirDataOf :: String -> IO (Result String String)
+mirDataOf source = do
+    cache <- cacheDirectory
+    case cache of
+        Error _ -> pure compute
+        Ok dir -> do
+            built <- binaryIdentity
+            let dataDir = dir </> "mir-data"
+                file = dataDir </> fingerprint [source, built]
+            present <- doesFileExist file
+            if present
+                then do
+                    cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
+                    pure $ case cached of
+                        Right text -> Ok text
+                        Left _ -> compute
+                else do
+                    let result = compute
+                    case result of
+                        Error _ -> pure result
+                        Ok text -> do
+                            made <- try (createDirectoryIfMissing True dataDir) :: IO (Either IOException ())
+                            case made of
+                                Left _ -> pure result
+                                Right () -> do
+                                    (staging, handle) <- openTempFile dataDir "mir-data.tmp"
+                                    hClose handle
+                                    removeFile staging
+                                    writeFile staging text
+                                    renameFile staging file
+                                    pure result
+  where
+    compute = case ownedSource source of
+        Error e -> Error e
+        Ok program -> Ok (writeProgram program)
+
+-- What identifies the test binary that is running: a compiler or harness change rebuilds it, which changes at
+-- least one of these, so cached MIR data made by another build is not used.
+{-# NOINLINE binaryIdentity #-}
+binaryIdentity :: IO String
+binaryIdentity = unsafePerformIO $ do
+    cache <- newMVar Nothing
+    pure $ modifyMVar cache $ \known -> case known of
+        Just identity -> pure (known, identity)
+        Nothing -> do
+            identity <- try identify :: IO (Either IOException String)
+            let text = case identity of
+                    Right value -> value
+                    Left _ -> ""
+            pure (Just text, text)
+  where
+    identify :: IO String
+    identify = do
+        exe <- getExecutablePath
+        size <- getFileSize exe
+        modified <- getModificationTime exe
+        pure (show size ++ " " ++ show modified)
 
 -- Run tests
 -- A function over integers only
