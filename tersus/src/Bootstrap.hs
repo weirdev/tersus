@@ -40,7 +40,7 @@ import Utils
 --   are the same;
 -- - stage 0 is the seed built with clang (`stageZero`);
 -- - stage 1 is the emitter as it is now, built from the IR that stage 0 writes for its source (`stageOne`). This is the one that compiles programs;
--- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it). Making a new seed is `tersus llvm examples/emit.tersus > bootstrap/emitter.ll`.
+-- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it). Making a new seed is `tersus llvm examples/emit.tersus > bootstrap/emitter.ll.new && mv bootstrap/emitter.ll.new bootstrap/emitter.ll`: not a redirect straight into the seed, which the shell would truncate before the compiler runs, leaving `PreludeSource` to embed an empty seed it cannot then build the emitter from.
 -- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang.
 
 -- What stage 0 is made of: the seed and the runtime it is linked with

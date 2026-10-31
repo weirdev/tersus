@@ -79,9 +79,13 @@ Work from `tersus/`.
   `testNative` also runs some programs under `valgrind` when it is installed;
   the heap model of `testOwnership` needs neither.
 - If a change alters what the emitter in Tersus produces (a change to
-  `examples/emit.tersus` or to what it is built from), regenerate the seed:
-  `stack run tersus-exe -- llvm examples/emit.tersus > bootstrap/emitter.ll`,
-  and let `TestBootstrap` check the stage 0 / stage 1 fixpoint.
+  `examples/emit.tersus` or to what it is built from), regenerate the seed
+  into a temporary file and replace the seed only when that succeeds:
+  `stack run tersus-exe -- llvm examples/emit.tersus > bootstrap/emitter.ll.new && mv bootstrap/emitter.ll.new bootstrap/emitter.ll`,
+  and let `TestBootstrap` check the stage 0 / stage 1 fixpoint. Do not
+  redirect straight into `bootstrap/emitter.ll`: the shell truncates it
+  before Stack runs, and `PreludeSource` embeds that file, so a rebuild
+  would embed an empty seed and the emitter could not be built from it.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`,
   which runs each group in a process of its own;
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
