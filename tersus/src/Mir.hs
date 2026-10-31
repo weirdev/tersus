@@ -49,7 +49,7 @@ import Data.Maybe (listToMaybe)
 
 import Pretty (renderType, renderVarProof)
 import qualified Data.Set as Set
-import TersusTypes (Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceOf, instanceFields, tupleGeneric, Size (..), pattern TArray)
+import TersusTypes (Arg (..), Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -276,9 +276,26 @@ completeInstancesWith erased program
                 ++ concat [typeNames t | StructDecl fields <- Map.elems (progTypes program), (_, t) <- fields]
                 ++ concat [typeNames t | EnumDecl variants <- Map.elems (progTypes program), (_, fields) <- variants, (_, t) <- fields]
             )
+    argMap = Map.fromList [(instanceName base args, (base, args)) | ty <- allTypes, (base, args) <- namedArgs ty]
+    allTypes =
+        concat [map localType (Map.elems (fnLocals f)) | f <- functions]
+            ++ [t | f <- functions, Just t <- [fnReturns f]]
+            ++ [t | StructDecl fields <- Map.elems (progTypes program), (_, t) <- fields]
+            ++ [t | EnumDecl variants <- Map.elems (progTypes program), (_, fields) <- variants, (_, t) <- fields]
+    namedArgs ty = case ty of
+        TNamed base args -> (base, args) : concat [namedArgs t | ArgType t <- args]
+        TList t -> namedArgs t
+        TArrayOf t _ -> namedArgs t
+        TBox t -> namedArgs t
+        TAddr t -> namedArgs t
+        TBlock t -> namedArgs t
+        TUninit t -> namedArgs t
+        TRef t -> namedArgs t
+        TFn args ret -> concatMap namedArgs (ret : args)
+        _ -> []
     go types [] = types
     go types (name : rest) =
-        case (Map.member name types, instanceOf name) of
+        case (Map.member name types, Map.lookup name argMap) of
             (False, Just (base, args))
                 | Just (params, fields) <- maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program))
                 , Just fields0 <- instanceFields params args fields ->
@@ -297,7 +314,7 @@ completeInstancesWith erased program
         Call callee args _ _ -> callee : args
         _ -> []
     typeNames ty = case ty of
-        TNamed n -> [n]
+        TNamed base args -> [instanceName base args]
         TList t -> typeNames t
         TArrayOf t _ -> typeNames t
         TBox t -> typeNames t
@@ -362,7 +379,7 @@ layoutOf program = go (0 :: Int)
             -- (a Box is laid out as native code holds it: a StdBox, the address of what it holds, and for an array a StdList, MirLists)
             TBox TArrayOf{} -> (24, 8)
             TArray t n -> let (size, align) = go (depth + 1) t in (n * size, align)
-            TNamed n -> declared depth n
+            TNamed base args -> declared depth (instanceName base args)
             TVariant v -> maybe (8, 8) (declared depth) (ownerOf program v)
             TUninit t -> go (depth + 1) t
             TBlock _ -> (0, 1)

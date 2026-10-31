@@ -1,6 +1,7 @@
 module TestMirData (testMirData) where
 
 import Data.Char (isAscii)
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 
 import Cli (Command (..), runSource)
@@ -35,6 +36,10 @@ testMirData =
                                 then Nothing
                                 else Just text
                     Error e -> Just e
+            , testCase "a named type writes its arguments" $
+                case runSource MirText "struct Pair<T> { a: T, b: T }; p = Pair<Int> { a: 1, b: 2 }; return p.a;" of
+                    Ok text | any ("named \"Pair\" 1 type int" `isInfixOf`) (lines text) -> Nothing
+                    other -> Just ("not the data of a generic instance: " ++ show other)
             , testCase "a name of any bytes is ASCII and comes back" (names roundTripsNames)
             , testCase "the validator's part is not data" $
                 case ownedSource "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; return f(2);" of
@@ -86,7 +91,7 @@ names program =
 roundTripsNames :: Program
 roundTripsNames =
     Program
-        { progTypes = Map.fromList [(oddName, StructDecl [(oddName, TNamed oddName)])]
+        { progTypes = Map.fromList [(oddName, StructDecl [(oddName, TNamed oddName [])])]
         , progFunctions = Map.fromList [(oddName, fn oddName)]
         , progMain = fn "main"
         , progGenerics = Map.empty

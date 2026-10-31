@@ -459,11 +459,10 @@ typeSteps types invariants fn local@(M.Local number) b0 = do
     facts (TArrayOf _ (SizeParam name)) b = sizedByParam name b
     facts (TBox (TArrayOf _ (SizeParam name))) b = sizedByParam name b
     facts (TBox inner) b = facts inner b
-    facts (TNamed name) b = do
-        let base = maybe name fst (instanceOf name)
-            clauses = Map.findWithDefault [] base invariants
+    facts (TNamed base args) b = do
+        let clauses = Map.findWithDefault [] base invariants
         if null clauses then Just ([], b) else do
-            case instanceOf name of Just _ -> Nothing; Nothing -> Just ()
+            case args of [] -> Just (); _ -> Nothing
             fields <- case Map.lookup base types of Just (M.StructDecl fs) -> Just (map fst fs); _ -> Nothing
             (projections, env, b1) <- foldM project ([], Map.empty, b) fields
             (assumptions, b2) <- contractSteps True env clauses b1
@@ -603,10 +602,10 @@ block types invariants functions allowCalls fn (blockId@(M.BlockId n), M.BasicBl
             pure (steps ++ [save leftLocal left, save rightLocal right] ++ more ++ typeFacts, b6,
                   Map.insert dest (r, localRef leftLocal, localRef rightLocal) conditions)
         M.Assign dest (M.MakeData name fields) -> do
-            let base = maybe name fst (instanceOf name)
+            let base = baseNameOf name
                 clauses = Map.findWithDefault [] base invariants
-            case instanceOf name of
-                Just _ | not (null clauses) -> Nothing
+            case () of
+                _ | '<' `elem` name && not (null clauses) -> Nothing
                 _ -> Just ()
             (checks, b1) <- contractSteps False (Map.fromList fields) clauses b
             (more, b2) <- statement s b1

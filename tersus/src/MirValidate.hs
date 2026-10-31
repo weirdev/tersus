@@ -258,7 +258,7 @@ branchFacts st cond branch = FApp eqProof [cond, CTerm (VBool branch)] : relatio
     variant = case cond of
         ATerm iota ->
             concat
-                [ if branch then constructedFacts st name value else lastVariant name value
+                [ if branch then constructedFacts st name [] value else lastVariant name value
                 | FApp eq [ATerm lhs, FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is name)) _)) [value]] <- psFacts st
                 , eq == eqProof
                 , lhs == iota
@@ -267,7 +267,7 @@ branchFacts st cond branch = FApp eqProof [cond, CTerm (VBool branch)] : relatio
     lastVariant name value =
         let ruledOut = name : [w | FApp eq [ATerm c, FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is w)) _)) [v]] <- psFacts st, eq == eqProof, v == value, FApp eqProof [ATerm c, CTerm (VBool False)] `elem` psFacts st]
          in case [v | v <- enumVariants st name, v `notElem` ruledOut] of
-                [left] -> FApp eqProof [FApp (CTerm (builtinFunct (Is left))) [value], CTerm (VBool True)] : constructedFacts st left value
+                [left] -> FApp eqProof [FApp (CTerm (builtinFunct (Is left))) [value], CTerm (VBool True)] : constructedFacts st left [] value
                 _ -> []
     relation = case cond of
         ATerm iota ->
@@ -367,7 +367,7 @@ assign st dest rv =
                 terms <- mapM (operandTerm st) operands
                 -- (a struct that is made has to meet its invariant)
                 case builtin of
-                    Ctor name fields -> checkInvariant st name (zip fields terms)
+                    Ctor name _ fields -> checkInvariant st name (zip fields terms)
                     _ -> return ()
                 result <- fresh
                 st' <- applyCall st (builtinInfo builtin) terms result []
@@ -378,7 +378,7 @@ assign st dest rv =
 -- The invariant of the struct that a type is, or that a Box of the type holds, as facts about a value of the type
 typeInvariants :: PState -> Type -> IotaProof -> [IotaProof]
 typeInvariants st ty value = case ty of
-    TNamed name -> invariantFacts st name value
+    TNamed base args -> invariantFacts st (instanceName base args) value
     TBox inner -> typeInvariants st inner value
     _ -> []
 
@@ -406,7 +406,7 @@ withTypeFacts fn l st =
         _ -> st
   where
     structFacts ty value = case ty of
-        TNamed name | Just (M.StructDecl _) <- Map.lookup name (M.progTypes (psProgram st)) -> constructedFacts st name value
+        TNamed base args | Just (M.StructDecl _) <- Map.lookup (instanceName base args) (M.progTypes (psProgram st)) -> constructedFacts st (instanceName base args) args value
         TRef t -> structFacts t value
         _ -> []
     sized n iota = addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], CTerm (VInt n)]]
@@ -440,9 +440,9 @@ checkFromListSize cx st dest src = do
 
 -- A value of a struct or a variant is that constructor applied to the fields of the value (which, with congruence, makes two
 -- values whose fields are equal equal)
-constructedFacts :: PState -> Name -> IotaProof -> [IotaProof]
-constructedFacts st ctor value = case fieldsOf of
-    Just fields -> [FApp eqProof [value, FApp (CTerm (builtinFunct (Ctor ctor fields))) [FApp (CTerm (builtinFunct (Field Nothing f))) [value] | f <- fields]]]
+constructedFacts :: PState -> Name -> [Arg] -> IotaProof -> [IotaProof]
+constructedFacts st ctor ctorArgs value = case fieldsOf of
+    Just fields -> [FApp eqProof [value, FApp (CTerm (builtinFunct (Ctor ctor ctorArgs fields))) [FApp (CTerm (builtinFunct (Field Nothing f))) [value] | f <- fields]]]
     Nothing -> []
   where
     types = M.progTypes (psProgram st)
