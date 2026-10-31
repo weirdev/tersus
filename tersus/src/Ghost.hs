@@ -150,7 +150,7 @@ rvalueCall rv =
     case rv of
         M.BinaryOp op a b -> Just (binary op, [a, b])
         M.ListOp op os -> Just (list op, os)
-        M.MakeData name fields -> Just (Ctor name (map fst fields), map snd fields)
+        M.MakeData name fields -> Just (Ctor name [] (map fst fields), map snd fields)
         M.ReadField o _ field -> Just (Field Nothing field, [o])
         M.IsVariant o name -> Just (Is name, [o])
         M.AsVariant o name -> Just (Cast name, [o])
@@ -609,7 +609,7 @@ exportFacts checked bindings inputs outputs = do
 -- What every value of a struct meets, if it says: the struct is the one the name is of, or an instance of it
 invariantOf :: PState -> Name -> Maybe (Name, [ValidationStatement])
 invariantOf st name =
-    let base = maybe name fst (instanceOf name)
+    let base = baseNameOf name
      in (,) base <$> Map.lookup base (M.progInvariants (psProgram st))
 
 -- The names of the fields of a struct

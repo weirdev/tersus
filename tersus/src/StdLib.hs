@@ -272,7 +272,7 @@ builtinFunct NewBox = VFunct ["value"] [] [] (BuiltinFunct NewBox) []
 builtinFunct UnBox = VFunct ["box"] [] [] (BuiltinFunct UnBox) []
 -- clone(x) is x: a copy has the value of what it copies
 builtinFunct CloneOf = VFunct ["value"] [] [] (BuiltinFunct CloneOf) []
-builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
+builtinFunct (Ctor name args fields) = VFunct fields [] [] (BuiltinFunct (Ctor name args fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []
 -- A cast demands the proof that the value is the variant, and does nothing when it runs
@@ -582,7 +582,7 @@ evalBuiltinFunct UnBox [value] = Ok value
 evalBuiltinFunct UnBox _ = Error "Box::unbox takes one Box"
 evalBuiltinFunct CloneOf [value] = Ok value
 evalBuiltinFunct CloneOf _ = Error "clone takes one value"
-evalBuiltinFunct (Ctor name fields) args
+evalBuiltinFunct (Ctor name _ fields) args
     | length fields == length args = Ok $ VData name (zip fields args)
     | otherwise = Error ("Struct " ++ name ++ " takes " ++ show (length fields) ++ " fields, got " ++ show (length args))
 evalBuiltinFunct (Field owner field) [VData name fields]

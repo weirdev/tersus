@@ -10,7 +10,7 @@ import qualified Data.Set as Set
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Arg (..), Size (..), Type (..), instanceName, instanceOf)
+import TersusTypes (Arg (..), Size (..), Type (..), instanceName)
 import Utils
 
 -- Permissions (`Block<T>`, POINTERS.md) are ghost values: the validator has them, and the program that runs does not. This pass takes them
@@ -50,7 +50,7 @@ ghostType program = go (0 :: Int)
         | depth > 16 = False
         | otherwise = case ty of
             TBlock _ -> True
-            TNamed n -> case Map.lookup n (progTypes program) of
+            TNamed base args -> case Map.lookup (instanceName base args) (progTypes program) of
                 Just (StructDecl fields@(_ : _)) -> all (go (depth + 1) . snd) fields
                 _ -> False
             _ -> False
@@ -153,9 +153,7 @@ checkCasts program = case concatMap castsOf (progMain program : Map.elems (progF
                 TAddr t -> go (depth + 1) t
                 TBlock t -> go (depth + 1) t
                 TUninit t -> go (depth + 1) t
-                TNamed n -> case instanceOf n of
-                    Just (_, args) -> and [go (depth + 1) t | ArgType t <- args] && and [False | ArgSize s <- args, not (constSize s)]
-                    Nothing -> fieldsKnown depth n
+                TNamed base args -> and [go (depth + 1) t | ArgType t <- args] && and [False | ArgSize s <- args, not (constSize s)] && (not (null args) || fieldsKnown depth (instanceName base args))
                 _ -> True
         fieldsKnown depth n = case Map.lookup n (progTypes program) of
             Just (StructDecl fields) -> all (go (depth + 1) . snd) fields
@@ -220,9 +218,21 @@ withoutUninit program =
         CArray cs -> CArray (map constant cs)
         CData n fields -> CData (name n) [(f, constant v) | (f, v) <- fields]
         _ -> c
-    name n = case instanceOf n of
-        Just (base, args) -> instanceName base (map arg args)
-        Nothing -> n
+    name n = Map.findWithDefault n n renames
+    renames = Map.fromList [(instanceName base args, instanceName base (map arg args)) | ty <- allTypes, (base, args) <- namedSubs ty]
+    allTypes = [localType d | fn <- progMain program : Map.elems (progFunctions program), d <- Map.elems (fnLocals fn)] ++ [t | fn <- progMain program : Map.elems (progFunctions program), Just t <- [fnReturns fn]] ++ [t | StructDecl fields <- Map.elems (progTypes program), (_, t) <- fields] ++ [t | EnumDecl variants <- Map.elems (progTypes program), (_, fields) <- variants, (_, t) <- fields] ++ [t | (_, fields) <- Map.elems (progGenerics program), (_, t) <- fields]
+    namedSubs ty = case ty of
+        TNamed base args -> (base, args) : concat [namedSubs u | ArgType u <- args]
+        TList u -> namedSubs u
+        TArrayOf u _ -> namedSubs u
+        TBox u -> namedSubs u
+        TAddr u -> namedSubs u
+        TBlock u -> namedSubs u
+        TUninit u -> namedSubs u
+        TRef u -> namedSubs u
+        TFn as r -> concatMap namedSubs (r : as)
+        TForall _ _ u -> namedSubs u
+        _ -> []
     arg a = case a of
         ArgType t -> ArgType (plain t)
         _ -> a
@@ -239,6 +249,6 @@ plain ty = case ty of
     TRef t -> TRef (plain t)
     TFn args ret -> TFn (map plain args) (plain ret)
     TForall sizes types t -> TForall sizes types (plain t)
-    TNamed n | Just (base, args) <- instanceOf n -> TNamed (instanceName base [case a of ArgType t -> ArgType (plain t); _ -> a | a <- args])
+    TNamed base args -> TNamed base [case a of ArgType t -> ArgType (plain t); _ -> a | a <- args]
     _ -> ty
 

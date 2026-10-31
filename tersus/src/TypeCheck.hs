@@ -19,6 +19,8 @@ module TypeCheck
     , arrayElement
     , checkBuiltinCall
     , checkConstruct
+    , ensureInstance
+    , solveInstanceArgs
     , readField
     , typeCtors
     , ctorInfo
@@ -36,7 +38,7 @@ module TypeCheck
 import Control.Monad (forM, forM_, unless, void, when)
 import qualified Data.Map as Map
 import Data.Map (Map)
-import Data.List (intercalate, (\\))
+import Data.List (intercalate, isInfixOf, (\\))
 import Data.Maybe (isJust)
 import qualified Data.Set as Set
 
@@ -82,7 +84,7 @@ data TcState = TcState
     , tcCurrent :: Maybe Variable -- the function being checked, which may call itself
     , tcTraitParams :: Map Name [Variable] -- the types of each trait that has any (`trait Sequence<E>`)
     , tcTraitSelf :: Maybe [TraitFn] -- the functions of the trait being checked, which a contract of it may call on a value of type Self
-    , tcImplArgs :: Map (Name, Name) (Name, [Arg]) -- for a trait and a type that implements it, the name of the impl's type (`Vec<'T>`) and the types it gives the trait
+    , tcImplArgs :: Map (Name, Name) (Type, [Arg]) -- for a trait and a type that implements it, the impl's type (`Vec<T>`) and the types it gives the trait
     , tcTemplates :: Map Name Template -- the functions with bounds on their types, each checked for the types it is called with
     , tcInstances :: Map Name Type -- the functions that a template has been made into so far, with their types
     , tcEmitted :: [Statement] -- the instances made since the last statement of the program, which come before it
@@ -186,7 +188,7 @@ zonk (TList t) = TList <$> zonk t
 zonk (TArrayOf t size) = TArrayOf <$> zonk t <*> zonkSize size
 zonk (TForall sizes types t) = TForall sizes types <$> zonk t
 -- (the sizes of an instance of a struct with sizes are in its name)
-zonk (TNamed name) | Just (base, args) <- instanceOf name = (\args' -> TNamed (instanceName base args')) <$> mapM zonkArg args
+zonk (TNamed base args) = TNamed base <$> mapM zonkArg args
   where
     zonkArg (ArgSize size) = ArgSize <$> zonkSize size
     zonkArg (ArgType t) = ArgType <$> zonk t
@@ -212,7 +214,7 @@ occurs n (TBox t) = occurs n t
 occurs n (TAddr t) = occurs n t
 occurs n (TUninit t) = occurs n t
 occurs n (TBlock t) = occurs n t
-occurs n (TNamed name) | Just (_, args) <- instanceOf name = or [occurs n t | ArgType t <- args]
+occurs n (TNamed _ args) = or [occurs n t | ArgType t <- args]
 occurs n (TRef t) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
@@ -230,16 +232,14 @@ unify a b = do
         (TByte, TByte) -> return True
         (TBool, TBool) -> return True
         (TWord s n, TWord t m) -> return (s == t && n == m)
-        (TNamed x, TNamed y)
-            | x == y -> return True
-            -- two instances of one struct with sizes are the same type if their sizes are
-            | Just (b, xs) <- instanceOf x, Just (c, ys) <- instanceOf y, b == c, length xs == length ys -> allM (uncurry unifyArg) (zip xs ys)
+        (TNamed bx xs, TNamed by ys)
+            | bx == by, length xs == length ys -> allM (uncurry unifyArg) (zip xs ys)
             | otherwise -> return False
         (TVariant x, TVariant y) -> return (x == y)
         -- a value read as one variant is still a value of its enum
         -- (only one way: a Circle is a Shape, but a Shape is not a Circle)
-        (TNamed t, TVariant v) -> variantOf t v
-        (TVariant _, TNamed _) -> return False
+        (TNamed base args, TVariant v) -> variantOf (instanceName base args) v
+        (TVariant _, TNamed _ _) -> return False
         (TList x, TList y) -> unify x y
         (TArrayOf x n, TArrayOf y m) -> unifySize n m >>= \same -> if same then unify x y else return False
         (TBox x, TBox y) -> unify x y
@@ -363,12 +363,13 @@ assignVar _ env var t =
 -- Structs
 
 -- A struct with sizes and types is a struct for each list of them (Packet<4>, Vec<Int, 3>), which is declared the first time it is looked at
-ensureInstance :: Name -> TC ()
-ensureInstance name = do
+ensureInstance :: Type -> TC ()
+ensureInstance (TNamed base args) = do
     s <- getState
-    unless (Map.member name (tcCtors s)) $
-        case instanceOf name of
-            Just (base, args) | Just (params, fields) <- maybe (tupleGeneric base) Just (Map.lookup base (tcGenerics s)) -> do
+    let name = instanceName base args
+    unless (Map.member name (tcCtors s) || null args) $
+        case maybe (tupleGeneric base) Just (Map.lookup base (tcGenerics s)) of
+            Just (params, fields) -> do
                 when (length args /= length params) $
                     failTc ("Type error: " ++ base ++ " has " ++ show (length params) ++ " parameters (" ++ intercalate ", " params ++ "), got " ++ show (length args))
                 when (ArgSize SizeAny `elem` args) $
@@ -380,21 +381,21 @@ ensureInstance name = do
                     Just fields' -> do
                         s' <- getState
                         putState s'{tcTypes = Map.insert name [name] (tcTypes s'), tcCtors = Map.insert name (name, fields') (tcCtors s')}
-            _ -> return ()
+            Nothing -> return ()
   where
     -- (a size can come to be an Int, as the size of a function that is given the struct, so it has to fit in one; a type is a type of value)
     argKnown (_, ArgSize size) = case size of
         SizeParam _ -> sizeInScope size
-        SizeConst c | not (inIntRange c) -> failTc ("Type error: the size " ++ show c ++ " in " ++ name ++ " is more than an Int can hold (an Int is 64 bits)")
+        SizeConst c | not (inIntRange c) -> failTc ("Type error: the size " ++ show c ++ " in " ++ instanceName base args ++ " is more than an Int can hold (an Int is 64 bits)")
         _ -> return ()
     argKnown (p, ArgType ty) = do
         ty' <- zonk ty
-        when (hasFunction ty') $ failTc ("Type error: the type " ++ p ++ " of " ++ name ++ " would be " ++ renderType ty' ++ ", and a type parameter is not a function")
+        when (hasFunction ty') $ failTc ("Type error: the type " ++ p ++ " of " ++ instanceName base args ++ " would be " ++ renderType ty' ++ ", and a type parameter is not a function")
         checkType ty'
+ensureInstance _ = return ()
 
 ctorInfo :: Name -> TC (Name, [(Variable, Type)])
 ctorInfo name = do
-    ensureInstance name
     s <- getState
     case Map.lookup name (tcCtors s) of
         Just info -> return info
@@ -403,7 +404,6 @@ ctorInfo name = do
 -- The constructors of a type
 typeCtors :: Name -> TC [Name]
 typeCtors name = do
-    ensureInstance name
     s <- getState
     case Map.lookup name (tcTypes s) of
         Just ctors -> return ctors
@@ -411,21 +411,78 @@ typeCtors name = do
             Just (params, _) -> failTc ("Type error: " ++ name ++ " has parameters <" ++ intercalate ", " params ++ ">, which a type gives, as in " ++ name ++ "<" ++ intercalate ", " params ++ ">")
             Nothing -> failTc ("Type error: unknown type " ++ name)
 
--- A struct built from values for its fields, which are given in declaration order
-checkConstruct :: Name -> [Variable] -> [Type] -> TC Type
--- (a tuple is the instance of its struct for the types of its parts)
-checkConstruct name fields argTys | Just _ <- tupleGeneric name = do
-    let ty = tupleType argTys
-    case ty of
-        TNamed instanceName' -> checkConstruct instanceName' fields argTys
-        _ -> return ty
-checkConstruct name fields argTys = do
-    (typeName, declared) <- ctorInfo name
+-- The arguments a generic struct is given, worked out by matching its declared field types against the types at hand
+solveInstanceArgs :: [Variable] -> [(Variable, Type)] -> [Type] -> [Arg]
+solveInstanceArgs params template actuals =
+    let (sizeBindings, typeBindings) = foldl collect ([], []) (zip (map snd template) actuals)
+     in [if isTypeName param then ArgType (maybe (TParam param) id (lookup param typeBindings)) else ArgSize (maybe (SizeParam param) id (lookup param sizeBindings)) | param <- params]
+  where
+    collect bindings (pattern, actual) = matchType bindings pattern actual
+    matchType bindings (TParam param) actual = (fst bindings, (param, actual) : snd bindings)
+    matchType bindings (TList a) (TList b) = matchType bindings a b
+    matchType bindings (TBox a) (TBox b) = matchType bindings a b
+    matchType bindings (TAddr a) (TAddr b) = matchType bindings a b
+    matchType bindings (TUninit a) (TUninit b) = matchType bindings a b
+    matchType bindings (TBlock a) (TBlock b) = matchType bindings a b
+    matchType bindings (TRef a) b = matchType bindings a b
+    matchType bindings a (TRef b) = matchType bindings a b
+    matchType bindings (TArrayOf a size) (TArrayOf b actualSize) =
+        let bindings' = matchType bindings a b
+         in case size of SizeParam param -> ( (param, actualSize) : fst bindings', snd bindings'); _ -> bindings'
+    matchType bindings (TNamed pb pa) (TNamed ab aa)
+        | pb == ab = foldl (\bs (x, y) -> matchArg bs x y) bindings (zip pa aa)
+    matchType bindings (TFn pa pr) (TFn aa ar) = foldl (\bs (x, y) -> matchType bs x y) bindings (zip (pr : pa) (ar : aa))
+    matchType bindings _ _ = bindings
+    matchArg bindings (ArgType x) (ArgType y) = matchType bindings x y
+    matchArg bindings (ArgSize (SizeParam param)) (ArgSize s) = ((param, s) : fst bindings, snd bindings)
+    matchArg bindings _ _ = bindings
+
+-- The instance type a constructor with these argument types builds, by unifying its declared fields with them
+instanceTypeFor :: Name -> [Type] -> TC (Maybe Type)
+instanceTypeFor base argTys = do
+    s <- getState
+    case Map.lookup base (tcGenerics s) of
+        Nothing -> return Nothing
+        Just (params, template) -> do
+            vars <- mapM (\param -> if isTypeName param then Right <$> freshVar else Left <$> freshSize) params
+            let sizes = [(param, size) | (param, Left size) <- zip params vars]
+                types = [(param, ty) | (param, Right ty) <- zip params vars]
+            mapM_ (uncurry unify) (zip [substitute sizes types fieldTy | (_, fieldTy) <- template] argTys)
+            args <- mapM (\v -> case v of Left size -> ArgSize <$> zonkSize size; Right ty -> ArgType <$> zonk ty) vars
+            return (Just (TNamed base args))
+
+-- The type of a constructor's value, from its owner name and its declared (already instantiated) fields
+ctorResultType :: Name -> [(Variable, Type)] -> TC Type
+ctorResultType typeName declared = do
+    let base = baseNameOf typeName
+    s <- getState
+    case tupleGeneric base of
+        Just _ -> return (tupleType (map snd declared))
+        Nothing -> case Map.lookup base (tcGenerics s) of
+            Just (params, template) -> return (TNamed base (solveInstanceArgs params template (map snd declared)))
+            Nothing -> return (TNamed typeName [])
+
+-- A struct built from values for its fields, which are given in declaration order. The type is the instance the
+-- literal names, with its arguments structural from the parser, so a size or type that no field value decides
+-- (`P<2> { body: #[5] }`, `B<Int> { data: Array::empty() }`) is still the one that was written.
+checkConstruct :: Type -> [Variable] -> [Type] -> TC Type
+checkConstruct ty0 fields argTys0 = do
+    argTys <- mapM zonk argTys0
+    ty <- case ty0 of
+        TNamed base _
+            | Just _ <- tupleGeneric base -> return (tupleType argTys)
+            | "::" `isInfixOf` base -> do (owner, _) <- ctorInfo base; return (TNamed owner [])
+        TNamed base [] -> maybe ty0 id <$> instanceTypeFor base argTys
+        _ -> return ty0
+    ensureInstance ty
+    let name = case ty of TNamed b a -> instanceName b a; _ -> ""
+        ctorName = case ty0 of TNamed base _ | "::" `isInfixOf` base -> base; _ -> name
+    (_, declared) <- ctorInfo ctorName
     if map fst declared /= fields || length fields /= length argTys
-        then failTc ("Type error: " ++ name ++ " is built with the wrong fields")
+        then failTc ("Type error: " ++ ctorName ++ " is built with the wrong fields")
         else do
-            mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) fieldTy argTy) (zip declared argTys)
-            return (TNamed typeName)
+            mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ ctorName) fieldTy argTy) (zip declared argTys)
+            return ty
 
 -- Reading a field; the base of an update must be the struct being built
 readField :: Maybe Name -> Variable -> Type -> TC Type
@@ -433,7 +490,7 @@ readField owner field structTy = do
     -- (a Box is looked into for the base of an update as for a field)
     held <- zonk structTy >>= \t -> return (case t of TBox inner -> inner; _ -> t)
     case owner of
-        Just name -> expect ("base of an update of " ++ name) (TNamed name) held
+        Just name -> do h <- zonk held; unless (namedMatches h name) $ expect ("base of an update of " ++ name) (TNamed name []) held
         Nothing -> return ()
     fieldType field structTy
 
@@ -454,7 +511,7 @@ derefOwner :: Type -> TC Name
 derefOwner ty = do
     t <- zonk ty
     case t of
-        TNamed name -> return (maybe name fst (instanceOf name))
+        TNamed base _ -> return base
         TVariant variant -> fst <$> ctorInfo variant
         other -> failTc ("Type error: " ++ renderType other ++ " has no Deref impl")
 
@@ -497,8 +554,10 @@ fieldType field structTy = do
     case t of
         -- (a Box has the fields of what it holds)
         TBox inner -> fieldType field inner
-        TNamed "Self" -> failTc ("Type error: a trait does not know the fields of Self, so field " ++ field ++ " cannot be read from it")
-        TNamed name -> do
+        TNamed "Self" _ -> failTc ("Type error: a trait does not know the fields of Self, so field " ++ field ++ " cannot be read from it")
+        TNamed base args -> do
+            let name = instanceName base args
+            ensureInstance (TNamed base args)
             ctors <- typeCtors name
             case ctors of
                 [ctor] -> do
@@ -536,7 +595,7 @@ selfExpands name ty = case ty of
     TRef t -> selfExpands name t
     TArrayOf t _ -> selfExpands name t
     TFn args ret -> any (selfExpands name) (ret : args)
-    TNamed n | Just (base, args) <- instanceOf n -> (base == name && any grows args) || or [selfExpands name t | ArgType t <- args]
+    TNamed base args -> (base == name && any grows args) || or [selfExpands name t | ArgType t <- args]
     _ -> False
   where
     grows (ArgType t) = case t of
@@ -580,7 +639,7 @@ checkFinite root variants = do
     s <- getState
     let ownerOf v = fst <$> Map.lookup v (tcCtors s)
         holds ty = case ty of
-            TNamed n -> n == root || fmap fst (instanceOf n) == Just root
+            TNamed base _ -> base == root
             TVariant v -> ownerOf v == Just root
             TArrayOf t _ -> holds t
             _ -> False
@@ -594,7 +653,7 @@ unref t = t
 
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
-checkType (TNamed name) = () <$ typeCtors name
+checkType ty@(TNamed base args) = ensureInstance ty >> (() <$ typeCtors (instanceName base args))
 checkType (TVariant name) = () <$ ctorInfo name
 checkType (TList t) = noGhostIn "a list" t >> checkType t
 -- (a Box holds any type that has a size; the one place an array of no size can be is behind it)
@@ -636,17 +695,18 @@ holdsGhost ty0 = fst <$> go Set.empty ty0
             TList t -> go seen t
             TBox t -> go seen t
             TArrayOf t _ -> go seen t
-            TNamed "Self" -> return (False, seen)
-            TNamed n
-                | Set.member n seen -> return (False, seen)
+            TNamed "Self" _ -> return (False, seen)
+            TNamed base args
+                | Set.member (instanceName base args) seen -> return (False, seen)
                 | otherwise -> do
                   linear <- tcLinear <$> getState
                   drops <- tcDrops <$> getState
                   -- (a type with a drop is used by its drop, wherever it goes out of scope: it is not linear, whatever it holds)
-                  if Set.member (maybe n fst (instanceOf n)) drops then return (False, seen) else
-                   if Set.member (maybe n fst (instanceOf n)) linear then return (True, seen) else do
+                  let n = instanceName base args
+                  if Set.member base drops then return (False, seen) else
+                   if Set.member base linear then return (True, seen) else do
                     s0 <- getState
-                    when (isJust (instanceOf n) && Map.notMember n (tcCtors s0)) (ensureInstance n)
+                    when (not (null args) && Map.notMember n (tcCtors s0)) (ensureInstance (TNamed base args))
                     s <- getState
                     let fields = concat [fs | c <- Map.findWithDefault [] n (tcTypes s), Just (_, fs) <- [Map.lookup c (tcCtors s)]]
                     anyOf (Set.insert n seen) (map snd fields)
@@ -673,11 +733,12 @@ ownsHeap = go Set.empty
             TBox _ -> return True
             TArrayOf t _ -> go seen t
             TUninit t -> go seen t
-            TNamed n | Set.member n seen -> return False
-            TNamed "Self" -> return False
-            TNamed n -> do
+            TNamed base args | Set.member (instanceName base args) seen -> return False
+            TNamed "Self" _ -> return False
+            TNamed base args -> do
+                let n = instanceName base args
                 s0 <- getState
-                when (isJust (instanceOf n) && Map.notMember n (tcCtors s0)) (ensureInstance n)
+                when (not (null args) && Map.notMember n (tcCtors s0)) (ensureInstance (TNamed base args))
                 s <- getState
                 let fields = concat [fs | c <- Map.findWithDefault [] n (tcTypes s), Just (_, fs) <- [Map.lookup c (tcCtors s)]]
                 or <$> mapM (go (Set.insert n seen) . snd) fields
@@ -748,17 +809,23 @@ builtinType funct =
         Rel NotEq -> list (\a -> TFn [a, a] TBool)
         Rel _ -> return (TFn [TInt, TInt] TBool)
         Within -> list (\a -> TFn [a, a] TBool)
-        Ctor name fields -> do
+        Ctor name ctorArgs fields -> do
+            let ty0 = TNamed (baseNameOf name) ctorArgs
+            when (not ("::" `isInfixOf` name)) $ ensureInstance ty0
             (typeName, declared) <- ctorInfo name
             if map fst declared == fields
-                then return (TFn (map snd declared) (TNamed typeName))
+                then do
+                    resultTy <- case ctorArgs of
+                        [] -> ctorResultType typeName declared
+                        _ -> return ty0
+                    return (TFn (map snd declared) resultTy)
                 else failTc ("Type error: " ++ name ++ " is built with the wrong fields")
         Is variant -> do
             (typeName, _) <- ctorInfo variant
-            return (TFn [TNamed typeName] TBool)
+            return (TFn [TNamed typeName []] TBool)
         Cast variant -> do
             (typeName, _) <- ctorInfo variant
-            return (TFn [TNamed typeName] (TVariant variant))
+            return (TFn [TNamed typeName []] (TVariant variant))
         Project variant field -> projectType variant field
         Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
         -- addresses and permissions (POINTERS.md)
@@ -815,7 +882,7 @@ builtinType funct =
     projectType variant field = do
         (typeName, declared) <- ctorInfo variant
         case lookup field declared of
-            Just fieldTy -> return (TFn [TNamed typeName] fieldTy)
+            Just fieldTy -> return (TFn [TNamed typeName []] fieldTy)
             Nothing -> failTc ("Type error: " ++ variant ++ " has no field " ++ field)
 
 -- size, first, last, get and set work on an array as on a list: the same contracts, so a call is typed by the kind of its first
@@ -925,11 +992,10 @@ typeWords ty = do
     case t of
         TBox (TArrayOf _ SizeAny) -> return 2
         TArrayOf e (SizeConst n) -> (n *) <$> typeWords e
-        TNamed name -> ensureInstance name >> ofType name
+        ty@(TNamed base args) -> ensureInstance ty >> ofType (instanceName base args)
         TVariant variant -> do
-            ensureInstance variant
             case Map.lookup variant (tcCtors s) of
-                Just (owner, _) -> typeWords (TNamed owner)
+                Just (owner, _) -> typeWords (TNamed owner [])
                 Nothing -> return 1
         _ -> return 1
   where
@@ -1016,7 +1082,7 @@ builtinHead _ _ _ = Nothing
 valueType :: Value -> TC Type
 valueType (VInt _) = return TInt
 valueType (VBool _) = return TBool
-valueType (VData name _) = TNamed . fst <$> ctorInfo name
+valueType (VData name _) = do (typeName, declared) <- ctorInfo name; ctorResultType typeName declared
 valueType (VList elements) = do
     element <- freshVar
     types <- mapM valueType elements
@@ -1227,7 +1293,7 @@ resolveTermination ctx env (Just (Shrinks variant)) = do
     ty <- zonk ty''
     case ty of
         TInt -> return (Just (Counting variant''))
-        TNamed _ -> return (Just (Parts variant''))
+        TNamed _ _ -> return (Just (Parts variant''))
         TVariant _ -> return (Just (Parts variant''))
         TBox _ -> return (Just (Parts variant''))
         _ -> failTc ("Type error: shrinks needs an Int, an enum or a struct, got " ++ renderType ty)
@@ -1300,12 +1366,13 @@ inferExprR ctx env expr =
                                     return (t, expr)
             (t, struct'') <- go (structTy, struct')
             return (t, F funct [struct''])
-        F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
+        F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
             inferred0 <- mapM (inferExprR ctx env) args
             -- (a tuple's parts are what they are: it is made of their types)
-            declared <- if isJust (tupleGeneric name) then return [] else snd <$> ctorInfo name
+            unless (isJust (tupleGeneric (baseNameOf name))) $ ensureInstance (TNamed (baseNameOf name) ctorArgs)
+            declared <- if isJust (tupleGeneric (baseNameOf name)) then return [] else snd <$> ctorInfo name
             inferred <- if length declared == length inferred0 then mapM (uncurry coerce) (zip (map snd declared) inferred0) else return inferred0
-            t <- checkConstruct name fields (map fst inferred)
+            t <- checkConstruct (TNamed (baseNameOf name) ctorArgs) fields (map fst inferred)
             return (t, F funct (map snd inferred))
         -- Box::new(x): x held in a Box, which has its value
         F (Var "Box::new") args -> case args of
@@ -1375,7 +1442,7 @@ inferExprR ctx env expr =
             t <- zonk receiverTy
             s <- getState
             let owned = case t of
-                    TNamed name -> Map.member (maybe name fst (instanceOf name), "clone") (tcAssoc s)
+                    TNamed base _ -> Map.member (base, "clone") (tcAssoc s)
                     _ -> False
             if owned then methodCall "clone" args else cloneCall args
         F (Var ('.' : method)) (receiver : args) -> methodCall method (receiver : args)
@@ -1551,7 +1618,7 @@ ownerOfValue function ty = do
     t <- zonk ty
     case t of
         -- (a struct with types and sizes has the functions of its impl, whatever it is given)
-        TNamed name -> return (maybe name fst (instanceOf name))
+        TNamed base _ -> return base
         TList _ -> return "List"
         TVariant variant -> fst <$> ctorInfo variant
         TVar _ -> failTc ("Type error: the type of the value whose function " ++ function ++ " is called is not known yet; annotate it")
@@ -1579,7 +1646,7 @@ ownerThroughTrait trait functions function ats =
                 path = trait ++ "::" ++ function
             when (length ptys /= length ats) $
                 failTc ("Type error: " ++ path ++ " takes " ++ show (length ptys) ++ " arguments, got " ++ show (length ats))
-            case [i | (i, t) <- zip [0 :: Int ..] ptys, unref t == TNamed "Self"] of
+            case [i | (i, t) <- zip [0 :: Int ..] ptys, unref t == TNamed "Self" []] of
                 [] -> failTc ("Type error: " ++ path ++ " has no Self parameter to tell the type by: call it on the type, as in Type::" ++ function ++ "(...)")
                 i : _ -> do
                     -- (through a trait an array and a Box of one have the impls written for them, as a list does; called as a
@@ -1617,8 +1684,8 @@ substTraitArgs params args = substitute [] [(p, t) | (p, ArgType t) <- zip param
 -- Self as a type: the type an impl is for, which is a list for an impl for one (`impl<T> Sequence<T> for List<T>`, lib/prelude.tersus)
 substSelfAs :: Name -> Type -> Type -> Type
 substSelfAs selfName selfType ty = case ty of
-    TNamed "Self" -> selfType
-    TNamed name | name == selfName -> selfType
+    TNamed "Self" _ -> selfType
+    TNamed base args | instanceName base args == selfName -> selfType
     TList t -> TList (go t)
     TArrayOf t size -> TArrayOf (go t) size
     TBox t -> TBox (go t)
@@ -1632,7 +1699,7 @@ substSelfAs selfName selfType ty = case ty of
     go = substSelfAs selfName selfType
 
 substSelf :: Name -> Type -> Type
-substSelf owner (TNamed "Self") = TNamed owner
+substSelf owner (TNamed "Self" _) = TNamed owner []
 substSelf owner (TList t) = TList (substSelf owner t)
 substSelf owner (TArrayOf t size) = TArrayOf (substSelf owner t) size
 substSelf owner (TBox t) = TBox (substSelf owner t)
@@ -1654,16 +1721,17 @@ substSelf _ t = t
 -- The validator checks it like any function, and what it proves is that the impl may be used wherever the trait is: the
 -- trait's input contract must give the impl's (the call is checked against the impl's input contract), and the impl's
 -- output contract must give the trait's (the return is checked against it).
-checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
-checkImpl ctx env trait traitArgs typeName selfName functions = do
+checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Type -> [Statement] -> TC (Ctx, Env, [Statement])
+checkImpl ctx env trait traitArgs typeName selfTypeInput functions = do
+    let selfName = case selfTypeInput of TNamed b a -> instanceName b a; other -> renderType other
     declared <- getState
     -- (a struct with parameters has them in the impl, `impl<T> Vec<T>`, and its type is a different one for each; a list is the one
     -- type with an impl that is not declared as a struct, and Self for it is a List of the type the impl names)
-    let selfType = case (typeName, instanceOf selfName) of
-            ("List", Just (_, [ArgType t])) -> TList t
-            ("Box", Just (_, [ArgType t])) -> TBox t
-            ("Array", Just (_, [ArgType t, ArgSize s])) -> TArrayOf t s
-            _ -> TNamed selfName
+    let selfType = case (typeName, selfTypeInput) of
+            ("List", TNamed _ [ArgType t]) -> TList t
+            ("Box", TNamed _ [ArgType t]) -> TBox t
+            ("Array", TNamed _ [ArgType t, ArgSize s]) -> TArrayOf t s
+            _ -> selfTypeInput
         asSelf = substSelfAs selfName selfType
         functions' = map (rewriteSignature asSelf) functions
     unless (typeName `elem` ["List", "Box", "Array"] || Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
@@ -1678,7 +1746,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
             when (length params /= length traitArgs) $
                 failTc ("Type error: trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">, which impl " ++ traitName ++ " for " ++ typeName ++ " gives " ++ show (length traitArgs))
             when (Set.member (traitName, typeName) (tcImpls s)) $ failTc ("Type error: " ++ typeName ++ " already implements " ++ traitName)
-            putState s{tcImpls = Set.insert (traitName, typeName) (tcImpls s), tcImplArgs = Map.insert (traitName, typeName) (selfName, traitArgs) (tcImplArgs s)}
+            putState s{tcImpls = Set.insert (traitName, typeName) (tcImpls s), tcImplArgs = Map.insert (traitName, typeName) (selfTypeInput, traitArgs) (tcImplArgs s)}
             when (traitName `elem` ["Clone", "Copy"] && null found && null params) $ checkMarkerImpl traitName typeName
             -- (a type with a drop is freed by it: it is not linear, and not copied, since each copy would be freed)
             when (traitName == "Drop") $ do
@@ -1690,7 +1758,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                 -- that holds memory never is, since the address of an allocation is not 0, so a type with a drop holds a permission)
                 holding <- case Map.lookup typeName (tcGenerics s') of
                     Just (_, fields) -> or <$> mapM (holdsGhost . snd) fields
-                    Nothing -> holdsGhost (TNamed typeName)
+                    Nothing -> holdsGhost (TNamed typeName [])
                 unless holding $ failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " holds no permission (Block<T>), and a drop is how a value frees the memory it holds; a value that has to be closed is a linear type, closed by a call")
                 putState s'{tcDrops = Set.insert typeName (tcDrops s')}
             return (found, params)
@@ -1781,9 +1849,9 @@ inferProofR ctx env proof =
                                     return (t, proof)
             (t, struct'') <- go (structTy, struct')
             return (t, FApp funct [struct''])
-        FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) args -> do
+        FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
             inferred <- mapM (inferProofR ctx env) args
-            t <- checkConstruct name fields (map fst inferred)
+            t <- checkConstruct (TNamed (baseNameOf name) ctorArgs) fields (map fst inferred)
             return (t, FApp funct (map snd inferred))
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct NewArray) _)) [n, x] -> do
             (nt, n') <- inferProofR ctx env n
@@ -2030,7 +2098,7 @@ structOwner :: Type -> TC (Maybe Name)
 structOwner ty = do
     t <- zonk ty
     return $ case t of
-        TNamed name -> Just (maybe name fst (instanceOf name))
+        TNamed base _ -> Just base
         _ -> Nothing
 
 -- (a name in a proof is a variable of the program or the builtin of that name, as for an expression)
@@ -2079,7 +2147,7 @@ isExpanding scope ty = case ty of
         TArrayOf u _ -> usesParam u
         TFn args ret -> any usesParam (ret : args)
         -- (a struct that is given a type is made of it: Wrap<T>)
-        TNamed n | Just (_, args) <- instanceOf n -> or [usesParam u | ArgType u <- args]
+        TNamed _ args -> or [usesParam u | ArgType u <- args]
         _ -> False
 
 hasFunction :: Type -> Bool
@@ -2173,17 +2241,17 @@ implementsMarker trait = go (0 :: Int) False
                 TBlock _ -> return False
                 -- (an Uninit of a value that owns nothing is its bits, and is copied as they are; one of a value that owns something is linear)
                 TUninit e -> ownsHeap e >>= \owning -> if owning then return False else go (depth + 1) lenient e
-                TNamed "Self" -> return (trait == "Clone")
+                TNamed "Self" _ -> return (trait == "Clone")
                 -- (a tuple has what all of its parts have)
-                TNamed name | Just (base, args) <- instanceOf name, Just _ <- tupleGeneric base -> allM' [go (depth + 1) lenient t | ArgType t <- args]
-                TNamed name -> declared depth lenient name
+                TNamed base args | Just _ <- tupleGeneric base -> allM' [go (depth + 1) lenient t | ArgType t <- args]
+                TNamed base args -> declared depth lenient (instanceName base args)
                 TVariant variant -> ctorInfo variant >>= \(owner, _) -> declared depth lenient owner
                 _ -> return False
     allM' [] = return True
     allM' (m : ms) = m >>= \ok -> if ok then allM' ms else return False
     declared depth lenient name = do
         s <- getState
-        let base = maybe name fst (instanceOf name)
+        let base = baseNameOf name
         if not (Set.member (trait, base) (tcImpls s))
             then return False
             else
@@ -2217,7 +2285,7 @@ requireMarker trait ty = do
         ok <- implementsMarker trait e
         if ok then return t else zonk e >>= lacking
     describeOwner t = case t of
-        TNamed name -> maybe name fst (instanceOf name)
+        TNamed base _ -> base
         TVariant variant -> variant
         _ -> renderType t
 
@@ -2271,13 +2339,13 @@ traitArgumentsOf trait ty = do
         builtin elementType traits = Just [elementType | trait `elem` traits, arity == 1]
         own name args = case Map.lookup (trait, name) (tcImplArgs s) of
             Nothing -> Nothing
-            Just (selfName, given) -> case instanceOf selfName of
-                Just (_, selfArgs)
+            Just (selfType, given) -> case selfType of
+                TNamed _ selfArgs
                     | length selfArgs /= length args -> Nothing
                     | otherwise -> do
                         (sizesBound, typesBound) <- foldl collect (Just ([], [])) (zip selfArgs args)
                         return [substitute sizesBound typesBound t | ArgType t <- given]
-                Nothing -> Just [t | ArgType t <- given]
+                _ -> Just [t | ArgType t <- given]
           where
             collect Nothing _ = Nothing
             collect (Just (ss, ts)) (ArgSize (SizeParam p), ArgSize sz) = Just ((p, sz) : ss, ts)
@@ -2309,7 +2377,7 @@ traitArgumentsOf trait ty = do
         TBox (TArrayOf e _) -> case own "Box" [ArgType (TArrayOf e SizeAny)] of
             Just args -> return (Just args)
             Nothing -> return (builtin e ["Sequence"] >>= nonEmpty)
-        TNamed name -> return (maybe (own name []) (\(base, args) -> own base args) (instanceOf name))
+        TNamed base args -> return (own base args)
         TVariant variant -> (\(enum, _) -> own enum []) <$> ctorInfo variant
         _ -> return Nothing
   where
@@ -2348,7 +2416,7 @@ templateCall name template inferred = do
                     when (unknown t) $ failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " cannot be worked out from its arguments")
                     when (mentionsParameter t) $
                         failTc ("Type error: the type " ++ n ++ " of " ++ name ++ " would be " ++ renderType t ++ ", which is made of a type parameter of the function that calls: a function with bounds is made for types a call writes")
-                let instanceName' = name ++ "[" ++ intercalate ", " (map typeText concrete) ++ "]"
+                let instanceName' = name ++ "[" ++ intercalate ", " (map renderType concrete) ++ "]"
                 instances <- tcInstances <$> getState
                 active <- tcActive <$> getState
                 unless (Map.member instanceName' instances) $ do
@@ -2384,7 +2452,7 @@ templateCall name template inferred = do
         TAddr u -> unknown u
         TUninit u -> unknown u
         TBlock u -> unknown u
-        TNamed n | Just (_, args) <- instanceOf n -> or [unknown u | ArgType u <- args]
+        TNamed _ args -> or [unknown u | ArgType u <- args]
         TRef u -> unknown u
         TArrayOf u _ -> unknown u
         TFn args r -> any unknown (r : args)

@@ -9,7 +9,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Arg (..), Name, Size (..), Type (..), Variable, instanceOf, mentionsParameter, substitute)
+import TersusTypes (Arg (..), Name, Size (..), Type (..), Variable, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -36,7 +36,7 @@ monomorphize program
     withInstances p =
         let complete = completeErasedInstances p
          in complete{progTypes = Map.filterWithKey (\name _ -> not (symbolic name)) (progTypes complete)}
-    symbolic name = mentionsParameter (TNamed name)
+    symbolic name = maybe False mentionsParameter (Map.lookup name (namedTypesByName program))
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)
     unspecified f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
     isGhost s = case s of
@@ -54,18 +54,18 @@ monomorphize program
             keys = [key | n <- Map.keys (progTypes p), not (symbolic n), Just key <- [dropKey n], Map.notMember key done]
          in if null keys || k <= 0 then done else withDrops (build program keys done) (k - 1)
     dropKey n = do
-        (base, _) <- instanceOf n
+        base <- Just (takeWhile (/= '<') n)
         let name = "<" ++ base ++ " as Drop>::drop"
         f <- Map.lookup name (progFunctions program)
         self <- case fnParams f of
             p : _ -> Just p
             [] -> Nothing
         selfTy <- localType <$> Map.lookup self (fnLocals f)
-        let bindings = match selfTy (TNamed n)
+        let bindings = match selfTy (namedTypeOf program n)
         tys <- mapM (`lookup` bindings) (fnTypeParams f)
         Just (name, tys, [])
     dropName (name, _, _) f
-        | isDropFunction name, self : _ <- fnParams f, Just (TNamed n) <- localType <$> Map.lookup self (fnLocals f) = f{fnName = "<" ++ n ++ " as Drop>::drop"}
+        | isDropFunction name, self : _ <- fnParams f, Just (TNamed base args) <- localType <$> Map.lookup self (fnLocals f) = f{fnName = "<" ++ instanceName base args ++ " as Drop>::drop"}
         | otherwise = f
 
 -- The copies to make, with those that the copies need
@@ -82,14 +82,14 @@ build program (key@(name, tys, sizes) : rest) done
             let (copy, needs) = redirect program (instantiate generic tys sizes)
              in build program (rest ++ needs) (Map.insert key copy done)
 
-instanceName :: Name -> [Type] -> [Integer] -> Name
-instanceName name tys sizes = name ++ "<" ++ intercalate ", " (map renderType tys ++ map show sizes) ++ ">"
+fnInstanceName :: Name -> [Type] -> [Integer] -> Name
+fnInstanceName name tys sizes = name ++ "<" ++ intercalate ", " (map renderType tys ++ map show sizes) ++ ">"
 
 -- The function with its type and size parameters replaced by the types and the sizes
 instantiate :: Function -> [Type] -> [Integer] -> Function
 instantiate fn tys sizes =
     fn
-        { fnName = instanceName (fnName fn) tys sizes
+        { fnName = fnInstanceName (fnName fn) tys sizes
         , fnParams = keptParams
         , fnReturns = fmap types (fnReturns fn)
         , fnLocals = Map.map (\d -> d{localType = types (localType d)}) (Map.filterWithKey (\l _ -> l `notElem` sizeLocals) (fnLocals fn))
@@ -106,10 +106,22 @@ instantiate fn tys sizes =
     values = Map.fromList (zip sizeLocals sizes)
     pairs = zip (fnSizeParams fn) (map SizeConst sizes)
     types = substitute pairs (zip (fnTypeParams fn) tys)
-    -- (the name of a struct with sizes names them)
-    named name = case types (TNamed name) of
-        TNamed name' -> name'
-        _ -> name
+    -- (the name of a struct with sizes names them, from the types this function has)
+    named name = Map.findWithDefault name name renames
+      where
+        renames = Map.fromList [(instanceName b a, case types (TNamed b a) of TNamed b' a' -> instanceName b' a'; _ -> instanceName b a) | ty <- map localType (Map.elems (fnLocals fn)) ++ maybe [] (: []) (fnReturns fn), (b, a) <- namedSubs ty]
+        namedSubs ty = case ty of
+            TNamed b a -> (b, a) : concat [namedSubs u | ArgType u <- a]
+            TList u -> namedSubs u
+            TArrayOf u _ -> namedSubs u
+            TBox u -> namedSubs u
+            TAddr u -> namedSubs u
+            TBlock u -> namedSubs u
+            TUninit u -> namedSubs u
+            TRef u -> namedSubs u
+            TFn as r -> concatMap namedSubs (r : as)
+            TForall _ _ u -> namedSubs u
+            _ -> []
     constant c = case c of
         CData name fields -> CData (named name) [(f, constant v) | (f, v) <- fields]
         CList cs -> CList (map constant cs)
@@ -160,7 +172,7 @@ redirect program fn = (fn{fnBlocks = Map.fromList (map fst blocks)}, concatMap s
             , let (explicit, given) = splitAt (length args - length (fnSizeParams target)) args
             , Just sizes <- mapM constantSize given
             , let tys = typeArguments fn target explicit dest ->
-                (Call (Const (CFn (instanceName callee tys sizes))) explicit dest next, [(callee, tys, sizes)])
+                (Call (Const (CFn (fnInstanceName callee tys sizes))) explicit dest next, [(callee, tys, sizes)])
         _ -> (term, [])
     constantSize o = case o of
         Const (CInt c) -> Just c
@@ -187,7 +199,7 @@ typeArguments caller target args dest = [fromMaybe TInt (lookup t found) | t <- 
         CBool _ -> Just TBool
         -- (an empty array has the shape, and the element type that nothing decides is an Int, as it is everywhere)
         CArray cs -> Just (TArrayOf (firstKnown cs) (SizeConst (toInteger (length cs))))
-        CData name _ -> Just (TNamed name)
+        CData name _ -> Just (TNamed name [])
         _ -> Nothing
 
 -- What the type parameters of a type are, given the type it stands for
@@ -201,8 +213,8 @@ match pattern actual = case (pattern, actual) of
     (TRef p, a) -> match p a
     (p, TRef a) -> match p a
     (TArrayOf p _, TArrayOf a _) -> match p a
-    (TNamed p, TNamed a)
-        | Just (b, ps) <- instanceOf p, Just (c, as) <- instanceOf a, b == c, length ps == length as -> concat (zipWith matchArg ps as)
+    (TNamed bp ps, TNamed ba as)
+        | bp == ba, length ps == length as -> concat (zipWith matchArg ps as)
     (TFn ps p, TFn as a) -> concat (zipWith match (p : ps) (a : as))
     _ -> []
 
@@ -210,3 +222,24 @@ match pattern actual = case (pattern, actual) of
 matchArg :: Arg -> Arg -> [(Variable, Type)]
 matchArg (ArgType p) (ArgType a) = match p a
 matchArg _ _ = []
+
+-- The named types a program's functions and types mention, by rendered name
+namedTypesByName :: Program -> Map Name Type
+namedTypesByName program = Map.fromList [(instanceName b a, TNamed b a) | ty <- allTypes, (b, a) <- subs ty]
+  where
+    allTypes = [localType d | f <- progMain program : Map.elems (progFunctions program), d <- Map.elems (fnLocals f)] ++ [ty | f <- progMain program : Map.elems (progFunctions program), Just ty <- [fnReturns f]] ++ [ty | StructDecl fields <- Map.elems (progTypes program), (_, ty) <- fields] ++ [ty | EnumDecl variants <- Map.elems (progTypes program), (_, fields) <- variants, (_, ty) <- fields] ++ [ty | (_, fields) <- Map.elems (progGenerics program), (_, ty) <- fields]
+    subs ty = case ty of
+        TNamed b a -> (b, a) : concat [subs u | ArgType u <- a]
+        TList u -> subs u
+        TArrayOf u _ -> subs u
+        TBox u -> subs u
+        TAddr u -> subs u
+        TBlock u -> subs u
+        TUninit u -> subs u
+        TRef u -> subs u
+        TFn as r -> concatMap subs (r : as)
+        TForall _ _ u -> subs u
+        _ -> []
+
+namedTypeOf :: Program -> Name -> Type
+namedTypeOf program name = Map.findWithDefault (TNamed name []) name (namedTypesByName program)

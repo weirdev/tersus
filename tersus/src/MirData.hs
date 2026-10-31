@@ -8,7 +8,7 @@ import Control.Monad (replicateM)
 import qualified Data.Map.Strict as Map
 
 import Mir
-import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable)
+import TersusTypes (Arg (..), Name, Rel (..), Size (..), Type (..), Variable)
 import Utils
 
 -- The MIR of a program as text that a program can read (`tersus mir --data`): what native code is made from, and nothing else. It is the
@@ -32,7 +32,7 @@ import Utils
 --     return
 --     end
 --
--- The words of a type are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `fn N T... T`, `named "n"`, `variant "n"`, `var N`,
+-- The words of a type are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`,
 -- `forall N "n"... N "n"... T`, `param "n"` and `ref T`, and of a size `c N`, `any`, `p "n"` and `v N`. An operand is `copy L`, `move L` or
 -- `const C`, a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. The statements are
 -- `assign L RVALUE`, `peek L RVALUE` and `drop L`; the terminators `goto B`, `switch O B B`, `call O N O... L B`, `return` and `unreachable`.
@@ -112,12 +112,16 @@ typeTokens ty = case ty of
     TUninit t -> "uninit" : typeTokens t
     TBlock t -> "block" : typeTokens t
     TFn args ret -> ["fn", show (length args)] ++ concatMap typeTokens (args ++ [ret])
-    TNamed n -> ["named", quote n]
+    TNamed base args -> ["named", quote base, show (length args)] ++ concatMap argTokens args
     TVariant n -> ["variant", quote n]
     TVar i -> ["var", show i]
     TForall sizes types t -> ["forall", show (length sizes)] ++ map quote sizes ++ [show (length types)] ++ map quote types ++ typeTokens t
     TParam n -> ["param", quote n]
     TRef t -> "ref" : typeTokens t
+
+argTokens :: Arg -> [String]
+argTokens (ArgSize s) = "size" : sizeTokens s
+argTokens (ArgType ty) = "type" : typeTokens ty
 
 sizeTokens :: Size -> [String]
 sizeTokens s = case s of
@@ -307,7 +311,7 @@ typeP = word >>= \w -> case w of
     "addr" -> TAddr <$> typeP
     "block" -> TBlock <$> typeP
     "fn" -> int >>= \n -> replicateM n typeP >>= \args -> TFn args <$> typeP
-    "named" -> TNamed <$> name
+    "named" -> name >>= \base -> int >>= \n -> TNamed base <$> replicateM n argP
     "variant" -> TVariant <$> name
     "var" -> TVar <$> int
     "forall" -> do
@@ -317,6 +321,12 @@ typeP = word >>= \w -> case w of
     "param" -> TParam <$> name
     "ref" -> TRef <$> typeP
     _ -> failP ("not a type: " ++ w)
+
+argP :: P Arg
+argP = word >>= \w -> case w of
+    "size" -> ArgSize <$> sizeP
+    "type" -> ArgType <$> typeP
+    _ -> failP ("not an argument: " ++ w)
 
 sizeP :: P Size
 sizeP = word >>= \w -> case w of

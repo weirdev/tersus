@@ -239,7 +239,7 @@ assign st dest rv =
                 terms <- mapM (operandTerm st) operands
                 -- (a struct that is made has to meet its invariant)
                 case builtin of
-                    Ctor name fields -> checkInvariant st name (zip fields terms)
+                    Ctor name _ fields -> checkInvariant st name (zip fields terms)
                     _ -> return ()
                 result <- fresh
                 st' <- applyCall st (builtinInfo builtin) terms result
@@ -250,7 +250,7 @@ assign st dest rv =
 -- The invariant of the struct that a type is, or that a Box of the type holds, as facts about a value of the type
 typeInvariants :: PState -> Type -> IotaProof -> [IotaProof]
 typeInvariants st ty value = case ty of
-    TNamed name -> invariantFacts st name value
+    TNamed base args -> invariantFacts st (instanceName base args) value
     TBox inner -> typeInvariants st inner value
     _ -> []
 

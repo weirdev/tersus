@@ -523,7 +523,7 @@ selections table classes = reads ++ injectivity ++ casts
             (++)
             [ (rep classes termId, [(name, fields, args)])
             | (termId, (functId, args)) <- tableApps table
-            , Just (Ctor name fields) <- [Map.lookup (rep classes functId) builtinOfClass]
+            , Just (Ctor name _ fields) <- [Map.lookup (rep classes functId) builtinOfClass]
             , length fields == length args
             ]
 
@@ -578,7 +578,7 @@ evaluatedTerms table classes = variantTests ++ evaluated
             (++)
             [ (rep classes termId, [name])
             | (termId, (functId, _)) <- tableApps table
-            , Just (Ctor name _) <- [Map.lookup (rep classes functId) builtinOfClass]
+            , Just (Ctor name _ _) <- [Map.lookup (rep classes functId) builtinOfClass]
             ]
     builtinOfClass = builtinsByClass table classes (const True)
     concreteOfClass = Map.map head (constantsByClass table classes)
@@ -610,7 +610,7 @@ constructorNames table classes =
             (++)
             ( [ (rep classes termId, [name])
               | (termId, (functId, _)) <- tableApps table
-              , Just (Ctor name _) <- [Map.lookup (rep classes functId) builtinOfClass]
+              , Just (Ctor name _ _) <- [Map.lookup (rep classes functId) builtinOfClass]
               ]
                 ++ [ (cls, [name])
                    | (cls, values) <- Map.toList (constantsByClass table classes)

@@ -23,7 +23,7 @@ import qualified Data.Map as Map
 import Control.Monad (unless, void, when)
 import Data.Char (isDigit, isLetter, isUpper)
 import Data.List (intercalate, isInfixOf, nub, (\\))
-import Data.Maybe (isJust)
+import Data.Maybe (fromMaybe, isJust)
 
 import StdLib
 import Utils (inIntRange, utf8Bytes)
@@ -36,6 +36,7 @@ data Decls = Decls
     { declCtors :: Map.Map Name [Variable]
     , declTypes :: Map.Map Name [Name]
     , declSelf :: Maybe Name -- the type of the impl being read, which `Self` stands for
+    , declSelfType :: Maybe Type -- the same, as a type
     , declTypeParams :: [Name] -- the type parameters of the function or the struct being read: a name of these in a type is that parameter
     , declGenerics :: Map.Map Name [Variable] -- the structs with sizes and types, and the parameters of each, in order
     , declImplParams :: [Variable] -- the type and size parameters of the impl being read (`impl<T> Vec<T>`), which each of its functions has
@@ -44,7 +45,7 @@ data Decls = Decls
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty [] False False
+emptyDecls = Decls Map.empty Map.empty Nothing Nothing [] Map.empty [] False False
 
 -- The declarations from which a program is parsed with the place of each of its statements kept
 locating :: Decls -> Decls
@@ -498,7 +499,7 @@ ghostOnly ghostly ty = when (ghostly && not (ghostType ty)) $ fail "ghost is wri
 -- the way to build a value like another that is only lent, or that is still wanted. The second argument tells a clone from another base.
 structLiteral :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Parser a
 structLiteral element cloned apply = do
-    (name, declared) <- try $ do
+    (name, declared, ctorArgs) <- try $ do
         base <- qualifiedName
         ctors <- declCtors <$> getState
         known <- maybe (fail "not a struct or variant") return (Map.lookup base ctors)
@@ -509,18 +510,18 @@ structLiteral element cloned apply = do
             _ -> return Nothing
         let candidate = maybe base (instanceName base) args
         if null known && isVariant candidate
-            then return (candidate, known)
+            then return (candidate, known, fromMaybe [] args)
             else do
                 whitespace
                 void (char '{')
-                return (candidate, known)
-    if null declared && isVariant name then whitespace >> return (apply (builtinFunct (Ctor name [])) []) else structFields element cloned apply name declared
+                return (candidate, known, fromMaybe [] args)
+    if null declared && isVariant name then whitespace >> return (apply (builtinFunct (Ctor name [] [])) []) else structFields element cloned apply name ctorArgs declared
   where
     isVariant = ("::" `isInfixOf`)
 
 -- The braces of a struct or variant literal, after its name and the opening brace
-structFields :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Name -> [Variable] -> Parser a
-structFields element cloned0 apply name declared = do
+structFields :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Name -> [Arg] -> [Variable] -> Parser a
+structFields element cloned0 apply name ctorArgs declared = do
     whitespace
     inits <- many fieldInit
     base <- optionMaybe (string ".." >> whitespace >> element <* whitespace <* optional (char ',' >> whitespace))
@@ -533,7 +534,7 @@ structFields element cloned0 apply name declared = do
     when (isJust base && all (`elem` map fst inits) declared) $
         fail ("Struct " ++ name ++ " literal gives every field, so ..base copies nothing")
     args <- mapM (argument own name base inits) declared
-    return (apply (builtinFunct (Ctor name declared)) args)
+    return (apply (builtinFunct (Ctor name ctorArgs declared)) args)
   where
     fieldInit = do
         field <- variable
@@ -567,7 +568,7 @@ qualifiedName = do
 
 -- The struct or enum that a type names, without the types it is given: Vec for Vec<'T>
 selfBase :: Name -> Name
-selfBase name = maybe name fst (instanceOf name)
+selfBase name = baseNameOf name
 
 -- A struct or variant that has been declared, with its fields
 declaredCtor :: Parser (Name, [Variable])
@@ -841,26 +842,26 @@ implStatement = do
         (Just traitName, Just params) | firstArgs == Nothing -> fail ("trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">: write impl " ++ traitName ++ "<" ++ intercalate ", " params ++ "> for " ++ typeName)
         (Just traitName, Nothing) | firstArgs /= Nothing -> fail ("trait " ++ traitName ++ " has no parameters")
         _ -> return ()
-    selfName <- case (typeName, typeArgs) of
-        ("List", Just args) -> return (instanceName typeName args)
-        ("Box", Just args) -> return (instanceName typeName args)
-        ("Array", Just args) -> return (instanceName typeName args)
+    (selfName, selfType) <- case (typeName, typeArgs) of
+        ("List", Just args) -> return (instanceName typeName args, TNamed typeName args)
+        ("Box", Just args) -> return (instanceName typeName args, TNamed typeName args)
+        ("Array", Just args) -> return (instanceName typeName args, TNamed typeName args)
         ("List", Nothing) -> fail "impl for List names its types, so it is written impl<T> Trait<T> for List<T>"
         _ -> case (Map.lookup typeName generics, typeArgs) of
             (Just params, Nothing) -> fail ("impl for " ++ typeName ++ ", which has parameters <" ++ intercalate ", " params ++ ">: write impl<" ++ intercalate ", " params ++ "> " ++ typeName ++ "<" ++ intercalate ", " params ++ ">")
             (Just _, Just args) -> do
                 when (null implParams) $ fail ("impl for " ++ typeName ++ " names its types, so it is written impl<...>")
-                return (instanceName typeName args)
+                return (instanceName typeName args, TNamed typeName args)
             (Nothing, _) -> do
                 when (not (null implParams)) $ fail ("impl<" ++ intercalate ", " implParams ++ "> for " ++ typeName ++ ", which has no parameters")
-                return typeName
+                return (typeName, TNamed typeName [])
     ctors <- declCtors <$> getState
     -- (`Self { ... }` is a literal of the struct with the types of the impl)
-    modifyState (\d -> d{declSelf = Just selfName, declImplParams = implParams, declCtors = maybe (declCtors d) (\fields -> Map.insert selfName fields (declCtors d)) (Map.lookup typeName ctors)})
+    modifyState (\d -> d{declSelf = Just selfName, declSelfType = Just selfType, declImplParams = implParams, declCtors = maybe (declCtors d) (\fields -> Map.insert selfName fields (declCtors d)) (Map.lookup typeName ctors)})
     functions <- curlyBracesParse (genericStatementBlock (implFunction typeName trait))
-    modifyState (\d -> d{declSelf = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
+    modifyState (\d -> d{declSelf = Nothing, declSelfType = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
     whitespace
-    return (ImplDef trait traitArgs typeName selfName functions)
+    return (ImplDef trait traitArgs typeName selfType functions)
   where
     -- the types of an array in an impl, `Array<T, n>`: a type and a size, as in a type
     arrayArguments = do
@@ -928,7 +929,19 @@ typeAnnotation = do
         whitespace
         TFn args <$> typeAnnotation
     namedType = do
-        name <- variable >>= resolveSelf
+        rawName <- variable
+        selfType <- declSelfType <$> getState
+        case (rawName, selfType) of
+            ("Self", Just ty) -> do
+                variant <- optionMaybe (try (string "::" >> variable))
+                case variant of
+                    Just v -> case ty of
+                        TNamed owner _ -> return (TVariant (owner ++ "::" ++ v))
+                        _ -> return ty
+                    Nothing -> return ty
+            _ -> namedTypeOf rawName
+    namedTypeOf rawName = do
+        name <- resolveSelf rawName
         typeParams <- declTypeParams <$> getState
         case name of
             _ | name `elem` typeParams -> return (TParam name)
@@ -958,7 +971,7 @@ typeAnnotation = do
                 args <- case Map.lookup name generics of
                     Just params | not (isJust variant) -> optionMaybe (try (genericArguments params))
                     _ -> return Nothing
-                return (maybe (TNamed (maybe name (instanceName name) args)) (\v -> TVariant (name ++ "::" ++ v)) variant)
+                return (maybe (TNamed name (fromMaybe [] args)) (\v -> TVariant (name ++ "::" ++ v)) variant)
 
 -- A size is a number, `?`, or a size parameter of the function
 sizeArgument :: Parser Size
@@ -1219,7 +1232,7 @@ stringLiteralOf apply literal = do
     whitespace
     ctors <- declCtors <$> getState
     when (Map.lookup "String" ctors /= Just ["bytes"]) $ fail "a string literal needs the library String, which this program declares differently"
-    return (apply (builtinFunct (Ctor "String" ["bytes"])) [apply (builtinFunct BytesFrom) [literal (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))]])
+    return (apply (builtinFunct (Ctor "String" [] ["bytes"])) [apply (builtinFunct BytesFrom) [literal (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))]])
   where
     stringChar = noneOf "\"\\\n" <|> (char '\\' >> escape)
     escape =
@@ -1255,7 +1268,7 @@ parensExpression = do
     parts <- parensParse (expression `sepBy1` skipWhitespace (char ','))
     case parts of
         [single] -> return single
-        _ -> return (F (Val (builtinFunct (Ctor (tupleBase (length parts)) (map show [0 .. length parts - 1])))) parts)
+        _ -> return (F (Val (builtinFunct (Ctor (tupleBase (length parts)) [] (map show [0 .. length parts - 1])))) parts)
 
 value :: Parser Value
 value = vbool <|> vint <|> vlist

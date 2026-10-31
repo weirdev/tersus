@@ -129,7 +129,7 @@ testStructs :: Test
 testStructs =
     let node = "struct Node { value: Int, prev: Int, next: Int };"
         point = "struct Point { x: Int, y: Int };"
-        ctor name fields = builtinFunct (Ctor name fields)
+        ctor name fields = builtinFunct (Ctor name [] fields)
         field name = builtinFunct (Field Nothing name)
         fieldOf struct name = builtinFunct (Field (Just struct) name)
      in testCaseSeq
