@@ -8,7 +8,7 @@ import Data.Containers.ListUtils (nubOrd)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (fromMaybe, isNothing)
+import Data.Maybe (fromMaybe, isNothing, listToMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
 
@@ -182,8 +182,24 @@ processBlock cx run b st0 = do
 
 -- What a branch of an if or a loop knows: the truth of its condition, and the relation when the condition compares
 branchFacts :: PState -> IotaProof -> Bool -> [IotaProof]
-branchFacts st cond branch = FApp eqProof [cond, CTerm (VBool branch)] : relation
+branchFacts st cond branch = FApp eqProof [cond, CTerm (VBool branch)] : relation ++ variant
   where
+    -- (a value that is a variant is that variant built from its own fields, so two values of one variant with equal fields are equal)
+    -- (and a value that is not any of the other variants of its enum is the one that is left)
+    variant = case cond of
+        ATerm iota ->
+            concat
+                [ if branch then constructedFacts st name value else lastVariant name value
+                | FApp eq [ATerm lhs, FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is name)) _)) [value]] <- psFacts st
+                , eq == eqProof
+                , lhs == iota
+                ]
+        _ -> []
+    lastVariant name value =
+        let ruledOut = name : [w | FApp eq [ATerm c, FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is w)) _)) [v]] <- psFacts st, eq == eqProof, v == value, FApp eqProof [ATerm c, CTerm (VBool False)] `elem` psFacts st]
+         in case [v | v <- enumVariants st name, v `notElem` ruledOut] of
+                [left] -> FApp eqProof [FApp (CTerm (builtinFunct (Is left))) [value], CTerm (VBool True)] : constructedFacts st left value
+                _ -> []
     relation = case cond of
         ATerm iota ->
             [ FApp (CTerm (builtinFunct (Rel rel'))) args
@@ -311,16 +327,37 @@ withTypeFacts fn l st =
         (Just (TBox (TArray _ n)), Just iota) -> sized n iota
         (Just (TArrayOf _ (SizeParam p)), Just iota) -> sizedByParam p iota
         (Just (TBox (TArrayOf _ (SizeParam p))), Just iota) -> sizedByParam p iota
-        -- (a struct meets its invariant, wherever it came from)
-        (Just ty, Just iota) | facts@(_ : _) <- typeInvariants st ty (ATerm iota) -> addFacts st facts
+        -- (a struct meets its invariant, wherever it came from, and is built from its fields)
+        (Just ty, Just iota) | facts@(_ : _) <- typeInvariants st ty (ATerm iota) ++ structFacts ty (ATerm iota) -> addFacts st facts
         _ -> st
   where
+    structFacts ty value = case ty of
+        TNamed name | Just (M.StructDecl _) <- Map.lookup name (M.progTypes (psProgram st)) -> constructedFacts st name value
+        TRef t -> structFacts t value
+        _ -> []
     sized n iota = addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], CTerm (VInt n)]]
     -- (a size parameter is the parameter of the function that is named like it)
     sizedByParam p iota =
         case [value | (param, M.LocalDecl _ (Just name)) <- Map.toList (M.fnLocals fn), name == p, param `elem` M.fnParams fn, Just value <- [Map.lookup param (psLocals st)]] of
             value : _ -> addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], ATerm value]]
             [] -> st
+
+-- A value of a struct or a variant is that constructor applied to the fields of the value (which, with congruence, makes two
+-- values whose fields are equal equal)
+constructedFacts :: PState -> Name -> IotaProof -> [IotaProof]
+constructedFacts st ctor value = case fieldsOf of
+    Just fields -> [FApp eqProof [value, FApp (CTerm (builtinFunct (Ctor ctor fields))) [FApp (CTerm (builtinFunct (Field Nothing f))) [value] | f <- fields]]]
+    Nothing -> []
+  where
+    types = M.progTypes (psProgram st)
+    fieldsOf = case Map.lookup ctor types of
+        Just (M.StructDecl fs) -> Just (map fst fs)
+        _ -> listToMaybe [map fst fs | (enum, M.EnumDecl variants) <- Map.toList types, (v, fs) <- variants, v == ctor || enum ++ "::" ++ v == ctor]
+
+-- The variants of the enum that a variant is of, named as the variant is
+enumVariants :: PState -> Name -> [Name]
+enumVariants st variant =
+    head ([[if "::" `isInfixOf` v then v else enum ++ "::" ++ v | (v, _) <- variants] | (enum, M.EnumDecl variants) <- Map.toList (M.progTypes (psProgram st)), any (\(v, _) -> v == variant || enum ++ "::" ++ v == variant) variants] ++ [[]])
 
 -- The term for the value at a place of a local
 placeTerm :: PState -> M.Local -> [M.RefStep] -> V IotaProof
