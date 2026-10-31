@@ -41,6 +41,7 @@ import Utils
 -- - stage 0 is the seed built with clang (`stageZero`);
 -- - stage 1 is the emitter as it is now, built from the IR that stage 0 writes for its source (`stageOne`). This is the one that compiles programs;
 -- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it). Making a new seed is `tersus llvm examples/emit.tersus > bootstrap/emitter.ll`.
+--   When a change breaks the data the seed reads (a MirData format change), that command cannot run until there is a seed that reads it: build the emitter as it is now with stage 0 fed the emitter's data in the format the seed reads (the same types with the old type words), which gives an emitter that reads the new format, and make the seed with it (`<that emitter>`, fed the new data by hand, in place of `tersus llvm`); the result is a seed only when it writes the same IR for the emitter again.
 -- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang.
 
 -- What stage 0 is made of: the seed and the runtime it is linked with

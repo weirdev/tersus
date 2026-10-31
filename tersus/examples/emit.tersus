@@ -44,6 +44,8 @@ enum Type {
     TParam { name: String },
     TRef { inner: Box<Type> },
     TAddr { inner: Box<Type> },
+    TBlock { inner: Box<Type> },
+    TUninit { inner: Box<Type> },
     TWord { signed: Bool, bits: Int },
 };
 
@@ -442,6 +444,8 @@ fn renderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] [{ }
         Type::TArray { elem: e, size: s } => { r = catStrings(catStrings(catStrings(catStrings("Array<", renderTypeForName(Box::unbox(e), fuel - 1)), ", "), renderSizeForName(s)), ">"); },
         Type::TRef { inner: e } => { r = catStrings("&", renderTypeForName(Box::unbox(e), fuel - 1)); },
         Type::TAddr { inner: e } => { r = catStrings(catStrings("Addr<", renderTypeForName(Box::unbox(e), fuel - 1)), ">"); },
+        Type::TBlock { inner: e } => { r = catStrings(catStrings("Block<", renderTypeForName(Box::unbox(e), fuel - 1)), ">"); },
+        Type::TUninit { inner: e } => { r = catStrings(catStrings("Uninit<", renderTypeForName(Box::unbox(e), fuel - 1)), ">"); },
         Type::TWord { signed: signed, bits: bits } => {
             if signed { r = catStrings("I", String::fromInt(bits)); } else { r = catStrings("U", String::fromInt(bits)); };
         },
@@ -464,7 +468,7 @@ fn renderTypeForName(t: &Type, fuel: Int) -> String [{ affirm fuel >= 0; }] [{ }
     return r;
 };
 
-// A type. The words are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`,
+// A type. The words are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `uninit T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`,
 // `forall N "n"... N "n"... T`, `param "n"` and `ref T`.
 fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] shrinks size(ts) - pos {
     bad = failed(Type::TInt, ts);
@@ -481,12 +485,14 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
     if kw = "u16" { return done(Type::TWord { signed: false, bits: 16 }, next); };
     if kw = "u32" { return done(Type::TWord { signed: false, bits: 32 }, next); };
     if next >= size(ts) { return bad; };
-    if kw = "list" || kw = "box" || kw = "ref" || kw = "addr" {
+    if kw = "list" || kw = "box" || kw = "ref" || kw = "addr" || kw = "block" || kw = "uninit" {
         e = typeAt(ts, next);
         if !e.ok { return bad; };
         if kw = "addr" { return done(Type::TAddr { inner: Box::new(e.value) }, e.pos); };
         if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
         if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
+        if kw = "block" { return done(Type::TBlock { inner: Box::new(e.value) }, e.pos); };
+        if kw = "uninit" { return done(Type::TUninit { inner: Box::new(e.value) }, e.pos); };
         return done(Type::TRef { inner: Box::new(e.value) }, e.pos);
     };
     if kw = "array" {
@@ -1215,6 +1221,8 @@ fn renderType(t: &Type) -> String ~ {
         Type::TArray { elem: e, size: s } => { r = "Array<".then(renderType(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
         Type::TRef { inner: e } => { r = "&".then(renderType(Box::unbox(e))); },
         Type::TAddr { inner: e } => { r = "Addr<".then(renderType(Box::unbox(e))).then(">"); },
+        Type::TBlock { inner: e } => { r = "Block<".then(renderType(Box::unbox(e))).then(">"); },
+        Type::TUninit { inner: e } => { r = "Uninit<".then(renderType(Box::unbox(e))).then(">"); },
         Type::TWord { signed: signed, bits: bits } => {
             if signed { r = "I".then(showInt(bits)); } else { r = "U".then(showInt(bits)); };
         },
@@ -1395,6 +1403,8 @@ fn simpleLayout(t: &Type) -> Simple [{ }] [{ }] {
 };
 
 fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
+    if t is Type::TBlock { return Layout { size: 0, align: 1 }; };
+    if t is Type::TUninit { return layoutOf(types, Box::unbox((t as Type::TUninit).inner)); };
     simple = simpleLayout(t);
     if simple.ok { return clone(simple.layout); };
     arr = sizedArray(t);
