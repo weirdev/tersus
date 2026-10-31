@@ -19,7 +19,7 @@ import MirEval
 import MirLower
 import MirVerify
 import Pipeline
-import SelfHostedMir (validateMirSubset)
+import SelfHostedMir (validateMirSubset, verdictProved)
 import Parse
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
@@ -633,7 +633,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                      in case lowered of
                             Error e -> Just ("Could not lower test program: " ++ e)
                             Ok mir ->
-                                let result = validateMirSubset program mir
+                                let result = mapResult verdictProved (validateMirSubset program mir)
                                  in case testAssertEq result (Ok expected) of
                                         Just failure -> Just (input ++ ": " ++ failure)
                                         Nothing -> Nothing
@@ -651,7 +651,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                                             replace block' = block'{M.blockStatements = map alter (M.blockStatements block')}
                                             broken = fn{M.fnBlocks = Map.map replace (M.fnBlocks fn)}
                                             program' = mir{M.progFunctions = Map.insert "f" broken (M.progFunctions mir)}
-                                         in testAssertEq (verifyProgram program') (Ok ()) `orElse` testAssertEq (validateMirSubset program program') (Ok Nothing)
+                                         in testAssertEq (verifyProgram program') (Ok ()) `orElse` testAssertEq (mapResult verdictProved (validateMirSubset program program')) (Ok Nothing)
                                     _ -> Just "Fixture has no unique m parameter"
                 variantFact (object, family, constructor, matches) = MData "VariantFact" [("object", MInt object), ("family", MInt family), ("constructor", MInt constructor), ("matches", MBool matches)]
                 variantContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList [variantFact (0, 10, 20, True), variantFact (1, 10, 21, True)]), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
