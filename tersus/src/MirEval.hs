@@ -319,21 +319,16 @@ runBlock program fn block frame =
                     f <- liftE (operandValue frame' callee)
                     argValues <- liftE (mapResults (operandValue frame') args)
                     resolved <- liftE (mapResults (resolveRef frame') argValues)
-                    (result, finalParams) <- callFunction program f resolved
-                    -- (a result that is a reference to a place of an argument is that place in this frame)
-                    result' <- liftE $ case (f, result) of
-                        (MFn name, MRef l steps)
-                            | Just callee <- Map.lookup name (progFunctions program)
-                            , Just i <- elemIndex l (fnParams callee)
-                            , Copy cl <- args !! i -> Ok (case Map.lookup cl frame' of
-                                Just (MRef rl rs) -> MRef rl (rs ++ steps)
-                                _ -> MRef cl steps)
-                            | Just callee <- Map.lookup name (progFunctions program)
-                            , Just i <- elemIndex l (fnParams callee)
-                            , Move cl <- args !! i -> Ok (case Map.lookup cl frame' of
-                                Just (MRef rl rs) -> MRef rl (rs ++ steps)
-                                _ -> MRef cl steps)
+                    (result, calleeFrame) <- callFunction program f resolved
+                    -- (a result that is a reference, or holds them in its fields, is to a place of an argument:
+                    -- the same place in this frame. References to the callee's own places cannot be returned,
+                    -- which the checker has already refused.)
+                    result' <- liftE $ case f of
+                        MFn name | Just callee <- Map.lookup name (progFunctions program) -> rebaseRefs program callee calleeFrame args frame' result
                         _ -> Ok result
+                    let finalParams = case f of
+                            MFn name | Just callee <- Map.lookup name (progFunctions program) -> [Map.findWithDefault MEmpty p calleeFrame | p <- fnParams callee]
+                            _ -> []
                     frame'' <- liftE (writeBack program frame' f args finalParams)
                     runBlock program fn next (Map.insert dest result' frame'')
                 Return -> return (Map.lookup (Local 0) frame', frame')
@@ -372,6 +367,33 @@ writePlace frame l steps value = case Map.lookup l frame of
         | otherwise = Error "A reference is to an index that is not there"
     setSteps _ _ _ = Error "A reference is to a place that is not there"
 
+-- A value that comes back from a call, with each reference in it made to name its place in the caller's
+-- frame: a reference in the callee was to a local there, which was itself a reference or a parameter, and a
+-- parameter's place is the place its argument is to here
+rebaseRefs :: Program -> Function -> Frame -> [Operand] -> Frame -> MirValue -> Result MirValue String
+rebaseRefs program callee calleeFrame args callerFrame value = case value of
+    MRef l steps -> placeOf l steps
+    MData name fields -> mapResult (MData name) (mapEach field fields)
+      where
+        field (f, v) = mapResult (\v' -> (f, v')) (rebaseRefs program callee calleeFrame args callerFrame v)
+    MList values -> mapResult MList (mapEach (rebaseRefs program callee calleeFrame args callerFrame) values)
+    _ -> Ok value
+  where
+    mapEach _ [] = Ok []
+    mapEach g (x : xs) = g x `bindResult` \y -> mapResult (y :) (mapEach g xs)
+    placeOf l steps = case Map.lookup l calleeFrame of
+        Just (MRef l2 steps2) -> placeOf l2 (steps2 ++ steps)
+        _ -> case elemIndex l (fnParams callee) of
+            Just i | i < length args -> case args !! i of
+                Copy cl -> Ok (case Map.lookup cl callerFrame of
+                    Just (MRef rl rs) -> MRef rl (rs ++ steps)
+                    _ -> MRef cl steps)
+                Move cl -> Ok (case Map.lookup cl callerFrame of
+                    Just (MRef rl rs) -> MRef rl (rs ++ steps)
+                    _ -> MRef cl steps)
+                _ -> Ok value
+            _ -> Ok value
+
 -- After a call, the final value of each update parameter is written back into the place its argument was to
 writeBack :: Program -> Frame -> MirValue -> [Operand] -> [MirValue] -> Result Frame String
 writeBack program frame (MFn name) args finalParams = case Map.lookup name (progFunctions program) of
@@ -388,7 +410,7 @@ writeBack program frame (MFn name) args finalParams = case Map.lookup name (prog
          in foldl (\acc i -> acc `bindResult` \f -> write (f, i)) (Ok frame) muts
 writeBack _ frame _ _ _ = Ok frame
 
-callFunction :: Program -> MirValue -> [MirValue] -> E (MirValue, [MirValue])
+callFunction :: Program -> MirValue -> [MirValue] -> E (MirValue, Frame)
 callFunction _ (MFn name) _
     | take 7 name == "extern " = failE ("The extern function " ++ drop 7 name ++ " is a function of C, which only native code can call")
 callFunction program (MFn name) args =
@@ -397,7 +419,7 @@ callFunction program (MFn name) args =
         Just fn -> do
             (result, frame) <- runFunction program fn args
             value <- maybe (failE "Function did not return a value") return result
-            return (value, [Map.findWithDefault MEmpty p frame | p <- fnParams fn])
+            return (value, frame)
 callFunction _ _ _ = failE "Object being called must be a function"
 
 mapResults :: (a -> Result b String) -> [a] -> Result [b] String

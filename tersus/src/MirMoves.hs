@@ -13,7 +13,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirOwnership (Role (..), isProjection, operandLocal, roles)
-import TersusTypes (Name, Type (..), instanceOf, tupleGeneric)
+import TersusTypes (Name, Type (..), Variable, instanceOf, tupleGeneric)
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.
@@ -102,16 +102,16 @@ type Pos = Maybe (Int, Int)
 -- "the interval of a borrow" means here: past the last use of the reference, the place is free again.
 type Loan = (Place, Bool, Pos)
 
-data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place]}
+data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place]}
 
 emptySt :: St
-emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
+emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
 
 joinSt :: St -> St -> St
-joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith (++) (stExtraLoans a) (stExtraLoans b))
+joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith (++) (stExtraLoans a) (stExtraLoans b)) (Map.unionWith (++) (stFieldLoans a) (stFieldLoans b))
 
 sameShape :: St -> St -> Bool
-sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.keysSet (stLoans a) == Map.keysSet (stLoans b) && Map.keysSet (stExtraLoans a) == Map.keysSet (stExtraLoans b)
+sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.keysSet (stLoans a) == Map.keysSet (stLoans b) && Map.keysSet (stExtraLoans a) == Map.keysSet (stExtraLoans b) && Map.keysSet (stFieldLoans a) == Map.keysSet (stFieldLoans b)
 
 -- Every loan that freezes a place: a reference's own place, and the other places a result that may be from
 -- more than one parameter freezes (a call result: which of them it is is the callee's choice)
@@ -306,9 +306,35 @@ placesOf st l = case Map.lookup l (stViews st) of
     _ -> [(l, [])]
 
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
-assign cx pos st0 d rv = (base{stLoans = loans', stExtraLoans = Map.delete d (stExtraLoans base)}, errs ++ lost cx pos st1 d ++ loanErrs)
+assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans''}, errs ++ lost cx pos st1 d ++ loanErrs)
   where
     base = hold cx pos (define cx st1 d view) d view
+    -- the places the fields of a value that holds references are to: made at its construction, read out of
+    -- it by a field read, and carried with it when it is moved (the holder's own extra loans freeze them
+    -- while the holder is live)
+    loansOf l = case Map.lookup l (stLoans st1) of
+        Just (place, _, _) -> place : Map.findWithDefault [] l (stExtraLoans st1)
+        Nothing -> Map.findWithDefault [] l (stExtraLoans st1)
+    clearedFields = Map.filterWithKey (\(root, _) _ -> root /= d) (stFieldLoans base)
+    (loans'', extras'', fieldLoans'') = case rv of
+        MakeData _ fields ->
+            let made = [(f, loansOf l) | (f, o) <- fields, Just l <- [operandLocal o], not (null (loansOf l))]
+             in (loans', if null made then Map.delete d (stExtraLoans base) else Map.insert d (concatMap snd made) (stExtraLoans base), foldl' (\m (f, places) -> Map.insert (d, f) places m) clearedFields made)
+        ReadField o _ field
+            | (case typeOf cx d of TRef _ -> True; TMutRef _ -> True; _ -> False), Just src <- operandLocal o, Just places <- Map.lookup (src, field) (stFieldLoans st1) ->
+                case places of
+                    place : more -> (Map.insert d (place, False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
+                    [] -> (loans', Map.delete d (stExtraLoans base), clearedFields)
+        Use (Move src) -> (loans', transferExtras src, transferFields src True)
+        Use (Copy src) -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
+        _ -> (loans', Map.delete d (stExtraLoans base), clearedFields)
+    transferExtras src = case Map.lookup src (stExtraLoans st1) of
+        Just places -> Map.insert d places (Map.delete src (stExtraLoans base))
+        Nothing -> Map.delete d (stExtraLoans base)
+    transferFields src move =
+        let from = [(f, places) | ((root, f), places) <- Map.toList (stFieldLoans st1), root == src]
+            kept = if move then Map.filterWithKey (\(root, _) _ -> root /= src) clearedFields else clearedFields
+         in foldl' (\m (f, places) -> Map.insert (d, f) places m) kept from
     (borrowPlace, borrowChain) = case rv of
         Borrow root steps mutable -> let (place, chain) = resolvePlaceChain st1 (root, map refStepOf steps) in (Just (place, mutable), chain)
         _ -> (Nothing, [])
@@ -504,6 +530,7 @@ define _ st d view0 =
         , stHeld = stHeld st
         , stLoans = stLoans st
         , stExtraLoans = stExtraLoans st
+        , stFieldLoans = stFieldLoans st
         }
 
 terminator :: Cx -> Pos -> St -> Terminator -> (St, [String])
@@ -531,7 +558,11 @@ terminator cx pos st term = case term of
             loaned = case resultFromPlaces cx st' callee args of
                 [] -> defined
                 place : more -> defined{stLoans = Map.insert dest (place, False, pos) (stLoans defined), stExtraLoans = if null more then Map.delete dest (stExtraLoans defined) else Map.insert dest more (stExtraLoans defined)}
-         in (hold cx pos loaned dest [], errs ++ take 1 conflicts ++ mutErrs ++ lost cx pos st' dest)
+            -- (a result that holds references: each reference field of it is to one of the same places)
+            windowed = case (refFieldNames cx (typeOf cx dest), resultFromPlaces cx st' callee args) of
+                (fields@(_ : _), places@(_ : _)) -> loaned{stFieldLoans = foldl' (\m f -> Map.insert (dest, f) places m) (Map.filterWithKey (\(root, _) _ -> root /= dest) (stFieldLoans loaned)) fields, stExtraLoans = Map.insert dest places (stExtraLoans loaned)}
+                _ -> loaned
+         in (hold cx pos windowed dest [], errs ++ take 1 conflicts ++ mutErrs ++ lost cx pos st' dest)
     -- (what a function returns is given to its caller, and a permission it has not used by then is lost)
     Return ->
         let (st', errs) = if Local 0 `Map.member` fnLocals (cxFn cx) then accessAll [(Local 0, [], Consume)] else (st, [])
@@ -580,6 +611,13 @@ resultFromPlaces cx st callee args = case callee of
             Just (place, _, _) -> place
             Nothing -> (l, []))
         Nothing -> Nothing
+
+-- The reference fields of a struct type, which a value of it holds loans in
+refFieldNames :: Cx -> Type -> [Variable]
+refFieldNames cx (TNamed name) = case Map.lookup name (progTypes (cxProgram cx)) of
+    Just (StructDecl fields) -> [f | (f, TRef _) <- fields]
+    _ -> []
+refFieldNames _ _ = []
 
 -- Messages
 

@@ -1168,7 +1168,28 @@ return *r;   // 10; ys cannot be assigned or moved while r is live
 
 - **`from` names the parameters the result may be from** (`from xs`, or `from (a, b)` when the body chooses between them). With exactly one reference parameter it may be left out; with several it is required. Every place the function returns has to be of one of them: returning a reference to a local is refused. With several candidates, all of them are frozen while the result is live, since which one it is is the callee's choice.
 - **In a contract, `return` is what the reference is to** (`*return` is the same thing written as a place), so a promise about the result is a promise about the caller's place.
-- A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. It cannot be stored in a struct or a list, given through a function value, or returned by the program, and an update reference (`&mut T`) cannot be returned yet. Native code does not take a program that holds a reference in a local yet (see Updating through a reference).
+- A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. It cannot be given through a function value or returned by the program, and an update reference (`&mut T`) cannot be returned yet. Native code does not take a program that holds a reference in a local yet (see Updating through a reference).
+
+#### Holding references in a struct
+
+A field of a struct may be a read reference, so a value can hold the ends of what it looks at:
+
+```tersus
+struct Window { first: &Int, last: &Int };
+
+fn ends(xs: &List<Int>) -> Window from xs [{ affirm size(xs) > 0; }] [{ }] {
+    return Window { first: &get(xs, 0), last: &get(xs, size(xs) - 1) };
+};
+
+ys = [10, 20, 30];
+w = ends(ys);
+f = w.first;   // the reference the field holds
+return *f;     // 10; ys is frozen while w, or a reference read out of it, is live
+```
+
+- **The holder freezes the places**, as a reference local does: while the struct is held (or a reference read out of it is live), what its fields are to cannot be assigned or moved. A field read gives the reference the field holds, with its own last use from there.
+- **Returning one is under the same `from`**: every field of the returned value has to be from a named parameter (one bound covers all the fields), and the caller's holder freezes those places.
+- **For now, such a value stays local**: it is made, held by a local, read out of, and returned — it is not given to a function (as a parameter or an argument), put in a list, an array or a `Box`, or held in another struct, and a field cannot be an update reference (`&mut T`) or be in an enum variant yet.
 
 ## Moves, Clone And Copy
 
