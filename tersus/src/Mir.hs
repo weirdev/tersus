@@ -264,7 +264,7 @@ completeErasedInstances = completeInstancesWith True
 
 completeInstancesWith :: Bool -> Program -> Program
 completeInstancesWith erased program
-    | otherwise = program{progTypes = go (progTypes program) (Set.toList mentioned)}
+    | otherwise = program{progTypes = go (progTypes program) argMap (Set.toList mentioned)}
   where
     functions = progMain program : Map.elems (progFunctions program)
     mentioned =
@@ -292,16 +292,18 @@ completeInstancesWith erased program
         TUninit t -> namedArgs t
         TRef t -> namedArgs t
         TFn args ret -> concatMap namedArgs (ret : args)
+        TForall _ _ t -> namedArgs t
         _ -> []
-    go types [] = types
-    go types (name : rest) =
-        case (Map.member name types, Map.lookup name argMap) of
+    go types _ [] = types
+    go types argsMap (name : rest) =
+        case (Map.member name types, Map.lookup name argsMap) of
             (False, Just (base, args))
                 | Just (params, fields) <- maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program))
                 , Just fields0 <- instanceFields params args fields ->
                     let fields' = [(f, t) | (f, t) <- fields0, not (erased && isPermission t)]
-                     in go (Map.insert name (StructDecl fields') types) (concatMap (typeNames . snd) fields' ++ rest)
-            _ -> go types rest
+                        discovered = [(instanceName b a, (b, a)) | (_, t) <- fields', (b, a) <- namedArgs t]
+                     in go (Map.insert name (StructDecl fields') types) (foldr (uncurry Map.insert) argsMap discovered) (concatMap (typeNames . snd) fields' ++ rest)
+            _ -> go types argsMap rest
     isPermission t = case t of
         TBlock _ -> True
         _ -> False
@@ -314,16 +316,17 @@ completeInstancesWith erased program
         Call callee args _ _ -> callee : args
         _ -> []
     typeNames ty = case ty of
-        TNamed base args -> [instanceName base args]
+        TNamed base args -> instanceName base args : concat [typeNames t | ArgType t <- args]
         TList t -> typeNames t
         TArrayOf t _ -> typeNames t
         TBox t -> typeNames t
         TAddr t -> typeNames t
         TBlock t -> typeNames t
         TUninit t -> typeNames t
-        TFn args ret -> concatMap typeNames (ret : args)
         TRef t -> typeNames t
         TMutRef t -> typeNames t
+        TFn args ret -> concatMap typeNames (ret : args)
+        TForall _ _ t -> typeNames t
         _ -> []
     rvalueNames rv = case rv of
         Use o -> operandNames o
