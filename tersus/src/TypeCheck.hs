@@ -17,6 +17,7 @@ import Data.List (intercalate, isInfixOf, (\\))
 import Data.Maybe (isJust, isNothing, fromMaybe)
 import qualified Data.Set as Set
 
+import BuiltinRegistry (SigScheme (..), ghostBuiltinByName, methodBuiltinByName, methodNameFor, pointerBuiltinByName, signatureScheme)
 import Pretty (renderType)
 import StdLib
 import StdLibDefs (stdLibCtx)
@@ -1119,119 +1120,53 @@ sizeInScope _ = return ()
 
 builtinType :: BuiltinFunct -> TC Type
 builtinType funct =
-    case funct of
-        Size -> list (\a -> TFn [TRef (TList a)] TInt)
-        First -> list (\a -> TFn [TRef (TList a)] a)
-        Last -> list (\a -> TFn [TRef (TList a)] a)
-        Get -> list (\a -> TFn [TRef (TList a), TInt] a)
-        Push -> list (\a -> TFn [TList a, a] (TList a))
-        Pop -> list (\a -> TFn [TList a] (TList a))
-        Set -> list (\a -> TFn [TList a, TInt, a] (TList a))
-        UnBox -> failTc "Type error: Box::unbox is called, as in Box::unbox(b), and cannot be used as a value"
-        NewBox -> failTc "Type error: Box::new is called, as in Box::new(x), and cannot be used as a value"
-        CloneOf -> failTc "Type error: clone is called, as in clone(x) or x.clone(), and cannot be used as a value"
-        NewArray -> failTc "Type error: array needs a size that is a constant, so it is written array(3, x) and cannot be used as a value"
-        ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
-        ArrayFromList -> failTc "Type error: Array::fromList is called, as in Array::fromList(xs), and cannot be used as a value"
-        NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
-        NewEmptyArray -> failTc "Type error: Array::empty is called, as in Array::empty(), and cannot be used as a value"
-        WriteByte -> return (TFn [TByte] TByte)
-        WriteError -> return (TFn [TByte] TByte)
-        ReadByte -> return (TFn [] TInt)
-        ArgCount -> return (TFn [] TInt)
-        ArgByte -> return (TFn [TInt, TInt] TInt)
-        PathByte -> return (TFn [TByte] TInt)
-        FileLoad -> return (TFn [] TInt)
-        FileByte -> return (TFn [TInt] TInt)
-        StoreByte -> return (TFn [TByte] TInt)
-        FileStore -> return (TFn [] TInt)
-        ToByte -> return (TFn [TInt] TByte)
-        FromByte -> return (TFn [TByte] TInt)
-        ToWord signed bits -> return (TFn [TInt] (TWord signed bits))
-        BytesFrom -> return (TFn [TRef (TList TInt)] (TList TByte))
-        Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
-        Plus -> arith
-        Minus -> arith
-        Times -> arith
-        Div -> arith
-        Mod -> arith
-        And -> return (TFn [TBool, TBool] TBool)
-        Or -> return (TFn [TBool, TBool] TBool)
-        Not -> return (TFn [TBool] TBool)
-        Rel Eq -> list (\a -> TFn [a, a] TBool)
-        Rel NotEq -> list (\a -> TFn [a, a] TBool)
-        Rel _ -> return (TFn [TInt, TInt] TBool)
-        Within -> list (\a -> TFn [a, a] TBool)
-        Ctor name ctorArgs fields -> do
-            let ty0 = TNamed (baseNameOf name) ctorArgs
-            when (not ("::" `isInfixOf` name)) $ ensureInstance ty0
-            (typeName, declared) <- ctorInfo name
-            if map fst declared == fields
-                then do
-                    resultTy <- case ctorArgs of
-                        [] -> ctorResultType typeName declared
-                        _ -> return ty0
-                    return (TFn (map snd declared) resultTy)
-                else failTc ("Type error: " ++ name ++ " is built with the wrong fields")
-        Is variant -> do
-            (typeName, _) <- ctorInfo variant
-            return (TFn [TNamed typeName []] TBool)
-        Cast variant -> do
-            (typeName, _) <- ctorInfo variant
-            return (TFn [TNamed typeName []] (TVariant variant))
-        Project variant field -> projectType variant field
-        Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
-        -- addresses and permissions (POINTERS.md)
-        AddrNull -> list (\a -> TFn [] (TAddr a))
-        AddrOffset -> list (\a -> TFn [TAddr a, TInt] (TAddr a))
-        AddrCast -> do
-            a <- freshVar
-            b <- freshVar
-            return (TFn [TAddr a] (TAddr b))
-        AddrToInt -> list (\a -> TFn [TAddr a] TInt)
-        AddrFromInt -> list (\a -> TFn [TInt] (TAddr a))
-        AllocPair -> list (\a -> TFn [TInt] (tupleType [TAddr a, TBlock a]))
-        AddrAlloc -> list (\a -> TFn [TInt] (TAddr a))
-        BlockNew -> list (\a -> TFn [TAddr a, TInt] (TBlock a))
-        AddrGet -> list (\a -> TFn [TAddr a, TInt, TBlock a] a)
-        AddrWrite -> list (\a -> TFn [TAddr a, TInt, a, TBlock a] (TBlock a))
-        TakePair -> list (\a -> TFn [TAddr a, TInt, TBlock a] (tupleType [a, TBlock a]))
-        AddrTake -> list (\a -> TFn [TAddr a, TInt, TBlock a] a)
-        BlockTaken -> list (\a -> TFn [TBlock a, TInt] (TBlock a))
-        AddrDropValue -> list (\a -> TFn [TAddr a, TInt, TBlock a] (TBlock a))
-        AddrDropRange -> list (\a -> TFn [TAddr a, TInt, TInt, TBlock a] (TBlock a))
-        ResizePair -> list (\a -> TFn [TAddr a, TInt, TBlock a] (tupleType [TAddr a, TBlock a]))
-        AddrResize -> list (\a -> TFn [TAddr a, TInt, TBlock a] (TAddr a))
-        BlockResized -> list (\a -> TFn [TBlock a, TAddr a, TInt] (TBlock a))
-        AddrFree -> list (\a -> TFn [TAddr a, TBlock a] TInt)
-        SplitPair -> list (\a -> TFn [TBlock a, TInt] (tupleType [TBlock a, TBlock a]))
-        BlockSplitLo -> list (\a -> TFn [TBlock a, TInt] (TBlock a))
-        BlockSplitHi -> list (\a -> TFn [TBlock a, TInt] (TBlock a))
-        BlockJoin -> list (\a -> TFn [TBlock a, TBlock a] (TBlock a))
-        BlockAssume -> list (\a -> TFn [TAddr a, TInt] (TBlock a))
-        BlockCast -> do
-            a <- freshVar
-            b <- freshVar
-            return (TFn [TBlock a] (TBlock b))
-        BlockBase -> list (\a -> TFn [TBlock a] (TAddr a))
-        BlockCap -> list (\a -> TFn [TBlock a] TInt)
-        BlockFilled -> list (\a -> TFn [TBlock a] (TList TBool))
-        BlockContents -> list (\a -> TFn [TBlock a] (TList a))
-        BlockOrigin -> list (\a -> TFn [TBlock a] TInt)
-        BlockStart -> list (\a -> TFn [TBlock a] TInt)
-        BlockExtent -> return (TFn [TInt] TInt)
-        BlockCount -> list (\a -> TFn [TBlock a] TInt)
-        UninitEmpty -> list (\a -> TFn [] (TUninit a))
-        UninitNew -> list (\a -> TFn [a] (TUninit a))
-        UninitGet -> list (\a -> TFn [TUninit a] a)
-        UninitTake -> list (\a -> TFn [TUninit a] a)
-        UninitDiscard -> list (\a -> TFn [TUninit a] TInt)
-        UninitFilled -> list (\a -> TFn [TUninit a] TBool)
-        UninitAt -> list (\a -> TFn [TUninit a] a)
-        Replace -> list (\a -> TFn [TList a, TInt, a] (tupleType [TList a, a]))
+    case signatureScheme funct of
+        SigValueError message -> failTc message
+        SigFn params ret -> do
+            assignments <- mapM (\name -> (,) name <$> freshVar) (schemeVars (ret : params))
+            return (TFn (map (instantiate assignments) params) (instantiate assignments ret))
+        SigDynamic -> case funct of
+            Ctor name ctorArgs fields -> do
+                let ty0 = TNamed (baseNameOf name) ctorArgs
+                when (not ("::" `isInfixOf` name)) $ ensureInstance ty0
+                (typeName, declared) <- ctorInfo name
+                if map fst declared == fields
+                    then do
+                        resultTy <- case ctorArgs of
+                            [] -> ctorResultType typeName declared
+                            _ -> return ty0
+                        return (TFn (map snd declared) resultTy)
+                    else failTc ("Type error: " ++ name ++ " is built with the wrong fields")
+            Is variant -> do
+                (typeName, _) <- ctorInfo variant
+                return (TFn [TNamed typeName []] TBool)
+            Cast variant -> do
+                (typeName, _) <- ctorInfo variant
+                return (TFn [TNamed typeName []] (TVariant variant))
+            Project variant field -> projectType variant field
+            Field _ field -> failTc ("Type error: field " ++ field ++ " must be read from a struct, as in value." ++ field)
+            _ -> failTc ("Type error: " ++ show funct ++ " cannot be used as a value")
   where
-    list build = build <$> freshVar
-    arith = return (TFn [TInt, TInt] TInt)
+    instantiate assignments ty = substitute [] assignments ty
+    schemeVars tys = nub' (concatMap vars tys)
+      where
+        vars ty = case ty of
+            TParam name -> [name]
+            TList t -> vars t
+            TArrayOf t _ -> vars t
+            TBox t -> vars t
+            TAddr t -> vars t
+            TBlock t -> vars t
+            TUninit t -> vars t
+            TRef t -> vars t
+            TMutRef t -> vars t
+            TFn args ret -> concatMap vars (ret : args)
+            TNamed _ args -> concatMap argVars args
+            TForall _ _ t -> vars t
+            _ -> []
+        argVars (ArgType t) = vars t
+        argVars _ = []
+    nub' = foldr (\x rest -> if x `elem` rest then rest else x : rest) []
     projectType variant field = do
         (typeName, declared) <- ctorInfo variant
         case lookup field declared of
@@ -2786,64 +2721,17 @@ permissionArgument b args infer
                 _ -> False
         [] -> return False
 
--- The operations on addresses and permissions, by the names a program calls them by
+-- The operations on addresses and permissions, by the names a program calls them by (BuiltinRegistry)
 pointerBuiltin :: Name -> Maybe BuiltinFunct
-pointerBuiltin name =
-    lookup
-        name
-        [ ("Addr::null", AddrNull)
-        , ("Addr::offset", AddrOffset)
-        , ("Addr::cast", AddrCast)
-        , ("Addr::toInt", AddrToInt)
-        , ("Addr::fromInt", AddrFromInt)
-        , ("Addr::alloc", AllocPair)
-        , ("Addr::get", AddrGet)
-        , ("Addr::write", AddrWrite)
-        , ("Addr::take", TakePair)
-        , ("Addr::dropValue", AddrDropValue)
-        , ("Addr::dropRange", AddrDropRange)
-        , ("Addr::resize", ResizePair)
-        , ("Addr::free", AddrFree)
-        , ("Block::split", SplitPair)
-        , ("Block::join", BlockJoin)
-        , ("Block::assume", BlockAssume)
-        , ("Block::cast", BlockCast)
-        , ("Uninit::empty", UninitEmpty)
-        , ("Uninit::new", UninitNew)
-        , ("Uninit::get", UninitGet)
-        , ("Uninit::take", UninitTake)
-        , ("Uninit::discard", UninitDiscard)
-        , ("replace", Replace)
-        , ("I8::from", ToWord True 8)
-        , ("I16::from", ToWord True 16)
-        , ("I32::from", ToWord True 32)
-        , ("U16::from", ToWord False 16)
-        , ("U32::from", ToWord False 32)
-        ]
+pointerBuiltin = pointerBuiltinByName
 
--- What a proof can say of a permission, and the operations on addresses a proof can use (they need no permission)
+-- What a proof can say of a permission, and the operations on addresses a proof can use (BuiltinRegistry)
 ghostFunction :: Name -> Maybe BuiltinFunct
-ghostFunction name =
-    lookup
-        name
-        [ ("base", BlockBase)
-        , ("cap", BlockCap)
-        , ("filled", BlockFilled)
-        , ("at", BlockContents)
-        , ("origin", BlockOrigin)
-        , ("start", BlockStart)
-        , ("extent", BlockExtent)
-        , ("count", BlockCount)
-        , ("Addr::null", AddrNull)
-        , ("Addr::offset", AddrOffset)
-        , ("Addr::cast", AddrCast)
-        , ("Addr::toInt", AddrToInt)
-        , ("Addr::fromInt", AddrFromInt)
-        ]
+ghostFunction = ghostBuiltinByName
 
--- The builtin that a method of a list or an array is
+-- The builtin that a method of a list or an array is (BuiltinRegistry)
 listMethod :: Name -> Maybe BuiltinFunct
-listMethod method = lookup method [("size", Size), ("first", First), ("last", Last), ("get", Get), ("push", Push), ("pop", Pop), ("set", Set)]
+listMethod = methodBuiltinByName
 
 -- Whether a type is a list or an array, which have the functions of the builtins as methods
 sequenceType :: Type -> Bool
@@ -2853,17 +2741,9 @@ sequenceType ty = case ty of
     TBox TArrayOf{} -> True
     _ -> False
 
--- The functions of a list that a struct can have of its own: `size(v)` is the function `size` of the impl of the type of `v`
+-- The functions of a list that a struct can have of its own: `size(v)` is the function `size` of the impl of the type of `v` (BuiltinRegistry)
 sequenceFunction :: BuiltinFunct -> Maybe Name
-sequenceFunction b = case b of
-    Size -> Just "size"
-    First -> Just "first"
-    Last -> Just "last"
-    Get -> Just "get"
-    Push -> Just "push"
-    Pop -> Just "pop"
-    Set -> Just "set"
-    _ -> Nothing
+sequenceFunction = methodNameFor
 
 -- The struct (without the types it is given) that a type is, or Self in a trait
 structOwner :: Type -> TC (Maybe Name)

@@ -1,6 +1,6 @@
 // The standard library, written in Tersus: the contracts of the builtins a program calls by name.
 //
-// Each `builtin fn` here declares one builtin (StdLib.stdlibBuiltinDecls): it has no body, because what it
+// Each `builtin fn` here declares one builtin (BuiltinRegistry.builtinDecls): it has no body, because what it
 // does is the builtin it names, which the lowering and the executor have as an operation (a ListOp, a
 // BinaryOp, an effect). The input contract is checked at each call and the affirmations of the output
 // contract are what a call exports. The types written here are placeholders: the checker types these
