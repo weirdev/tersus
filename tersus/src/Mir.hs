@@ -48,7 +48,8 @@ import Data.Maybe (listToMaybe)
 
 import Pretty (renderType, renderVarProof)
 import qualified Data.Set as Set
-import TersusTypes (Arg (..), Name, Rel (..), Termination (..), Type (..), ValidationStatement (..), Variable, RwRule (..), Expression, exprToProof, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray)
+import Types (Arg (..), Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray)
+import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, exprToProof)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each

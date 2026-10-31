@@ -20,7 +20,8 @@ import qualified Data.Set as Set
 import BuiltinRegistry (SigScheme (..), ghostBuiltinByName, methodBuiltinByName, methodNameFor, pointerBuiltinByName, signatureScheme)
 import Pretty (renderType)
 import StdLib
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- Types are checked between parsing and validation. Parameters and return types are written in the

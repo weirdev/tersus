@@ -27,7 +27,8 @@ import Data.Maybe (fromMaybe, isJust)
 
 import BuiltinRegistry (builtinSymbol, proofBuiltinByName)
 import Utils (inIntRange, utf8Bytes)
-import TersusTypes
+import Types
+import Syntax
 
 -- The parser remembers the structs and enums declared so far. A literal needs the fields of a constructor
 -- in declaration order (a struct is a constructor named like its type, a variant is Enum::Variant), and a

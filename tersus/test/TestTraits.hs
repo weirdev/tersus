@@ -1,6 +1,7 @@
 module TestTraits (testTraits) where
 
-import TersusTypes
+import Types
+import Syntax
 import TestHarness
 
 -- Traits and impls: the functions of a type, how they are called, and what an impl has to meet

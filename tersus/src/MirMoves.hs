@@ -13,7 +13,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirOwnership (Role (..), isProjection, operandLocal, roles)
-import TersusTypes (Name, Type (..), baseNameOf, instanceName, tupleGeneric)
+import Types (Name, Type (..), baseNameOf, instanceName, tupleGeneric)
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.

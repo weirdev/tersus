@@ -15,7 +15,7 @@ import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import TersusTypes (Name, Rel (..), Size (..), Type (..), Variable)
+import Types (Name, Rel (..), Size (..), Type (..), Variable)
 import TestHarness
 import Utils
 

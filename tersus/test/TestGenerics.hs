@@ -1,6 +1,7 @@
 module TestGenerics (testGenerics) where
 
-import TersusTypes
+import Types
+import Syntax
 import TestHarness
 
 -- Type parameters: `fn first<T>(a: &List<T>) -> T` is written once for any type. A name that starts with a capital letter between the

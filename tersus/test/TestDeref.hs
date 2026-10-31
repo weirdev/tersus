@@ -1,6 +1,6 @@
 module TestDeref (testDeref) where
 
-import TersusTypes
+import Syntax
 import TestHarness
 
 -- Deref<T>: a type that holds another is looked through to it where a struct or an enum is looked at (a field, `is`, `as`, a

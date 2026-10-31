@@ -20,7 +20,8 @@ import Parse
 import Pipeline (validateStatements)
 import qualified ProofEngine as Engine
 import StdLib
-import TersusTypes
+import Types
+import Syntax
 import Utils
 import TestHarness
 

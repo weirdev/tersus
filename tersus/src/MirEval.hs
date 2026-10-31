@@ -20,7 +20,8 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
 import Mir
-import TersusTypes (Name, Rel (..), Value (..), Variable)
+import Types (Name, Rel (..), Variable)
+import Syntax (Value (..))
 import Utils
 
 -- Runs the MIR: a function is its locals and the block it is in. The statements of the block run, then the

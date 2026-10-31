@@ -57,7 +57,9 @@ library
       SelfHostedMir
       SelfHostedProof
       StdLib
-      TersusTypes
+      Solver
+      Syntax
+      Types
       TypeCheck
       Utils
   other-modules:

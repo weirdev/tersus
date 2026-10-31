@@ -9,7 +9,8 @@ module TestData
 import Data.List (isInfixOf)
 import Parse
 import StdLib
-import TersusTypes
+import Types
+import Syntax
 import TypeCheck
 import Utils
 import TestHarness

@@ -25,7 +25,8 @@ import SelfHostedMir (validateMirSubset)
 import Parse
 import StdLib
 import TypeCheck (Elaborated (..), elaborate)
-import TersusTypes
+import Types
+import Syntax
 import Utils
 import TestHarness
 

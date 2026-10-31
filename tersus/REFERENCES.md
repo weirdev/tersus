@@ -395,7 +395,7 @@ evaluate stable storage or handles before adopting a pinning concept.
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 
-Every stage updates `TersusTypes`, elaboration, MIR serialization/verification,
+Every stage updates `Types`/`Syntax`, elaboration, MIR serialization/verification,
 the interpreter, ownership lowering and both LLVM emitters as needed. Recheck
 loans after transformations that introduce aliases, moves or storage changes;
 make pass boundaries explicit in `Pipeline`. Never emit LLVM `noalias` or other
