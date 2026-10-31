@@ -23,7 +23,8 @@ The Haskell package `tersus/` is 61 `.hs` files, about 24,900 lines:
 | Tests | 8,399 | 25 files under `test/`, plus `dev/parity/Parity.hs` (101) |
 
 Already in Tersus: the emitter (`examples/emit.tersus`, 3,698 lines), a
-reader and writer of the MIR as data (`examples/mir_reader.tersus`), the
+reader and writer of the MIR as data (`examples/mir_reader.tersus`) and a
+checker of it (`examples/mir_verify.tersus`), the
 libraries every program gets (`lib/prelude.tersus`, `lib/lists.tersus`,
 `lib/box.tersus`, `lib/string.tersus`), and a validator that is not yet the
 production one (`lib/validation.tersus`, 2,884 lines). The superseded
@@ -94,6 +95,20 @@ Tersus well-formedness check must accept and refuse the same programs
 as `MirVerify`. Erasing ghosts (`MirGhost`) is a small pass over the
 same types. Mostly transcription; do it while the format is fresh from
 target 1's bridge work.
+
+Status (2026-10-30): the writer and the reader were already Tersus, and
+the check is now Tersus too. `examples/mir_verify.tersus` runs the parts
+of `MirVerify` that apply to a program in the data form: the shape,
+declared locals (parameters and `_0` included), jump and call targets,
+unknown types, array frame sizes, and the typing of statements,
+switches and calls. `TestMirVerify` compares its verdict with
+`MirVerify`'s on every example and test program, and on mutated
+programs it must refuse. The one piece not done is `MirGhost`: ghost
+statements and the block permissions are erased by `MirData.forNative`
+before the data is written, so the data holds nothing for a Tersus
+erasure to erase. That part waits on the data form carrying ghost
+statements. Until the host runs the Tersus check, `MirData`,
+`MirVerify` and `MirGhost` stay as the production path and the oracle.
 
 ### 4. The MIR passes in Tersus (deletes `MirLower` 867, `MirOwnership` 501, `MirLists` 450, `MirMoves` 426, `MirMono` 213, and `Mir` 626)
 
