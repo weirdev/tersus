@@ -70,6 +70,61 @@ test program, with the Haskell validator kept for one release as the
 oracle behind a flag. Then the Haskell proof modules and both bridges
 are deleted together (the bridges exist only to feed a Haskell host).
 
+Status (2026-10-31, PR #94): the flip is made. `Pipeline` validates only
+through `lib/validation.tersus`, fed by `SelfHostedMir`; the Haskell
+validator, `SelfHostedProof` and `dev/parity` are deleted, and a program
+the bridge does not model is refused, never passed. The bridge still
+refuses three things master gained after the branch started, so the
+corpus that uses them fails with "does not model yet" until they are
+modeled. The plan for each, in the order to do them:
+
+1. Equality as the trait `Eq` (`lib/eq.tersus`). `=` on anything but a
+   word is now a call of an `eq` impl, which the bridge already models
+   as a call with a contract (`return = (self = other)`). What is
+   missing is proving the impls: the old engine's equality by parts
+   (a disequality by refuting the equality, two lists equal by their
+   sizes and a `forall` over their elements, two constructions equal
+   by their fields, and `c = (a rel b)` from the relation), and the
+   facts it added at branches and locals (a struct is its constructor
+   applied to its fields; a value that tested as none of the other
+   variants is the last one). These are entailment rules in
+   `validation.tersus` plus constructed-value facts the bridge emits
+   from the types it already reads.
+2. References (REFERENCES.md, stages 1 to 5). A reference is the
+   version of its place, as in the old validator, so no new proof
+   terms are needed, only bookkeeping in the bridge: `&place` binds the
+   reference local to the place's term (a field read or a `get`, with
+   the index bound checked as `get` checks it); `*r` is a copy;
+   `AssignRef root steps v` gives the root a new term (the whole value,
+   a construction with one field replaced, or a `set`, so the invariant
+   and the bound are checked as a construction and a `set` are); after
+   any new version of a root, the reference locals borrowing it are
+   rebound. The borrow of each reference local is found statically
+   per function and the function is refused when two borrows of one
+   local disagree. A call with update parameters gets a fresh term per
+   updated argument, the callee's promise read with the parameter as
+   that term and `old(p)` as the argument's term, and the root rebound;
+   the callee is checked with `old(p)` as the entry term. Loops treat
+   the roots that `AssignRef` and update calls write as assigned.
+   Returned references (`from`) and holders follow from the same
+   rebinding once the callee's `from` list says which argument's place
+   the result is.
+3. `Hash`, `HashMap` and `HashSet` (`lib/prelude.tersus`,
+   `lib/map.tersus`, `lib/set.tersus`). Nothing new reaches the MIR:
+   bounded impls are templates the checker instantiates. What the
+   libraries need from the validator is arithmetic it does not have
+   yet: `x % n` for a positive `n` in `0..n` (and the identity
+   `x = n * (x / n) + x % n` that `hashCombine` rests on), and the
+   list-of-lists frame facts of `bucketPut`. These go in with the
+   division-family linear arithmetic gap that already fails several
+   test cases.
+
+The validator itself now uses `HashMap` and `HashSet`, so every
+validation runs those libraries interpreted, and is several times
+slower than it was before the rebase; and its own self-check needs
+item 3. Performance comes before the three items, since each test run
+is gated on it.
+
 ### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
 
 `StdLib.hs` defines the builtins in Haskell; its own TODO says to write
