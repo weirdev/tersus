@@ -50,12 +50,15 @@ assumedInfo program name =
                 assumed = [p | ProofAssert p <- M.specEnsures spec, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
              in FnInfo names (M.specRequires spec) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name (M.readersOfInput program)) (M.specMutParams spec)
 
--- The functions that call each other in a cycle: each name in a group that has more than one member, or one that calls itself
+-- The functions defined at the top that call each other in a cycle: each name in a group that has more than
+-- one member, or one that calls itself. A function defined inside another is not in a group: it can call the
+-- one around it only under the rule for that (both declared ~), which the recursive call itself checks.
 callGroups :: M.Program -> Map Name (Set Name)
 callGroups program = Map.fromList [(name, group) | (name, group) <- groups, Set.size group > 1 || Set.member name (callees name)]
   where
     fns = M.progFunctions program
-    callees name = maybe Set.empty (Set.intersection (Map.keysSet fns) . M.functionsNamed) (Map.lookup name fns)
+    tops = Map.keysSet (topLevelSources program)
+    callees name = maybe Set.empty (Set.intersection tops . M.functionsNamed) (Map.lookup name fns)
     reach name = go Set.empty [name]
       where
         go seen [] = seen
