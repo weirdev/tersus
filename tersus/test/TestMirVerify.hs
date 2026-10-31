@@ -1,4 +1,4 @@
-module TestMirVerify (testMirVerify) where
+module TestMirVerify (testMirVerify, testMirVerifyPrograms) where
 
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
@@ -38,11 +38,17 @@ testMirVerify =
             , TestCase "what is not the MIR is refused" refused
             ]
         , TestParallel
-            "every example and program, natively"
-            ( [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
-                ++ [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
-            )
+            "every example, natively"
+            [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
         ]
+
+-- The validated programs of the sweep as a group of their own, so the suite's group processes balance: this sweep
+-- and testMirEmit's were the longest groups, and a group is a process.
+testMirVerifyPrograms :: Test
+testMirVerifyPrograms =
+    TestParallel
+        "testMirVerifyPrograms"
+        [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
 
 goodSource :: String
 goodSource = "fn double(n: Int) -> Int [{ }] [{ }] { return n + n; }; if double(2) = 4 { return 1; }; return 0;"
