@@ -25,6 +25,7 @@ extra-source-files:
     lib/stdlib.tersus
     lib/box.tersus
     lib/map.tersus
+    lib/set.tersus
 
 source-repository head
   type: git

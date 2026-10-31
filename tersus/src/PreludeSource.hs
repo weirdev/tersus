@@ -7,6 +7,7 @@ module PreludeSource
     , boxSource
     , stringSource
     , mapSource
+    , setSource
     , emitterSource
     , stdlibSource
     , seedSha256
@@ -74,6 +75,15 @@ mapSource =
     $( do
         addDependentFile "lib/map.tersus"
         contents <- runIO (readFile "lib/map.tersus")
+        lift contents
+     )
+
+-- The text of lib/set.tersus: the HashSet a program has when it mentions one
+setSource :: String
+setSource =
+    $( do
+        addDependentFile "lib/set.tersus"
+        contents <- runIO (readFile "lib/set.tersus")
         lift contents
      )
 

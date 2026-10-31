@@ -1,0 +1,59 @@
+// The library a program has when it mentions `HashSet` and does not declare it itself (see Pipeline.parseSource): it is parsed
+// before the program, after the prelude, the string library and the map library, so the program's line numbers are its own.
+//
+// A HashSet<K> is the keys of a HashMap<K, Bool>: a key is in the set when the map has it, and the map's buckets, spread and
+// hashing are the set's. A set is a value like a map: insert and remove give a new set, and the set owns its keys. What a
+// caller can rely on is the contracts on the count (insert adds at most one, remove takes at most one); that a key that
+// was inserted is found is true when a set runs, and the tests say so, but a caller cannot prove it from these contracts,
+// for the reason lib/map.tersus gives for maps.
+
+struct HashSet<K> {
+    map: HashMap<K, Bool>,
+};
+
+impl<K> Clone for HashSet<K> { };
+
+// The set with this map (the way a set is made in the functions below, whose types are decided by a call)
+fn makeSet<K>(map: HashMap<K, Bool>) -> HashSet<K> [{ }] [{ affirm return.map.count = map.count; affirm return.map.buckets = map.buckets; }] {
+    return HashSet<K> { map: map };
+};
+
+impl<K> HashSet<K> {
+    fn size(self: &Self) -> Int [{ }] [{ affirm return = self.map.count; }] {
+        return self.map.size();
+    };
+
+    // (the type of an empty set is decided by what is put in it, as the type of an empty map is)
+    fn new() -> Self [{ }] [{ affirm size(return) = 0; }] {
+        return Self { map: HashMap::new() };
+    };
+};
+
+impl<K: Hash + Eq> HashSet<K> {
+    fn contains(self: &Self, k: &K) -> Bool [{ }] [{ }] {
+        return self.map.contains(k);
+    };
+
+    fn insert(self: Self, k: K) -> Self [{ }] [{
+        affirm size(return) >= size(self);
+        affirm size(return) <= size(self) + 1;
+    }] {
+        return makeSet(self.map.insert(k, true));
+    };
+
+    fn remove(self: Self, k: &K) -> Self [{ }] [{
+        affirm size(return) <= size(self);
+        affirm size(return) >= size(self) - 1;
+    }] {
+        return makeSet(self.map.remove(k));
+    };
+
+    // Every key of the set, in bucket order (which order that is says nothing about the keys)
+    fn elements(self: &Self) -> List<K> [{ }] [{ }] {
+        result = [];
+        for e in self.map.entries() {
+            result = push(result, clone(e.key));
+        };
+        return result;
+    };
+};

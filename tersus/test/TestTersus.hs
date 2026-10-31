@@ -41,6 +41,7 @@ import TestMirEmit
 import TestBootstrap
 import TestEq
 import TestHashMap
+import TestHashSet
 
 main :: IO ()
 main = do
@@ -146,6 +147,7 @@ allGroups =
     , testBootstrap
     , testEq
     , testHashMap
+    , testHashSet
     ]
 
 groupName :: Test -> String
