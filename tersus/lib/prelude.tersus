@@ -1,4 +1,5 @@
-// The library that every program has when it mentions `Sequence` or `Growable` and does not declare them itself (see Pipeline.parseSource): it is parsed
+// The library that every program has when it mentions one of its traits (`Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref`, `Hash`) or
+// `hashCombine` and does not declare it itself (see Pipeline.parseSource): it is parsed
 // before the program, so the program's line numbers are its own.
 //
 // `Sequence<E>` says what a sequence of E is: `size`, `get`, `set` and `push`, with contracts written with `size` and `get` themselves,
