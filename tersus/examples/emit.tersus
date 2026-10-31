@@ -1411,6 +1411,155 @@ fn needsDrop(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Bool ~ {
     return r;
 };
 
+// The symbol of the function that frees what a value of the type owns, made for the type below
+fn dropSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("drop.", renderType(canonical(types, t)));
+};
+
+// The symbol of the function that frees what each of a run of values of the type owns
+fn dropRangeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("droprange.", renderType(canonical(types, t)));
+};
+
+// The lines that free the fields of one variant of a value at %slot, the fields from the byte `start`
+fn dropFieldLines(types: &List<TypeDecl>, fns: &List<String>, variantIndex: Int, fields: &List<Field>, start: Int) -> List<String> ~ {
+    out = noStrings();
+    offset = 0;
+    i = 0;
+    for f in fields {
+        l = layoutOf(types, f.ty);
+        offset = roundUp(offset, l.align);
+        if needsDrop(types, fns, f.ty) {
+            reg = "%df".then(showInt(variantIndex)).then(".").then(showInt(i));
+            out = push(out, "    ".then(reg).then(" = getelementptr i8, ptr %slot, i64 ").then(showInt(start + offset)));
+            out = push(out, "    call void ".then(dropSymbol(types, f.ty)).then("(ptr ").then(reg).then(")"));
+        };
+        offset = offset + l.size;
+        i = i + 1;
+    };
+    return out;
+};
+
+// The function that frees what a value of the type owns: the drop of the type first when it has one (not when the value
+// was taken apart, which cleared its bytes), then what its fields or its elements own
+fn dropFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> List<String> ~ {
+    out = noStrings();
+    out = push(out, "define internal void ".then(dropSymbol(types, t)).then("(ptr %slot) {"));
+    out = push(out, "entry:");
+    arr = sizedArray(t);
+    if arr.ok {
+        step = layoutOf(types, arr.elem).size;
+        out = push(out, "    br label %ahead");
+        out = push(out, "ahead:");
+        out = push(out, "    %ai = phi i64 [0, %entry], [%anext, %abody]");
+        out = push(out, "    %acond = icmp eq i64 %ai, ".then(showInt(arr.length)));
+        out = push(out, "    br i1 %acond, label %done, label %abody");
+        out = push(out, "abody:");
+        out = push(out, "    %aoff = mul i64 %ai, ".then(showInt(step)));
+        out = push(out, "    %ap = getelementptr i8, ptr %slot, i64 %aoff");
+        out = push(out, "    call void ".then(dropSymbol(types, arr.elem)).then("(ptr %ap)"));
+        out = push(out, "    %anext = add i64 %ai, 1");
+        out = push(out, "    br label %ahead");
+        out = push(out, "done:");
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    n = declaredName(types, t);
+    if !n.ok { return noStrings(); };
+    variants = variantsOf(types, n.text);
+    isEnumKind = isEnum(types, n.text);
+    payload = 1;
+    for v in variants {
+        l = fieldsLayout(types, v.fields);
+        if l.align > payload { payload = l.align; };
+    };
+    start = 0;
+    if isEnumKind { start = roundUp(4, payload); };
+    if containsName(fns, dropName(n.text)) {
+        size = layoutOf(types, t).size;
+        out = push(out, "    br label %zhead");
+        out = push(out, "zhead:");
+        out = push(out, "    %zi = phi i64 [0, %entry], [%znext, %zbody]");
+        out = push(out, "    %zcond = icmp eq i64 %zi, ".then(showInt(size)));
+        out = push(out, "    br i1 %zcond, label %fields, label %zbody");
+        out = push(out, "zbody:");
+        out = push(out, "    %zp = getelementptr i8, ptr %slot, i64 %zi");
+        out = push(out, "    %zb = load i8, ptr %zp");
+        out = push(out, "    %znz = icmp ne i8 %zb, 0");
+        out = push(out, "    %znext = add i64 %zi, 1");
+        out = push(out, "    br i1 %znz, label %znonzero, label %zhead");
+        out = push(out, "znonzero:");
+        out = push(out, "    %dr = call i64 ".then(functionSymbol(dropName(n.text))).then("(ptr %slot)"));
+        out = push(out, "    br label %fields");
+        out = push(out, "fields:");
+    };
+    if isEnumKind {
+        out = push(out, "    %tag = load i32, ptr %slot");
+        cases = "";
+        j = 0;
+        for v in variants {
+            cases = cases.then(" i32 ").then(showInt(j)).then(", label %v").then(showInt(j));
+            j = j + 1;
+        };
+        out = push(out, "    switch i32 %tag, label %done [".then(cases).then(" ]"));
+        j = 0;
+        for v in variants {
+            out = push(out, "v".then(showInt(j)).then(":"));
+            for l in dropFieldLines(types, fns, j, v.fields, start) { out = push(out, clone(l)); };
+            out = push(out, "    br label %done");
+            j = j + 1;
+        };
+        out = push(out, "done:");
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    if size(variants) > 0 {
+        for l in dropFieldLines(types, fns, 0, get(variants, 0).fields, start) { out = push(out, clone(l)); };
+    };
+    out = push(out, "    ret void");
+    out = push(out, "}");
+    return out;
+};
+
+// The function that frees what each of a run of values of the type owns (Addr::dropRange)
+fn dropRangeFunctionLines(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> List<String> ~ {
+    out = noStrings();
+    step = layoutOf(types, t).size;
+    out = push(out, "define internal void ".then(dropRangeSymbol(types, t)).then("(i64 %base, i64 %count) {"));
+    out = push(out, "entry:");
+    out = push(out, "    %basep = inttoptr i64 %base to ptr");
+    out = push(out, "    br label %rhead");
+    out = push(out, "rhead:");
+    out = push(out, "    %ri = phi i64 [0, %entry], [%rnext, %rbody]");
+    out = push(out, "    %rcond = icmp eq i64 %ri, %count");
+    out = push(out, "    br i1 %rcond, label %done, label %rbody");
+    out = push(out, "rbody:");
+    out = push(out, "    %roff = mul i64 %ri, ".then(showInt(step)));
+    out = push(out, "    %rp = getelementptr i8, ptr %basep, i64 %roff");
+    out = push(out, "    call void ".then(dropSymbol(types, t)).then("(ptr %rp)"));
+    out = push(out, "    %rnext = add i64 %ri, 1");
+    out = push(out, "    br label %rhead");
+    out = push(out, "done:");
+    out = push(out, "    ret void");
+    out = push(out, "}");
+    return out;
+};
+
+// A drop function for every type that owns something to free, and the run function of each
+fn dropFunctions(types: &List<TypeDecl>, fns: &List<String>, closed: &List<Type>) -> List<String> ~ {
+    out = noStrings();
+    for t in closed {
+        if needsDrop(types, fns, t) && (t is Type::TNamed || sizedArray(t).ok) {
+            for l in dropFunctionLines(types, fns, t) { out = push(out, clone(l)); };
+            for l in dropRangeFunctionLines(types, fns, t) { out = push(out, clone(l)); };
+            out = push(out, "");
+        };
+    };
+    return out;
+};
+
 // Whether a value is a word that is a number: an Int, a Byte or an address
 fn isNumberWord(t: &Type) -> Bool [{ }] [{ }] {
     return t is Type::TInt || t is Type::TByte || t is Type::TAddr || t is Type::TWord;
@@ -1526,9 +1675,7 @@ fn dataDescriptor(types: &List<TypeDecl>, fns: &List<String>, n: &String) -> Lis
     kind = "0";
     if isEnum(types, n) { kind = "1"; } else { if beforeAngle(n) = "StdList" { kind = "2"; } else { if beforeAngle(n) = "StdBox" { kind = "3"; }; }; };
     out = noStrings();
-    drop = "null";
-    if containsName(fns, dropName(n)) { drop = functionSymbol(dropName(n)); };
-    out = push(out, global("data.", n).then(" = private constant { i64, ptr, i64, ptr } { i64 ").then(showInt(size(variants))).then(", ptr ").then(global("variants.", n)).then(", i64 ").then(kind).then(", ptr ").then(drop).then(" }"));
+    out = push(out, global("data.", n).then(" = private constant { i64, ptr, i64 } { i64 ").then(showInt(size(variants))).then(", ptr ").then(global("variants.", n)).then(", i64 ").then(kind).then(" }"));
     entries = noStrings();
     for v in variants {
         fieldsRef = "null";
@@ -1630,12 +1777,10 @@ fn declarations() -> List<String> [{ }] [{ }] {
     out = push(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
     out = push(out, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)");
     out = push(out, "declare void @tersus_clone(ptr, ptr, ptr)");
-    out = push(out, "declare void @tersus_drop(ptr, ptr)");
     out = push(out, "declare void @tersus_box_free(ptr)");
     out = push(out, "declare i64 @tersus_addr_alloc(i64, i64)");
     out = push(out, "declare i64 @tersus_addr_resize(i64, i64, i64)");
     out = push(out, "declare void @tersus_addr_free(i64)");
-    out = push(out, "declare void @tersus_drop_slots(ptr, i64, i64)");
     out = push(out, "");
     return out;
 };
@@ -1690,7 +1835,7 @@ fn entryPoint(types: &List<TypeDecl>, fns: &List<String>, main: &Function) -> En
         body = push(body, "%w = ptrtoint ptr %out to i64");
         body = push(body, "call void @tersus_print(ptr ".then(sym).then(", i64 %w)"));
         if needsDrop(types, fns, ty) {
-            body = push(body, "call void @tersus_drop(ptr ".then(sym).then(", ptr %out)"));
+            body = push(body, "call void ".then(dropSymbol(types, ty)).then("(ptr %out)"));
         };
         body = push(body, "br label %done");
         body = push(body, "done:");
@@ -2122,8 +2267,7 @@ fn descriptor(g: Gen, cx: &Ctx, t: &Type) -> Gen ~ {
 // Frees what the value a local holds owns (nothing, if it holds none), and leaves a Box it held holding nothing
 fn dropSlot(g: Gen, cx: &Ctx, t: &Type, l: Int) -> Gen ~ {
     g1 = descriptor(g, cx, t);
-    d = g1.last;
-    return emit(g1, "call void @tersus_drop(ptr ".then(d).then(", ptr ").then(slot(l)).then(")"));
+    return emit(g1, "call void ".then(dropSymbol(cx.types, t)).then("(ptr ").then(slot(l)).then(")"));
 };
 
 fn memcpyText(to: &String, from: &String, bytes: Int) -> String [{ }] [{ }] {
@@ -2489,12 +2633,12 @@ fn elementValue(g: Gen, cx: &Ctx, f: &Function, elementTy: &Type, o: &Operand) -
 // Frees what an element owns, before another is written over it
 fn dropElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String) -> Gen ~ {
     if !needsDropIn(cx, elementTy) { return g; };
+    if !(elementTy is Type::TNamed || elementTy is Type::TVariant || sizedArray(elementTy).ok) { return g; };
     bytes = bytesIn(cx, elementTy);
     g1 = elementAddress(g, base, index, bytes);
     p = g1.last;
     g2 = descriptor(clone(g1), cx, elementTy);
-    d = g2.last;
-    return emit(g2, "call void @tersus_drop(ptr ".then(d).then(", ptr ").then(p).then(")"));
+    return emit(g2, "call void ".then(dropSymbol(cx.types, elementTy)).then("(ptr ").then(p).then(")"));
 };
 
 fn writeElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String, value: &String) -> Gen ~ {
@@ -2750,23 +2894,23 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
         e = addressElement(f, get(args, 0));
         if !e.ok { return failG(g, "Not an address"); };
         if !needsDropIn(cx, e.ty) { return giving(g, "0"); };
+        if !(e.ty is Type::TNamed || e.ty is Type::TVariant || sizedArray(e.ty).ok) { return giving(g, "0"); };
         g1 = slotAddress(g, cx, f, get(args, 0), get(args, 1));
         at = g1.last;
         g2 = descriptor(clone(g1), cx, e.ty);
-        d = g2.last;
-        return giving(emit(clone(g2), "call void @tersus_drop(ptr ".then(d).then(", ptr ").then(at).then(")")), "0");
+        return giving(emit(clone(g2), "call void ".then(dropSymbol(cx.types, e.ty)).then("(ptr ").then(at).then(")")), "0");
     };
     if op = 32 && n = 3 {
         e = addressElement(f, get(args, 0));
         if !e.ok { return failG(g, "Not an address"); };
         if !needsDropIn(cx, e.ty) { return giving(g, "0"); };
+        if !(e.ty is Type::TNamed || e.ty is Type::TVariant || sizedArray(e.ty).ok) { return giving(g, "0"); };
         g1 = slotNumber(g, cx, f, get(args, 0), get(args, 1));
         at = g1.last;
         g2 = operandValue(clone(g1), cx, f, Type::TInt, get(args, 2));
         count = g2.last;
         g3 = descriptor(clone(g2), cx, e.ty);
-        d = g3.last;
-        return giving(emit(clone(g3), "call void @tersus_drop_slots(ptr ".then(d).then(", i64 ").then(at).then(", i64 ").then(count).then(")")), "0");
+        return giving(emit(clone(g3), "call void ".then(dropRangeSymbol(cx.types, e.ty)).then("(i64 ").then(at).then(", i64 ").then(count).then(")")), "0");
     };
     return failG(g, "Native code does not support this operation on an address");
 };
@@ -3640,6 +3784,7 @@ fn ir(program: &Program) -> Entry ~ {
     };
     for l in m.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
+    for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
     for l in e.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     return Entry { ok: true, error: "", lines: lines, types: closed };
@@ -3658,6 +3803,7 @@ fn outline(program: &Program) -> Entry ~ {
     closed = closeTypes(program.types, roots);
     lines = declarations();
     for l in typeDescriptors(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
+    for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
     for l in entry.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     return Entry { ok: true, error: "", lines: lines, types: closed };
