@@ -16,7 +16,7 @@ Facts about Tersus that decide the shape (from `Parse` and the semantics of the 
 
 - **Values are immutable and unaliased.** `push`/`set` return new lists; there is no heap to model, so a place is just a local. No projections, no borrows, no storage markers.
 - **`match` and `for` are already desugared by the parser** into `if` chains over `Is` tests and `while` loops, so the MIR needs neither.
-- **Functions are first-class but do not capture.** A body sees its parameters, the standard library and the top-level functions defined before it, so a nested `fn` lifts to a top-level MIR function with no environment.
+- **Functions are first-class but do not capture.** A body sees its parameters, the standard library and the top-level functions, so a nested `fn` lifts to a top-level MIR function with no environment.
 - **Scopes decide which variable an assignment means** (`x = ...` updates the nearest enclosing `x`, else defines a new one in the current scope). Lowering resolves that once; the MIR has numbered locals and no scopes.
 - **Partial operations have contracts the validator discharged** (`get` in range, `/` and `%` by non-zero, `first`/`last` of a non-empty list, `Cast`). The MIR keeps them as ordinary operations with documented preconditions, as `unreachable` would be in LLVM; the interpreter still checks them and reports an error, which turns any validator bug into a test failure instead of a wrong answer.
 - **Proof-only constructs** (`affirm`, `define`, `rewrite`, `axiom`, `proof`, invariants, `shrinks`, contracts) have no run-time meaning. The validator reads them from the MIR (see Specifications and Validation); the executor ignores them.
@@ -313,4 +313,4 @@ A type is `int`, `byte`, `bool`, `list T`, `array T SIZE`, `box T`, `fn N T... T
 
 - **Top-level `return` with no value** (`main` without one) leaves `_0` unassigned and `fnReturns = Nothing`.
 - **Recursive types** (`Tree`) need a pointer in a native layout; the MIR only names them.
-- **Mutual recursion** does not exist in the language yet, so `progFunctions` needs no forward references.
+- **Mutual recursion** is ordinary in the MIR: `progFunctions` holds every function before validation, and the validator works out the call cycles from it.
