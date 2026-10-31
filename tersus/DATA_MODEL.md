@@ -81,7 +81,7 @@ match s {                                      // statement form: arms are block
 - **Telling a literal from a block:** `Name {` followed by `field :` or `}` is a literal, and a block starts with a statement, which never has `Ident :`. So `if i < n { x = 1; }` is unambiguous without relying on case.
 - **Field access:** `x.f` on a struct is always allowed. On an enum value it has the input contract "`x` is a variant that has `f`", checked like the index of `get`. A `match` arm, an `if x is V` branch or an earlier `affirm x is V;` establishes it. `x is V` is a Bool expression and also a proof, so it appears in `affirm`, contracts and `if`.
 - **`match`:** an arm is a variant pattern, `=>`, and an expression (in an expression `match`) or a block (in a statement `match`). Patterns are flat; nested data is taken apart with a second `match`. Every variant must have an arm, which is checked syntactically against the declaration. A pattern names each field it wants (`radius: r` binds `r`) and may leave fields out.
-- **Equality:** `=` works on every type and is structural. Ordering (`<`, `<=`, ...) is for `Int`.
+- **Equality:** `=` is the trait `Eq` (LANGUAGE.md, Equality): the words compare as they are, and any other type by its impl, which `impl Eq for T { };` writes to compare the fields. Ordering (`<`, `<=`, ...) is for `Int`.
 - **No field assignment at first.** Write `n = Node { next: 3, ..n };`. Sugar (`n.next = 3`, `nodes[i].next = 3`) is a later phase and is only rewriting.
 
 ## Types

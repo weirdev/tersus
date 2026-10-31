@@ -1,0 +1,53 @@
+// What makes `=` and `!=` work on a type: a program that compares two values has this library in front of it (Pipeline.libraries), unless it declares
+// a trait `Eq` itself. `a = b` in code is `Eq::eq(a, b)`, and `a != b` is `!Eq::eq(a, b)`, for every type but Int, Byte, Bool, the fixed-width
+// integers and addresses, which implement Eq by the language and are compared as words. In a proof (`affirm`, a contract, an invariant, a `define`),
+// `=` is the validator's own equality instead, which is what `eq` promises to give: an impl may compare in its own way, but its answer is the
+// equality of the values, so a program that tests `if a = b` knows `a = b` in the branch and `a != b` in the other, whatever the type.
+//
+// A struct or an enum implements it with `impl Eq for T { };`, which compares the fields (of the same variant, for an enum) with their own Eq,
+// or with an impl that has a body. A list and an array implement it when their elements do, and so does a Box when what it holds does.
+trait Eq {
+    fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }];
+};
+
+impl<T: Eq> Eq for List<T> {
+    fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] {
+        if size(self) != size(other) { return false; };
+        i = 0;
+        while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm forall j in 0..i: get(self, j) = get(other, j); }] shrinks size(self) - i {
+            if get(self, i) != get(other, i) { return false; };
+            i = i + 1;
+        };
+        return true;
+    };
+};
+
+impl<T: Eq, n> Eq for Array<T, n> {
+    fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] {
+        i = 0;
+        while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm forall j in 0..i: get(self, j) = get(other, j); }] shrinks size(self) - i {
+            if get(self, i) != get(other, i) { return false; };
+            i = i + 1;
+        };
+        return true;
+    };
+};
+
+// (a Box has the value of what it holds, so what it holds is compared: unbox of a borrowed Box reads it)
+impl<T: Eq> Eq for Box<T> {
+    fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] {
+        return Box::unbox(self) = Box::unbox(other);
+    };
+};
+
+// (a Box of an array of no size is compared element by element: `=` on two of them is a call of this, since an impl for Box is the one
+// above, for a Box of a value with a size)
+fn eqBoxedArrays<T: Eq>(a: &Box<Array<T>>, b: &Box<Array<T>>) -> Bool [{ }] [{ affirm return = (a = b); }] {
+    if size(a) != size(b) { return false; };
+    i = 0;
+    while i < size(a) [{ affirm i >= 0; affirm i <= size(a); affirm forall j in 0..i: get(a, j) = get(b, j); }] shrinks size(a) - i {
+        if get(a, i) != get(b, i) { return false; };
+        i = i + 1;
+    };
+    return true;
+};

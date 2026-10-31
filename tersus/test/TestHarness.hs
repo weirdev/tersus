@@ -43,7 +43,7 @@ import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
 import Parse
-import Pipeline (compileSource, ownedSource, runStatements, validateStatements)
+import Pipeline (compileSource, ownedSource, parseWithEquality, runStatements, validateStatements)
 import TersusTypes
 import Utils
 
@@ -156,30 +156,30 @@ parseValFailStmtHelper stmtStr =
 -- Control flow tests. A program runs on the MIR once it type checks; nothing here validates it.
 parseEvalProgramHelper :: String -> Maybe Value -> TestResult
 parseEvalProgramHelper source expected = withProgram source $
-    case parseStatementBlock source of
-        Left err -> Just $ "Parse failed: " ++ show err
+    case parseWithEquality source of
+        Left err -> Just $ "Parse failed: " ++ err
         Right stmts -> case runStatements stmts of
             Ok result -> testAssertEq (fmap fromMirValue result) expected
             Error e -> Just $ "Evaluation failed with error: " ++ e
 
 parseEvalProgramFailHelper :: String -> String -> TestResult
 parseEvalProgramFailHelper source expectedError = withProgram source $
-    case parseStatementBlock source of
-        Left err -> Just $ "Parse failed: " ++ show err
+    case parseWithEquality source of
+        Left err -> Just $ "Parse failed: " ++ err
         Right stmts -> testAssertErrorContains expectedError (runStatements stmts)
 
 parseValidProgramHelper :: String -> TestResult
 parseValidProgramHelper source = withProgram source $
-    case parseStatementBlock source of
-        Left err -> Just $ "Parse failed: " ++ show err
+    case parseWithEquality source of
+        Left err -> Just $ "Parse failed: " ++ err
         Right stmts -> case validateStatements stmts of
             Ok _ -> Nothing
             Error e -> Just $ "Validation failed with error: " ++ e
 
 parseValidateFailProgramHelper :: String -> String -> TestResult
 parseValidateFailProgramHelper source expectedError = withProgram source $
-    case parseStatementBlock source of
-        Left err -> Just $ "Parse failed: " ++ show err
+    case parseWithEquality source of
+        Left err -> Just $ "Parse failed: " ++ err
         Right stmts -> testAssertErrorContains expectedError (validateStatements stmts)
 
 -- A failure says which program it was about (the start of it)
