@@ -46,8 +46,8 @@ testBorrow =
                 [ testCase "a lent parameter is not assigned" (rejected "fn f(a: &List<Int>) -> Int { a = push(a, 1); return 0; }; return f([]);" "a is borrowed (&), so it is only read")
                 , testCase "a call gives the value, not a reference" (rejected "fn f(a: &List<Int>) -> Int { return 0; }; return f(3);" "argument 1 of f: expected List<Int>, got Int")
                 , testCase "a & result has to be from a parameter" (rejected "fn f() -> &List<Int> { return []; }; return 0;" "no parameter of it is a reference for the result to be from")
-                , testCase "nor a field" (rejected "struct S { a: &List<Int> }; return 0;" "is written on a parameter or held by a local")
-                , testCase "nor a Box" (rejected "fn f(a: Box<&Int>) -> Int { return 0; }; return 0;" "is written on a parameter or held by a local")
+                , testCase "a field can be a read reference" (runs "struct S { a: &List<Int> }; xs = [1, 2]; s = S { a: &xs }; r = s.a; return size(*r);" (VInt 2))
+                , testCase "nor a Box" (rejected "fn f(a: Box<&Int>) -> Int { return 0; }; return 0;" "a Box cannot hold")
                 , testCase "a function value lends too" (valid "fn total(a: &List<Int>) -> Int { return size(a); }; f = total; return 0;")
                 , testCase "a function that lends is not a function that does not" (rejected "fn total(a: &List<Int>) -> Int { return size(a); }; fn apply(f: fn(List<Int>) -> Int) -> Int { return 0; }; return apply(total);" "expected fn(List<Int>) -> Int, got fn(&List<Int>) -> Int")
                 , testCase "the & can have spaces" (runs "fn f(a: & List<Int>) -> Int { return size(a); }; return f([1]);" (VInt 1))
@@ -104,6 +104,23 @@ testBorrow =
                 , testCase "a returned parameter is a reference to what the result says" (rejected "fn bad(x: &Bool) -> &Int from x { return x; }; b = true; r = bad(b); return *r;" "expected Int, got Bool")
                 , testCase "every candidate of a returned call counts, not only the first" (rejected "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; fn outer(xs: &Int) -> &Int from xs { local = 5; return choose(false, xs, &local); }; x = 1; r = outer(x); return *r;" "is not a reference from xs")
                 , testCase "a result that may be from several places still freezes them all through another call" (rejected "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; fn identity(v: &Int) -> &Int from v { return v; }; x = 1; y = 2; r = choose(false, x, y); s = identity(r); y = 9; return *s;" "cannot be assigned while it is borrowed")
+                ]
+            , TestList
+                "reference fields"
+                [ testCase "a struct can hold read references, and they are read where they point" (runs "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; f = w.first; l = w.last; return *f + *l;" (VInt 40))
+                , testCase "in a generic struct too" (runs "struct Window<T> { first: &T, last: &T }; xs = [10, 20, 30]; w = Window<Int> { first: &get(xs, 0), last: &get(xs, 2) }; f = w.first; l = w.last; return *f + *l;" (VInt 40))
+                , testCase "a struct of references is returned under a from bound" (runs "struct Window { first: &Int, last: &Int }; fn ends(xs: &List<Int>) -> Window from xs [{ affirm size(xs) > 0; }] [{ }] { return Window { first: &get(xs, 0), last: &get(xs, size(xs) - 1) }; }; ys = [10, 20, 30]; w = ends(ys); f = w.first; return *f;" (VInt 10))
+                , testCase "the place a returned struct's fields are from is frozen while it is held" (rejected "struct Window { first: &Int, last: &Int }; fn ends(xs: &List<Int>) -> Window from xs [{ affirm size(xs) > 0; }] [{ }] { return Window { first: &get(xs, 0), last: &get(xs, size(xs) - 1) }; }; ys = [10, 20, 30]; w = ends(ys); ys = [40, 50]; f = w.first; return *f;" "cannot be assigned while it is borrowed")
+                , testCase "every field of a returned struct has to be from a named parameter" (rejected "struct Window { first: &Int, last: &Int }; fn ends(xs: &List<Int>, other: &List<Int>) -> Window from xs [{ affirm size(xs) > 0; affirm size(other) > 0; }] [{ }] { return Window { first: &get(xs, 0), last: &get(other, 0) }; }; ys = [10, 20]; zs = [30, 40]; w = ends(ys, zs); f = w.first; return *f;" "is not a reference from xs")
+                , testCase "a field read out of a moved holder still freezes its place" (rejected "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; w2 = w; f = w2.last; xs = [99]; return *f;" "cannot be assigned while it is borrowed")
+                , testCase "a struct update keeps the fields it does not name" (runs "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; w2 = Window { first: &get(xs, 1), ..w }; f = w2.first; l = w2.last; return *f + *l;" (VInt 50))
+                , testCase "an update reference cannot be a field yet" (rejected "struct Bad { r: &mut Int }; x = 1; return x;" "a field cannot be an update reference")
+                , testCase "a struct cannot hold a value that holds references yet" (rejected "struct Window { first: &Int, last: &Int }; struct Outer { w: Window, n: Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; o = Outer { w: w, n: 1 }; return o.n;" "cannot be held in another value yet")
+                , testCase "a value that holds references is not given to a function yet" (rejected "struct Window { first: &Int, last: &Int }; fn total(w: Window) -> Int { f = w.first; return *f; }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; return total(w);" "is not given to a function yet")
+                , testCase "nor put in a list" (rejected "struct Window { first: &Int, last: &Int }; xs = [10, 20, 30]; w = Window { first: &get(xs, 0), last: &get(xs, 2) }; ws = push([], w); return size(ws);" "holds references")
+                , testCase "a clone of a holder holds its references too" (rejected "trait Clone { }; struct S { r: &Int }; impl Clone for S { }; x = 1; s = S { r: &x }; t = clone(s); x = 2; f = t.r; return *f;" "cannot be assigned while it is borrowed")
+                , testCase "a holder made in the function is returned from what its fields are from" (runs "struct S { r: &Int }; fn f(x: &Int) -> S from x { s = S { r: &x }; return s; }; x = 3; w = f(x); g = w.r; return *g;" (VInt 3))
+                , testCase "an ordinary field is not an origin" (runs "struct S { r: &Int, n: Int }; fn f(x: &Int) -> S from x { n = 1; return S { r: &x, n: n }; }; x = 3; w = f(x); g = w.r; return *g + w.n;" (VInt 4))
                 ]
             , TestList
                 "conflicts"

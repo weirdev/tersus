@@ -27,6 +27,7 @@ module TypeCheck
     , declareGeneric
     , registerCtors
     , checkType
+    , checkFieldType
     , unify
     , expect
     , zonk
@@ -97,6 +98,7 @@ data TcState = TcState
     , tcRefResults :: Map Name ([Variable], [Variable]) -- each function that returns a reference: its parameters, and the ones the result is from
     , tcResultFrom :: Maybe [Variable] -- the parameters the result of the function being checked is from, when it is a reference
     , tcParams :: [Variable] -- the parameters of the function being checked
+    , tcRefOrigins :: Map Variable [Variable] -- what each local that holds references (or a value that holds them) is from: the roots of its places
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -118,7 +120,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing []
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -588,7 +590,7 @@ declareGeneric name params fields = do
             when (any (selfExpands name . snd) fields) $
                 failTc ("Type error: " ++ name ++ " uses itself with a type made of its own parameters, which would make a struct for each depth (Node<List<T>> inside Node<T>): a struct that holds itself gives its own parameters as they are")
             -- (the fields are checked with the sizes and types in scope, and the struct may hold itself in a Box)
-            withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkType . snd) fields)
+            withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkFieldType . snd) fields)
             checkFinite name [fields]
   where
     nubSizes = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -716,11 +718,16 @@ checkCallWrites expr = do
 -- parameter when there is only one. A reference result with no reference parameter, or with several and
 -- none named, is refused; so is an update reference as a result, for now (REFERENCES.md, stage 4)
 refResultFrom :: Variable -> [Variable] -> [Type] -> Type -> [Variable] -> TC [Variable]
-refResultFrom name params ptys rty fromNames = case rty of
-    TMutRef _ -> failTc ("Type error: " ++ name ++ " returns an update reference (&mut T): a returned update reference is not in the language yet")
-    TRef inner -> do
-        checkType inner
-        case fromNames of
+refResultFrom name params ptys rty fromNames = do
+    isRefResult <- case rty of
+        TMutRef _ -> failTc ("Type error: " ++ name ++ " returns an update reference (&mut T): a returned update reference is not in the language yet")
+        TRef inner -> checkType inner >> return True
+        _ -> holdsRef rty
+    if not isRefResult
+        then case fromNames of
+            [] -> return []
+            _ -> failTc ("Type error: " ++ name ++ " is written from " ++ intercalate ", " fromNames ++ ", but its result is not a reference")
+        else case fromNames of
             _ : _ -> do
                 forM_ fromNames $ \p -> case lookup p (zip params ptys) of
                     Just t | isRefType t -> return ()
@@ -730,9 +737,27 @@ refResultFrom name params ptys rty fromNames = case rty of
                 [only] -> return [only]
                 [] -> failTc ("Type error: " ++ name ++ " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>")
                 _ -> failTc ("Type error: " ++ name ++ " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)")
-    _ -> case fromNames of
-        [] -> return []
-        _ -> failTc ("Type error: " ++ name ++ " is written from " ++ intercalate ", " fromNames ++ ", but its result is not a reference")
+
+-- What a value that is or holds references is from, as the roots its places start from, where that can be
+-- told: a borrow of a place, a local that holds references (whose own origins are recorded), a field of one,
+-- a struct made of them, or a call of a function whose signature says what its result is from
+exprRefOrigins :: Ctx -> Env -> Expression -> TC [Variable]
+exprRefOrigins ctx env expr = do
+    st <- getState
+    case expr of
+        F (Val (VFunct _ _ _ (BuiltinFunct (Ctor _ _)) _)) args -> concat <$> mapM (exprRefOrigins ctx env) args
+        F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> exprRefOrigins ctx env sub
+        -- (what a local that holds references was made from is what it is from, before any alias of it;
+        -- a reference parameter is one too, though in the body it has the type of what it is to)
+        Var v -> case Map.lookup v (tcRefOrigins st) of
+            Just origins -> return origins
+            Nothing
+                | v `elem` tcReadOnly st || v `elem` tcMutParams st -> return [fst (resolveRefPlace st v [])]
+                | otherwise -> do
+                    t <- lookupVar ctx env v
+                    tz <- zonk t
+                    if isRefType tz then exprOriginCandidates expr else return []
+        _ -> exprOriginCandidates expr
 
 -- What a returned reference is from, as the root it starts from, where that can be told: a borrow of a place,
 -- a reference a local holds, or a call of a function whose signature says what its result is from
@@ -794,6 +819,18 @@ recordAlias var ty expr = do
                 [root] -> putState st{tcRefAliases = Map.insert var (root, []) (tcRefAliases st)}
                 _ -> putState st{tcRefAliases = Map.delete var (tcRefAliases st)}
 
+-- The roots a binding's places are from, when its value is or holds references; forgotten when it does not
+recordOrigins :: Ctx -> Env -> Variable -> Type -> Expression -> TC ()
+recordOrigins ctx env var t expr = do
+    tz <- zonk t
+    holds <- holdsRef tz
+    st <- getState
+    if not holds
+        then putState st{tcRefOrigins = Map.delete var (tcRefOrigins st)}
+        else do
+            origins <- exprRefOrigins ctx env expr
+            putState st{tcRefOrigins = Map.insert var origins (tcRefOrigins st)}
+
 rewriteOld :: VariableProof -> VariableProof
 rewriteOld (FApp (CTerm (VFunct _ _ _ (BuiltinFunct OldOf) _)) [inner]) = snapshot inner
   where
@@ -809,22 +846,22 @@ rewriteOld other = other
 checkType :: Type -> TC ()
 checkType (TNamed name) = () <$ typeCtors name
 checkType (TVariant name) = () <$ ctorInfo name
-checkType (TList t) = noGhostIn "a list" t >> checkType t
+checkType (TList t) = noGhostIn "a list" t >> noRefIn "a list" t >> checkType t
 -- (a Box holds any type that has a size; the one place an array of no size can be is behind it)
 checkType (TBox t@(TArrayOf e SizeAny)) = checkType e >> arrayOk t
-checkType (TBox t) = noGhostIn "a Box" t >> checkType t
+checkType (TBox t) = noGhostIn "a Box" t >> noRefIn "a Box" t >> checkType t
 checkType (TAddr t) = addressable t
-checkType (TUninit t) = noGhostIn "an Uninit" t >> checkType t
+checkType (TUninit t) = noGhostIn "an Uninit" t >> noRefIn "an Uninit" t >> checkType t
 checkType (TBlock t) = addressable t
 checkType (TArrayOf _ SizeAny) = failTc unsizedByValue
-checkType ty@(TArrayOf t size) = noGhostIn "an array" t >> checkType t >> sizeInScope size >> arrayOk ty
+checkType ty@(TArrayOf t size) = noGhostIn "an array" t >> noRefIn "an array" t >> checkType t >> sizeInScope size >> arrayOk ty
 checkType (TForall _ _ t) = checkType t
 checkType (TParam name) = do
     s <- getState
     unless (name `elem` tcTypeScope s) $ failTc ("Type error: " ++ name ++ " is not a type here: a function declares a type parameter, as in fn f<" ++ name ++ ">(a: " ++ name ++ ")")
 checkType (TFn args ret) = mapM_ (noGhostIn "a function value") (ret : map unref args) >> mapM_ checkType (ret : map unref args)
-checkType (TRef _) = failTc "Type error: &T is a reference, as in fn f(a: &List<Int>): it is written on a parameter or held by a local, and a value, a field or a result is never one (a reference that escapes is not in the language yet)"
-checkType (TMutRef _) = failTc "Type error: &mut T is a reference, as in fn f(a: &mut List<Int>): it is written on a parameter or held by a local, and a value, a field or a result is never one (a reference that escapes is not in the language yet)"
+checkType (TRef _) = failTc "Type error: &T is a reference, as in fn f(a: &List<Int>): it is written on a parameter, held by a local or a field, or returned under a from bound, and it is never an element of a list, an array or a Box"
+checkType (TMutRef _) = failTc "Type error: &mut T is a reference, as in fn f(a: &mut List<Int>): it is written on a parameter or held by a local, and it is never a field, an element of a list, an array or a Box, or a result yet"
 checkType _ = return ()
 
 -- A permission is a ghost value: it is erased before the program runs, so it can only be where it is erased with what holds it (a local, a
@@ -834,6 +871,14 @@ noGhostIn what t = do
     t' <- zonk t
     ghostly <- holdsGhost t'
     when ghostly $ failTc ("Type error: a permission and a value of a linear type are used exactly once, so " ++ what ++ " cannot hold " ++ renderType t' ++ ", which is or holds one")
+
+-- A value that holds references is held by a local, or returned under a `from` bound: it is not put in a
+-- container or given to a function, where its places could not be followed (REFERENCES.md, stage 4)
+noRefIn :: String -> Type -> TC ()
+noRefIn what t = do
+    t' <- zonk t
+    holds <- holdsRef t'
+    when holds $ failTc ("Type error: " ++ what ++ " cannot hold " ++ renderType t' ++ ", which holds references: a value that holds references is held by a local, or returned under a from bound")
 
 -- Whether a value of a type is or holds a permission or a value of a linear type, in a field or a part, at any depth. Such a value is linear:
 -- it is used exactly once.
@@ -874,6 +919,52 @@ holdsGhost ty0 = fst <$> go Set.empty ty0
     anyOf seen (t : ts) = do
         (found, seen') <- go seen t
         if found then return (True, seen') else anyOf seen' ts
+
+-- Whether a value of a type is or holds a reference, in a field or a part, at any depth (REFERENCES.md, stage 4)
+holdsRef :: Type -> TC Bool
+holdsRef ty0 = fst <$> go Set.empty ty0
+  where
+    go seen ty1 = do
+        ty <- zonk ty1
+        case ty of
+            TRef _ -> return (True, seen)
+            TMutRef _ -> return (True, seen)
+            TList t -> go seen t
+            TBox t -> go seen t
+            TArrayOf t _ -> go seen t
+            TUninit t -> go seen t
+            TNamed "Self" -> return (False, seen)
+            TNamed n
+                | Set.member n seen -> return (False, seen)
+                | otherwise -> do
+                    s0 <- getState
+                    when (isJust (instanceOf n) && Map.notMember n (tcCtors s0)) (ensureInstance n)
+                    s <- getState
+                    let fields = concat [fs | c <- Map.findWithDefault [] n (tcTypes s), Just (_, fs) <- [Map.lookup c (tcCtors s)]]
+                    anyOf (Set.insert n seen) (map snd fields)
+            TVariant v
+                | Set.member v seen -> return (False, seen)
+                | otherwise -> do
+                    s <- getState
+                    anyOf (Set.insert v seen) (maybe [] (map snd . snd) (Map.lookup v (tcCtors s)))
+            _ -> return (False, seen)
+    anyOf seen [] = return (False, seen)
+    anyOf seen (t : ts) = do
+        (found, seen') <- go seen t
+        if found then return (True, seen') else anyOf seen' ts
+
+-- A field may be a read reference; an update reference in a field, and a field of a type that itself holds
+-- references, are not in the language yet. Anything else is checked as a type is.
+checkFieldType :: Type -> TC ()
+checkFieldType ty = do
+    t <- zonk ty
+    case t of
+        TRef inner -> checkType inner
+        TMutRef _ -> failTc "Type error: a field cannot be an update reference (&mut T) yet: only a read reference (&T) can be held in a struct"
+        _ -> do
+            holds <- holdsRef t
+            when holds $ failTc ("Type error: a field cannot be of " ++ renderType t ++ ", which holds references: a value that holds references cannot be held in another value yet")
+            checkType t
 
 -- Whether a value of a type owns something on the heap (a list or a Box, in it at any depth): an Uninit of one is linear, since nothing
 -- frees what it holds but taking it out
@@ -1355,11 +1446,13 @@ checkStatement top ctx env stmt =
                 [] -> return inferred
             env' <- assignVar ctx env var t
             recordAlias var t expr'
+            recordOrigins ctx env var t expr'
             return (ctx, env', Assign var expr')
         Let var expr -> do
             notSize var
             (t, expr') <- inferExprR ctx env expr
             recordAlias var t expr'
+            recordOrigins ctx env var t expr'
             case env of
                 scope : outer -> return (ctx, Map.insert var t scope : outer, Let var expr')
                 [] -> return (ctx, [Map.singleton var t], Let var expr')
@@ -1383,7 +1476,7 @@ checkStatement top ctx env stmt =
                     st <- getState
                     case tcResultFrom st of
                         Just froms -> do
-                            origins <- exprOriginCandidates expr
+                            origins <- exprRefOrigins ctx env expr
                             unless (not (null origins) && all (`elem` froms) origins) $
                                 failTc ("Type error: the value returned is not a reference from " ++ intercalate ", " froms ++ ", which the signature names: return a reference to a place of one of them")
                         Nothing -> return ()
@@ -1405,7 +1498,7 @@ checkStatement top ctx env stmt =
                 return (ctx, env, StructDef name params fields invariant')
         StructDef name _ fields invariant -> do
             declareType name
-            mapM_ (checkType . snd) fields
+            mapM_ (checkFieldType . snd) fields
             registerCtors name [(name, fields)]
             checkFinite name [fields]
             invariant' <- checkInvariant ctx fields invariant
@@ -1413,7 +1506,10 @@ checkStatement top ctx env stmt =
         EnumDef name variants -> do
             -- the type is known before its fields are checked, so a variant may hold the enum itself
             declareTypeWith name (map fst variants)
-            mapM_ (mapM_ (checkType . snd) . snd) variants
+            mapM_ (mapM_ (\(_, ty) -> do
+                t <- zonk ty
+                when (isRefType t) $ failTc "Type error: a variant cannot hold a reference yet: only a field of a struct can"
+                checkFieldType ty) . snd) variants
             registerCtors name variants
             checkFinite name (map snd variants)
             return (ctx, env, stmt)
@@ -1467,7 +1563,7 @@ checkFunction ctx name params ptys rty sizes types ins outs writes fromNames ter
         paramEnv = [Map.fromList (zip params (map unref ptys))]
     -- (a parameter that is borrowed is only read; one that may update is assigned only through it)
     withBorrowed <- getState
-    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params}
+    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params, tcRefOrigins = Map.empty}
     -- (writes(...) names update parameters, whole or by a field)
     forM_ writes $ \w -> do
         let (root, field) = case break (== '.') w of
@@ -1481,6 +1577,10 @@ checkFunction ctx name params ptys rty sizes types ins outs writes fromNames ter
                     _ <- zonk fieldTy
                     return ()
             _ -> failTc ("Type error: writes(" ++ w ++ ") in " ++ name ++ " does not name an update parameter (&mut T) of the function")
+    -- (a value that holds references is not taken as a parameter yet: it is made and held locally, or returned)
+    forM_ (map unref ptys) $ \t -> do
+        holds <- holdsRef t
+        when holds $ failTc ("Type error: a parameter of " ++ name ++ " is of a type that holds references: such a value is made and held by a local, or returned under a from bound, and is not given to a function yet")
     let outsOld = map rewriteOldStatement outs
     (inEnv, ins') <- checkValidations bodyCtx paramEnv ins
     term' <- resolveTermination bodyCtx inEnv term
@@ -1488,7 +1588,7 @@ checkFunction ctx name params ptys rty sizes types ins outs writes fromNames ter
     (_, body') <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     -- (the sizes of the function end with it)
     after <- getState
-    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcMutParams = tcMutParams outer, tcWrites = tcWrites outer, tcRefAliases = tcRefAliases outer, tcResultFrom = tcResultFrom outer, tcParams = tcParams outer, tcCurrent = tcCurrent outer}
+    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcMutParams = tcMutParams outer, tcWrites = tcWrites outer, tcRefAliases = tcRefAliases outer, tcResultFrom = tcResultFrom outer, tcParams = tcParams outer, tcRefOrigins = tcRefOrigins outer, tcCurrent = tcCurrent outer}
     return (term', ins', outs', body', from)
   where
     nub' = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -2786,6 +2886,13 @@ checkCall name ft ats = do
             | length pts /= length ats ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts) ++ " arguments, got " ++ show (length ats))
             | otherwise -> do
+                forM_ ats $ \at -> do
+                    atz <- zonk at
+                    holds <- case atz of
+                        TRef _ -> return False
+                        TMutRef _ -> return False
+                        _ -> holdsRef atz
+                    when holds $ failTc ("Type error: an argument of " ++ name ++ " holds references, and a value that holds references cannot be given to a function yet: it is held by a local, or returned under a from bound")
                 mapM_ (\(i, pt, at) -> do
                     ptz <- zonk pt
                     atz <- zonk at

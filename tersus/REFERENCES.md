@@ -518,8 +518,14 @@ mid-implementation:
    (a reference to a local is refused), `MirMoves` freezes every candidate
    place at the call while the result is live, the validator knows the result
    through the callee's contract (`return` is the referent), and the
-   interpreter resolves the returned place in the caller's frame. Still to
-   come in this stage: reference fields in aggregates (`Window<T>` above),
+   interpreter resolves the returned place in the caller's frame.
+   Reference fields in structs followed in the same stage: a `Window`-style
+   struct holds read references, its holder freezes their places (a field
+   read is a reference local with its own last use), struct updates carry
+   the fields, and returning one is under the same `from` bound for every
+   field; such a value is local-only for now (not a parameter, an argument,
+   an element, or a field of another value), as are update references in
+   fields and references in enum variants. Still to come in this stage:
    returned update references, origins on function values and trait
    functions, and references to unsized values. Add result-origin constraints, unsized
    metadata, aggregate fields, generic and function-value contracts. Check region
