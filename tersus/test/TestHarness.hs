@@ -28,6 +28,7 @@ import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket_, displayException, mask, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities)
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -125,7 +126,7 @@ testAssertErrorContains expectedSubstring result =
     case result of
         Ok _ -> Just $ "Expected failure containing: " ++ show expectedSubstring
         Error err ->
-            if expectedSubstring `contains` err
+            if expectedSubstring `isInfixOf` err
                 then Nothing
                 else
                     Just $
@@ -133,15 +134,6 @@ testAssertErrorContains expectedSubstring result =
                             ++ show expectedSubstring
                             ++ "\nGot: "
                             ++ show err
-  where
-    contains [] _ = True
-    contains _ [] = False
-    contains needle haystack =
-        startsWith needle haystack || contains needle (tail haystack)
-
-    startsWith [] _ = True
-    startsWith _ [] = False
-    startsWith (n : ns) (h : hs) = n == h && startsWith ns hs
 
 parseValFailStmtHelper :: String -> TestResult
 parseValFailStmtHelper stmtStr =

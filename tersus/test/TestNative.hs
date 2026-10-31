@@ -7,7 +7,7 @@ module TestNative
     , runExecutableBytes
     ) where
 
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
@@ -1008,11 +1008,29 @@ runExecutableBytes exe args input = withMVar encodingLock $ \_ -> do
     pure (code, decodeUtf8 out, decodeUtf8 err)
 
 valgrindAvailable :: IO Bool
-valgrindAvailable = do
-    outcome <- try (readProcessWithExitCode "valgrind" ["--version"] "")
-    pure $ case outcome of
-        Left e -> const False (e :: IOException)
-        Right (code, _, _) -> code == ExitSuccess
+valgrindAvailable = probeOnce valgrindProbe "valgrind"
+
+clangAvailable :: IO Bool
+clangAvailable = probeOnce clangProbe "clang"
+
+-- Whether a tool is there, asked of the process once for the whole process: cases used to spawn it once per case.
+probeOnce :: MVar (Maybe Bool) -> String -> IO Bool
+probeOnce cache exe = modifyMVar cache $ \known -> case known of
+    Just available -> pure (known, available)
+    Nothing -> do
+        outcome <- try (readProcessWithExitCode exe ["--version"] "")
+        let available = case outcome of
+                Left e -> const False (e :: IOException)
+                Right (code, _, _) -> code == ExitSuccess
+        pure (Just available, available)
+
+{-# NOINLINE clangProbe #-}
+clangProbe :: MVar (Maybe Bool)
+clangProbe = unsafePerformIO (newMVar Nothing)
+
+{-# NOINLINE valgrindProbe #-}
+valgrindProbe :: MVar (Maybe Bool)
+valgrindProbe = unsafePerformIO (newMVar Nothing)
 
 -- The same for a program that is lowered without being validated
 sameAsUnvalidated :: String -> String -> IO TestResult
@@ -1050,9 +1068,3 @@ lowerSource source = case parseStatementBlock source of
 safeChar :: Char -> Char
 safeChar c = if c `elem` ['a' .. 'z'] ++ ['A' .. 'Z'] ++ ['0' .. '9'] then c else '_'
 
-clangAvailable :: IO Bool
-clangAvailable = do
-    outcome <- try (readProcessWithExitCode "clang" ["--version"] "")
-    pure $ case outcome of
-        Left e -> const False (e :: IOException)
-        Right (code, _, _) -> code == ExitSuccess
