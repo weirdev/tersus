@@ -540,6 +540,9 @@ mid-implementation:
    (`lowerLibrary` lowers `lib/lists.tersus` and `lib/box.tersus` with the move
    check off, so a reference in library code would be unchecked until this is
    closed). Introduce explicit guarded mutation and handle libraries when needed.
+   *Partly done (2026-10-30): the move-check exemption is closed — the
+   library passes `checkMoves` as it stands, so `lowerLibrary` checks it
+   like any program. `Block` unification and the rest remain.*
    The `Block` unification in this stage does not depend on stage 4 and may be
    done at the checkpoint instead.
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization

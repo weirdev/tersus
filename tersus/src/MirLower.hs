@@ -28,10 +28,10 @@ lowerProgram stmts = elaborate stmts `bindResult` lowerElaborated
 lowerElaborated :: [Statement] -> Result M.Program String
 lowerElaborated = lowerWith True
 
--- A library of the compiler (lib/lists.tersus), which copies values where the program that is made of it needs them, and is not checked for
--- moves
+-- A library of the compiler (lib/lists.tersus and lib/box.tersus), checked for moves like any program:
+-- the exemption it had would have let a reference in library code go unchecked (REFERENCES.md, stage 5)
 lowerLibrary :: [Statement] -> Result M.Program String
-lowerLibrary = lowerWith False
+lowerLibrary = lowerWith True
 
 lowerWith :: Bool -> [Statement] -> Result M.Program String
 lowerWith checking elaborated =
