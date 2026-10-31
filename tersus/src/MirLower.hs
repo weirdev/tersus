@@ -312,7 +312,7 @@ buildFunction requires ensures term env b =
         , M.fnTypeParams = bTypeParams b
         , M.fnBorrowed = bBorrowed b
         , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
-        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env [] []
+        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env [] [] []
         }
   where
     order = reverse (walk [] (M.BlockId 0))
@@ -427,7 +427,16 @@ assignTarget var ty = do
 
 lowerReturn :: Expression -> L ()
 lowerReturn expr = do
-    (pending, ty) <- lowerLast expr
+    -- (a reference parameter that is returned is returned as a reference to its place: in the body the
+    -- parameter is the value it is to, and the caller is given the reference, which `from` names)
+    b0 <- builder
+    (pending, ty) <- case (bReturns b0, expr) of
+        (Just (TRef rt), Var v) -> do
+            binding <- lookupBinding v
+            case binding of
+                Just (BLocal l _) | l `elem` bBorrowed b0 || l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] False), TRef rt)
+                _ -> lowerLast expr
+        _ -> lowerLast expr
     b <- builder
     case bReturns b of
         Just declared -> tc (expect "returned value" declared ty)
@@ -500,7 +509,7 @@ lowerWhile cond invariant term body = do
 -- parameters and the functions at the top, so there is nothing to capture). One defined at the top of the program is
 -- found by name from the bodies of the functions after it, and from itself; any other is a name in its scope.
 defineFunction :: Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Signature -> Maybe Termination -> [Statement] -> L ()
-defineFunction var params ins outs (Signature ptys rty sizes types writes) term body = do
+defineFunction var params ins outs (Signature ptys rty sizes types writes sigFrom) term body = do
     enclosing <- builder
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
         fnTy = functionType sizes types ptys rty
@@ -518,7 +527,7 @@ defineFunction var params ins outs (Signature ptys rty sizes types writes) term 
             bindName var (BLocal l fnTy)
             emit (M.Assign l (M.Use (M.Const (M.CFn name))))
         else unless atTop (bindName var (BFn name fnTy))
-    tc (withGenerics sizes types (mapM_ checkType (rty : map unrefType ptys)))
+    tc (withGenerics sizes types (mapM_ checkType (map unrefType ptys ++ [case rty of TRef inner -> inner; _ -> rty])))
     outer <- builder
     -- the body is lowered as a function of its own, then the outer one goes on
     modifyB (const (newBuilder name False (Just rty)){bSizes = sizes, bTypeParams = types})
@@ -533,7 +542,7 @@ defineFunction var params ins outs (Signature ptys rty sizes types writes) term 
     inner <- builder
     modifyB (const outer)
     let fn0 = buildFunction ins outs term env inner
-        fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys]}}
+        fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys], M.specFrom = sigFrom}}
     modifyS (\s -> s{lsFunctions = Map.insert name fn (lsFunctions s)})
 
 unrefType :: Type -> Type

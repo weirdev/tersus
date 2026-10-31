@@ -151,11 +151,11 @@ externStatement = do
     whitespace
     name <- variable
     whitespace
-    (params, returnType, inputReqs, outputReqs, writes) <- functHeader
+    (params, returnType, inputReqs, outputReqs, writes, _) <- functHeader
     termination <- terminationClause
     mapM_ (\(p, t) -> unless (cWord t) (fail ("the parameter " ++ p ++ " of extern fn " ++ name ++ " is not an Int, a Byte, a Bool, an address or a permission"))) params
     unless (cWord returnType) $ fail ("extern fn " ++ name ++ " gives a value that is not an Int, a Byte, a Bool, an address or a permission")
-    return [ExternDef name, Assign name (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType [] [] writes) termination []) []))]
+    return [ExternDef name, Assign name (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType [] [] writes []) termination []) []))]
   where
     cWord t = case t of
         TInt -> True
@@ -178,7 +178,7 @@ builtinStatement = do
     whitespace
     name <- variable
     whitespace
-    (params, _, inputReqs, outputReqs, _) <- functHeader
+    (params, _, inputReqs, outputReqs, _, _) <- functHeader
     builtin <- case lookup name stdlibBuiltinDecls of
         Just b -> return b
         Nothing -> fail ("builtin fn " ++ name ++ " is not a builtin of the standard library (StdLib.stdlibBuiltinDecls)")
@@ -772,13 +772,13 @@ functStatement = do
     let allTypes = typeParams ++ filter isTypeParam implParams
         allSizes = sizes ++ filter (not . isTypeParam) implParams
     modifyState (\d -> d{declTypeParams = allTypes})
-    (params, returnType, inputReqs, outputReqs, writes) <- functHeader
+    (params, returnType, inputReqs, outputReqs, writes, fromNames) <- functHeader
     termination <- terminationClause
     fnBody <- curlyBracesParse statementBlock
     whitespace
     modifyState (\d -> d{declTypeParams = outerParams})
     let allParams = params ++ [(size, TInt) | size <- allSizes]
-    let function = Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType allSizes allTypes writes) termination fnBody) []))
+    let function = Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType allSizes allTypes writes fromNames) termination fnBody) []))
     return (if null bounds then function else BoundedDef bounds function)
   where
     isTypeParam name = case name of
@@ -801,7 +801,7 @@ functStatement = do
     nested = void (char '<') >> skipMany (void (noneOf "<>") <|> nested) >> void (char '>')
 
 -- (parameters) -> Type [{ input contract }] [{ output contract }], the part of a function before its termination clause
-functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement], [Variable])
+functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement], [Variable], [Variable])
 functHeader = do
     void (char '(')
     whitespace
@@ -812,12 +812,20 @@ functHeader = do
     returnType <- string "->" >> whitespace >> typeAnnotation
     whitespace
     writes <- option [] writesClause
+    fromNames <- option [] fromClause
     inputReqs <- option [] functContractReqs
     whitespace
     outputReqs <- option [] functContractReqs
     whitespace
-    return (params, returnType, inputReqs, outputReqs, writes)
+    return (params, returnType, inputReqs, outputReqs, writes, fromNames)
   where
+    -- from xs, or from (a, b): the parameters a reference result is from (REFERENCES.md)
+    fromClause = do
+        keyword "from"
+        whitespace
+        names <- (char '(' >> whitespace >> (variable `sepBy1` skipWhitespace (char ',')) <* char ')') <|> ((: []) <$> variable)
+        whitespace
+        return names
     -- writes(n) or writes(n.field): the places an update parameter may change (REFERENCES.md)
     writesClause = do
         keyword "writes"
@@ -856,8 +864,8 @@ traitStatement = do
         whitespace
         fname <- variable
         whitespace
-        (params, returnType, inputReqs, outputReqs, _) <- functHeader
-        return (TraitFn fname (map fst params) (Signature (map snd params) returnType [] [] []) inputReqs outputReqs)
+        (params, returnType, inputReqs, outputReqs, _, _) <- functHeader
+        return (TraitFn fname (map fst params) (Signature (map snd params) returnType [] [] [] []) inputReqs outputReqs)
 
 -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are named <Type>::f and <Type as Trait>::f (see
 -- implFunctionName), and the checker resolves Type::f and x.f(...) to the one that is meant. Self stands for Type in them.

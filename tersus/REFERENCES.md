@@ -1,6 +1,6 @@
 # References and borrowing (design plan)
 
-> Stages 1 to 3 implemented (2026-10-30); stages 4 to 6 are still design.
+> Stages 1 to 3 implemented, and the first part of stage 4 (returned read references), 2026-10-30; the rest of stages 4 to 6 is still design.
 > What is in the language is in `LANGUAGE.md` (Lent parameters, References,
 > Updating through a reference); what is below is the rationale, the core
 > rules, and the plan for what is left. This complements `POINTERS.md`,
@@ -511,7 +511,17 @@ mid-implementation:
    where most of the value is (no copies for reads, checked in-place update,
    no stale facts). Stage 4 is not started until its prerequisites below are
    met; if they stall, stage 5's `Block` unification proceeds without it.
-4. **Escaping reads, then updates.** Add result-origin constraints, unsized
+4. **Escaping reads, then updates.** *Partly implemented (2026-10-30): returned
+   read references.* A result written `-> &T from xs` (or `from (a, b)`) is a
+   reference to a place of a named parameter; the one-reference-parameter case
+   infers it. The checker proves every returned place is of a named parameter
+   (a reference to a local is refused), `MirMoves` freezes every candidate
+   place at the call while the result is live, the validator knows the result
+   through the callee's contract (`return` is the referent), and the
+   interpreter resolves the returned place in the caller's frame. Still to
+   come in this stage: reference fields in aggregates (`Window<T>` above),
+   returned update references, origins on function values and trait
+   functions, and references to unsized values. Add result-origin constraints, unsized
    metadata, aggregate fields, generic and function-value contracts. Check region
    containment. Gate each extension on negative escape tests and separate checking
    of callers and callees, without inspecting callee bodies.

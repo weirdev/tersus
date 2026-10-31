@@ -237,6 +237,7 @@ data FunctionSpec = FunctionSpec
     , specEnv :: Env -- the parameters, and the functions defined at the top of the program before this one
     , specWrites :: [Variable] -- the places an update parameter may change (`writes(n.field)`), as the program wrote them; empty means every update parameter whole (REFERENCES.md)
     , specMutParams :: [Variable] -- the parameters lent for updating (&mut T): a call gives the caller a new version of what they are to
+    , specFrom :: [Variable] -- the parameters a reference result is from (`-> &T from xs`): a call's result is a reference to a place of one of them (REFERENCES.md)
     }
     deriving (Show, Eq)
 
@@ -422,7 +423,7 @@ isDropFunction :: Name -> Bool
 isDropFunction name = let suffix = " as Drop>::drop" in reverse suffix == take (length suffix) (reverse name)
 
 emptySpec :: FunctionSpec
-emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty [] []
+emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty [] [] []
 
 successors :: Terminator -> [BlockId]
 successors (Goto b) = [b]

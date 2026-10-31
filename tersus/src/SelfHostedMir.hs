@@ -738,7 +738,7 @@ encode program
   where
     allFunctions = M.progMain program : Map.elems (M.progFunctions program)
     externFunction fn = "extern " `isPrefixOf` M.fnName fn
-    unsupportedFunction fn = any (unsupportedType . M.localType) (Map.elems (M.fnLocals fn)) || maybe False unsupportedType (M.fnReturns fn)
+    unsupportedFunction fn = any (unsupportedType . M.localType) (Map.elems (M.fnLocals fn)) || maybe False unsupportedType (M.fnReturns fn) || not (null (M.specFrom (M.fnSpec fn)))
     unsupportedDecl (M.StructDecl fields) = any (unsupportedType . snd) fields
     unsupportedDecl (M.EnumDecl variants) = any (any (unsupportedType . snd) . snd) variants
     unsupportedType t = case t of
