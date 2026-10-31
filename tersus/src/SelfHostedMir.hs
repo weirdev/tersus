@@ -97,6 +97,8 @@ proofOperand _ (CTerm (VInt n)) b = do
 proofOperand _ (CTerm (VBool x)) b = do
     (v, b') <- operand (M.Const (M.CBool x)) b
     pure ([], v, b')
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct ToByte) _)) [arg]) b = proofOperand env arg b
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct FromByte) _)) [arg]) b = proofOperand env arg b
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Size) _)) [arg]) b0 = do
     (prefix, value, b1) <- proofOperand env arg b0
     let (i, b2) = fresh b1
@@ -158,6 +160,12 @@ proofOperand env (FApp (ATerm name) args) b
         "push" -> proofOperand env (FApp (CTerm (builtinFunct Push)) args) b
         "set" -> proofOperand env (FApp (CTerm (builtinFunct Set)) args) b
         "newArray" -> proofOperand env (FApp (CTerm (builtinFunct NewArray)) args) b
+        "toByte" -> case args of
+            [arg] -> proofOperand env arg b
+            _ -> Nothing
+        "toInt" -> case args of
+            [arg] -> proofOperand env arg b
+            _ -> Nothing
         _ -> Nothing
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Set) _)) [list, index, value]) b0 = do
     (listSteps, listRef, b1) <- proofOperand env list b0
@@ -532,6 +540,20 @@ statement rules (M.Assign (M.Local dest) (M.ListOp M.Set [source, index, value])
     (indexRef, b2) <- operand index b1
     (valueRef, b3) <- operand value b2
     setSteps (toInteger dest) listRef indexRef valueRef b3
+statement rules (M.Assign (M.Local dest) (M.ListOp M.ReadByte [])) b0 = do
+    let (function, b1) = namedFunction "readByte" b0
+    (minusOne, b2) <- operand (M.Const (M.CInt (-1))) b1
+    (limit, b3) <- operand (M.Const (M.CInt 256)) b2
+    let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
+    pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [])], step "Assume" [("relation", MInt 3), ("left", minusOne), ("right", ref)], step "Assume" [("relation", MInt 2), ("left", ref), ("right", limit)]], b3)
+statement rules (M.Assign (M.Local dest) (M.ListOp M.ToByte [source])) b0 = do
+    (value, b1) <- operand source b0
+    (zero, b2) <- operand (M.Const (M.CInt 0)) b1
+    (limit, b3) <- operand (M.Const (M.CInt 256)) b2
+    pure ([check 3 zero value, check 2 value limit, step "Assign" [("local", MInt (toInteger dest)), ("value", value)]], b3)
+statement rules (M.Assign (M.Local dest) (M.ListOp M.FromByte [source])) b = do
+    (value, b') <- operand source b
+    pure ([step "Assign" [("local", MInt (toInteger dest)), ("value", value)]], b')
 statement rules (M.Assign (M.Local dest) (M.ListOp operation [source])) b0
     | operation == M.First || operation == M.Last = do
         (listRef, b1) <- operand source b0

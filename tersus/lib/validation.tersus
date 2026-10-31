@@ -491,6 +491,55 @@ fn hasDifference(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, 
     return false;
 };
 
+struct DistanceTable { source: Int, distances: List<Distance> };
+
+impl Clone for DistanceTable { };
+
+fn differenceDistances(equalities: &List<EqualityFact>, facts: &List<DifferenceFact>, source: Int) -> List<Distance> {
+    distances = push([], Distance { node: source, value: 0 });
+    finished = false;
+    for round in 0..size(facts) {
+      if finished = false {
+        changed = false;
+        for edge in facts {
+            found = findDistance(equalities, distances, edge.right);
+            if found is DistanceResult::Found {
+                distance = (found as DistanceResult::Found).value;
+                sum = safeBoundSum(distance, edge.bound);
+                if sum is SumResult::Sum {
+                    candidate = (sum as SumResult::Sum).value;
+                    previous = findDistance(equalities, distances, edge.left);
+                    if previous is DistanceResult::Found {
+                        if candidate < (previous as DistanceResult::Found).value {
+                            distances = improveDistance(equalities, distances, edge.left, candidate);
+                            changed = true;
+                        };
+                    } else {
+                        distances = improveDistance(equalities, distances, edge.left, candidate);
+                        changed = true;
+                    };
+                };
+            };
+        };
+        if changed = false { finished = true; };
+      };
+    };
+    return distances;
+};
+
+fn distanceAtMost(equalities: &List<EqualityFact>, tables: &List<DistanceTable>, from: Int, to: Int, bound: Int) -> Bool {
+    for table in tables {
+        if table.source = from {
+            found = findDistance(equalities, table.distances, to);
+            if found is DistanceResult::Found {
+                return (found as DistanceResult::Found).value <= bound;
+            };
+            return false;
+        };
+    };
+    return false;
+};
+
 fn hasApplicationDifference(equalities: &List<EqualityFact>, terms: &List<ApplicationTerm>, facts: &List<DifferenceFact>, left: Int, right: Int, bound: Int) -> Bool {
     return hasDifference(applicationFacts(equalities, terms), facts, left, right, bound);
 };
@@ -745,11 +794,15 @@ fn contextNodes(context: &ValidatorContext) -> List<Int> {
 
 fn boundEqualities(equalities: &List<EqualityFact>, differences: &List<DifferenceFact>, nodes: &List<Int>) -> List<EqualityFact> {
     known = clone(equalities);
+    tables = [];
+    for node in nodes {
+        tables = push(tables, DistanceTable { source: node, distances: differenceDistances(equalities, differences, node) });
+    };
     for a in nodes {
         for b in nodes {
             if hasEquality(known, a, b) = false {
-                if hasDifference(equalities, differences, a, b, 0) {
-                    if hasDifference(equalities, differences, b, a, 0) {
+                if distanceAtMost(equalities, tables, b, a, 0) {
+                    if distanceAtMost(equalities, tables, a, b, 0) {
                         known = push(known, EqualityFact { left: a, right: b });
                     };
                 };
@@ -1209,13 +1262,42 @@ fn linFacts(context: &ValidatorContext) -> List<LinFact> {
     return facts;
 };
 
+fn linSameFact(a: &LinFact, b: &LinFact) -> Bool {
+    if a.bound != b.bound { return false; };
+    if size(a.terms) != size(b.terms) { return false; };
+    for t in a.terms {
+        if linCoeff(b.terms, t.term) != t.coeff { return false; };
+    };
+    return true;
+};
+
+fn linDedup(facts: &List<LinFact>) -> List<LinFact> {
+    result = [];
+    for f in facts {
+        seen = false;
+        for g in result {
+            if linSameFact(f, g) { seen = true; };
+        };
+        if seen = false { result = push(result, clone(f)); };
+    };
+    return result;
+};
+
+fn linRemoveTerm(values: &List<Int>, value: Int) -> List<Int> {
+    result = [];
+    for x in values {
+        if x != value { result = push(result, x); };
+    };
+    return result;
+};
+
 // Fourier-Motzkin elimination over the (small) fact sets a goal produces:
 // eliminating every variable either derives 0 <= a negative bound, proving
 // the facts inconsistent, or it does not.
-fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
+fn linContradictionOrdered(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
     current = clone(facts);
     for v in vars {
-        if size(current) > 300 { return false; };
+        if size(current) > 600 { return false; };
         pos = [];
         neg = [];
         zero = [];
@@ -1243,11 +1325,72 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
     return false;
 };
 
+// The same elimination, but each round first removes the variable whose
+// positive and negative facts combine into the fewest new facts. The order
+// matters to the integer reasoning: a variable that appears only in the
+// identity of a scaled term carries a divisibility constraint, and removing
+// it first would lose that constraint, so both orders are tried.
+fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
+    if linContradictionOrdered(facts, vars) { return true; };
+    current = clone(facts);
+    remaining = clone(vars);
+    for round in 0..size(vars) {
+        if size(current) > 600 { return false; };
+        best = 0;
+        bestCost = 0;
+        found = false;
+        for v in remaining {
+            posCount = 0;
+            negCount = 0;
+            for f in current {
+                c = linCoeff(f.terms, v);
+                if c > 0 { posCount = posCount + 1; };
+                if c < 0 { negCount = negCount + 1; };
+            };
+            if posCount + negCount > 0 {
+                cost = posCount * negCount;
+                if found = false || cost < bestCost {
+                    best = v;
+                    bestCost = cost;
+                    found = true;
+                };
+            };
+        };
+        if found = false { return false; };
+        v = best;
+        pos = [];
+        neg = [];
+        zero = [];
+        for f in current {
+            c = linCoeff(f.terms, v);
+            if c > 0 { pos = push(pos, clone(f)); };
+            if c < 0 { neg = push(neg, clone(f)); };
+            if c = 0 { zero = push(zero, clone(f)); };
+        };
+        next = clone(zero);
+        for f in pos {
+            for g in neg {
+                cf = linCoeff(f.terms, v);
+                cg = linCoeff(g.terms, v);
+                next = push(next, linCombine(f, 0 - cg, g, cf));
+            };
+        };
+        current = next;
+        for f in current {
+            if size(f.terms) = 0 {
+                if f.bound < 0 { return true; };
+            };
+        };
+        remaining = linRemoveTerm(remaining, v);
+    };
+    return false;
+};
+
 // Prove left - right <= bound by contradiction with the context's facts.
 fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
-    facts = linFacts(context);
+    facts = linDedup(linFacts(context));
     facts = push(facts, linFact2(left, -1, right, 1, 0 - bound - 1));
-    if size(facts) > 80 { return false; };
+    if size(facts) > 160 { return false; };
     vars = [];
     for f in facts {
         for t in f.terms {
