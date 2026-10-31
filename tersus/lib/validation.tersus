@@ -952,7 +952,55 @@ fn integerValue(context: &ValidatorContext, term: Int) -> IntegerLookup {
     return IntegerLookup::Missing;
 };
 
-fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
+fn knownNonnegative(context: &ValidatorContext, term: Int) -> Bool {
+    if isSizeTerm(context.applications, term) { return true; };
+    v = integerValue(context, term);
+    if v is IntegerLookup::Found {
+        if (v as IntegerLookup::Found).value >= 0 { return true; };
+    };
+    z = 0;
+    found = false;
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = 0 { z = constant.id; found = true; };
+        };
+    };
+    if found = false { return false; };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    return hasOrder(equalities, orders, z, term, false);
+};
+
+fn hasOrderFact(facts: &List<OrderFact>, smaller: Int, greater: Int) -> Bool {
+    for fact in facts {
+        if fact.smaller = smaller && fact.greater = greater { return true; };
+    };
+    return false;
+};
+
+// Facts about a sum whose parts are only known nonnegative after the sum was
+// formed (a contract may state the sum before the signs) are derived when a
+// goal is checked, from whatever signs are known by then.
+fn deriveSumOrders(context: &ValidatorContext) -> ValidatorContext {
+    facts = clone(context.orders);
+    for app in context.applications {
+        if app.function = -1 {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                if knownNonnegative(context, a) {
+                    if hasOrderFact(facts, b, app.id) = false { facts = push(facts, OrderFact { smaller: b, greater: app.id, strict: false }); };
+                };
+                if knownNonnegative(context, b) {
+                    if hasOrderFact(facts, a, app.id) = false { facts = push(facts, OrderFact { smaller: a, greater: app.id, strict: false }); };
+                };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     recognized = false;
     if goal is ValidatorGoal::Equal { recognized = true; };
     if goal is ValidatorGoal::Different { recognized = true; };
@@ -1058,6 +1106,10 @@ impl Clone for ProofRun { };
 
 // Return the first unproved obligation; -1 means that every check succeeded.
 // Assumptions made later in the list cannot justify an earlier assertion.
+fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
+    return entailsGoalWithFacts(deriveSumOrders(context), goal);
+};
+
 fn runProofSteps(initial: &ValidatorContext, steps: &List<ProofStep>) -> ProofRun {
     state = clone(initial);
     for i in 0..size(steps) {
@@ -1669,24 +1721,6 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
 
 // Scaling preserves or reverses an operand's order around zero according to
 // the sign of the known integer factor.
-fn knownNonnegative(context: &ValidatorContext, term: Int) -> Bool {
-    if isSizeTerm(context.applications, term) { return true; };
-    v = integerValue(context, term);
-    if v is IntegerLookup::Found {
-        if (v as IntegerLookup::Found).value >= 0 { return true; };
-    };
-    z = 0;
-    found = false;
-    for constant in context.constants {
-        if constant.kind = 0 {
-            if constant.value = 0 { z = constant.id; found = true; };
-        };
-    };
-    if found = false { return false; };
-    equalities = semanticFacts(context.equalities, context.applications, context.constants);
-    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
-    return hasOrder(equalities, orders, z, term, false);
-};
 
 fn addSumOrders(context: &ValidatorContext, result: Int, a: Int, b: Int) -> ValidatorContext {
     facts = clone(context.orders);
