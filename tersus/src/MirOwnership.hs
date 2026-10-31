@@ -1,5 +1,6 @@
 module MirOwnership
     ( insertOwnership
+    , expandRefWrites
     , needsDrop
     , Role (..)
     , roles
@@ -122,17 +123,22 @@ roles rv =
         AsVariant o _ -> [(o, Consume)]
         Clone o -> [(o, Read)]
         TakeField l _ _ -> [(Copy l, Read)]
+        -- (a reference owns nothing: its root is not moved or copied into it, and reading through it owns nothing either)
+        Borrow _ steps _ -> [(o, Read) | RefIndex o <- steps]
+        Deref o -> [(o, Read)]
 
 -- The rvalues that read a part of a value
 isProjection :: Rvalue -> Bool
 isProjection (ListOp op _) = op `elem` [First, Last, Get, AddrGet, UninitGet]
 isProjection ReadField{} = True
+isProjection Deref{} = True
 isProjection _ = False
 
 -- The value a projection reads from
 projectionSource :: Rvalue -> Maybe Operand
 projectionSource (ListOp _ (l : _)) = Just l
 projectionSource (ReadField o _ _) = Just o
+projectionSource (Deref o) = Just o
 projectionSource _ = Nothing
 
 mentions :: Local -> Operand -> Bool
@@ -697,6 +703,7 @@ borrowedArguments cx callee count =
         _ -> replicate count (False, Nothing)
   where
     ref (TRef t) = (True, Just t)
+    ref (TMutRef t) = (True, Just t)
     ref t = (False, Just t)
 
 -- Whether the statement takes a field out of a value that is not used again, rather than copying it
@@ -857,7 +864,67 @@ withOperands rv operands =
         (IsVariant _ name, [o]) -> IsVariant o name
         (AsVariant _ name, [o]) -> AsVariant o name
         (Clone _, [o]) -> Clone o
+        (Borrow root steps mutable, os) -> Borrow root (rewriteRefSteps steps os) mutable
+        (Deref _, [o]) -> Deref o
         _ -> rv
+
+-- An assignment through a reference (AssignRef), expanded for native code into assignments of its root: a field
+-- is rebuilt from its other fields and an element is `set` back, as the lowering of a place update is written in
+-- the interpreter by hand (MirEval.writePlace). It runs before ownership, on the validated program.
+expandRefWrites :: Program -> Program
+expandRefWrites program = program{progFunctions = Map.map expandFn (progFunctions program), progMain = expandFn (progMain program)}
+  where
+    expandFn fn = fn{fnBlocks = blocks', fnLocals = Map.union (fnLocals fn) (Map.fromList newLocals)}
+      where
+        start = maximum (0 : [n | Local n <- Map.keys (fnLocals fn)]) + 1
+        (blocks', _, newLocals) = foldl step (Map.empty, start, []) (Map.toList (fnBlocks fn))
+        step (acc, next, locals) (b, BasicBlock stmts term) =
+            let (stmts', next', locals') = expandStmts next locals stmts
+             in (Map.insert b (BasicBlock stmts' term) acc, next', locals')
+        expandStmts next locals [] = ([], next, locals)
+        expandStmts next locals (stmt : rest) =
+            let (here, next', locals') = expandStmt next locals stmt
+                (rest', next'', locals'') = expandStmts next' locals' rest
+             in (here ++ rest', next'', locals'')
+        expandStmt next locals (AssignRef root steps rv) =
+            let (valueOp, before, next1, locals1) = case rv of
+                    Use o -> (o, [], next, locals)
+                    _ -> let t = Local next in (Copy t, [Assign t rv], next + 1, (t, LocalDecl (placeType root steps) Nothing) : locals)
+                (stmts, next2, locals2) = go next1 locals1 root steps valueOp
+             in (before ++ stmts, next2, locals2)
+        expandStmt next locals stmt = ([stmt], next, locals)
+        placeType root steps = foldl stepType (maybe TInt localType (Map.lookup root (fnLocals fn))) steps
+          where
+            stepType ty (RefField ctor field) = case Map.lookup ctor (progTypes program) of
+                Just (StructDecl fields) -> maybe TInt id (lookup field fields)
+                _ -> TInt
+            stepType (TList e) (RefIndex _) = e
+            stepType (TArrayOf e _) (RefIndex _) = e
+            stepType (TBox (TArrayOf e _)) (RefIndex _) = e
+            stepType _ (RefIndex _) = TInt
+        go next locals root [] valueOp = ([Assign root (Use valueOp)], next, locals)
+        go next locals root (RefField ctor field : rest) valueOp =
+            let subTy = placeType root [RefField ctor field]
+                sub = Local next
+                (inner, next1, locals1) = go (next + 1) ((sub, LocalDecl subTy Nothing) : locals) sub rest valueOp
+                fields = case Map.lookup ctor (progTypes program) of
+                    Just (StructDecl fs) -> fs
+                    _ -> [(field, subTy)]
+                (keptStmts, keptOps, next2, locals2) = foldl kept (inner, [], next1, locals1) fields
+                kept (acc, ops, n, ls) (f, fty)
+                    | f == field = (acc, ops ++ [(f, Copy sub)], n, ls)
+                    | otherwise = (acc ++ [Assign (Local n) (ReadField (Copy root) ctor f)], ops ++ [(f, Copy (Local n))], n + 1, (Local n, LocalDecl fty Nothing) : ls)
+             in (Assign sub (ReadField (Copy root) ctor field) : keptStmts ++ [Assign root (MakeData ctor keptOps)], next2, locals2)
+        go next locals root (RefIndex index : rest) valueOp =
+            let elementTy = placeType root [RefIndex index]
+                element = Local next
+                (inner, next1, locals1) = go (next + 1) ((element, LocalDecl elementTy Nothing) : locals) element rest valueOp
+             in (Assign element (ListOp Get [Copy root, index]) : inner ++ [Assign root (ListOp Set [Copy root, index, Copy element])], next1, locals1)
+
+rewriteRefSteps :: [RefStep] -> [Operand] -> [RefStep]
+rewriteRefSteps [] _ = []
+rewriteRefSteps (RefIndex _ : rest) (o : os) = RefIndex o : rewriteRefSteps rest os
+rewriteRefSteps (other : rest) os = other : rewriteRefSteps rest os
 
 rewriteTerminator :: Ctx -> Live -> Terminator -> R ([Statement], Terminator)
 rewriteTerminator cx out term =

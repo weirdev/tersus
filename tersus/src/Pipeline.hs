@@ -8,8 +8,9 @@ module Pipeline
     , assumptionsOf
     ) where
 
+import qualified Data.Map as Map
 import qualified Mir as M
-import MirOwnership (insertOwnership)
+import MirOwnership (expandRefWrites, insertOwnership)
 import MirVerify (verifyProgram)
 import MirEval (MirValue, runProgram)
 import MirGhost (eraseGhosts, withoutUninit)
@@ -149,13 +150,32 @@ compileWith reserving source =
 ownedSource :: String -> Result M.Program String
 ownedSource source =
     compileSource source `bindResult` \program ->
-        let owned = insertOwnership (nativeProgram program)
-         in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
+        -- (an update parameter is written back by the executor; native code does not do that yet, so a function
+        -- that has one is refused here rather than miscompiled. A reference held by a local is likewise not in
+        -- native code yet: assignment through one is an assignment of its root by then (expandRefWrites), but
+        -- making one (&place) and reading through one (*r) are rows the emitter does not have.)
+        if any (not . null . M.specMutParams . M.fnSpec) (M.progMain program : Map.elems (M.progFunctions program))
+            then Error "a function with an update parameter (&mut T) is not in native code yet: run it with eval, or check it"
+            else
+                if any localReference (M.progMain program : Map.elems (M.progFunctions program))
+                    then Error "a reference held by a local (&place, read or updated through *) is not in native code yet: run it with eval, or check it"
+                    else
+                        let owned = insertOwnership (nativeProgram program)
+                         in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
+  where
+    localReference fn = any statementHas (concatMap M.blockStatements (Map.elems (M.fnBlocks fn)))
+      where
+        statementHas (M.Assign _ rv) = rvalueHas rv
+        statementHas (M.Peek _ rv) = rvalueHas rv
+        statementHas _ = False
+        rvalueHas (M.Borrow {}) = True
+        rvalueHas (M.Deref _) = True
+        rvalueHas _ = False
 
 -- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists), and each
 -- Uninit<T> a T (it is laid out as one: an empty one is the words of a T cleared, which own nothing)
 nativeProgram :: M.Program -> M.Program
-nativeProgram = lowerLists listLibrary . withoutUninit
+nativeProgram = lowerLists listLibrary . withoutUninit . expandRefWrites
 
 -- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once
 listLibrary :: M.Program

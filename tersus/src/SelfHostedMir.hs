@@ -288,6 +288,10 @@ statement (M.Assign dest (M.MakeBox source)) b = statement (M.Assign dest (M.Use
 statement (M.Assign dest (M.Unbox source)) b = statement (M.Assign dest (M.Use source)) b
 statement (M.Assign dest (M.Unsize source)) b = statement (M.Assign dest (M.Use source)) b
 statement (M.Assign dest (M.Clone source)) b = statement (M.Assign dest (M.Use source)) b
+-- A reference to a whole local has the value of what it is to, as in the reference MIR validator; a reference
+-- to a part of one, a read through one and an assignment through one are outside this bridge's subset for now
+statement (M.Assign dest (M.Borrow root [] _)) b = statement (M.Assign dest (M.Use (M.Copy root))) b
+statement (M.Assign dest (M.Deref source)) b = statement (M.Assign dest (M.Use source)) b
 statement (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
     (snapshots, b1) <- foldM snapshot ([], b0) fields
     let (constructor, b2) = namedFunction ("ctor:" ++ name) b1
@@ -748,6 +752,7 @@ encode program
         TForall _ _ element -> unsupportedType element
         TUninit element -> unsupportedType element
         TRef element -> unsupportedType element
+        TMutRef element -> unsupportedType element
         _ -> False
     isEnum M.EnumDecl{} = True
     isEnum _ = False

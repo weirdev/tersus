@@ -1,9 +1,10 @@
 # References and borrowing (design plan)
 
-> Draft, not implemented. This extends today's parameter-only `&T` lending.
-> It complements `POINTERS.md`, `DROPS.md` and `ALLOCATORS.md`; it does not
-> change the current language. The syntax below is proposed for review, not supported
-> by the parser.
+> Stages 1 to 3 implemented (2026-10-30); stages 4 to 6 are still design.
+> What is in the language is in `LANGUAGE.md` (Lent parameters, References,
+> Updating through a reference); what is below is the rationale, the core
+> rules, and the plan for what is left. This complements `POINTERS.md`,
+> `DROPS.md` and `ALLOCATORS.md`.
 
 ## Recommendation
 
@@ -216,8 +217,9 @@ add notation only with an accompanying sound rule.
 The explicit expressions make borrowing visible at the call and distinguish a
 reference from an owned argument. They replace implicit parameter lending.
 `from` states the input/result relationship without introducing a named lifetime
-for common cases. Method receiver borrowing follows the same explicit rule
-initially. These spellings do not commit Tersus to Rust's other design choices.
+for common cases. Method receivers are the one exception: a method call
+borrows its receiver as the signature declares (see Delivery plan). These
+spellings do not commit Tersus to Rust's other design choices.
 
 ## Core rules
 
@@ -303,6 +305,64 @@ Invariant-bearing abstractions control field access: temporary invariant breaks
 are permitted only inside exclusive encapsulated operations that restore them
 before callbacks, reentrant access or return can expose the value.
 
+## Worked examples (stage 1, decided)
+
+The proof-model sentences above have answers, as of the code after stage 3.
+All four programs are accepted or rejected exactly as stated (they are the
+shape of the `TestBorrow` cases, not new promises).
+
+A loan carried around a loop:
+
+```tersus
+x = 1;
+total = 0;
+i = 0;
+while i < 3 [{ affirm total >= 0; affirm x = 1; }] shrinks 3 - i {
+    r = &x;
+    total = total + *r;
+    i = i + 1;
+};
+```
+
+Accepted. The loan starts and has its last use inside each iteration, so no
+loan is live at the loop head and `x` needs nothing there. What the loop head
+keeps is the invariant plus facts of the version of each value that arrives
+from every path: here `x` has one version (nothing assigns it), so `x = 1`
+is carried by the invariant; a value updated in the body arrives as a new
+version and pre-loop facts about it are not live at the head.
+
+A loan live across a one-sided join, borrow only in one branch:
+
+```tersus
+x = 7;
+a = 0;
+r = &x;
+if c { a = *r; } else { a = 0; };
+x = 9;          // accepted: the last use of r is in the branch
+return a;
+```
+
+Accepted, and the variant that adds `return *r + a;` after `x = 9;` is
+rejected (`x cannot be assigned while it is borrowed by r`). At the join a
+loan is kept while a last use may still be ahead on any path; the position
+of the last use decides, not which branch was taken.
+
+An update at a loop head:
+
+```tersus
+fn inc(n: &mut Int) -> Int [{ }] [{ affirm *n = old(*n) + 1; }] { *n = *n + 1; return *n; };
+x = 0;
+while x < 3 [{ affirm x >= 0; affirm x <= 3; }] shrinks 3 - x {
+    y = inc(&mut x);
+};
+affirm x = 3;   // proved: the contract applies per iteration, the exit test gives the rest
+```
+
+Accepted. An `affirm x = 0;` written after the `inc(&mut x);` inside the
+loop instead is rejected (`Could not prove: x = 0`): the call gives `x` a new
+version, and what was proved of the old version is a fact about `old(x)`,
+not about `x`.
+
 ## Alternatives and shared mutation
 
 ### Owning references: possible later extension
@@ -371,32 +431,118 @@ evaluate stable storage or handles before adopting a pinning concept.
 
 ## Delivery plan and acceptance gates
 
-1. **Executable rules and syntax validation.** Model roots, projections, permissions,
+Two decisions are made before the stages start, so they are not reopened
+mid-implementation:
+
+- **Loans live in `MirMoves`, not in a new pass.** `MirMoves` already has the
+  place projections, view tracking and CFG fixpoint that loan intervals need,
+  and it already treats a Drop `self` as lent. A separate `MirBorrow` pass
+  would duplicate place identity and could drift from the move checker. Loan
+  state is one more fact per place in `MirMoves`.
+- **Method receivers are the one implicit borrow.** Trait functions are
+  written `fn size(self: &Self)` and called as `x.size()` throughout the
+  library (`lib/prelude.tersus`); making receivers explicit at every call
+  site would rewrite every method call in every program for no safety gain,
+  since the receiver's permission is in the signature either way. Explicit
+  `&`/`&mut` is required for ordinary arguments; a method call borrows its
+  receiver as its signature declares. This is the one exception to explicit
+  borrowing at call sites.
+
+1. **Executable rules and syntax validation.** *Done (2026-10-30): the three
+   worked examples are written above and behave as stated; `DROPS.md` is
+   reconciled (its Part 1 `&Self` drop is superseded by the built `Self`
+   form in `POINTERS.md`, Status item 9).* Model roots, projections, permissions,
    initialization, version changes and scope exit. Specify overlap and reborrow
    rules. Compare accepted and rejected examples with the safety contract above.
    Validate the proposed syntax using those examples, including ambiguous result origins.
-2. **Nonescaping read references.** Generalize parameter lending and add local
+   This stage must also produce, as worked examples rather than prose: a loan
+   carried around a loop, a loan live across a join where only one branch
+   borrows, and an update at a loop head — showing what the versioned proof
+   state keeps and forgets in each case (the proof model section above is
+   incomplete until those three examples have answers, because `forall`
+   facts are already not kept where paths meet). Reconcile `DROPS.md` in this
+   stage: it still describes user-defined drops as unbuilt with a `&Self`
+   receiver, while `POINTERS.md` (Status, item 9) records the built form
+   taking `Self`; stage 3's replacement and cleanup rules are written against
+   the built form. Gate: the examples are decided, and a reader can tell for
+   each whether it is accepted or rejected and why.
+2. **Nonescaping read references.** *Implemented (2026-10-30), with one
+   decision revised.* Generalize parameter lending and add local
    loans. Extend type checking and MIR with explicit borrow, reborrow, read and
-   loan-end operations. Extend `MirMoves` or add a focused `MirBorrow` pass using
-   its place analysis. Migrate parameter lending to explicit `&` arguments; decide value-view and
-   clone behavior deliberately, without compatibility requirements.
-3. **Nonescaping exclusive updates.** Start with whole roots and fields, scoped
+   loan-end operations, with loan checking in `MirMoves` per the decision
+   above. Value-view and clone behavior are as in `LANGUAGE.md` (References):
+   reading through a reference is a view, taking the value needs `clone`.
+   The migration to explicit `&` arguments at every call site was *not* done,
+   deliberately: a call to a read parameter still lends by passing the value,
+   as `total(xs)` always has, because the permission is in the callee's
+   signature either way and the churn (every library, example and test call
+   site) buys no safety. Explicitness is required exactly where it is
+   load-bearing: making a reference value (`&place`, `&mut place`), giving a
+   reference on, and every update borrow — a call that updates through a
+   parameter is always written `f(&mut x)`, never inferred. What remains
+   implicit is lending for *reading* only, plus method receivers (above).
+3. **Nonescaping exclusive updates.** *Implemented (2026-10-30), whole roots,
+   fields and places through `get(...)` included; index/range splitting of a
+   container into simultaneous loans is not (borrowing an element is one
+   loan at a time).* Start with whole roots and fields, scoped
    update calls, replacement, entry/exit contracts and versioned validation.
    Gate on stale-fact rejection and correct cleanup. Then add checked disjoint
    index/range splitting. General references need not wait for raw allocation.
+   Precise state: `*r = v;` and `(*r).field = v;` assign through an update
+   reference; `writes(...)` bounds the footprint and `old(...)` names the
+   entry snapshot in postconditions; the validator versions the caller's root
+   at an update call, so a stale fact is refused and a disjoint field's facts
+   are kept. The interpreter gives the caller the new value when the call
+   returns (copy-in/copy-out). A function with an update *parameter* is
+   refused for native code (`run`/`build` name the gap) until native
+   writeback lands, and a reference held by a local is refused at the same
+   place: assignment through one is expanded to root assignments before
+   ownership (`expandRefWrites`), but making one (`&place`) and reading
+   through one (`*r`) are rows the Tersus emitter does not have yet. The self-hosted bridge
+   (`SelfHostedMir`) handles a borrow of a whole local and a read through a
+   reference at the value level and refuses the rest as outside its subset;
+   the Tersus reader/validator of step 33 does not model references yet.
+   The MIR-as-data format (`MirData`) carries `mutref`, `borrow`,
+   `borrowmut`, `deref` and `assignref` rows; `examples/mir_reader.tersus`
+   does not model references yet (a program with an update parameter is
+   refused earlier, with the native error above).
+
+   **Checkpoint after stage 3.** Stages 1 to 3 are self-contained and are
+   where most of the value is (no copies for reads, checked in-place update,
+   no stale facts). Stage 4 is not started until its prerequisites below are
+   met; if they stall, stage 5's `Block` unification proceeds without it.
 4. **Escaping reads, then updates.** Add result-origin constraints, unsized
    metadata, aggregate fields, generic and function-value contracts. Check region
    containment. Gate each extension on negative escape tests and separate checking
    of callers and callees, without inspecting callee bodies.
+   Prerequisites, all landed before this stage starts: (a) the `Deref`
+   language items left over from step 29 of the roadmap (the checker looking
+   through a `Deref` impl as it now looks through `Box` by name), without
+   which a returned `&T` cannot be used through a `Box` or a list; (b) an
+   answer to region containment — `ALLOCATORS.md` is step 32, a draft with
+   nothing built, and its statement that a borrow's region does not matter
+   holds only for nonescaping reads, so either regions land first or escaping
+   references are restricted to the `System` region until they do; and (c) the
+   unsized metadata of step 29 for a reference to an unsized value.
 5. **Library and raw-memory integration.** Unify `Block` loans; recheck list
    lowering, drops, partial moves and allocator design. Verify generated library
-   MIR too: its current exemption from move checking cannot authorize references.
-   Introduce explicit guarded mutation and handle libraries when needed.
+   MIR too: its current exemption from move checking cannot authorize references
+   (`lowerLibrary` lowers `lib/lists.tersus` and `lib/box.tersus` with the move
+   check off, so a reference in library code would be unchecked until this is
+   closed). Introduce explicit guarded mutation and handle libraries when needed.
+   The `Block` unification in this stage does not depend on stage 4 and may be
+   done at the checkpoint instead.
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 
 Every stage updates `TersusTypes`, elaboration, MIR serialization/verification,
-the interpreter, ownership lowering and both LLVM emitters as needed. Recheck
+the interpreter, ownership lowering and both LLVM emitters as needed, and also
+the self-hosted path: `SelfHostedMir` (which today reports `TRef` as
+unsupported), `examples/mir_reader.tersus`, `examples/emit.tersus` and the
+validator being written in Tersus for step 33 of the roadmap. A stage that
+adds a MIR operation or a type constructor is not done until the Tersus
+programs that read and emit MIR handle it, or explicitly refuse it with the
+same error. Recheck
 loans after transformations that introduce aliases, moves or storage changes;
 make pass boundaries explicit in `Pipeline`. Never emit LLVM `noalias` or other
 alias promises stronger than the established semantics. Update `LANGUAGE.md`

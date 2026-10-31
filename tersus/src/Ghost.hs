@@ -26,6 +26,8 @@ module Ghost
     ) where
 
 import Control.Monad (foldM, when)
+import Data.List (isPrefixOf)
+import Data.Maybe (fromMaybe)
 import Data.Containers.ListUtils (nubOrd)
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -109,7 +111,7 @@ exprTerm st (F funct args) = do
     (st2, argTerms) <- foldM (\(s, ts) a -> (\(s', t) -> (s', ts ++ [t])) <$> exprTerm s a) (st1, []) args
     info <- liftR (resolveFunction st2 functTerm)
     result <- fresh
-    st3 <- applyCall st2 info argTerms result
+    st3 <- applyCall st2 info argTerms result []
     return (st3, ATerm result)
 
 -- The function that a term stands for
@@ -142,8 +144,8 @@ resolveFunction st term =
 builtinInfo :: BuiltinFunct -> FnInfo
 builtinInfo b =
     case stdlibBuiltin b of
-        VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b)
-        _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b)
+        VFunct params requires _ _ exported -> FnInfo params requires exported Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b) []
+        _ -> FnInfo [] [] [] Nothing (CTerm (builtinFunct b)) True (KBuiltin b) (readsWorld b) []
 
 -- The builtin function that an operation is
 rvalueCall :: M.Rvalue -> Maybe (BuiltinFunct, [M.Operand])
@@ -162,6 +164,8 @@ rvalueCall rv =
         M.Unsize _ -> Nothing
         M.Clone _ -> Nothing
         M.TakeField{} -> Nothing
+        M.Borrow{} -> Nothing
+        M.Deref _ -> Nothing
   where
     binary op = case op of
         M.Add -> Plus
@@ -232,13 +236,13 @@ wrapperInfo st name = do
 
 -- Calling a function: the arguments have to meet its input contract and the call has to end, and the call then gives
 -- the facts the function promises about its result, and the result itself when everything is known.
-applyCall :: PState -> FnInfo -> [IotaProof] -> Iota -> V PState
-applyCall st info args result = do
+applyCall :: PState -> FnInfo -> [IotaProof] -> Iota -> [(Variable, Iota)] -> V PState
+applyCall st info args result mutPosts = do
     let params = fnParamNames info
     when (length params /= length args) (throwV ("Function expected " ++ show (length params) ++ " arguments, got " ++ show (length args)))
     checkInputs st params args (fnRequires info)
     callTermination st info args
-    (st', instantiated) <- instantiateOutputs st params args result (fnExported info)
+    (st', instantiated) <- instantiateOutputsMut st params args (ATerm result) mutPosts (fnExported info)
     -- (a function that reads the input is not a function of its arguments: its result is only what it promises)
     let call = [FApp eqProof [ATerm result, FApp (fnTerm info) args] | not (fnReads info)]
         known = case concreteResult st info args of
@@ -358,11 +362,17 @@ instantiateOutputs st params args result = instantiateOutputsWith st params args
 -- (the result is a term: a value, or a call of the function that a proof makes)
 instantiateOutputsWith :: PState -> [Variable] -> [IotaProof] -> IotaProof -> [VariableProof] -> V (PState, [IotaProof])
 instantiateOutputsWith st _ _ _ [] = return (st, [])
-instantiateOutputsWith st params args result exported = do
-    let defined = filter (\var -> var /= "return" && var `notElem` params && Map.notMember var (psGlobals st)) (nubOrd (concatMap proofVars exported))
+instantiateOutputsWith st params args result exported = instantiateOutputsMut st params args result [] exported
+
+-- As instantiateOutputsWith, with the post-call versions of update parameters: an update parameter in a promise is
+-- its version after the call, and `$old x` is the version it had at entry (REFERENCES.md, Mutation in the proof model)
+instantiateOutputsMut :: PState -> [Variable] -> [IotaProof] -> IotaProof -> [(Variable, Iota)] -> [VariableProof] -> V (PState, [IotaProof])
+instantiateOutputsMut st params args result mutPosts exported = do
+    let defined = filter (\var -> var /= "return" && var `notElem` params && not ("$old " `isPrefixOf` var) && Map.notMember var (psGlobals st)) (nubOrd (concatMap proofVars exported))
     iotas <- freshN (length defined)
     let bound = zip defined iotas
-        view = (calleeView st (zip params args ++ [("return", result)])){psVars = Map.fromList bound}
+        argOf name = fromMaybe (CTerm (VInt 0)) (lookup name (zip params args))
+        view = (calleeView st ([(name, maybe (argOf name) (ATerm . id) (lookup name mutPosts)) | name <- params] ++ [("$old " ++ name, argOf name) | (name, _) <- mutPosts] ++ [("return", result)])){psVars = Map.fromList bound}
     proofs <- liftR (flatResultMap (toIotaProof view) exported)
     return (st{psVars = Map.union (Map.fromList bound) (psVars st)}, proofs)
 

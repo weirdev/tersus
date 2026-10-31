@@ -1092,7 +1092,7 @@ A function body's scope has no parent scope, so assignments inside it never reac
 
 #### Lent parameters
 
-A parameter written `&T` is *lent*: the function only reads it, so a call neither moves nor copies it and the caller keeps it. It is for a parameter only (a result, a field, a local or a `Box` is never a `&T`).
+A parameter written `&T` is *lent*: the function only reads it, so a call neither moves nor copies it and the caller keeps it.
 
 ```tersus
 fn total(a: &List<Int>) -> Int {
@@ -1118,6 +1118,39 @@ return total(xs) + total(xs) + size(xs);   // 6 + 6 + 3: xs is lent each time, a
 See `examples/borrowing.tersus`.
 
 During validation, arguments are symbolic values. Proofs the caller has established about an argument are visible to the callee's input contract, which is how a call such as `spread(x)` can rely on `size(x) > 0` proven at the call site.
+
+#### References
+
+A *reference* is a local or a parameter that stands for a place (a variable, a field of one, an element of one, or through another reference) instead of holding a value of its own. `&T` is a reference that only reads the place; `&mut T` is one that may also update it. A reference is made with `&place` or `&mut place`, and the value at the place is read with `*r`. A reference is never a result, a field or an element, so one cannot outlive the function that makes it.
+
+```tersus
+xs = [1, 2, 3];
+r = &xs;              // reads xs where it is
+a = size(*r);         // the last use of r
+xs = push(xs, 4);     // xs is the program's again
+```
+
+- **A borrow ends at the last use of the reference**, including uses through what is borrowed from it (`&*r` is a *reborrow*). While a borrow is live, what it is to cannot be moved, assigned, or borrowed incompatibly: read borrows may coexist; borrowing for updating, or moving or assigning the place, waits until every live borrow of it has ended. Two borrows of two fields of one struct are of different places, so both may update.
+- **Reading through a reference is a view** of the place (as a field read is): it is not a move, and taking the value for itself (returning `*r`, giving it where a value is taken) is an error for a value that is not Copy: write `clone(*r)`, or replace it through an update reference.
+- **Method receivers are the one place a call does not write the borrow**: `x.size()` borrows `x` as the signature of `size` declares (`self: &Self`), as it did before references could be held by locals.
+
+#### Updating through a reference
+
+A parameter written `&mut T` is lent *for updating*. A call to one is never silent: it is written with `&mut` and the place (`increment(&mut count)`), and when the call returns the caller has the new value. In the function, the parameter is assigned only through itself (`*n = *n + 1;`), never assigned itself, and is read as `*n`.
+
+```tersus
+fn increment(n: &mut Int) -> Int writes(n)
+    [{ affirm *n < 100; }]
+    [{ affirm *n = old(*n) + 1; affirm return = *n; }]
+{
+    *n = *n + 1;
+    return *n;
+};
+```
+
+- **`writes(...)`** after the return type says which places of the update parameters a function may change (`writes(n)`, `writes(p.x)`). Without it, every update parameter may be changed whole. An assignment through a reference anywhere else is an error that names the clause.
+- **`old(place)`** in a postcondition is the value the place had when the function was entered. It is the only way a promise relates the new value to the old one, and it may only name what an update parameter is to.
+- **An update makes a new version.** Facts proved about a value are about a version of it: after `*r = v;` or a call through `&mut`, what was proved about the place before is about its old version, not a fact about the new one (an `affirm` of the old fact is refused), and facts about a different field of the same struct are kept. In the interpreter the caller gets the new value when the call returns. Native code does not have references yet: a function with an update parameter, or a reference held by a local, is refused by `run` and `build` with that reason, while `eval` and `check` take it.
 
 ## Moves, Clone And Copy
 

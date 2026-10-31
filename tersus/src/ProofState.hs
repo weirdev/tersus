@@ -88,6 +88,7 @@ data FnInfo = FnInfo
     , fnGlobal :: Bool -- defined at the top of the program, where the functions after it can use it
     , fnKind :: FnKind
     , fnReads :: Bool -- reads the standard input: what it gives is not determined by its arguments, so two calls are not the same value
+    , fnMutParams :: [Variable] -- the parameters a call may update (&mut T): the caller gets a new version of what each is to (REFERENCES.md)
     }
 
 data FnKind = KBuiltin BuiltinFunct | KUser Name
@@ -109,6 +110,7 @@ data PState = PState
     , psCache :: Maybe FactCache
     , psProgram :: M.Program
     , psReaders :: Set.Set Name -- the functions of the program that read the standard input
+    , psBorrows :: Map M.Local (M.Local, [M.RefStep]) -- the place each reference local is to, so that an assignment to the root re-versions what reads through it see it as
     }
 
 -- The name of a function of the program as a value in proofs
@@ -137,6 +139,7 @@ initialPState program =
             , psCache = Just (Engine.factCacheAdd Engine.emptyFactCache globalFacts)
             , psProgram = program
             , psReaders = M.readersOfInput program
+            , psBorrows = Map.empty
             }
 
 -- The functions that a function names are known by their value too (`f = $f` is `VFnRef f`), so that what returns one can be
@@ -208,6 +211,8 @@ toIotaProof st (FApp funct args) =
         flatResultMap (toIotaProof st) args `bindResult` \iotaProofs -> case (functProof, iotaProofs) of
             -- (toInt(b) is b: a Byte is the Int that it is, so a proof about toInt(b) is a proof about b, which has the facts of a Byte)
             (ATerm (Iota "toInt"), [x]) -> Ok x
+            -- (*r is what r is to: in a proof a reference is its current version, which the iota of its place is)
+            (CTerm (VFunct _ _ _ (BuiltinFunct DerefOf) _), [x]) -> Ok x
             _ -> Ok (FApp functProof iotaProofs)
 
 -- The state where the names of the program mean what the environment says, with the values they have now

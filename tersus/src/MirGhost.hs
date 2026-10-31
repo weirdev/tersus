@@ -192,6 +192,7 @@ withoutUninit program =
             }
     statement st = case st of
         Assign d rv -> Assign d (rvalue rv)
+        AssignRef root steps rv -> AssignRef root (map refStep steps) (rvalue rv)
         Peek d rv -> Peek d (rvalue rv)
         _ -> st
     terminator term = case term of
@@ -212,6 +213,11 @@ withoutUninit program =
         AsVariant o n -> AsVariant (operand o) (name n)
         Clone o -> Clone (operand o)
         TakeField l n f -> TakeField l (name n) f
+        Borrow root steps mut -> Borrow root (map refStep steps) mut
+        Deref o -> Deref (operand o)
+    refStep s = case s of
+        RefField n f -> RefField (name n) f
+        RefIndex o -> RefIndex (operand o)
     operand o = case o of
         Const c -> Const (constant c)
         _ -> o
@@ -237,6 +243,7 @@ plain ty = case ty of
     TAddr t -> TAddr (plain t)
     TBlock t -> TBlock (plain t)
     TRef t -> TRef (plain t)
+    TMutRef t -> TMutRef (plain t)
     TFn args ret -> TFn (map plain args) (plain ret)
     TForall sizes types t -> TForall sizes types (plain t)
     TNamed n | Just (base, args) <- instanceOf n -> TNamed (instanceName base [case a of ArgType t -> ArgType (plain t); _ -> a | a <- args])
