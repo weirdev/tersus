@@ -17,10 +17,11 @@ testBytes =
                 "conversions"
                 [ testCase "an Int is a Byte, and a Byte an Int" (runs "b = toByte(200); return toInt(b) + 1;" "201")
                 , testCase "the ends of the range" (runs "return toInt(toByte(0)) * 1000 + toInt(toByte(255));" "255")
-                , testCase "an Int above the range is refused" (rejected "b = toByte(256); return 0;" "Funct input validation failed")
-                , testCase "and one below it" (rejected "b = toByte(0 - 1); return 0;" "Funct input validation failed")
-                , testCase "an Int that is not known to be in the range is refused" (rejected "x = readByte(); b = toByte(x); return 0;" "Funct input validation failed")
+                , testCase "an Int above the range is refused" (rejected "b = toByte(256); return 0;" "Could not prove")
+                , testCase "and one below it" (rejected "b = toByte(0 - 1); return 0;" "Could not prove")
+                , testCase "an Int that is not known to be in the range is refused" (rejected "x = readByte(); b = toByte(x); return 0;" "Could not prove")
                 , testCase "and is accepted where it has been tested" (valid "x = readByte(); if x >= 0 { b = toByte(x); return toInt(b); }; return 0 - 1;")
+                , testCase "a value assigned in a branch keeps its range" (valid "x = readByte(); y = 1; if x < 5 { y = 2; }; affirm y >= 1;")
                 , testCase "a parameter that is tested" (valid "fn f(x: Int) -> Byte [{ }] [{ }] { if x < 0 { return toByte(0); }; if x > 255 { return toByte(255); }; return toByte(x); }; return toInt(f(300));")
                 , testCase "a clamped value" (runs "fn f(x: Int) -> Byte [{ }] [{ }] { if x < 0 { return toByte(0); }; if x > 255 { return toByte(255); }; return toByte(x); }; return toInt(f(300)) * 1000 + toInt(f(0 - 4)) * 10 + toInt(f(7));" "255007")
                 ]
@@ -37,7 +38,7 @@ testBytes =
                 , testCase "an Int does not go into a list of them" (rejected "bs = push(push([], toByte(1)), 2); return 0;" "Byte")
                 , testCase "a list of Bytes is written as the numbers" (runs "return push(push([], toByte(1)), toByte(2));" "[1, 2]")
                 , testCase "a function over Bytes" (runs "fn next(b: Byte) -> Byte [{ affirm toInt(b) < 255; }] [{ affirm toInt(return) = toInt(b) + 1; }] { return toByte(toInt(b) + 1); }; return toInt(next(toByte(41)));" "42")
-                , testCase "and the caller has to meet its contract" (rejected "fn next(b: Byte) -> Byte [{ affirm toInt(b) < 255; }] [{ }] { return toByte(toInt(b) + 1); }; return toInt(next(toByte(255)));" "Funct input validation failed")
+                , testCase "and the caller has to meet its contract" (rejected "fn next(b: Byte) -> Byte [{ affirm toInt(b) < 255; }] [{ }] { return toByte(toInt(b) + 1); }; return toInt(next(toByte(255)));" "Could not prove")
                 , testCase "Byte is a type that can be written" (valid "fn f(a: List<Byte>, b: Byte) -> Byte [{ }] [{ }] { return b; }; return 0;")
                 ]
             , TestList

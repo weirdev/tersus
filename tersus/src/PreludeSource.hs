@@ -10,6 +10,7 @@ module PreludeSource
     , setSource
     , emitterSource
     , stdlibSource
+    , validationSource
     , seedSha256
     ) where
 
@@ -93,6 +94,16 @@ emitterSource =
     $( do
         addDependentFile "examples/emit.tersus"
         contents <- runIO (readFile "examples/emit.tersus")
+        lift contents
+     )
+
+-- The text of lib/validation.tersus: the validator written in Tersus, which is
+-- what validates every program (see SelfHostedMir.validateByTersus)
+validationSource :: String
+validationSource =
+    $( do
+        addDependentFile "lib/validation.tersus"
+        contents <- runIO (readFile "lib/validation.tersus")
         lift contents
      )
 

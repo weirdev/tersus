@@ -49,7 +49,7 @@ testCallsAndReturnJoin =
               parseValidProgramHelper "fn f(a: List<Int>) -> Int [{ }] [{ affirm return >= -1; affirm return < size(a); }] { for i in 0..size(a) { if get(a, i) > 2 { return i; }; }; return -1; }; x = f([1, 3]);"
             ]
 
--- The join of an `if` also tries what the program is about to need (see mergeStates in MirValidate.hs)
+-- The join of an `if` also tries what the program is about to need (see mergeStates in lib/validation.tersus)
 testIfJoin :: Test
 testIfJoin =
     let fn' body = "fn f(c: Int, y: Int) -> Int [{ affirm y > 0; }] [{ }] { " ++ body ++ " return 0; };"
