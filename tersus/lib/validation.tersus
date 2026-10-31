@@ -1165,12 +1165,12 @@ fn walkFlow(blocks: &HashMap<Int, FlowBlock>, id: Int, context: &ValidatorContex
         if fuel = 0 {
             return FlowResult { status: 4, block: id, step: -1 };
         };
-        block = blocks.lookup(id, FlowBlock { id: id, steps: [], end: FlowEnd::Done });
-        run = runProofSteps(context, block.steps);
+        block = blocks.lookupRef(id);
+        run = runProofSteps(context, (*block).steps);
         if run.valid = false {
             return FlowResult { status: 1, block: id, step: run.failedAt };
         };
-        end = block.end;
+        end = (*block).end;
         if end is FlowEnd::Done {
             return FlowResult { status: 0, block: id, step: -1 };
         };
@@ -2675,15 +2675,15 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
         };
     };
     if blocks.contains(id) {
-        block = blocks.lookup(id, ExecutionBlock { id: id, steps: [], end: ExecutionEnd::Done });
-        if block.end is ExecutionEnd::Loop {
-            loop = block.end as ExecutionEnd::Loop;
+        block = blocks.lookupRef(id);
+        if (*block).end is ExecutionEnd::Loop {
+            loop = (*block).end as ExecutionEnd::Loop;
             entry = executeSteps(initial, loop.checks);
             if entry.status != 0 { return ExecutionFlowResult { status: entry.status, block: id, step: entry.failedAt, state: entry.state }; };
         };
-        run = executeSteps(initial, block.steps);
+        run = executeSteps(initial, (*block).steps);
         if run.status != 0 { return ExecutionFlowResult { status: run.status, block: id, step: run.failedAt, state: run.state }; };
-        end = block.end;
+        end = (*block).end;
         if end is ExecutionEnd::Done { return ExecutionFlowResult { status: 0, block: id, step: -1, state: run.state }; };
         if end is ExecutionEnd::Jump {
             jump = end as ExecutionEnd::Jump;
@@ -2703,7 +2703,7 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
             };
             assumed = executeSteps(arbitrary, loop.assumptions);
             if assumed.status != 0 { return ExecutionFlowResult { status: assumed.status, block: id, step: assumed.failedAt, state: assumed.state }; };
-            header = executeSteps(assumed.state, block.steps);
+            header = executeSteps(assumed.state, (*block).steps);
             if header.status != 0 { return ExecutionFlowResult { status: header.status, block: id, step: header.failedAt, state: header.state }; };
             left = resolveValue(header.state, loop.left);
             right = resolveValue(header.state, loop.right);

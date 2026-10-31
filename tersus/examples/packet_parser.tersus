@@ -55,7 +55,7 @@ fn parse(buf: &List<Int>) -> Parsed {
 // The other direction: the buffer for a version and a payload, whose size and length field are proved. The loop's
 // invariants are inferred: out starts with two numbers and grows by one per element, and its first two numbers
 // stay as they were, so the length field is still there after the loop.
-fn encode(version: Int, payload: List<Int>) -> List<Int>
+fn encode(version: Int, payload: &List<Int>) -> List<Int>
     [{ }]
     [{ affirm size(return) = size(payload) + 3; affirm get(return, 1) = size(payload); }]
 {

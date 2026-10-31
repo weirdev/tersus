@@ -21,8 +21,8 @@ fn holder<T>(x: T, n: Int) -> Holder<T> [{ define s = n; rewrite eqToGtZero s; a
     return Holder<T> { items: Array::boxed(n, x), len: n };
 };
 
-fn at<T>(h: &Holder<T>, i: Int) -> T [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ }] {
-    return clone(get(h.items, i));
+fn at<T>(h: &Holder<T>, i: Int) -> &T from h [{ define s = size(h.items); affirm i >= 0; affirm i < s; }] [{ affirm *return = get(h.items, i); }] {
+    return &get(h.items, i);
 };
 
 // A type and a size together
@@ -40,4 +40,4 @@ turned = swap(lists);                                   // a is [2, 3] now
 ints = swap(Pair<Int> { a: 10, b: 20 });                // a is 20
 h = holder(push(push([], 7), 8), 3);
 v = Vec<Bool, 4> { cells: array(4, false), used: 0 };
-return size(turned.a) * 1000 + ints.a + size(at(h, 2)) * 100 + capacity(v);    // 2000 + 20 + 200 + 4
+return size(turned.a) * 1000 + ints.a + size(*at(h, 2)) * 100 + capacity(v);    // 2000 + 20 + 200 + 4

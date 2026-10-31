@@ -8,7 +8,7 @@
 // The counter facts (0 <= i <= size(a), and i = size(a) after the loop) come with the for loop,
 // and so does size(out) = i, which the validator works out from how out and i start and change.
 
-fn pairSums(a: List<Int>, b: List<Int>) -> List<Int> [{
+fn pairSums(a: &List<Int>, b: &List<Int>) -> List<Int> [{
     affirm size(a) = size(b);
 }] [{
     affirm size(return) = size(a);

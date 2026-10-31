@@ -5,7 +5,7 @@
 //
 // The function is validated once, for an n it knows nothing of but that it is the size of the arrays it is given. Native code is
 // made for each size the program calls it with (dot<3>, dot<1>), since an array is held inline and needs its size.
-fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int {
+fn dot<n>(a: &Array<Int, n>, b: &Array<Int, n>) -> Int {
     total = 0;
     i = 0;
     while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
@@ -16,16 +16,16 @@ fn dot<n>(a: Array<Int, n>, b: Array<Int, n>) -> Int {
 };
 
 // The size can be the size of the result, and two sizes can be declared
-fn ones<n>(a: Array<Int, n>) -> Array<Int, n> {
+fn ones<n>(a: &Array<Int, n>) -> Array<Int, n> {
     return array(n, 1);
 };
 
-fn cells<rows, columns>(grid: Array<Array<Int, columns>, rows>) -> Int {
+fn cells<rows, columns>(grid: &Array<Array<Int, columns>, rows>) -> Int {
     return rows * columns;
 };
 
 // A function with sizes can call another with its own
-fn lengthOfOnes<m>(a: Array<Int, m>) -> Int {
+fn lengthOfOnes<m>(a: &Array<Int, m>) -> Int {
     return dot(ones(a), ones(a));
 };
 

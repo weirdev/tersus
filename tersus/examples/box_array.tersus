@@ -5,7 +5,7 @@
 // carries the size along with the address, and it is what Array::boxed(n, x) makes, with an n that the program works out. A
 // Box of an array of a size becomes a Box of an array of any size where one is wanted (the unsizing conversion), so one function
 // serves arrays of every size.
-fn total(a: Box<Array<Int>>) -> Int [{ define s = size(a); affirm s >= 0; }] [{ }] {
+fn total(a: &Box<Array<Int>>) -> Int [{ define s = size(a); affirm s >= 0; }] [{ }] {
     sum = 0;
     i = 0;
     while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {

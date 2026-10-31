@@ -301,12 +301,18 @@ lowerFunction original fn =
         return $ case (o, ty) of
             (Const (CList _), _) -> True
             (_, Just (TList _)) -> True
+            (_, Just (TRef (TList _))) -> True
+            (_, Just (TMutRef (TList _))) -> True
             -- (a Box of an array is a list of native code)
             (_, Just (TBox TArrayOf{})) -> True
             _ -> False
 
     listCall dest destTy op os = do
-        operandTy <- maybe (TList TInt) id <$> operandType (head os)
+        operandTy0 <- maybe (TList TInt) id <$> operandType (head os)
+        let operandTy = case operandTy0 of
+                TRef inner -> inner
+                TMutRef inner -> inner
+                other -> other
         -- (a list that is pushed to or set is the list that results, which says the type of a constant that is empty)
         let listTy = case (op, destTy, head os) of
                 (Push, TList _, _) -> destTy

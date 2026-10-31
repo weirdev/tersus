@@ -15,17 +15,17 @@
 // text, and not a Haskell literal, is what the validator is given.
 
 // size(list) is the number of elements. It has no contract: nothing is needed and nothing is promised.
-builtin fn size(list: List<Int>) -> Int;
+builtin fn size(list: &List<Int>) -> Int;
 
 // first and last are get at the first and the last index, which is how element facts about the list reach them
-builtin fn first(list: List<Int>) -> Int [{ affirm size(list) > 0; }] [{ affirm return = get(list, 0); }];
-builtin fn last(list: List<Int>) -> Int [{ affirm size(list) > 0; }] [{ affirm return = get(list, size(list) - 1); }];
+builtin fn first(list: &List<Int>) -> Int [{ affirm size(list) > 0; }] [{ affirm return = get(list, 0); }];
+builtin fn last(list: &List<Int>) -> Int [{ affirm size(list) > 0; }] [{ affirm return = get(list, size(list) - 1); }];
 
 // get requires a valid index, and its result is equal to the term get(list, index), which is what
 // forall facts about the list are instantiated at. The contract is checked with checkRel so that a concrete
 // list and index need no proof from the caller, while symbolic ones must already have
 // 0 <= index < size(list) in the proof context.
-builtin fn get(list: List<Int>, index: Int) -> Int [{
+builtin fn get(list: &List<Int>, index: Int) -> Int [{
     rewrite checkRel index >= 0;
     rewrite checkRel index < size(list);
     affirm index >= 0;
@@ -126,7 +126,7 @@ builtin fn toByte(x: Int) -> Byte [{
 builtin fn toInt(b: Byte) -> Int [{ }] [{ affirm return = b; }];
 
 // The List<Byte> of a list of Ints that is written out: the same list
-builtin fn bytesFrom(list: List<Int>) -> List<Int>;
+builtin fn bytesFrom(list: &List<Int>) -> List<Int>;
 
 // unsize b is b: the Box has the same value, it carries the size. The array that a literal makes is
 // the list of its elements, read as an array: the same value. Box::new(x) is x, box::unbox(b) the value

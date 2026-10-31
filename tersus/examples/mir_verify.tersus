@@ -1938,11 +1938,11 @@ fn one(s: &String) -> List<String> [{ }] [{ affirm size(return) = 1; }] {
     return push([], clone(s));
 };
 
-fn single<T>(x: T) -> List<T> [{ }] [{ affirm size(return) = 1; }] {
+fn single<T>(x: &T) -> List<T> [{ }] [{ affirm size(return) = 1; }] {
     return push([], clone(x));
 };
 
-fn pairOf<T>(x: T, y: T) -> List<T> [{ }] [{ affirm size(return) = 2; }] {
+fn pairOf<T>(x: &T, y: &T) -> List<T> [{ }] [{ affirm size(return) = 2; }] {
     return push(push([], clone(x)), clone(y));
 };
 

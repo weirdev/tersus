@@ -7,7 +7,7 @@ fn add1(i: Int) -> Int [{}] [{
 };
 
 // Proof variables defined in a contract (here s) are exported to the caller.
-fn firstWithSize(lst: List<Int>) -> Int [{
+fn firstWithSize(lst: &List<Int>) -> Int [{
     define s = size(lst);
     rewrite eqToGtZero s;
     affirm s > 0;

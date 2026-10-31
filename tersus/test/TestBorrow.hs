@@ -56,6 +56,9 @@ testBorrow =
             , TestList
                 "local read references"
                 [ testCase "a local borrow reads what it is to" (runs "xs = [1, 2, 3]; r = &xs; return size(*r) + get(*r, 0);" (VInt 4))
+                , testCase "a reference local is given to a lent builtin" (runs "xs = [1, 2]; r = &xs; return size(r) + first(r);" (VInt 3))
+                , testCase "a generic lent parameter takes a reference local" (runs "fn f<T>(xs: &List<T>) -> Int { return size(xs); }; ys = [1, 2]; r = &ys; return f(r);" (VInt 2))
+                , testCase "an element borrowed with get is read where it is" (runs "xss = push(push([], push(push([], 1), 2)), push([], 3)); e = &get(xss, 0); return size(e) * 10 + get(e, 1);" (VInt 22))
                 , testCase "a borrow of a field" (runs "struct Point { x: Int, y: Int }; p = Point { x: 3, y: 4 }; r = &p.y; return *r;" (VInt 4))
                 , testCase "a borrow of an element" (runs "xs = [5, 6]; r = &get(xs, 1); return *r;" (VInt 6))
                 , testCase "a reference is given on to a lent parameter" (runs "fn total(a: &List<Int>) -> Int { return size(a); }; xs = [1, 2]; r = &xs; return total(r) + total(&xs);" (VInt 4))

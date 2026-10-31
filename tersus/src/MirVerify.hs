@@ -265,7 +265,12 @@ rvalueProblems env localTy d rv =
         ([], TInt) -> []
         _ -> ["the result is " ++ renderType d ++ ", not " ++ (if null rest then "Int" else "a permission")]
     -- the sequence an element is read from is a list or an array
-    fitsSequence e l = fits' (TList e) l || any (\ty -> fits' ty l) [t | Just t <- [arrayOf l e]] || arrayConstant l e
+    fitsSequence e l = fits' (TList e) l || fits' (TRef (TList e)) l || fits' (TMutRef (TList e)) l || stdListRef l || any (\ty -> fits' ty l) [t | Just t <- [arrayOf l e]] || arrayConstant l e
+      where
+        stdListRef o = case operandType env localTy o of
+            Just (TRef (TNamed n)) | Just ("StdList", [ArgType e']) <- instanceOf n -> sub env e e'
+            Just (TMutRef (TNamed n)) | Just ("StdList", [ArgType e']) <- instanceOf n -> sub env e e'
+            _ -> False
     arrayConstant l e = case l of
         Const (CArray cs) -> all (constantFits env e) cs
         _ -> False
@@ -311,6 +316,12 @@ rvalueProblems env localTy d rv =
         _ -> False
     isList o = case operandType env localTy o of
         Just (TList _) -> True
+        Just (TRef (TList _)) -> True
+        Just (TMutRef (TList _)) -> True
+        Just (TRef (TNamed n)) | Just ("StdList", _) <- instanceOf n -> True
+        Just (TMutRef (TNamed n)) | Just ("StdList", _) <- instanceOf n -> True
+        Just (TRef TArrayOf{}) -> True
+        Just (TMutRef TArrayOf{}) -> True
         Just TArrayOf{} -> True
         Just (TBox TArrayOf{}) -> True
         Nothing -> case o of

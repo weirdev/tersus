@@ -1354,7 +1354,9 @@ fn printLocal(d: &LocalDecl) -> Int ~ {
 fn printFunction(kind: &String, f: &Function) -> Int ~ {
     n = kind.print() + printName(f.name) + " params".print() + printInts(f.params) + " returns".print();
     if f.hasReturn { n = n + " some".print() + printType(f.returns); } else { n = n + " none".print(); };
-    n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed) + newLine();
+    n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed);
+    if size(f.mutBorrowed) + size(f.from) > 0 { n = n + " mutborrowed".print() + printInts(f.mutBorrowed) + " from".print() + printInts(f.from); };
+    n = n + newLine();
     i = 0;
     while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] ~ {
         n = n + printLocal(get(f.locals, i));

@@ -583,7 +583,7 @@ evalRvalue frame rv =
         Borrow root steps _ -> MRef root <$$> mapResults evalStep steps
         Deref o -> operandValue frame o `bindResult` resolveRef frame
         BinaryOp op a b -> operandValue frame a `bindResult` \x -> operandValue frame b `bindResult` \y -> binary op x y
-        ListOp op os -> mapResults (operandValue frame) os `bindResult` listOp op
+        ListOp op os -> mapResults (\o -> operandValue frame o `bindResult` resolveRef frame) os `bindResult` listOp op
         MakeList os -> MList <$$> mapResults (operandValue frame) os
         MakeBox o -> operandValue frame o
         Unbox o -> operandValue frame o

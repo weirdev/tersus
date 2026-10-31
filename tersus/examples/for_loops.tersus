@@ -4,7 +4,7 @@
 // that the loop ends. A for loop needs no invariant or termination clause, but can add an invariant.
 // for x in list { ... } goes through the elements, and for i, x in list { ... } also has the index.
 
-fn total(a: List<Int>) -> Int {
+fn total(a: &List<Int>) -> Int {
     s = 0;
     for x in a {
         s = s + x;
@@ -13,7 +13,7 @@ fn total(a: List<Int>) -> Int {
 };
 
 // With the index, a range loop and an element loop are the same loop: x is get(a, i).
-fn weighted(a: List<Int>) -> Int {
+fn weighted(a: &List<Int>) -> Int {
     s = 0;
     for i, x in a {
         s = s + i * x;
@@ -22,7 +22,7 @@ fn weighted(a: List<Int>) -> Int {
 };
 
 // A return in the body leaves the function, as in a while loop.
-fn firstOver(a: List<Int>, limit: Int) -> Int {
+fn firstOver(a: &List<Int>, limit: Int) -> Int {
     for i in 0..size(a) {
         if get(a, i) > limit { return i; };
     };
