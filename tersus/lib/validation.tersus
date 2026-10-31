@@ -1072,17 +1072,17 @@ fn linScale(terms: &List<LinTerm>, factor: Int) -> List<LinTerm> {
     return result;
 };
 
+fn linGcdStep(x: Int, y: Int) -> Int [{ affirm x >= 0; affirm y >= 0; }] [{ }] shrinks y {
+    if y = 0 { return x; };
+    return linGcdStep(y, x % y);
+};
+
 fn linGcd(a: Int, b: Int) -> Int {
     x = a;
     if x < 0 { x = 0 - x; };
     y = b;
     if y < 0 { y = 0 - y; };
-    while y != 0 {
-        r = x % y;
-        x = y;
-        y = r;
-    };
-    return x;
+    return linGcdStep(x, y);
 };
 
 fn linFloorDiv(a: Int, g: Int) -> Int {
@@ -1866,6 +1866,74 @@ fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
+// One end of the integer range a term is known to lie in: its constant
+// value, or the tightest order fact against a constant-valued term.
+fn rangeBound(context: &ValidatorContext, term: Int, low: Bool) -> IntegerLookup {
+    value = integerValue(context, term);
+    if value is IntegerLookup::Found { return value; };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    best = 0;
+    found = false;
+    for order in context.orders {
+        if low {
+            if hasEquality(equalities, order.greater, term) {
+                v = integerValue(context, order.smaller);
+                if v is IntegerLookup::Found {
+                    cand = (v as IntegerLookup::Found).value;
+                    usable = true;
+                    if order.strict {
+                        if cand < 9223372036854775807 { cand = cand + 1; } else { usable = false; };
+                    };
+                    if usable {
+                        if found = false || cand > best { best = cand; found = true; };
+                    };
+                };
+            };
+        } else {
+            if hasEquality(equalities, order.smaller, term) {
+                v = integerValue(context, order.greater);
+                if v is IntegerLookup::Found {
+                    cand = (v as IntegerLookup::Found).value;
+                    usable = true;
+                    if order.strict {
+                        if cand > -9223372036854775808 { cand = cand - 1; } else { usable = false; };
+                    };
+                    if usable {
+                        if found = false || cand < best { best = cand; found = true; };
+                    };
+                };
+            };
+        };
+    };
+    if found { return IntegerLookup::Found { value: best }; };
+    return IntegerLookup::Missing;
+};
+
+fn addRangeBound(state: &ExecutionState, term: Int, value: Int, low: Bool) -> ExecutionState {
+    boundTerm = 0;
+    found = false;
+    for constant in state.context.constants {
+        if constant.kind = 0 {
+            if constant.value = value { boundTerm = constant.id; found = true; };
+        };
+    };
+    owned = clone(state);
+    context = clone(owned.context);
+    if found = false {
+        fresh = freshValue(state);
+        if fresh is ValueLookup::Found {
+            boundTerm = (fresh as ValueLookup::Found).term;
+            context = ValidatorContext { constants: push(clone(context.constants), ConstantTerm { id: boundTerm, kind: 0, value: value }), ..context };
+        } else { return clone(state); };
+    };
+    if low {
+        context = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: boundTerm, greater: term, strict: false }), ..context };
+    } else {
+        context = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: term, greater: boundTerm, strict: false }), ..context };
+    };
+    return ExecutionState { context: context, ..owned };
+};
+
 fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
     poolContext = unionContexts(left.context, right.context);
     poolEqualities = clone(poolContext.equalities);
@@ -1906,7 +1974,28 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
     };
     leftContext = normalizedContext(left.context, pairs, true);
     rightContext = normalizedContext(right.context, pairs, false);
-    return StateMergeLookup::Found { state: ExecutionState { context: commonContext(leftContext, rightContext), locals: locals } };
+    state = ExecutionState { context: commonContext(leftContext, rightContext), locals: locals };
+    for pair in pairs {
+        loLeft = rangeBound(left.context, pair.left, true);
+        loRight = rangeBound(right.context, pair.right, true);
+        if loLeft is IntegerLookup::Found {
+            if loRight is IntegerLookup::Found {
+                lo = (loLeft as IntegerLookup::Found).value;
+                if (loRight as IntegerLookup::Found).value < lo { lo = (loRight as IntegerLookup::Found).value; };
+                state = addRangeBound(state, pair.joined, lo, true);
+            };
+        };
+        hiLeft = rangeBound(left.context, pair.left, false);
+        hiRight = rangeBound(right.context, pair.right, false);
+        if hiLeft is IntegerLookup::Found {
+            if hiRight is IntegerLookup::Found {
+                hi = (hiLeft as IntegerLookup::Found).value;
+                if (hiRight as IntegerLookup::Found).value > hi { hi = (hiRight as IntegerLookup::Found).value; };
+                state = addRangeBound(state, pair.joined, hi, false);
+            };
+        };
+    };
+    return StateMergeLookup::Found { state: state };
 };
 
 // The MIR bridge reserves function -1 for addition and -2 for subtraction.
@@ -1995,6 +2084,21 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
                                     };
                                 };
                             };
+                            if moved = false {
+                                distinct = false;
+                                for d in context.different {
+                                    if hasEquality(equalities, d.left, index) {
+                                        if hasEquality(equalities, d.right, changed) { distinct = true; };
+                                    };
+                                    if hasEquality(equalities, d.left, changed) {
+                                        if hasEquality(equalities, d.right, index) { distinct = true; };
+                                    };
+                                };
+                                if distinct {
+                                    current = get(app.arguments, 0);
+                                    moved = true;
+                                };
+                            };
                         };
                     };
                     if app.function = -18 {
@@ -2023,6 +2127,18 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
                                                     if i >= 0 {
                                                         if i < n { current = original; moved = true; };
                                                     };
+                                                };
+                                            };
+                                            if hasEquality(equalities, index, lengthApp.id) {
+                                                fact = EqualityFact { left: result, right: get(app.arguments, 1) };
+                                                return ValidatorContext { equalities: push(state.equalities, fact), ..state };
+                                            };
+                                            if moved = false {
+                                                orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+                                                differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
+                                                if hasDifference(equalities, differences, index, lengthApp.id, -1) {
+                                                    current = original;
+                                                    moved = true;
                                                 };
                                             };
                                         };
@@ -2499,6 +2615,38 @@ fn lastSequence(initial: &ExecutionState, local: Int, list: Int, zero: Int) -> E
                     locals = bindLocal(state.locals, local, result);
                     return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals } };
                 };
+            };
+        };
+        state = clone(initial);
+        oneTerm = zero;
+        knownOne = false;
+        for constant in initial.context.constants {
+            if constant.kind = 0 {
+                if constant.value = 1 { oneTerm = constant.id; knownOne = true; };
+            };
+        };
+        if knownOne = false {
+            symbol = freshValue(state);
+            if symbol is ValueLookup::Found {
+                oneTerm = (symbol as ValueLookup::Found).term;
+                context = ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: oneTerm, kind: 0, value: 1 }), ..state.context };
+                state = ExecutionState { context: context, ..state };
+            } else { return ExecutionResult { status: 2, failedAt: -1, state: state }; };
+        };
+        idxFresh = freshValue(state);
+        if idxFresh is ValueLookup::Found {
+            indexTerm = (idxFresh as ValueLookup::Found).term;
+            subApp = ApplicationTerm { id: indexTerm, function: -2, arguments: push(push([], lengthTerm), oneTerm) };
+            context = ValidatorContext { applications: push(clone(state.context.applications), subApp), ..state.context };
+            state = ExecutionState { context: context, ..state };
+            fresh = freshValue(state);
+            if fresh is ValueLookup::Found {
+                result = (fresh as ValueLookup::Found).term;
+                app = ApplicationTerm { id: result, function: -14, arguments: push(push([], list), indexTerm) };
+                withApp = ValidatorContext { applications: push(clone(state.context.applications), app), ..state.context };
+                context = readThroughSequence(withApp, result, list, indexTerm);
+                locals = bindLocal(state.locals, local, result);
+                return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, locals: locals } };
             };
         };
     };
