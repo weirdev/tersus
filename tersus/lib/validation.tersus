@@ -2157,6 +2157,22 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
     leftContext = normalizedContext(left.context, pairs, true);
     rightContext = normalizedContext(right.context, pairs, false);
     state = ExecutionState { context: commonContext(leftContext, rightContext), locals: locals };
+    mergedConstants = clone(state.context.constants);
+    for fact in leftContext.constants {
+        if fact.id >= 0 {
+            known = false;
+            for kept in mergedConstants { if kept.id = fact.id { known = true; }; };
+            if known = false { mergedConstants = push(mergedConstants, clone(fact)); };
+        };
+    };
+    for fact in rightContext.constants {
+        if fact.id >= 0 {
+            known = false;
+            for kept in mergedConstants { if kept.id = fact.id { known = true; }; };
+            if known = false { mergedConstants = push(mergedConstants, clone(fact)); };
+        };
+    };
+    state = ExecutionState { context: ValidatorContext { constants: mergedConstants, ..state.context }, ..state };
     for pair in pairs {
         loLeft = rangeBound(left.context, pair.left, true);
         loRight = rangeBound(right.context, pair.right, true);

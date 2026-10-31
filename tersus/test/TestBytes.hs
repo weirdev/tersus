@@ -21,6 +21,7 @@ testBytes =
                 , testCase "and one below it" (rejected "b = toByte(0 - 1); return 0;" "Could not prove")
                 , testCase "an Int that is not known to be in the range is refused" (rejected "x = readByte(); b = toByte(x); return 0;" "Could not prove")
                 , testCase "and is accepted where it has been tested" (valid "x = readByte(); if x >= 0 { b = toByte(x); return toInt(b); }; return 0 - 1;")
+                , testCase "a value assigned in a branch keeps its range" (valid "x = readByte(); y = 1; if x < 5 { y = 2; }; affirm y >= 1;")
                 , testCase "a parameter that is tested" (valid "fn f(x: Int) -> Byte [{ }] [{ }] { if x < 0 { return toByte(0); }; if x > 255 { return toByte(255); }; return toByte(x); }; return toInt(f(300));")
                 , testCase "a clamped value" (runs "fn f(x: Int) -> Byte [{ }] [{ }] { if x < 0 { return toByte(0); }; if x > 255 { return toByte(255); }; return toByte(x); }; return toInt(f(300)) * 1000 + toInt(f(0 - 4)) * 10 + toInt(f(7));" "255007")
                 ]
