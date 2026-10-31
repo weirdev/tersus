@@ -23,15 +23,15 @@ module TestHarness
     ) where
 
 import qualified Control.Exception as Exception
-import Control.Concurrent (forkIO)
+import Control.Concurrent (forkIO, threadDelay)
 import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
-import Control.Exception (IOException, SomeException, bracket_, displayException, mask, throwIO, try)
+import Control.Exception (IOException, SomeException, bracket_, displayException, finally, mask, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesFileExist, getFileSize, getModificationTime, removeFile, renameFile)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, getFileSize, getModificationTime, removeDirectory, removeFile, renameFile)
 import System.Environment (getExecutablePath)
 import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
@@ -226,21 +226,47 @@ mirDataOf source = do
                         Right text -> Ok text
                         Left _ -> compute
                 else do
-                    let result = compute
-                    case result of
-                        Error _ -> pure result
-                        Ok text -> do
-                            made <- try (createDirectoryIfMissing True dataDir) :: IO (Either IOException ())
-                            case made of
-                                Left _ -> pure result
-                                Right () -> do
-                                    (staging, handle) <- openTempFile dataDir "mir-data.tmp"
-                                    hClose handle
-                                    removeFile staging
-                                    writeFile staging text
-                                    renameFile staging file
-                                    pure result
+                    made <- try (createDirectoryIfMissing True dataDir) :: IO (Either IOException ())
+                    case made of
+                        Left _ -> pure compute
+                        Right () -> do
+                            -- (one process compiles an entry while the others wait for it: on a cold cache the group
+                            -- processes would otherwise each validate the same program at the same time. The lock is a
+                            -- directory made for the entry, which only one process can make)
+                            let lock = file ++ ".lock"
+                                produce = do
+                                    let result = compute
+                                    case result of
+                                        Error _ -> pure result
+                                        Ok text -> do
+                                            (staging, handle) <- openTempFile dataDir "mir-data.tmp"
+                                            hClose handle
+                                            removeFile staging
+                                            writeFile staging text
+                                            renameFile staging file
+                                            pure result
+                            acquired <- try (createDirectory lock) :: IO (Either IOException ())
+                            case acquired of
+                                Right () -> produce `finally` removeDirectory lock
+                                Left _ -> do
+                                    waited <- waitForEntry file (120 :: Int)
+                                    case waited of
+                                        Just text -> pure (Ok text)
+                                        -- (the holder may be gone, or slower than the wait: computing again is
+                                        -- always safe, the entry written is the same)
+                                        Nothing -> produce
   where
+    waitForEntry file tries
+        | tries <= 0 = pure Nothing
+        | otherwise = do
+            present <- doesFileExist file
+            if present
+                then do
+                    cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
+                    pure $ case cached of
+                        Right text -> Just text
+                        Left _ -> Nothing
+                else threadDelay 500000 >> waitForEntry file (tries - 1)
     compute = case ownedSource source of
         Error e -> Error e
         Ok program -> Ok (writeProgram program)
