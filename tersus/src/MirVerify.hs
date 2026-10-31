@@ -9,7 +9,7 @@ import qualified Data.Map.Strict as Map
 import Mir hiding (Env)
 import qualified Mir
 import Pretty (renderType)
-import TypeCheck (functionType, maxArraySlots, solveInstanceArgs)
+import TypeCheckCore (functionType, maxArraySlots, solveInstanceArgs)
 import Types (Arg (..), Name, Rel (..), Size (..), Type (..), Variable, baseNameOf, instanceName, namedMatches, pattern TArray, substSizes, tupleGeneric, tupleType, wordRange)
 import Utils (Result (..))
 
