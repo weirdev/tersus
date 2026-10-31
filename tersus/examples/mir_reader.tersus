@@ -491,6 +491,8 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
         e = typeAt(ts, next);
         if !e.ok { return bad; };
         if kw = "addr" { return done(Type::TAddr { inner: Box::new(e.value) }, e.pos); };
+        if kw = "block" { return done(Type::TBlock { inner: Box::new(e.value) }, e.pos); };
+        if kw = "uninit" { return done(Type::TUninit { inner: Box::new(e.value) }, e.pos); };
         if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
         if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
         if kw = "block" { return done(Type::TBlock { inner: Box::new(e.value) }, e.pos); };
