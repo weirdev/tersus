@@ -375,11 +375,11 @@ lowerStatement stmt =
             tc (declareGeneric name sizes fields)
             modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s), lsInvariants = withInvariant name invariant (lsInvariants s)})
         StructDef name _ fields invariant -> do
-            tc (declareType name >> mapM_ (checkType . snd) fields >> registerCtors name [(name, fields)])
+            tc (declareType name >> mapM_ (checkFieldType . snd) fields >> registerCtors name [(name, fields)])
             addType name (M.StructDecl fields)
             modifyS (\s -> s{lsInvariants = withInvariant name invariant (lsInvariants s)})
         EnumDef name variants -> do
-            tc (declareTypeWith name (map fst variants) >> mapM_ (mapM_ (checkType . snd) . snd) variants >> registerCtors name variants)
+            tc (declareTypeWith name (map fst variants) >> mapM_ (mapM_ (checkFieldType . snd) . snd) variants >> registerCtors name variants)
             addType name (M.EnumDecl variants)
         -- (the checker takes a trait apart and hands an impl back as the functions it defines)
         TraitDef{} -> failL "A trait reached the lowering"
