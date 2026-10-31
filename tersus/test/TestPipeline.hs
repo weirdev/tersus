@@ -658,7 +658,8 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 checkFlowMissing = testAssertEq (runFlow [block 0 [] (jump 2)]) (flowResult 3 2 (-1))
                 checkFlowDuplicate = testAssertEq (runFlow [block 0 [] done, block 0 [] done]) (flowResult 3 0 (-1))
                 checkFlowUnsupported = testAssertEq (runFlow [block 0 [] (MData "FlowEnd::Unsupported" [])]) (flowResult 2 0 (-1))
-                initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", MList [])]
+                localsValue bindings = MData "HashMap" [("buckets", MList [MList [MData "Entry" [("key", MInt k), ("value", MInt v)] | (k, v) <- bindings]]), ("count", MInt (toInteger (length bindings)))]
+                initialExecution = MData "ExecutionState" [("context", emptyContext), ("locals", localsValue [])]
                 termRef i = MData "ValueRef::Term" [("term", MInt i)]
                 localRef i = MData "ValueRef::Local" [("local", MInt i)]
                 assignLocal i ref = MData "ExecutionStep::Assign" [("local", MInt i), ("value", ref)]
@@ -672,7 +673,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                     let comparison = app (10, function, [0,1])
                         bool = constant (20, 1, if truth then 1 else 0)
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [comparison]), ("constants", MList [bool]), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
                         assume = MData "ExecutionStep::Assume" [("relation", MInt 0), ("left", termRef 10), ("right", termRef 20)]
                         obligation = MData "ExecutionStep::Check" [("relation", MInt relation), ("left", termRef left), ("right", termRef right)]
                      in case runNamedFunction program "executeSteps" [initial, MList [assume, obligation]] of
@@ -689,7 +690,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                     result -> Just ("Unexpected execution flow result: " ++ show result)
                 checkBooleanBranch constantTerms destinations blocks expected =
                     let context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList constantTerms), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt (fst destinations)), ("no", MInt (snd destinations)), ("join", MInt (-1)), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                      in case runNamedFunction program "validateExecution" [MList (execBlock 0 [] end : blocks), MInt 0, initial] of
                             Ok (Just (MData "ExecutionFlowResult" fields)) -> testAssertEq (lookup "status" fields) (Just (MInt expected))
@@ -697,7 +698,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 checkBooleanJoin rightValue expected =
                     let joinConstants = boolConstants ++ [constant (30, 0, 3), constant (31, 0, rightValue), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("join", MInt 3), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
@@ -706,7 +707,7 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 checkBooleanJoinKnown expected =
                     let joinConstants = boolConstants ++ [constant (0, 0, 1), constant (1, 0, 2), constant (30, 0, 3), constant (31, 0, 4), constant (32, 0, 3)]
                         context = MData "ValidatorContext" [("equalities", MList []), ("applications", MList [app (10, -8, [0,1])]), ("constants", MList joinConstants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                        initial = MData "ExecutionState" [("context", context), ("locals", MList [])]
+                        initial = MData "ExecutionState" [("context", context), ("locals", localsValue [])]
                         end = MData "ExecutionEnd::BooleanBranch" [("yes", MInt 1), ("no", MInt 2), ("join", MInt 3), ("value", termRef 10), ("trueValue", termRef 20), ("falseValue", termRef 21)]
                         blocks = [execBlock 0 [] end, execBlock 1 [assignLocal 1 (termRef 30)] (execJump 3), execBlock 2 [assignLocal 1 (termRef 31)] (execJump 3), execBlock 3 [MData "ExecutionStep::Check" [("relation", MInt 0), ("left", localRef 1), ("right", termRef 32)]] execEndDone]
                      in case runNamedFunction program "validateExecution" [MList blocks, MInt 0, initial] of
@@ -759,18 +760,18 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 rightValue = ATerm (Iota "right value")
                 checkSymbolicVariantBridge = testAssertEq (querySelfHosted program [FApp (CTerm (builtinFunct (Is "Option::None"))) [leftValue], FApp (CTerm (builtinFunct (Is "Option::Some"))) [rightValue]] (FApp (CTerm (builtinFunct (Rel NotEq))) [leftValue, rightValue])) (Ok (Just True))
                 mergeContext constants equalities = MData "ValidatorContext" [("equalities", MList equalities), ("applications", MList []), ("constants", MList constants), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
-                mergeLeftState = MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", MList [MData "LocalBinding" [("local", MInt 1), ("term", MInt 10)]])]
-                mergeRightState = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", MList [MData "LocalBinding" [("local", MInt 1), ("term", MInt 11)]])]
+                mergeLeftState = MData "ExecutionState" [("context", mergeContext [constant (10, 0, 3)] [fact (10, 10)]), ("locals", localsValue [(1, 10)])]
+                mergeRightState = MData "ExecutionState" [("context", mergeContext [constant (11, 0, 3)] [fact (11, 11)]), ("locals", localsValue [(1, 11)])]
                 checkCommonContext =
                     let left = mergeContext [] [fact (0, 1), fact (2, 3)]
                         right = mergeContext [] [fact (1, 0), fact (2, 4)]
                         expected = mergeContext [] [fact (0, 1)]
                      in testAssertEq (runNamedFunction program "commonContext" [left, right]) (Ok (Just expected))
                 checkMergeStates = case runNamedFunction program "mergeStates" [mergeLeftState, mergeRightState] of
-                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", MData "ValidatorContext" fields), ("locals", MList [MData "LocalBinding" [("local", MInt 1), ("term", MInt joined)]])])])) ->
-                        case lookup "constants" fields of
-                            Just (MList constants) -> testAssertEq constants [MData "ConstantTerm" [("id", MInt joined), ("kind", MInt 0), ("value", MInt 3)]]
-                            other -> Just ("Merged constants malformed: " ++ show other)
+                    Ok (Just (MData "StateMergeLookup::Found" [("state", MData "ExecutionState" [("context", MData "ValidatorContext" fields), ("locals", mergedLocals)])])) ->
+                        case (lookup "constants" fields, runNamedFunction program "lookupLocal" [mergedLocals, MInt 1]) of
+                            (Just (MList [MData "ConstantTerm" [("id", MInt joined), ("kind", MInt 0), ("value", MInt 3)]]), Ok (Just (MData "ValueLookup::Found" [("term", MInt found)]))) -> testAssertEq found joined
+                            other -> Just ("Merged state malformed: " ++ show other)
                     result -> Just ("Unexpected mergeStates result: " ++ show result)
                 withinOuter = ATerm (Iota "outer value")
                 withinInner = FApp (CTerm (builtinFunct (Field Nothing "x"))) [withinOuter]

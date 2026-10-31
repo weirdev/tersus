@@ -6,6 +6,10 @@ impl Clone for EqualityFact { };
 
 impl Copy for EqualityFact { };
 
+fn emptyIntSet() -> HashMap<Int, Bool> { return HashMap::new(); };
+
+fn emptyIntMap() -> HashMap<Int, Int> { return HashMap::new(); };
+
 fn containsValue(values: &List<Int>, value: Int) -> Bool {
     for item in values {
         if item = value {
@@ -21,22 +25,22 @@ fn containsValue(values: &List<Int>, value: Int) -> Bool {
 // sufficient, including when the facts are ordered against the path. Duplicate
 // facts and cycles do not add duplicate values to the reachable set.
 fn hasEquality(facts: &List<EqualityFact>, left: Int, right: Int) -> Bool {
-    reachable = push([], left);
+    reachable = HashMap::new().insert(left, true);
     for round in 0..size(facts) {
         for fact in facts {
-            if containsValue(reachable, fact.left) {
-                if containsValue(reachable, fact.right) = false {
-                    reachable = push(reachable, fact.right);
+            if reachable.contains(fact.left) {
+                if reachable.contains(fact.right) = false {
+                    reachable = reachable.insert(fact.right, true);
                 };
             };
-            if containsValue(reachable, fact.right) {
-                if containsValue(reachable, fact.left) = false {
-                    reachable = push(reachable, fact.left);
+            if reachable.contains(fact.right) {
+                if reachable.contains(fact.left) = false {
+                    reachable = reachable.insert(fact.left, true);
                 };
             };
         };
     };
-    return containsValue(reachable, right);
+    return reachable.contains(right);
 };
 
 // A binary application of an uninterpreted operator to two term identifiers.
@@ -690,32 +694,33 @@ struct ValidatorContext {
 
 impl Clone for ValidatorContext { };
 
-fn addNode(nodes: List<Int>, node: Int) -> List<Int> {
-    if containsValue(nodes, node) {
-        return nodes;
-    };
-    return push(nodes, node);
-};
-
 // Any equality obtained from bounds relates endpoints of comparisons,
 // differences, constants or disequalities. Equalities to other identifiers
 // are already represented in the equality closure.
 fn contextNodes(context: &ValidatorContext) -> List<Int> {
-    nodes = [];
+    candidates = [];
     for order in context.orders {
-        nodes = addNode(nodes, order.smaller);
-        nodes = addNode(nodes, order.greater);
+        candidates = push(candidates, order.smaller);
+        candidates = push(candidates, order.greater);
     };
     for fact in context.differences {
-        nodes = addNode(nodes, fact.left);
-        nodes = addNode(nodes, fact.right);
+        candidates = push(candidates, fact.left);
+        candidates = push(candidates, fact.right);
     };
     for fact in context.different {
-        nodes = addNode(nodes, fact.left);
-        nodes = addNode(nodes, fact.right);
+        candidates = push(candidates, fact.left);
+        candidates = push(candidates, fact.right);
     };
     for constant in context.constants {
-        nodes = addNode(nodes, constant.id);
+        candidates = push(candidates, constant.id);
+    };
+    nodes = [];
+    seen = emptyIntSet();
+    for node in candidates {
+        if seen.contains(node) = false {
+            seen = seen.insert(node, true);
+            nodes = push(nodes, node);
+        };
     };
     return nodes;
 };
@@ -1122,10 +1127,6 @@ struct FlowBlock { id: Int, steps: List<ProofStep>, end: FlowEnd };
 
 impl Clone for FlowBlock { };
 
-enum FlowLookup { Missing, Found { block: FlowBlock } };
-
-impl Clone for FlowLookup { };
-
 // status 0: valid; 1: unproved obligation; 2: unsupported operation;
 // 3: invalid graph; 4: a cycle needs an invariant and has not been checked.
 struct FlowResult { status: Int, block: Int, step: Int };
@@ -1134,35 +1135,31 @@ impl Clone for FlowResult { };
 
 impl Copy for FlowResult { };
 
-fn findFlowBlock(blocks: &List<FlowBlock>, id: Int) -> FlowLookup {
+fn flowTable(blocks: &List<FlowBlock>) -> HashMap<Int, FlowBlock> {
+    table = HashMap::new();
     for block in blocks {
-        if block.id = id {
-            return FlowLookup::Found { block: clone(block) };
-        };
+        table = table.insert(block.id, clone(block));
     };
-    return FlowLookup::Missing;
+    return table;
 };
 
 fn uniqueFlowBlocks(blocks: &List<FlowBlock>) -> Bool {
-    for i in 0..size(blocks) {
-        for j in 0..size(blocks) {
-            if i != j {
-                if get(blocks, i).id = get(blocks, j).id {
-                    return false;
-                };
-            };
+    seen = emptyIntSet();
+    for block in blocks {
+        if seen.contains(block.id) {
+            return false;
         };
+        seen = seen.insert(block.id, true);
     };
     return true;
 };
 
-fn walkFlow(blocks: &List<FlowBlock>, id: Int, context: &ValidatorContext, fuel: Int) -> FlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
-    found = findFlowBlock(blocks, id);
-    if found is FlowLookup::Found {
+fn walkFlow(blocks: &HashMap<Int, FlowBlock>, id: Int, context: &ValidatorContext, fuel: Int) -> FlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+    if blocks.contains(id) {
         if fuel = 0 {
             return FlowResult { status: 4, block: id, step: -1 };
         };
-        block = (found as FlowLookup::Found).block;
+        block = blocks.lookup(id, FlowBlock { id: id, steps: [], end: FlowEnd::Done });
         run = runProofSteps(context, block.steps);
         if run.valid = false {
             return FlowResult { status: 1, block: id, step: run.failedAt };
@@ -1202,16 +1199,11 @@ fn validateFlow(blocks: &List<FlowBlock>, entry: Int, initial: &ValidatorContext
     if uniqueFlowBlocks(blocks) = false {
         return FlowResult { status: 3, block: entry, step: -1 };
     };
-    return walkFlow(blocks, entry, initial, size(blocks));
+    return walkFlow(flowTable(blocks), entry, initial, size(blocks));
 };
 
 // Locals are names for immutable symbolic terms. A copy changes the binding,
 // not the term or the facts that describe it.
-struct LocalBinding { local: Int, term: Int };
-
-impl Clone for LocalBinding { };
-
-impl Copy for LocalBinding { };
 enum ValueRef { Local { local: Int }, Term { term: Int } };
 
 impl Clone for ValueRef { };
@@ -1226,7 +1218,7 @@ enum ArgumentsLookup { Missing, Found { terms: List<Int> } };
 
 impl Clone for ArgumentsLookup { };
 
-struct ExecutionState { context: ValidatorContext, locals: List<LocalBinding> };
+struct ExecutionState { context: ValidatorContext, locals: HashMap<Int, Int> };
 
 impl Clone for ExecutionState { };
 
@@ -1240,30 +1232,19 @@ enum StateMergeLookup { Missing, Found { state: ExecutionState } };
 
 impl Clone for StateMergeLookup { };
 
-fn lookupLocal(locals: &List<LocalBinding>, local: Int) -> ValueLookup {
-    for binding in locals {
-        if binding.local = local {
-            return ValueLookup::Found { term: binding.term };
-        };
+fn lookupLocal(locals: &HashMap<Int, Int>, local: Int) -> ValueLookup {
+    if locals.contains(local) {
+        return ValueLookup::Found { term: locals.lookup(local, 0) };
     };
     return ValueLookup::Missing;
 };
 
-fn bindLocal(locals: List<LocalBinding>, local: Int, term: Int) -> List<LocalBinding> {
-    for i in 0..size(locals) {
-        if get(locals, i).local = local {
-            return set(locals, i, LocalBinding { local: local, term: term });
-        };
-    };
-    return push(locals, LocalBinding { local: local, term: term });
+fn bindLocal(locals: HashMap<Int, Int>, local: Int, term: Int) -> HashMap<Int, Int> {
+    return locals.insert(local, term);
 };
 
-fn forgetLocal(locals: &List<LocalBinding>, local: Int) -> List<LocalBinding> {
-    result = [];
-    for binding in locals {
-        if binding.local != local { result = push(result, clone(binding)); };
-    };
-    return result;
+fn forgetLocal(locals: HashMap<Int, Int>, local: Int) -> HashMap<Int, Int> {
+    return locals.remove(local);
 };
 
 // Term references are supplied by the host's term interner; a Local reference
@@ -1293,7 +1274,7 @@ fn resolveArguments(state: &ExecutionState, values: &List<ValueRef>) -> Argument
 
 // A fresh result must not alias any term already present on this path.
 fn termInUse(state: &ExecutionState, term: Int) -> Bool {
-    for binding in state.locals { if binding.term = term { return true; }; };
+    for binding in state.locals.entries() { if binding.value = term { return true; }; };
     for fact in state.context.equalities {
         if fact.left = term { return true; }; if fact.right = term { return true; };
     };
@@ -1367,28 +1348,31 @@ fn unionContexts(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
-fn mergeTerm(pairs: &List<MergePair>, term: Int, leftSide: Bool) -> ValueLookup {
-    found = false;
-    joined = 0;
-    for pair in pairs {
-        source = pair.right;
-        if leftSide { source = pair.left; };
-        if source = term {
-            if pair.ambiguous { return ValueLookup::Missing; };
-            if found {
-                if joined != pair.joined { return ValueLookup::Missing; };
-            } else {
-                found = true;
-                joined = pair.joined;
-            };
-        };
-    };
-    if found { return ValueLookup::Found { term: joined }; };
+fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashMap<Int, Bool>, term: Int) -> ValueLookup {
+    if ambiguous.contains(term) { return ValueLookup::Missing; };
+    if joined.contains(term) { return ValueLookup::Found { term: joined.lookup(term, 0) }; };
     if term >= 0 { return ValueLookup::Found { term: term }; };
     return ValueLookup::Missing;
 };
 
 fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> ValidatorContext {
+    joined = emptyIntMap();
+    ambiguous = emptyIntSet();
+    for pair in pairs {
+        source = pair.right;
+        if leftSide { source = pair.left; };
+        if pair.ambiguous {
+            ambiguous = ambiguous.insert(source, true);
+        } else if ambiguous.contains(source) = false {
+            if joined.contains(source) {
+                if joined.lookup(source, 0) != pair.joined {
+                    ambiguous = ambiguous.insert(source, true);
+                };
+            } else {
+                joined = joined.insert(source, pair.joined);
+            };
+        };
+    };
     equalities = [];
     applications = [];
     constants = [];
@@ -1400,8 +1384,8 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
     constructorFields = clone(context.constructorFields);
     differences = [];
     for fact in context.equalities {
-        left = mergeTerm(pairs, fact.left, leftSide);
-        right = mergeTerm(pairs, fact.right, leftSide);
+        left = mergeTerm(joined, ambiguous, fact.left);
+        right = mergeTerm(joined, ambiguous, fact.right);
         if left is ValueLookup::Found {
             if right is ValueLookup::Found {
                 equalities = push(equalities, EqualityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term });
@@ -1409,11 +1393,11 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
         };
     };
     for fact in context.applications {
-        id = mergeTerm(pairs, fact.id, leftSide);
+        id = mergeTerm(joined, ambiguous, fact.id);
         arguments = [];
         valid = true;
         for argument in fact.arguments {
-            mapped = mergeTerm(pairs, argument, leftSide);
+            mapped = mergeTerm(joined, ambiguous, argument);
             if mapped is ValueLookup::Found { arguments = push(arguments, (mapped as ValueLookup::Found).term); } else { valid = false; };
         };
         if id is ValueLookup::Found {
@@ -1421,32 +1405,32 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
         };
     };
     for fact in context.constants {
-        id = mergeTerm(pairs, fact.id, leftSide);
+        id = mergeTerm(joined, ambiguous, fact.id);
         if id is ValueLookup::Found { constants = push(constants, ConstantTerm { id: (id as ValueLookup::Found).term, kind: fact.kind, value: fact.value }); };
     };
     for fact in context.orders {
-        smaller = mergeTerm(pairs, fact.smaller, leftSide);
-        greater = mergeTerm(pairs, fact.greater, leftSide);
+        smaller = mergeTerm(joined, ambiguous, fact.smaller);
+        greater = mergeTerm(joined, ambiguous, fact.greater);
         if smaller is ValueLookup::Found {
             if greater is ValueLookup::Found { orders = push(orders, OrderFact { smaller: (smaller as ValueLookup::Found).term, greater: (greater as ValueLookup::Found).term, strict: fact.strict }); };
         };
     };
     for fact in context.different {
-        left = mergeTerm(pairs, fact.left, leftSide);
-        right = mergeTerm(pairs, fact.right, leftSide);
+        left = mergeTerm(joined, ambiguous, fact.left);
+        right = mergeTerm(joined, ambiguous, fact.right);
         if left is ValueLookup::Found {
             if right is ValueLookup::Found { different = push(different, DisequalityFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term }); };
         };
     };
     for fact in context.differences {
-        left = mergeTerm(pairs, fact.left, leftSide);
-        right = mergeTerm(pairs, fact.right, leftSide);
+        left = mergeTerm(joined, ambiguous, fact.left);
+        right = mergeTerm(joined, ambiguous, fact.right);
         if left is ValueLookup::Found {
             if right is ValueLookup::Found { differences = push(differences, DifferenceFact { left: (left as ValueLookup::Found).term, right: (right as ValueLookup::Found).term, bound: fact.bound }); };
         };
     };
     for fact in context.variants {
-        object = mergeTerm(pairs, fact.object, leftSide);
+        object = mergeTerm(joined, ambiguous, fact.object);
         if object is ValueLookup::Found { variants = push(variants, VariantFact { object: (object as ValueLookup::Found).term, family: fact.family, constructor: fact.constructor, matches: fact.matches }); };
     };
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
@@ -1495,23 +1479,23 @@ fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> Validator
 fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLookup {
     poolContext = unionContexts(left.context, right.context);
     poolEqualities = clone(poolContext.equalities);
-    for binding in left.locals { poolEqualities = push(poolEqualities, EqualityFact { left: binding.term, right: binding.term }); };
-    for binding in right.locals { poolEqualities = push(poolEqualities, EqualityFact { left: binding.term, right: binding.term }); };
+    for binding in left.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
+    for binding in right.locals.entries() { poolEqualities = push(poolEqualities, EqualityFact { left: binding.value, right: binding.value }); };
     poolContext = ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) };
-    pool = ExecutionState { context: clone(poolContext), locals: [] };
+    pool = ExecutionState { context: clone(poolContext), locals: HashMap::new() };
     pairs = emptyMergePairs();
-    locals = [];
-    for binding in left.locals {
-        other = lookupLocal(right.locals, binding.local);
+    locals = emptyIntMap();
+    for binding in left.locals.entries() {
+        other = lookupLocal(right.locals, binding.key);
         if other is ValueLookup::Found {
             rightTerm = (other as ValueLookup::Found).term;
-            if binding.term >= 0 && rightTerm >= 0 && binding.term = rightTerm {
-                locals = bindLocal(locals, binding.local, binding.term);
+            if binding.value >= 0 && rightTerm >= 0 && binding.value = rightTerm {
+                locals = bindLocal(locals, binding.key, binding.value);
             } else {
                 joined = 0;
                 found = false;
                 for pair in pairs {
-                    if pair.left = binding.term && pair.right = rightTerm {
+                    if pair.left = binding.value && pair.right = rightTerm {
                         joined = pair.joined;
                         found = true;
                     };
@@ -1520,13 +1504,13 @@ fn mergeStates(left: &ExecutionState, right: &ExecutionState) -> StateMergeLooku
                     fresh = freshValue(pool);
                     if fresh is ValueLookup::Found {
                         joined = (fresh as ValueLookup::Found).term;
-                        pairs = push(pairs, MergePair { left: binding.term, right: rightTerm, joined: joined, ambiguous: binding.term < 0 && binding.term = rightTerm });
+                        pairs = push(pairs, MergePair { left: binding.value, right: rightTerm, joined: joined, ambiguous: binding.value < 0 && binding.value = rightTerm });
                         poolEqualities = push(clone(poolEqualities), EqualityFact { left: joined, right: joined });
-                        pool = ExecutionState { context: ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) }, locals: [] };
+                        pool = ExecutionState { context: ValidatorContext { equalities: clone(poolEqualities), ..clone(poolContext) }, locals: HashMap::new() };
                         found = true;
                     } else { return StateMergeLookup::Missing; };
                 };
-                if found { locals = bindLocal(locals, binding.local, joined); };
+                if found { locals = bindLocal(locals, binding.key, joined); };
             };
         };
     };
@@ -2595,30 +2579,25 @@ struct ExecutionBlock { id: Int, steps: List<ExecutionStep>, end: ExecutionEnd }
 
 impl Clone for ExecutionBlock { };
 
-enum ExecutionBlockLookup { Missing, Found { block: ExecutionBlock } };
-
-impl Clone for ExecutionBlockLookup { };
-
 // status 0: valid; 1: unproved; 2: unsupported or malformed step;
 // 3: invalid graph; 4: cycle whose invariant has not yet been checked.
 struct ExecutionFlowResult { status: Int, block: Int, step: Int, state: ExecutionState };
 
 impl Clone for ExecutionFlowResult { };
 
-fn findExecutionBlock(blocks: &List<ExecutionBlock>, id: Int) -> ExecutionBlockLookup {
+fn executionTable(blocks: &List<ExecutionBlock>) -> HashMap<Int, ExecutionBlock> {
+    table = HashMap::new();
     for block in blocks {
-        if block.id = id { return ExecutionBlockLookup::Found { block: clone(block) }; };
+        table = table.insert(block.id, clone(block));
     };
-    return ExecutionBlockLookup::Missing;
+    return table;
 };
 
 fn uniqueExecutionBlocks(blocks: &List<ExecutionBlock>) -> Bool {
-    for i in 0..size(blocks) {
-        for j in 0..size(blocks) {
-            if i != j {
-                if get(blocks, i).id = get(blocks, j).id { return false; };
-            };
-        };
+    seen = emptyIntSet();
+    for block in blocks {
+        if seen.contains(block.id) { return false; };
+        seen = seen.insert(block.id, true);
     };
     return true;
 };
@@ -2667,19 +2646,12 @@ fn checkLoopBackEdge(initial: &ExecutionState, frame: &LoopFrame, id: Int) -> Ex
     return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state };
 };
 
-fn stopAtJoin(blocks: &List<ExecutionBlock>, join: Int) -> List<ExecutionBlock> {
-    result = [];
-    for block in blocks {
-        if block.id = join {
-            result = push(result, ExecutionBlock { id: block.id, steps: [], end: ExecutionEnd::Done });
-        } else {
-            result = push(result, clone(block));
-        };
-    };
-    return result;
+fn stopTableAtJoin(blocks: &HashMap<Int, ExecutionBlock>, join: Int) -> HashMap<Int, ExecutionBlock> {
+    table = clone(blocks);
+    return table.insert(join, ExecutionBlock { id: join, steps: [], end: ExecutionEnd::Done });
 };
 
-fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
+fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: clone(initial) }; };
     if size(loops) > 0 {
         frame = last(loops);
@@ -2688,9 +2660,8 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
             return walkExecution(blocks, id, initial, fuel - 1, popLoopFrames(loops, id));
         };
     };
-    found = findExecutionBlock(blocks, id);
-    if found is ExecutionBlockLookup::Found {
-        block = (found as ExecutionBlockLookup::Found).block;
+    if blocks.contains(id) {
+        block = blocks.lookup(id, ExecutionBlock { id: id, steps: [], end: ExecutionEnd::Done });
         if block.end is ExecutionEnd::Loop {
             loop = block.end as ExecutionEnd::Loop;
             entry = executeSteps(initial, loop.checks);
@@ -2824,12 +2795,13 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                             yesContext = assumeRelation(run.state.context, 0, term, yesLiteral);
                             yesContext = assumeBooleanFact(yesContext, term, yesLiteral);
                             yesState = ExecutionState { context: yesContext, ..clone(run.state) };
-                            yesResult = walkExecution(stopAtJoin(blocks, branch.join), branch.yes, yesState, fuel - 1, clone(loops));
+                            stopped = stopTableAtJoin(blocks, branch.join);
+                            yesResult = walkExecution(stopped, branch.yes, yesState, fuel - 1, clone(loops));
                             if yesResult.status != 0 { return yesResult; };
                             noContext = assumeRelation(run.state.context, 0, term, noLiteral);
                             noContext = assumeBooleanFact(noContext, term, noLiteral);
                             noState = ExecutionState { context: noContext, ..clone(run.state) };
-                            noResult = walkExecution(stopAtJoin(blocks, branch.join), branch.no, noState, fuel - 1, clone(loops));
+                            noResult = walkExecution(stopped, branch.no, noState, fuel - 1, clone(loops));
                             if noResult.status != 0 { return noResult; };
                             merged = mergeStates(yesResult.state, noResult.state);
                             if merged is StateMergeLookup::Found {
@@ -2880,5 +2852,5 @@ fn validateExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &Execut
     if uniqueExecutionBlocks(blocks) = false {
         return ExecutionFlowResult { status: 3, block: entry, step: -1, state: clone(initial) };
     };
-    return walkExecution(blocks, entry, initial, 2 * size(blocks) + 2, []);
+    return walkExecution(executionTable(blocks), entry, initial, 2 * size(blocks) + 2, []);
 };

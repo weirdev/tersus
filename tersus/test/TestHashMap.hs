@@ -53,6 +53,11 @@ testHashMap =
                 , testCase "a map in a map" (runs "inner = HashMap::new().insert(1, 5); m = HashMap::new().insert(9, inner); return m.lookup(9, HashMap::new()).lookup(1, 0);" 5)
                 ]
             , TestList
+                "entries"
+                [ testCase "every entry, in some order" (runs "m = HashMap::new().insert(1, 10).insert(2, 20).insert(1, 11); s = 0; for e in m.entries() { s = s + e.key * 1000 + e.value; }; return s + size(m.entries()) * 100000 + m.size();" 203033)
+                , testCase "entries past the spread" (runs "m = HashMap::new(); i = 0; while i < 40 [{ affirm i >= 0; affirm i <= 40; }] shrinks 40 - i { m = m.insert(i, i); i = i + 1; }; s = 0; for e in m.entries() { s = s + e.key + e.value; }; return s;" 1560)
+                ]
+            , TestList
                 "growth"
                 [ testCase "past the spread, everything is found" (runs "m = HashMap::new(); i = 0; while i < 40 [{ affirm i >= 0; affirm i <= 40; }] shrinks 40 - i { m = m.insert(i, i * 2); i = i + 1; }; s = 0; j = 0; while j < 40 [{ affirm j >= 0; affirm j <= 40; }] shrinks 40 - j { s = s + m.lookup(j, 0 - 1); j = j + 1; }; return m.size() * 10000 + s;" 401560)
                 , testCase "removed after the spread" (runs "m = HashMap::new(); i = 0; while i < 40 [{ affirm i >= 0; affirm i <= 40; }] shrinks 40 - i { m = m.insert(i, i); i = i + 1; }; m = m.remove(0).remove(39).remove(20); return m.size() * 100 + m.lookup(0, 7) * 10 + m.lookup(20, 8);" 3778)
