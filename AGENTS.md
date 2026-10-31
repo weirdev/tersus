@@ -14,6 +14,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
 - `tersus/src/`: core language, parser, type checker, MIR, proof, and utility
   modules. The CLI entry point is `tersus/app/Main.hs` (logic in `src/Cli.hs`).
 - `tersus/lib/` (Tersus sources the Haskell implementation depends on):
+  - `eq.tersus`: the trait `Eq` that `=` and `!=` call, and its impls for lists, arrays and Boxes, put in front of every program that does not
+    declare a trait `Eq` (`Pipeline.libraries`). Embedded by `PreludeSource`.
   - `prelude.tersus`: the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`
     and `Deref`, put in front of a program that mentions any of them and does
     not declare it (`Pipeline.libraries`). Embedded by `PreludeSource`.
@@ -44,7 +46,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   groups live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`,
   `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
   `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
-  `TestCopies`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
+  `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
   `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
   `TestMirEmit` and `TestBootstrap`, with the shared harness in `TestHarness`.
 

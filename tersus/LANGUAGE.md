@@ -136,7 +136,7 @@ m = Node { next: 3, ..n };                 // a new Node: next replaced, the res
 
 - A literal gives every field, or names the fields that change and ends with `..base` to copy the rest. The base must be a value of the same struct. A missing, repeated or unknown field is a parse error, so is a `..base` that has nothing to copy, and so is a struct named `Int`, `Bool` or `List`.
 - Structs are values. Nothing is mutated: `Node { next: 3, ..n }` is a new struct and `n` is unchanged. There is no field assignment, so write `n = Node { next: 3, ..n };`. A struct is held where it is made, as its fields (natively, the words of its fields in the frame of the function, in another struct, or in a list), so a struct or an enum costs no allocation, and giving one to a function gives it a copy.
-- `=` and `!=` compare structs field by field, and a struct can hold any type, including lists and other structs declared earlier. A struct cannot hold itself (it would have no size); it holds the recursion in a `Box` (see Box).
+- `=` and `!=` compare structs field by field when the struct says so with `impl Eq for T { };` (see Equality), and a struct can hold any type, including lists and other structs declared earlier. A struct cannot hold itself (it would have no size); it holds the recursion in a `Box` (see Box).
 - Field reads and literals work in proofs too, so a contract can say `affirm return.next = target;`.
 - The validator treats a literal as a constructor applied to its fields. Reading a field of a literal gives the field (`Node { next: 3, ..n }.value` is `n.value`), two equal constructions agree field by field, and so an update's other fields are known without a `forall`. A value of a struct is that constructor applied to its own fields (`n = Node { value: n.value, prev: n.prev, next: n.next }`, which the validator knows of every local of a struct type), so two structs whose fields are all known to be equal are equal, and a struct with a field that differs from another's differs from it.
 
@@ -237,7 +237,7 @@ return sum(Box::new(Tree::Branch { left: leaf, value: 2, right: Box::new(Tree::L
 ```
 
 - **`Box::new(x)`** holds `x` in a Box; `Box::unbox(b)` gives back what a Box holds. They are written as calls and cannot be used as values (`h = Box::new` is an error).
-- **A Box has the value of what it holds.** It changes where the value lives, not what it is: `Box::new(p) = Box::new(q)` compares `p` and `q`, the validator reasons about a Box as about its contents, and `Box::unbox(Box::new(x))` is `x`. `Box<Tree>` and `Tree` are different types, and neither is used for the other.
+- **A Box has the value of what it holds.** It changes where the value lives, not what it is: `Box::new(p) = Box::new(q)` compares `p` and `q` (with the Eq of what they hold, see Equality), the validator reasons about a Box as about its contents, and `Box::unbox(Box::new(x))` is `x`. `Box<Tree>` and `Tree` are different types, and neither is used for the other.
 - **A Box is looked into where a struct or an enum is looked at.** A field of a boxed struct is read as `b.x`, the base of an update can be a Box (`P { x: 9, ..b }`), `b is Tree::Branch`, `b as Tree::Branch` and `match b { ... }` work on a Box, and `shrinks b` is the shrinking of a value that loses a field at a time. A function over the contents of a Box is called on `Box::unbox(b)`, as in `Box::unbox(b).total()`. A type of the program is looked into the same way when it implements `Deref` for what it holds (see Deref); a Box is the one such type the language gives itself, since what it holds is not a field of it.
 - **What a Box can hold.** Any type that has a size: a struct or an enum, an `Int` or a `Bool`, a list, an array of a size, another Box (`Box::unbox(Box::new(3))` is `3`). An array of no size, `Array<T>` or `Array<T, ?>`, is held only behind a Box (see Arrays), and `Box::unbox` cannot take one out, since it would not know how much to take.
 - **A Box of an array is looked through by `size`, `first`, `last`, `get` and `set`**, which work on it as on the array (`set` gives the Box back with the element changed, in place when nothing else has the Box).
@@ -452,6 +452,7 @@ n = c.size() + Measure::size(c);                 // through the trait
 - **A call is to the impl's function**, so the caller knows the impl's contracts, which may be stronger than the trait's (`examples/traits.tersus`). A function that may not end (`~`) can implement a trait, and the functions that call it have to be `~` as for any function.
 - **A trait's contracts are type checked where the trait is written**, with `Self` as a type that has no fields, so they can mention the other parameters and `return` but not read a field of a `Self` value (`affirm self.value > 0;` in a trait is a type error). A contract calls the functions of the trait on `Self` (`size(self)`) and the functions of the program, and the check of an impl resolves them to the impl's.
 - **`Clone` and `Copy`** are traits with no functions that a struct or enum says it has with an impl with no functions, `impl Clone for T { };`, and the checker checks the fields (see Moves, Clone And Copy). A function with a type parameter can bound it by either: `fn twice<T: Clone>(x: T) -> List<T>`.
+- **`Eq`** is the trait `=` and `!=` call (see Equality).
 - **`Deref<T>`** says that a value of the type holds a `T` and is looked into where a struct or an enum is looked at, through the value its `deref` gives (see the next section). The trait is in `lib/prelude.tersus`, which a program has when it mentions `Deref` and does not declare it itself.
 - `trait`, `impl` and `Self` are reserved (`Self` cannot be the name of a type or a trait); `implement` and `traits` are still ordinary names. Trait and impl blocks end with `;` like every declaration.
 
@@ -475,9 +476,9 @@ return w.x + w.y;                       // 9: the fields of the P it holds
 ```
 
 - **Where the look-through applies.** A field read (`w.x`), a test of the variant (`w is E::A`), a cast (`w as E::A`), a `match` on the value, the base of an update (`P { x: 9, ..w }`) and `shrinks w` all work on what `deref` gives, in code and in proofs. A field the type has itself is read as it is (`w.v` above), and only a field it does not have is read through it. A type can be looked through in steps (`W` to a `W` to a `P`).
-- **What it does not do.** The functions of what is held are not the functions of the holder: a method is called on the value inside, as with a Box (`w.deref().total()`, and `w.total()` is an error). A value of the type is not a value of what it holds anywhere else: it is not given where a `T` is wanted, and `=` on it is the equality of the holder, not of what it holds.
+- **What it does not do.** The functions of what is held are not the functions of the holder: a method is called on the value inside, as with a Box (`w.deref().total()`, and `w.total()` is an error). A value of the type is not a value of what it holds anywhere else: it is not given where a `T` is wanted, and `=` on it is the Eq of the holder, not of what it holds.
 - **`deref` is an ordinary function.** It is lent its value (`&Self`), it can be called in code and in proofs, and what a caller knows of the value it gives is its contract. What is read from it is a view of the value the call gives, so a `match` takes the fields out of that value, and the holder is neither moved nor changed by being looked through.
-- **A Box is the `Deref` the language gives itself.** What a Box holds is not a field of it, so no impl a program writes can give it; the language looks through a Box as it looks through a type with a `Deref` impl, and `Box::new`/`Box::unbox`, the equality of two Boxes and the unsizing of a Box of an array are the rest of what it does by name (see Box).
+- **A Box is the `Deref` the language gives itself.** What a Box holds is not a field of it, so no impl a program writes can give it; the language looks through a Box as it looks through a type with a `Deref` impl, and `Box::new`/`Box::unbox`, the comparison of two Boxes by what they hold and the unsizing of a Box of an array are the rest of what it does by name (see Box).
 
 ### A trait with types
 
@@ -527,6 +528,32 @@ Type error: impl Step for Counter: start is fn() -> Int, but Step declares fn() 
 ```
 
 See `examples/traits.tersus`, and `examples/rejected/` for `trait_input_stronger`, `trait_output_weaker`, `trait_missing_function` and `trait_ambiguous_call`.
+
+### Equality
+
+`=` and `!=` in code are a trait, `Eq`, which a program has in front of it (`lib/eq.tersus`) unless it declares a trait `Eq` of its own:
+
+```tersus
+trait Eq {
+    fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }];
+};
+
+struct Point { x: Int, y: Int };
+impl Eq for Point { };                           // compares x, then y
+
+enum Shape { Circle { radius: Int }, Empty };
+impl Eq for Shape { };                           // the same variant, with equal fields
+
+if Point { x: 1, y: 2 } != Point { x: 1, y: 3 } { ... }      // !Eq::eq(...)
+```
+
+- **`a = b` is `Eq::eq(a, b)`, and `a != b` is `!Eq::eq(a, b)`**, for every type but `Int`, `Byte`, `Bool`, the fixed-width integers and addresses, which implement Eq by the language and are compared as the words they are. Both sides are lent to `eq`, so they are still there after the comparison.
+- **`impl Eq for T { };` is the impl that compares the fields**, each with its own Eq (in order, for a struct; of the same variant, for an enum). A field whose type has no Eq is an error that names it (`Q is compared with =, which needs it to implement Eq, and Q does not: write impl Eq for Q { }; to compare its fields`), and so is a field that is a permission. A struct with types, `impl<T> Eq for Pair<T> { };`, implements Eq for the types that do (it has the bound `T: Eq`). A type that holds itself in a `Box` or in a list of itself is compared by the impl calling itself on the parts, which `shrinks self` proves to end.
+- **A list, an array of a size and a Box implement Eq when their elements do**, by the impls in `lib/eq.tersus`, and a string because its struct says so. A Box is compared by what it holds, and a Box of an array of no size element by element (`eqBoxedArrays` in `lib/eq.tersus`, which `=` calls: it is not an impl, so `Eq::eq` is not written for one).
+- **An impl with a body is checked against the trait like any impl**: whatever it does, its answer has to be the equality of the two values, so it can compare in a cheaper order or by another route, but not decide that values which differ are equal (`impl Eq for P: eq does not meet what Eq declares`). Its body proves the contract most easily by returning `true` and `false` in branches, as the impl the compiler writes does.
+- **What the validator knows**: the contract is what makes `if a = b` say `a = b` in the branch and `a != b` in the other, for any type with Eq, as it does for an `Int`. It proves the contract of an impl by the parts of the values (see Structs and Enums: two values built by one constructor from equal fields are equal, and two values with a part that differs are different, a list's or an array's size and elements included).
+- **A type parameter is compared only with a bound**: `fn same<T: Eq>(a: &T, b: &T) -> Bool { return a = b; }`. Without it, `=` on a `T` is `T is compared with =, which needs it to implement Eq: bound it, as in <T: Eq>`.
+- **In a proof, `=` is the validator's equality**, not a call: `affirm`, contracts, invariants, `define` and rewrite rules compare any two values of one type, whether the type implements Eq or not, and that equality is what `eq` promises. What it should mean for a type that compares in its own way (or for one that has no Eq) is an open question, recorded in README.md (roadmap, step 34).
 
 ### Bounded types
 
@@ -988,7 +1015,7 @@ Statements that are not loops or calls end by themselves. A loop and a function 
 **`shrinks e`** names what gets smaller, here called the variant. Which kind of shrinking it means depends on the type of `e`, which the type checker resolves before validation:
 
 - An `Int` counts down to a bound. For a loop, `e` must be at least `0` where an iteration starts (assuming the invariant and the condition), and smaller where the iteration ends, on every path that reaches the end of the body. A path that returns does not need to. For a function, `e` is evaluated in the parameters. It must be at least `0` for any arguments that meet the input contract, and at every call the function makes to itself the variant of the arguments must be smaller than the variant of the call it is in (the arguments of the function when it started, even if the body has assigned its parameters since).
-- A struct or enum value must be a part of the one before it: a field, or a field of a field, which a `match` binding or `(t as Tree::Branch).left` is. Such values are finite, so this ends, and there is no bound to prove.
+- A struct or enum value must be a part of the one before it: a field, a field of a field, or an element of a list it holds, which a `match` binding, `(t as Tree::Branch).left` or `get((t as Rose::Node).kids, i)` is. Such values are finite, so this ends, and there is no bound to prove.
 - Any other type is an error: `shrinks needs an Int, an enum or a struct`.
 
 `i` can be counted up or down: `shrinks n - i` needs `i <= n` to be known where the iteration starts, and the condition `i < n` supplies it. The validator compares a difference such as `n - i` by its two sides, so `n - i >= 0` is `n >= i`, `n - (i + 1) < n - i` holds because `i + 1 > i`, and when both sides move (`k - i` with `i = i + 1; k = k - 1`, which shrinks by 2) or the variant is a sum (`shrinks i + j`) linear arithmetic decides it.
@@ -1513,7 +1540,7 @@ return get(c, 1) + size(b) + first(b);
 
 - **The size is a constant.** `array(n, x)` makes `n` copies of `x`, and `n` has to be a number or arithmetic on numbers (`array(2 * 3, 0)`), so that the compiler knows how much room the array takes. `n = 3; array(n, 0)` is an error. The arithmetic is the program's, so each step has to fit in an `Int` and a divisor cannot be 0 (`array(9223372036854775807 + 1 - 9223372036854775807, 0)` is refused for the overflow, not folded to 1). The size cannot be negative, and an array is limited to 8192 words (64 KB), counting the arrays inside it, since it lives in a frame. `array` cannot be used as a value (`h = array;`).
 - **The type says the size, and so does the validator.** The validator knows `size(a) = N` for every local of the type `Array<T, N>` wherever it came from (a parameter, a result, a loop that sets it, a row of a grid), so a contract or a loop invariant never has to repeat it, and `get(a, 3)` on an `Array<Int, 4>` needs no proof.
-- **The same operations as a list, minus `push`.** `size`, `get`, `first`, `last` and `set` work on an array with the same contracts and facts (an index in range for `get` and `set`, an array that is not empty for `first` and `last`; `set` gives a new array, in place on the local when the result is assigned back to it). `array(n, x)` also says `forall j in 0..n: get(return, j) = x`. `=` and `!=` compare two arrays of the same type structurally. An array has no `push`: its size never changes.
+- **The same operations as a list, minus `push`.** `size`, `get`, `first`, `last` and `set` work on an array with the same contracts and facts (an index in range for `get` and `set`, an array that is not empty for `first` and `last`; `set` gives a new array, in place on the local when the result is assigned back to it). `array(n, x)` also says `forall j in 0..n: get(return, j) = x`. `=` and `!=` compare two arrays of the same type element by element, when the elements implement Eq. An array has no `push`: its size never changes.
 - **Arrays nest.** `Array<Array<Int, 3>, 2>` is two rows of three, six words in one block. `get(m, 1)` is a row (a Copy value, as the elements are), and `set(m, 1, row)` replaces one.
 - **A value, not a reference.** An array of Copy elements is Copy, so giving it to a function gives the function a copy and it cannot change the caller's array; an array of anything else is moved (`clone(a)` to keep it). A function returns an array by value.
 
@@ -1791,7 +1818,7 @@ affirm size(greeting) = 10;
 affirm get(greeting, 9) = 33;
 ```
 
-The escapes are `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` (a character from U+0000 to U+10FFFF, not a surrogate). A literal cannot run over a line. `String` is a library type, in `lib/string.tersus`: a program that writes a literal or mentions `String` has it in front of it (after the prelude, which it needs), the way it has `Sequence`, and a program that declares a `String` (or a `Sequence`) of its own does not get it and cannot write a literal. It implements `Sequence<Byte>` and `Growable<Byte>` over its bytes, so `size`, `get`, `set` and `push` work on it with the contracts of the traits (`get` gives a `Byte` and `push` and `set` take one, which is why every byte of a string is known to be from 0 to 255), a function over any `Sequence<Byte>` takes one, and `a.concat(b)` joins two (`b` is borrowed; the size of the result is the sum). Two strings are equal when their bytes are, as for any struct. Nothing looks at the bytes as characters yet.
+The escapes are `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` (a character from U+0000 to U+10FFFF, not a surrogate). A literal cannot run over a line. `String` is a library type, in `lib/string.tersus`: a program that writes a literal or mentions `String` has it in front of it (after the prelude, which it needs), the way it has `Sequence`, and a program that declares a `String` (or a `Sequence`) of its own does not get it and cannot write a literal. It implements `Sequence<Byte>` and `Growable<Byte>` over its bytes, so `size`, `get`, `set` and `push` work on it with the contracts of the traits (`get` gives a `Byte` and `push` and `set` take one, which is why every byte of a string is known to be from 0 to 255), a function over any `Sequence<Byte>` takes one, and `a.concat(b)` joins two (`b` is borrowed; the size of the result is the sum). Two strings are equal when their bytes are (`impl Eq for String { };`). Nothing looks at the bytes as characters yet.
 
 `push` promises the size, the new byte at the end and the bytes before it unchanged, and `concat` promises the size of the result, the bytes of the first string at the same indexes (`forall j in 0..size(self.bytes): get(return.bytes, j) = get(self.bytes, j)`, so `toInt(get("ab".concat("cd"), 0)) = 97` is proved), and the bytes of the second after them (`forall j in 0..size(other.bytes): get(return.bytes, size(self.bytes) + j) = get(other.bytes, j)`), which a proof uses at the element it names (`affirm get(c.bytes, size(a.bytes) + 1) = get(b.bytes, 1);`, since a `forall` is only used at the elements that appear in the proof, and the index `2 + 1` is not the same term as `3`).
 
@@ -1942,7 +1969,7 @@ l = push(l, 9);                       // does not change a
 return a;                             // [[1], [2, 3], [1]]
 ```
 
-- **`array(n, x)` copies `x` into each slot** (a list or a struct that owns one is cloned `n` times, so it has to be Clone); `set(a, i, x)` takes `x`. `get`, `first` and `last` read the element in place, as for a list, and `clone(get(a, i))` is a copy of it. Equality and printing go through the elements.
+- **`array(n, x)` copies `x` into each slot** (a list or a struct that owns one is cloned `n` times, so it has to be Clone); `set(a, i, x)` takes `x`. `get`, `first` and `last` read the element in place, as for a list, and `clone(get(a, i))` is a copy of it. Equality (with the elements' Eq) and printing go through the elements.
 - **A literal is for Int, Bool and arrays of them**: `#[[1], [2]]` is an error (make the array with `array(n, x)` and `set`), since a literal is a constant that is written out.
 - **Not a function**: an array of functions is an error.
 - **Frame limit.** The 8192 words an array held in a frame can have are counted in words of the elements (`Array<P, 3000>` for a struct of 3 words takes 9000).
@@ -1950,8 +1977,9 @@ return a;                             // [[1], [2, 3], [1]]
 
 ## Current Limitations
 
+- Equality (see Equality): `Eq::eq` cannot be called by name on a Box of an array of no size (`=` can), the impl that compares the fields cannot compare a type that holds itself through a list of lists or through another type (that would be two functions that call each other, which no function can do), and the validator proves `return = (self = other)` from branches that return `true` and `false`, not from a `return` of another comparison (`return self.x = other.x && ...`).
 - No `break` or `continue`. `for` goes through a range or the elements of a list, not by a step other than `1` or backwards.
-- Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field at each step. Nothing else is a variant: not a lexicographic pair of integers, and not the length of a list that shrinks (`size(l)` is an integer that can be used, but one that shrinks only if the program says so). The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: it never runs a function of the program (see Function Contracts).
+- Termination is checked for loops and for a function that calls itself, but only for a single `shrinks` value: an integer that counts to a bound, or a struct or enum value that loses a field (or is an element of a list it held) at each step. Nothing else is a variant: not a lexicographic pair of integers, and not the length of a list that shrinks (`size(l)` is an integer that can be used, but one that shrinks only if the program says so). The intended direction is a termination proof written out with `affirm`s, of which `shrinks` is the sugar (see Termination). A program that cannot show termination is declared `~`, can loop forever, and `run` will not return. Validation does not hang on this: it never runs a function of the program (see Function Contracts).
 - A condition is one relation or boolean: there is no `&&` or `||`, so a guard with several parts is nested `if`s or sequential early returns (see `parse` in `examples/packet_parser.tersus`). The intended form is short-circuit sugar for nested `if`s, with a boolean value that a proof can mention left out.
 - An output contract cannot depend on which variant is returned, so "if `parse` returns `Parsed::Message`, its payload fits in the buffer" cannot be stated to a caller. The intended form is an implication in contracts, `affirm return is Parsed::Message => ...;`, proved for each way out of the function and assumed by a caller once it knows the variant.
 - No declarations separate from assignment.

@@ -3,7 +3,7 @@
 //
 // A HashMap<K, V> is the entries with one key in buckets chosen by the hash of the key: `hash(k) % size(buckets)` is the bucket,
 // and the entries of a bucket are scanned with `=` on their keys, so a key type needs an impl of Hash (lib/prelude.tersus) and
-// the structural equality every type has. A map is a value like a list: insert and remove give a new map, lookup clones the value
+// one of Eq (lib/eq.tersus). A map is a value like a list: insert and remove give a new map, lookup clones the value
 // out, and the map owns its entries. When the count reaches four times the number of buckets the entries are spread over twice
 // as many, so a map built by inserting is built in time in proportion to its count.
 //
@@ -31,12 +31,12 @@ struct HashMap<K, V> {
 impl<K, V> Clone for HashMap<K, V> { };
 
 // The index of the entry with this key in the bucket, or -1: the scan every lookup is
-fn findIn<K, V>(entries: &List<Entry<K, V>>, k: &K) -> Int [{ }] [{ affirm return >= -1; affirm return < size(entries); }] {
+fn findIn<K: Eq, V>(entries: &List<Entry<K, V>>, k: &K) -> Int [{ }] [{ affirm return >= -1; affirm return < size(entries); }] {
     i = 0;
     while i < size(entries) [{
         affirm i >= 0; affirm i <= size(entries);
     }] shrinks size(entries) - i {
-        if get(entries, i).key = clone(k) {
+        if get(entries, i).key = k {
             return i;
         };
         i = i + 1;
@@ -44,12 +44,13 @@ fn findIn<K, V>(entries: &List<Entry<K, V>>, k: &K) -> Int [{ }] [{ affirm retur
     return -1;
 };
 
-// The buckets with the entry for (k, v) in the bucket idx (in the place of the entry the key already has, or at its end)
-fn bucketPut<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, k: K, v: V) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); }] [{
+// The buckets with the entry for (k, v) in the bucket idx: in the place `at` of the entry the key already has (which findIn gives), or at
+// its end when `at` is -1
+fn bucketPut<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int, k: K, v: V) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= -1; affirm at < size(get(buckets, idx)); }] [{
     affirm size(return) = size(buckets);
 }] {
     entries = clone(get(buckets, idx));
-    i = findIn(entries, k);
+    i = at;
     if i >= 0 {
         return set(buckets, idx, set(entries, i, Entry<K, V> { key: k, value: v }));
     };
@@ -113,7 +114,7 @@ fn indexFor<K: Hash>(buckets: Int, k: &K) -> Int [{ affirm buckets >= 1; }] [{ a
     return Hash::hash(k) % buckets;
 };
 
-impl<K: Hash, V> HashMap<K, V> {
+impl<K: Hash + Eq, V> HashMap<K, V> {
     fn contains(self: &Self, k: &K) -> Bool [{ }] [{
         affirm return = (findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0);
     }] {
@@ -154,14 +155,16 @@ impl<K: Hash, V> HashMap<K, V> {
         affirm return.count <= self.count + 1;
     }] {
         idx = indexFor(size(self.buckets), k);
-        if findIn(get(self.buckets, idx), k) >= 0 {
-            return makeMap(bucketPut(self.buckets, idx, k, v), self.count);
+        at = findIn(get(self.buckets, idx), k);
+        if at >= 0 {
+            return makeMap(bucketPut(self.buckets, idx, at, k, v), self.count);
         };
         if self.count + 1 >= size(self.buckets) * 4 {
             grown = self.spread();
-            return makeMap(bucketPut(grown.buckets, indexFor(size(grown.buckets), k), k, v), grown.count + 1);
+            // (k is not in the map, so it goes at the end of its bucket)
+            return makeMap(bucketPut(grown.buckets, indexFor(size(grown.buckets), k), -1, k, v), grown.count + 1);
         };
-        return makeMap(bucketPut(self.buckets, idx, k, v), self.count + 1);
+        return makeMap(bucketPut(self.buckets, idx, -1, k, v), self.count + 1);
     };
 
     fn remove(self: Self, k: &K) -> Self [{ }] [{
@@ -201,7 +204,8 @@ impl<K: Hash, V> HashMap<K, V> {
                 Entry { key: ek, value: ev } = clone(get(entries, i));
                 wb = wide.buckets;
                 wc = wide.count;
-                wide = makeMap(bucketPut(wb, indexFor(size(wb), ek), ek, ev), wc);
+                // (the keys of a map are different, so each goes at the end of its new bucket)
+                wide = makeMap(bucketPut(wb, indexFor(size(wb), ek), -1, ek, ev), wc);
                 i = i + 1;
             };
             b = b + 1;

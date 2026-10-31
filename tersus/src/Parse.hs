@@ -41,10 +41,11 @@ data Decls = Decls
     , declImplParams :: [Variable] -- the type and size parameters of the impl being read (`impl<T> Vec<T>`), which each of its functions has
     , declOwnClone :: Bool -- whether the program defines a function or method named clone, which `..clone(x)` then calls and the parser does not take apart
     , declLocate :: Bool -- whether a statement of a block is preceded by a `Mark` of the place it is written at
+    , declFieldTypes :: Map.Map Name [(Variable, Type)] -- the fields of each struct and variant, with their types
     }
 
 emptyDecls :: Decls
-emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty [] False False
+emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty [] False False Map.empty
 
 -- The declarations from which a program is parsed with the place of each of its statements kept
 locating :: Decls -> Decls
@@ -470,6 +471,7 @@ enumStatement = do
         ( \d ->
             d
                 { declCtors = foldr (\(v, fields) m -> Map.insert v (map fst fields) m) (declCtors d) variants
+                , declFieldTypes = foldr (\(v, fields) m -> Map.insert v fields m) (declFieldTypes d) variants
                 , declTypes = Map.insert name (map fst variants) (declTypes d)
                 }
         )
@@ -504,7 +506,7 @@ structStatement = do
     modifyState (\d -> d{declTypeParams = outerParams})
     when (length (nubFields fields) /= length fields) $ fail ("Struct " ++ name ++ " repeats a field")
     when (name `elem` ["Int", "Bool", "List", "Array", "Box", "Self", "Addr", "Block", "Uninit", "I8", "I16", "I32", "I64", "U8", "U16", "U32"] || isJust (tupleGeneric name)) $ fail (name ++ " is a builtin type and cannot be a struct name")
-    modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d)})
+    modifyState (\d -> d{declCtors = Map.insert name (map fst fields) (declCtors d), declTypes = Map.insert name [name] (declTypes d), declFieldTypes = Map.insert name fields (declFieldTypes d)})
     return (StructDef name params fields invariant)
   where
     nubFields = foldr (\(f, t) rest -> if f `elem` map fst rest then rest else (f, t) : rest) []
@@ -923,11 +925,58 @@ implStatement = do
     ctors <- declCtors <$> getState
     -- (`Self { ... }` is a literal of the struct with the types of the impl)
     modifyState (\d -> d{declSelf = Just selfName, declImplParams = implParams, declCtors = maybe (declCtors d) (\fields -> Map.insert selfName fields (declCtors d)) (Map.lookup typeName ctors)})
-    functions <- curlyBracesParse (genericStatementBlock (implFunction typeName trait))
+    written <- curlyBracesParse (genericStatementBlock (implFunction typeName trait))
+    -- (`impl Eq for T { };` is the impl that compares the fields, of the same variant for an enum, each with its own Eq: it is written
+    -- out here as the program would write it, and the types of the impl have to implement Eq too)
+    let standardEq = trait == Just "Eq" && null written && typeName `notElem` ["List", "Box", "Array", "Int", "Byte", "Bool"]
+    fieldTypes <- declFieldTypes <$> getState
+    functions <- if standardEq then generated (standardEqFunction typeName (Map.findWithDefault [] typeName types) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else return written
+    let implBounds' = if standardEq then implBounds ++ [(p, "Eq", []) | p <- implParams, isTypeParameter p, (p, "Eq", []) `notElem` implBounds] else implBounds
     modifyState (\d -> d{declSelf = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
     whitespace
-    return (ImplDef trait traitArgs typeName selfName implBounds functions)
+    return (ImplDef trait traitArgs typeName selfName implBounds' functions)
   where
+    -- the parse of a text that is not the program's, at the point where the program is
+    generated text p = do
+        input <- getInput
+        position <- getPosition
+        setInput text
+        result <- p <* eof
+        setInput input
+        setPosition position
+        return result
+    -- (a list of the type itself is compared here, element by element, so that the comparison of an element is a call of this function on
+    -- a part of the value, which `shrinks self` allows: an impl for the list would call this function back, which no function can)
+    standardEqFunction typeName variants fieldTypes =
+        let fieldsOf v = Map.findWithDefault [] v fieldTypes
+            differs a b = "if " ++ a ++ " != " ++ b ++ " { return false; }; "
+            compareField (n, (f, ty)) a b = case ty of
+                TList element | mentions element ->
+                    let i = "i" ++ show (n :: Int)
+                        l = a ++ "." ++ f
+                        r = b ++ "." ++ f
+                     in differs ("size(" ++ l ++ ")") ("size(" ++ r ++ ")")
+                            ++ i ++ " = 0; while " ++ i ++ " < size(" ++ l ++ ") [{ affirm " ++ i ++ " >= 0; affirm " ++ i ++ " <= size(" ++ l ++ "); affirm forall j in 0.." ++ i ++ ": get(" ++ l ++ ", j) = get(" ++ r ++ ", j); }] shrinks size(" ++ l ++ ") - " ++ i ++ " { "
+                            ++ differs ("get(" ++ l ++ ", " ++ i ++ ")") ("get(" ++ r ++ ", " ++ i ++ ")")
+                            ++ i ++ " = " ++ i ++ " + 1; }; "
+                _ -> differs (a ++ "." ++ f) (b ++ "." ++ f)
+            mentions t = case t of
+                TNamed n -> n == typeName || maybe False ((== typeName) . fst) (instanceOf n)
+                TList u -> mentions u
+                TBox u -> mentions u
+                TArrayOf u _ -> mentions u
+                _ -> False
+            body = case variants of
+                [single] | not ("::" `isInfixOf` single) -> concatMap (\field -> compareField field "self" "other") (zip [0 ..] (fieldsOf single)) ++ "return true;"
+                _ ->
+                    concat
+                        [ "if self is " ++ v ++ " { if other is " ++ v ++ " { "
+                            ++ concatMap (\field -> compareField field ("(self as " ++ v ++ ")") ("(other as " ++ v ++ ")")) (zip [0 ..] (fieldsOf v))
+                            ++ "return true; }; return false; }; "
+                        | v <- variants
+                        ]
+                        ++ "return false;"
+         in "fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] shrinks self { " ++ body ++ " };"
     implParameter = do
         name <- variable
         whitespace

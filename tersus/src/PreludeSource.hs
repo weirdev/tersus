@@ -2,6 +2,7 @@
 
 module PreludeSource
     ( preludeSource
+    , eqSource
     , listsSource
     , boxSource
     , stringSource
@@ -19,6 +20,15 @@ preludeSource =
     $( do
         addDependentFile "lib/prelude.tersus"
         contents <- runIO (readFile "lib/prelude.tersus")
+        lift contents
+     )
+
+-- The text of lib/eq.tersus: the trait Eq, which `=` and `!=` call, and its impls for lists, arrays and Boxes
+eqSource :: String
+eqSource =
+    $( do
+        addDependentFile "lib/eq.tersus"
+        contents <- runIO (readFile "lib/eq.tersus")
         lift contents
      )
 

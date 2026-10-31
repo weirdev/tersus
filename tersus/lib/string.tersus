@@ -13,6 +13,9 @@ struct String {
 // (a copy of a String is made where a program writes clone(s))
 impl Clone for String { };
 
+// (two strings are equal when their bytes are)
+impl Eq for String { };
+
 impl Hash for String {
     fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] {
         h = 23;

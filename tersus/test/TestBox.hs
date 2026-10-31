@@ -29,8 +29,8 @@ testBox =
                 , testCase "an enum in a Box" (runs "enum E { A { v: Int }, B }; b = Box::new(E::A { v: 3 }); return b is E::A;" (VBool True))
                 , testCase "a Box is cast to a variant" (runs "enum E { A { v: Int }, B }; b = Box::new(E::A { v: 3 }); return (b as E::A).v;" (VInt 3))
                 , testCase "a Box is matched" (runs "enum E { A { v: Int }, B }; fn f(b: Box<E>) -> Int { return match b { E::A { v: v } => v, E::B => 0 }; }; return f(Box::new(E::A { v: 6 }));" (VInt 6))
-                , testCase "a Box has the value of what it holds" (runs (point ++ "return Box::new(P { x: 1, y: 2 }) = Box::new(P { x: 1, y: 2 });") (VBool True))
-                , testCase "boxes of different values differ" (runs (point ++ "return Box::new(P { x: 1, y: 2 }) != Box::new(P { x: 1, y: 3 });") (VBool True))
+                , testCase "a Box has the value of what it holds" (runs (point ++ "impl Eq for P { }; return Box::new(P { x: 1, y: 2 }) = Box::new(P { x: 1, y: 2 });") (VBool True))
+                , testCase "boxes of different values differ" (runs (point ++ "impl Eq for P { }; return Box::new(P { x: 1, y: 2 }) != Box::new(P { x: 1, y: 3 });") (VBool True))
                 , testCase "a Box is a parameter and a result" (runs (point ++ "fn mk(n: Int) -> Box<P> { return Box::new(P { x: n, y: n * 2 }); }; fn sum(p: Box<P>) -> Int { return p.x + p.y; }; return sum(mk(4));") (VInt 12))
                 , testCase "a Box in a struct" (runs (point ++ "struct Q { p: Box<P>, n: Int }; q = Q { p: Box::new(P { x: 3, y: 4 }), n: 5 }; return q.p.x * 100 + q.p.y * 10 + q.n;") (VInt 345))
                 , testCase "a Box in a list" (runs (point ++ "ps = push(push([], Box::new(P { x: 1, y: 2 })), Box::new(P { x: 3, y: 4 })); return get(ps, 1).y + size(ps);") (VInt 6))
@@ -38,7 +38,7 @@ testBox =
                 , testCase "a method is called on what a Box holds" (runs (point ++ "impl P { fn total(self: Self) -> Int { return self.x + self.y; }; }; b = Box::new(P { x: 2, y: 3 }); return Box::unbox(b).total();") (VInt 5))
                 , testCase "not on the Box" (rejected (point ++ "impl P { fn total(self: Self) -> Int { return self.x + self.y; }; }; b = Box::new(P { x: 2, y: 3 }); return b.total();") "total is called on a Box<P>, which has no functions: call it on the value inside, as in Box::unbox(b).total(...)")
                 , testCase "unbox gives back what was held" (runs (point ++ "b = Box::new(P { x: 2, y: 3 }); p = Box::unbox(b); return p.x * 10 + p.y;") (VInt 23))
-                , testCase "unbox of a Box is the value" (runs (point ++ "return Box::unbox(Box::new(P { x: 2, y: 3 })) = P { x: 2, y: 3 };") (VBool True))
+                , testCase "unbox of a Box is the value" (runs (point ++ "impl Eq for P { }; return Box::unbox(Box::new(P { x: 2, y: 3 })) = P { x: 2, y: 3 };") (VBool True))
                 , testCase "the contents of a Box can be passed where the struct is wanted by a builtin test" (runs "enum E { A, B }; b = Box::new(E::B); if b is E::B { return 1; }; return 0;" (VInt 1))
                 ]
             , TestList

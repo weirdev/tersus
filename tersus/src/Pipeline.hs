@@ -1,5 +1,6 @@
 module Pipeline
     ( parseSource
+    , parseWithEquality
     , validatedSource
     , compileSource
     , ownedSource
@@ -20,7 +21,7 @@ import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
-import PreludeSource (boxSource, listsSource, mapSource, preludeSource, stringSource)
+import PreludeSource (eqSource, boxSource, listsSource, mapSource, preludeSource, stringSource)
 import Pretty (renderVarProof)
 import TersusTypes (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
@@ -39,6 +40,15 @@ import Utils
 
 parseSource :: String -> Result [Statement] String
 parseSource source = parseSourceWith True source
+
+-- A program with the equality library in front of it (unless it declares a trait Eq), as `=` on any type but a word needs, and with no
+-- other library: how the tests of the language read a program
+parseWithEquality :: String -> Either String [Statement]
+parseWithEquality source = case [text | ("the equality library", text) <- libraries source] of
+    [] -> either (Left . show) (Right . fst) (parseStatementBlockWith emptyDecls source)
+    text : _ -> case parseStatementBlockWith emptyDecls text of
+        Left err -> Left ("Parse error in the equality library: " ++ show err)
+        Right (library, declared) -> either (Left . show) (Right . (library ++) . fst) (parseStatementBlockWith declared source)
 
 -- (the library of lists is the one program that may use the names that a program may not)
 parseSourceWith :: Bool -> String -> Result [Statement] String
@@ -74,11 +84,11 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
     reserved name = name `elem` ["StdList", "StdBox"] || take 7 name == "stdList" || take 6 name == "stdBox"
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
--- unchanged: lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`) if it mentions any of them (or
+-- unchanged: lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares), lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`) if it mentions any of them (or
 -- `hashCombine`), lib/string.tersus (the struct `String` that a string literal is a value of, which needs the traits) if it mentions `String` or
 -- has a literal, and lib/map.tersus (the struct `HashMap`) if it mentions `HashMap`
 libraries :: String -> [(String, String)]
-libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps]
+libraries source = [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps]
   where
     code = withoutText source
     ws = names code
