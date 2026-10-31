@@ -1103,6 +1103,9 @@ testPipeline =
             Error e -> Just e
         , testAssertErrorContains "Parse error" (parseSource "trait Sequence { fn size(self: Self) -> Int; }; s = \"a\";")
         , testAssertErrorContains "Parse error" (parseSource "x = \"a\"; y = ;")
+        , -- A program that declares its own enum or trait named String is read without the string library
+          testAssertEq (mapResult (const ()) (compileSource "enum String { Empty }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
+        , testAssertEq (mapResult (const ()) (compileSource "trait String { fn size(self: Self) -> Int; }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
         , -- The names native code makes a list and a Box of are reserved from what a program declares, not from its text
           testAssertErrorContains "StdList is reserved" (parseSource "struct StdList { x: Int }; return 1;")
         , case parseSource "// struct StdList\nreturn 1;" of
