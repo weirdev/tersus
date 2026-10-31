@@ -802,6 +802,8 @@ mainProgram locals stmts =
                 , fnBlocks = Map.singleton (BlockId 0) (BasicBlock stmts Return)
                 , fnSizeParams = []
                 , fnBorrowed = []
+            , fnMutBorrowed = []
+            , fnFrom = []
                 , fnSpec = emptySpec
                 }
         , progGenerics = Map.empty

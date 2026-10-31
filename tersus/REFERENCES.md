@@ -1,6 +1,6 @@
 # References and borrowing (design plan)
 
-> Stages 1 to 3 implemented, and the first part of stage 4 (returned read references), 2026-10-30; the rest of stages 4 to 6 is still design.
+> Stages 1 to 5 implemented, 2026-10-31; stage 6 (concurrency) is still design. References to unsized values are interpreter-only for now (native code refuses them: it does not carry the size with the address yet).
 > What is in the language is in `LANGUAGE.md` (Lent parameters, References,
 > Updating through a reference); what is below is the rationale, the core
 > rules, and the plan for what is left. This complements `POINTERS.md`,
@@ -529,14 +529,21 @@ mid-implementation:
    struct holds read references, its holder freezes their places (a field
    read is a reference local with its own last use), struct updates carry
    the fields, and returning one is under the same `from` bound for every
-   field; such a value is local-only for now (not a parameter, an argument,
-   an element, or a field of another value), as are update references in
-   fields and references in enum variants. Still to come in this stage:
-   returned update references, origins on function values and trait
-   functions, and references to unsized values. Add result-origin constraints, unsized
-   metadata, aggregate fields, generic and function-value contracts. Check region
-   containment. Gate each extension on negative escape tests and separate checking
-   of callers and callees, without inspecting callee bodies.
+   field. The rest of the stage landed 2026-10-31: holders go anywhere a
+   value goes (parameters, arguments, elements of lists, arrays and Boxes,
+   fields of other values), fields and enum variants may hold update
+   references, update references can be returned, a result's origin is
+   known through a trait method (the trait's own `from`) and through a
+   function value that is a named function held by a local, and a reference
+   to an unsized array can be made by borrowing through a `Box` (`&*b`).
+   Region containment is answered for now by restriction: an escaping
+   reference is only ever to a place of a parameter the signature names
+   with `from`, in the caller's frame — the `System`-region restriction
+   the prerequisites allowed — until allocator regions land. References
+   to unsized values work in the interpreter (the size is what the
+   reference is to) and are refused by native code, which does not carry
+   the size with the address yet; element access to one still needs a
+   size fact the validator can prove, as other bounds do.
    Prerequisites, all landed before this stage starts: (a) the `Deref`
    language items left over from step 29 of the roadmap (the checker looking
    through a `Deref` impl as it now looks through `Box` by name), without
@@ -554,9 +561,19 @@ mid-implementation:
    closed). Introduce explicit guarded mutation and handle libraries when needed.
    *Partly done (2026-10-30): the move-check exemption is closed — the
    library passes `checkMoves` as it stands, so `lowerLibrary` checks it
-   like any program. `Block` unification and the rest remain.*
-   The `Block` unification in this stage does not depend on stage 4 and may be
-   done at the checkpoint instead.
+   like any program.*
+   *Done (2026-10-31): disjoint index loans (two borrows of different
+   elements of one list may be live together when both indices are known;
+   an unknown index counts as any element), and the `Block` unification
+   is settled by construction: a reference cannot be made from raw
+   memory — an `Addr` and its `Block` permission confer no reference
+   permission — so references and `Block` permissions never alias and
+   neither can bypass the other; `Addr::write`, `take`, `free`, splits
+   and joins remain governed by the permission alone. Native code takes
+   all of stages 1 to 5 except unsized references: a borrowed or update
+   parameter is passed by address, a returned reference is the address
+   of its place, and `mir_verify.tersus` checks the borrow, deref and
+   assignref rows like the Haskell verifier.*
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 

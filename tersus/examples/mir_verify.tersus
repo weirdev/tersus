@@ -40,6 +40,7 @@ enum Type {
     TForall { sizes: List<String>, types: List<String>, body: Box<Type> },
     TParam { name: String },
     TRef { inner: Box<Type> },
+    TMutRef { inner: Box<Type> },
     TAddr { inner: Box<Type> },
     TWord { signed: Bool, bits: Int },
 };
@@ -73,6 +74,10 @@ enum Operand { Copy { local: Int }, Move { local: Int }, Const { value: Constant
 
 impl Clone for Operand { };
 
+enum RefStep { Field { ctor: String, field: String }, Index { o: Operand } };
+
+impl Clone for RefStep { };
+
 enum Rvalue {
     Use { o: Operand },
     BinaryOp { op: Int, a: Operand, b: Operand },
@@ -87,11 +92,13 @@ enum Rvalue {
     AsVariant { o: Operand, name: String },
     Clone { o: Operand },
     TakeField { local: Int, name: String, field: String },
+    Borrow { root: Int, steps: List<RefStep>, mutable: Bool },
+    Deref { o: Operand },
 };
 
 impl Clone for Rvalue { };
 
-enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int } };
+enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, AssignRef { local: Int, steps: List<RefStep>, rv: Rvalue } };
 
 impl Clone for Statement { };
 
@@ -121,6 +128,8 @@ struct Function {
     sizeParams: List<String>,
     typeParams: List<String>,
     borrowed: List<Int>,
+    mutBorrowed: List<Int>,
+    from: List<Int>,
     locals: List<LocalDecl>,
     blocks: List<MirBlock>,
 };
@@ -412,12 +421,13 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
     if kw = "u16" { return done(Type::TWord { signed: false, bits: 16 }, next); };
     if kw = "u32" { return done(Type::TWord { signed: false, bits: 32 }, next); };
     if next >= size(ts) { return bad; };
-    if kw = "list" || kw = "box" || kw = "ref" || kw = "addr" {
+    if kw = "list" || kw = "box" || kw = "ref" || kw = "mutref" || kw = "addr" {
         e = typeAt(ts, next);
         if !e.ok { return bad; };
         if kw = "addr" { return done(Type::TAddr { inner: Box::new(e.value) }, e.pos); };
         if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
         if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
+        if kw = "mutref" { return done(Type::TMutRef { inner: Box::new(e.value) }, e.pos); };
         return done(Type::TRef { inner: Box::new(e.value) }, e.pos);
     };
     if kw = "array" {
@@ -578,6 +588,42 @@ fn operandsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<Operand>> [{ af
     return done(items, p);
 };
 
+fn noRefSteps() -> List<RefStep> [{ }] [{ }] {
+    return [];
+};
+
+fn refStepAt(ts: &List<Token>, pos: Int) -> Parsed<RefStep> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(RefStep::Index { o: noOperand() }, ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    if w.value = "field" {
+        n = nameAt(ts, w.pos);
+        if !n.ok || n.pos >= size(ts) { return bad; };
+        f = nameAt(ts, n.pos);
+        if !f.ok { return bad; };
+        return done(RefStep::Field { ctor: n.value, field: f.value }, f.pos);
+    };
+    if w.value = "index" {
+        o = operandAt(ts, w.pos);
+        if !o.ok { return bad; };
+        return done(RefStep::Index { o: o.value }, o.pos);
+    };
+    return bad;
+};
+
+fn refStepsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<RefStep>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    items = noRefSteps();
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noRefSteps(), ts); };
+        o = refStepAt(ts, p);
+        if !o.ok { return failed(noRefSteps(), ts); };
+        items = push(items, o.value);
+        p = o.pos;
+    };
+    return done(items, p);
+};
+
 fn noRvalue() -> Rvalue [{ }] [{ }] {
     return Rvalue::Use { o: noOperand() };
 };
@@ -647,6 +693,20 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
         };
         return done(Rvalue::MakeData { name: s.value, fields: names, values: values }, p);
     };
+    if kw = "borrow" || kw = "borrowmut" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        c = countAt(ts, l.pos);
+        if !c.ok { return bad; };
+        steps = refStepsAt(ts, c.pos, c.value);
+        if !steps.ok { return bad; };
+        return done(Rvalue::Borrow { root: l.value, steps: steps.value, mutable: kw = "borrowmut" }, steps.pos);
+    };
+    if kw = "deref" {
+        o = operandAt(ts, next);
+        if !o.ok { return bad; };
+        return done(Rvalue::Deref { o: o.value }, o.pos);
+    };
     if kw = "readfield" {
         o = operandAt(ts, next);
         if !o.ok || o.pos >= size(ts) { return bad; };
@@ -702,6 +762,17 @@ fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm
         if !rv.ok { return bad; };
         if kw = "assign" { return done(Line::LStatement { s: Statement::Assign { local: l.value, rv: rv.value } }, rv.pos); };
         return done(Line::LStatement { s: Statement::Peek { local: l.value, rv: rv.value } }, rv.pos);
+    };
+    if kw = "assignref" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        c = countAt(ts, l.pos);
+        if !c.ok { return bad; };
+        steps = refStepsAt(ts, c.pos, c.value);
+        if !steps.ok || steps.pos >= size(ts) { return bad; };
+        rv = rvalueAt(ts, steps.pos);
+        if !rv.ok { return bad; };
+        return done(Line::LStatement { s: Statement::AssignRef { local: l.value, steps: steps.value, rv: rv.value } }, rv.pos);
     };
     if kw = "drop" {
         l = intAt(ts, next);
@@ -812,7 +883,7 @@ fn declAt(ts: &List<Token>) -> Parsed<TypeDecl> [{ }] [{ }] {
 };
 
 fn noFunction() -> Function [{ }] [{ }] {
-    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], locals: [], blocks: [] };
+    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], mutBorrowed: [], from: [], locals: [], blocks: [] };
 };
 
 // The header of a function, from a whole line (the locals and the blocks are filled in by the caller)
@@ -851,8 +922,18 @@ fn headerAt(ts: &List<Token>) -> Parsed<Function> [{ }] [{ }] {
     nb = countAt(ts, typeParams.pos + 1);
     if !nb.ok { return bad; };
     borrowed = intsAt(ts, nb.pos, nb.value);
-    if !borrowed.ok || borrowed.pos != size(ts) { return bad; };
-    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, locals: [], blocks: [] }, borrowed.pos);
+    if !borrowed.ok { return bad; };
+    if borrowed.pos = size(ts) { return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: [], from: [], locals: [], blocks: [] }, borrowed.pos); };
+    if !isWord(ts, borrowed.pos, "mutborrowed") || borrowed.pos + 1 >= size(ts) { return bad; };
+    nm = countAt(ts, borrowed.pos + 1);
+    if !nm.ok { return bad; };
+    mutBorrowed = intsAt(ts, nm.pos, nm.value);
+    if !mutBorrowed.ok || !isWord(ts, mutBorrowed.pos, "from") || mutBorrowed.pos + 1 >= size(ts) { return bad; };
+    nf = countAt(ts, mutBorrowed.pos + 1);
+    if !nf.ok { return bad; };
+    fromList = intsAt(ts, nf.pos, nf.value);
+    if !fromList.ok || fromList.pos != size(ts) { return bad; };
+    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: mutBorrowed.value, from: fromList.value, locals: [], blocks: [] }, fromList.pos);
 };
 
 fn noLocalDecl() -> LocalDecl [{ }] [{ }] {
@@ -1106,6 +1187,7 @@ fn renderType(t: &Type) -> String ~ {
         Type::TBox { inner: e } => { r = "Box<".then(renderType(Box::unbox(e))).then(">"); },
         Type::TArray { elem: e, size: s } => { r = "Array<".then(renderType(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
         Type::TRef { inner: e } => { r = "&".then(renderType(Box::unbox(e))); },
+        Type::TMutRef { inner: e } => { r = "&mut ".then(renderType(Box::unbox(e))); },
         Type::TAddr { inner: e } => { r = "Addr<".then(renderType(Box::unbox(e))).then(">"); },
         Type::TWord { signed: signed, bits: bits } => {
             if signed { r = "I".then(showInt(bits)); } else { r = "U".then(showInt(bits)); };
@@ -1454,6 +1536,7 @@ fn isUnknown(t: &Type) -> Bool ~ {
         Type::TBox { inner: e } => { r = isUnknown(Box::unbox(e)); },
         Type::TAddr { inner: e } => { r = isUnknown(Box::unbox(e)); },
         Type::TRef { inner: e } => { r = isUnknown(Box::unbox(e)); },
+        Type::TMutRef { inner: e } => { r = isUnknown(Box::unbox(e)); },
         Type::TFn { args: args, ret: ret } => {
             r = isUnknown(Box::unbox(ret));
             for a in args { if isUnknown(a) { r = true; }; };
@@ -1913,6 +1996,14 @@ fn operandFunctions(o: &Operand) -> List<String> ~ {
     return r;
 };
 
+fn refStepOperands(steps: &List<RefStep>) -> List<Operand> [{ }] [{ }] {
+    out = [];
+    for s in steps {
+        if s is RefStep::Index { out = push(out, clone((s as RefStep::Index).o)); };
+    };
+    return out;
+};
+
 fn rvalueOperands(rv: &Rvalue) -> List<Operand> [{ }] [{ }] {
     out = [];
     match clone(rv) {
@@ -1929,6 +2020,8 @@ fn rvalueOperands(rv: &Rvalue) -> List<Operand> [{ }] [{ }] {
         Rvalue::AsVariant { o: o, name: name } => { out = single(o); },
         Rvalue::Clone { o: o } => { out = single(o); },
         Rvalue::TakeField { local: l, name: name, field: field } => { out = single(Operand::Copy { local: l }); },
+        Rvalue::Borrow { root: root, steps: steps, mutable: m } => { out = refStepOperands(steps); },
+        Rvalue::Deref { o: o } => { out = single(o); },
     };
     return out;
 };
@@ -2271,6 +2364,57 @@ fn valueOf(p: &Program, f: &Function, typeName: &String, o: &Operand) -> Bool ~ 
     return sub(p, Type::TNamed { name: clone(typeName) }, t);
 };
 
+fn ctorFields(p: &Program, ctor: &String) -> List<Field> ~ {
+    for d in p.types {
+        if d is TypeDecl::DStruct {
+            if (d as TypeDecl::DStruct).name = ctor { return clone((d as TypeDecl::DStruct).fields); };
+        };
+        if d is TypeDecl::DEnum {
+            for v in (d as TypeDecl::DEnum).variants {
+                if v.name = ctor { return clone(v.fields); };
+            };
+        };
+    };
+    return [];
+};
+
+fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRes ~ {
+    lt = localTy(f, root);
+    if !lt.ok { return noTy(); };
+    ty = clone(lt.ty);
+    if ty is Type::TRef { ty = Box::unbox(clone((ty as Type::TRef).inner)); };
+    if ty is Type::TMutRef { ty = Box::unbox(clone((ty as Type::TMutRef).inner)); };
+    if ty is Type::TBox { ty = Box::unbox(clone((ty as Type::TBox).inner)); };
+    i = 0;
+    while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+        step = get(steps, i);
+        if step is RefStep::Field {
+            fields = ctorFields(p, (step as RefStep::Field).ctor);
+            found = false;
+            for fd in fields {
+                if fd.name = (step as RefStep::Field).field { ty = clone(fd.ty); found = true; };
+            };
+            if !found { return noTy(); };
+        };
+        if step is RefStep::Index {
+            if ty is Type::TList { ty = Box::unbox(clone((ty as Type::TList).elem)); }
+            else if ty is Type::TArray { ty = Box::unbox(clone((ty as Type::TArray).elem)); }
+            else if ty is Type::TNamed {
+                iargs = instanceArgs((ty as Type::TNamed).name);
+                if size(iargs) = 1 {
+                    et = textAt(iargs, 0);
+                    if et.ok { ty = clone(et.ty); } else { return noTy(); };
+                } else { return noTy(); };
+            } else { return noTy(); };
+        };
+        if ty is Type::TRef { ty = Box::unbox(clone((ty as Type::TRef).inner)); };
+        if ty is Type::TMutRef { ty = Box::unbox(clone((ty as Type::TMutRef).inner)); };
+        if ty is Type::TBox { ty = Box::unbox(clone((ty as Type::TBox).inner)); };
+        i = i + 1;
+    };
+    return TyRes { ok: true, ty: ty };
+};
+
 fn rvalueWhy(p: &Program, f: &Function, d: &Type, rv: &Rvalue) -> List<String> ~ {
     out = [];
     dst = clone(d);
@@ -2415,6 +2559,29 @@ fn rvalueWhy(p: &Program, f: &Function, d: &Type, rv: &Rvalue) -> List<String> ~
         Rvalue::Clone { o: o } => {
             if !fits(p, f, dst, o) { out = expectedWhy(p, f, dst, o); };
         },
+        Rvalue::Borrow { root: root, steps: steps, mutable: m } => {
+            pt = placeWhy(p, f, root, steps);
+            if !pt.ok { out = one("a reference is to a place that is not there"); }
+            else if dst is Type::TRef {
+                inner = Box::unbox((dst as Type::TRef).inner);
+                if !sub(p, inner, pt.ty) && !sub(p, pt.ty, inner) { out = one("a reference to ".then(renderType(pt.ty)).then(" is not ").then(renderType(dst))); };
+            } else if dst is Type::TMutRef {
+                inner = Box::unbox((dst as Type::TMutRef).inner);
+                if !m { out = one("a read reference is not an update reference"); };
+                if !sub(p, inner, pt.ty) && !sub(p, pt.ty, inner) { out = one("a reference to ".then(renderType(pt.ty)).then(" is not ").then(renderType(dst))); };
+            } else { out = one("a reference is not ".then(renderType(dst))); };
+        },
+        Rvalue::Deref { o: o } => {
+            ot = operandTy(p, f, o);
+            if !ot.ok { out = one("a reference is read through a value that is not there"); }
+            else if ot.ty is Type::TRef {
+                inner = Box::unbox((ot.ty as Type::TRef).inner);
+                if !sub(p, dst, inner) { out = one("what a reference is to is ".then(renderType(inner)).then(", not ").then(renderType(dst))); };
+            } else if ot.ty is Type::TMutRef {
+                inner = Box::unbox((ot.ty as Type::TMutRef).inner);
+                if !sub(p, dst, inner) { out = one("what a reference is to is ".then(renderType(inner)).then(", not ").then(renderType(dst))); };
+            } else { out = one("a value that is not a reference is read through"); };
+        },
         Rvalue::TakeField { local: l, name: name, field: field } => {
             out = rvalueWhy(p, f, dst, Rvalue::ReadField { o: Operand::Copy { local: l }, name: clone(name), field: clone(field) });
         },
@@ -2443,6 +2610,7 @@ fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
         Type::TBox { inner: e } => { r = Type::TBox { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
         Type::TAddr { inner: e } => { r = Type::TAddr { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
         Type::TRef { inner: e } => { r = Type::TRef { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
+        Type::TMutRef { inner: e } => { r = Type::TMutRef { inner: Box::new(substSizes(Box::unbox(e), names, sizes)) }; },
         Type::TFn { args: args, ret: ret } => {
             na = [];
             for a in args { na = push(na, substSizes(a, names, sizes)); };
@@ -2534,6 +2702,11 @@ fn statementLocals(st: &Statement) -> List<Int> [{ }] [{ }] {
             for o in rvalueOperands(rv) { for x in operandLocals(o) { out = push(out, x); }; };
         },
         Statement::Drop { local: l } => { out = single(l); },
+        Statement::AssignRef { local: l, steps: steps, rv: rv } => {
+            out = single(l);
+            for o in rvalueOperands(rv) { for x in operandLocals(o) { out = push(out, x); }; };
+            for o in refStepOperands(steps) { for x in operandLocals(o) { out = push(out, x); }; };
+        },
     };
     return out;
 };
@@ -2604,6 +2777,7 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, f: &Function) -> List<S
                 Statement::Assign { local: dl, rv: rv } => { rvOps = rvalueOperands(rv); },
                 Statement::Peek { local: dl, rv: rv } => { rvOps = rvalueOperands(rv); },
                 Statement::Drop { local: dl } => { },
+                Statement::AssignRef { local: dl, steps: steps, rv: rv } => { rvOps = rvalueOperands(rv); },
             };
             for o in rvOps { for n in operandFunctions(o) { fnames = push(fnames, clone(n)); }; };
         };
@@ -2629,6 +2803,7 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, f: &Function) -> List<S
             match st {
                 Statement::Assign { local: dl, rv: rv } => { dst = localTy(f, dl); rvx = clone(rv); hasRv = true; },
                 Statement::Peek { local: dl, rv: rv } => { dst = localTy(f, dl); rvx = clone(rv); hasRv = true; },
+                Statement::AssignRef { local: dl, steps: steps, rv: rv } => { dst = placeWhy(p, f, dl, steps); rvx = clone(rv); hasRv = true; },
                 Statement::Drop { local: dl } => { },
             };
             if hasRv && dst.ok {

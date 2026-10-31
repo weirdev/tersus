@@ -749,6 +749,13 @@ referencePrograms =
     , ("a local reference is given to a read parameter", "fn id(n: &Int) -> Int { return n; }; x = 4; r = &x; return id(r);")
     , ("a reference to a list is given to a read parameter", "fn sz(a: &List<Int>) -> Int { return size(a); }; xs = [1, 2, 3]; r = &xs; return sz(r);")
     , ("a borrowed field of a generic struct with a list", "struct S<T> { n: Int, value: T }; s = S<List<Int>> { n: 7, value: [1] }; r = &s.n; return *r;")
+    , ("a constant is lent by address", "fn id(n: &Int) -> Int { return n; }; return id(42);")
+    , ("a read reference is returned", "fn idr(x: &Int) -> &Int from x { return x; }; a = 41; r = idr(&a); return *r + 1;")
+    , ("an update reference is returned", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return a;")
+    , ("an update parameter is written through", "fn inc(x: &mut Int) -> Int { *x = *x + 1; return *x; }; a = 41; inc(&mut a); return a;")
+    , ("a field reference is returned", "struct P { a: Int, b: Int }; fn getb(p: &P) -> &Int from p { return &p.b; }; p = P { a: 1, b: 41 }; r = getb(&p); return *r + 1;")
+    , ("a holder is given to a function", "struct W { r: &Int }; fn rd(w: W) -> Int { return *w.r; }; a = 7; w = W { r: &a }; return rd(w);")
+    , ("an update reference in a field is written through", "struct W { r: &mut Int }; a = 1; w = W { r: &mut a }; *w.r = 9; return a;")
     ]
 
 -- Every program of these tests that validates, and every one that is lowered without being validated

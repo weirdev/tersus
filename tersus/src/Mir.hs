@@ -90,6 +90,8 @@ data Function = Function
     , fnSizeParams :: [Variable] -- the names of the last parameters, which are the sizes that a call of the function gives (see Mono)
     , fnTypeParams :: [Variable] -- the names of the type parameters, which a call gives and native code makes a copy of the function for (see MirMono)
     , fnBorrowed :: [Local] -- the parameters that the function only reads, which a call lends (see MirOwnership)
+    , fnMutBorrowed :: [Local] -- the parameters lent for updating (&mut T)
+    , fnFrom :: [Local] -- the parameters a reference result is from
     , fnSpec :: FunctionSpec
     }
     deriving (Show, Eq)

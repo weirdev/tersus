@@ -104,7 +104,7 @@ enum Rvalue {
 
 impl Clone for Rvalue { };
 
-enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int } };
+enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, AssignRef { local: Int, steps: List<RefStep>, rv: Rvalue } };
 
 impl Clone for Statement { };
 
@@ -134,6 +134,8 @@ struct Function {
     sizeParams: List<String>,
     typeParams: List<String>,
     borrowed: List<Int>,
+    mutBorrowed: List<Int>,
+    from: List<Int>,
     locals: List<LocalDecl>,
     blocks: List<MirBlock>,
 };
@@ -768,6 +770,17 @@ fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm
         if kw = "assign" { return done(Line::LStatement { s: Statement::Assign { local: l.value, rv: rv.value } }, rv.pos); };
         return done(Line::LStatement { s: Statement::Peek { local: l.value, rv: rv.value } }, rv.pos);
     };
+    if kw = "assignref" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        n = countAt(ts, l.pos);
+        if !n.ok { return bad; };
+        steps = refStepsAt(ts, n.pos, n.value);
+        if !steps.ok || steps.pos >= size(ts) { return bad; };
+        rv = rvalueAt(ts, steps.pos);
+        if !rv.ok { return bad; };
+        return done(Line::LStatement { s: Statement::AssignRef { local: l.value, steps: steps.value, rv: rv.value } }, rv.pos);
+    };
     if kw = "drop" {
         l = intAt(ts, next);
         if !l.ok { return bad; };
@@ -877,7 +890,7 @@ fn declAt(ts: &List<Token>) -> Parsed<TypeDecl> [{ }] [{ }] {
 };
 
 fn noFunction() -> Function [{ }] [{ }] {
-    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], locals: [], blocks: [] };
+    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], mutBorrowed: [], from: [], locals: [], blocks: [] };
 };
 
 // The header of a function, from a whole line (the locals and the blocks are filled in by the caller)
@@ -916,8 +929,18 @@ fn headerAt(ts: &List<Token>) -> Parsed<Function> [{ }] [{ }] {
     nb = countAt(ts, typeParams.pos + 1);
     if !nb.ok { return bad; };
     borrowed = intsAt(ts, nb.pos, nb.value);
-    if !borrowed.ok || borrowed.pos != size(ts) { return bad; };
-    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, locals: [], blocks: [] }, borrowed.pos);
+    if !borrowed.ok { return bad; };
+    if borrowed.pos = size(ts) { return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: [], from: [], locals: [], blocks: [] }, borrowed.pos); };
+    if !isWord(ts, borrowed.pos, "mutborrowed") || borrowed.pos + 1 >= size(ts) { return bad; };
+    nm = countAt(ts, borrowed.pos + 1);
+    if !nm.ok { return bad; };
+    mutBorrowed = intsAt(ts, nm.pos, nm.value);
+    if !mutBorrowed.ok || !isWord(ts, mutBorrowed.pos, "from") || mutBorrowed.pos + 1 >= size(ts) { return bad; };
+    nf = countAt(ts, mutBorrowed.pos + 1);
+    if !nf.ok { return bad; };
+    fromList = intsAt(ts, nf.pos, nf.value);
+    if !fromList.ok || fromList.pos != size(ts) { return bad; };
+    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: mutBorrowed.value, from: fromList.value, locals: [], blocks: [] }, fromList.pos);
 };
 
 fn noLocalDecl() -> LocalDecl [{ }] [{ }] {
@@ -1962,7 +1985,7 @@ impl Clone for Gen { };
 
 // What a call needs to know of a function of the program: the types of its parameters and of its result. (Looking a function up in the program itself copies it, and all
 // its blocks, so they are taken once.)
-struct Sig { name: String, params: List<Type>, paramsOk: Bool, hasReturn: Bool, returns: Type };
+struct Sig { name: String, params: List<Type>, ptrs: List<Bool>, paramsOk: Bool, hasReturn: Bool, returns: Type };
 
 impl Clone for Sig { };
 
@@ -2045,8 +2068,20 @@ fn localTypeOf(f: &Function, l: Int) -> LT [{ }] [{ }] {
     return LT { ok: false, ty: Type::TInt };
 };
 
+fn hasInt(l: &List<Int>, x: Int) -> Bool [{ }] [{ }] {
+    for y in l {
+        if y = x { return true; };
+    };
+    return false;
+};
+
+fn noBools() -> List<Bool> [{ }] [{ }] {
+    return [];
+};
+
 fn sigOf(f: &Function) -> Sig [{ }] [{ }] {
     params = noTypes();
+    ptrs = noBools();
     ok = true;
     for param in f.params {
         r = localTypeOf(f, param);
@@ -2054,8 +2089,9 @@ fn sigOf(f: &Function) -> Sig [{ }] [{ }] {
             params = push(params, Type::TInt);
             ok = false;
         };
+        ptrs = push(ptrs, hasInt(f.borrowed, param) || hasInt(f.mutBorrowed, param));
     };
-    return Sig { name: clone(f.name), params: params, paramsOk: ok, hasReturn: f.hasReturn, returns: clone(f.returns) };
+    return Sig { name: clone(f.name), params: params, ptrs: ptrs, paramsOk: ok, hasReturn: f.hasReturn, returns: clone(f.returns) };
 };
 
 fn noCtors() -> List<Ctor> [{ }] [{ }] {
@@ -2063,10 +2099,6 @@ fn noCtors() -> List<Ctor> [{ }] [{ }] {
 };
 
 fn noInts2() -> List<Int> [{ }] [{ }] {
-    return [];
-};
-
-fn noBools() -> List<Bool> [{ }] [{ }] {
     return [];
 };
 
@@ -2978,6 +3010,40 @@ fn refTargetOf(t: &Type) -> Type ~ {
     return clone(t);
 };
 
+fn assignRefType(cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>) -> Type ~ {
+    lt = localTypeOf(f, root);
+    if !lt.ok { return Type::TInt; };
+    ty = refTargetOf(lt.ty);
+    i = 0;
+    while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+        ty = refTargetOf(ty);
+        step = get(steps, i);
+        if step is RefStep::Field {
+            ctorName = (step as RefStep::Field).ctor;
+            fieldName = (step as RefStep::Field).field;
+            k = 0;
+            while k < size(cx.ctors) [{ affirm k >= 0; affirm k <= size(cx.ctors); }] ~ {
+                ctor = get(cx.ctors, k);
+                if ctor.name = ctorName {
+                    j = fieldIndex(ctor.fields, fieldName);
+                    if j >= 0 { ty = clone(get(ctor.fields, j).ty); };
+                };
+                k = k + 1;
+            };
+        };
+        if step is RefStep::Index {
+            elem = Held { ok: false, ty: Type::TInt };
+            if isListStruct(ty) { elem = listElement(cx, ty); };
+            if isBoxStruct(ty) { elem = listElement(cx, ty); };
+            arr = sizedArray(ty);
+            if arr.ok { elem = Held { ok: true, ty: clone(arr.elem) }; };
+            if elem.ok { ty = clone(elem.ty); };
+        };
+        i = i + 1;
+    };
+    return ty;
+};
+
 fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>) -> Gen ~ {
     lt = localTypeOf(f, root);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(root))); };
@@ -3035,12 +3101,24 @@ fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>
     return giving(g1, at);
 };
 
+fn operandPointer(g: Gen, cx: &Ctx, f: &Function, o: &Operand) -> Gen ~ {
+    l = 0;
+    isLocal = false;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; isLocal = true; };
+    if o is Operand::Move { l = (o as Operand::Move).local; isLocal = true; };
+    if !isLocal { return operandValue(g, cx, f, Type::TInt, o); };
+    lt = localTypeOf(f, l);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    if lt.ty is Type::TRef || lt.ty is Type::TMutRef { return operandValue(g, cx, f, lt.ty, o); };
+    return giving(g, slot(l));
+};
+
 fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~ {
     if rv is Rvalue::Use { return operandValue(g, cx, f, destType, (rv as Rvalue::Use).o); };
     if rv is Rvalue::Borrow { return placeAddress(g, cx, f, (rv as Rvalue::Borrow).root, (rv as Rvalue::Borrow).steps); };
     if rv is Rvalue::Deref {
         o = (rv as Rvalue::Deref).o;
-        g1 = operandValue(g, cx, f, destType, o);
+        g1 = operandPointer(g, cx, f, o);
         at = g1.last;
         return loadAt(clone(g1), destType, at);
     };
@@ -3272,7 +3350,7 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         return fromPart(clone(g1), cx, dropsOld, ty, dest, src, false);
     };
     if rv is Rvalue::Deref {
-        g1 = operandValue(g, cx, f, ty, (rv as Rvalue::Deref).o);
+        g1 = operandPointer(g, cx, f, (rv as Rvalue::Deref).o);
         src = g1.last;
         return fromPart(clone(g1), cx, dropsOld, ty, dest, src, false);
     };
@@ -3535,6 +3613,25 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
         dest = (st as Statement::Assign).local;
         rv = (st as Statement::Assign).rv;
     };
+    if st is Statement::AssignRef {
+        root = (st as Statement::AssignRef).local;
+        steps = (st as Statement::AssignRef).steps;
+        rv2 = (st as Statement::AssignRef).rv;
+        g1 = placeAddress(g, cx, f, root, steps);
+        if size(g1.error.bytes) > 0 { return g1; };
+        addr = clone(g1.last);
+        ty = assignRefType(cx, f, root, steps);
+        if isAggregate(ty) {
+            if rv2 is Rvalue::Use { g2 = operandAddress(clone(g1), cx, f, ty, (rv2 as Rvalue::Use).o); return copyWords(g2, addr, clone(g2.last), bytesIn(cx, ty)); };
+            if rv2 is Rvalue::Deref { g2 = operandValue(clone(g1), cx, f, ty, (rv2 as Rvalue::Deref).o); return copyWords(g2, addr, clone(g2.last), bytesIn(cx, ty)); };
+            return failG(g1, "an assignment through a reference of this shape is not made by native code yet");
+        };
+        g2 = rvalue(clone(g1), cx, f, ty, rv2);
+        if size(g2.error.bytes) > 0 { return g2; };
+        value = clone(g2.last);
+        g3 = typeText(clone(g2), ty);
+        return emit(g3, "store ".then(g3.last).then(" ").then(value).then(", ptr ").then(addr));
+    };
     lt = localTypeOf(f, dest);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
     returned = entry && dest = 0 && !peek;
@@ -3562,7 +3659,7 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
 };
 
 // A call of a function, given its symbol or the address of it, the types of its parameters and of its result
-fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int) -> Gen ~ {
+fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, ptrs: &List<Bool>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int) -> Gen ~ {
     values = noStrings();
     g1 = g;
     i = 0;
@@ -3571,7 +3668,27 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
         argument = get(args, i);
         given = operandLocalType(f, argument);
         // (a local that is a reference to what the parameter wants is given what it is to: the value itself, or for a value held inline the address of its words, which is the pointer the reference holds)
-        if given.ok && (given.ty is Type::TRef || given.ty is Type::TMutRef) && refTargetOf(given.ty) = wanted {
+        if i < size(ptrs) && get(ptrs, i) {
+            if given.ok && (given.ty is Type::TRef || given.ty is Type::TMutRef) {
+                g1 = operandValue(g1, cx, f, given.ty, argument);
+            } else {
+                if argument is Operand::Copy { g1 = giving(g1, slot((argument as Operand::Copy).local)); };
+                if argument is Operand::Move { g1 = giving(g1, slot((argument as Operand::Move).local)); };
+                if !(argument is Operand::Copy) && !(argument is Operand::Move) {
+                    g1 = operandValue(g1, cx, f, wanted, argument);
+                    if isAggregate(wanted) {
+                        g1 = giving(g1, clone(g1.last));
+                    } else {
+                        value = clone(g1.last);
+                        g1 = entryTemp(clone(g1), 1);
+                        room = clone(g1.last);
+                        g1 = typeText(clone(g1), wanted);
+                        g1 = emit(g1, "store ".then(g1.last).then(" ").then(value).then(", ptr ").then(room));
+                        g1 = giving(g1, room);
+                    };
+                };
+            };
+        } else if given.ok && (given.ty is Type::TRef || given.ty is Type::TMutRef) && refTargetOf(given.ty) = wanted {
             g1 = operandValue(g1, cx, f, given.ty, argument);
             if !isAggregate(wanted) { g1 = loadAt(clone(g1), wanted, g1.last); };
         } else {
@@ -3583,8 +3700,12 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
     arguments = noStrings();
     j = 0;
     while j < size(values) && j < size(argTypes) [{ affirm j >= 0; affirm j <= size(values); affirm j <= size(argTypes); }] ~ {
-        g1 = typeText(g1, get(argTypes, j));
-        arguments = push(arguments, clone(g1.last).then(" ").then(get(values, j)));
+        if j < size(ptrs) && get(ptrs, j) {
+            arguments = push(arguments, "ptr ".then(get(values, j)));
+        } else {
+            g1 = typeText(g1, get(argTypes, j));
+            arguments = push(arguments, clone(g1.last).then(" ").then(get(values, j)));
+        };
         j = j + 1;
     };
     g2 = typeText(g1, returnType);
@@ -3646,7 +3767,7 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
                 target = get(cx.sigs, i);
                 if !target.paramsOk { return failG(g, "Undeclared local of ".then(name)); };
                 if !target.hasReturn { return failG(g, "Function without a result: ".then(name)); };
-                return call(g, cx, entry, f, functionSymbol(name), target.params, target.returns, args, dest, next);
+                return call(g, cx, entry, f, functionSymbol(name), target.params, target.ptrs, target.returns, args, dest, next);
             };
         };
         // a function value: the address of a function, with the types its type says
@@ -3655,7 +3776,7 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
         if ty is Type::TFn {
             g1 = operandValue(g, cx, f, ty, callee);
             address = g1.last;
-            return call(clone(g1), cx, entry, f, address, (ty as Type::TFn).args, Box::unbox((ty as Type::TFn).ret), args, dest, next);
+            return call(clone(g1), cx, entry, f, address, (ty as Type::TFn).args, noBools(), Box::unbox((ty as Type::TFn).ret), args, dest, next);
         };
         return failG(g, "Call of something that is not a function");
     };
@@ -3712,13 +3833,6 @@ fn failedFn(message: &String) -> FnOut [{ }] [{ }] {
     return FnOut { ok: false, error: clone(message), lines: noStrings(), types: noTypes() };
 };
 
-fn hasInt(l: &List<Int>, x: Int) -> Bool [{ }] [{ }] {
-    for y in l {
-        if y = x { return true; };
-    };
-    return false;
-};
-
 // What a local takes in the frame: a word, or for a value held inline all the words it is made of
 fn storageText(cx: &Ctx, t: &Type) -> Res ~ {
     if isAggregate(t) { return Res { ok: true, text: "[".then(showInt(slotsIn(cx, t))).then(" x i64]") }; };
@@ -3727,9 +3841,7 @@ fn storageText(cx: &Ctx, t: &Type) -> Res ~ {
 
 // Whether a parameter is lent and held inline
 fn lentInline(f: &Function, l: Int) -> Bool ~ {
-    if !hasInt(f.borrowed, l) { return false; };
-    lt = localTypeOf(f, l);
-    return lt.ok && isAggregate(lt.ty);
+    return hasInt(f.borrowed, l) || hasInt(f.mutBorrowed, l);
 };
 
 // The declaration of a C function: its parameters and its result are words
@@ -3761,7 +3873,7 @@ fn emitFunction(cx: &Ctx, entry: Bool, symbol: &String, f: &Function) -> FnOut ~
         if !lt.ok { return failedFn(prefix.then("Undeclared local ").then(showInt(p))); };
         r = llvmType(lt.ty);
         if !r.ok { return failedFn(prefix.then(r.text)); };
-        ptexts = push(ptexts, r.text);
+        if lentInline(f, p) { ptexts = push(ptexts, "ptr"); } else { ptexts = push(ptexts, r.text); };
     };
     valueType = "void";
     if f.hasReturn {

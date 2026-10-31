@@ -96,7 +96,9 @@ functionLines = functionLinesWith statementText
 
 functionLinesWith :: (Statement -> String) -> String -> Function -> [String]
 functionLinesWith statementText kind fn =
-    unwords
+    let mutBorrowedLocals = fnMutBorrowed fn
+        fromLocals = fnFrom fn
+     in unwords
         ( [kind, quote (fnName fn), "params", show (length (fnParams fn))]
             ++ map localText (fnParams fn)
             ++ ["returns"]
@@ -107,6 +109,7 @@ functionLinesWith statementText kind fn =
             ++ map quote (fnTypeParams fn)
             ++ ["borrowed", show (length (fnBorrowed fn))]
             ++ map localText (fnBorrowed fn)
+            ++ (if null mutBorrowedLocals && null fromLocals then [] else ["mutborrowed", show (length mutBorrowedLocals)] ++ map localText mutBorrowedLocals ++ ["from", show (length fromLocals)] ++ map localText fromLocals)
         )
         : [ unwords (["local", localText l] ++ maybe ["none"] (\n -> ["some", quote n]) (localName d) ++ typeTokens (localType d))
           | (l, d) <- Map.toList (fnLocals fn)
@@ -445,7 +448,19 @@ headerP = do
     typeParams <- int >>= \n -> replicateM n name
     expect "borrowed"
     borrowed <- int >>= \n -> replicateM n local
-    pure (Function fname params returns Map.empty Map.empty sizeParams typeParams borrowed emptySpec)
+    (mutBorrowed, fromLocals) <- optionalRefHeader
+    pure (Function fname params returns Map.empty Map.empty sizeParams typeParams borrowed mutBorrowed fromLocals (emptySpec{specMutParams = map localIdName mutBorrowed, specFrom = map localIdName fromLocals}))
+  where
+    localIdName (Local n) = "$local " ++ show n
+
+optionalRefHeader :: P ([Local], [Local])
+optionalRefHeader = P (\ts -> case ts of
+    Word "mutborrowed" : rest -> runP (do
+        mutBorrowed <- int >>= \n -> replicateM n local
+        expect "from"
+        fromLocals <- int >>= \n -> replicateM n local
+        pure (mutBorrowed, fromLocals)) rest
+    _ -> Ok (([], []), ts))
 
 localDeclP :: P (Local, LocalDecl)
 localDeclP = do
@@ -494,7 +509,10 @@ functionFrom header rest =
     parseLine headerP header `bindResult` \fn ->
         localsFrom rest `bindResult` \(decls, rest1) ->
             blocksFrom rest1 `bindResult` \(blocks, rest2) ->
-                Ok (fn{fnLocals = Map.fromList decls, fnBlocks = Map.fromList blocks}, rest2)
+                let resolveIds names = [name | lid <- names, Just (LocalDecl _ (Just name)) <- [Map.lookup (readLocal lid) (Map.fromList decls)]]
+                    readLocal s = Local (read (drop 7 s) :: Int)
+                    spec = (fnSpec fn){specMutParams = resolveIds (specMutParams (fnSpec fn)), specFrom = resolveIds (specFrom (fnSpec fn))}
+                 in Ok (fn{fnLocals = Map.fromList decls, fnBlocks = Map.fromList blocks, fnSpec = spec}, rest2)
 
 localsFrom :: [[Token]] -> Result ([(Local, LocalDecl)], [[Token]]) String
 localsFrom (record : rest)
