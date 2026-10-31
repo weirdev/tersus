@@ -37,6 +37,7 @@ import TestMirData
 import TestMirReader
 import TestMirEmit
 import TestBootstrap
+import TestBuiltinRegistry
 
 main :: IO ()
 main = do
@@ -135,6 +136,7 @@ allGroups =
     , testMirReader
     , testMirEmit
     , testBootstrap
+    , testBuiltinRegistry
     ]
 
 groupName :: Test -> String
