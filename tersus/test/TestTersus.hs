@@ -36,6 +36,7 @@ import TestConnectives
 import TestMirData
 import TestMirReader
 import TestMirVerify
+import TestMirErase
 import TestMirEmit
 import TestBootstrap
 
@@ -135,6 +136,7 @@ allGroups =
     , testMirData
     , testMirReader
     , testMirVerify
+    , testMirErase
     , testMirEmit
     , testBootstrap
     ]

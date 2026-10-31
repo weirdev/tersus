@@ -26,7 +26,7 @@ import System.IO
 import System.IO.Unsafe (unsafePerformIO)
 
 import Mir (Program, renderProgram)
-import MirData (writeProgram)
+import MirData (writeProgram, writeProgramWithGhosts)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
 import TersusTypes
@@ -40,7 +40,7 @@ import Utils
 -- `Llvm` prints the LLVM IR of the validated program, and `Build` compiles that to the
 -- executable at the path.
 -- `Assumptions` lists what the program takes on trust (`assume`, `Block::assume` and `axiom`), which the validator does not prove.
-data Command = Check | Run | Interpret | Mir | MirText | Owned | Llvm | Build FilePath | Assumptions deriving (Show, Eq)
+data Command = Check | Run | Interpret | Mir | MirText | GhostText | Owned | Llvm | Build FilePath | Assumptions deriving (Show, Eq)
 
 usage :: String
 usage =
@@ -56,6 +56,8 @@ usage =
         , "  mir <file>    Validate a program, then print its MIR"
         , "  mir --data <file>"
         , "                Validate a program, then print the MIR that native code is made from as data (see MirData)"
+        , "  mir --ghost-data <file>"
+        , "                Validate a program, then print its MIR before its ghosts are erased, as data for the eraser written in Tersus (examples/mir_erase.tersus)"
         , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
         , "  assumptions <file>"
@@ -76,6 +78,7 @@ parseCommandLine ["run", file] = Just (Run, file)
 parseCommandLine ["eval", file] = Just (Interpret, file)
 parseCommandLine ["mir", file] = Just (Mir, file)
 parseCommandLine ["mir", "--data", file] = Just (MirText, file)
+parseCommandLine ["mir", "--ghost-data", file] = Just (GhostText, file)
 parseCommandLine ["owned", file] = Just (Owned, file)
 parseCommandLine ["llvm", file] = Just (Llvm, file)
 parseCommandLine ["build", file, "-o", output] = Just (Build output, file)
@@ -142,6 +145,7 @@ runOther :: String -> Command -> String -> Result String String
 runOther _ Mir source = mapResult renderProgram (compileSource source)
 runOther _ Owned source = mapResult renderProgram (ownedSource source)
 runOther _ MirText source = mapResult writeProgram (ownedSource source)
+runOther _ GhostText source = mapResult writeProgramWithGhosts (validatedSource source)
 runOther _ Assumptions source = mapResult (\found -> if null found then "No assumptions" else intercalate "\n" found) (assumptionsOf source)
 -- (making the IR, compiling it, and running it for `Run`, is left to the caller: the emitter is a program that is built and run, see Bootstrap and Main)
 runOther _ _ _ = Error "not a command that is run on its own"
