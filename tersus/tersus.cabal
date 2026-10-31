@@ -36,6 +36,7 @@ library
       Bootstrap
       Cli
       Hash
+      Libraries
       LlvmRuntime
       Mir
       MirData
