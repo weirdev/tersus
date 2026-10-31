@@ -1,0 +1,10 @@
+// A function can call a function defined after it: the signatures of the functions
+// at the top of the program are gathered before any body is checked.
+fn firstUse(n: Int) -> Int [{ }] [{ }] {
+    return later(n);
+};
+
+fn later(n: Int) -> Int [{ }] [{ }] {
+    return n + 1;
+};
+return firstUse(41);

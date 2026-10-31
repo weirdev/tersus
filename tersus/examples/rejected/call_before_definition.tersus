@@ -1,8 +1,0 @@
-// Rejected: a function can only call functions defined before it.
-fn firstUse(n: Int) -> Int [{ }] [{ }] {
-    return later(n);
-};
-
-fn later(n: Int) -> Int [{ }] [{ }] {
-    return n;
-};

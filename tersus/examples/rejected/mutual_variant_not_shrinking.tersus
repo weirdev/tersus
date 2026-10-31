@@ -1,0 +1,8 @@
+// Rejected: a call of one function of a mutually recursive pair by the other has to shrink the variant.
+fn isOdd(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n {
+    if n = 0 { return 0; } else { return isEven(n); };
+};
+fn isEven(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n {
+    if n = 0 { return 1; } else { return isOdd(n - 1); };
+};
+return isEven(3);

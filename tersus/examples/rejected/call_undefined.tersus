@@ -1,0 +1,5 @@
+// Rejected: a function can only call functions defined somewhere in the program.
+fn firstUse(n: Int) -> Int [{ }] [{ }] {
+    return nowhere(n);
+};
+return firstUse(1);

@@ -1,0 +1,9 @@
+// Functions that call each other, each saying what shrinks: a call of one by the
+// other is checked like a call of a function by itself.
+fn isOdd(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n {
+    if n = 0 { return 0; } else { return isEven(n - 1); };
+};
+fn isEven(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n {
+    if n = 0 { return 1; } else { return isOdd(n - 1); };
+};
+return isEven(10) + isOdd(7);
