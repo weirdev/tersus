@@ -29,7 +29,8 @@ import Mir (Program, renderProgram)
 import MirData (writeProgram, writeProgramWithGhosts)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- `Check` parses a program, lowers it to the MIR and validates that. `Run` is how a program is run: it validates it, compiles it

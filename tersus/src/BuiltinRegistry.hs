@@ -24,7 +24,8 @@ module BuiltinRegistry
 import Data.List (find)
 import Data.Maybe (mapMaybe)
 
-import TersusTypes
+import Types
+import Syntax
 
 -- The one registry of builtins. Every BuiltinFunct constructor has exactly one entry here, carrying its
 -- surface names, its signature scheme (TParam "T"/"U" are scheme variables the checker instantiates

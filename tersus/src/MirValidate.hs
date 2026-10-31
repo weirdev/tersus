@@ -19,7 +19,8 @@ import ProofHelpers (proofIotas, proofVars, substituteProofTerm)
 import ProofState
 import Pretty (renderVarProof)
 import StdLib
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- Validation on the MIR: the validator walks the control-flow graph of each function with a state per path (what is known

@@ -2,7 +2,8 @@ module Pretty (renderProof, renderVarProof, renderValue, renderType) where
 
 import Data.List (intercalate, stripPrefix)
 
-import TersusTypes
+import Types
+import Syntax
 
 -- Renders a proof term in Tersus syntax, e.g. "forall j in 0..size(l): get(l, j) = 0".
 renderVarProof :: Proof Variable -> String

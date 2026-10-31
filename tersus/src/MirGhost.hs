@@ -10,7 +10,7 @@ import qualified Data.Set as Set
 
 import Mir
 import Pretty (renderType)
-import TersusTypes (Arg (..), Size (..), Type (..), instanceName)
+import Types (Arg (..), Size (..), Type (..), instanceName)
 import Utils
 
 -- Permissions (`Block<T>`, POINTERS.md) are ghost values: the validator has them, and the program that runs does not. This pass takes them

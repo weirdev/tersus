@@ -8,7 +8,8 @@ module TestControl
     ) where
 
 import Parse
-import TersusTypes
+import Types
+import Syntax
 import TypeCheck
 import Utils
 import TestHarness

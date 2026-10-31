@@ -27,7 +27,8 @@ import Parse
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
 import TypeCheck (Elaborated (..), elaborate)
-import TersusTypes
+import Types
+import Syntax
 import Utils
 import TestHarness
 

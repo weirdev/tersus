@@ -2,7 +2,9 @@ module TestTraits (testTraits) where
 
 import MirEval (fromMirValue)
 import Pipeline (parseSource, runStatements, validateStatements)
-import TersusTypes
+import Types
+import Syntax
+import Solver
 import TestHarness
 import Utils
 

@@ -23,7 +23,8 @@ import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
 import PreludeSource (cloneSource, eqSource, boxSource, listsSource, mapSource, preludeSource, setSource, stringSource)
 import Pretty (renderVarProof)
-import TersusTypes (Expression (..), FunctBody (..), Size (..), Statement (..), Type (..), ValidationStatement (..), Value (..), exprToProof)
+import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
+import Types (Size (..), Type (..))
 import TypeCheck (elaborate)
 import Utils
 
