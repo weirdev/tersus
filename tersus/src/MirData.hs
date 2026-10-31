@@ -118,6 +118,7 @@ typeTokens ty = case ty of
     TForall sizes types t -> ["forall", show (length sizes)] ++ map quote sizes ++ [show (length types)] ++ map quote types ++ typeTokens t
     TParam n -> ["param", quote n]
     TRef t -> "ref" : typeTokens t
+    TMutRef t -> "mutref" : typeTokens t
 
 sizeTokens :: Size -> [String]
 sizeTokens s = case s of
@@ -131,6 +132,7 @@ statementText s = case s of
     Assign l rv -> unwords ("assign" : localText l : rvalueTokens rv)
     Peek l rv -> unwords ("peek" : localText l : rvalueTokens rv)
     Drop l -> unwords ["drop", localText l]
+    AssignRef root steps rv -> unwords ("assignref" : localText root : show (length steps) : concatMap refStepTokens steps ++ rvalueTokens rv)
     Ghost _ _ -> error "MirData: a ghost statement is not data (see forNative)"
 
 terminatorText :: Terminator -> String
@@ -156,6 +158,12 @@ rvalueTokens rv = case rv of
     AsVariant o name -> "asvariant" : operandTokens o ++ [quote name]
     Clone o -> "clone" : operandTokens o
     TakeField l name field -> ["takefield", localText l, quote name, quote field]
+    Borrow root steps mutable -> (if mutable then "borrowmut" else "borrow") : localText root : show (length steps) : concatMap refStepTokens steps
+    Deref o -> "deref" : operandTokens o
+
+refStepTokens :: RefStep -> [String]
+refStepTokens (RefField ctor field) = ["field", quote ctor, quote field]
+refStepTokens (RefIndex o) = "index" : operandTokens o
 
 operandTokens :: Operand -> [String]
 operandTokens o = case o of
@@ -316,6 +324,7 @@ typeP = word >>= \w -> case w of
         TForall sizes types <$> typeP
     "param" -> TParam <$> name
     "ref" -> TRef <$> typeP
+    "mutref" -> TMutRef <$> typeP
     _ -> failP ("not a type: " ++ w)
 
 sizeP :: P Size
@@ -361,7 +370,16 @@ rvalueP = word >>= \w -> case w of
     "asvariant" -> AsVariant <$> operandP <*> name
     "clone" -> Clone <$> operandP
     "takefield" -> TakeField <$> local <*> name <*> name
+    "borrow" -> Borrow <$> local <*> (int >>= \n -> replicateM n refStepP) <*> pure False
+    "borrowmut" -> Borrow <$> local <*> (int >>= \n -> replicateM n refStepP) <*> pure True
+    "deref" -> Deref <$> operandP
     _ -> failP ("not an rvalue: " ++ w)
+
+refStepP :: P RefStep
+refStepP = word >>= \w -> case w of
+    "field" -> RefField <$> name <*> name
+    "index" -> RefIndex <$> operandP
+    _ -> failP ("not a reference step: " ++ w)
 
 data Line = LStatement Statement | LTerminator Terminator
 
@@ -370,6 +388,7 @@ lineP = word >>= \w -> case w of
     "assign" -> LStatement <$> (Assign <$> local <*> rvalueP)
     "peek" -> LStatement <$> (Peek <$> local <*> rvalueP)
     "drop" -> LStatement . Drop <$> local
+    "assignref" -> LStatement <$> (AssignRef <$> local <*> (int >>= \n -> replicateM n refStepP) <*> rvalueP)
     "goto" -> LTerminator . Goto <$> block
     "switch" -> LTerminator <$> (SwitchBool <$> operandP <*> block <*> block)
     "call" -> do

@@ -200,6 +200,8 @@ match pattern actual = case (pattern, actual) of
     (TBlock p, TBlock a) -> match p a
     (TRef p, a) -> match p a
     (p, TRef a) -> match p a
+    (TMutRef p, a) -> match p a
+    (p, TMutRef a) -> match p a
     (TArrayOf p _, TArrayOf a _) -> match p a
     (TNamed p, TNamed a)
         | Just (b, ps) <- instanceOf p, Just (c, as) <- instanceOf a, b == c, length ps == length as -> concat (zipWith matchArg ps as)

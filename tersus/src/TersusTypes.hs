@@ -55,6 +55,15 @@ data BuiltinFunct
       UnBox
     | -- CloneOf x: clone(x), a copy of x, which has its value. It is the one place a program says that a value is copied.
       CloneOf
+    | -- References (REFERENCES.md, stages 2 and 3): BorrowOf place is `&place`, a read reference to a place; BorrowMutOf
+      -- place is `&mut place`, the exclusive reference to it; DerefOf r is `*r`, the value at the place a reference is to.
+      -- Only the checker writes them. A place is a variable, a field of one, an element of one, or through a reference.
+      BorrowOf
+    | BorrowMutOf
+    | DerefOf
+    | -- OldOf e in a postcondition is `old(e)`: the entry value of the place e is of, which only a contract may write.
+      -- The checker replaces it with the entry snapshot of an update parameter before the lowering sees it.
+      OldOf
     | -- Addresses and permissions (POINTERS.md). An address is a word that allows nothing by itself; every operation on memory is given
       -- the permission to it (a Block, a ghost value), and its contract says what the permission has to allow and what the new one says.
       -- These need no permission: the null address, an address i slots further on, the same address of another type, and an address as
@@ -173,6 +182,9 @@ data Type = TInt | TByte | TBool
     | -- A parameter that the function only reads, so a call does not give it a copy (`fn sum(a: &List<Int>)`). Only a parameter has one:
       -- in the function it is its type, a value it cannot assign, and a call gives it the value as it is.
       TRef Type
+    | -- A reference that may update its referent (REFERENCES.md): as a parameter it is lent exclusively, as a local it is
+      -- made by `&mut place`. It is never a result, a field or an element in stages 1 to 3 (escaping references are stage 4).
+      TMutRef Type
     deriving (Show, Eq, Ord)
 
 -- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
@@ -222,6 +234,7 @@ typeText ty = case ty of
     TBlock t -> "Block<" ++ typeText t ++ ">"
     TUninit t -> "Uninit<" ++ typeText t ++ ">"
     TRef t -> "&" ++ typeText t
+    TMutRef t -> "&mut " ++ typeText t
     TArrayOf t size -> "Array<" ++ typeText t ++ ", " ++ sizeText size ++ ">"
     TFn args ret -> "fn(" ++ intercalate ", " (map typeText args) ++ ") -> " ++ typeText ret
     -- (a name that starts with a small letter has a ` before it, so that it is not read as a size)
@@ -293,6 +306,7 @@ splitArgs = go (0 :: Int) ""
 readType :: String -> Maybe (Type, String)
 readType text =
     case text of
+        '&' : 'm' : 'u' : 't' : ' ' : rest -> (\(t, r) -> (TMutRef t, r)) <$> readType rest
         '&' : rest -> (\(t, r) -> (TRef t, r)) <$> readType rest
         '\'' : rest -> let (name, r) = span isAlphaNum rest in if null name then Nothing else Just (TParam name, r)
         '`' : rest -> let (name, r) = span isAlphaNum rest in if null name then Nothing else Just (TNamed name, r)
@@ -385,6 +399,7 @@ mentionsParameter ty = case ty of
     TBlock t -> mentionsParameter t
     TUninit t -> mentionsParameter t
     TRef t -> mentionsParameter t
+    TMutRef t -> mentionsParameter t
     TArrayOf t size -> mentionsParameter t || sizeParam size
     TFn args ret -> any mentionsParameter (ret : args)
     TNamed name | Just (_, args) <- instanceOf name -> any argParameter args
@@ -411,6 +426,7 @@ substitute sizes types = go
         TBlock t -> TBlock (go t)
         TUninit t -> TUninit (go t)
         TRef t -> TRef (go t)
+        TMutRef t -> TMutRef (go t)
         TFn args ret -> TFn (map go args) (go ret)
         TParam name | Just t <- lookup name types -> t
         TForall ss ts t -> TForall ss ts (substitute [(n, s) | (n, s) <- sizes, n `notElem` ss] [(n, u) | (n, u) <- types, n `notElem` ts] t)
@@ -446,7 +462,7 @@ pattern TArray t n = TArrayOf t (SizeConst n)
 
 -- The declared parameter types and return type of a user function, its size parameters, which are the last parameters (of type Int),
 -- given by the call and not written in it, and its type parameters, which a call gives too
-data Signature = Signature [Type] Type [Variable] [Variable] deriving (Show, Eq, Ord)
+data Signature = Signature [Type] Type [Variable] [Variable] [Variable] deriving (Show, Eq, Ord) -- parameter types, return type, size parameters, type parameters, writes footprint (REFERENCES.md)
 
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.
@@ -518,6 +534,9 @@ data ValidationStatement
     deriving (Show, Eq, Ord)
 data Statement
     = Assign Variable Expression
+    | -- `*place = expression;`: the place a reference is to is given a new value (REFERENCES.md, stage 3). The first
+      -- expression is a dereference, possibly of a field or an element of one. Only the parser writes it.
+      AssignDeref Expression Expression
     | -- Binds a variable in the innermost scope, hiding any variable of that name outside it instead of assigning it.
       -- Never parsed: a match uses it for its scrutinee and the fields its patterns name.
       Let Variable Expression

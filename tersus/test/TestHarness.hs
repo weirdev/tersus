@@ -196,7 +196,7 @@ compiledSources = unsafePerformIO (newMVar Map.empty)
 -- Run tests
 -- A function over integers only
 nativeInts :: Int -> [Statement] -> FunctBody
-nativeInts n = NativeFunct (Signature (replicate n TInt) TInt [] []) Nothing
+nativeInts n = NativeFunct (Signature (replicate n TInt) TInt [] [] []) Nothing
 
 
 -- The growable list of `examples/vec.tersus` (without the comments), which the tests build programs on

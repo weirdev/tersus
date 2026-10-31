@@ -39,7 +39,8 @@ environment program =
   where
     ctors (name, StructDecl fields) = [(name, (name, fields))]
     ctors (name, EnumDecl variants) = [(v, (name, fields)) | (v, fields) <- variants]
-    fnType f = functionType (fnSizeParams f) (fnTypeParams f) [(if p `elem` fnBorrowed f then TRef else id) (maybe (TVar 0) localType (Map.lookup p (fnLocals f))) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
+    fnType f = functionType (fnSizeParams f) (fnTypeParams f) [(if p `elem` fnBorrowed f then refOf f p else id) (maybe (TVar 0) localType (Map.lookup p (fnLocals f))) | p <- fnParams f] (fromMaybe (TVar 0) (fnReturns f))
+    refOf f p = if maybe False (`elem` specMutParams (fnSpec f)) (Map.lookup p (fnLocals f) >>= localName) then TMutRef else TRef
 
 problems :: Program -> Function -> [String]
 problems program fn =
@@ -86,6 +87,7 @@ problems program fn =
     statementProblems (Peek dest rv) = statementProblems (Assign dest rv)
     statementProblems Ghost{} = []
     statementProblems Drop{} = []
+    statementProblems (AssignRef root _ _) = ["assigns through a reference to " ++ show root ++ ", which is not a local" | Nothing <- [localTy root]]
 
     terminatorProblems term = case term of
         SwitchBool test _ _ -> [renderTerminator term ++ " is ill typed: the test is not a Bool" | not (fits env localTy TBool test)]
@@ -125,6 +127,7 @@ problems program fn =
     hasUnknown (TUninit t) = hasUnknown t
     hasUnknown (TBlock t) = hasUnknown t
     hasUnknown (TRef t) = hasUnknown t
+    hasUnknown (TMutRef t) = hasUnknown t
     hasUnknown (TFn args ret) = any hasUnknown (ret : args)
     hasUnknown _ = False
 
@@ -213,6 +216,16 @@ rvalueProblems env localTy d rv =
                     ++ ["the result is " ++ renderType d ++ ", not " ++ name | not (sub env d (TVariant name))]
         Clone o -> [expected d o | not (fits' d o)]
         TakeField l name field -> rvalueProblems env localTy d (ReadField (Copy l) name field)
+        Borrow _ _ mutable -> case d of
+            TMutRef _ | mutable -> []
+            TRef _ | not mutable -> []
+            _ -> ["a reference is assigned to a local of " ++ renderType d]
+        Deref o -> case operandType env localTy o of
+            Just (TRef t) -> ["the result is " ++ renderType d ++ ", not " ++ renderType t | not (sub env d t)]
+            Just (TMutRef t) -> ["the result is " ++ renderType d ++ ", not " ++ renderType t | not (sub env d t)]
+            -- (a borrowed parameter's local has the type it is a reference to)
+            Just t -> ["the result is " ++ renderType d ++ ", not " ++ renderType t | not (sub env d t)]
+            Nothing -> ["* of a value whose type is not known"]
   where
     fits' = fits env localTy
     -- (the operations on addresses, with the permission they are given, or without it after it is erased; see MirGhost)
@@ -329,6 +342,7 @@ fits env localTy wanted o = case o of
 
 constantFits :: Env -> Type -> Constant -> Bool
 constantFits env (TRef wanted) c = constantFits env wanted c
+constantFits env (TMutRef wanted) c = constantFits env wanted c
 constantFits _ TParam{} _ = True
 constantFits env wanted c = case c of
     CInt n -> wanted == TInt || (wanted == TByte && n >= 0 && n < 256) || (case wanted of TWord s b -> n >= fst (wordRange s b) && n < snd (wordRange s b); _ -> False)
@@ -365,6 +379,8 @@ sub env wanted actual = case (wanted, actual) of
         | Just (c, as) <- instanceOf a, Just (d, bs) <- instanceOf b, c == d, length as == length bs -> and (zipWith argSub as bs)
     (TRef a, b) -> sub env a b
     (a, TRef b) -> sub env a b
+    (TMutRef a, b) -> sub env a b
+    (a, TMutRef b) -> sub env a b
     -- (a type parameter is any type to a call, which the checker has seen the types of)
     (TFn xs x, TFn ys y) | length xs == length ys -> and (zipWith (sub env) (x : xs) (y : ys))
     (TParam _, _) -> True
@@ -382,6 +398,7 @@ statementLocals (Assign dest rv) = dest : concatMap operandLocals (rvalueOperand
 statementLocals (Ghost env _) = envLocals env
 statementLocals (Drop l) = [l]
 statementLocals (Peek dest rv) = statementLocals (Assign dest rv)
+statementLocals (AssignRef root steps rv) = root : concatMap operandLocals (rvalueOperands rv) ++ [l | RefIndex o <- steps, l <- operandLocals o]
 
 rvalueOperands :: Rvalue -> [Operand]
 rvalueOperands (Use o) = [o]
@@ -397,6 +414,8 @@ rvalueOperands (IsVariant o _) = [o]
 rvalueOperands (AsVariant o _) = [o]
 rvalueOperands (Clone o) = [o]
 rvalueOperands (TakeField l _ _) = [Copy l]
+rvalueOperands (Borrow _ steps _) = [o | RefIndex o <- steps]
+rvalueOperands (Deref o) = [o]
 
 operandLocals :: Operand -> [Local]
 operandLocals (Copy l) = [l]
@@ -413,6 +432,7 @@ statementFunctions (Assign _ rv) = concatMap operandFunctions (rvalueOperands rv
 statementFunctions (Ghost env g) = envFunctions env ++ [n | GhostFunction n _ _ <- [g]]
 statementFunctions (Drop _) = []
 statementFunctions (Peek dest rv) = statementFunctions (Assign dest rv)
+statementFunctions (AssignRef _ steps rv) = concatMap operandFunctions (rvalueOperands rv) ++ concatMap operandFunctions [o | RefIndex o <- steps]
 
 envLocals :: Mir.Env -> [Local]
 envLocals env = [l | Copy l <- Map.elems env]

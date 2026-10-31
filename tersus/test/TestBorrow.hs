@@ -45,12 +45,56 @@ testBorrow =
                 "types"
                 [ testCase "a lent parameter is not assigned" (rejected "fn f(a: &List<Int>) -> Int { a = push(a, 1); return 0; }; return f([]);" "a is borrowed (&), so it is only read")
                 , testCase "a call gives the value, not a reference" (rejected "fn f(a: &List<Int>) -> Int { return 0; }; return f(3);" "argument 1 of f: expected List<Int>, got Int")
-                , testCase "a & is for a parameter, not a result" (rejected "fn f() -> &List<Int> { return []; }; return 0;" "& is for the parameter of a function")
-                , testCase "nor a field" (rejected "struct S { a: &List<Int> }; return 0;" "& is for the parameter of a function")
-                , testCase "nor a Box" (rejected "fn f(a: Box<&Int>) -> Int { return 0; }; return 0;" "& is for the parameter of a function")
+                , testCase "a & is for a parameter or a local, not a result" (rejected "fn f() -> &List<Int> { return []; }; return 0;" "is written on a parameter or held by a local")
+                , testCase "nor a field" (rejected "struct S { a: &List<Int> }; return 0;" "is written on a parameter or held by a local")
+                , testCase "nor a Box" (rejected "fn f(a: Box<&Int>) -> Int { return 0; }; return 0;" "is written on a parameter or held by a local")
                 , testCase "a function value lends too" (valid "fn total(a: &List<Int>) -> Int { return size(a); }; f = total; return 0;")
                 , testCase "a function that lends is not a function that does not" (rejected "fn total(a: &List<Int>) -> Int { return size(a); }; fn apply(f: fn(List<Int>) -> Int) -> Int { return 0; }; return apply(total);" "expected fn(List<Int>) -> Int, got fn(&List<Int>) -> Int")
                 , testCase "the & can have spaces" (runs "fn f(a: & List<Int>) -> Int { return size(a); }; return f([1]);" (VInt 1))
                 , testCase "a & needs a type" (parseFails "fn f(a: &) -> Int { return 0; }; return 0;")
+                ]
+            , TestList
+                "local read references"
+                [ testCase "a local borrow reads what it is to" (runs "xs = [1, 2, 3]; r = &xs; return size(*r) + get(*r, 0);" (VInt 4))
+                , testCase "a borrow of a field" (runs "struct Point { x: Int, y: Int }; p = Point { x: 3, y: 4 }; r = &p.y; return *r;" (VInt 4))
+                , testCase "a borrow of an element" (runs "xs = [5, 6]; r = &get(xs, 1); return *r;" (VInt 6))
+                , testCase "a reference is given on to a lent parameter" (runs "fn total(a: &List<Int>) -> Int { return size(a); }; xs = [1, 2]; r = &xs; return total(r) + total(&xs);" (VInt 4))
+                , testCase "a place can be used again after the borrow's last use" (runs "xs = [1, 2, 3]; r = &xs; a = size(*r); xs = push(xs, 4); return a * 10 + size(xs);" (VInt 34))
+                , testCase "a read reborrow of an update reference" (runs "x = 4; r = &mut x; s = &*r; a = *s; *r = 9; return a * 10 + *r;" (VInt 49))
+                , testCase "a local reference cannot escape as a value" (rejected "fn f() -> Int { x = 1; r = &x; return r; }; return f();" "got &Int")
+                ]
+            , TestList
+                "update references"
+                [ testCase "an update through a local reference" (runs "x = 4; r = &mut x; *r = *r + 1; return x;" (VInt 5))
+                , testCase "an update of a whole list through a reference" (runs "xs = [1, 2, 3]; r = &mut xs; *r = push(clone(*r), 4); return size(xs) * 10 + get(xs, 3);" (VInt 44))
+                , testCase "an update of an element through a reference" (runs "xs = [1, 2, 3]; r = &mut get(xs, 0); *r = 9; return get(xs, 0) * 10 + get(xs, 1);" (VInt 92))
+                , testCase "disjoint fields can be borrowed for updating together" (runs "struct Point { x: Int, y: Int }; p = Point { x: 1, y: 2 }; a = &mut p.x; b = &mut p.y; *a = 5; *b = 6; return p.x * 10 + p.y;" (VInt 56))
+                , testCase "an update parameter with its contract" (runs "fn increment(n: &mut Int) -> Int writes(n) [{ affirm *n < 100; }] [{ affirm *n = old(*n) + 1; affirm return = *n; }] { *n = *n + 1; return *n; }; x = 4; y = increment(&mut x); return x * 10 + y;" (VInt 55))
+                , testCase "a field update through a parameter, with the rest kept" (runs "struct Point { x: Int, y: Int }; fn bumpX(p: &mut Point) -> Int writes(p.x) [{ }] [{ affirm (*p).x = old((*p).x) + 1; affirm (*p).y = old((*p).y); }] { (*p).x = (*p).x + 1; return (*p).x; }; pt = Point { x: 1, y: 2 }; n = bumpX(&mut pt); return n * 100 + pt.x * 10 + pt.y;" (VInt 222))
+                , testCase "an update in a loop" (runs "fn inc(n: &mut Int) -> Int [{ }] [{ affirm *n = old(*n) + 1; }] { *n = *n + 1; return *n; }; x = 0; while x < 3 [{ affirm x >= 0; affirm x <= 3; }] shrinks 3 - x { y = inc(&mut x); }; return x;" (VInt 3))
+                , testCase "an update reference is not lent silently" (rejected "fn inc(n: &mut Int) -> Int { *n = *n + 1; return *n; }; x = 4; return inc(x);" "is not lent silently")
+                , testCase "assignment is only through an update reference" (rejected "x = 4; r = &x; *r = 5; return x;" "assignment is through a read reference")
+                , testCase "an update parameter is not assigned itself" (rejected "fn f(n: &mut Int) -> Int { n = 5; return *n; }; x = 1; return f(&mut x);" "is borrowed (&mut), so it is assigned through it")
+                , testCase "the writes clause bounds what may change" (rejected "struct Point { x: Int, y: Int }; fn bad(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { (*p).y = 9; return (*p).y; }; pt = Point { x: 1, y: 2 }; return bad(&mut pt);" "writes clause of the function does not allow")
+                , testCase "an old fact is not a fact about the updated value" (rejected "fn inc(n: &mut Int) -> Int [{ }] [{ }] { *n = *n + 1; return *n; }; x = 4; y = inc(&mut x); affirm x = 4; return y;" "Could not prove: x = 4")
+                , testCase "the new fact is the one the contract gives" (valid "fn inc(n: &mut Int) -> Int [{ }] [{ affirm *n = old(*n) + 1; }] { *n = *n + 1; return *n; }; x = 4; y = inc(&mut x); affirm x = 5; return y;")
+                , testCase "an element reference is to the element the index named when it was made" (runs "xs = [1, 2]; i = 0; r = &mut get(xs, i); i = 1; *r = 9; affirm get(xs, 0) = 9; return get(xs, 0) * 10 + get(xs, 1);" (VInt 92))
+                , testCase "a reference to an element that is not there is not made" (rejected "xs = [1]; r = &get(xs, 1); return *r;" "not known to be in the value it borrows")
+                , testCase "a write through a reference has to meet the invariant of the struct it rebuilds" (rejected "struct S { n: Int } invariant [{ affirm n >= 0; }]; s = S { n: 0 }; r = &mut s.n; *r = -1; return s.n;" "does not meet its invariant")
+                , testCase "and of a struct inside it" (rejected "struct A { n: Int } invariant [{ affirm n >= 0; }]; struct S { a: A, m: Int }; s = S { a: A { n: 1 }, m: 2 }; r = &mut s.a.n; *r = -3; return s.m;" "does not meet its invariant")
+                , testCase "a write that meets the invariant is proved, and the invariant is known after it" (runs "struct S { n: Int } invariant [{ affirm n >= 0; }]; s = S { n: 0 }; r = &mut s.n; *r = 5; affirm s.n >= 0; return s.n;" (VInt 5))
+                , testCase "the writes clause binds a reference a local holds" (rejected "struct Point { x: Int, y: Int }; fn bad(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { q = &mut (*p).y; *q = 9; return (*p).y; }; pt = Point { x: 1, y: 2 }; return bad(&mut pt);" "writes clause of the function does not allow")
+                , testCase "and a place given on to a call" (rejected "struct Point { x: Int, y: Int }; fn touch(q: &mut Int) -> Int [{ }] [{ }] { *q = 5; return *q; }; fn bad(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { z = touch(&mut (*p).y); return z; }; pt = Point { x: 1, y: 2 }; return bad(&mut pt);" "this call may change p.y")
+                , testCase "the writes clause allows its field through a local reference" (runs "struct Point { x: Int, y: Int }; fn good(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { q = &mut (*p).x; *q = 9; return (*p).x; }; pt = Point { x: 1, y: 2 }; return good(&mut pt);" (VInt 9))
+                ]
+            , TestList
+                "conflicts"
+                [ testCase "a second update borrow while the first is live" (rejected "x = 4; a = &mut x; b = &mut x; *a = 1; return *b;" "cannot be borrowed for updating while that borrow is live")
+                , testCase "an update borrow while a read borrow is live" (rejected "fn inc(n: &mut Int) -> Int [{ }] [{ }] { *n = *n + 1; return *n; }; x = 1; r = &x; y = inc(&mut x); return *r + y;" "cannot be borrowed for updating while that borrow is live")
+                , testCase "a move while a borrow is live" (rejected "xs = [1, 2]; r = &xs; ys = xs; return size(*r) + size(ys);" "cannot be moved while that borrow is live")
+                , testCase "an owner is not assigned while borrowed" (rejected "x = 4; r = &mut x; x = 9; return *r;" "cannot be assigned while it is borrowed")
+                , testCase "a value is not moved out of a reference" (rejected "xs = [1, 2]; r = &xs; return *r;" "cannot move")
+                , testCase "a value read through a reference is a view, not a move" (runs "xs = [1, 2]; r = &xs; ys = *r; return size(ys) + size(xs);" (VInt 4))
+                , testCase "no update borrow of what a read borrow is to" (rejected "x = 4; r = &x; s = &mut *r; *s = 5; return x;" "cannot be made through a read reference")
                 ]
             ]

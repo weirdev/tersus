@@ -79,6 +79,8 @@ data TcState = TcState
     , tcSizeScope :: [Variable] -- the size parameters of the function being checked
     , tcGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields, with the sizes in them
     , tcReadOnly :: [Variable] -- the parameters of the function being checked that it borrows
+    , tcMutParams :: [Variable] -- the parameters of the function being checked that it may update through (&mut T)
+    , tcWrites :: [Variable] -- the writes footprint of the function being checked, as written (`writes(n.field)`)
     , tcTypeScope :: [Variable] -- the type parameters of the function being checked
     , tcCurrent :: Maybe Variable -- the function being checked, which may call itself
     , tcTraitParams :: Map Name [Variable] -- the types of each trait that has any (`trait Sequence<E>`)
@@ -91,6 +93,7 @@ data TcState = TcState
     , tcLinear :: Set.Set Name -- the structs and enums that are linear
     , tcDrops :: Set.Set Name -- the structs and enums that have a drop
     , tcGhost :: Bool -- whether the expression being checked is the validator's (of a `define`), where what is known of a permission can be read
+    , tcRefAliases :: Map Variable (Variable, [Maybe Variable]) -- each local that holds a reference, and the place it is to: a root and its steps (a field, or an element)
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -112,7 +115,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -196,6 +199,7 @@ zonk (TAddr t) = TAddr <$> zonk t
 zonk (TUninit t) = TUninit <$> zonk t
 zonk (TBlock t) = TBlock <$> zonk t
 zonk (TRef t) = TRef <$> zonk t
+zonk (TMutRef t) = TMutRef <$> zonk t
 zonk (TFn args ret) = TFn <$> mapM zonk args <*> zonk ret
 zonk t = return t
 
@@ -215,6 +219,7 @@ occurs n (TUninit t) = occurs n t
 occurs n (TBlock t) = occurs n t
 occurs n (TNamed name) | Just (_, args) <- instanceOf name = or [occurs n t | ArgType t <- args]
 occurs n (TRef t) = occurs n t
+occurs n (TMutRef t) = occurs n t
 occurs n (TFn args ret) = any (occurs n) (ret : args)
 occurs _ _ = False
 
@@ -248,6 +253,9 @@ unify a b = do
         (TUninit x, TUninit y) -> unify x y
         (TBlock x, TBlock y) -> unify x y
         (TRef x, TRef y) -> unify x y
+        (TMutRef x, TMutRef y) -> unify x y
+        (TMutRef x, TRef y) -> unify x y
+        (TRef x, TMutRef y) -> unify x y
         (TParam x, TParam y) -> return (x == y)
         (TFn xs x, TFn ys y)
             | length xs == length ys -> allM (uncurry unify) (zip (x : xs) (y : ys))
@@ -306,8 +314,28 @@ coerceArguments :: Type -> [(Type, Expression)] -> TC [(Type, Expression)]
 coerceArguments ft inferred = do
     ft' <- zonk ft
     case ft' of
-        TFn pts _ | length pts == length inferred -> mapM (uncurry coerce) (zip (map unref pts) inferred)
+        TFn pts _ | length pts == length inferred -> mapM (uncurry refArg) (zip pts inferred)
         _ -> return inferred
+  where
+    refArg pt arg@(at, expr) = do
+        ptz <- zonk pt
+        atz <- zonk at
+        case (ptz, atz) of
+            (TRef t, TRef u) -> expect "reference argument" t u >> return (ptz, expr)
+            (TRef t, TMutRef u) -> expect "reference argument" t u >> return (ptz, expr)
+            (TMutRef t, TMutRef u) -> expect "reference argument" t u >> checkCallWrites expr >> return (ptz, expr)
+            (TMutRef _, TRef _) -> failTc "Type error: a read reference (&T) cannot be given where an update reference (&mut T) is wanted: borrow the place for updating, as in &mut x"
+            (TMutRef t, _) -> do
+                expect "reference argument" t at
+                case expr of
+                    -- (an update parameter given on is a reborrow, and is written &mut *x where it is not the parameter itself)
+                    Var var -> do
+                        st <- getState
+                        if var `elem` tcMutParams st
+                            then checkCallWrites expr >> return (ptz, expr)
+                            else failTc "Type error: an update reference (&mut T) is not lent silently: write &mut and the place, as in &mut x"
+                    _ -> failTc "Type error: an update reference (&mut T) is not lent silently: write &mut and the place, as in &mut x"
+            _ -> coerce (unref ptz) arg
 
 -- Fails with the context if the types cannot be made equal
 expect :: String -> Type -> Type -> TC ()
@@ -591,7 +619,109 @@ checkFinite root variants = do
 -- The type a parameter has in its function: what it is, without the & that says a call lends it
 unref :: Type -> Type
 unref (TRef t) = t
+unref (TMutRef t) = t
 unref t = t
+
+isMutRef :: Type -> Bool
+isMutRef (TMutRef _) = True
+isMutRef _ = False
+
+-- In a postcondition, old(place) is the entry snapshot of the place's root: the proof name `$old x`, which the
+-- validator binds to the entry version of an update parameter (REFERENCES.md).
+rewriteOldStatement :: ValidationStatement -> ValidationStatement
+rewriteOldStatement (ProofAssert proof) = ProofAssert (rewriteOld proof)
+rewriteOldStatement (Assume proof) = Assume (rewriteOld proof)
+rewriteOldStatement other = other
+
+placeRootOf :: Expression -> Maybe Variable
+placeRootOf expr = case expr of
+    Var var -> Just var
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeRootOf sub
+    F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> placeRootOf sub
+    F (Var "get") [sub, _] -> placeRootOf sub
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [sub] -> placeRootOf sub
+    _ -> Nothing
+
+-- The reference a dereference place is through, and the first field of such a place, if it has one
+derefRoot :: Expression -> Maybe Expression
+derefRoot (F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub]) = derefRoot sub
+derefRoot (F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _]) = derefRoot sub
+derefRoot (F (Var "get") [sub, _]) = derefRoot sub
+derefRoot (F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner]) = Just inner
+derefRoot _ = Nothing
+
+lhsField :: Expression -> Maybe Variable
+lhsField (F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub]) = case derefRoot sub of
+    Just _ -> Just field
+    Nothing -> lhsField sub
+lhsField (F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [_]]) = Just field
+lhsField _ = Nothing
+
+-- A place as the root it starts from and its steps (Just a field, Nothing an element of it), where it is one
+placeSteps :: Expression -> Maybe (Variable, [Maybe Variable])
+placeSteps expr = case expr of
+    Var var -> Just (var, [])
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> fmap (\(r, ss) -> (r, ss ++ [Just field])) (placeSteps sub)
+    F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> fmap (\(r, ss) -> (r, ss ++ [Nothing])) (placeSteps sub)
+    F (Var "get") [sub, _] -> fmap (\(r, ss) -> (r, ss ++ [Nothing])) (placeSteps sub)
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [Var var] -> Just (var, [])
+    _ -> Nothing
+
+-- The place a root and steps are really of, through the references a local holds
+resolveRefPlace :: TcState -> Variable -> [Maybe Variable] -> (Variable, [Maybe Variable])
+resolveRefPlace st var steps = case Map.lookup var (tcRefAliases st) of
+    Just (root, rootSteps) -> resolveRefPlace st root (rootSteps ++ steps)
+    Nothing -> (var, steps)
+
+-- The target a writes entry names: the whole root, or its first field
+writesTarget :: (Variable, [Maybe Variable]) -> Variable
+writesTarget (root, steps) = root ++ case steps of
+    (Just field : _) -> "." ++ field
+    _ -> ""
+
+withinWrites :: [Variable] -> (Variable, [Maybe Variable]) -> Bool
+withinWrites writes place = any (\w -> w == fst place || w == writesTarget place) writes
+
+-- The place an expression that is given for updating is of, where it is one
+updatePlaceOf :: TcState -> Expression -> Maybe (Variable, [Maybe Variable])
+updatePlaceOf st expr = case expr of
+    F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) [place] -> fmap (\(r, ss) -> resolveRefPlace st r ss) (placeSteps place)
+    Var var -> Just (resolveRefPlace st var [])
+    _ -> Nothing
+
+-- A call that is given a place of an update parameter for updating may change it: the writes clause bounds that too
+checkCallWrites :: Expression -> TC ()
+checkCallWrites expr = do
+    st <- getState
+    case (tcWrites st, updatePlaceOf st expr) of
+        (writes@(_ : _), Just place@(root, _))
+            | root `elem` tcMutParams st ->
+                unless (withinWrites writes place) $
+                    failTc ("Type error: this call may change " ++ writesTarget place ++ ", which the writes clause of the function does not allow (writes(" ++ intercalate ", " writes ++ "))")
+        _ -> return ()
+
+-- What a binding makes the variable an alias of, when it is made by &place or &mut place, and forgetting it otherwise
+recordAlias :: Variable -> Expression -> TC ()
+recordAlias var expr = do
+    st <- getState
+    let alias = case expr of
+            F (Val (VFunct _ _ _ (BuiltinFunct BorrowOf) _)) [place] -> placeSteps place
+            F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) [place] -> placeSteps place
+            _ -> Nothing
+    case alias of
+        Just (root, steps) -> putState st{tcRefAliases = Map.insert var (resolveRefPlace st root steps) (tcRefAliases st)}
+        Nothing -> putState st{tcRefAliases = Map.delete var (tcRefAliases st)}
+
+rewriteOld :: VariableProof -> VariableProof
+rewriteOld (FApp (CTerm (VFunct _ _ _ (BuiltinFunct OldOf) _)) [inner]) = snapshot inner
+  where
+    snapshot (FApp (CTerm (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [ATerm var]) = ATerm ("$old " ++ var)
+    snapshot (ATerm var) = ATerm ("$old " ++ var)
+    snapshot (FApp funct args) = FApp funct (map snapshot args)
+    snapshot other = other
+rewriteOld (FApp funct args) = FApp (rewriteOld funct) (map rewriteOld args)
+rewriteOld (Forall var guards body) = Forall var (map rewriteOld guards) (rewriteOld body)
+rewriteOld other = other
 
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
@@ -611,7 +741,8 @@ checkType (TParam name) = do
     s <- getState
     unless (name `elem` tcTypeScope s) $ failTc ("Type error: " ++ name ++ " is not a type here: a function declares a type parameter, as in fn f<" ++ name ++ ">(a: " ++ name ++ ")")
 checkType (TFn args ret) = mapM_ (noGhostIn "a function value") (ret : map unref args) >> mapM_ checkType (ret : map unref args)
-checkType (TRef _) = failTc "Type error: & is for the parameter of a function, as in fn f(a: &List<Int>), and a type is not a reference anywhere else"
+checkType (TRef _) = failTc "Type error: &T is a reference, as in fn f(a: &List<Int>): it is written on a parameter or held by a local, and a value, a field or a result is never one (a reference that escapes is not in the language yet)"
+checkType (TMutRef _) = failTc "Type error: &mut T is a reference, as in fn f(a: &mut List<Int>): it is written on a parameter or held by a local, and a value, a field or a result is never one (a reference that escapes is not in the language yet)"
 checkType _ = return ()
 
 -- A permission is a ghost value: it is erased before the program runs, so it can only be where it is erased with what holds it (a local, a
@@ -877,6 +1008,7 @@ arrayElement ty = case ty of
     TFn{} -> False
     TForall{} -> False
     TRef{} -> False
+    TMutRef{} -> False
     TArrayOf t _ -> arrayElement t
     _ -> True
 
@@ -1024,7 +1156,7 @@ valueType (VList elements) = do
     mapM_ (expect "list element" element) types
     return (TList element)
 valueType (VFunct _ _ _ (BuiltinFunct funct) _) = builtinType funct
-valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types) _ _) _) = return (functionType sizes types ptys rty)
+valueType (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _writes) _ _) _) = return (functionType sizes types ptys rty)
 valueType (VFnRef name) = failTc ("Type error: " ++ name ++ " is a function of the MIR, which a program cannot write")
 
 -- Checks with the sizes that a function declares in scope
@@ -1095,14 +1227,41 @@ checkItem top ctx env stmt =
 checkStatement :: Bool -> Ctx -> Env -> Statement -> TC (Ctx, Env, Statement)
 checkStatement top ctx env stmt =
     case stmt of
-        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types) term body) proofs)) -> do
+        Assign var (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types _writes) term body) proofs)) -> do
             templates <- tcTemplates <$> getState
             when (Map.member var templates) $ failTc ("Type error: " ++ var ++ " is already defined")
             let fnTy = functionType sizes types ptys rty
                 ctx' = if top then ctx{ctxFns = Map.insert var fnTy (ctxFns ctx)} else ctx
             env' <- assignVar ctx env var fnTy
-            (term', ins', outs', body') <- checkFunction ctx' var params ptys rty sizes types ins outs term body
-            return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty sizes types) term' body') proofs)))
+            (term', ins', outs', body') <- checkFunction ctx' var params ptys rty sizes types ins outs _writes term body
+            return (ctx', env', Assign var (Val (VFunct params ins' outs' (NativeFunct (Signature ptys rty sizes types _writes) term' body') proofs)))
+        AssignDeref lhs expr -> do
+            -- (the place must be through an update reference; the value is evaluated before the replacement, which
+            -- the lowering keeps by lowering the value first)
+            (targetTy, lhs') <- inferExprR ctx env lhs
+            case derefRoot lhs of
+                Just refExpr -> do
+                    st <- getState
+                    mutable <- case refExpr of
+                        Var var | var `elem` tcMutParams st -> return True
+                        _ -> do
+                            (rt, _) <- inferExprR ctx env refExpr
+                            rtz <- zonk rt
+                            return (isMutRef rtz)
+                    unless mutable $ failTc "Type error: assignment is through a read reference (&T), which does not allow updating what it is to: borrow the place with &mut"
+                    -- (a writes footprint bounds which places of an update parameter this function may change,
+                    -- through a reference a local holds as much as through the parameter itself)
+                    case (placeSteps lhs, tcWrites st) of
+                        (Just (root, steps), writes@(_ : _)) -> do
+                            let place = resolveRefPlace st root steps
+                            when (fst place `elem` tcMutParams st) $
+                                unless (withinWrites writes place) $
+                                    failTc ("Type error: this assignment changes " ++ writesTarget place ++ ", which the writes clause of the function does not allow (writes(" ++ intercalate ", " writes ++ "))")
+                        _ -> return ()
+                Nothing -> failTc "Type error: assignment through a reference is written *r = value; or (*r).field = value;"
+            inferred <- inferExprR ctx env expr
+            (_, expr') <- coerce targetTy inferred
+            return (ctx, env, AssignDeref lhs' expr')
         Assign var expr -> do
             notSize var
             inferred <- inferExprR ctx env expr
@@ -1111,10 +1270,12 @@ checkStatement top ctx env stmt =
                 existing : _ -> coerce existing inferred
                 [] -> return inferred
             env' <- assignVar ctx env var t
+            recordAlias var expr'
             return (ctx, env', Assign var expr')
         Let var expr -> do
             notSize var
             (t, expr') <- inferExprR ctx env expr
+            recordAlias var expr'
             case env of
                 scope : outer -> return (ctx, Map.insert var t scope : outer, Let var expr')
                 [] -> return (ctx, [Map.singleton var t], Let var expr')
@@ -1183,8 +1344,8 @@ checkStatement top ctx env stmt =
             return (ctx, env, While cond' invariant' term' body')
 
 -- The body sees its parameters, the functions defined before it (and itself), and nothing else
-checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement])
-checkFunction ctx name params ptys rty sizes types ins outs term body = do
+checkFunction :: Ctx -> Variable -> [Variable] -> [Type] -> Type -> [Variable] -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> [Variable] -> Maybe Termination -> [Statement] -> TC (Maybe Termination, [ValidationStatement], [ValidationStatement], [Statement])
+checkFunction ctx name params ptys rty sizes types ins outs writes term body = do
     outer <- getState
     -- the sizes and types the function declares are the names its types may use, and the sizes are the last parameters (Ints)
     putState outer{tcSizeScope = sizes, tcTypeScope = types, tcCurrent = Just name}
@@ -1196,16 +1357,30 @@ checkFunction ctx name params ptys rty sizes types ins outs term body = do
         else return ()
     let bodyCtx = ctx{ctxReturn = Just rty}
         paramEnv = [Map.fromList (zip params (map unref ptys))]
-    -- (a parameter that is borrowed is only read)
+    -- (a parameter that is borrowed is only read; one that may update is assigned only through it)
     withBorrowed <- getState
-    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys]}
+    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty}
+    -- (writes(...) names update parameters, whole or by a field)
+    forM_ writes $ \w -> do
+        let (root, field) = case break (== '.') w of
+                (r, '.' : f) -> (r, Just f)
+                (r, _) -> (r, Nothing)
+        case lookup root (zip params ptys) of
+            Just (TMutRef referent) -> case field of
+                Nothing -> return ()
+                Just f -> do
+                    fieldTy <- readField Nothing f referent
+                    _ <- zonk fieldTy
+                    return ()
+            _ -> failTc ("Type error: writes(" ++ w ++ ") in " ++ name ++ " does not name an update parameter (&mut T) of the function")
+    let outsOld = map rewriteOldStatement outs
     (inEnv, ins') <- checkValidations bodyCtx paramEnv ins
     term' <- resolveTermination bodyCtx inEnv term
-    (_, outs') <- checkValidations bodyCtx (Map.insert "return" rty (head inEnv) : tail inEnv) outs
+    (_, outs') <- checkValidations bodyCtx (Map.insert "return" rty (Map.fromList [("$old " ++ p, unref t) | (p, t) <- zip params ptys, isMutRef t] `Map.union` head inEnv) : tail inEnv) outsOld
     (_, body') <- checkStatements False bodyCtx (Map.empty : paramEnv) body
     -- (the sizes of the function end with it)
     after <- getState
-    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcCurrent = tcCurrent outer}
+    putState after{tcSizeScope = tcSizeScope outer, tcTypeScope = tcTypeScope outer, tcReadOnly = tcReadOnly outer, tcMutParams = tcMutParams outer, tcWrites = tcWrites outer, tcRefAliases = tcRefAliases outer, tcCurrent = tcCurrent outer}
     return (term', ins', outs', body')
   where
     nub' = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
@@ -1216,6 +1391,8 @@ notSize var = do
     s <- getState
     when (var `elem` tcReadOnly s) $
         failTc ("Type error: " ++ var ++ " is borrowed (&), so it is only read: a copy of it can be assigned to another variable")
+    when (var `elem` tcMutParams s) $
+        failTc ("Type error: " ++ var ++ " is borrowed (&mut), so it is assigned through it, as in *" ++ var ++ " = value;: the parameter itself cannot be assigned")
     when (var `elem` tcSizeScope s) $
         failTc ("Type error: " ++ var ++ " is a size parameter of the function, which a call gives, and it cannot be assigned")
 
@@ -1308,6 +1485,27 @@ inferExprR ctx env expr =
             inferred <- if length declared == length inferred0 then mapM (uncurry coerce) (zip (map snd declared) inferred0) else return inferred0
             t <- checkConstruct name fields (map fst inferred)
             return (t, F funct (map snd inferred))
+        -- &place, &mut place: a reference to a place (REFERENCES.md, stages 2 and 3)
+        F (Val (VFunct _ _ _ (BuiltinFunct BorrowOf) _)) [place] -> borrowCall False place
+        F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) [place] -> borrowCall True place
+        F (Val (VFunct _ _ _ (BuiltinFunct BorrowOf) _)) args -> failTc ("Type error: & takes a place, got " ++ show (length args) ++ " arguments")
+        F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) args -> failTc ("Type error: &mut takes a place, got " ++ show (length args) ++ " arguments")
+        -- *r: the value a reference is to
+        F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
+            st <- getState
+            case inner of
+                Var var | var `elem` tcReadOnly st || var `elem` tcMutParams st -> do
+                    (t, inner') <- inferExprR ctx env inner
+                    return (t, F (Val (builtinFunct DerefOf)) [inner'])
+                _ -> do
+                    (et, inner') <- inferExprR ctx env inner
+                    etz <- zonk et
+                    case etz of
+                        TRef t -> return (t, F (Val (builtinFunct DerefOf)) [inner'])
+                        TMutRef t -> return (t, F (Val (builtinFunct DerefOf)) [inner'])
+                        _ -> failTc ("Type error: * is only through a reference, and the value here is " ++ renderType etz ++ ": write *r for a reference r, or clone(x) for a copy of a value")
+        F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) args -> failTc ("Type error: * takes a reference, got " ++ show (length args) ++ " arguments")
+        F (Val (VFunct _ _ _ (BuiltinFunct OldOf) _)) _ -> failTc "Type error: old(...) is only written in a postcondition, of the place an update parameter is to"
         -- Box::new(x): x held in a Box, which has its value
         F (Var "Box::new") args -> case args of
             [x] -> do
@@ -1420,6 +1618,42 @@ inferExprR ctx env expr =
             | Just (path, function) <- traitPath name -> traitCall path function args
         F funct args -> general funct args
   where
+    borrowCall mutable place = do
+        unless (placeForm place) $ failTc "Type error: & is to a place (a variable, a field of one, an element of one, or through a reference, as in &p.x, &get(xs, 0) or &*r): bind the value to a variable first if it needs borrowing"
+        st <- getState
+        (pt, place') <- inferExprR ctx env place
+        ptz <- zonk pt
+        case ptz of
+            TRef _ -> failTc "Type error: a reference to a reference is not in the language: write &*r to borrow what a reference is to"
+            TMutRef _ -> failTc "Type error: a reference to a reference is not in the language: write &*r to borrow what a reference is to"
+            _ -> return ()
+        when mutable $ do
+            case placeRoot place of
+                Just root | root `elem` tcReadOnly st -> failTc ("Type error: " ++ root ++ " is lent (&T) to this function and can only be read, so it cannot be borrowed for updating (&mut)")
+                _ -> return ()
+            case place of
+                F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
+                    (it, _) <- inferExprR ctx env inner
+                    itz <- zonk it
+                    case itz of
+                        TRef _ -> failTc "Type error: an update reference (&mut) cannot be made through a read reference (&T): the read reference does not allow updating what it is to"
+                        _ -> return ()
+                _ -> return ()
+        return (if mutable then TMutRef ptz else TRef ptz, F (Val (builtinFunct (if mutable then BorrowMutOf else BorrowOf))) [place'])
+    placeForm expr = case expr of
+        Var _ -> True
+        F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeForm sub
+        F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> placeForm sub
+        F (Var "get") [sub, _] -> placeForm sub
+        F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [_] -> True
+        _ -> False
+    placeRoot expr = case expr of
+        Var var -> Just var
+        F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeRoot sub
+        F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> placeRoot sub
+        F (Var "get") [sub, _] -> placeRoot sub
+        F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [sub] -> placeRoot sub
+        _ -> Nothing
     cloneCall args = case args of
         [x] -> do
             (xt, x') <- inferExprR ctx env x
@@ -1428,7 +1662,7 @@ inferExprR ctx env expr =
         _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
     methodCall method (receiver : args) = do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
-            receiverTy <- zonk (fst (head inferred))
+            receiverTy <- unref <$> zonk (fst (head inferred))
             case (listMethod method, receiverTy) of
                 -- l.push(x), l.size(), a.get(i): the function of that name on a list or an array
                 -- (with the arguments that are inferred already: a chain of them is inferred once)
@@ -1576,7 +1810,7 @@ ownerThroughTrait trait functions function ats =
     case [f | f <- functions, traitFnName f == function] of
         [] -> failTc ("Type error: trait " ++ trait ++ " has no function " ++ function)
         f : _ -> do
-            let Signature ptys _ _ _ = traitFnSignature f
+            let Signature ptys _ _ _ _writes = traitFnSignature f
                 path = trait ++ "::" ++ function
             when (length ptys /= length ats) $
                 failTc ("Type error: " ++ path ++ " takes " ++ show (length ptys) ++ " arguments, got " ++ show (length ats))
@@ -1601,7 +1835,7 @@ checkTrait name params functions = do
     putState s{tcTypes = Map.insert "Self" [] (tcTypes s), tcTraitSelf = Just (functions ++ concat (Map.elems (tcTraits s)))}
     -- (the types of the trait are types in its signatures and contracts)
     withGenerics [] params $ forM_ functions $ \f -> do
-        let Signature ptys rty _ _ = traitFnSignature f
+        let Signature ptys rty _ _ _writes = traitFnSignature f
             ctx = Ctx Map.empty (Just rty)
             paramEnv = [Map.fromList (zip (traitFnParams f) (map unref ptys))]
         mapM_ checkType (rty : map unref ptys)
@@ -1641,6 +1875,7 @@ substSelf owner (TAddr t) = TAddr (substSelf owner t)
 substSelf owner (TUninit t) = TUninit (substSelf owner t)
 substSelf owner (TBlock t) = TBlock (substSelf owner t)
 substSelf owner (TRef t) = TRef (substSelf owner t)
+substSelf owner (TMutRef t) = TMutRef (substSelf owner t)
 substSelf owner (TFn args ret) = TFn (map (substSelf owner) args) (substSelf owner ret)
 substSelf _ t = t
 
@@ -1700,7 +1935,7 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
         Nothing -> return (ctx', env', checked)
         Just traitName -> do
             let here = "impl " ++ traitName ++ " for " ++ typeName
-                defined = [(implFunctionPart name, (params, Signature ptys rty sizes types, term)) | Assign name (Val (VFunct params _ _ (NativeFunct (Signature ptys rty sizes types) term _) _)) <- checked]
+                defined = [(implFunctionPart name, (params, Signature ptys rty sizes types _writes, term)) | Assign name (Val (VFunct params _ _ (NativeFunct (Signature ptys rty sizes types _writes) term _) _)) <- checked]
                 wanted = map traitFnName required
                 -- (what the trait asks for, with Self the type and the types of the trait the ones this impl gives)
                 inImpl = substTraitArgs traitParams traitArgs . substSelfAs selfName selfType
@@ -1711,17 +1946,17 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
                 missing : _ -> failTc ("Type error: " ++ here ++ " lacks the function " ++ missing)
                 [] -> return ()
             wrappers <- forM required $ \f -> do
-                let Signature ptys rty _ _ = traitFnSignature f
-                    expected = Signature (map inImpl ptys) (inImpl rty) [] []
+                let Signature ptys rty _ _ _writes = traitFnSignature f
+                    expected = Signature (map inImpl ptys) (inImpl rty) [] [] []
                 case lookup (traitFnName f) defined of
-                    Just (implParams, Signature aptys arty asizes atypes, term) -> do
+                    Just (implParams, Signature aptys arty asizes atypes _writes, term) -> do
                         -- (the sizes of the type, and any of the function, are given to it as its last parameters, which the
                         -- trait does not declare, so they are not part of the type the trait asks for)
-                        let actual = Signature (take (length aptys - length asizes) aptys) arty [] []
+                        let actual = Signature (take (length aptys - length asizes) aptys) arty [] [] []
                         when (actual /= expected) $
                             failTc ("Type error: " ++ here ++ ": " ++ traitFnName f ++ " is " ++ renderSignature actual ++ ", but " ++ traitName ++ " declares " ++ renderSignature expected)
                         -- (an impl of a struct with types is for any of them, and the check of it is too)
-                        return (wrapper traitName typeName f (traitFnParams f ++ drop (length implParams - length asizes) implParams) (Signature aptys arty asizes atypes) term)
+                        return (wrapper traitName typeName f (traitFnParams f ++ drop (length implParams - length asizes) implParams) (Signature aptys arty asizes atypes _writes) term)
                     Nothing -> failTc ("Type error: " ++ here ++ " lacks the function " ++ traitFnName f)
             (ctx'', env'', wrapped) <- definitions False (ctx', env', []) wrappers
             return (ctx'', env'', [CopyDef typeName | traitName == "Copy", null required] ++ [DropDef typeName | traitName == "Drop"] ++ checked ++ wrapped)
@@ -1737,11 +1972,11 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
             _ -> return ()
         (c', e', stmt') <- checkStatement True c e stmt
         definitions own (c', e', done ++ [stmt']) rest
-    renderSignature (Signature ptys rty _ _) = renderType (TFn ptys rty)
+    renderSignature (Signature ptys rty _ _ _writes) = renderType (TFn ptys rty)
     -- (Self in the signature of a function of the impl is the type the impl is for, as the parser wrote it and as it is)
     rewriteSignature asSelf stmt = case stmt of
-        Assign name (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types) term body) proofs)) ->
-            Assign name (Val (VFunct params ins outs (NativeFunct (Signature (map asSelf ptys) (asSelf rty) sizes types) term body) proofs))
+        Assign name (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types _writes) term body) proofs)) ->
+            Assign name (Val (VFunct params ins outs (NativeFunct (Signature (map asSelf ptys) (asSelf rty) sizes types _writes) term body) proofs))
         _ -> stmt
     wrapper traitName owner f params signature term =
         Assign
@@ -1767,6 +2002,16 @@ inferProofR ctx env proof =
         ATerm var -> (\t -> (t, proof)) <$> lookupProofVar ctx env var
         BVar var -> (\t -> (t, proof)) <$> lookupVar ctx env var
         CTerm value -> (\t -> (t, proof)) <$> valueType value
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct OldOf) _)) _ -> failTc "Type error: old(...) is only written in a postcondition, of the place an update parameter is to"
+        FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
+            (t, inner') <- inferProofR ctx env inner
+            tz <- zonk t
+            referent <- case tz of
+                TRef u -> return u
+                TMutRef u -> return u
+                -- (a borrowed parameter is its referent in the body, so *p is p)
+                _ -> return tz
+            return (referent, FApp funct [inner'])
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
             (structTy, struct') <- inferProofR ctx env struct
             let go (ty, proof) = do
@@ -1900,7 +2145,7 @@ inferProofR ctx env proof =
         TFn{} -> True
         TForall{} -> True
         _ -> False
-    signatureTypes f = let Signature ptys rty _ _ = traitFnSignature f in (ptys, rty)
+    signatureTypes f = let Signature ptys rty _ _ _writes = traitFnSignature f in (ptys, rty)
     ghostCall full inferred = do
         ft <- lookupVar ctx env full
         ftz <- zonk ft
@@ -1942,8 +2187,10 @@ permissionArgument b args infer
             return $ case t' of
                 TBlock _ -> True
                 TRef (TBlock _) -> True
+                TMutRef (TBlock _) -> True
                 TUninit _ -> b `elem` [BlockFilled, BlockContents]
                 TRef (TUninit _) -> b `elem` [BlockFilled, BlockContents]
+                TMutRef (TUninit _) -> b `elem` [BlockFilled, BlockContents]
                 _ -> False
         [] -> return False
 
@@ -2077,6 +2324,7 @@ isExpanding scope ty = case ty of
         TUninit u -> usesParam u
         TBlock u -> usesParam u
         TRef u -> usesParam u
+        TMutRef u -> usesParam u
         TArrayOf u _ -> usesParam u
         TFn args ret -> any usesParam (ret : args)
         -- (a struct that is given a type is made of it: Wrap<T>)
@@ -2093,6 +2341,7 @@ hasFunction ty = case ty of
     TBlock t -> hasFunction t
     TArrayOf t _ -> hasFunction t
     TRef t -> hasFunction t
+    TMutRef t -> hasFunction t
     _ -> False
 
 -- A call of a function with size parameters, from the types of the arguments that are written: the type of the result, and the
@@ -2133,7 +2382,7 @@ sizeArgument name n size = case size of
 -- Functions with bounds
 
 declareTemplate :: Ctx -> Name -> [Bound] -> [Variable] -> Signature -> [ValidationStatement] -> [ValidationStatement] -> Maybe Termination -> [Statement] -> TC ()
-declareTemplate ctx name bounds params signature@(Signature _ _ _ types) ins outs term body = do
+declareTemplate ctx name bounds params signature@(Signature _ _ _ types _writes) ins outs term body = do
     s <- getState
     when (Map.member name (ctxFns ctx) || Map.member name (tcTemplates s) || Map.member name stdLibCtx) $ failTc ("Type error: " ++ name ++ " is already defined")
     forM_ bounds $ \(param, trait, args) -> do
@@ -2320,7 +2569,7 @@ traitArgumentsOf trait ty = do
 -- and the function is checked for those types, once (it is a function of the program named after them: total[Vec<Int>]). The call is a call of that.
 templateCall :: Name -> Template -> [(Type, Expression)] -> TC (Type, Name, [Expression], [Expression])
 templateCall name template inferred = do
-    let Signature ptys rty sizes types = tmplSignature template
+    let Signature ptys rty sizes types _writes = tmplSignature template
     (instantiated, sizeVars, typeVars) <- instantiateGenerics sizes types (TFn ptys rty)
     case instantiated of
         TFn pts result
@@ -2387,20 +2636,21 @@ templateCall name template inferred = do
         TBlock u -> unknown u
         TNamed n | Just (_, args) <- instanceOf n -> or [unknown u | ArgType u <- args]
         TRef u -> unknown u
+        TMutRef u -> unknown u
         TArrayOf u _ -> unknown u
         TFn args r -> any unknown (r : args)
         _ -> False
     -- the function with the types it was called with in place of its own, which is checked like any function
     makeInstance instanceName' bindings = do
-        let Signature ptys rty sizes _ = tmplSignature template
+        let Signature ptys rty sizes _ _writes = tmplSignature template
             ptys' = map (substitute [] bindings) ptys
             rty' = substitute [] bindings rty
             fnTy = functionType sizes [] ptys' rty'
             ctx = (tmplCtx template){ctxFns = Map.insert instanceName' fnTy (ctxFns (tmplCtx template))}
         s <- getState
         putState s{tcInstances = Map.insert instanceName' fnTy (tcInstances s), tcActive = name : tcActive s}
-        (term', ins', outs', body') <- checkFunction ctx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) (tmplTermination template) (tmplBody template)
-        let function = Assign instanceName' (Val (VFunct (tmplParams template) ins' outs' (NativeFunct (Signature ptys' rty' sizes []) term' body') []))
+        (term', ins', outs', body') <- checkFunction ctx instanceName' (tmplParams template) ptys' rty' sizes [] (tmplRequires template) (tmplEnsures template) [] (tmplTermination template) (tmplBody template)
+        let function = Assign instanceName' (Val (VFunct (tmplParams template) ins' outs' (NativeFunct (Signature ptys' rty' sizes [] []) term' body') []))
         s' <- getState
         putState s'{tcEmitted = tcEmitted s' ++ [function], tcActive = tcActive s}
 
@@ -2417,7 +2667,18 @@ checkCall name ft ats = do
             | length pts /= length ats ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts) ++ " arguments, got " ++ show (length ats))
             | otherwise -> do
-                mapM_ (\(i, pt, at) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at) (zip3 [1 ..] pts ats)
+                mapM_ (\(i, pt, at) -> do
+                    ptz <- zonk pt
+                    atz <- zonk at
+                    case (ptz, atz) of
+                        (TRef t, TRef u) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) t u
+                        (TRef t, TMutRef u) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) t u
+                        (TMutRef t, TMutRef u) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) t u
+                        (TMutRef _, TRef _) -> failTc ("Type error: argument " ++ show (i :: Int) ++ " of " ++ name ++ " is a read reference (&T), and an update reference (&mut T) is wanted")
+                        (TMutRef t, _) -> do
+                            expect ("argument " ++ show (i :: Int) ++ " of " ++ name) t atz
+                            failTc ("Type error: argument " ++ show (i :: Int) ++ " of " ++ name ++ " is lent for updating (&mut), so the call writes it with &mut: write &mut and the place, as in &mut x")
+                        _ -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref ptz) atz) (zip3 [1 ..] pts ats)
                 return rty
         TVar _ -> do
             rty <- freshVar

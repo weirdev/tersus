@@ -151,11 +151,11 @@ externStatement = do
     whitespace
     name <- variable
     whitespace
-    (params, returnType, inputReqs, outputReqs) <- functHeader
+    (params, returnType, inputReqs, outputReqs, writes) <- functHeader
     termination <- terminationClause
     mapM_ (\(p, t) -> unless (cWord t) (fail ("the parameter " ++ p ++ " of extern fn " ++ name ++ " is not an Int, a Byte, a Bool, an address or a permission"))) params
     unless (cWord returnType) $ fail ("extern fn " ++ name ++ " gives a value that is not an Int, a Byte, a Bool, an address or a permission")
-    return [ExternDef name, Assign name (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType [] []) termination []) []))]
+    return [ExternDef name, Assign name (Val (VFunct (map fst params) inputReqs outputReqs (NativeFunct (Signature (map snd params) returnType [] [] writes) termination []) []))]
   where
     cWord t = case t of
         TInt -> True
@@ -178,7 +178,7 @@ builtinStatement = do
     whitespace
     name <- variable
     whitespace
-    (params, _, inputReqs, outputReqs) <- functHeader
+    (params, _, inputReqs, outputReqs, _) <- functHeader
     builtin <- case lookup name stdlibBuiltinDecls of
         Just b -> return b
         Nothing -> fail ("builtin fn " ++ name ++ " is not a builtin of the standard library (StdLib.stdlibBuiltinDecls)")
@@ -244,6 +244,7 @@ statement =
         <|> traitStatement
         <|> implStatement
         <|> functStatement
+        <|> derefAssignStatement
         <|> callStatement
         <|> assignStatement
         <|> blockStatement
@@ -257,6 +258,20 @@ assignStatement = do
     expr <- expression
     whitespace
     return (Assign var expr)
+
+-- `*r = value;` and `(*r).field = value;`: the place a reference is to is given a new value.
+derefAssignStatement :: Parser Statement
+derefAssignStatement = try $ do
+    lhs <- derefPlace
+    whitespace
+    void (char '=')
+    notFollowedBy (char '=')
+    whitespace
+    expr <- expression
+    whitespace
+    return (AssignDeref lhs expr)
+  where
+    derefPlace = withFields expressionApply Nothing (derefExpression <|> parensParse derefExpression)
 
 -- `(a, b) = e;`: the parts of a tuple, each given to a name. The tuple is held by a name that no program can write (`$tuple L:C`, from the
 -- place of the statement), and each part is read from it, so each is moved on its own and the tuple need not be Clone.
@@ -757,13 +772,13 @@ functStatement = do
     let allTypes = typeParams ++ filter isTypeParam implParams
         allSizes = sizes ++ filter (not . isTypeParam) implParams
     modifyState (\d -> d{declTypeParams = allTypes})
-    (params, returnType, inputReqs, outputReqs) <- functHeader
+    (params, returnType, inputReqs, outputReqs, writes) <- functHeader
     termination <- terminationClause
     fnBody <- curlyBracesParse statementBlock
     whitespace
     modifyState (\d -> d{declTypeParams = outerParams})
     let allParams = params ++ [(size, TInt) | size <- allSizes]
-    let function = Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType allSizes allTypes) termination fnBody) []))
+    let function = Assign var (Val (VFunct (map fst allParams) inputReqs outputReqs (NativeFunct (Signature (map snd allParams) returnType allSizes allTypes writes) termination fnBody) []))
     return (if null bounds then function else BoundedDef bounds function)
   where
     isTypeParam name = case name of
@@ -786,7 +801,7 @@ functStatement = do
     nested = void (char '<') >> skipMany (void (noneOf "<>") <|> nested) >> void (char '>')
 
 -- (parameters) -> Type [{ input contract }] [{ output contract }], the part of a function before its termination clause
-functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement])
+functHeader :: Parser ([(Variable, Type)], Type, [ValidationStatement], [ValidationStatement], [Variable])
 functHeader = do
     void (char '(')
     whitespace
@@ -796,11 +811,24 @@ functHeader = do
     whitespace
     returnType <- string "->" >> whitespace >> typeAnnotation
     whitespace
+    writes <- option [] writesClause
     inputReqs <- option [] functContractReqs
     whitespace
     outputReqs <- option [] functContractReqs
     whitespace
-    return (params, returnType, inputReqs, outputReqs)
+    return (params, returnType, inputReqs, outputReqs, writes)
+  where
+    -- writes(n) or writes(n.field): the places an update parameter may change (REFERENCES.md)
+    writesClause = do
+        keyword "writes"
+        whitespace
+        places <- parensParse (place `sepBy1` skipWhitespace (char ','))
+        whitespace
+        return places
+    place = do
+        root <- variable
+        fields <- many (char '.' >> whitespace >> variable <* whitespace)
+        return (intercalate "." (root : fields))
 
 -- trait Name { fn f(params) -> Type [{ input contract }] [{ output contract }]; ... }: what a type has to provide to
 -- implement the trait. Self is the implementing type. The contracts are met by every implementation: it may ask for less
@@ -828,8 +856,8 @@ traitStatement = do
         whitespace
         fname <- variable
         whitespace
-        (params, returnType, inputReqs, outputReqs) <- functHeader
-        return (TraitFn fname (map fst params) (Signature (map snd params) returnType [] []) inputReqs outputReqs)
+        (params, returnType, inputReqs, outputReqs, _) <- functHeader
+        return (TraitFn fname (map fst params) (Signature (map snd params) returnType [] [] []) inputReqs outputReqs)
 
 -- impl Type { fn f ... } or impl Trait for Type { fn f ... }: the functions are named <Type>::f and <Type as Trait>::f (see
 -- implFunctionName), and the checker resolves Type::f and x.f(...) to the one that is meant. Self stands for Type in them.
@@ -930,8 +958,8 @@ typeAnnotation = do
         ty <- typeAnnotation
         ghostOnly ghostly ty
         return ty
-    -- &T: a parameter that is only read
-    borrowed = char '&' >> whitespace >> (TRef <$> namedOrFunction)
+    -- &T is a reference that is only read, &mut T one that may update its referent
+    borrowed = try (string "&mut" >> whitespace >> (TMutRef <$> namedOrFunction)) <|> (char '&' >> whitespace >> (TRef <$> namedOrFunction))
     namedOrFunction = try functionType <|> namedType
     typeArgument = do
         whitespace
@@ -1129,12 +1157,34 @@ bindIndex _ other = other
 
 nonInfixProof :: Parser VariableProof
 nonInfixProof =
-    stringLiteralOf proofApply CTerm
+    oldProof
+        <|> derefProof
+        <|> stringLiteralOf proofApply CTerm
         <|> concreteProof
         <|> withFields proofApply Nothing (parensProof <|> structLiteral proof (const Nothing) proofApply <|> try functionProof <|> try abstractProof)
 
 infixProof :: Parser VariableProof
 infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof]) (\funct proof' -> FApp (CTerm (builtinFunct funct)) [proof'])
+
+-- old(e) in a postcondition: the entry value of the place e is of; *r in a proof: the value a reference is to.
+oldProof :: Parser VariableProof
+oldProof = try $ do
+    keyword "old"
+    whitespace
+    void (char '(')
+    whitespace
+    inner <- proof
+    whitespace
+    void (char ')')
+    whitespace
+    return (FApp (CTerm (builtinFunct OldOf)) [inner])
+
+derefProof :: Parser VariableProof
+derefProof = do
+    void (char '*')
+    whitespace
+    operand <- nonInfixProof
+    return (FApp (CTerm (builtinFunct DerefOf)) [operand])
 
 parensProof :: Parser VariableProof
 parensProof = parensParse proof
@@ -1214,7 +1264,9 @@ expression = try infixExpression <|> nonInfixExpression
 
 nonInfixExpression :: Parser Expression
 nonInfixExpression =
-    notExpression
+    borrowExpression
+        <|> derefExpression
+        <|> notExpression
         <|> withFields expressionApply methods (structLiteral expression clonedBase expressionApply <|> try fExpression <|> qualifiedCall)
         <|> arrayLiteral (\items -> F (Val (builtinFunct ArrayFrom)) [Val items])
         <|> withFields expressionApply methods stringLiteral
@@ -1222,6 +1274,21 @@ nonInfixExpression =
         <|> withFields expressionApply methods (varExpression <|> parensExpression)
   where
     methods = Just (expression, methodCall)
+
+-- &place and &mut place: a reference to a place, and *r: the value a reference is to (REFERENCES.md).
+-- The checker decides whether what follows is a place; `(*r).field` says a field of the referent.
+borrowExpression :: Parser Expression
+borrowExpression = do
+    mutable <- try (string "&mut" >> whitespace >> return True) <|> (char '&' >> notFollowedBy (char '&') >> whitespace >> return False)
+    place <- nonInfixExpression
+    return (F (Val (builtinFunct (if mutable then BorrowMutOf else BorrowOf))) [place])
+
+derefExpression :: Parser Expression
+derefExpression = do
+    void (char '*')
+    whitespace
+    operand <- nonInfixExpression
+    return (F (Val (builtinFunct DerefOf)) [operand])
 
 -- !a: the Bool that a is not. It binds tighter than any infix operator (`!a && b` is `(!a) && b`).
 notExpression :: Parser Expression

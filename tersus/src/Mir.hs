@@ -12,6 +12,7 @@ module Mir
     , GhostStatement (..)
     , Env
     , Rvalue (..)
+    , RefStep (..)
     , BinOp (..)
     , ListOp (..)
     , ghostOp
@@ -114,6 +115,10 @@ data Statement
       Drop Local
     | -- The local points into a value that something else owns: it does not own what it holds, and so does not free it
       Peek Local Rvalue
+    | -- The place a reference is to is given a new value (REFERENCES.md, stage 3): the root local, the steps from it,
+      -- and the value. It is not an assignment of the root: it goes through a live update loan to the place, and the
+      -- root gets a new version whose place at those steps is the value. Native code expands it (MirOwnership).
+      AssignRef Local [RefStep] Rvalue
     deriving (Show, Eq)
 
 -- What the names of the source mean at a point: the local of a variable, or the function (a constant) of a name that
@@ -158,6 +163,15 @@ data Rvalue
       Clone Operand
     | -- The field of the value the local owns, taken out of it: the local does not hold it any more (MirOwnership)
       TakeField Local Name Variable
+    | -- A reference to a place of a local (REFERENCES.md): the root local, the steps from it to the place, and whether
+      -- it may update the place. It owns nothing and is never freed; reading it gives the place's current version.
+      Borrow Local [RefStep] Bool
+    | -- The value at the place a reference local is to: the local's current version, in the validator and the executor
+      Deref Operand
+    deriving (Show, Eq)
+
+-- A step from the root of a borrowed place to the place itself: a field of a struct or variant, or an element at an index
+data RefStep = RefField Name Variable | RefIndex Operand
     deriving (Show, Eq)
 
 -- Div and Mod need a divisor that is not 0. Compare Eq and NotEq are structural, and the other comparisons are of Ints.
@@ -221,6 +235,8 @@ data FunctionSpec = FunctionSpec
     , specTermination :: Maybe Termination
     , specLoops :: Map BlockId LoopSpec -- by the header block of the loop
     , specEnv :: Env -- the parameters, and the functions defined at the top of the program before this one
+    , specWrites :: [Variable] -- the places an update parameter may change (`writes(n.field)`), as the program wrote them; empty means every update parameter whole (REFERENCES.md)
+    , specMutParams :: [Variable] -- the parameters lent for updating (&mut T): a call gives the caller a new version of what they are to
     }
     deriving (Show, Eq)
 
@@ -285,6 +301,8 @@ completeInstancesWith erased program
         TBlock t -> typeNames t
         TUninit t -> typeNames t
         TFn args ret -> concatMap typeNames (ret : args)
+        TRef t -> typeNames t
+        TMutRef t -> typeNames t
         _ -> []
     rvalueNames rv = case rv of
         Use o -> operandNames o
@@ -299,6 +317,8 @@ completeInstancesWith erased program
         IsVariant o name -> name : operandNames o
         AsVariant o name -> name : operandNames o
         Clone o -> operandNames o
+        Borrow _ steps _ -> concatMap operandNames [o | RefIndex o <- steps]
+        Deref o -> operandNames o
         TakeField _ name _ -> [name]
     operandNames o = case o of
         Const c -> constantNames c
@@ -402,7 +422,7 @@ isDropFunction :: Name -> Bool
 isDropFunction name = let suffix = " as Drop>::drop" in reverse suffix == take (length suffix) (reverse name)
 
 emptySpec :: FunctionSpec
-emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty
+emptySpec = FunctionSpec [] [] Nothing Map.empty Map.empty [] []
 
 successors :: Terminator -> [BlockId]
 successors (Goto b) = [b]
@@ -496,6 +516,10 @@ renderStatement (Ghost _ (GhostFunction name _ _)) = "ghost fn " ++ name ++ ";"
 renderStatement (Ghost _ (GhostDissolve l)) = "ghost dissolve " ++ show l ++ ";"
 renderStatement (Drop l) = "drop " ++ show l ++ ";"
 renderStatement (Peek dest rv) = show dest ++ " = peek " ++ renderRvalue rv ++ ";"
+renderStatement (AssignRef root steps rv) = show root ++ concatMap step steps ++ " := " ++ renderRvalue rv ++ ";"
+  where
+    step (RefField _ field) = "." ++ field
+    step (RefIndex o) = "[" ++ renderOperand o ++ "]"
 
 renderRvalue :: Rvalue -> String
 renderRvalue (Use o) = renderOperand o
@@ -512,6 +536,11 @@ renderRvalue (IsVariant o name) = renderOperand o ++ " is " ++ name
 renderRvalue (AsVariant o name) = renderOperand o ++ " as " ++ name
 renderRvalue (Clone o) = "clone " ++ renderOperand o
 renderRvalue (TakeField l name field) = "take (" ++ show l ++ " as " ++ name ++ ")." ++ field
+renderRvalue (Borrow root steps mutable) = (if mutable then "&mut " else "&") ++ show root ++ concatMap step steps
+  where
+    step (RefField _ field) = "." ++ field
+    step (RefIndex o) = "[" ++ renderOperand o ++ "]"
+renderRvalue (Deref o) = "*" ++ renderOperand o
 
 renderBinOp :: BinOp -> String
 renderBinOp (Compare rel) = case rel of
@@ -623,3 +652,5 @@ operandsOfRvalue rv = case rv of
     AsVariant o _ -> [o]
     Clone o -> [o]
     TakeField{} -> []
+    Borrow _ steps _ -> [o | RefIndex o <- steps]
+    Deref o -> [o]

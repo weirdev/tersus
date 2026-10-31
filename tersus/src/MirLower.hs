@@ -1,6 +1,6 @@
 module MirLower (lowerProgram, lowerElaborated, lowerLibrary) where
 
-import Control.Monad (unless, when)
+import Control.Monad (forM, unless, when)
 import Data.List (intercalate)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
@@ -81,6 +81,8 @@ data Builder = Builder
     , bSizes :: [Variable] -- the size parameters of the function
     , bTypeParams :: [Variable] -- its type parameters
     , bBorrowed :: [M.Local] -- the parameters it borrows
+    , bMutBorrowed :: [M.Local] -- the parameters it may update through (&mut T)
+    , bRefTargets :: Map M.Local (M.Local, [M.RefStep]) -- the place each reference local is to, when it was made by &place or &mut place in this function
     , bReturns :: Maybe Type
     , bParams :: [M.Local]
     , bLocals :: Map M.Local M.LocalDecl
@@ -136,6 +138,8 @@ newBuilder name isMain returns =
         , bSizes = []
         , bTypeParams = []
         , bBorrowed = []
+        , bMutBorrowed = []
+        , bRefTargets = Map.empty
         , bReturns = returns
         , bParams = []
         , bLocals = maybe Map.empty (\t -> Map.singleton (M.Local 0) (M.LocalDecl t Nothing)) returns
@@ -308,7 +312,7 @@ buildFunction requires ensures term env b =
         , M.fnTypeParams = bTypeParams b
         , M.fnBorrowed = bBorrowed b
         , M.fnBlocks = Map.fromList [(rename old, M.BasicBlock stmts (renameTerm t)) | old <- order, Just (M.BasicBlock stmts t) <- [Map.lookup old (bBlocks b)]]
-        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env
+        , M.fnSpec = M.FunctionSpec requires ensures term (Map.fromList [(rename h, spec{M.loopBody = rename (M.loopBody spec)}) | (h, spec) <- Map.toList (bLoops b), Map.member h mapping]) env [] []
         }
   where
     order = reverse (walk [] (M.BlockId 0))
@@ -344,6 +348,10 @@ lowerStatement stmt =
             (pending, ty) <- lowerLast expr
             dest <- assignTarget var ty
             finishInto dest pending
+        AssignDeref lhs expr -> do
+            (value, _) <- lowerOperand expr
+            (root, steps, _) <- lowerDerefPlace lhs
+            emit (M.AssignRef root steps (M.Use value))
         Let var expr -> do
             (pending, ty) <- lowerLast expr
             dest <- newLocal (Just var) ty
@@ -492,7 +500,7 @@ lowerWhile cond invariant term body = do
 -- parameters and the functions at the top, so there is nothing to capture). One defined at the top of the program is
 -- found by name from the bodies of the functions after it, and from itself; any other is a name in its scope.
 defineFunction :: Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> Signature -> Maybe Termination -> [Statement] -> L ()
-defineFunction var params ins outs (Signature ptys rty sizes types) term body = do
+defineFunction var params ins outs (Signature ptys rty sizes types writes) term body = do
     enclosing <- builder
     let atTop = bIsMain enclosing && length (bScopes enclosing) == 1
         fnTy = functionType sizes types ptys rty
@@ -516,7 +524,7 @@ defineFunction var params ins outs (Signature ptys rty sizes types) term body = 
     modifyB (const (newBuilder name False (Just rty)){bSizes = sizes, bTypeParams = types})
     -- (a borrowed parameter is a local of its type, which the function only reads)
     paramLocals <- mapM (\(p, ty) -> (\l -> (p, l, unrefType ty)) <$> newLocal (Just p) (unrefType ty)) (zip params ptys)
-    modifyB (\b -> b{bBorrowed = [l | ((_, l, _), TRef _) <- zip paramLocals ptys]})
+    modifyB (\b -> b{bBorrowed = [l | ((_, l, _), ty) <- zip paramLocals ptys, isRefType ty], bMutBorrowed = [l | ((_, l, _), TMutRef _) <- zip paramLocals ptys]})
     modifyB (\b -> b{bParams = [l | (_, l, _) <- paramLocals], bScopes = [Map.fromList [(p, BLocal l ty) | (p, l, ty) <- paramLocals]]})
     env <- visibleEnv
     lowerStatements body
@@ -524,12 +532,19 @@ defineFunction var params ins outs (Signature ptys rty sizes types) term body = 
     when open (terminate M.Unreachable)
     inner <- builder
     modifyB (const outer)
-    let fn = buildFunction ins outs term env inner
+    let fn0 = buildFunction ins outs term env inner
+        fn = fn0{M.fnSpec = (M.fnSpec fn0){M.specWrites = writes, M.specMutParams = [p | (p, TMutRef _) <- zip params ptys]}}
     modifyS (\s -> s{lsFunctions = Map.insert name fn (lsFunctions s)})
 
 unrefType :: Type -> Type
 unrefType (TRef t) = t
+unrefType (TMutRef t) = t
 unrefType t = t
+
+isRefType :: Type -> Bool
+isRefType (TRef _) = True
+isRefType (TMutRef _) = True
+isRefType _ = False
 
 -- Expressions
 
@@ -537,6 +552,9 @@ unrefType t = t
 data Pending = PRvalue M.Rvalue | PCall M.Operand [M.Operand]
 
 finishInto :: M.Local -> Pending -> L ()
+finishInto dest (PRvalue rv@(M.Borrow root steps _)) = do
+    emit (M.Assign dest rv)
+    modifyB (\b -> b{bRefTargets = Map.insert dest (root, steps) (bRefTargets b)})
 finishInto dest (PRvalue rv) = emit (M.Assign dest rv)
 finishInto dest (PCall callee args) = do
     open <- isOpen
@@ -608,7 +626,158 @@ resolveHead (Var name) = do
                 _ -> failL ("Undefined variable: " ++ name)
 resolveHead other = uncurry Callable <$> lowerOperand other
 
+-- A place as the root local it starts from, the steps from there, and its type (REFERENCES.md)
+lowerPlace :: Expression -> L (M.Local, [M.RefStep], Type)
+lowerPlace expr = case expr of
+    Var name -> do
+        binding <- lookupBinding name
+        case binding of
+            Just (BLocal l ty) -> return (l, [], ty)
+            _ -> failL ("Lowering failed: " ++ name ++ " is not a value that a place can start from")
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [sub] -> do
+        (root, steps, subTy) <- lowerPlace sub
+        ctor <- structCtor subTy
+        fieldTy <- tc (readField owner field subTy)
+        return (root, steps ++ [M.RefField ctor field], fieldTy)
+    F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, index] -> lowerIndexPlace sub index
+    F (Var "get") [sub, index] -> lowerIndexPlace sub index
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
+        (root, ty) <- lowerRefRoot inner
+        return (root, [], ty)
+    _ -> do
+        (operand, ty) <- lowerOperand expr
+        case operand of
+            M.Copy l -> return (l, [], ty)
+            M.Move l -> return (l, [], ty)
+            M.Const _ -> failL "Lowering failed: a reference cannot be to a value that has no place"
+  where
+    lowerIndexPlace sub index = do
+        (root, steps, subTy) <- lowerPlace sub
+        (indexOperand, indexTy) <- lowerOperand index
+        elementTy <- tc (builtinType Get >>= \ft -> checkBuiltinCall (Just Get) "get" ft [subTy, indexTy])
+        return (root, steps ++ [M.RefIndex indexOperand], elementTy)
+
+-- The local a reference expression stands in, and the type it is a reference to
+lowerRefRoot :: Expression -> L (M.Local, Type)
+lowerRefRoot (Var name) = do
+    binding <- lookupBinding name
+    b <- builder
+    case binding of
+        Just (BLocal l ty)
+            | isRefType ty -> return (l, unrefType ty)
+            | l `elem` bBorrowed b -> return (l, ty)
+            | otherwise -> failL ("Lowering failed: " ++ name ++ " is not a reference")
+        _ -> failL ("Lowering failed: " ++ name ++ " is not a reference")
+lowerRefRoot expr = do
+    (operand, ty) <- lowerOperand expr
+    case operand of
+        M.Copy l -> return (l, unrefType ty)
+        M.Move l -> return (l, unrefType ty)
+        M.Const _ -> failL "Lowering failed: * of a value that is not a reference"
+
+lowerBorrow :: Bool -> Expression -> L (Pending, Type)
+lowerBorrow mutable place = do
+    (root, steps, ty) <- lowerPlace place
+    -- (an index of the place is the value it has here, where the reference is made: the reference is to that
+    -- element, not to whichever element the index names when the reference is used)
+    steps' <- mapM captureStep steps
+    return (PRvalue (M.Borrow root steps' mutable), if mutable then TMutRef ty else TRef ty)
+  where
+    captureStep (M.RefIndex (M.Copy l)) = captureIndex (M.Copy l)
+    captureStep (M.RefIndex (M.Move l)) = captureIndex (M.Move l)
+    captureStep step = return step
+    captureIndex operand = do
+        at <- newLocal Nothing TInt
+        emit (M.Assign at (M.Use operand))
+        return (M.RefIndex (M.Copy at))
+
+-- `root.steps = value` as assignments of the root: a field is rebuilt from its other fields, an element is `set`
+emitAssignPlace :: M.Local -> [M.RefStep] -> M.Operand -> L ()
+emitAssignPlace root [] value = emit (M.Assign root (M.Use value))
+emitAssignPlace root (M.RefField ctor field : rest) value = do
+    types <- lsTypes <$> getS
+    case Map.lookup ctor types of
+        Just (M.StructDecl fields) -> do
+            sub <- newLocal Nothing (fieldTypeOf fields)
+            emit (M.Assign sub (M.ReadField (M.Copy root) ctor field))
+            emitAssignPlace sub rest value
+            rebuilt <- forM fields $ \(f, _) ->
+                if f == field
+                    then return (f, M.Copy sub)
+                    else do
+                        kept <- newLocal Nothing (fieldTypeOf' f fields)
+                        emit (M.Assign kept (M.ReadField (M.Copy root) ctor f))
+                        return (f, M.Copy kept)
+            emit (M.Assign root (M.MakeData ctor rebuilt))
+        _ -> failL ("Lowering failed: an assignment through a reference is to a field of " ++ ctor ++ ", which is not a struct here")
+  where
+    fieldTypeOf fields = maybe TInt id (lookup field fields)
+    fieldTypeOf' f fields = maybe TInt id (lookup f fields)
+emitAssignPlace root (M.RefIndex index : rest) value = do
+    subTy <- localTypeOf root
+    let elementTy = case subTy of
+            TList e -> e
+            TArrayOf e _ -> e
+            TBox (TArrayOf e _) -> e
+            _ -> TInt
+    element <- newLocal Nothing elementTy
+    emit (M.Assign element (M.ListOp M.Get [M.Copy root, index]))
+    emitAssignPlace element rest value
+    emit (M.Assign root (M.ListOp M.Set [M.Copy root, index, M.Copy element]))
+
+localTypeOf :: M.Local -> L Type
+localTypeOf l = do
+    b <- builder
+    case Map.lookup l (bLocals b) of
+        Just (M.LocalDecl ty _) -> return ty
+        Nothing -> return TInt
+
+-- The place an assignment through a reference is to: through an update parameter (the parameter local itself), or
+-- through a reference local made by &mut place in this function (the place it was made to)
+lowerDerefPlace :: Expression -> L (M.Local, [M.RefStep], Type)
+lowerDerefPlace expr = case expr of
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> case inner of
+        Var name -> do
+            binding <- lookupBinding name
+            b <- builder
+            case binding of
+                Just (BLocal l ty)
+                    | l `elem` bMutBorrowed b -> return (l, [], ty)
+                    | isRefType ty -> case Map.lookup l (bRefTargets b) of
+                        Just (root, steps) -> return (root, steps, unrefType ty)
+                        Nothing -> failL ("Lowering failed: the place that " ++ name ++ " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter")
+                    | otherwise -> failL ("Lowering failed: " ++ name ++ " is not a reference")
+                _ -> failL ("Lowering failed: " ++ name ++ " is not a reference")
+        _ -> do
+            (root, ty) <- lowerRefRoot inner
+            return (root, [], ty)
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [sub] -> do
+        (root, steps, subTy) <- lowerDerefPlace sub
+        ctor <- structCtor subTy
+        fieldTy <- tc (readField owner field subTy)
+        return (root, steps ++ [M.RefField ctor field], fieldTy)
+    F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, index] -> lowerDerefIndex sub index
+    F (Var "get") [sub, index] -> lowerDerefIndex sub index
+    _ -> failL "Lowering failed: an assignment through a reference is to *r, (*r).field or (*r) at an index"
+  where
+    lowerDerefIndex sub index = do
+        (root, steps, subTy) <- lowerDerefPlace sub
+        (indexOperand, indexTy) <- lowerOperand index
+        elementTy <- tc (builtinType Get >>= \ft -> checkBuiltinCall (Just Get) "get" ft [subTy, indexTy])
+        return (root, steps ++ [M.RefIndex indexOperand], elementTy)
+
 lowerBuiltin :: BuiltinFunct -> [Expression] -> L (Pending, Type)
+lowerBuiltin BorrowOf args = case args of
+    [place] -> lowerBorrow False place
+    _ -> failL "& takes a place"
+lowerBuiltin BorrowMutOf args = case args of
+    [place] -> lowerBorrow True place
+    _ -> failL "&mut takes a place"
+lowerBuiltin DerefOf args = case args of
+    [inner] -> do
+        (operand, ty) <- lowerOperand inner
+        return (PRvalue (M.Deref operand), unrefType ty)
+    _ -> failL "* takes a reference"
 lowerBuiltin b args = do
     operands <- mapM lowerOperand args
     let tys = map snd operands

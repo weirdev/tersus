@@ -52,6 +52,12 @@ builtinFunct :: BuiltinFunct -> Value
 -- The builtins lib/stdlib.tersus declares: their contracts are written there, and StdLibDefs is where
 -- they are read from. The value made here, which is how a proof names such a builtin, carries none.
 builtinFunct b | Just params <- lookup b stdlibDeclaredParams = VFunct params [] [] (BuiltinFunct b) []
+builtinFunct CloneOf = VFunct ["value"] [] [] (BuiltinFunct CloneOf) []
+-- References are made and read in the MIR, never called: these are only how they are named in a proof term
+builtinFunct BorrowOf = VFunct ["place"] [] [] (BuiltinFunct BorrowOf) []
+builtinFunct BorrowMutOf = VFunct ["place"] [] [] (BuiltinFunct BorrowMutOf) []
+builtinFunct DerefOf = VFunct ["reference"] [] [] (BuiltinFunct DerefOf) []
+builtinFunct OldOf = VFunct ["place"] [] [] (BuiltinFunct OldOf) []
 builtinFunct (Ctor name fields) = VFunct fields [] [] (BuiltinFunct (Ctor name fields)) []
 builtinFunct (Field owner field) = VFunct ["struct"] [] [] (BuiltinFunct (Field owner field)) []
 builtinFunct (Is variant) = VFunct ["value"] [] [] (BuiltinFunct (Is variant)) []

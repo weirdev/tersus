@@ -35,6 +35,14 @@ data MirValue
     | MFn Name
     | -- What an empty Uninit<T> holds: nothing, which no operation can read
       MEmpty
+    | -- A reference to a place in the frame that runs it: the local it starts from, and the fields and indexes from
+      -- there (REFERENCES.md). Reading it gives the place's current value; a call through an update reference
+      -- writes the callee's final value back into the place.
+      MRef Local [EvalStep]
+    deriving (Eq, Show)
+
+-- A step from the root of a borrowed place to the place itself, with its index a value
+data EvalStep = EvalField Variable | EvalIndex Integer
     deriving (Eq, Show)
 
 -- The value of _0 when the program returns, and Nothing when it ends without
@@ -81,7 +89,7 @@ runProgramEnv :: RunEnv -> Program -> Result Outcome String
 runProgramEnv env program =
     mapResult
         (\(value, (out, err), s) -> Outcome out err [(spelling, Map.findWithDefault "" key (sFiles s)) | (key, spelling) <- sOrder s] value)
-        (runE (runFunction program (progMain program) []) env (startState (envInput env)))
+        (runE (fmap fst (runFunction program (progMain program) [])) env (startState (envInput env)))
 
 -- What a program has written to the standard output and to the standard error
 type Written = (String, String)
@@ -182,7 +190,7 @@ newtype E a = E {runE :: RunEnv -> S -> Result (a, Written, S) String}
 runNamedFunction :: Program -> Name -> [MirValue] -> Result (Maybe MirValue) String
 runNamedFunction program name args = case Map.lookup name (progFunctions program) of
     Nothing -> Error ("Function does not exist: " ++ name)
-    Just fn -> mapResult (\(value, _, _) -> value) (runE (runFunction program fn args) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState ""))
+    Just fn -> mapResult (\((value, _), _, _) -> value) (runE (runFunction program fn args) RunEnv{envArgs = [], envInput = "", envFile = const Nothing} (startState ""))
 
 instance Functor E where
     fmap f (E r) = E (\env s -> mapResult (\(a, output, s') -> (f a, output, s')) (r env s))
@@ -285,7 +293,7 @@ fileStore = E (\_ s ->
                        }
                     ))
 
-runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue)
+runFunction :: Program -> Function -> [MirValue] -> E (Maybe MirValue, Frame)
 runFunction program fn args
     | length args /= length (fnParams fn) =
         failE ("Function expected " ++ show (length (fnParams fn)) ++ " arguments, got " ++ show (length args))
@@ -293,7 +301,7 @@ runFunction program fn args
 
 type Frame = Map Local MirValue
 
-runBlock :: Program -> Function -> BlockId -> Frame -> E (Maybe MirValue)
+runBlock :: Program -> Function -> BlockId -> Frame -> E (Maybe MirValue, Frame)
 runBlock program fn block frame =
     case Map.lookup block (fnBlocks fn) of
         Nothing -> failE ("Jump to a block that does not exist: " ++ show block)
@@ -310,18 +318,72 @@ runBlock program fn block frame =
                 Call callee args dest next -> do
                     f <- liftE (operandValue frame' callee)
                     argValues <- liftE (mapResults (operandValue frame') args)
-                    result <- callFunction program f argValues
-                    runBlock program fn next (Map.insert dest result frame')
-                Return -> return (Map.lookup (Local 0) frame')
+                    resolved <- liftE (mapResults (resolveRef frame') argValues)
+                    (result, finalParams) <- callFunction program f resolved
+                    frame'' <- liftE (writeBack program frame' f args finalParams)
+                    runBlock program fn next (Map.insert dest result frame'')
+                Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
 
-callFunction :: Program -> MirValue -> [MirValue] -> E MirValue
+-- What a reference stands for here: the value at the place it is to
+resolveRef :: Frame -> MirValue -> Result MirValue String
+resolveRef frame (MRef l steps) = readPlace frame l steps
+resolveRef _ v = Ok v
+
+readPlace :: Frame -> Local -> [EvalStep] -> Result MirValue String
+readPlace frame l steps = case Map.lookup l frame of
+    Nothing -> Error ("Undefined variable: " ++ show l)
+    Just base -> readSteps base steps
+  where
+    readSteps (MRef l' steps') rest = readPlace frame l' (steps' ++ rest)
+    readSteps v [] = Ok v
+    readSteps (MData _ fields) (EvalField field : rest) = maybe (Error ("A reference is to a field that is not there: " ++ field)) (\v -> readSteps v rest) (lookup field fields)
+    readSteps (MList xs) (EvalIndex i : rest)
+        | i >= 0 && i < toInteger (length xs) = readSteps (xs !! fromInteger i) rest
+        | otherwise = Error "A reference is to an index that is not there"
+    readSteps _ _ = Error "A reference is to a place that is not there"
+
+writePlace :: Frame -> Local -> [EvalStep] -> MirValue -> Result Frame String
+writePlace frame l steps value = case Map.lookup l frame of
+    Nothing -> Error ("Undefined variable: " ++ show l)
+    Just (MRef l' steps') -> writePlace frame l' (steps' ++ steps) value
+    Just base -> mapResult (\new -> Map.insert l new frame) (setSteps base steps value)
+  where
+    setSteps _ [] new = Ok new
+    setSteps (MData name fields) (EvalField field : rest) new = case lookup field fields of
+        Nothing -> Error ("A reference is to a field that is not there: " ++ field)
+        Just old -> mapResult (\changed -> MData name [(f, if f == field then changed else v) | (f, v) <- fields]) (setSteps old rest new)
+    setSteps (MList xs) (EvalIndex i : rest) new
+        | i >= 0 && i < toInteger (length xs) = mapResult (\changed -> MList [if toInteger j == i then changed else x | (j, x) <- zip [0 ..] xs]) (setSteps (xs !! fromInteger i) rest new)
+        | otherwise = Error "A reference is to an index that is not there"
+    setSteps _ _ _ = Error "A reference is to a place that is not there"
+
+-- After a call, the final value of each update parameter is written back into the place its argument was to
+writeBack :: Program -> Frame -> MirValue -> [Operand] -> [MirValue] -> Result Frame String
+writeBack program frame (MFn name) args finalParams = case Map.lookup name (progFunctions program) of
+    Nothing -> Ok frame
+    Just fn ->
+        let muts = [i | (i, param) <- zip [0 ..] (fnParams fn), Just (LocalDecl _ (Just n)) <- [Map.lookup param (fnLocals fn)], n `elem` specMutParams (fnSpec fn)]
+            write (f, i) = case (args !! i, finalParams !! i) of
+                (Copy l, v) -> placeOf f l v
+                (Move l, v) -> placeOf f l v
+                _ -> Ok f
+            placeOf f l v = case Map.lookup l f of
+                Just (MRef root steps) -> writePlace f root steps v
+                _ -> writePlace f l [] v
+         in foldl (\acc i -> acc `bindResult` \f -> write (f, i)) (Ok frame) muts
+writeBack _ frame _ _ _ = Ok frame
+
+callFunction :: Program -> MirValue -> [MirValue] -> E (MirValue, [MirValue])
 callFunction _ (MFn name) _
     | take 7 name == "extern " = failE ("The extern function " ++ drop 7 name ++ " is a function of C, which only native code can call")
 callFunction program (MFn name) args =
     case Map.lookup name (progFunctions program) of
         Nothing -> failE ("Call of a function that does not exist: " ++ name)
-        Just fn -> runFunction program fn args >>= maybe (failE "Function did not return a value") return
+        Just fn -> do
+            (result, frame) <- runFunction program fn args
+            value <- maybe (failE "Function did not return a value") return result
+            return (value, [Map.findWithDefault MEmpty p frame | p <- fnParams fn])
 callFunction _ _ _ = failE "Object being called must be a function"
 
 mapResults :: (a -> Result b String) -> [a] -> Result [b] String
@@ -366,6 +428,11 @@ runStatements frame (Assign dest (ListOp op os) : rest) | Just run <- memoryOp o
     args <- mapM (intOrValue frame) os
     v <- run args
     runStatements (Map.insert dest v frame) rest
+runStatements frame (AssignRef root steps rv : rest) = do
+    v <- liftE (evalRvalue frame rv)
+    evalSteps <- liftE (mapResults (evalRefStep frame) steps)
+    frame' <- liftE (writePlace frame root evalSteps v)
+    runStatements frame' rest
 runStatements frame (Assign dest rv : rest) = do
     v <- liftE (evalRvalue frame rv)
     runStatements (Map.insert dest v frame) rest
@@ -406,6 +473,12 @@ memoryOp op = case op of
   where
     bad = failE (show op ++ " is given an address, numbers and a value, without the permission (which is erased before the program runs)")
 
+evalRefStep :: Frame -> RefStep -> Result EvalStep String
+evalRefStep _ (RefField _ field) = Ok (EvalField field)
+evalRefStep frame (RefIndex o) = operandValue frame o `bindResult` \v -> case v of
+    MInt i -> Ok (EvalIndex i)
+    _ -> Error "The index of a borrowed place is not an Int"
+
 -- The Int that an operand is
 intArgument :: Frame -> Operand -> E Integer
 intArgument frame o = do
@@ -432,6 +505,8 @@ evalRvalue :: Frame -> Rvalue -> Result MirValue String
 evalRvalue frame rv =
     case rv of
         Use o -> operandValue frame o
+        Borrow root steps _ -> MRef root <$$> mapResults evalStep steps
+        Deref o -> operandValue frame o `bindResult` resolveRef frame
         BinaryOp op a b -> operandValue frame a `bindResult` \x -> operandValue frame b `bindResult` \y -> binary op x y
         ListOp op os -> mapResults (operandValue frame) os `bindResult` listOp op
         MakeList os -> MList <$$> mapResults (operandValue frame) os
@@ -455,6 +530,7 @@ evalRvalue frame rv =
                 _ -> Error "Is only tests the variant of an enum value"
   where
     f <$$> r = mapResult f r
+    evalStep = evalRefStep frame
 
 binary :: BinOp -> MirValue -> MirValue -> Result MirValue String
 binary Add (MInt a) (MInt b) = checked (a + b)

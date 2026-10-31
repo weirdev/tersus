@@ -45,6 +45,7 @@ hasLists program =
         TAddr t -> mentionsList t
         TUninit t -> mentionsList t
         TRef t -> mentionsList t
+        TMutRef t -> mentionsList t
         TFn args ret -> any mentionsList (ret : args)
         TNamed n | Just (_, args) <- instanceOf n -> or [mentionsList t | ArgType t <- args]
         _ -> False
@@ -128,6 +129,7 @@ listType ty = case ty of
     TAddr t -> TAddr (listType t)
     TUninit t -> TUninit (listType t)
     TRef t -> TRef (listType t)
+    TMutRef t -> TMutRef (listType t)
     TFn args ret -> TFn (map listType args) (listType ret)
     TNamed n -> TNamed (renameName n)
     _ -> ty

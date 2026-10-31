@@ -3,7 +3,7 @@ module MirValidate
     , validateProgram
     ) where
 
-import Control.Monad (filterM, foldM, forM_, when)
+import Control.Monad (filterM, foldM, forM_, unless, when)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Map (Map)
@@ -170,8 +170,11 @@ processBlock cx run b st0 = do
             argTerms <- mapM (operandTerm st) args
             info <- liftR (resolveFunction st calleeTerm)
             result <- fresh
-            st' <- applyCall st info argTerms result
-            return noWalk{wdExits = [(next, forgetProofVar dest (withTypeFacts (cxFn cx) dest st'{psLocals = Map.insert dest result (psLocals st')}))]}
+            let mutNames = fnMutParams info
+            posts <- freshN (length mutNames)
+            st' <- applyCall st info argTerms result (zip mutNames posts)
+            st'' <- versionMutArgs cx st' info args (zip mutNames posts)
+            return noWalk{wdExits = [(next, forgetProofVar dest (withTypeFacts (cxFn cx) dest st''{psLocals = Map.insert dest result (psLocals st'')}))]}
         M.Return -> return noWalk{wdReturns = [st]}
         M.Unreachable
             | unreachable st -> return noWalk
@@ -209,12 +212,37 @@ forgetProofVar dest st = case Map.lookup dest (psLocalNames st) of
     Nothing -> st
 
 execStatement :: Ctx -> PState -> M.Statement -> V PState
-execStatement cx st (M.Assign dest rv) = forgetProofVar dest . typed <$> assign st dest rv
+execStatement cx st (M.Assign dest rv) = do
+    st1 <- assign st dest rv
+    let st2 = case rv of
+            M.Borrow root steps _ -> st1{psBorrows = Map.insert dest (root, steps) (psBorrows st1)}
+            _ -> st1{psBorrows = Map.delete dest (psBorrows st1)}
+    st3 <- reversionBorrows st2 dest
+    return (forgetProofVar dest (typed st3))
   where
     -- (a local that is another local has its facts already)
     typed = case rv of
         M.Use (M.Copy _) -> id
         _ -> withTypeFacts (cxFn cx) dest
+execStatement cx st (M.AssignRef root steps rv) = do
+    valueTerm <- case rv of
+        M.Use o -> operandTerm st o
+        _ -> throwV "An assignment through a reference of a value the validator does not know"
+    valueIota <- case valueTerm of
+        ATerm iota -> return iota
+        _ -> do
+            iota <- fresh
+            return iota
+    st1 <- case valueTerm of
+        ATerm _ -> setPlaceVersion st root steps valueIota
+        _ -> do
+            s1 <- setPlaceVersion st root steps valueIota
+            return (addFacts s1 [FApp eqProof [ATerm valueIota, valueTerm]])
+    -- (a struct whose field is written is a struct that is made: it has to meet its invariant, as at a construction)
+    checkPlaceBounds st1 root steps
+    checkWriteInvariants st1 root steps
+    st2 <- reversionBorrows st1 root
+    return (forgetProofVar root (withTypeFacts (cxFn cx) root st2))
 execStatement cx st (M.Ghost env g) = ghostStatement cx st env g
 
 assign :: PState -> M.Local -> M.Rvalue -> V PState
@@ -227,6 +255,16 @@ assign st dest rv =
                 _ -> do
                     iota <- fresh
                     return (addFacts (bind st iota) [FApp eqProof [ATerm iota, term]])
+        M.Borrow root steps _ -> do
+            checkPlaceBounds st root steps
+            term <- placeTerm st root steps
+            case term of
+                ATerm iota -> return (bind st iota)
+                _ -> do
+                    iota <- fresh
+                    return (addFacts (bind st iota) [FApp eqProof [ATerm iota, term]])
+        -- (what a reference is to is the reference's own version: Borrow bound it to the place's term)
+        M.Deref o -> assign st dest (M.Use o)
         M.MakeList _ -> throwV "A list written from variables is not supported by the validator"
         -- (a Box has the value of what it holds)
         M.MakeBox o -> assign st dest (M.Use o)
@@ -242,7 +280,7 @@ assign st dest rv =
                     Ctor name fields -> checkInvariant st name (zip fields terms)
                     _ -> return ()
                 result <- fresh
-                st' <- applyCall st (builtinInfo builtin) terms result
+                st' <- applyCall st (builtinInfo builtin) terms result []
                 return (bind st' result)
   where
     bind s iota = s{psLocals = Map.insert dest iota (psLocals s)}
@@ -283,6 +321,116 @@ withTypeFacts fn l st =
         case [value | (param, M.LocalDecl _ (Just name)) <- Map.toList (M.fnLocals fn), name == p, param `elem` M.fnParams fn, Just value <- [Map.lookup param (psLocals st)]] of
             value : _ -> addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], ATerm value]]
             [] -> st
+
+-- The term for the value at a place of a local
+placeTerm :: PState -> M.Local -> [M.RefStep] -> V IotaProof
+placeTerm st root steps = operandTerm st (M.Copy root) >>= \term -> placeTermSteps st term steps
+
+placeTermSteps :: PState -> IotaProof -> [M.RefStep] -> V IotaProof
+placeTermSteps _ term [] = return term
+placeTermSteps st term (step : rest) = do
+    next <- case step of
+        M.RefField _ field -> return (FApp (CTerm (builtinFunct (Field Nothing field))) [term])
+        M.RefIndex index -> do
+            indexTerm <- operandTerm st index
+            return (FApp (CTerm (builtinFunct Get)) [term, indexTerm])
+    placeTermSteps st next rest
+
+-- After a call, what an update argument is to gets its post-call version: the old version keeps the old facts, and
+-- facts about the new one come from the callee's promises, which applyCall has already added (REFERENCES.md)
+versionMutArgs :: Ctx -> PState -> FnInfo -> [M.Operand] -> [(Variable, Iota)] -> V PState
+versionMutArgs _ st _ _ [] = return st
+versionMutArgs cx st info args mutPosts = foldM apply st (zip (fnParamNames info) args)
+  where
+    apply s (name, operand)
+        | Just post <- lookup name mutPosts = case operandLocalOf operand of
+            Just l -> do
+                let (root, steps) = fromMaybe (l, []) (Map.lookup l (psBorrows s))
+                s1 <- setPlaceVersion s root steps post
+                s2 <- reversionBorrows (forgetProofVar root s1) root
+                return (withTypeFacts (cxFn cx) root s2)
+            Nothing -> return s
+        | otherwise = return s
+    oldRootOf s root = ATerm <$> Map.lookup root (psLocals s)
+    operandLocalOf (M.Copy l) = Just l
+    operandLocalOf (M.Move l) = Just l
+    operandLocalOf _ = Nothing
+
+-- The index steps of a place have to be in the value they index, as an index of `get` is: a reference to an
+-- element that is not there is not made, and an assignment through one does not write there
+checkPlaceBounds :: PState -> M.Local -> [M.RefStep] -> V ()
+checkPlaceBounds st root steps = do
+    rootTerm <- operandTerm st (M.Copy root)
+    go rootTerm steps
+  where
+    go _ [] = return ()
+    go term (step : rest) = case step of
+        M.RefField _ field -> go (FApp (CTerm (builtinFunct (Field Nothing field))) [term]) rest
+        M.RefIndex index -> do
+            indexTerm <- operandTerm st index
+            let sizeTerm = FApp (CTerm (builtinFunct Size)) [term]
+                inBounds = Engine.entails (FApp (CTerm (builtinFunct (Rel GtEq))) [indexTerm, CTerm (VInt 0)]) (proofContext st)
+                    && Engine.entails (FApp (CTerm (builtinFunct (Rel Lt))) [indexTerm, sizeTerm]) (proofContext st)
+            unless inBounds $ throwV "A reference is to an index that is not known to be in the value it borrows"
+            go (FApp (CTerm (builtinFunct Get)) [term, indexTerm]) rest
+
+-- Each struct that a write through a reference builds again (the owner of each field step, at its new version)
+-- has to meet its invariant, as a struct that is made does (a construction is checked by checkInvariant)
+checkWriteInvariants :: PState -> M.Local -> [M.RefStep] -> V ()
+checkWriteInvariants st root steps = do
+    rootTerm <- operandTerm st (M.Copy root)
+    go rootTerm steps
+  where
+    go _ [] = return ()
+    go term (step : rest) = case step of
+        M.RefField ctor field -> do
+            let fields = case Map.lookup ctor (M.progTypes (psProgram st)) of
+                    Just (M.StructDecl fs) -> map fst fs
+                    _ -> []
+            checkInvariant st ctor [(f, FApp (CTerm (builtinFunct (Field Nothing f))) [term]) | f <- fields]
+            go (FApp (CTerm (builtinFunct (Field Nothing field))) [term]) rest
+        M.RefIndex index -> do
+            indexTerm <- operandTerm st index
+            go (FApp (CTerm (builtinFunct Get)) [term, indexTerm]) rest
+
+-- A root's new version, whose place at the steps is the given version: the rest of a struct keeps its fields,
+-- the rest of a list or an array is the old one at every other index (which `set` says), and a whole place is it
+setPlaceVersion :: PState -> M.Local -> [M.RefStep] -> Iota -> V PState
+setPlaceVersion s root steps post = case steps of
+    [] -> return s{psLocals = Map.insert root post (psLocals s)}
+    [M.RefField ctor field] -> do
+        newRoot <- fresh
+        let fieldOf t f = FApp (CTerm (builtinFunct (Field Nothing f))) [t]
+            fields = case Map.lookup ctor (M.progTypes (psProgram s)) of
+                Just (M.StructDecl fs) -> map fst fs
+                _ -> [field]
+            oldRootTerm = fromMaybe (ATerm post) (ATerm <$> Map.lookup root (psLocals s))
+            facts = [FApp eqProof [fieldOf (ATerm newRoot) field, ATerm post]]
+                ++ [FApp eqProof [fieldOf (ATerm newRoot) f, fieldOf oldRootTerm f] | f <- fields, f /= field]
+        return (addFacts s{psLocals = Map.insert root newRoot (psLocals s)} facts)
+    [M.RefIndex index] -> do
+        indexTerm <- operandTerm s index
+        newRoot <- fresh
+        let oldRootTerm = fromMaybe (ATerm post) (ATerm <$> Map.lookup root (psLocals s))
+        return (addFacts s{psLocals = Map.insert root newRoot (psLocals s)} [FApp eqProof [ATerm newRoot, FApp (CTerm (builtinFunct Set)) [oldRootTerm, indexTerm, ATerm post]]])
+    _ -> do
+        newRoot <- fresh
+        term <- placeTermSteps s (ATerm newRoot) steps
+        return (addFacts s{psLocals = Map.insert root newRoot (psLocals s)} [FApp eqProof [term, ATerm post]])
+
+-- After an assignment to a local, the reference locals that are to a place of it see its new version
+reversionBorrows :: PState -> M.Local -> V PState
+reversionBorrows st dest = do
+    let targets = [(ref, steps) | (ref, (root, steps)) <- Map.toList (psBorrows st), root == dest, ref /= dest]
+    case Map.lookup dest (psLocals st) of
+        Nothing -> return st
+        Just rootIota -> foldM (\s (ref, steps) -> do
+            term <- placeTermSteps s (ATerm rootIota) steps
+            case term of
+                ATerm iota -> return s{psLocals = Map.insert ref iota (psLocals s)}
+                _ -> do
+                    iota <- fresh
+                    return (addFacts s{psLocals = Map.insert ref iota (psLocals s)} [FApp eqProof [ATerm iota, term]])) st targets
 
 -- The term for the value of an operand
 operandTerm :: PState -> M.Operand -> V IotaProof
@@ -347,15 +495,15 @@ validateFunction st name top = do
         ensures = M.specEnsures spec
         params = M.fnParams fn
         names = [n | p <- params, Just d <- [Map.lookup p (M.fnLocals fn)], Just n <- [M.localName d]]
-        term' = FnInfo names requires [] term (ATerm (fnIota name)) top (KUser name) (Set.member name (psReaders st))
+        term' = FnInfo names requires [] term (ATerm (fnIota name)) top (KUser name) (Set.member name (psReaders st)) (M.specMutParams spec)
         -- the function can call itself: it promises what its output contract says of its parameters and result, and the body is
         -- checked against that
-        assumed = [p | ProofAssert p <- ensures, all (`elem` ("return" : names)) (proofVars p)]
+        assumed = [p | ProofAssert p <- ensures, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
         selfInfo = term'{fnExported = assumed, fnTermination = Just (Recursing term)}
         inner0 = withFunctions fn (bodyState st{psFns = if top then Map.insert name selfInfo (psFns st) else psFns st})
         inner = inner0{psTerminates = case term of Just MayDiverge -> False; _ -> True}
     entry <- freshN (length params)
-    let started = inner{psLocals = Map.fromList (zip params entry)}
+    let started = inner{psLocals = Map.fromList (zip params entry), psVars = Map.union (Map.fromList [("$old " ++ n, i) | (n, i) <- zip names entry, n `elem` M.specMutParams spec]) (psVars inner)}
         env = M.specEnv spec
     -- (a size is not negative)
     let sizeLocals = drop (length params - length (M.fnSizeParams fn)) params
@@ -372,10 +520,21 @@ validateFunction st name top = do
         _ -> do
             -- (the result has no value of its own in the contracts' view: they only say things about it)
             result <- fresh
-            let known =
+            -- (an update parameter's entry snapshot is a version of its own at export, equal to the entry version:
+            -- otherwise a promise about $old x could not be told from one about x)
+            oldIotas <- freshN (length (M.specMutParams spec))
+            let oldEntries = [(n, i) | (n, i) <- zip names entry, n `elem` M.specMutParams spec]
+                oldBindings = [("$old " ++ n, o) | ((n, _), o) <- zip oldEntries oldIotas]
+                known =
                     concat [typeInvariants st (M.localType d) (ATerm iota) | (p, iota) <- zip params entry, Just d <- [Map.lookup p (M.fnLocals fn)]]
                         ++ maybe [] (\t -> typeInvariants st t (ATerm result)) (M.fnReturns fn)
-            exportContract started known (zip names entry ++ [("return", result)]) requires ensures
+                        ++ [FApp eqProof [ATerm o, ATerm i] | ((_, i), o) <- zip oldEntries oldIotas]
+            exported0 <- exportContract started known (zip names entry ++ oldBindings ++ [("return", result)]) requires ensures
+            -- (the equality of an entry snapshot with the entry version is how the snapshot was made, not a promise:
+            -- exported, it would say that an update changed nothing)
+            let isOldEquality (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Eq)) _)) [ATerm a, ATerm b]) = any (\n -> (a, b) == ("$old " ++ n, n) || (a, b) == (n, "$old " ++ n)) (M.specMutParams spec)
+                isOldEquality _ = False
+            return (filter (not . isOldEquality) exported0)
     return (term'{fnExported = exported})
 
 -- A function that says what shrinks has it at least 0 for any arguments that meet the input contract, and keeps its value at the start
@@ -550,6 +709,7 @@ mergeStates wantedOf states@(s1 : others) = do
             (refreshCache s1)
                 { psLocals = locals'
                 , psVars = vars'
+                , psBorrows = Map.filterWithKey (\k v -> all (\s -> Map.lookup k (psBorrows s) == Just v) states) (psBorrows s1)
                 , psFacts = s0Facts
                 , psRules = Map.unions (map psRules states)
                 , psFns = Map.unions (map psFns states)
@@ -645,7 +805,20 @@ assignedIn cx region = Set.fromList (concat [assigned b | b <- Set.toList region
   where
     assigned b = case Map.lookup b (M.fnBlocks (cxFn cx)) of
         Nothing -> []
-        Just (M.BasicBlock stmts term) -> [d | M.Assign d _ <- stmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> [])
+        Just (M.BasicBlock stmts term) -> [d | M.Assign d _ <- stmts] ++ [root | M.AssignRef root _ _ <- stmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> []) ++ mutRoots stmts term
+    -- (what a call through an update parameter changes is assigned by the call, so a loop may not keep its old version:
+    -- an argument made by &mut place, or a local of an update-reference type, stands for its root)
+    mutRoots _ (M.Call _ args _ _) = concatMap rootOf args
+      where
+        borrowOf = Map.fromList [(d, root) | blk <- Map.elems (M.fnBlocks (cxFn cx)), M.Assign d (M.Borrow root _ True) <- M.blockStatements blk]
+        rootOf (M.Copy l) = mutRoot l
+        rootOf (M.Move l) = mutRoot l
+        rootOf _ = []
+        mutRoot l = case (Map.lookup l borrowOf, M.localType <$> Map.lookup l (M.fnLocals (cxFn cx))) of
+            (Just root, _) -> [root]
+            (_, Just (TMutRef _)) -> [l]
+            _ -> []
+    mutRoots _ _ = []
 
 -- The rest of the validation of a loop, from the state where the variables its body assigns are unknown: the invariant is
 -- assumed, the body is walked, and each way back to the start has to establish the invariant again

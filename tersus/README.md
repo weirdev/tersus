@@ -129,7 +129,7 @@ The CLI in `app/Main.hs` drives these paths over a source file (logic in `src/Cl
 - Use `-` as the file to read the program from standard input.
 - Errors go to standard error, prefixed with `Parse error:`, `Validation failed:`, `Lowering failed:` (a bug: a program that type checks always lowers) or `Evaluation failed:`. The exit code is 1 for a failed program and 2 for bad command-line usage.
 
-References and borrowing are planned in [REFERENCES.md](REFERENCES.md): scoped read/update capabilities, escaping references, versioned proof state, and integration with raw-memory permissions and allocator regions. This is a draft, not implemented syntax.
+References and borrowing are in [REFERENCES.md](REFERENCES.md): scoped read/update capabilities, escaping references, versioned proof state, and integration with raw-memory permissions and allocator regions. Stages 1 to 3 are implemented (nonescaping read references and exclusive updates: `&place`, `*r`, `&mut` with `writes(...)` and `old(...)`, loan checking in `MirMoves`, versioned validation); escaping references and the rest are still design.
 
 Next steps, roughly in priority order:
 1. Element-level facts about lists (mostly done)
