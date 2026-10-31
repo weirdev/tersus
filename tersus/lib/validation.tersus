@@ -1258,12 +1258,14 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
 fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
     facts = linFacts(context);
     facts = push(facts, linFact2(left, -1, right, 1, 0 - bound - 1));
+    if size(facts) > 80 { return false; };
     vars = [];
     for f in facts {
         for t in f.terms {
             if containsValue(vars, t.term) = false { vars = push(vars, t.term); };
         };
     };
+    if size(vars) > 24 { return false; };
     return linContradiction(facts, vars);
 };
 
@@ -1400,11 +1402,7 @@ fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool
         } else {
             if congruenceEqual(context, g.left, g.right) { return true; };
         };
-        if arithmeticTerm(context, g.left) {
-            if arithmeticTerm(context, g.right) {
-                if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
-            };
-        };
+        if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
         return false;
     };
     if goal is ValidatorGoal::Different {
@@ -1482,6 +1480,7 @@ fn deriveRefinedOrders(context: &ValidatorContext) -> ValidatorContext {
 };
 
 fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
+    if entailsGoalWithFacts(context, goal) { return true; };
     return entailsGoalWithFacts(deriveRefinedOrders(deriveSumOrders(context)), goal);
 };
 
@@ -3299,6 +3298,18 @@ fn stopTableAtJoin(blocks: &HashMap<Int, ExecutionBlock>, join: Int) -> HashMap<
     return table.insert(join, ExecutionBlock { id: join, steps: [], end: ExecutionEnd::Done });
 };
 
+fn contextContradictory(context: &ValidatorContext) -> Bool {
+    equalities = closeContext(context);
+    if contradictoryVariants(equalities, context.variants) { return true; };
+    if contradictoryConstructors(equalities, context.applications, context.constructorFunctions) { return true; };
+    if contradictoryConstants(equalities, context.constants) { return true; };
+    if contradictoryDisequalities(equalities, context.different) { return true; };
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    differences = constantDifferences(context.constants, comparisonDifferences(orders, context.differences));
+    if contradictoryDifferences(equalities, differences) { return true; };
+    return false;
+};
+
 fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: clone(initial) }; };
     if size(loops) > 0 {
@@ -3391,6 +3402,9 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                     if variantObject is ValueLookup::Found {
                                         noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
                                     };
+                                };
+                                if contextContradictory(noContext) {
+                                    return ExecutionFlowResult { status: 0, block: id, step: -1, state: ExecutionState { context: noContext, ..header.state } };
                                 };
                                 noState = ExecutionState { context: noContext, ..header.state };
                                 return walkExecution(blocks, loop.exit, noState, fuel - 1, loops);
