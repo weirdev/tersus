@@ -686,7 +686,7 @@ encodeFunction types invariants functions allowCalls fn
         (blocks, b) <- foldM add ([], withRequires) (Map.toList (M.fnBlocks fn))
         let context = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
             entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (paramFacts ++ sizeFacts ++ requires)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
-        pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", MList params)], -1)
+        pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", localsMap params)], -1)
   where
     spec = M.fnSpec fn
     sizeParams = drop (length (M.fnParams fn) - length (M.fnSizeParams fn)) (M.fnParams fn)
@@ -701,8 +701,14 @@ encodeFunction types invariants functions allowCalls fn
     ambiguousSizeName name = length [p | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], M.localName d == Just name] /= 1
     addParam (params, b) (M.Local local) =
         let (term, b') = fresh b
-            binding = record "LocalBinding" [("local", MInt (toInteger local)), ("term", MInt term)]
-         in (params ++ [binding], b')
+         in (params ++ [(toInteger local, term)], b')
+    -- A HashMap value with every entry in its single bucket: lookups hash to bucket 0 of one,
+    -- and the first insert past four entries spreads it into the usual shape.
+    localsMap bindings =
+        record "HashMap"
+            [ ("buckets", MList [MList [record "Entry" [("key", MInt local), ("value", MInt term)] | (local, term) <- bindings]])
+            , ("count", MInt (toInteger (length bindings)))
+            ]
     addType (steps, b) local = do
         (more, b') <- typeSteps types invariants fn local b
         pure (steps ++ more, b')

@@ -138,6 +138,17 @@ impl<K: Hash, V> HashMap<K, V> {
         return clone(get(entries, i).value);
     };
 
+    // Every entry of the map, in bucket order (which order that is says nothing about the keys)
+    fn entries(self: &Self) -> List<Entry<K, V>> [{ }] [{ }] {
+        result = [];
+        for bucket in self.buckets {
+            for e in bucket {
+                result = push(result, clone(e));
+            };
+        };
+        return result;
+    };
+
     fn insert(self: Self, k: K, v: V) -> Self [{ }] [{
         affirm return.count >= self.count;
         affirm return.count <= self.count + 1;
