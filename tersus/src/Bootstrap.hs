@@ -10,14 +10,13 @@ module Bootstrap
     , emitWith
     ) where
 
-import Control.Exception (IOException, finally, try)
+import Control.Exception (IOException, evaluate, finally, try)
 import GHC.IO.Encoding (char8)
-import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getXdgDirectory, removeFile, renameFile)
+import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import Control.Concurrent (forkIO)
-import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
-import System.IO (hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openTempFile, stderr)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
+import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
 
@@ -65,8 +64,9 @@ stageOne compiler output = case ownedSource emitterSource of
             Error e -> pure (Error e)
             Ok text -> buildExecutable output text
 
--- What the emitter at the path writes for the MIR as data: its IR, or its reason (on the standard error) for refusing the program. The bytes are read as they are:
--- the encodings are set on the pipes of the process, not on this one, so that callers may run emitters at the same time.
+-- What the emitter at the path writes for the MIR as data: its IR, or its reason (on the standard error) for refusing the program. The bytes are read as they are.
+-- The MIR goes in and the IR comes out through files, not pipes: with the non-threaded runtime a thread that feeds a pipe is never run while the process is
+-- waited on, so a program fed through pipes stops both ways (a thread per pipe does not help there, and callers may run emitters at the same time either way).
 emitWith :: FilePath -> String -> IO (Result String String)
 emitWith exe input = do
     outcome <- try run :: IO (Either IOException (ExitCode, String, String))
@@ -77,18 +77,36 @@ emitWith exe input = do
   where
     dropWhileEnd' p = reverse . dropWhile p . reverse
     run = do
-        (Just hin, Just hout, Just herr, process) <- createProcess (proc exe []){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe}
-        mapM_ (`hSetEncoding` char8) [hin, hout, herr]
-        _ <- forkIO (hPutStr hin input >> hClose hin)
-        -- (each pipe is drained by a thread of its own: a program that fills one while the other is waited on would stop both)
-        written <- newEmptyMVar
-        reported <- newEmptyMVar
-        _ <- forkIO (hGetContents hout >>= \out -> length out `seq` putMVar written out)
-        _ <- forkIO (hGetContents herr >>= \err -> length err `seq` putMVar reported err)
-        code <- waitForProcess process
-        out <- takeMVar written
-        err <- takeMVar reported
-        pure (code, out, err)
+        (inPath, inHandle) <- openTempFileAt "tersus-emit-in.tmp"
+        (outPath, outHandle) <- openTempFileAt "tersus-emit-out.tmp"
+        (errPath, errHandle) <- openTempFileAt "tersus-emit-err.tmp"
+        finally
+            ( do
+                hSetEncoding inHandle char8
+                hPutStr inHandle input
+                hClose inHandle
+                hSetEncoding outHandle char8
+                hSetEncoding errHandle char8
+                readHandle <- openFile inPath ReadMode
+                hSetEncoding readHandle char8
+                (_, _, _, process) <- createProcess (proc exe []){std_in = UseHandle readHandle, std_out = UseHandle outHandle, std_err = UseHandle errHandle}
+                code <- waitForProcess process
+                hClose readHandle
+                hClose outHandle
+                hClose errHandle
+                out <- readBytes outPath
+                err <- readBytes errPath
+                pure (code, out, err)
+            )
+            (mapM_ removeFile [inPath, outPath, errPath])
+    openTempFileAt name = getTemporaryDirectory >>= \dir -> openTempFile dir name
+    readBytes path = do
+        handle <- openFile path ReadMode
+        hSetEncoding handle char8
+        contents <- hGetContents handle
+        _ <- evaluate (length contents)
+        hClose handle
+        pure contents
 
 -- Stage 0 in the cache, built if it is not there yet
 cachedSeed :: IO (Result FilePath String)
