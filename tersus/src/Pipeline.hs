@@ -21,7 +21,7 @@ import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
-import PreludeSource (eqSource, boxSource, listsSource, mapSource, preludeSource, stringSource)
+import PreludeSource (eqSource, boxSource, listsSource, mapSource, preludeSource, setSource, stringSource)
 import Pretty (renderVarProof)
 import TersusTypes (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
@@ -86,9 +86,10 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
 -- unchanged: lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares), lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`) if it mentions any of them (or
 -- `hashCombine`), lib/string.tersus (the struct `String` that a string literal is a value of, which needs the traits) if it mentions `String` or
--- has a literal, and lib/map.tersus (the struct `HashMap`) if it mentions `HashMap`
+-- has a literal, lib/map.tersus (the struct `HashMap`) if it mentions `HashMap`, and lib/set.tersus (the struct `HashSet`,
+-- which is made of a map) if it mentions `HashSet`
 libraries :: String -> [(String, String)]
-libraries source = [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps]
+libraries source = [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps] ++ [("the set library", setSource) | sets]
   where
     code = withoutText source
     ws = names code
@@ -96,8 +97,9 @@ libraries source = [("the equality library", eqSource) | not (declares ["Eq"])] 
     declares candidates = any (\(keyword, name) -> keyword `elem` ["struct", "enum", "trait"] && name `elem` candidates) ws'
     preludeFree = not (declares ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash"])
     strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || '"' `elem` code)
-    maps = preludeFree && not (declares ["HashMap"]) && "HashMap" `elem` ws
-    prelude = preludeFree && (strings || maps || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash", "hashCombine"])
+    maps = preludeFree && not (declares ["HashMap"]) && ("HashMap" `elem` ws || sets)
+    sets = preludeFree && not (declares ["HashSet"]) && "HashSet" `elem` ws
+    prelude = preludeFree && (strings || maps || sets || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash", "hashCombine"])
     -- (the names in a text: runs of letters, digits and underscores)
     names text = case dropWhile (not . isNameChar) text of
         "" -> []
