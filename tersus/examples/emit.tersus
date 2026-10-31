@@ -43,6 +43,7 @@ enum Type {
     TForall { sizes: List<String>, types: List<String>, body: Box<Type> },
     TParam { name: String },
     TRef { inner: Box<Type> },
+    TMutRef { inner: Box<Type> },
     TAddr { inner: Box<Type> },
     TWord { signed: Bool, bits: Int },
 };
@@ -76,6 +77,11 @@ enum Operand { Copy { local: Int }, Move { local: Int }, Const { value: Constant
 
 impl Clone for Operand { };
 
+// A step from the root of a borrowed place to the place itself: a field of a struct or variant, or an element at an index
+enum RefStep { Field { ctor: String, field: String }, Index { o: Operand } };
+
+impl Clone for RefStep { };
+
 enum Rvalue {
     Use { o: Operand },
     BinaryOp { op: Int, a: Operand, b: Operand },
@@ -90,6 +96,8 @@ enum Rvalue {
     AsVariant { o: Operand, name: String },
     Clone { o: Operand },
     TakeField { local: Int, name: String, field: String },
+    Borrow { root: Int, steps: List<RefStep>, mutable: Bool },
+    Deref { o: Operand },
 };
 
 impl Clone for Rvalue { };
@@ -238,6 +246,10 @@ fn noFields() -> List<Field> [{ }] [{ }] {
 };
 
 fn noOperands() -> List<Operand> [{ }] [{ }] {
+    return [];
+};
+
+fn noRefSteps() -> List<RefStep> [{ }] [{ }] {
     return [];
 };
 
@@ -415,12 +427,13 @@ fn typeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; affirm
     if kw = "u16" { return done(Type::TWord { signed: false, bits: 16 }, next); };
     if kw = "u32" { return done(Type::TWord { signed: false, bits: 32 }, next); };
     if next >= size(ts) { return bad; };
-    if kw = "list" || kw = "box" || kw = "ref" || kw = "addr" {
+    if kw = "list" || kw = "box" || kw = "ref" || kw = "mutref" || kw = "addr" {
         e = typeAt(ts, next);
         if !e.ok { return bad; };
         if kw = "addr" { return done(Type::TAddr { inner: Box::new(e.value) }, e.pos); };
         if kw = "list" { return done(Type::TList { elem: Box::new(e.value) }, e.pos); };
         if kw = "box" { return done(Type::TBox { inner: Box::new(e.value) }, e.pos); };
+        if kw = "mutref" { return done(Type::TMutRef { inner: Box::new(e.value) }, e.pos); };
         return done(Type::TRef { inner: Box::new(e.value) }, e.pos);
     };
     if kw = "array" {
@@ -585,8 +598,41 @@ fn noRvalue() -> Rvalue [{ }] [{ }] {
     return Rvalue::Use { o: noOperand() };
 };
 
+// A step of a borrowed place: `field "n" "f"` or `index O`
+fn refStepAt(ts: &List<Token>, pos: Int) -> Parsed<RefStep> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+    bad = failed(RefStep::Index { o: noOperand() }, ts);
+    w = wordAt(ts, pos);
+    if !w.ok || w.pos >= size(ts) { return bad; };
+    if w.value = "index" {
+        o = operandAt(ts, w.pos);
+        if !o.ok { return bad; };
+        return done(RefStep::Index { o: o.value }, o.pos);
+    };
+    if w.value = "field" {
+        s = nameAt(ts, w.pos);
+        if !s.ok || s.pos >= size(ts) { return bad; };
+        f = nameAt(ts, s.pos);
+        if !f.ok { return bad; };
+        return done(RefStep::Field { ctor: s.value, field: f.value }, f.pos);
+    };
+    return bad;
+};
+
+fn refStepsAt(ts: &List<Token>, pos: Int, n: Int) -> Parsed<List<RefStep>> [{ affirm pos >= 0; affirm pos <= size(ts); affirm n >= 0; }] [{ affirm return.pos >= pos; affirm return.pos <= size(ts); }] {
+    items = noRefSteps();
+    p = pos;
+    for i in 0..n [{ affirm p >= pos; affirm p <= size(ts); }] {
+        if p >= size(ts) { return failed(noRefSteps(), ts); };
+        o = refStepAt(ts, p);
+        if !o.ok { return failed(noRefSteps(), ts); };
+        items = push(items, o.value);
+        p = o.pos;
+    };
+    return done(items, p);
+};
+
 // `use O`, `binary OP O O`, `listop OP N O...`, `makelist N O...`, `makebox O`, `unbox O`, `unsize O`, `makedata "n" N ("f" O)...`, `readfield O "n" "f"`,
-// `isvariant O "n"`, `asvariant O "n"`, `clone O` and `takefield L "n" "f"`
+// `isvariant O "n"`, `asvariant O "n"`, `clone O`, `takefield L "n" "f"`, `borrow L N ("field" "n" "f" | "index" O)...`, `borrowmut` likewise and `deref O`
 fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
     bad = failed(noRvalue(), ts);
     w = wordAt(ts, pos);
@@ -675,6 +721,20 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
         f = nameAt(ts, s.pos);
         if !f.ok { return bad; };
         return done(Rvalue::TakeField { local: l.value, name: s.value, field: f.value }, f.pos);
+    };
+    if kw = "borrow" || kw = "borrowmut" {
+        l = intAt(ts, next);
+        if !l.ok || l.pos >= size(ts) { return bad; };
+        c = countAt(ts, l.pos);
+        if !c.ok { return bad; };
+        steps = refStepsAt(ts, c.pos, c.value);
+        if !steps.ok { return bad; };
+        return done(Rvalue::Borrow { root: l.value, steps: steps.value, mutable: kw = "borrowmut" }, steps.pos);
+    };
+    if kw = "deref" {
+        o = operandAt(ts, next);
+        if !o.ok { return bad; };
+        return done(Rvalue::Deref { o: o.value }, o.pos);
     };
     return bad;
 };
@@ -1107,6 +1167,7 @@ fn renderType(t: &Type) -> String ~ {
         Type::TBox { inner: e } => { r = "Box<".then(renderType(Box::unbox(e))).then(">"); },
         Type::TArray { elem: e, size: s } => { r = "Array<".then(renderType(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
         Type::TRef { inner: e } => { r = "&".then(renderType(Box::unbox(e))); },
+        Type::TMutRef { inner: e } => { r = "&mut ".then(renderType(Box::unbox(e))); },
         Type::TAddr { inner: e } => { r = "Addr<".then(renderType(Box::unbox(e))).then(">"); },
         Type::TWord { signed: signed, bits: bits } => {
             if signed { r = "I".then(showInt(bits)); } else { r = "U".then(showInt(bits)); };
@@ -1576,9 +1637,7 @@ fn llvmType(t: &Type) -> Res ~ {
     unsupported = Res { ok: false, text: "Native code does not support ".then(renderType(t)).then(" yet") };
     if isNumberWord(t) { return Res { ok: true, text: "i64" }; };
     if t is Type::TBool { return Res { ok: true, text: "i1" }; };
-    if t is Type::TRef {
-        return llvmType(Box::unbox((t as Type::TRef).inner));
-    };
+    if t is Type::TRef || t is Type::TMutRef { return Res { ok: true, text: "ptr" }; };
     arr = sizedArray(t);
     if arr.ok {
         inner = llvmType(arr.elem);
@@ -2923,8 +2982,81 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
 };
 
 // The value of an rvalue that is a word, in `last`
+// The address of the place a borrow is of, in `last`: the root local's own room, then each step to the place. A root or a value
+// held inline is its room; what a list or a Box holds is at the address that is its first word, which an index step starts from.
+// What a reference is to, or the type itself if it is not a reference
+fn refTargetOf(t: &Type) -> Type ~ {
+    if t is Type::TRef { return clone(Box::unbox(clone((t as Type::TRef).inner))); };
+    if t is Type::TMutRef { return clone(Box::unbox(clone((t as Type::TMutRef).inner))); };
+    return clone(t);
+};
+
+fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>) -> Gen ~ {
+    lt = localTypeOf(f, root);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(root))); };
+    g1 = g;
+    at = slot(root);
+    ty = clone(lt.ty);
+    // (the root may itself be a reference: a reborrow is to what the reference is to)
+    if ty is Type::TRef || ty is Type::TMutRef {
+        g1 = ins(g1, "p", "load ptr, ptr ".then(at));
+        at = g1.last;
+        ty = refTargetOf(lt.ty);
+    };
+    i = 0;
+    while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+        // (a step may start from a reference met on the way, which is followed the same way)
+        if ty is Type::TRef || ty is Type::TMutRef {
+            g1 = ins(g1, "p", "load ptr, ptr ".then(at));
+            at = g1.last;
+            ty = refTargetOf(ty);
+        };
+        step = get(steps, i);
+        if step is RefStep::Field {
+            ctorName = (step as RefStep::Field).ctor;
+            fieldName = (step as RefStep::Field).field;
+            k = constructorG(g1, cx, ctorName);
+            if size(k.g.error.bytes) > 0 { return k.g; };
+            ctor = ctorAt(cx, k.i);
+            j = fieldIndex(ctor.fields, fieldName);
+            if j < 0 { return failG(k.g, "Variant ".then(ctorName).then(" has no field ").then(fieldName)); };
+            g1 = ins(k.g, "p", "getelementptr i8, ptr ".then(at).then(", i64 ").then(showInt(fieldOffset(cx, ctor, j))));
+            at = g1.last;
+            ty = clone(get(ctor.fields, j).ty);
+        };
+        if step is RefStep::Index {
+            o = (step as RefStep::Index).o;
+            elem = Held { ok: false, ty: Type::TInt };
+            if isListStruct(ty) { elem = listElement(cx, ty); };
+            if isBoxStruct(ty) { elem = listElement(cx, ty); };
+            arr = sizedArray(ty);
+            if arr.ok { elem = Held { ok: true, ty: clone(arr.elem) }; };
+            if !elem.ok { return failG(g1, "A reference to an element of this is not made by native code"); };
+            g1 = operandValue(g1, cx, f, Type::TInt, o);
+            index = g1.last;
+            base = clone(at);
+            if isListStruct(ty) || isBoxStruct(ty) {
+                g1 = ins(clone(g1), "a", "load ptr, ptr ".then(at));
+                base = g1.last;
+            };
+            g1 = elementAddress(clone(g1), base, index, bytesIn(cx, elem.ty));
+            at = g1.last;
+            ty = clone(elem.ty);
+        };
+        i = i + 1;
+    };
+    return giving(g1, at);
+};
+
 fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~ {
     if rv is Rvalue::Use { return operandValue(g, cx, f, destType, (rv as Rvalue::Use).o); };
+    if rv is Rvalue::Borrow { return placeAddress(g, cx, f, (rv as Rvalue::Borrow).root, (rv as Rvalue::Borrow).steps); };
+    if rv is Rvalue::Deref {
+        o = (rv as Rvalue::Deref).o;
+        g1 = operandValue(g, cx, f, destType, o);
+        at = g1.last;
+        return loadAt(clone(g1), destType, at);
+    };
     // (native code has no Box: a Box is made into a struct of lib/box.tersus or lib/lists.tersus first, see MirLists)
     if rv is Rvalue::MakeBox || rv is Rvalue::Unbox { return failG(g, "Native code has no Box: a Box is made into the struct of lib/box.tersus first (see MirLists)"); };
     if rv is Rvalue::BinaryOp {
@@ -3149,6 +3281,11 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
     target = slot(dest);
     if rv is Rvalue::Use {
         g1 = operandAddress(g, cx, f, ty, (rv as Rvalue::Use).o);
+        src = g1.last;
+        return fromPart(clone(g1), cx, dropsOld, ty, dest, src, false);
+    };
+    if rv is Rvalue::Deref {
+        g1 = operandValue(g, cx, f, ty, (rv as Rvalue::Deref).o);
         src = g1.last;
         return fromPart(clone(g1), cx, dropsOld, ty, dest, src, false);
     };
@@ -3443,7 +3580,16 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
     g1 = g;
     i = 0;
     while i < size(argTypes) && i < size(args) [{ affirm i >= 0; affirm i <= size(argTypes); affirm i <= size(args); }] ~ {
-        g1 = operandValue(g1, cx, f, get(argTypes, i), get(args, i));
+        wanted = get(argTypes, i);
+        argument = get(args, i);
+        given = operandLocalType(f, argument);
+        // (a local that is a reference to what the parameter wants is given what it is to: the value itself, or for a value held inline the address of its words, which is the pointer the reference holds)
+        if given.ok && (given.ty is Type::TRef || given.ty is Type::TMutRef) && refTargetOf(given.ty) = wanted {
+            g1 = operandValue(g1, cx, f, given.ty, argument);
+            if !isAggregate(wanted) { g1 = loadAt(clone(g1), wanted, g1.last); };
+        } else {
+            g1 = operandValue(g1, cx, f, wanted, argument);
+        };
         values = push(values, clone(g1.last));
         i = i + 1;
     };
