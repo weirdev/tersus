@@ -9,18 +9,94 @@ tests, documentation, and bootstrap artifacts as appropriate, and explain the
 resulting behavior and migration when a change is user-visible.
 
 ## Project Structure & Module Organization
-The active implementation lives in `tersus/`, a Stack-based Haskell package. Core language, parser, proof, and utility modules are under `tersus/src/`; the CLI entry point is `tersus/app/Main.hs`; the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop` and `Deref` that every program that mentions any of them has is in `tersus/lib/prelude.tersus`, and the list that native code is made of in `tersus/lib/lists.tersus`, and the Box that native code is made of in `tersus/lib/box.tersus`, and the struct `String` that a string literal is a value of in `tersus/lib/string.tersus` (all embedded by `PreludeSource`); and regression tests are in `tersus/test/` (`TestTersus.hs` runs the groups, which live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`, `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`, `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`, `TestCopies`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`, `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirEmit` and `TestBootstrap`, with the shared harness in `TestHarness`).
+The active implementation lives in `tersus/`, a Stack-based Haskell package.
+
+- `tersus/src/`: core language, parser, type checker, MIR, proof, and utility
+  modules. The CLI entry point is `tersus/app/Main.hs` (logic in `src/Cli.hs`).
+- `tersus/lib/` (Tersus sources the Haskell implementation depends on):
+  - `prelude.tersus`: the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`
+    and `Deref`, put in front of a program that mentions any of them and does
+    not declare it (`Pipeline.libraries`). Embedded by `PreludeSource`.
+  - `lists.tersus`: the list that native code is made of (`StdList`), and
+    `box.tersus`: the Box that native code is made of (`StdBox`). Both embedded
+    by `PreludeSource` and lowered with the lists library.
+  - `string.tersus`: the struct `String` that a string literal is a value of,
+    embedded by `PreludeSource` and put after the prelude for a program that
+    writes a string literal or mentions `String`.
+  - `stdlib.tersus`: the standard library written in Tersus. Embedded by
+    `PreludeSource` and parsed by `StdLibDefs`, which is where the builtins it
+    declares get their contracts; it is not put in front of user programs.
+  - `validation.tersus`: the validator written in Tersus, run by
+    `SelfHostedMir`/`SelfHostedProof` alongside the Haskell validator, which
+    remains the production path. It is not embedded by `PreludeSource`; tests
+    and hosts read it from `lib/` directly.
+- `tersus/examples/`: example programs, all loaded and checked by
+  `testExamples` (see Testing Guidelines). `examples/emit.tersus` is the LLVM
+  emitter written in Tersus, and `examples/mir_reader.tersus` /
+  `examples/mir_verify.tersus` are the MIR reader and MIR checker written in
+  Tersus.
+- `tersus/bootstrap/emitter.ll`: the checked-in seed IR the Tersus emitter is
+  bootstrapped from (see Build, Test, and Development Commands).
+- `tersus/dev/parity/`: the `parity` executable, a development harness outside
+  the production library and CLI.
+- `tersus/test/`: regression tests. `TestTersus.hs` runs the test groups; the
+  groups live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`,
+  `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
+  `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
+  `TestCopies`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
+  `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
+  `TestMirEmit` and `TestBootstrap`, with the shared harness in `TestHarness`.
 
 ## Build, Test, and Development Commands
 Work from `tersus/`.
 
-- `stack build`: compile the Haskell package and surface warnings.
-- `stack run -- check <file>` / `stack run -- run <file>`: validate, or validate, compile to native code and run (needs clang), a `.tersus` program via the CLI; `stack run -- eval <file>` runs the validated MIR with the reference interpreter instead (what `testNative` compares native code with) in `app/Main.hs` (logic in `src/Cli.hs`). `stack run -- mir --data <file>` prints the MIR that native code is made from as data (`MirData`; the input of the emitter that step 31 writes in Tersus), `stack run -- llvm <file>` prints the LLVM IR of a validated program (written by the emitter in Tersus, `examples/emit.tersus`, which is built with clang on first use from the seed `bootstrap/emitter.ll` and cached; `Bootstrap`) and `stack run -- build <file> -o <output>` compiles it with clang (which `testNative` also needs to run the executables; it passes without). `testNative` also runs some programs under `valgrind` when it is installed; the heap model of `testOwnership` needs neither.
-- `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`, which runs each group in a process of its own; `stack test --test-arguments='-j 1'` runs the groups one at a time, and `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
-- `ghci` then `:load Pipeline`: quick interactive workflow noted in `tersus/README.md`.
+- `stack build`: compile the Haskell package and surface warnings. CI
+  (`.github/workflows/ci.yml`) runs `stack build --test --no-run-tests` and
+  then `stack test`, both from `tersus/`.
+- The package builds two executables, `parity` and `tersus-exe`, and a bare
+  `stack run` runs the first of them (`parity`), so always name the CLI:
+  `stack run tersus-exe -- <command> <file>`. Commands (`src/Cli.hs`):
+  - `check <file>`: parse and validate a program.
+  - `run <file> [args]`: validate, compile to native code and run (needs
+    clang), passing any extra arguments to the program.
+  - `eval <file> [args]`: run the validated MIR with the reference interpreter
+    instead (what `testNative` compares native code with); no compiler needed.
+  - `mir <file>`: print the validated MIR; `mir --data <file>` prints the MIR
+    that native code is made from as data (`MirData`; the input of the emitter
+    written in Tersus).
+  - `owned <file>`: print the MIR that native code is made from, with moves,
+    copies and frees.
+  - `llvm <file>`: print the LLVM IR of a validated program (written by the
+    emitter in Tersus, `examples/emit.tersus`, which is built with clang on
+    first use from the seed `bootstrap/emitter.ll` and cached; `Bootstrap`).
+  - `build <file> -o <output>`: compile a validated program to an executable
+    with clang (which `testNative` also needs to run the executables; it
+    passes without).
+  - `assumptions <file>`: print what the program takes on trust (`assume`,
+    `Block::assume`, `extern fn` and `axiom`), which the validator does not
+    prove.
+  - Use `-` as the file to read the program from standard input.
+  `testNative` also runs some programs under `valgrind` when it is installed;
+  the heap model of `testOwnership` needs neither.
+- If a change alters what the emitter in Tersus produces (a change to
+  `examples/emit.tersus` or to what it is built from), regenerate the seed:
+  `stack run tersus-exe -- llvm examples/emit.tersus > bootstrap/emitter.ll`,
+  and let `TestBootstrap` check the stage 0 / stage 1 fixpoint.
+- `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`,
+  which runs each group in a process of its own;
+  `stack test --test-arguments='-j 1'` runs the groups one at a time, and
+  `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
+- `ghci` then `:load Pipeline`: quick interactive workflow noted in
+  `tersus/README.md`.
 
 ## Coding Style & Naming Conventions
 Follow the existing style in `tersus/src`: 4-space indentation, explicit type signatures for top-level helpers when useful, and `CamelCase` for data constructors and module names. Use `camelCase` for functions such as `parseStatementBlock` and `evalReturningBlock`. Keep parser and proof code split by concern instead of growing monolithic files.
+
+`tersus.cabal` is generated from `package.yaml` by hpack: edit `package.yaml`
+and let Stack regenerate the `.cabal` file; do not hand-edit it. A new file
+under `lib/` that the build depends on also needs an `extra-source-files`
+entry in `package.yaml`, and a `PreludeSource` embedding if Haskell code has
+to read it at compile time.
 
 ## Testing Guidelines
 Add or update Haskell tests in the matching module under `tersus/test/` (and list a new group in `TestTersus.hs`) alongside the affected parser, evaluator, or validator behavior. Existing tests group cases with names like `testParseEval` and `testValidationFail`; follow that pattern and make failures readable. Run `stack test` before opening a PR.
@@ -30,8 +106,18 @@ Note: the Haskell test harness is custom. It prints `[PASS]`/`[FAIL]` per case a
 ## Documentation Guidelines
 Keep `tersus/LANGUAGE.md` in sync with user-visible syntax (including comments), builtins, validation statements, rewrite rules, contracts, and known language limitations. Keep `tersus/examples/README.md` in sync with the programs in `tersus/examples/`. Update the interpreter-flow section in `tersus/README.md` when parser, concrete evaluation, validation, scope, function-call, or CLI behavior changes. Include small Tersus snippets when documenting grammar or proof behavior.
 
+The design and status documents in `tersus/` are part of the documentation:
+update whichever of `MIR.md`, `DATA_MODEL.md`, `POINTERS.md`, `DROPS.md`,
+`REFERENCES.md`, `ALLOCATORS.md`, `STEP31.md` and `REPLACING_HASKELL.md`
+describes the area a change touches, including its Status section when what
+is built changes, and the roadmap in `tersus/README.md` when a step's state
+changes.
+
 ## Commit & Pull Request Guidelines
 Recent history uses short, direct subjects such as `Minor cleanup` and feature-focused summaries. Prefer concise imperative commits that describe behavior, not process; avoid `Checkpoint` for reviewable work. PRs should include a brief problem statement, the chosen approach, and exact verification commands. Link related issues when available and include example Tersus snippets when grammar or proof behavior changes.
 
 ## Contributor Notes
-Keep experimental work isolated from the production Haskell package.
+Keep experimental and development-only work out of the production Haskell
+library and the `tersus-exe` CLI; put it under `tersus/dev/` (as the `parity`
+harness is) or in examples, and wire it into `package.yaml` as its own
+executable or test target rather than into the library.
