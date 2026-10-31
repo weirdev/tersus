@@ -306,7 +306,7 @@ rvalueProblems env localTy d rv =
     isValueOf typeName o = case operandType env localTy o of
         -- (a Box is looked into, and so is the struct a Box is made of in native code, lib/box.tersus)
         Just (TBox t) -> namedMatches t typeName || sub env (TNamed typeName []) t
-        Just t@(TNamed "StdBox" [ArgType held]) -> namedMatches t typeName || sub env (TNamed typeName []) t || sub env (TNamed typeName []) held
+        Just t@(TNamed "StdBox" [ArgType held]) -> namedMatches t typeName || sub env (TNamed typeName []) t || namedMatches held typeName || sub env (TNamed typeName []) held
         Just t -> namedMatches t typeName || sub env (TNamed typeName []) t
         Nothing -> False
 
