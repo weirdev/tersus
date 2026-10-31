@@ -34,6 +34,7 @@ source-repository head
 library
   exposed-modules:
       Bootstrap
+      BuiltinRegistry
       Cli
       Ghost
       Hash
@@ -129,6 +130,7 @@ test-suite tersus-test
       TestArrays
       TestBasics
       TestBootstrap
+      TestBuiltinRegistry
       TestBorrow
       TestBox
       TestBytes
