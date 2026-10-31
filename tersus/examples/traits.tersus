@@ -11,7 +11,7 @@ enum Shape {
 struct Counter { value: Int };
 
 trait Measure {
-    fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; }];
+    fn sides(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
 };
 
 trait Step {
@@ -27,7 +27,7 @@ impl Shape {
 // An impl may promise more than the trait does (the output contract of sides is stronger here, and start promises a value
 // the trait says nothing about), and may ask for less. A caller knows what the impl's contracts say and nothing else.
 impl Measure for Shape {
-    fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; affirm return <= 4; }] {
+    fn sides(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return <= 4; }] {
         return match self {
             Self::Circle { radius: r } => 1,
             Self::Rect { width: w, height: h } => 4,

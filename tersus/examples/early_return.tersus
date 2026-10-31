@@ -1,6 +1,6 @@
 // Early return. `return` ends the function (or the program) where it runs, so a guard clause
 // can leave the rest of the function to a case that is already known to be safe.
-fn firstOr(lst: List<Int>, fallback: Int) -> Int {
+fn firstOr(lst: &List<Int>, fallback: Int) -> Int {
     // Guard clause: the else branch returns, so the statements below only run when
     // size(lst) > 0, and the validator checks them under that assumption.
     if size(lst) > 0 {

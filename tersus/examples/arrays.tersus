@@ -6,7 +6,7 @@
 // that assigns the array back to itself it is a store into the array). There is no push: the size never changes.
 //
 // The validator knows the size of every array from its type, so no contract or loop invariant has to say it.
-fn dot(a: Array<Int, 5>, b: Array<Int, 5>) -> Int {
+fn dot(a: &Array<Int, 5>, b: &Array<Int, 5>) -> Int {
     total = 0;
     i = 0;
     while i < size(a) [{ affirm i >= 0; affirm i <= size(a); }] shrinks size(a) - i {

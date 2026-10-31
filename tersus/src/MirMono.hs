@@ -144,7 +144,12 @@ instantiate fn tys sizes =
         IsVariant o name -> IsVariant (operand o) (named name)
         AsVariant o name -> AsVariant (operand o) (named name)
         Clone o -> Clone (operand o)
+        Borrow root steps mutable -> Borrow root (map step steps) mutable
+        Deref o -> Deref (operand o)
         TakeField l name field -> TakeField l (named name) field
+      where
+        step (RefField n f) = RefField (named n) f
+        step (RefIndex o) = RefIndex (operand o)
     spec s = s{specEnv = env (specEnv s), specLoops = Map.map (\l -> l{loopEnv = env (loopEnv l)}) (specLoops s)}
 
 -- The function with each call of a function with size parameters made a call of the copy for its sizes, and the copies that need

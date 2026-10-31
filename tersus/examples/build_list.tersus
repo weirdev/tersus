@@ -7,7 +7,7 @@
 // elementwise fact. The counter facts (0 <= i <= size(a), and i = size(a) after the loop) come
 // with the for loop.
 
-fn doubled(a: List<Int>) -> List<Int> [{ }] [{
+fn doubled(a: &List<Int>) -> List<Int> [{ }] [{
     affirm size(return) = size(a);
     affirm forall j in 0..size(a): get(return, j) = (get(a, j) + get(a, j));
 }] {

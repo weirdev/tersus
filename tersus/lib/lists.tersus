@@ -76,7 +76,7 @@ impl<T> Drop for StdList<T> {
 };
 
 // Array::boxed(n, x): n copies of x, in memory of its own (a Box of an array is a list of native code, with as many elements as room)
-fn stdListFilled<T>(n: Int, x: T) -> StdList<T> [{ affirm n >= 0; }] [{ affirm return.len = n; }] {
+fn stdListFilled<T>(n: Int, x: &T) -> StdList<T> [{ affirm n >= 0; }] [{ affirm return.len = n; }] {
     (a, b) = Addr::alloc(n);
     i = 0;
     while i < n [{

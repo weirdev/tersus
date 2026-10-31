@@ -1025,10 +1025,10 @@ sizeInScope _ = return ()
 builtinType :: BuiltinFunct -> TC Type
 builtinType funct =
     case funct of
-        Size -> list (\a -> TFn [TList a] TInt)
-        First -> list (\a -> TFn [TList a] a)
-        Last -> list (\a -> TFn [TList a] a)
-        Get -> list (\a -> TFn [TList a, TInt] a)
+        Size -> list (\a -> TFn [TRef (TList a)] TInt)
+        First -> list (\a -> TFn [TRef (TList a)] a)
+        Last -> list (\a -> TFn [TRef (TList a)] a)
+        Get -> list (\a -> TFn [TRef (TList a), TInt] a)
         Push -> list (\a -> TFn [TList a, a] (TList a))
         Pop -> list (\a -> TFn [TList a] (TList a))
         Set -> list (\a -> TFn [TList a, TInt, a] (TList a))
@@ -1052,7 +1052,7 @@ builtinType funct =
         ToByte -> return (TFn [TInt] TByte)
         FromByte -> return (TFn [TByte] TInt)
         ToWord signed bits -> return (TFn [TInt] (TWord signed bits))
-        BytesFrom -> return (TFn [TList TInt] (TList TByte))
+        BytesFrom -> return (TFn [TRef (TList TInt)] (TList TByte))
         Unsize -> failTc "Type error: a Box of an array is given the size of its type by the checker, and unsize cannot be used as a value"
         Plus -> arith
         Minus -> arith
@@ -1151,11 +1151,11 @@ checkBuiltinCall (Just b) name ft ats@(container : _)
     arrayVersion sequenceOf funct = do
         a <- freshVar
         return $ case funct of
-            Size -> TFn [sequenceOf a] TInt
-            Get -> TFn [sequenceOf a, TInt] a
+            Size -> TFn [TRef (sequenceOf a)] TInt
+            Get -> TFn [TRef (sequenceOf a), TInt] a
             Set -> TFn [sequenceOf a, TInt, a] (sequenceOf a)
             Replace -> TFn [sequenceOf a, TInt, a] (tupleType [sequenceOf a, a])
-            _ -> TFn [sequenceOf a] a
+            _ -> TFn [TRef (sequenceOf a)] a
 -- (a Box is its contents wherever a struct or an enum is looked at: tested for its variant, cast to one, or read for a field)
 checkBuiltinCall (Just b) name ft (first : rest)
     | isLookingAt b = do
@@ -2770,7 +2770,16 @@ genericCall name names types inner inferred = do
             | length pts - length names /= length inferred ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts - length names) ++ " arguments, got " ++ show (length inferred))
             | otherwise -> do
-                args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at >> return arg') (zip3 [1 ..] pts inferred)
+                args <- mapM (\(i, pt, arg) -> do
+                    ptz <- zonk pt
+                    (at, arg') <- coerce (unref ptz) arg
+                    atz <- zonk at
+                    case (ptz, atz) of
+                        (TRef a, TRef b) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) a b
+                        (TRef a, TMutRef b) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) a b
+                        (TMutRef a, TMutRef b) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) a b
+                        _ -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref ptz) atz
+                    return arg') (zip3 [1 ..] pts inferred)
                 given <- mapM (\(n, size) -> zonkSize size >>= sizeArgument name n) (zip names sizes)
                 -- (a type parameter is a type of value: not a function, which native code has no copy of the function for)
                 forM_ (zip types given') $ \(n, t) -> do
@@ -3019,7 +3028,16 @@ templateCall ctx name template inferred = do
             | length pts - length sizes /= length inferred ->
                 failTc ("Type error: " ++ name ++ " takes " ++ show (length pts - length sizes) ++ " arguments, got " ++ show (length inferred))
             | otherwise -> do
-                args <- mapM (\(i, pt, arg) -> coerce (unref pt) arg >>= \(at, arg') -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref pt) at >> return arg') (zip3 [1 ..] pts inferred)
+                args <- mapM (\(i, pt, arg) -> do
+                    ptz <- zonk pt
+                    (at, arg') <- coerce (unref ptz) arg
+                    atz <- zonk at
+                    case (ptz, atz) of
+                        (TRef a, TRef b) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) a b
+                        (TRef a, TMutRef b) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) a b
+                        (TMutRef a, TMutRef b) -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) a b
+                        _ -> expect ("argument " ++ show (i :: Int) ++ " of " ++ name) (unref ptz) atz
+                    return arg') (zip3 [1 ..] pts inferred)
                 let given = zip types typeVars
                 -- (a bound on a type that another bound decides waits until that one has: the passes end when all are met, or none can be)
                 let attempt pending = do

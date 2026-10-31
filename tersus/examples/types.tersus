@@ -5,7 +5,7 @@ fn isPositive(n: Int) -> Bool {
 };
 
 // (a caller knows a function by its contracts, so the one thing the program needs of scale is said in one)
-fn scale(values: List<Int>, factor: Int) -> List<Int> [{ }] [{ affirm size(return) = size(values); }] {
+fn scale(values: &List<Int>, factor: Int) -> List<Int> [{ }] [{ affirm size(return) = size(values); }] {
     out = [];
     for value in values {
         out = push(out, value * factor);

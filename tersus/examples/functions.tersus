@@ -8,7 +8,7 @@ fn addThree(a: Int, b: Int, c: Int) -> Int {
 };
 
 // first and last need a non-empty list, so the contract has to show size(lst) > 0.
-fn sumFirstLast(lst: List<Int>) -> Int [{
+fn sumFirstLast(lst: &List<Int>) -> Int [{
     define s = size(lst);
     rewrite eqToGtZero s;
     affirm s > 0;

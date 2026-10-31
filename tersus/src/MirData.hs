@@ -449,9 +449,7 @@ headerP = do
     expect "borrowed"
     borrowed <- int >>= \n -> replicateM n local
     (mutBorrowed, fromLocals) <- optionalRefHeader
-    pure (Function fname params returns Map.empty Map.empty sizeParams typeParams borrowed mutBorrowed fromLocals (emptySpec{specMutParams = map localIdName mutBorrowed, specFrom = map localIdName fromLocals}))
-  where
-    localIdName (Local n) = "$local " ++ show n
+    pure (Function fname params returns Map.empty Map.empty sizeParams typeParams borrowed mutBorrowed fromLocals emptySpec)
 
 optionalRefHeader :: P ([Local], [Local])
 optionalRefHeader = P (\ts -> case ts of
@@ -509,10 +507,7 @@ functionFrom header rest =
     parseLine headerP header `bindResult` \fn ->
         localsFrom rest `bindResult` \(decls, rest1) ->
             blocksFrom rest1 `bindResult` \(blocks, rest2) ->
-                let resolveIds names = [name | lid <- names, Just (LocalDecl _ (Just name)) <- [Map.lookup (readLocal lid) (Map.fromList decls)]]
-                    readLocal s = Local (read (drop 7 s) :: Int)
-                    spec = (fnSpec fn){specMutParams = resolveIds (specMutParams (fnSpec fn)), specFrom = resolveIds (specFrom (fnSpec fn))}
-                 in Ok (fn{fnLocals = Map.fromList decls, fnBlocks = Map.fromList blocks, fnSpec = spec}, rest2)
+                Ok (fn{fnLocals = Map.fromList decls, fnBlocks = Map.fromList blocks}, rest2)
 
 localsFrom :: [[Token]] -> Result ([(Local, LocalDecl)], [[Token]]) String
 localsFrom (record : rest)

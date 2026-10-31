@@ -118,13 +118,13 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
     fn contains(self: &Self, k: &K) -> Bool [{ }] [{
         affirm return = (findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0);
     }] {
-        entries = clone(get(self.buckets, indexFor(size(self.buckets), k)));
+        entries = &get(self.buckets, indexFor(size(self.buckets), k));
         return findIn(entries, k) >= 0;
     };
 
     // The value at k, or the fallback when there is none
     fn lookup(self: &Self, k: &K, fallback: V) -> V [{ }] [{ }] {
-        entries = clone(get(self.buckets, indexFor(size(self.buckets), k)));
+        entries = &get(self.buckets, indexFor(size(self.buckets), k));
         i = findIn(entries, k);
         if i >= 0 {
             return clone(get(entries, i).value);
@@ -132,9 +132,16 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
         return fallback;
     };
 
+    // A reference to the value at k, which the caller says is there: the value is read where it is, not cloned out
+    fn lookupRef(self: &Self, k: &K) -> &V from self [{ affirm findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0; }] [{ }] {
+        entries = &get(self.buckets, indexFor(size(self.buckets), k));
+        i = findIn(entries, k);
+        return &get(entries, i).value;
+    };
+
     // The value at k, which the caller says is there
     fn fetch(self: &Self, k: &K) -> V [{ affirm findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0; }] [{ }] {
-        entries = clone(get(self.buckets, indexFor(size(self.buckets), k)));
+        entries = &get(self.buckets, indexFor(size(self.buckets), k));
         i = findIn(entries, k);
         return clone(get(entries, i).value);
     };
@@ -180,7 +187,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
     };
 
     // The same entries in twice as many buckets
-    fn spread(self: Self) -> Self [{ }] [{ affirm return.count = self.count; affirm size(return) = size(self); }] {
+    fn spread(self: &Self) -> Self [{ }] [{ affirm return.count = self.count; affirm size(return) = size(self); }] {
         fresh = [];
         f = 0;
         while f < size(self.buckets) * 2 [{
@@ -195,7 +202,7 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
             affirm b >= 0; affirm b <= size(self.buckets);
             affirm size(wide) = size(self);
         }] shrinks size(self.buckets) - b {
-            entries = clone(get(self.buckets, b));
+            entries = &get(self.buckets, b);
             i = 0;
             while i < size(entries) [{
                 affirm i >= 0; affirm i <= size(entries);

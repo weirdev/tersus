@@ -748,6 +748,7 @@ referencePrograms =
     , ("a reborrow reads what the first reference is to", "x = 4; r = &x; s = &*r; return *s;")
     , ("a local reference is given to a read parameter", "fn id(n: &Int) -> Int { return n; }; x = 4; r = &x; return id(r);")
     , ("a reference to a list is given to a read parameter", "fn sz(a: &List<Int>) -> Int { return size(a); }; xs = [1, 2, 3]; r = &xs; return sz(r);")
+    , ("an element borrowed with get is read where it is", "xss = push(push([], push(push([], 1), 2)), push([], 3)); e = &get(xss, 0); return size(e) * 10 + get(e, 1);")
     , ("a borrowed field of a generic struct with a list", "struct S<T> { n: Int, value: T }; s = S<List<Int>> { n: 7, value: [1] }; r = &s.n; return *r;")
     , ("a constant is lent by address", "fn id(n: &Int) -> Int { return n; }; return id(42);")
     , ("a read reference is returned", "fn idr(x: &Int) -> &Int from x { return x; }; a = 41; r = idr(&a); return *r + 1;")

@@ -10,7 +10,7 @@ fn head<T>(items: &List<T>) -> T [{ define s = size(items); rewrite eqToGtZero s
 };
 
 // The type can be in the result, in a Box, and in an array of a size
-fn repeat<T>(x: T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ affirm size(return) = n; }] {
+fn repeat<T>(x: &T, n: Int) -> List<T> [{ define s = n; affirm s >= 0; }] [{ affirm size(return) = n; }] {
     out = [];
     i = 0;
     while i < n [{ affirm i >= 0; affirm i <= n; affirm size(out) = i; }] shrinks n - i {

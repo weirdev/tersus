@@ -5,7 +5,7 @@ struct Image { id: Int, pixels: Array<Int, 4>, tag: Int };
 enum Tile { Empty, Row { cells: Array<Int, 2> }, Block { id: Int, cells: Array<Int, 4> } };
 
 // Reading the field gives a copy of the array, and the update builds a new Image around the new array
-fn brighten(img: Image) -> Image {
+fn brighten(img: &Image) -> Image {
     px = img.pixels;
     i = 0;
     while i < 4 [{ affirm i >= 0; affirm i <= 4; }] shrinks 4 - i {
@@ -16,7 +16,7 @@ fn brighten(img: Image) -> Image {
 };
 
 // The variants of an enum are as wide as their fields
-fn weight(t: Tile) -> Int {
+fn weight(t: &Tile) -> Int {
     return match t {
         Tile::Empty => 0,
         Tile::Row { cells: c } => get(c, 0) + get(c, 1),

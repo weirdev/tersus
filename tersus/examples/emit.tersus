@@ -2696,6 +2696,7 @@ fn dataBase(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
     // (a Box of the library is the address of what it holds, as a Box is: lib/box.tersus; its own field is read from it)
     if isBoxStruct(lt.ty) && !isBoxStruct(ty) { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
+    if lt.ty is Type::TRef || lt.ty is Type::TMutRef { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
     return giving(g, slot(l));
 };
 
@@ -2703,7 +2704,11 @@ fn dataBase(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
 fn isArrayOperand(f: &Function, o: &Operand) -> Bool [{ }] [{ }] {
     if o is Operand::Const { return (o as Operand::Const).value is Constant::CArray; };
     lt = operandLocalType(f, o);
-    return lt.ok && (isArray(lt.ty) || isListStruct(lt.ty));
+    if !lt.ok { return false; };
+    if isArray(lt.ty) || isListStruct(lt.ty) { return true; };
+    if lt.ty is Type::TRef { return isListStruct(clone(Box::unbox(clone((lt.ty as Type::TRef).inner)))); };
+    if lt.ty is Type::TMutRef { return isListStruct(clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner)))); };
+    return false;
 };
 
 // The address of the words of an array operand: a local, or a constant that is a global; in `last`
@@ -2720,6 +2725,15 @@ fn arrayPtr(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
     // (a list of native code holds the address of the elements in its first word)
     if isListStruct(lt.ty) { return ins(g, "a", "load ptr, ptr ".then(slot(l))); };
+    if lt.ty is Type::TRef || lt.ty is Type::TMutRef {
+        g1 = ins(g, "a", "load ptr, ptr ".then(slot(l)));
+        at = g1.last;
+        inner = Type::TInt;
+        if lt.ty is Type::TRef { inner = clone(Box::unbox(clone((lt.ty as Type::TRef).inner))); };
+        if lt.ty is Type::TMutRef { inner = clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner))); };
+        if isListStruct(inner) { return ins(clone(g1), "a", "load ptr, ptr ".then(at)); };
+        return g1;
+    };
     return giving(g, slot(l));
 };
 
