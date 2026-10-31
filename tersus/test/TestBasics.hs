@@ -688,8 +688,8 @@ testFunctionCalls =
             , -- Rejected: the callee's input contract is not met, or the caller's own output contract is not
               parseValidateFailProgramHelper (positive ++ "fn bump(n: Int) -> Int [{ }] [{ }] { return positive(n); };") "Could not prove: n > 0"
             , parseValidateFailProgramHelper (inc ++ "fn twice(n: Int) -> Int [{ }] [{ affirm return = (n + 3); }] { return inc(inc(n)); };") "Could not prove"
-            , -- A function cannot call one defined after it, and a name is defined once
-              parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return g(n); }; fn g(n: Int) -> Int [{ }] [{ }] { return n; };" "Undefined variable: g"
+            , -- A function can call one defined after it, and a name is defined once
+              parseValidProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return g(n); }; fn g(n: Int) -> Int [{ }] [{ }] { return n; }; x = f(1);"
             , parseValidateFailProgramHelper "fn f(n: Int) -> Int [{ }] [{ }] { return n; }; fn f(n: Int) -> Int [{ }] [{ }] { return n + 1; };" "Function already defined: f"
             , -- A function defined inside a body is local to it: a later local function cannot call it
               parseValidProgramHelper "fn outer(n: Int) -> Int { fn helper(m: Int) -> Int { return m; }; return helper(n); }; x = outer(1);"

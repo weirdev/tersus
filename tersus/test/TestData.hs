@@ -73,9 +73,9 @@ testTypeCheck =
             , -- Equality is structural, which functions do not have
               typeError "fn f(n: Int) -> Int { return n; }; b = f = f;" "functions cannot be compared"
             , typeError "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return n; }; affirm f != g;" "functions cannot be compared"
-            , -- Bodies see only their parameters and earlier functions
+            , -- Bodies see only their parameters and the functions defined at the top
               typeError "y = 1; fn f(n: Int) -> Int { return y; };" "Undefined variable: y"
-            , typeError "fn f(n: Int) -> Int { return g(n); }; fn g(n: Int) -> Int { return n; };" "Undefined variable: g"
+            , typeOk "fn f(n: Int) -> Int { return g(n); }; fn g(n: Int) -> Int { return n; };"
             , typeOk "fn f(n: Int) -> Int { return n; }; fn g(n: Int) -> Int { return f(n); };"
             , -- Contracts and proofs are typed too
               typeError "fn f(n: Int) -> Int [{ affirm n; }] [{ }] { return n; };" "affirmed proof: expected Bool, got Int"
