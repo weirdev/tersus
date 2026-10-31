@@ -264,6 +264,29 @@ fn applicationFactsWithConstructors(facts: &List<EqualityFact>, terms: &List<App
                             };
                         };
                     };
+                    if a.function = -2 {
+                        if b.function = -1 {
+                            if size(a.arguments) = 2 {
+                                if size(b.arguments) = 2 {
+                                    subtrahend = get(a.arguments, 1);
+                                    leftPart = get(b.arguments, 0);
+                                    rightPart = get(b.arguments, 1);
+                                    if hasEquality(known, get(a.arguments, 0), b.id) {
+                                        if hasEquality(known, subtrahend, leftPart) {
+                                            if hasEquality(known, a.id, rightPart) = false {
+                                                known = push(known, EqualityFact { left: a.id, right: rightPart });
+                                            };
+                                        };
+                                        if hasEquality(known, subtrahend, rightPart) {
+                                            if hasEquality(known, a.id, leftPart) = false {
+                                                known = push(known, EqualityFact { left: a.id, right: leftPart });
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
                 };
             };
             if size(known) = before { finished = true; };
@@ -952,7 +975,321 @@ fn integerValue(context: &ValidatorContext, term: Int) -> IntegerLookup {
     return IntegerLookup::Missing;
 };
 
-fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
+fn knownNonnegative(context: &ValidatorContext, term: Int) -> Bool {
+    if isSizeTerm(context.applications, term) { return true; };
+    v = integerValue(context, term);
+    if v is IntegerLookup::Found {
+        if (v as IntegerLookup::Found).value >= 0 { return true; };
+    };
+    z = 0;
+    found = false;
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = 0 { z = constant.id; found = true; };
+        };
+    };
+    if found = false { return false; };
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
+    return hasOrder(equalities, orders, z, term, false);
+};
+
+fn hasOrderFact(facts: &List<OrderFact>, smaller: Int, greater: Int) -> Bool {
+    for fact in facts {
+        if fact.smaller = smaller && fact.greater = greater { return true; };
+    };
+    return false;
+};
+
+// Facts about a sum whose parts are only known nonnegative after the sum was
+// formed (a contract may state the sum before the signs) are derived when a
+// goal is checked, from whatever signs are known by then.
+fn deriveSumOrders(context: &ValidatorContext) -> ValidatorContext {
+    facts = clone(context.orders);
+    for app in context.applications {
+        if app.function = -1 {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                if knownNonnegative(context, a) {
+                    if hasOrderFact(facts, b, app.id) = false { facts = push(facts, OrderFact { smaller: b, greater: app.id, strict: false }); };
+                };
+                if knownNonnegative(context, b) {
+                    if hasOrderFact(facts, a, app.id) = false { facts = push(facts, OrderFact { smaller: a, greater: app.id, strict: false }); };
+                };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+
+struct LinTerm { term: Int, coeff: Int };
+
+impl Clone for LinTerm { };
+
+impl Copy for LinTerm { };
+
+struct LinFact { terms: List<LinTerm>, bound: Int };
+
+impl Clone for LinFact { };
+
+fn linCoeff(terms: &List<LinTerm>, term: Int) -> Int {
+    for t in terms {
+        if t.term = term { return t.coeff; };
+    };
+    return 0;
+};
+
+fn linAddTerm(terms: &List<LinTerm>, term: Int, coeff: Int) -> List<LinTerm> {
+    if coeff = 0 { return clone(terms); };
+    result = [];
+    found = false;
+    for t in terms {
+        if t.term = term {
+            found = true;
+            if t.coeff + coeff != 0 { result = push(result, LinTerm { term: term, coeff: t.coeff + coeff }); };
+        } else { result = push(result, clone(t)); };
+    };
+    if found = false { result = push(result, LinTerm { term: term, coeff: coeff }); };
+    return result;
+};
+
+fn linScale(terms: &List<LinTerm>, factor: Int) -> List<LinTerm> {
+    result = [];
+    for t in terms { result = push(result, LinTerm { term: t.term, coeff: t.coeff * factor }); };
+    return result;
+};
+
+fn linGcd(a: Int, b: Int) -> Int {
+    x = a;
+    if x < 0 { x = 0 - x; };
+    y = b;
+    if y < 0 { y = 0 - y; };
+    while y != 0 {
+        r = x % y;
+        x = y;
+        y = r;
+    };
+    return x;
+};
+
+fn linFloorDiv(a: Int, g: Int) -> Int {
+    if a >= 0 { return a / g; };
+    return 0 - ((0 - a + g - 1) / g);
+};
+
+// Over integers a fact may be divided through by the gcd of its
+// coefficients, rounding the bound down: 2i - 2j <= 1 is i - j <= 0.
+fn linNormalize(fact: &LinFact) -> LinFact {
+    g = 0;
+    for t in fact.terms { g = linGcd(g, t.coeff); };
+    if g <= 1 { return clone(fact); };
+    terms = [];
+    for t in fact.terms { terms = push(terms, LinTerm { term: t.term, coeff: t.coeff / g }); };
+    return LinFact { terms: terms, bound: linFloorDiv(fact.bound, g) };
+};
+
+fn linCombine(a: &LinFact, scaleA: Int, b: &LinFact, scaleB: Int) -> LinFact {
+    terms = linScale(a.terms, scaleA);
+    for t in b.terms { terms = linAddTerm(terms, t.term, t.coeff * scaleB); };
+    return linNormalize(LinFact { terms: terms, bound: scaleA * a.bound + scaleB * b.bound });
+};
+
+fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
+    terms = linAddTerm([], t1, c1);
+    terms = linAddTerm(terms, t2, c2);
+    return LinFact { terms: terms, bound: bound };
+};
+
+// The facts of a context as linear inequalities over terms: orders and
+// differences directly, equalities and the defining identities of sum,
+// difference, scale and size applications as equations.
+fn linFacts(context: &ValidatorContext) -> List<LinFact> {
+    facts = [];
+    for order in context.orders {
+        bound = 0;
+        if order.strict { bound = -1; };
+        facts = push(facts, linFact2(order.smaller, 1, order.greater, -1, bound));
+    };
+    for d in context.differences {
+        facts = push(facts, linFact2(d.left, 1, d.right, -1, d.bound));
+    };
+    for e in context.equalities {
+        facts = push(facts, linFact2(e.left, 1, e.right, -1, 0));
+        facts = push(facts, linFact2(e.left, -1, e.right, 1, 0));
+    };
+    for c in context.constants {
+        if c.kind = 0 {
+            facts = push(facts, linFact2(c.id, 1, c.id, 0, c.value));
+            facts = push(facts, linFact2(c.id, -1, c.id, 0, 0 - c.value));
+        };
+    };
+    for app in context.applications {
+        if app.function = -13 {
+            if size(app.arguments) = 1 {
+                facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+            };
+        };
+        if size(app.arguments) = 2 {
+            a = get(app.arguments, 0);
+            b = get(app.arguments, 1);
+            if app.function = -1 {
+                t = linAddTerm([], app.id, 1);
+                t = linAddTerm(t, a, -1);
+                t = linAddTerm(t, b, -1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+                t = linAddTerm([], app.id, -1);
+                t = linAddTerm(t, a, 1);
+                t = linAddTerm(t, b, 1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+            };
+            if app.function = -2 {
+                t = linAddTerm([], app.id, 1);
+                t = linAddTerm(t, a, -1);
+                t = linAddTerm(t, b, 1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+                t = linAddTerm([], app.id, -1);
+                t = linAddTerm(t, a, 1);
+                t = linAddTerm(t, b, -1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+            };
+            if app.function = -4 {
+                bv = integerValue(context, b);
+                if bv is IntegerLookup::Found {
+                    divisor = (bv as IntegerLookup::Found).value;
+                    if divisor > 0 {
+                        if knownNonnegative(context, a) {
+                            t = linAddTerm([], app.id, divisor);
+                            t = linAddTerm(t, a, -1);
+                            facts = push(facts, LinFact { terms: t, bound: 0 });
+                            t = linAddTerm([], a, 1);
+                            t = linAddTerm(t, app.id, 0 - divisor);
+                            facts = push(facts, LinFact { terms: t, bound: divisor - 1 });
+                        };
+                    };
+                };
+            };
+            if app.function = -5 {
+                bv = integerValue(context, b);
+                if bv is IntegerLookup::Found {
+                    divisor = (bv as IntegerLookup::Found).value;
+                    if divisor > 0 {
+                        if knownNonnegative(context, a) {
+                            facts = push(facts, linFact2(app.id, 1, app.id, 0, divisor - 1));
+                            facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+                        };
+                    };
+                };
+            };
+            if app.function = -3 {
+                av = integerValue(context, a);
+                if av is IntegerLookup::Found {
+                    c = (av as IntegerLookup::Found).value;
+                    t = linAddTerm([], app.id, 1);
+                    t = linAddTerm(t, b, 0 - c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                    t = linAddTerm([], app.id, -1);
+                    t = linAddTerm(t, b, c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                };
+                bv = integerValue(context, b);
+                if bv is IntegerLookup::Found {
+                    c = (bv as IntegerLookup::Found).value;
+                    t = linAddTerm([], app.id, 1);
+                    t = linAddTerm(t, a, 0 - c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                    t = linAddTerm([], app.id, -1);
+                    t = linAddTerm(t, a, c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                };
+            };
+        };
+    };
+    return facts;
+};
+
+// Fourier-Motzkin elimination over the (small) fact sets a goal produces:
+// eliminating every variable either derives 0 <= a negative bound, proving
+// the facts inconsistent, or it does not.
+fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
+    current = clone(facts);
+    for v in vars {
+        if size(current) > 300 { return false; };
+        pos = [];
+        neg = [];
+        zero = [];
+        for f in current {
+            c = linCoeff(f.terms, v);
+            if c > 0 { pos = push(pos, clone(f)); };
+            if c < 0 { neg = push(neg, clone(f)); };
+            if c = 0 { zero = push(zero, clone(f)); };
+        };
+        next = clone(zero);
+        for f in pos {
+            for g in neg {
+                cf = linCoeff(f.terms, v);
+                cg = linCoeff(g.terms, v);
+                next = push(next, linCombine(f, 0 - cg, g, cf));
+            };
+        };
+        current = next;
+        for f in current {
+            if size(f.terms) = 0 {
+                if f.bound < 0 { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+// Prove left - right <= bound by contradiction with the context's facts.
+fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
+    facts = linFacts(context);
+    facts = push(facts, linFact2(left, -1, right, 1, 0 - bound - 1));
+    vars = [];
+    for f in facts {
+        for t in f.terms {
+            if containsValue(vars, t.term) = false { vars = push(vars, t.term); };
+        };
+    };
+    return linContradiction(facts, vars);
+};
+
+
+// Whether a term is built by arithmetic (or is not an application at all):
+// the linear solver may prove equalities of those, but an equality between
+// data applications (a get, a field read) needs a congruence fact.
+
+// Equality of data applications by congruence over the stated equalities
+// alone: bounds that happen to pin two indices together do not make a get
+// of one a get of the other until the program states that equality.
+fn congruenceEqual(context: &ValidatorContext, left: Int, right: Int) -> Bool {
+    known = semanticFacts(context.equalities, context.applications, context.constants);
+    for round in 0..2 * size(context.equalities) + 8 * size(context.applications) + 8 {
+        next = applicationFactsWithConstructors(known, context.applications, context.constructorFunctions, context.constructorFields);
+        if size(next) = size(known) { return hasEquality(next, left, right); };
+        known = next;
+    };
+    return hasEquality(known, left, right);
+};
+
+fn arithmeticTerm(context: &ValidatorContext, term: Int) -> Bool {
+    for app in context.applications {
+        if app.id = term {
+            if app.function = -1 { return true; };
+            if app.function = -2 { return true; };
+            if app.function = -3 { return true; };
+            if app.function = -4 { return true; };
+            if app.function = -5 { return true; };
+            if app.function = -13 { return true; };
+            return false;
+        };
+    };
+    return true;
+};
+
+fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     recognized = false;
     if goal is ValidatorGoal::Equal { recognized = true; };
     if goal is ValidatorGoal::Different { recognized = true; };
@@ -1007,21 +1344,36 @@ fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     };
     if goal is ValidatorGoal::Equal {
         g = goal as ValidatorGoal::Equal;
-        return contextEqual(equalities, differences, g.left, g.right);
+        bothArithmetic = arithmeticTerm(context, g.left) && arithmeticTerm(context, g.right);
+        if bothArithmetic {
+            if contextEqual(equalities, differences, g.left, g.right) { return true; };
+        } else {
+            if congruenceEqual(context, g.left, g.right) { return true; };
+        };
+        if arithmeticTerm(context, g.left) {
+            if arithmeticTerm(context, g.right) {
+                if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
+            };
+        };
+        return false;
     };
     if goal is ValidatorGoal::Different {
         g = goal as ValidatorGoal::Different;
         if entailsConstructorDisequality(equalities, context.applications, context.constructorFunctions, g.left, g.right) { return true; };
         if entailsVariantDisequality(equalities, context.variants, g.left, g.right) { return true; };
+        if contextWithin(context, g.left, g.right) { return true; };
+        if contextWithin(context, g.right, g.left) { return true; };
         return contextDifferent(equalities, context.applications, orders, context.different, differences, g.left, g.right);
     };
     if goal is ValidatorGoal::Less {
         g = goal as ValidatorGoal::Less;
-        return hasDifference(equalities, differences, g.left, g.right, -1);
+        if hasDifference(equalities, differences, g.left, g.right, -1) { return true; };
+        return linearEntails(context, g.left, g.right, -1);
     };
     if goal is ValidatorGoal::AtMost {
         g = goal as ValidatorGoal::AtMost;
-        return hasDifference(equalities, differences, g.left, g.right, 0);
+        if hasDifference(equalities, differences, g.left, g.right, 0) { return true; };
+        return linearEntails(context, g.left, g.right, 0);
     };
     if goal is ValidatorGoal::Difference {
         g = goal as ValidatorGoal::Difference;
@@ -1058,6 +1410,30 @@ impl Clone for ProofRun { };
 
 // Return the first unproved obligation; -1 means that every check succeeded.
 // Assumptions made later in the list cannot justify an earlier assertion.
+fn deriveRefinedOrders(context: &ValidatorContext) -> ValidatorContext {
+    facts = clone(context.orders);
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
+    for order in context.orders {
+        if order.strict = false {
+            refined = false;
+            for d in context.different {
+                if hasEquality(equalities, d.left, order.smaller) && hasEquality(equalities, d.right, order.greater) { refined = true; };
+                if hasEquality(equalities, d.left, order.greater) && hasEquality(equalities, d.right, order.smaller) { refined = true; };
+            };
+            if refined {
+                if hasOrderFact(facts, order.smaller, order.greater) = false || true {
+                    facts = push(facts, OrderFact { smaller: order.smaller, greater: order.greater, strict: true });
+                };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
+fn entailsGoal(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
+    return entailsGoalWithFacts(deriveRefinedOrders(deriveSumOrders(context)), goal);
+};
+
 fn runProofSteps(initial: &ValidatorContext, steps: &List<ProofStep>) -> ProofRun {
     state = clone(initial);
     for i in 0..size(steps) {
@@ -1669,6 +2045,21 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
 
 // Scaling preserves or reverses an operand's order around zero according to
 // the sign of the known integer factor.
+
+fn addSumOrders(context: &ValidatorContext, result: Int, a: Int, b: Int) -> ValidatorContext {
+    facts = clone(context.orders);
+    if knownNonnegative(context, b) { facts = push(facts, OrderFact { smaller: a, greater: result, strict: false }); };
+    if knownNonnegative(context, a) { facts = push(facts, OrderFact { smaller: b, greater: result, strict: false }); };
+    if knownNonnegative(context, a) && knownNonnegative(context, b) {
+        for constant in context.constants {
+            if constant.kind = 0 {
+                if constant.value = 0 { facts = push(facts, OrderFact { smaller: constant.id, greater: result, strict: false }); };
+            };
+        };
+    };
+    return ValidatorContext { orders: facts, ..clone(context) };
+};
+
 fn addScaleOrders(context: &ValidatorContext, result: Int, operand: Int, factor: Int) -> ValidatorContext {
     zero = ValueLookup::Missing;
     z = 0;
@@ -1682,7 +2073,7 @@ fn addScaleOrders(context: &ValidatorContext, result: Int, operand: Int, factor:
     } else { return clone(context); };
     equalities = semanticFacts(context.equalities, context.applications, context.constants);
     orders = refinedOrders(equalities, constantOrders(context.orders, context.constants), context.different);
-    nonnegative = hasOrder(equalities, orders, z, operand, false);
+    nonnegative = hasOrder(equalities, orders, z, operand, false) || isSizeTerm(context.applications, operand);
     positive = hasOrder(equalities, orders, z, operand, true);
     nonpositive = hasOrder(equalities, orders, operand, z, false);
     negative = hasOrder(equalities, orders, operand, z, true);
@@ -1793,6 +2184,7 @@ fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &L
         if av is IntegerLookup::Found {
             return addOffsetFacts(context, result, b, (av as IntegerLookup::Found).value);
         };
+        return addSumOrders(context, result, a, b);
     };
     if function = -2 {
         bv = integerValue(context, b);
@@ -1906,6 +2298,9 @@ enum ExecutionStep {
     RequireDefined { value: ValueRef },
     Check { relation: Int, left: ValueRef, right: ValueRef },
     Assume { relation: Int, left: ValueRef, right: ValueRef },
+    AssumeVariant { object: ValueRef, family: Int, constructor: Int, matches: Bool },
+    RequireVariant { object: ValueRef, family: Int, constructor: Int },
+    CheckWithin { inner: ValueRef, outer: ValueRef },
     Proof { step: ProofStep },
 };
 
@@ -2524,6 +2919,11 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     if ok = false {
                         return ExecutionResult { status: 1, failedAt: i, state: state };
                     };
+                    context = assumeRelation(state.context, check.relation, a, b);
+                    if check.relation = 0 {
+                        context = assumeBooleanFact(context, a, b);
+                    };
+                    state = ExecutionState { context: context, ..state };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
@@ -2542,6 +2942,42 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     };
                     state = ExecutionState { context: context, ..state };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::CheckWithin {
+            handled = true;
+            cw = step as ExecutionStep::CheckWithin;
+            inner = resolveValue(state, cw.inner);
+            outer = resolveValue(state, cw.outer);
+            if inner is ValueLookup::Found {
+                if outer is ValueLookup::Found {
+                    if entailsGoal(state.context, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
+                        return ExecutionResult { status: 1, failedAt: i, state: state };
+                    };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::AssumeVariant {
+            handled = true;
+            av = step as ExecutionStep::AssumeVariant;
+            object = resolveValue(state, av.object);
+            if object is ValueLookup::Found {
+                variants = push(clone(state.context.variants), VariantFact { object: (object as ValueLookup::Found).term, family: av.family, constructor: av.constructor, matches: av.matches });
+                context = ValidatorContext { variants: variants, ..state.context };
+                state = ExecutionState { context: context, ..state };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        };
+        if step is ExecutionStep::RequireVariant {
+            handled = true;
+            rv = step as ExecutionStep::RequireVariant;
+            object = resolveValue(state, rv.object);
+            if object is ValueLookup::Found {
+                term = (object as ValueLookup::Found).term;
+                if knownVariant(closeContext(state.context), state.context.variants, term, rv.family, rv.constructor) = 1 {
+                    variants = push(clone(state.context.variants), VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
+                    context = ValidatorContext { variants: variants, ..state.context };
+                    state = ExecutionState { context: context, ..state };
+                } else { return ExecutionResult { status: 1, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
         if step is ExecutionStep::Proof {
@@ -2585,7 +3021,7 @@ enum ExecutionEnd {
     // body is the block an iteration starts on, and region is the header and
     // every block that can get back to it; a block outside the region leaves
     // the loop and is walked after it.
-    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef },
+    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef, variantObject: ValueRef, variantFamily: Int, variantConstructor: Int },
     Unsupported,
 };
 
@@ -2652,14 +3088,24 @@ fn checkLoopBackEdge(initial: &ExecutionState, frame: &LoopFrame, id: Int) -> Ex
                 return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
             };
         } else {
-            otherAfter = resolveValue(preserved.state, frame.variantOther);
-            if otherAfter is ValueLookup::Found {
-                if entailsGoal(preserved.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
+            if frame.variantMode = 1 {
+                otherAfter = resolveValue(preserved.state, frame.variantOther);
+                if otherAfter is ValueLookup::Found {
+                    if entailsGoal(preserved.state.context, ValidatorGoal::Equal { left: (otherAfter as ValueLookup::Found).term, right: frame.priorOther }) = false {
+                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+                    };
+                } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state }; };
+                if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
                     return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
                 };
-            } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: preserved.state }; };
-            if entailsGoal(preserved.state.context, ValidatorGoal::Less { left: frame.prior, right: nextTerm }) = false {
-                return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+            };
+            if frame.variantMode = 3 {
+                if entailsGoal(preserved.state.context, ValidatorGoal::Within { inner: nextTerm, outer: frame.prior }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+                };
+                if entailsGoal(preserved.state.context, ValidatorGoal::Different { left: nextTerm, right: frame.prior }) = false {
+                    return ExecutionFlowResult { status: 1, block: id, step: -1, state: preserved.state };
+                };
             };
         };
         return ExecutionFlowResult { status: 0, block: id, step: -1, state: preserved.state };
@@ -2709,7 +3155,7 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
             if loop.relation < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.variantMode < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            if loop.variantMode > 1 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
+            if loop.variantMode > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             arbitrary = clone(initial);
             for local in loop.havoc {
                 changed = executeSteps(arbitrary, push([], ExecutionStep::Havoc { local: local }));
@@ -2740,13 +3186,21 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                                     if (zeroValue as IntegerLookup::Found).value != 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
                                 } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
                                 yesContext = assumeRelation(header.state.context, loop.relation, a, b);
+                                if loop.variantFamily >= 0 {
+                                    variantObject = resolveValue(header.state, loop.variantObject);
+                                    if variantObject is ValueLookup::Found {
+                                        yesContext = ValidatorContext { variants: push(clone(yesContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: true }), ..yesContext };
+                                    };
+                                };
                                 if loop.variantMode = 0 {
                                     if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
                                         return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
                                     };
                                 } else {
-                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
-                                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
+                                    if loop.variantMode = 1 {
+                                        if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
+                                            return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
+                                        };
                                     };
                                 };
                                 // Keep the prior variant live even if its local is overwritten.
@@ -2759,6 +3213,12 @@ fn walkExecution(blocks: &List<ExecutionBlock>, id: Int, initial: &ExecutionStat
                                 if bodyResult.status != 0 { return bodyResult; };
                                 inverse = negateRelation(loop.relation, a, b);
                                 noContext = assumeRelation(header.state.context, inverse.relation, inverse.left, inverse.right);
+                                if loop.variantFamily >= 0 {
+                                    variantObject = resolveValue(header.state, loop.variantObject);
+                                    if variantObject is ValueLookup::Found {
+                                        noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
+                                    };
+                                };
                                 noState = ExecutionState { context: noContext, ..header.state };
                                 return walkExecution(blocks, loop.exit, noState, fuel - 1, loops);
                             };
