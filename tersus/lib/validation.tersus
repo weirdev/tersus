@@ -1072,10 +1072,39 @@ fn linScale(terms: &List<LinTerm>, factor: Int) -> List<LinTerm> {
     return result;
 };
 
+fn linGcd(a: Int, b: Int) -> Int {
+    x = a;
+    if x < 0 { x = 0 - x; };
+    y = b;
+    if y < 0 { y = 0 - y; };
+    while y != 0 {
+        r = x % y;
+        x = y;
+        y = r;
+    };
+    return x;
+};
+
+fn linFloorDiv(a: Int, g: Int) -> Int {
+    if a >= 0 { return a / g; };
+    return 0 - ((0 - a + g - 1) / g);
+};
+
+// Over integers a fact may be divided through by the gcd of its
+// coefficients, rounding the bound down: 2i - 2j <= 1 is i - j <= 0.
+fn linNormalize(fact: &LinFact) -> LinFact {
+    g = 0;
+    for t in fact.terms { g = linGcd(g, t.coeff); };
+    if g <= 1 { return clone(fact); };
+    terms = [];
+    for t in fact.terms { terms = push(terms, LinTerm { term: t.term, coeff: t.coeff / g }); };
+    return LinFact { terms: terms, bound: linFloorDiv(fact.bound, g) };
+};
+
 fn linCombine(a: &LinFact, scaleA: Int, b: &LinFact, scaleB: Int) -> LinFact {
     terms = linScale(a.terms, scaleA);
     for t in b.terms { terms = linAddTerm(terms, t.term, t.coeff * scaleB); };
-    return LinFact { terms: terms, bound: scaleA * a.bound + scaleB * b.bound };
+    return linNormalize(LinFact { terms: terms, bound: scaleA * a.bound + scaleB * b.bound });
 };
 
 fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
@@ -1135,6 +1164,34 @@ fn linFacts(context: &ValidatorContext) -> List<LinFact> {
                 t = linAddTerm(t, a, 1);
                 t = linAddTerm(t, b, -1);
                 facts = push(facts, LinFact { terms: t, bound: 0 });
+            };
+            if app.function = -4 {
+                bv = integerValue(context, b);
+                if bv is IntegerLookup::Found {
+                    divisor = (bv as IntegerLookup::Found).value;
+                    if divisor > 0 {
+                        if knownNonnegative(context, a) {
+                            t = linAddTerm([], app.id, divisor);
+                            t = linAddTerm(t, a, -1);
+                            facts = push(facts, LinFact { terms: t, bound: 0 });
+                            t = linAddTerm([], a, 1);
+                            t = linAddTerm(t, app.id, 0 - divisor);
+                            facts = push(facts, LinFact { terms: t, bound: divisor - 1 });
+                        };
+                    };
+                };
+            };
+            if app.function = -5 {
+                bv = integerValue(context, b);
+                if bv is IntegerLookup::Found {
+                    divisor = (bv as IntegerLookup::Found).value;
+                    if divisor > 0 {
+                        if knownNonnegative(context, a) {
+                            facts = push(facts, linFact2(app.id, 1, app.id, 0, divisor - 1));
+                            facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+                        };
+                    };
+                };
             };
             if app.function = -3 {
                 av = integerValue(context, a);
@@ -1265,7 +1322,9 @@ fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool
     };
     if goal is ValidatorGoal::Equal {
         g = goal as ValidatorGoal::Equal;
-        return contextEqual(equalities, differences, g.left, g.right);
+        if contextEqual(equalities, differences, g.left, g.right) { return true; };
+        if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
+        return false;
     };
     if goal is ValidatorGoal::Different {
         g = goal as ValidatorGoal::Different;
