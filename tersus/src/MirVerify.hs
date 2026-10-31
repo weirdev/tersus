@@ -15,8 +15,8 @@ import Utils (Result (..))
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and function
 -- used is declared), and the types (every operation is applied to operands of the types it takes, and gives the type
--- of the local that receives it). Lowering gives every local its type by replaying the checker, which is a second
--- copy of its rules, and native code built on a wrong type is a wrong program, so this is what every lowering goes
+-- of the local that receives it). Lowering gives every local the type `elaborate` worked out, and native code
+-- built on a wrong type is a wrong program, so this is what every lowering goes
 -- through, and what every pass over the MIR should go through again.
 verifyProgram :: Program -> Result () String
 verifyProgram program =

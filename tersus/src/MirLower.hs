@@ -9,33 +9,35 @@ import qualified Data.Set as Set
 import qualified Mir as M
 import MirMoves (checkMoves, stripPositions)
 import MirVerify (verifyProgram)
+import Pretty (renderType)
 import StdLibDefs (stdLibCtx)
 import TersusTypes
-import TypeCheck
+import TypeCheck (Elaborated (..), arrayElement, elaborate, functionType)
 import Utils
 
 -- Lowers a program that has passed validation to the MIR: control flow becomes blocks that jump, nested expressions
 -- become temporaries, nested functions are lifted to the top, and the scopes that decide which variable an assignment
 -- means are resolved to numbered locals.
 --
--- Every local and temporary has a type. The AST has none (the checker erases them), so lowering replays the checker's
--- inference over the same program with the same unifier (TypeCheck's TC), taking the type of each piece from
--- the steps of inferExpr: that is how `x = []` gets the element type that a later `push(x, 1)` decides.
+-- Every local and temporary has a type, which the AST does not carry: `elaborate` hands them over with the
+-- program (see TypeCheck.Elaborated), one for each expression in the order the lowering visits them, fully
+-- resolved: that is how `x = []` gets the element type that a later `push(x, 1)` decides. The lowering takes
+-- the next one as it reaches each expression (`claim`), and infers nothing itself.
 lowerProgram :: [Statement] -> Result M.Program String
 lowerProgram stmts = elaborate stmts `bindResult` lowerElaborated
 
 -- For a program that `elaborate` has checked and handed back (the pipeline checks a program once)
-lowerElaborated :: [Statement] -> Result M.Program String
+lowerElaborated :: Elaborated -> Result M.Program String
 lowerElaborated = lowerWith True
 
 -- A library of the compiler (lib/lists.tersus and lib/box.tersus), checked for moves like any program:
 -- the exemption it had would have let a reference in library code go unchecked (REFERENCES.md, stage 5)
-lowerLibrary :: [Statement] -> Result M.Program String
+lowerLibrary :: Elaborated -> Result M.Program String
 lowerLibrary = lowerWith True
 
-lowerWith :: Bool -> [Statement] -> Result M.Program String
-lowerWith checking elaborated =
-    case runL (program elaborated) ((initialState elaborated){lsChecking = checking}) of
+lowerWith :: Bool -> Elaborated -> Result M.Program String
+lowerWith checking elaborated@(Elaborated stmts _) =
+    case runL (program stmts) ((initialState elaborated){lsChecking = checking}) of
         Left e -> Error e
         Right (p, _) -> Ok p
 
@@ -65,11 +67,14 @@ getS = L (\s -> Right (s, s))
 modifyS :: (LS -> LS) -> L ()
 modifyS f = L (\s -> Right ((), f s))
 
--- Runs a step of the checker on the state it keeps
-tc :: TC a -> L a
-tc action = L (\s -> case runTcState action (lsTc s) of
-    Left e -> Left ("Lowering: " ++ e)
-    Right (a, t) -> Right (a, s{lsTc = t}))
+-- The type `elaborate` gave the expression the lowering has just reached. A missing one means the
+-- elaboration and the lowering disagree about the program, which is a fault in the compiler.
+claim :: L Type
+claim = do
+    s <- getS
+    case lsElabTypes s of
+        t : rest -> modifyS (\s' -> s'{lsElabTypes = rest}) >> return t
+        [] -> failL "Lowering: the elaborated program ran out of expression types"
 
 -- What a name means: a local, or a function of the program
 data Binding = BLocal M.Local Type | BFn Name Type
@@ -96,7 +101,7 @@ data Builder = Builder
     }
 
 data LS = LS
-    { lsTc :: TcState
+    { lsElabTypes :: [Type] -- the types `elaborate` gave the expressions not reached yet, in visit order
     , lsTypes :: Map Name M.TypeDecl
     , lsFunctions :: Map Name M.Function
     , lsNames :: Set.Set Name
@@ -113,9 +118,8 @@ data LS = LS
     , lsPrereg :: Map Variable [Name] -- the names given to the functions defined at the top, before any body is lowered (one for each definition of the name)
     }
 
-initialState :: [Statement] -> LS
-initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty
-
+initialState :: Elaborated -> LS
+initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
 -- others are known functions, and a call of one is a call by name.
@@ -268,6 +272,7 @@ program stmts = do
     b <- builder
     let main' = buildFunction [] [] Nothing Map.empty b
     s <- getS
+    unless (null (lsElabTypes s)) (failL "Lowering: the elaborated program has expression types the lowering never reached")
     let functions = Map.elems (lsFunctions s)
     resolved <- mapM resolveFunction (main' : functions)
     let (resolvedMain, others) = case resolved of
@@ -280,8 +285,7 @@ program stmts = do
             [] -> return (stripPositions result)
             errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
--- Applies what the checker learned about the type variables; one it never learned (the elements of a list that is
--- never used) is an Int
+-- One type variable the checker never learned (the elements of a list that is never used) is an Int
 resolveFunction :: M.Function -> L M.Function
 resolveFunction fn = do
     locals <- mapM (\d -> (\t -> d{M.localType = t}) <$> resolveType (M.localType d)) (M.fnLocals fn)
@@ -334,7 +338,7 @@ resolveFunction fn = do
         _ -> []
 
 resolveType :: Type -> L Type
-resolveType ty = defaultType <$> tc (zonk ty)
+resolveType ty = return (defaultType ty)
   where
     defaultType (TVar _) = TInt
     defaultType (TNamed base args) = TNamed base (map defaultArg args)
@@ -394,8 +398,37 @@ lowerStatements [] = return ()
 lowerStatements (stmt : rest) = do
     lowerStatement stmt
     open <- isOpen
-    -- after a return nothing runs, as in the evaluator, which drops the rest
-    when open (lowerStatements rest)
+    -- after a return nothing runs, as in the evaluator, which drops the rest: its expression types are
+    -- taken and dropped, so the types of what follows the block still line up
+    if open then lowerStatements rest else skipStatements rest
+
+-- Takes the expression types of statements that are not lowered (after a return), in the order
+-- `elaborate` gave them
+skipStatements :: [Statement] -> L ()
+skipStatements = mapM_ skipStatement
+
+skipStatement :: Statement -> L ()
+skipStatement stmt = case stmt of
+    Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> skipStatements body
+    Assign _ expr -> skipExpr expr
+    Let _ expr -> skipExpr expr
+    Return expr -> skipExpr expr
+    Block stmts -> skipStatements stmts
+    If cond thenStmts elseStmts -> skipExpr cond >> skipStatements thenStmts >> skipStatements elseStmts
+    While cond _ _ body -> skipExpr cond >> skipStatements body
+    _ -> return ()
+
+skipExpr :: Expression -> L ()
+skipExpr expr = do
+    _ <- claim
+    case expr of
+        F funct args -> skipHead funct >> mapM_ skipExpr args
+        _ -> return ()
+  where
+    skipHead funct = case funct of
+        Val _ -> return ()
+        Var _ -> return ()
+        _ -> skipExpr funct
 
 lowerStatement :: Statement -> L ()
 lowerStatement stmt =
@@ -429,14 +462,11 @@ lowerStatement stmt =
             modifyB (\b -> b{bPlace = Just (line, column)})
             emit (M.Ghost Map.empty (M.GhostPosition line column))
         StructDef name sizes fields invariant | not (null sizes) -> do
-            tc (declareGeneric name sizes fields)
             modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s), lsInvariants = withInvariant name invariant (lsInvariants s)})
         StructDef name _ fields invariant -> do
-            tc (declareType name >> mapM_ (checkFieldType . snd) fields >> registerCtors name [(name, fields)])
             addType name (M.StructDecl fields)
             modifyS (\s -> s{lsInvariants = withInvariant name invariant (lsInvariants s)})
         EnumDef name variants -> do
-            tc (declareTypeWith name (map fst variants) >> mapM_ (mapM_ (checkFieldType . snd) . snd) variants >> registerCtors name variants)
             addType name (M.EnumDecl variants)
         -- (the checker takes a trait apart and hands an impl back as the functions it defines)
         TraitDef{} -> failL "A trait reached the lowering"
@@ -476,7 +506,7 @@ assignTarget :: Variable -> Type -> L M.Local
 assignTarget var ty = do
     binding <- lookupBinding var
     case binding of
-        Just (BLocal l existing) -> tc (expect ("assignment to " ++ var) existing ty) >> return l
+        Just (BLocal l _) -> return l
         _ -> do
             l <- newLocal (Just var) ty
             bindName var (BLocal l ty)
@@ -489,11 +519,13 @@ lowerReturn expr = do
     b0 <- builder
     (pending, ty) <- case (bReturns b0, expr) of
         (Just (TRef rt), Var v) -> do
+            _ <- claim
             binding <- lookupBinding v
             case binding of
                 Just (BLocal l _) | l `elem` bBorrowed b0 || l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] False), TRef rt)
                 _ -> lowerLast expr
         (Just (TMutRef rt), Var v) -> do
+            _ <- claim
             binding <- lookupBinding v
             case binding of
                 Just (BLocal l _) | l `elem` bMutBorrowed b0 -> return (PRvalue (M.Borrow l [] True), TMutRef rt)
@@ -501,7 +533,7 @@ lowerReturn expr = do
         _ -> lowerLast expr
     b <- builder
     case bReturns b of
-        Just declared -> tc (expect "returned value" declared ty)
+        Just _ -> return ()
         Nothing -> do
             -- the program has no declared type: the first return decides it
             modifyB (\b' -> b'{bReturns = Just ty, bLocals = Map.insert (M.Local 0) (M.LocalDecl ty Nothing) (bLocals b')})
@@ -529,22 +561,27 @@ lowerIf cond thenStmts elseStmts = do
 -- of `&&`, `||` and `!` is a test for each part that is evaluated (`a && b` does not evaluate b when a is false, and so the validator knows
 -- a when it checks b: `i < size(l) && get(l, i) = 0`), without the value of a Bool being made.
 lowerCondition :: String -> Expression -> M.BlockId -> M.BlockId -> L ()
-lowerCondition what cond yes no = case connective cond of
+lowerCondition what cond yes no = do
+    ty <- claim
+    lowerConditionWith what cond ty yes no
+
+-- A condition whose own type has been taken already (the value of a connective, lowered as a condition)
+lowerConditionWith :: String -> Expression -> Type -> M.BlockId -> M.BlockId -> L ()
+lowerConditionWith what cond ty condYes condNo = case connective cond of
     Just (And, [a, b]) -> do
         middle <- newBlock
-        lowerCondition what a middle no
+        lowerCondition what a middle condNo
         openBlock middle
-        lowerCondition what b yes no
+        lowerCondition what b condYes condNo
     Just (Or, [a, b]) -> do
         middle <- newBlock
-        lowerCondition what a yes middle
+        lowerCondition what a condYes middle
         openBlock middle
-        lowerCondition what b yes no
-    Just (Not, [a]) -> lowerCondition what a no yes
+        lowerCondition what b condYes condNo
+    Just (Not, [a]) -> lowerCondition what a condNo condYes
     _ -> do
-        (test, ty) <- lowerOperand cond
-        tc (expect what TBool ty)
-        terminate (M.SwitchBool test yes no)
+        (test, _) <- lowerOperandWith cond ty
+        terminate (M.SwitchBool test condYes condNo)
 
 -- The connective that an expression is the application of, and what it is applied to
 connective :: Expression -> Maybe (BuiltinFunct, [Expression])
@@ -596,7 +633,6 @@ defineFunction var params ins outs (Signature ptys rty sizes types writes sigFro
             bindName var (BLocal l fnTy)
             emit (M.Assign l (M.Use (M.Const (M.CFn name))))
         else unless atTop (bindName var (BFn name fnTy))
-    tc (withGenerics sizes types (mapM_ checkType (map unrefType ptys ++ [case rty of TRef inner -> inner; _ -> rty])))
     outer <- builder
     -- the body is lowered as a function of its own, then the outer one goes on
     modifyB (const (newBuilder name False (Just rty)){bSizes = sizes, bTypeParams = types})
@@ -647,10 +683,16 @@ finishInto dest (PCall callee args) = do
 
 -- The operand that holds the value of an expression, and the type of the value
 lowerOperand :: Expression -> L (M.Operand, Type)
-lowerOperand (Val v) = valueOperand v
-lowerOperand (Var name) = varOperand name
 lowerOperand expr = do
-    (pending, ty) <- lowerLast expr
+    ty <- claim
+    lowerOperandWith expr ty
+
+-- An operand whose expression's type has been taken already
+lowerOperandWith :: Expression -> Type -> L (M.Operand, Type)
+lowerOperandWith (Val v) ty = valueOperand v ty
+lowerOperandWith (Var name) ty = varOperand name ty
+lowerOperandWith expr ty = do
+    (pending, _) <- lowerLastWith expr ty
     case pending of
         PRvalue (M.Use operand) -> return (operand, ty)
         _ -> do
@@ -660,27 +702,32 @@ lowerOperand expr = do
 
 -- The arguments are evaluated left to right, then the operation or call is the last step
 lowerLast :: Expression -> L (Pending, Type)
-lowerLast (Val v) = (\(o, ty) -> (PRvalue (M.Use o), ty)) <$> valueOperand v
-lowerLast (Var name) = (\(o, ty) -> (PRvalue (M.Use o), ty)) <$> varOperand name
-lowerLast expr | Just (b, [_, _]) <- connective expr, b `elem` [And, Or] = lowerValueOfConnective expr
-lowerLast (F funct args) = do
+lowerLast expr = do
+    ty <- claim
+    lowerLastWith expr ty
+
+-- A last step whose expression's type has been taken already
+lowerLastWith :: Expression -> Type -> L (Pending, Type)
+lowerLastWith (Val v) ty = (\(o, _) -> (PRvalue (M.Use o), ty)) <$> valueOperand v ty
+lowerLastWith (Var name) ty = (\(o, _) -> (PRvalue (M.Use o), ty)) <$> varOperand name ty
+lowerLastWith expr ty | Just (b, [_, _]) <- connective expr, b `elem` [And, Or] = lowerValueOfConnective expr ty
+lowerLastWith (F funct args) ty = do
     target <- resolveHead funct
     case target of
-        Builtin b -> lowerBuiltin b args
-        Callable callee ty -> do
+        Builtin b -> lowerBuiltin b args ty
+        Callable callee -> do
             operands <- mapM lowerOperand args
-            result <- tc (checkCall "call" ty (map snd operands))
-            return (PCall callee (map fst operands), result)
+            return (PCall callee (map fst operands), ty)
 
 -- A connective where the Bool is wanted (`ok = a && b;`): the whole expression is lowered as a condition, so every test is known to the ones after it (`i >= 0
 -- && i < size(l) && get(l, i) = 0`), and the local that holds the value is assigned in each of the two ways to get there
-lowerValueOfConnective :: Expression -> L (Pending, Type)
-lowerValueOfConnective expr = do
-    result <- newLocal Nothing TBool
+lowerValueOfConnective :: Expression -> Type -> L (Pending, Type)
+lowerValueOfConnective expr ty = do
+    result <- newLocal Nothing ty
     yesB <- newBlock
     noB <- newBlock
     joinB <- newBlock
-    lowerCondition "operand of a connective" expr yesB noB
+    lowerConditionWith "operand of a connective" expr ty yesB noB
     openBlock yesB
     emit (M.Assign result (M.Use (M.Const (M.CBool True))))
     terminate (M.Goto joinB)
@@ -688,10 +735,10 @@ lowerValueOfConnective expr = do
     emit (M.Assign result (M.Use (M.Const (M.CBool False))))
     terminate (M.Goto joinB)
     openBlock joinB
-    return (PRvalue (M.Use (M.Copy result)), TBool)
+    return (PRvalue (M.Use (M.Copy result)), ty)
 
 -- What is being applied
-data Head = Builtin BuiltinFunct | Callable M.Operand Type
+data Head = Builtin BuiltinFunct | Callable M.Operand
 
 resolveHead :: Expression -> L Head
 resolveHead (Val (VFunct _ _ _ (BuiltinFunct b) _)) = return (Builtin b)
@@ -699,32 +746,36 @@ resolveHead (Var name) = do
     binding <- lookupBinding name
     s <- getS
     case binding of
-        Just (BLocal l ty) -> return (Callable (M.Copy l) ty)
-        Just (BFn fn ty) -> return (Callable (M.Const (M.CFn fn)) ty)
+        Just (BLocal l _) -> return (Callable (M.Copy l))
+        Just (BFn fn _) -> return (Callable (M.Const (M.CFn fn)))
         Nothing -> case Map.lookup name (lsGlobals s) of
-            Just (fn, ty) -> return (Callable (M.Const (M.CFn fn)) ty)
+            Just (fn, _) -> return (Callable (M.Const (M.CFn fn)))
             Nothing -> case Map.lookup name stdLibCtx of
                 Just (VFunct _ _ _ (BuiltinFunct b) _) -> return (Builtin b)
                 _ -> failL ("Undefined variable: " ++ name)
-resolveHead other = uncurry Callable <$> lowerOperand other
+resolveHead other = Callable . fst <$> lowerOperand other
 
--- A place as the root local it starts from, the steps from there, and its type (REFERENCES.md)
+-- A place as the root local it starts from, the steps from there, and its type (REFERENCES.md). Each
+-- expression of the place takes the type `elaborate` gave it (`claim`), in the order it gave them: the
+-- checker has already decided what a field read and an index give, so the lowering infers nothing here.
 lowerPlace :: Expression -> L (M.Local, [M.RefStep], Type)
 lowerPlace expr = case expr of
     Var name -> do
+        ty <- claim
         binding <- lookupBinding name
         case binding of
-            Just (BLocal l ty) -> return (l, [], ty)
+            Just (BLocal l _) -> return (l, [], ty)
             _ -> failL ("Lowering failed: " ++ name ++ " is not a value that a place can start from")
-    F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [sub] -> do
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> do
+        fieldTy <- claim
         (root, steps, subTy) <- lowerPlace sub
         ctor <- structCtor subTy
-        fieldTy <- tc (readField owner field subTy)
         return (root, steps ++ [M.RefField ctor field], fieldTy)
     F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, index] -> lowerIndexPlace sub index
     F (Var "get") [sub, index] -> lowerIndexPlace sub index
     F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
-        (root, ty) <- lowerRefRoot inner
+        ty <- claim
+        (root, _) <- lowerRefRoot inner
         return (root, [], ty)
     _ -> do
         (operand, ty) <- lowerOperand expr
@@ -734,14 +785,15 @@ lowerPlace expr = case expr of
             M.Const _ -> failL "Lowering failed: a reference cannot be to a value that has no place"
   where
     lowerIndexPlace sub index = do
-        (root, steps, subTy) <- lowerPlace sub
-        (indexOperand, indexTy) <- lowerOperand index
-        elementTy <- tc (builtinType Get >>= \ft -> checkBuiltinCall (Just Get) "get" ft [subTy, indexTy])
+        elementTy <- claim
+        (root, steps, _) <- lowerPlace sub
+        (indexOperand, _) <- lowerOperand index
         return (root, steps ++ [M.RefIndex indexOperand], elementTy)
 
 -- The local a reference expression stands in, and the type it is a reference to
 lowerRefRoot :: Expression -> L (M.Local, Type)
 lowerRefRoot (Var name) = do
+    _ <- claim
     binding <- lookupBinding name
     b <- builder
     case binding of
@@ -758,13 +810,13 @@ lowerRefRoot expr = do
         M.Move l -> return (l, unrefType ty)
         M.Const _ -> failL "Lowering failed: * of a value that is not a reference"
 
-lowerBorrow :: Bool -> Expression -> L (Pending, Type)
-lowerBorrow mutable place = do
-    (root, steps, ty) <- lowerPlace place
+lowerBorrow :: Bool -> Expression -> Type -> L (Pending, Type)
+lowerBorrow mutable place result = do
+    (root, steps, _) <- lowerPlace place
     -- (an index of the place is the value it has here, where the reference is made: the reference is to that
     -- element, not to whichever element the index names when the reference is used)
     steps' <- mapM captureStep steps
-    return (PRvalue (M.Borrow root steps' mutable), if mutable then TMutRef ty else TRef ty)
+    return (PRvalue (M.Borrow root steps' mutable), result)
   where
     captureStep (M.RefIndex (M.Copy l)) = captureIndex (M.Copy l)
     captureStep (M.RefIndex (M.Move l)) = captureIndex (M.Move l)
@@ -816,88 +868,67 @@ localTypeOf l = do
         Nothing -> return TInt
 
 -- The place an assignment through a reference is to: through an update parameter (the parameter local itself), or
--- through a reference local made by &mut place in this function (the place it was made to)
+-- through a reference local made by &mut place in this function (the place it was made to). Like `lowerPlace`,
+-- each expression of the place takes the type `elaborate` gave it.
 lowerDerefPlace :: Expression -> L (M.Local, [M.RefStep], Type)
 lowerDerefPlace expr = case expr of
-    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> case inner of
-        Var name -> do
-            binding <- lookupBinding name
-            b <- builder
-            case binding of
-                Just (BLocal l ty)
-                    | l `elem` bMutBorrowed b -> return (l, [], ty)
-                    | isRefType ty -> case Map.lookup l (bRefTargets b) of
-                        Just (root, steps) -> return (root, steps, unrefType ty)
-                        Nothing
-                            | isMutRefType ty -> return (l, [], unrefType ty)
-                            | otherwise -> failL ("Lowering failed: the place that " ++ name ++ " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter")
-                    | otherwise -> failL ("Lowering failed: " ++ name ++ " is not a reference")
-                _ -> failL ("Lowering failed: " ++ name ++ " is not a reference")
-        _ -> do
-            (root, ty) <- lowerRefRoot inner
-            return (root, [], ty)
-    F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [sub] -> do
+    F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
+        ty <- claim
+        case inner of
+            Var name -> do
+                _ <- claim
+                binding <- lookupBinding name
+                b <- builder
+                case binding of
+                    Just (BLocal l bty)
+                        | l `elem` bMutBorrowed b -> return (l, [], ty)
+                        | isRefType bty -> case Map.lookup l (bRefTargets b) of
+                            Just (root, steps) -> return (root, steps, ty)
+                            Nothing
+                                | isMutRefType bty -> return (l, [], ty)
+                                | otherwise -> failL ("Lowering failed: the place that " ++ name ++ " is a reference to is not known here: a reference that is assigned through must be made by &mut place in this function, or be an update parameter")
+                        | otherwise -> failL ("Lowering failed: " ++ name ++ " is not a reference")
+                    _ -> failL ("Lowering failed: " ++ name ++ " is not a reference")
+            _ -> do
+                (root, _) <- lowerRefRoot inner
+                return (root, [], ty)
+    F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> do
+        fieldTy <- claim
         (root, steps, subTy) <- lowerDerefPlace sub
         ctor <- structCtor subTy
-        fieldTy <- tc (readField owner field subTy)
         return (root, steps ++ [M.RefField ctor field], fieldTy)
     F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, index] -> lowerDerefIndex sub index
     F (Var "get") [sub, index] -> lowerDerefIndex sub index
     _ -> failL "Lowering failed: an assignment through a reference is to *r, (*r).field or (*r) at an index"
   where
     lowerDerefIndex sub index = do
-        (root, steps, subTy) <- lowerDerefPlace sub
-        (indexOperand, indexTy) <- lowerOperand index
-        elementTy <- tc (builtinType Get >>= \ft -> checkBuiltinCall (Just Get) "get" ft [subTy, indexTy])
+        elementTy <- claim
+        (root, steps, _) <- lowerDerefPlace sub
+        (indexOperand, _) <- lowerOperand index
         return (root, steps ++ [M.RefIndex indexOperand], elementTy)
 
-lowerBuiltin :: BuiltinFunct -> [Expression] -> L (Pending, Type)
-lowerBuiltin BorrowOf args = case args of
-    [place] -> lowerBorrow False place
+-- The result type is the one `elaborate` gave the application; the checker has already folded the
+-- size of an array into it, and decided what a field read, a constructor and each builtin gives
+lowerBuiltin :: BuiltinFunct -> [Expression] -> Type -> L (Pending, Type)
+lowerBuiltin BorrowOf args result = case args of
+    [place] -> lowerBorrow False place result
     _ -> failL "& takes a place"
-lowerBuiltin BorrowMutOf args = case args of
-    [place] -> lowerBorrow True place
+lowerBuiltin BorrowMutOf args result = case args of
+    [place] -> lowerBorrow True place result
     _ -> failL "&mut takes a place"
-lowerBuiltin DerefOf args = case args of
+lowerBuiltin DerefOf args result = case args of
     [inner] -> do
-        (operand, ty) <- lowerOperand inner
-        return (PRvalue (M.Deref operand), unrefType ty)
+        (operand, _) <- lowerOperand inner
+        return (PRvalue (M.Deref operand), result)
     _ -> failL "* takes a reference"
-lowerBuiltin b args = do
+lowerBuiltin b args result = do
     operands <- mapM lowerOperand args
     let tys = map snd operands
-    result <- case (b, operands) of
-        -- (the size is a constant: the checker has folded it, and the element decides the rest)
-        (NewArray, [(M.Const (M.CInt n), _), (_, elementTy)]) -> return (TArray elementTy n)
-        -- (the size is a size parameter of the function: the local that holds it is named like it)
-        (NewArray, [(M.Copy l, _), (_, elementTy)]) -> do
-            b' <- builder
-            case Map.lookup l (bLocals b') of
-                Just (M.LocalDecl _ (Just name)) | name `elem` bSizes b' -> return (TArrayOf elementTy (SizeParam name))
-                _ -> failL "array was not given a constant size"
-        (NewArray, _) -> failL "array was not given a constant size"
-        (NewBox, [(_, held)]) -> return (TBox held)
-        (NewBoxedArray, [_, (_, elementTy)]) -> return (TBox (TArrayOf elementTy SizeAny))
-        (NewEmptyArray, []) -> tc freshVar >>= \elementTy -> return (TBox (TArrayOf elementTy SizeAny))
-        (Unsize, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
-            TBox (TArrayOf elementTy _) -> return (TBox (TArrayOf elementTy SizeAny))
-            _ -> failL "unsize was given something that is not a Box of an array"
-        (CloneOf, [(_, copied)]) -> return copied
-        (UnBox, [(_, boxTy)]) -> tc (zonk boxTy) >>= \t -> case t of
-            TBox held -> return held
-            _ -> failL "Box::unbox was given something that is not a Box"
-        (ArrayFrom, [(M.Const (M.CList items), TList elementTy)]) -> return (TArray elementTy (fromIntegral (length items)))
-        (ArrayFromList, [(_, TList elementTy)]) -> do
-            size <- tc freshSize
-            return (TArrayOf elementTy size)
-        (ArrayFrom, _) -> failL "an array literal was not made from a list of constants"
-        _ -> builtinResult b tys
     rv <- case (pairParts b, b, map fst operands) of
         (Just (first, second), _, ops) -> pairRvalue b first second result ops
         -- replace(a, i, x): the element is copied out (it is what the list or array held, a value of its own), then x is put in its place
         (_, Replace, [a, i, x]) -> do
-            resultTy <- tc (zonk result)
-            case tupleParts resultTy of
+            case tupleParts result of
                 Just [containerTy, elementTy] -> do
                     view <- newLocal Nothing elementTy
                     emit (M.Assign view (M.ListOp M.Get [a, i]))
@@ -905,24 +936,17 @@ lowerBuiltin b args = do
                     emit (M.Assign old (M.CopyOf (M.Copy view)))
                     changed <- newLocal Nothing containerTy
                     emit (M.Assign changed (M.ListOp M.Set [a, i, x]))
-                    return (M.MakeData (typeName resultTy) [("0", M.Copy changed), ("1", M.Copy old)])
+                    return (M.MakeData (typeName result) [("0", M.Copy changed), ("1", M.Copy old)])
                 _ -> failL "The result of replace is not a pair"
         (_, _, ops) -> builtinRvalue b tys ops
     -- (a value built in the check of an instance of a template is built by the name the template wrote, which names
     -- the parameters: the value is of the instance the check is of)
     rv' <- case rv of
-        M.MakeData name fields | '<' `elem` name -> do
-            resultTy <- tc (zonk result)
-            case resultTy of
-                TNamed cbase _ | baseNameOf name == cbase -> return (M.MakeData (typeName resultTy) fields)
-                _ -> return rv
+        M.MakeData name fields | '<' `elem` name -> case result of
+            TNamed cbase _ | baseNameOf name == cbase -> return (M.MakeData (typeName result) fields)
+            _ -> return rv
         _ -> return rv
     return (PRvalue rv', result)
-  where
-    builtinResult b' tys' = case (b', tys') of
-        (Field owner field, [structTy]) -> tc (readField owner field structTy)
-        (Ctor name ctorArgs fields, _) -> tc (checkConstruct (TNamed (baseNameOf name) ctorArgs) fields tys')
-        _ -> tc (builtinType b' >>= \ft -> checkBuiltinCall (Just b') "call" ft tys')
 
 -- The forms that give two things, an address or a value and a permission: each is two operations, and the tuple of what they give
 pairParts :: BuiltinFunct -> Maybe (M.ListOp, M.ListOp)
@@ -938,8 +962,7 @@ pairParts b = case b of
 -- Addr::resize(p, n, b) is q = AddrResize(p, n, b), b2 = BlockResized(b, q, n); Block::split(b, i) is BlockSplitLo(b, i), BlockSplitHi(b, i)
 pairRvalue :: BuiltinFunct -> M.ListOp -> M.ListOp -> Type -> [M.Operand] -> L M.Rvalue
 pairRvalue b first second result ops = do
-    resultTy <- tc (zonk result)
-    case tupleParts resultTy of
+    case tupleParts result of
         Just [firstTy, secondTy] -> do
             x <- newLocal Nothing firstTy
             emit (M.Assign x (M.ListOp first ops))
@@ -951,7 +974,7 @@ pairRvalue b first second result ops = do
                 (SplitPair, _) -> return ops
                 _ -> failL ("A builtin was applied to the wrong number of arguments: " ++ show b)
             emit (M.Assign y (M.ListOp second secondOps))
-            return (M.MakeData (typeName resultTy) [("0", M.Copy x), ("1", M.Copy y)])
+            return (M.MakeData (typeName result) [("0", M.Copy x), ("1", M.Copy y)])
         _ -> failL ("The result of " ++ show b ++ " is not a pair")
 
 -- The operation that a builtin applied to operands stands for. `as` keeps the value and gives it the variant's type.
@@ -1026,38 +1049,44 @@ pointerOp b = lookup b
 
 -- The constructor that a struct type has, or the variant a value is known to be
 structCtor :: Type -> L Name
-structCtor ty = do
-    t <- tc (zonk ty)
-    case t of
-        TBox inner -> structCtor inner
-        TNamed base args -> do
-            let name = instanceName base args
-            tc (ensureInstance (TNamed base args))
-            ctors <- tc (typeCtors name)
-            case ctors of
-                [ctor] -> return ctor
-                _ -> failL ("The field of an enum " ++ name ++ " is read without a cast")
-        TVariant variant -> return variant
-        _ -> failL "A field is read from something that is not a struct"
+structCtor ty = case ty of
+    TBox inner -> structCtor inner
+    TNamed base args -> do
+        let name = instanceName base args
+        s <- getS
+        let ctors = case Map.lookup name (lsTypes s) of
+                Just (M.StructDecl _) -> [name]
+                Just (M.EnumDecl variants) -> map fst variants
+                Nothing -> case Map.lookup base (lsTypes s) of
+                    Just (M.StructDecl _) -> [name]
+                    Just (M.EnumDecl variants) -> map fst variants
+                    Nothing
+                        | Map.member base (lsGenerics s) -> [name]
+                        | Just _ <- tupleGeneric base -> [name]
+                        | otherwise -> []
+        case ctors of
+            [ctor] -> return ctor
+            _ -> failL ("The field of an enum " ++ name ++ " is read without a cast")
+    TVariant variant -> return variant
+    _ -> failL "A field is read from something that is not a struct"
 
-varOperand :: Variable -> L (M.Operand, Type)
-varOperand name = do
+varOperand :: Variable -> Type -> L (M.Operand, Type)
+varOperand name ty = do
     binding <- lookupBinding name
     s <- getS
     case binding of
-        Just (BLocal l ty) -> return (M.Copy l, ty)
-        Just (BFn fn ty) -> return (M.Const (M.CFn fn), ty)
+        Just (BLocal l _) -> return (M.Copy l, ty)
+        Just (BFn fn _) -> return (M.Const (M.CFn fn), ty)
         Nothing -> case Map.lookup name (lsGlobals s) of
-            Just (fn, ty) -> return (M.Const (M.CFn fn), ty)
+            Just (fn, _) -> return (M.Const (M.CFn fn), ty)
             Nothing -> case Map.lookup name stdLibCtx of
-                Just builtin -> valueOperand builtin
+                Just builtin -> valueOperand builtin ty
                 Nothing -> failL ("Undefined variable: " ++ name)
 
-valueOperand :: Value -> L (M.Operand, Type)
-valueOperand (VFunct _ _ _ (BuiltinFunct b) _) = builtinFunction b
-valueOperand VFunct{} = failL "A function is defined by a statement, not written in an expression"
-valueOperand v = do
-    ty <- tc (valueType v)
+valueOperand :: Value -> Type -> L (M.Operand, Type)
+valueOperand (VFunct _ _ _ (BuiltinFunct b) _) ty = builtinFunction b ty
+valueOperand VFunct{} _ = failL "A function is defined by a statement, not written in an expression"
+valueOperand v ty = do
     c <- constantOf v
     return (M.Const c, ty)
 
@@ -1070,10 +1099,8 @@ constantOf VFunct{} = failL "A function is not a constant"
 constantOf (VFnRef name) = return (M.CFn name)
 
 -- A builtin used as a value, such as `+` passed to a function, is a function of the program that applies it
-builtinFunction :: BuiltinFunct -> L (M.Operand, Type)
-builtinFunction b = do
-    ft <- tc (builtinType b)
-    ft' <- tc (zonk ft)
+builtinFunction :: BuiltinFunct -> Type -> L (M.Operand, Type)
+builtinFunction b ft' = do
     case ft' of
         TFn ptys rty -> do
             name <- uniqueName ("builtin::" ++ builtinLabel b)
