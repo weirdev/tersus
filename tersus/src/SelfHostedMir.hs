@@ -149,6 +149,21 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Pop) _)) [list]) b0 = 
 -- MIR environment does not bind that name to a program value.
 proofOperand env (FApp (ATerm "pop") [list]) b
     | Map.notMember "pop" env = proofOperand env (FApp (CTerm (builtinFunct Pop)) [list]) b
+-- A program function named in a proof denotes the same call application as a
+-- call in the code, so its result is the term the function's contract speaks of.
+proofOperand env (FApp (ATerm name) args) b0
+    | Just (M.Const (M.CFn callee)) <- Map.lookup name env = do
+        (prefixes, refs, b1) <- foldM evalArg ([], [], b0) args
+        let (function, b2) = namedFunction ("call:" ++ callee) b1
+            (i, b3) = fresh b2
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+            apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList refs)]
+        pure (prefixes ++ [apply], ref, b3)
+  where
+    evalArg (steps, refs, b) arg = do
+        (more, ref, b') <- proofOperand env arg b
+        pure (steps ++ more, refs ++ [ref], b')
 -- Builtins also occur in proofs under their source names (size, get, ...);
 -- they denote the builtin only when the name is not a program value.
 proofOperand env (FApp (ATerm name) args) b
@@ -558,6 +573,46 @@ statement rules (M.Assign (M.Local dest) (M.ListOp M.ToByte [source])) b0 = do
 statement rules (M.Assign (M.Local dest) (M.ListOp M.FromByte [source])) b = do
     (value, b') <- operand source b
     pure ([step "Assign" [("local", MInt (toInteger dest)), ("value", value)]], b')
+statement rules (M.Assign (M.Local dest) (M.ListOp op [source])) b
+    | op `elem` [M.WriteByte, M.WriteError, M.PathByte, M.StoreByte] = do
+    (value, b') <- operand source b
+    let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
+        isWrite = op == M.WriteByte || op == M.WriteError
+    pure
+        ( [ if isWrite then step "Assign" [("local", MInt (toInteger dest)), ("value", value)] else step "Havoc" [("local", MInt (toInteger dest))]
+          , step "Assume" [("relation", MInt 3), ("left", value), ("right", ref)]
+          , step "Assume" [("relation", MInt 3), ("left", ref), ("right", value)]
+          ]
+        , b'
+        )
+statement rules (M.Assign (M.Local dest) (M.ListOp op [])) b0
+    | op `elem` [M.ArgCount, M.FileLoad] = do
+        let (function, b1) = namedFunction (case op of M.ArgCount -> "argCount"; _ -> "fileLoad") b0
+        (minusOne, b2) <- operand (M.Const (M.CInt (-1))) b1
+        (zero, b3) <- operand (M.Const (M.CInt 0)) b2
+        let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
+            bound = if op == M.ArgCount then zero else minusOne
+        pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [])], step "Assume" [("relation", MInt 3), ("left", bound), ("right", ref)]], b3)
+statement rules (M.Assign (M.Local dest) (M.ListOp op args)) b
+    | op `elem` [M.ArgByte, M.PathByte, M.FileByte, M.StoreByte] = do
+        let name = case op of M.ArgByte -> "argByte"; M.PathByte -> "pathByte"; M.FileByte -> "fileByte"; _ -> "storeByte"
+            (function, b1) = namedFunction name b
+        (refs, b2) <- foldM (\(rs, bb) a -> do (r, bb') <- operand a bb; pure (rs ++ [r], bb')) ([], b1) args
+        (low, b3) <- operand (M.Const (M.CInt (if op == M.ArgByte || op == M.FileByte then -1 else 0))) b2
+        (high, b4) <- operand (M.Const (M.CInt 256)) b3
+        (zero, b5) <- operand (M.Const (M.CInt 0)) b4
+        let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
+            bounds = case op of
+                M.ArgByte -> [step "Assume" [("relation", MInt 3), ("left", low), ("right", ref)], step "Assume" [("relation", MInt 2), ("left", ref), ("right", high)]]
+                M.FileByte -> [step "Assume" [("relation", MInt 3), ("left", low), ("right", ref)], step "Assume" [("relation", MInt 2), ("left", ref), ("right", high)]]
+                _ -> [step "Assume" [("relation", MInt 3), ("left", zero), ("right", ref)]]
+        pure (step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList refs)] : bounds, b5)
+statement rules (M.Assign (M.Local dest) (M.ListOp M.FileStore [])) b0 = do
+    let (function, b1) = namedFunction "fileStore" b0
+    (minusOne, b2) <- operand (M.Const (M.CInt (-1))) b1
+    (zero, b3) <- operand (M.Const (M.CInt 0)) b2
+    let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
+    pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [])], step "Assume" [("relation", MInt 3), ("left", minusOne), ("right", ref)], step "Assume" [("relation", MInt 3), ("left", ref), ("right", zero)]], b3)
 statement rules (M.Assign (M.Local dest) (M.ListOp operation [source])) b0
     | operation == M.First || operation == M.Last = do
         (listRef, b1) <- operand source b0
@@ -952,7 +1007,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     -- the body) is not in the region and is walked as an exit, as the reference
     -- validator does.
     encodeLoop spec yes no dummyLocal (r, a, c, variantTestInfo, withCondition) = do
-        if yes == M.loopBody spec && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
+        if testChainToBody spec no yes && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
         (mode, variant, variantLocal, upper) <- case M.loopTermination spec of
             Just (Counting (Var name)) -> case Map.lookup name (M.loopEnv spec) of
                 Just op@(M.Copy v) -> Just (0, op, v, Val (VInt 0))
@@ -997,6 +1052,16 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         F (Var _) args -> concatMap expressionVars args
         F f args -> expressionVars f ++ concatMap expressionVars args
         _ -> []
+    -- A condition of several tests (a && b && ...) reaches the body through a
+    -- chain of test blocks, each leaving to the same exit when its test fails.
+    testChainToBody spec exit start = go Set.empty start
+      where
+        go seen b
+            | b == M.loopBody spec = True
+            | Set.member b seen = False
+            | otherwise = case Map.lookup b (M.fnBlocks fn) of
+                Just (M.BasicBlock _ (M.SwitchBool _ next no')) -> no' == exit && go (Set.insert b seen) next
+                _ -> False
     upperStable env assigned name = case Map.lookup name env of
         Just (M.Copy v) -> v `notElem` assigned
         Just (M.Const _) -> True
@@ -1231,8 +1296,6 @@ encode program
     | any externFunction allFunctions = Nothing
     | any unsupportedFunction allFunctions = Nothing
     | any unsupportedDecl (Map.elems (M.progTypes program)) = Nothing
-    -- Results of world-reading functions are not determined by arguments.
-    | not (Set.null (M.readersOfInput program)) = Nothing
     | not (null (M.fnParams (M.progMain program))) = Nothing
     | not (null (M.specRequires mainSpec) && null (M.specEnsures mainSpec)) = Nothing
     | length names /= length (nub names) = Nothing
