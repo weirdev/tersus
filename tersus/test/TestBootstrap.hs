@@ -17,7 +17,7 @@ import TestNative (clangAvailable)
 import Utils
 
 -- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (examples/emit.tersus) is built from a seed, the IR of an emitter that is
--- kept in the repository (bootstrap/emitter.ll):
+-- a GitHub release asset pinned by bootstrap/emitter.sha256 (see Bootstrap):
 -- - stage 0 is the seed built;
 -- - stage 1 is the emitter as it is now, made from the IR that stage 0 writes for it.
 -- The fixpoint is that stage 1 writes the same IR for the emitter as stage 0 does (so that the emitter built by stage 1 would be stage 1 again); stage 1 is the one
@@ -29,6 +29,7 @@ testBootstrap =
     TestList
         "testBootstrap"
         [ TestCase "the hashes of what the emitter is made of" hashShape
+        , TestCase "the seed pin and its release" seedPin
         , TestCase "the commands that make IR" commands
         , TestCase "the seed, stage 0 and stage 1 are a fixpoint, and the cache keeps them" bootstrap
         ]
@@ -39,6 +40,13 @@ hashShape =
         if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, emitterHash))
+
+seedPin :: IO TestResult
+seedPin =
+    pure $
+        if length seedSha256 == 64 && all isHexDigit seedSha256 && seedUrl == "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 seedSha256 ++ "/emitter.ll"
+            then Nothing
+            else Just ("the seed pin is " ++ show seedSha256 ++ " and its release is " ++ seedUrl)
 
 commands :: IO TestResult
 commands =

@@ -58,12 +58,12 @@ jobs:
         run: stack test
 
       # `build`, `llvm` and `run` write the IR with the emitter written in Tersus (examples/emit.tersus), which is built with clang the first time from the seed
-      # bootstrap/emitter.ll and kept in ~/.cache/tersus under a name made from what it is made of, so a cache entry that is out of date is only not used.
+      # (a release asset pinned by bootstrap/emitter.sha256, fetched and verified on first use) and kept in ~/.cache/tersus under a name made from what it is made of, so a cache entry that is out of date is only not used.
       - name: Cache the emitter written in Tersus
         uses: actions/cache@v4
         with:
           path: ~/.cache/tersus
-          key: emitter-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/emitter.ll', 'tersus/examples/emit.tersus', 'tersus/lib/*.tersus', 'tersus/src/LlvmRuntime.hs') }}
+          key: emitter-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/emitter.sha256', 'tersus/examples/emit.tersus', 'tersus/lib/*.tersus', 'tersus/src/LlvmRuntime.hs') }}
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)

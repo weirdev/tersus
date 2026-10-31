@@ -8,11 +8,9 @@ module PreludeSource
     , mapSource
     , emitterSource
     , stdlibSource
-    , seedSource
-    , seedFingerprint
+    , seedSha256
     ) where
 
-import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 
 -- The text of lib/prelude.tersus, read when this module is compiled
@@ -78,20 +76,11 @@ emitterSource =
         lift contents
      )
 
--- The text of bootstrap/emitter.ll: the LLVM IR of an emitter written in Tersus (an old one: see Bootstrap), which is what the emitter is first built from
-seedSource :: String
-seedSource =
+-- The SHA-256 pinned in bootstrap/emitter.sha256: the seed IR itself is a GitHub release asset (see Bootstrap), so only this digest is kept in the repository
+seedSha256 :: String
+seedSha256 =
     $( do
-        addDependentFile "bootstrap/emitter.ll"
-        contents <- runIO (readFile "bootstrap/emitter.ll")
-        lift contents
-     )
-
--- A hash of the seed, made when this module is compiled, so that it is not made of 9 million characters each time the compiler runs
-seedFingerprint :: String
-seedFingerprint =
-    $( do
-        addDependentFile "bootstrap/emitter.ll"
-        contents <- runIO (readFile "bootstrap/emitter.ll")
-        lift (fingerprint [contents])
+        addDependentFile "bootstrap/emitter.sha256"
+        contents <- runIO (readFile "bootstrap/emitter.sha256")
+        lift (head (words contents))
      )

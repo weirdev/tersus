@@ -35,8 +35,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   emitter written in Tersus, and `examples/mir_reader.tersus` /
   `examples/mir_verify.tersus` are the MIR reader and MIR checker written in
   Tersus.
-- `tersus/bootstrap/emitter.ll`: the checked-in seed IR the Tersus emitter is
-  bootstrapped from (see Build, Test, and Development Commands).
+- `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
+  emitter is bootstrapped from; the seed itself is a GitHub release asset
+  (see Build, Test, and Development Commands).
 - `tersus/dev/parity/`: the `parity` executable, a development harness outside
   the production library and CLI.
 - `tersus/test/`: regression tests. `TestTersus.hs` runs the test groups; the
@@ -68,7 +69,10 @@ Work from `tersus/`.
     copies and frees.
   - `llvm <file>`: print the LLVM IR of a validated program (written by the
     emitter in Tersus, `examples/emit.tersus`, which is built with clang on
-    first use from the seed `bootstrap/emitter.ll` and cached; `Bootstrap`).
+    first use from the seed (a release asset pinned by
+    `bootstrap/emitter.sha256`, fetched and verified on first use; a seed at
+    `$TERSUS_SEED_FILE` or `bootstrap/emitter.ll` is used instead when
+    present) and cached; `Bootstrap`).
   - `build <file> -o <output>`: compile a validated program to an executable
     with clang (which `testNative` also needs to run the executables; it
     passes without).
@@ -80,12 +84,14 @@ Work from `tersus/`.
   the heap model of `testOwnership` needs neither.
 - If a change alters what the emitter in Tersus produces (a change to
   `examples/emit.tersus` or to what it is built from), regenerate the seed
-  into a temporary file and replace the seed only when that succeeds:
-  `stack run tersus-exe -- llvm examples/emit.tersus > bootstrap/emitter.ll.new && mv bootstrap/emitter.ll.new bootstrap/emitter.ll`,
-  and let `TestBootstrap` check the stage 0 / stage 1 fixpoint. Do not
-  redirect straight into `bootstrap/emitter.ll`: the shell truncates it
-  before Stack runs, and `PreludeSource` embeds that file, so a rebuild
-  would embed an empty seed and the emitter could not be built from it.
+  into a temporary file only when that succeeds:
+  `stack run tersus-exe -- llvm examples/emit.tersus > emitter.ll.new`,
+  then `sha256sum emitter.ll.new`, upload it as the `emitter.ll` asset of a
+  new GitHub release tagged `bootstrap-<first 12 digits of that digest>`,
+  put the digest in `bootstrap/emitter.sha256`, and let `TestBootstrap`
+  check the stage 0 / stage 1 fixpoint. Do not redirect straight into a seed
+  file the running compiler is using: the shell truncates it before the
+  compiler runs.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`,
   which runs each group in a process of its own;
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and

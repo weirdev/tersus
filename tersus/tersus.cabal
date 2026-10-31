@@ -19,7 +19,7 @@ extra-source-files:
     lib/prelude.tersus
     lib/string.tersus
     examples/emit.tersus
-    bootstrap/emitter.ll
+    bootstrap/emitter.sha256
     lib/validation.tersus
     lib/stdlib.tersus
     lib/box.tersus
