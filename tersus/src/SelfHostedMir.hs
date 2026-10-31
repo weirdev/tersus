@@ -1,10 +1,10 @@
 -- The bridge from MIR to the validator written in Tersus
 -- (lib/validation.tersus): encode is a data-only translation, and anything it
--- does not fully model is reported as Nothing, never accepted.
-module SelfHostedMir (validateMirSubset, validateByTersus) where
+-- does not fully model is reported as an Unmodeled verdict, never accepted.
+module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus) where
 
 import Control.Monad (foldM)
-import Data.List (isPrefixOf, nub)
+import Data.List (find, isPrefixOf, nub)
 import Data.Maybe (mapMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
@@ -225,6 +225,23 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)
         (more, ref, b') <- proofOperand env arg b
         pure (steps ++ more, refs ++ [ref], b')
     register (ids, b) field = let (fieldId, b') = namedFunction ("field:" ++ field) b in (ids ++ [fieldId], b')
+-- A relation used as a value in a proof (`return = (a = b)` in a contract) is
+-- the comparison application itself, as a comparison in code is.
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel r)) _)) [a, b]) b0 = do
+    (leftSteps, x, b1) <- proofOperand env a b0
+    (rightSteps, y, b2) <- proofOperand env b b1
+    let function = case r of
+            Eq -> -6
+            NotEq -> -7
+            Lt -> -8
+            LtEq -> -9
+            Gt -> -10
+            GtEq -> -11
+        (i, b3) = fresh b2
+        local = negate i - 1
+        ref = record "ValueRef::Local" [("local", MInt local)]
+        apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [x, y])]
+    pure (leftSteps ++ rightSteps ++ [apply], ref, b3)
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) [a, b]) b0 = do
     op <- case f of
         Plus -> Just M.Add
@@ -1291,27 +1308,28 @@ encodeFunction types invariants functions rules allowCalls fn
         (more, b') <- typeSteps types invariants fn local b
         pure (steps ++ more, b')
 
-encode :: M.Program -> Maybe [(MirValue, MirValue, Integer)]
+encode :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
 encode program
-    | any externFunction allFunctions = Nothing
-    | any unsupportedFunction allFunctions = Nothing
-    | any unsupportedDecl (Map.elems (M.progTypes program)) = Nothing
-    | not (null (M.fnParams (M.progMain program))) = Nothing
-    | not (null (M.specRequires mainSpec) && null (M.specEnsures mainSpec)) = Nothing
-    | length names /= length (nub names) = Nothing
-    | any (\name -> Map.member name (fst stdLibValCtx)) names = Nothing
-    | length targets /= length (nub targets) = Nothing
-    | length targets /= length [() | name <- Map.keys (M.progFunctions program), not ("builtin::" `isPrefixOf` name)] = Nothing
-    | any (\name -> Map.notMember name (M.progFunctions program)) targets = Nothing
-    | any (\(name, fn) -> name /= M.fnName fn) (Map.toList (M.progFunctions program)) = Nothing
+    | Just fn <- find externFunction allFunctions = Left ("an extern function (" ++ M.fnName fn ++ ")")
+    | Just fn <- find unsupportedFunction allFunctions = Left ("a type of a local, the result or a reference result of " ++ M.fnName fn)
+    | Just (name, _) <- find (unsupportedDecl . snd) (Map.toList (M.progTypes program)) = Left ("a field type of " ++ name)
+    | not (null (M.fnParams (M.progMain program))) = Left "a main function with parameters"
+    | not (null (M.specRequires mainSpec) && null (M.specEnsures mainSpec)) = Left "a contract on the program itself"
+    | length names /= length (nub names) = Left "two functions with one name"
+    | any (\name -> Map.member name (fst stdLibValCtx)) names = Left "a function named like a builtin"
+    | length targets /= length (nub targets) = Left "two definitions of one function"
+    | length targets /= length [() | name <- Map.keys (M.progFunctions program), not ("builtin::" `isPrefixOf` name)] = Left "a function with no definition"
+    | any (\name -> Map.notMember name (M.progFunctions program)) targets = Left "a definition of a function that is not there"
+    | any (\(name, fn) -> name /= M.fnName fn) (Map.toList (M.progFunctions program)) = Left "a function filed under another name"
     | otherwise = do
         let functions = M.progFunctions program
             invariants = M.progInvariants program
             types = M.progTypes program
-        rules <- collectRules program
-        checked <- traverse (encodeFunction types invariants functions rules True) (Map.elems functions)
-        main <- encodeFunction types invariants functions rules True (M.progMain program)
-        ruleEntries <- pure (mapMaybe (encodeRule rules) (Map.toList rules))
+        rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
+        let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction types invariants functions rules' True fn)
+        checked <- traverse encodeOne (Map.elems functions)
+        main <- encodeOne (M.progMain program)
+        let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
         pure (checked ++ ruleEntries ++ [main])
   where
     allFunctions = M.progMain program : Map.elems (M.progFunctions program)
@@ -1346,22 +1364,36 @@ encode program
         (Just callerIndex, Just calledIndex) -> calledIndex >= callerIndex
         _ -> True
 
--- The first argument is the validated lib/validation.tersus program. A false
--- result means an obligation was unproved; Nothing means the MIR is outside
--- this bridge's current subset (including most loop shapes and function calls).
-validateMirSubset :: M.Program -> M.Program -> Result (Maybe Bool) String
+-- The first argument is the validated lib/validation.tersus program. The
+-- verdict says whether every obligation was proved, which one was not, or
+-- what part of the MIR is outside this bridge's current subset (including
+-- most loop shapes and function calls).
+validateMirSubset :: M.Program -> M.Program -> Result Verdict String
 validateMirSubset checker program = verifyProgram program `bindResult` \_ -> case encode program of
-    Nothing -> Ok Nothing
-    Just functions -> checkFunctions functions
+    Left what -> Ok (Unmodeled what)
+    Right functions -> checkFunctions functions
   where
-    checkFunctions [] = Ok (Just True)
-    checkFunctions ((blocks, initial, entry) : rest) = runNamedFunction checker "validateExecution" [blocks, MInt entry, initial] `bindResult` \result -> case result of
-        Just (MData "ExecutionFlowResult" fields) -> case lookup "status" fields of
-            Just (MInt 0) -> checkFunctions rest
-            Just (MInt 1) -> Ok (Just False)
-            Just (MInt _) -> Ok Nothing
+    checkFunctions [] = Ok Proved
+    checkFunctions ((name, (blocks, initial, entry)) : rest) = runNamedFunction checker "validateExecution" [blocks, MInt entry, initial] `bindResult` \result -> case result of
+        Just (MData "ExecutionFlowResult" fields) -> case (lookup "status" fields, lookup "block" fields, lookup "step" fields) of
+            (Just (MInt 0), _, _) -> checkFunctions rest
+            (Just (MInt 1), Just (MInt b), Just (MInt i)) -> Ok (Unproved (name ++ ", block " ++ show b ++ ", step " ++ show i))
+            (Just (MInt 2), Just (MInt b), _) -> Ok (Unmodeled ("an operation in " ++ name ++ ", block " ++ show b))
+            (Just (MInt 3), _, _) -> Ok (Unmodeled ("the control flow of " ++ name))
+            (Just (MInt _), Just (MInt b), _) -> Ok (Unmodeled ("a loop of " ++ name ++ " at block " ++ show b))
             _ -> Error "Tersus validator returned an invalid status"
         _ -> Error "Tersus validator returned an invalid result"
+
+-- What the validator said of a program: every obligation proved, one not proved (where), or a part of the program the
+-- bridge or the validator does not model (what)
+data Verdict = Proved | Unproved String | Unmodeled String
+
+-- A verdict as a yes, a no, or no answer
+verdictProved :: Verdict -> Maybe Bool
+verdictProved verdict = case verdict of
+    Proved -> Just True
+    Unproved _ -> Just False
+    Unmodeled _ -> Nothing
 
 -- The validator written in Tersus, lowered once without passing through any
 -- validator (it is the bootstrap: the Tersus validator's own test in
@@ -1377,6 +1409,6 @@ checkerProgram = case parseSourceWith True validationSource of
 -- back to.
 validateByTersus :: M.Program -> Result () String
 validateByTersus program = checkerProgram `bindResult` \checker -> validateMirSubset checker program `bindResult` \verdict -> case verdict of
-    Just True -> Ok ()
-    Just False -> Error "Could not prove: an obligation could not be proved by the Tersus validator"
-    Nothing -> Error "the program uses a feature the Tersus validator does not model yet"
+    Proved -> Ok ()
+    Unproved place -> Error ("Could not prove: an obligation could not be proved by the Tersus validator (in " ++ place ++ ")")
+    Unmodeled what -> Error ("the program uses a feature the Tersus validator does not model yet: " ++ what)
