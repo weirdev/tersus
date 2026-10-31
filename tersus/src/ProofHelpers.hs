@@ -13,7 +13,8 @@ import Data.Map (Map, fromList)
 import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, isJust)
 
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- Helpers for the terms of proofs: which iotas and variables a proof mentions, replacing a term by another, and moving a

@@ -35,7 +35,8 @@ import Mir (Program)
 import MirEval (fromMirValue)
 import Parse
 import Pipeline (compileSource, runStatements, validateStatements)
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 type TestResult = Maybe String

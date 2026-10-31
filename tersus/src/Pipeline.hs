@@ -20,7 +20,7 @@ import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
 import PreludeSource (boxSource, listsSource, preludeSource, stringSource)
 import Pretty (renderVarProof)
-import TersusTypes (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
+import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
 import Utils
 

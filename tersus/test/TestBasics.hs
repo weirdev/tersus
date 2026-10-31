@@ -14,7 +14,8 @@ import Parse
 import MirEval (fromMirValue)
 import Pipeline (runStatements, validateStatements)
 import StdLib
-import TersusTypes
+import Types
+import Syntax
 import Utils
 import TestHarness
 

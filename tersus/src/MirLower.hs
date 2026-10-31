@@ -11,7 +11,8 @@ import MirMoves (checkMoves, stripPositions)
 import MirVerify (verifyProgram)
 import Pretty (renderType)
 import StdLib (stdLibCtx)
-import TersusTypes
+import Types
+import Syntax
 import TypeCheck (Elaborated (..), arrayElement, elaborate, functionType)
 import Utils
 

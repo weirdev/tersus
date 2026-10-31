@@ -11,7 +11,8 @@ import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
 import MirVerify (verifyProgram)
 import StdLib (builtinFunct, stdLibValCtx)
-import TersusTypes
+import Types
+import Syntax
 import Utils (Result (..), bindResult, inIntRange)
 
 data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)] }

@@ -15,7 +15,8 @@ import qualified Data.Map as Map
 
 import BuiltinRegistry
 import Parse (emptyDecls, parseStatementBlockWith)
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- The standard library is what BuiltinRegistry says it is: the names in stdLibCtx and the contract
