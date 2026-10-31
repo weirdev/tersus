@@ -6,8 +6,6 @@ impl Clone for EqualityFact { };
 
 impl Copy for EqualityFact { };
 
-fn emptyIntSet() -> HashMap<Int, Bool> { return HashMap::new(); };
-
 fn emptyIntMap() -> HashMap<Int, Int> { return HashMap::new(); };
 
 fn containsValue(values: &List<Int>, value: Int) -> Bool {
@@ -25,17 +23,17 @@ fn containsValue(values: &List<Int>, value: Int) -> Bool {
 // sufficient, including when the facts are ordered against the path. Duplicate
 // facts and cycles do not add duplicate values to the reachable set.
 fn hasEquality(facts: &List<EqualityFact>, left: Int, right: Int) -> Bool {
-    reachable = HashMap::new().insert(left, true);
+    reachable = HashSet::new().insert(left);
     for round in 0..size(facts) {
         for fact in facts {
             if reachable.contains(fact.left) {
                 if reachable.contains(fact.right) = false {
-                    reachable = reachable.insert(fact.right, true);
+                    reachable = reachable.insert(fact.right);
                 };
             };
             if reachable.contains(fact.right) {
                 if reachable.contains(fact.left) = false {
-                    reachable = reachable.insert(fact.left, true);
+                    reachable = reachable.insert(fact.left);
                 };
             };
         };
@@ -214,13 +212,15 @@ impl Clone for ConstructorField { };
 // Constructor injectivity can merge argument classes, which can then make
 // additional application results equal.
 fn applicationFactsWithConstructors(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, constructors: &List<Int>, constructorFields: &List<ConstructorField>) -> List<EqualityFact> {
+    constructorSet = HashSet::new();
+    for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
     known = clone(facts);
     finished = false;
     for round in 0..2 * size(facts) + 8 * size(terms) + 8 {
         if finished = false {
             before = size(known);
             for a in terms {
-                if containsValue(constructors, a.function) {
+                if constructorSet.contains(a.function) {
                     for fieldApp in terms {
                         if size(fieldApp.arguments) = 1 {
                             for parent in fieldApp.arguments {
@@ -246,7 +246,7 @@ fn applicationFactsWithConstructors(facts: &List<EqualityFact>, terms: &List<App
             };
             for a in terms {
                 for b in terms {
-                    if containsValue(constructors, a.function) {
+                    if constructorSet.contains(a.function) {
                         if hasEquality(known, a.function, b.function) {
                             if hasEquality(known, a.id, b.id) {
                                 if size(a.arguments) = size(b.arguments) {
@@ -715,10 +715,10 @@ fn contextNodes(context: &ValidatorContext) -> List<Int> {
         candidates = push(candidates, constant.id);
     };
     nodes = [];
-    seen = emptyIntSet();
+    seen = HashSet::new();
     for node in candidates {
         if seen.contains(node) = false {
-            seen = seen.insert(node, true);
+            seen = seen.insert(node);
             nodes = push(nodes, node);
         };
     };
@@ -813,10 +813,12 @@ fn contradictoryVariants(equalities: &List<EqualityFact>, variants: &List<Varian
 };
 
 fn contradictoryConstructors(equalities: &List<EqualityFact>, applications: &List<ApplicationTerm>, constructors: &List<Int>) -> Bool {
+    constructorSet = HashSet::new();
+    for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
     for a in applications {
-        if containsValue(constructors, a.function) {
+        if constructorSet.contains(a.function) {
             for b in applications {
-                if containsValue(constructors, b.function) {
+                if constructorSet.contains(b.function) {
                     if hasEquality(equalities, a.id, b.id) {
                         if hasEquality(equalities, a.function, b.function) = false { return true; };
                     };
@@ -828,10 +830,12 @@ fn contradictoryConstructors(equalities: &List<EqualityFact>, applications: &Lis
 };
 
 fn entailsConstructorDisequality(equalities: &List<EqualityFact>, applications: &List<ApplicationTerm>, constructors: &List<Int>, left: Int, right: Int) -> Bool {
+    constructorSet = HashSet::new();
+    for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
     for a in applications {
-        if containsValue(constructors, a.function) {
+        if constructorSet.contains(a.function) {
             for b in applications {
-                if containsValue(constructors, b.function) {
+                if constructorSet.contains(b.function) {
                     if hasEquality(equalities, a.function, b.function) = false {
                         if hasEquality(equalities, left, a.id) {
                             if hasEquality(equalities, right, b.id) { return true; };
@@ -893,13 +897,15 @@ fn equivalentTermIn(equalities: &List<EqualityFact>, terms: &List<Int>, term: In
 };
 
 fn contextWithin(context: &ValidatorContext, inner: Int, outer: Int) -> Bool {
+    fieldSet = HashSet::new();
+    for function in context.fieldFunctions { fieldSet = fieldSet.insert(function); };
     equalities = closeContext(context);
     if hasEquality(equalities, inner, outer) { return false; };
     reached = push([], outer);
     // Each useful round adds a distinct field-result class; the graph is finite.
     for round in 0..size(context.applications) {
         for app in context.applications {
-            if containsValue(context.fieldFunctions, app.function) {
+            if fieldSet.contains(app.function) {
                 if size(app.arguments) = 1 {
                     parent = get(app.arguments, 0);
                     if equivalentTermIn(equalities, reached, parent) {
@@ -1144,12 +1150,12 @@ fn flowTable(blocks: &List<FlowBlock>) -> HashMap<Int, FlowBlock> {
 };
 
 fn uniqueFlowBlocks(blocks: &List<FlowBlock>) -> Bool {
-    seen = emptyIntSet();
+    seen = HashSet::new();
     for block in blocks {
         if seen.contains(block.id) {
             return false;
         };
-        seen = seen.insert(block.id, true);
+        seen = seen.insert(block.id);
     };
     return true;
 };
@@ -1341,14 +1347,18 @@ fn unionContexts(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     for fact in right.orders { orders = push(orders, clone(fact)); };
     for fact in right.different { different = push(different, clone(fact)); };
     for fact in right.variants { variants = push(variants, clone(fact)); };
-    for function in right.fieldFunctions { if containsValue(fieldFunctions, function) = false { fieldFunctions = push(fieldFunctions, function); }; };
-    for function in right.constructorFunctions { if containsValue(constructorFunctions, function) = false { constructorFunctions = push(constructorFunctions, function); }; };
+    fieldSeen = HashSet::new();
+    for function in fieldFunctions { fieldSeen = fieldSeen.insert(function); };
+    for function in right.fieldFunctions { if fieldSeen.contains(function) = false { fieldSeen = fieldSeen.insert(function); fieldFunctions = push(fieldFunctions, function); }; };
+    constructorSeen = HashSet::new();
+    for function in constructorFunctions { constructorSeen = constructorSeen.insert(function); };
+    for function in right.constructorFunctions { if constructorSeen.contains(function) = false { constructorSeen = constructorSeen.insert(function); constructorFunctions = push(constructorFunctions, function); }; };
     for field in right.constructorFields { if containsConstructorField(constructorFields, field) = false { constructorFields = push(constructorFields, clone(field)); }; };
     for fact in right.differences { differences = push(differences, clone(fact)); };
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
-fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashMap<Int, Bool>, term: Int) -> ValueLookup {
+fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashSet<Int>, term: Int) -> ValueLookup {
     if ambiguous.contains(term) { return ValueLookup::Missing; };
     if joined.contains(term) { return ValueLookup::Found { term: joined.lookup(term, 0) }; };
     if term >= 0 { return ValueLookup::Found { term: term }; };
@@ -1357,16 +1367,16 @@ fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashMap<Int, Bool>, term: I
 
 fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> ValidatorContext {
     joined = emptyIntMap();
-    ambiguous = emptyIntSet();
+    ambiguous = HashSet::new();
     for pair in pairs {
         source = pair.right;
         if leftSide { source = pair.left; };
         if pair.ambiguous {
-            ambiguous = ambiguous.insert(source, true);
+            ambiguous = ambiguous.insert(source);
         } else if ambiguous.contains(source) = false {
             if joined.contains(source) {
                 if joined.lookup(source, 0) != pair.joined {
-                    ambiguous = ambiguous.insert(source, true);
+                    ambiguous = ambiguous.insert(source);
                 };
             } else {
                 joined = joined.insert(source, pair.joined);
@@ -1469,8 +1479,12 @@ fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     for fact in left.orders { for other in right.orders { if fact.smaller = other.smaller && fact.greater = other.greater && fact.strict = other.strict { orders = push(orders, clone(fact)); }; }; };
     for fact in left.different { for other in right.different { if sameDisequality(fact, other) { different = push(different, clone(fact)); }; }; };
     for fact in left.variants { for other in right.variants { if sameVariantFact(fact, other) { variants = push(variants, clone(fact)); }; }; };
-    for function in left.fieldFunctions { if containsValue(right.fieldFunctions, function) { fieldFunctions = push(fieldFunctions, function); }; };
-    for function in left.constructorFunctions { if containsValue(right.constructorFunctions, function) { constructorFunctions = push(constructorFunctions, function); }; };
+    rightFields = HashSet::new();
+    for function in right.fieldFunctions { rightFields = rightFields.insert(function); };
+    for function in left.fieldFunctions { if rightFields.contains(function) { fieldFunctions = push(fieldFunctions, function); }; };
+    rightConstructors = HashSet::new();
+    for function in right.constructorFunctions { rightConstructors = rightConstructors.insert(function); };
+    for function in left.constructorFunctions { if rightConstructors.contains(function) { constructorFunctions = push(constructorFunctions, function); }; };
     for field in left.constructorFields { for other in right.constructorFields { if sameConstructorField(field, other) { constructorFields = push(constructorFields, clone(field)); }; }; };
     for fact in left.differences { for other in right.differences { if fact.left = other.left && fact.right = other.right && fact.bound = other.bound { differences = push(differences, clone(fact)); }; }; };
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
@@ -1573,11 +1587,11 @@ fn safeProduct(a: Int, b: Int) -> SumResult {
 fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index: Int) -> ValidatorContext {
     state = clone(context);
     current = list;
-    visited = [];
+    visited = HashSet::new();
     equalities = semanticFacts(context.equalities, context.applications, context.constants);
     for round in 0..size(context.applications) {
-        if containsValue(visited, current) { return state; };
-        visited = push(visited, current);
+        if visited.contains(current) { return state; };
+        visited = visited.insert(current);
         moved = false;
         for app in context.applications {
             if moved = false {
@@ -2594,10 +2608,10 @@ fn executionTable(blocks: &List<ExecutionBlock>) -> HashMap<Int, ExecutionBlock>
 };
 
 fn uniqueExecutionBlocks(blocks: &List<ExecutionBlock>) -> Bool {
-    seen = emptyIntSet();
+    seen = HashSet::new();
     for block in blocks {
         if seen.contains(block.id) { return false; };
-        seen = seen.insert(block.id, true);
+        seen = seen.insert(block.id);
     };
     return true;
 };
