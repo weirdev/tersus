@@ -170,6 +170,7 @@ test-suite tersus-test
       TestMirReader
       TestMirVerify
       TestModules
+      TestParity
       TestNative
       TestOwnership
       TestPipeline

@@ -49,6 +49,7 @@ import TestSharedCache
 import TestScheduling
 import TestAstData
 import TestModules
+import TestParity
 
 main :: IO ()
 main = do
@@ -177,6 +178,7 @@ originalGroups =
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
     , testAstReader
+    , testParity
     ]
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)
