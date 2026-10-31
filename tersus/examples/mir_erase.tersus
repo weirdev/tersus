@@ -134,6 +134,8 @@ struct Function {
     sizeParams: List<String>,
     typeParams: List<String>,
     borrowed: List<Int>,
+    mutBorrowed: List<Int>,
+    from: List<Int>,
     locals: List<LocalDecl>,
     blocks: List<MirBlock>,
 };
@@ -904,7 +906,7 @@ fn declAt(ts: &List<Token>) -> Parsed<TypeDecl> [{ }] [{ }] {
 };
 
 fn noFunction() -> Function [{ }] [{ }] {
-    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], locals: [], blocks: [] };
+    return Function { name: "", params: [], hasReturn: false, returns: Type::TInt, sizeParams: [], typeParams: [], borrowed: [], mutBorrowed: [], from: [], locals: [], blocks: [] };
 };
 
 // The header of a function, from a whole line (the locals and the blocks are filled in by the caller)
@@ -943,8 +945,18 @@ fn headerAt(ts: &List<Token>) -> Parsed<Function> [{ }] [{ }] {
     nb = countAt(ts, typeParams.pos + 1);
     if !nb.ok { return bad; };
     borrowed = intsAt(ts, nb.pos, nb.value);
-    if !borrowed.ok || borrowed.pos != size(ts) { return bad; };
-    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, locals: [], blocks: [] }, borrowed.pos);
+    if !borrowed.ok { return bad; };
+    if borrowed.pos = size(ts) { return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: [], from: [], locals: [], blocks: [] }, borrowed.pos); };
+    if !isWord(ts, borrowed.pos, "mutborrowed") || borrowed.pos + 1 >= size(ts) { return bad; };
+    nm = countAt(ts, borrowed.pos + 1);
+    if !nm.ok { return bad; };
+    mutBorrowed = intsAt(ts, nm.pos, nm.value);
+    if !mutBorrowed.ok || !isWord(ts, mutBorrowed.pos, "from") || mutBorrowed.pos + 1 >= size(ts) { return bad; };
+    nf = countAt(ts, mutBorrowed.pos + 1);
+    if !nf.ok { return bad; };
+    fromList = intsAt(ts, nf.pos, nf.value);
+    if !fromList.ok || fromList.pos != size(ts) { return bad; };
+    return done(Function { name: name.value, params: params.value, hasReturn: hasReturn, returns: returns, sizeParams: sizeParams.value, typeParams: typeParams.value, borrowed: borrowed.value, mutBorrowed: mutBorrowed.value, from: fromList.value, locals: [], blocks: [] }, fromList.pos);
 };
 
 fn noLocalDecl() -> LocalDecl [{ }] [{ }] {
@@ -1354,7 +1366,9 @@ fn printLocal(d: &LocalDecl) -> Int ~ {
 fn printFunction(kind: &String, f: &Function) -> Int ~ {
     n = kind.print() + printName(f.name) + " params".print() + printInts(f.params) + " returns".print();
     if f.hasReturn { n = n + " some".print() + printType(f.returns); } else { n = n + " none".print(); };
-    n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed) + newLine();
+    n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed);
+    if size(f.mutBorrowed) + size(f.from) > 0 { n = n + " mutborrowed".print() + printInts(f.mutBorrowed) + " from".print() + printInts(f.from); };
+    n = n + newLine();
     i = 0;
     while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] ~ {
         n = n + printLocal(get(f.locals, i));
@@ -2051,6 +2065,7 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
     return Function {
         name: clone(f.name), params: params, hasReturn: f.hasReturn, returns: returns,
         sizeParams: clone(f.sizeParams), typeParams: clone(f.typeParams), borrowed: borrowed,
+        mutBorrowed: clone(f.mutBorrowed), from: clone(f.from),
         locals: locals, blocks: blocks,
     };
 };
@@ -2324,6 +2339,7 @@ fn plainFunction(f: &Function) -> Function ~ {
     return Function {
         name: clone(f.name), params: clone(f.params), hasReturn: f.hasReturn, returns: returns,
         sizeParams: clone(f.sizeParams), typeParams: clone(f.typeParams), borrowed: clone(f.borrowed),
+        mutBorrowed: clone(f.mutBorrowed), from: clone(f.from),
         locals: locals, blocks: blocks,
     };
 };
