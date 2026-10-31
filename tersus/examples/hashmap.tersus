@@ -1,0 +1,25 @@
+// A HashMap from the standard library (lib/map.tersus, which a program has when it mentions HashMap): the entries
+// with one key are in a bucket chosen by the hash of the key, and a key type needs an impl of Hash, which Int and
+// String have already. Insert and remove give a new map, lookup gives the value at a key or the fallback when there
+// is none, and size is how many keys there are.
+//
+// Counting the words: how many times each word is there, read back with lookup (fetch is the read for a caller
+// that has the key being there as a precondition, which a count written by hand here is not).
+
+counts = HashMap::new();
+counts = counts.insert("the", 1);
+counts = counts.insert("cat", 1);
+counts = counts.insert("the", 2);
+counts = counts.insert("hat", 1);
+
+// Squares by their root, past the count where the buckets spread (four entries to a bucket to start with), and
+// one removed again
+squares = HashMap::new();
+i = 0;
+while i < 40 [{ affirm i >= 0; affirm i <= 40; }] shrinks 40 - i {
+    squares = squares.insert(i, i * i);
+    i = i + 1;
+};
+squares = squares.remove(7);
+
+return counts.lookup("the", 0) * 100000 + counts.lookup("cat", 0) * 10000 + counts.size() * 1000 + squares.size() * 100 + squares.lookup(7, 0 - 1) + squares.lookup(39, 0);

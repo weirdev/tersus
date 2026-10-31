@@ -38,6 +38,7 @@ import TestMirReader
 import TestMirVerify
 import TestMirEmit
 import TestBootstrap
+import TestHashMap
 
 main :: IO ()
 main = do
@@ -137,6 +138,7 @@ allGroups =
     , testMirVerify
     , testMirEmit
     , testBootstrap
+    , testHashMap
     ]
 
 groupName :: Test -> String
