@@ -7,17 +7,18 @@ module TestNative
     , runExecutableBytes
     ) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
+import Control.Concurrent (forkIO)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Exception (IOException, finally, try)
 import Data.Char (isAscii)
 import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile)
-import GHC.IO.Encoding (char8, getFileSystemEncoding, getLocaleEncoding, setFileSystemEncoding, setLocaleEncoding)
+import GHC.IO.Encoding (char8, getFileSystemEncoding, setFileSystemEncoding)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), hClose, hGetContents, hPutStr, openTempFile, withBinaryFile)
+import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hSetEncoding, openTempFile, withBinaryFile)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode, readProcessWithExitCode)
+import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, readProcessWithExitCode, waitForProcess)
 
 import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
@@ -966,57 +967,65 @@ sameAsMirFiles name initial source = do
                     Error e -> pure (Just e)
                     Ok text -> case runProgramIn noWorld{worldFile = \path -> lookup path initial} program of
                         Error e -> pure (Just ("The MIR run failed: " ++ e))
-                        Ok ((out, err), files) -> withByteNames $ do
+                        Ok ((out, err), files) -> do
                             tmp <- getTemporaryDirectory
                             let dir = tmp </> "tersus-native-files" </> map safeChar name
                                 exe = tmp </> "tersus-native-files" </> (map safeChar name ++ "_exe")
-                            exists <- doesDirectoryExist dir
-                            if exists then removeDirectoryRecursive dir else pure ()
-                            createDirectoryIfMissing True dir
-                            mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
+                            withByteNames $ do
+                                exists <- doesDirectoryExist dir
+                                if exists then removeDirectoryRecursive dir else pure ()
+                                createDirectoryIfMissing True dir
+                                mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
                             built <- buildExecutableFast [] exe text
                             case built of
                                 Error e -> pure (Just e)
                                 Ok () -> do
-                                    saved <- getLocaleEncoding
-                                    setLocaleEncoding char8
-                                    (code, nativeOut, nativeErr) <- readCreateProcessWithExitCode (proc exe []){cwd = Just dir} "" `finally` setLocaleEncoding saved
+                                    (code, nativeOut, nativeErr) <- runProcessBytes (Just dir) exe [] ""
                                     let expectedOut = if null out then "" else out ++ "\n"
-                                        sameStreams = testAssertEq (code, decodeUtf8 nativeOut, decodeUtf8 nativeErr) (ExitSuccess, expectedOut, err)
-                                    written <- mapM (\(path, contents) -> readBytes (dir </> path) >>= \actual -> pure (path, actual, contents)) files
+                                        sameStreams = testAssertEq (code, nativeOut, nativeErr) (ExitSuccess, expectedOut, err)
+                                    written <- withByteNames (mapM (\(path, contents) -> readBytes (dir </> path) >>= \actual -> pure (path, actual, contents)) files)
                                     let sameFiles = case [path ++ ": expected " ++ show contents ++ ", got " ++ show actual | (path, actual, contents) <- written, actual /= contents] of
                                             [] -> Nothing
                                             problems -> Just (unlines problems)
                                     pure (maybe sameFiles Just sameStreams)
   where
-    -- (the names of files are bytes here too)
-    withByteNames action = withMVar encodingLock $ \_ -> do
+    -- (the names of files are bytes here too: the file-system encoding is global, so the cases that run at the same
+    -- time take this lock for the file operations of a case)
+    withByteNames action = withMVar spawnLock $ \_ -> do
         savedFs <- getFileSystemEncoding
         setFileSystemEncoding char8
         action `finally` setFileSystemEncoding savedFs
-    readBytes path = do
-        saved <- getLocaleEncoding
-        setLocaleEncoding char8
-        (do contents <- withBinaryFile path ReadMode (\h -> hGetContents h >>= \c -> length c `seq` pure c)
-            pure contents) `finally` setLocaleEncoding saved
+    readBytes path = withBinaryFile path ReadMode (\h -> hGetContents h >>= \c -> length c `seq` pure c)
 
--- The encodings of this process are global (Bootstrap.emitWith sets them on its pipes instead, since the review of the test
--- speedups): the two places here that set them take this lock between them, so that cases that run at the same time do not
--- read or write each other's bytes.
-{-# NOINLINE encodingLock #-}
-encodingLock :: MVar ()
-encodingLock = unsafePerformIO (newMVar ())
+-- Spawning encodes the arguments with the file-system encoding of this process, which is global: the cases that run at
+-- the same time take this lock only to spawn, with that encoding set to char8 so an argument goes as the bytes it holds.
+-- What a spawned program reads and writes is handled per pipe instead (as Bootstrap.emitWith does), so a run holds no
+-- lock and cases truly run at the same time.
+{-# NOINLINE spawnLock #-}
+spawnLock :: MVar ()
+spawnLock = unsafePerformIO (newMVar ())
 
 -- Runs a program and gives what it wrote as the text it is the UTF-8 of, whatever the locale is: the bytes are read as they are (a locale that is
 -- not UTF-8 refuses some of them) and decoded
 runExecutableBytes :: FilePath -> [String] -> String -> IO (ExitCode, String, String)
-runExecutableBytes exe args input = withMVar encodingLock $ \_ -> do
-    saved <- getLocaleEncoding
-    savedFs <- getFileSystemEncoding
-    setLocaleEncoding char8
-    -- (the arguments are bytes too)
-    setFileSystemEncoding char8
-    (code, out, err) <- readProcessWithExitCode exe args input `finally` (setLocaleEncoding saved >> setFileSystemEncoding savedFs)
+runExecutableBytes = runProcessBytes Nothing
+
+runProcessBytes :: Maybe FilePath -> FilePath -> [String] -> String -> IO (ExitCode, String, String)
+runProcessBytes directory exe args input = do
+    (Just hin, Just hout, Just herr, process) <- withMVar spawnLock $ \_ -> do
+        savedFs <- getFileSystemEncoding
+        setFileSystemEncoding char8
+        createProcess (proc exe args){std_in = CreatePipe, std_out = CreatePipe, std_err = CreatePipe, cwd = directory}
+            `finally` setFileSystemEncoding savedFs
+    mapM_ (`hSetEncoding` char8) [hin, hout, herr]
+    _ <- forkIO (hPutStr hin input >> hClose hin)
+    written <- newEmptyMVar
+    reported <- newEmptyMVar
+    _ <- forkIO (hGetContents hout >>= \out -> length out `seq` putMVar written out)
+    _ <- forkIO (hGetContents herr >>= \err -> length err `seq` putMVar reported err)
+    code <- waitForProcess process
+    out <- takeMVar written
+    err <- takeMVar reported
     pure (code, decodeUtf8 out, decodeUtf8 err)
 
 valgrindAvailable :: IO Bool
