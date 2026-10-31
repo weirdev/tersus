@@ -1054,6 +1054,13 @@ testIntRange =
                ]
         )
 
+-- The trait of this name that a reading of a program has, and the fields of the struct of this name
+traitCount :: String -> [Statement] -> Int
+traitCount name stmts = length [() | TraitDef n _ _ <- stmts, n == name]
+
+structFields :: String -> [Statement] -> [[String]]
+structFields name stmts = [map fst fields | StructDef n _ fields _ <- stmts, n == name]
+
 -- The stages of a program, and what each one hands to the next
 testPipeline :: Test
 testPipeline =
@@ -1075,4 +1082,30 @@ testPipeline =
         , -- The MIR of a program is verified: a program with no return type to agree on never gets that far
           testAssertErrorContains "Validation failed: Type error" (compileSource "if true { return 1; } else { return false; };")
         , testAssertEq (mapResult (const ()) (compileSource "")) (Ok ())
+        , -- The libraries in front of a program are decided from the program as it was read, not from its text
+          case parseSource "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" of
+            Ok stmts -> testAssertEq (traitCount "Sequence" stmts) 1
+            Error e -> Just e
+        , case parseSource "struct String { x: Int }; return String { x: 3 }.x;" of
+            Ok stmts -> testAssertEq (structFields "String" stmts) [["x"]]
+            Error e -> Just e
+        , case parseSource "// Sequence String Clone\nreturn 4;" of
+            Ok stmts -> testAssertEq (traitCount "Sequence" stmts, structFields "String" stmts) (0, [])
+            Error e -> Just e
+        , case parseSource "struct String { bytes: List<Byte> }; s = \"trait Sequence\"; return size(s.bytes);" of
+            Ok stmts -> testAssertEq (traitCount "Sequence" stmts, structFields "String" stmts) (0, [["bytes"]])
+            Error e -> Just e
+        , case parseSource "return \"a\";" of
+            Ok stmts -> testAssertEq (structFields "String" stmts) [["bytes"]]
+            Error e -> Just e
+        , case parseSource "fn f<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return f([1, 2]);" of
+            Ok stmts -> testAssertEq (traitCount "Sequence" stmts) 1
+            Error e -> Just e
+        , testAssertErrorContains "Parse error" (parseSource "trait Sequence { fn size(self: Self) -> Int; }; s = \"a\";")
+        , testAssertErrorContains "Parse error" (parseSource "x = \"a\"; y = ;")
+        , -- The names native code makes a list and a Box of are reserved from what a program declares, not from its text
+          testAssertErrorContains "StdList is reserved" (parseSource "struct StdList { x: Int }; return 1;")
+        , case parseSource "// struct StdList\nreturn 1;" of
+            Ok _ -> Nothing
+            Error e -> Just e
         ]
