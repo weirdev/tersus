@@ -50,22 +50,21 @@ assumedInfo program name =
                 assumed = [p | ProofAssert p <- M.specEnsures spec, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
              in FnInfo names (M.specRequires spec) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name (M.readersOfInput program)) (M.specMutParams spec)
 
--- The functions defined at the top that call each other in a cycle: each name in a group that has more than
--- one member, or one that calls itself. A function defined inside another is not in a group: it can call the
--- one around it only under the rule for that (both declared ~), which the recursive call itself checks.
-callGroups :: M.Program -> Map Name (Set Name)
-callGroups program = Map.fromList [(name, group) | (name, group) <- groups, Set.size group > 1 || Set.member name (callees name)]
+-- The group of a function defined at the top: the ones that call it and that it calls, in a cycle, or just
+-- itself. A function defined inside another is in no group: it can call the one around it only under the
+-- rule for that (both declared ~), which the recursive call itself checks.
+callGroup :: M.Program -> Name -> Set Name
+callGroup program name = Set.filter (\other -> Set.member name (reach other)) (reach name)
   where
     fns = M.progFunctions program
     tops = Map.keysSet (topLevelSources program)
-    callees name = maybe Set.empty (Set.intersection tops . M.functionsNamed) (Map.lookup name fns)
-    reach name = go Set.empty [name]
+    callees n = maybe Set.empty (Set.intersection tops . M.functionsNamed) (Map.lookup n fns)
+    reach n = go Set.empty [n]
       where
         go seen [] = seen
         go seen (x : xs)
             | Set.member x seen = go seen xs
             | otherwise = go (Set.insert x seen) (Set.toList (callees x) ++ xs)
-    groups = [(name, Set.filter (\other -> Set.member name (reach other)) (reach name)) | name <- Map.keys fns]
 
 validateProgram :: M.Program -> Result Validated String
 validateProgram program = runV $ do
@@ -551,7 +550,7 @@ defineFunction st name source top
     | Map.member source (psGlobals st) = throwV ("Function already defined: " ++ source)
     | otherwise = do
         let program = psProgram st
-            group = Map.findWithDefault (Set.singleton name) name (callGroups program)
+            group = callGroup program name
             sources = topLevelSources program
             members = Set.toList group
             termOf member = maybe Nothing (M.specTermination . M.fnSpec) (Map.lookup member (M.progFunctions program))
