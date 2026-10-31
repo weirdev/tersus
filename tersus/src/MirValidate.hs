@@ -35,11 +35,44 @@ data Validated = Validated
     }
     deriving (Show)
 
+-- The source name of each function defined at the top of the program, from where main defines it
+topLevelSources :: M.Program -> Map Name Variable
+topLevelSources program = Map.fromList [(name, source) | block <- Map.elems (M.fnBlocks (M.progMain program)), M.Ghost _ (M.GhostFunction name source True) <- M.blockStatements block]
+
+-- What a call of a function is taken to give before its body has been checked: only what its output contract says of its parameters and result
+assumedInfo :: M.Program -> Name -> FnInfo
+assumedInfo program name =
+    case Map.lookup name (M.progFunctions program) of
+        Nothing -> FnInfo [] [] [] Nothing (ATerm (fnIota name)) True (KUser name) False []
+        Just fn ->
+            let spec = M.fnSpec fn
+                names = [n | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just n <- [M.localName d]]
+                assumed = [p | ProofAssert p <- M.specEnsures spec, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
+             in FnInfo names (M.specRequires spec) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name (M.readersOfInput program)) (M.specMutParams spec)
+
+-- The functions that call each other in a cycle: each name in a group that has more than one member, or one that calls itself
+callGroups :: M.Program -> Map Name (Set Name)
+callGroups program = Map.fromList [(name, group) | (name, group) <- groups, Set.size group > 1 || Set.member name (callees name)]
+  where
+    fns = M.progFunctions program
+    callees name = maybe Set.empty (Set.intersection (Map.keysSet fns) . M.functionsNamed) (Map.lookup name fns)
+    reach name = go Set.empty [name]
+      where
+        go seen [] = seen
+        go seen (x : xs)
+            | Set.member x seen = go seen xs
+            | otherwise = go (Set.insert x seen) (Set.toList (callees x) ++ xs)
+    groups = [(name, Set.filter (\other -> Set.member name (reach other)) (reach name)) | name <- Map.keys fns]
+
 validateProgram :: M.Program -> Result Validated String
 validateProgram program = runV $ do
     let main' = M.progMain program
-        st0 = withFunctions main' (initialPState program)
+        seeded = (initialPState program){psFns = Map.fromList [(name, assumedInfo program name) | name <- Map.keys (topLevelSources program)]}
+        st0 = withFunctions main' seeded
     returned <- walkFunction st0 main'
+    -- (a function whose definition main never reaches, past a return, has still to be checked)
+    let validated = Set.unions (map psValidated returned)
+    mapM_ (\name -> inImplCheck name (validateFunction st0 name True)) [name | name <- Map.keys (topLevelSources program), not (Set.member name validated)]
     case returned of
         [] -> return (Validated Map.empty (allFacts st0) Nothing)
         _ -> do
@@ -503,13 +536,34 @@ ghostStatement _ st env g =
         M.GhostPosition _ _ -> return st
         M.GhostDissolve _ -> return st
 
--- A function is validated where it is defined: its body, against what holds everywhere, and its output contract
+-- A function is validated where it is defined: its body, against what holds everywhere, and its output contract.
+-- The functions of a mutually recursive group are validated together there: each body is checked against the
+-- contracts of the others, which is all a call of one of them ever learns.
 defineFunction :: PState -> Name -> Variable -> Bool -> V PState
-defineFunction st name source top = do
-    when (top && Map.member source (psGlobals st)) (throwV ("Function already defined: " ++ source))
-    info <- inImplCheck name (validateFunction st name top)
-    let st' = st{psFns = Map.insert name info (psFns st)}
-    return (if top then st'{psGlobals = Map.insert source (fnIota name) (psGlobals st')} else st')
+defineFunction st name source top
+    | not top = do
+        info <- inImplCheck name (validateFunction st name top)
+        return st{psFns = Map.insert name info (psFns st)}
+    | Set.member name (psValidated st) = return st
+    | Map.member source (psGlobals st) = throwV ("Function already defined: " ++ source)
+    | otherwise = do
+        let program = psProgram st
+            group = Map.findWithDefault (Set.singleton name) name (callGroups program)
+            sources = topLevelSources program
+            members = Set.toList group
+            termOf member = maybe Nothing (M.specTermination . M.fnSpec) (Map.lookup member (M.progFunctions program))
+        when (Set.size group > 1 && not (all (== Just MayDiverge) (map termOf members)) && any (== Nothing) (map termOf members)) $
+            throwV "Mutually recursive functions must say what shrinks, or be declared ~"
+        -- (each member is seen by the others as it sees itself: a call of it is a recursive call, checked against the caller's variant)
+        let stGroup = st{psFns = foldr (\member m -> Map.adjust (\info -> info{fnTermination = Just (Recursing (termOf member))}) member m) (psFns st) members}
+        infos <- mapM (\member -> inImplCheck member (validateFunction stGroup member True)) members
+        let st' =
+                st
+                    { psFns = foldr (\(member, info) m -> Map.insert member info m) (psFns st) (zip (Set.toList group) infos)
+                    , psValidated = Set.union group (psValidated st)
+                    , psGlobals = foldr (\member m -> maybe m (\src -> Map.insert src (fnIota member) m) (Map.lookup member sources)) (psGlobals st) (Set.toList group)
+                    }
+        return st'
 
 -- The function that stands for the check that an impl meets its trait fails with the reason, and says which impl
 inImplCheck :: Name -> V a -> V a
@@ -750,6 +804,7 @@ mergeStates wantedOf states@(s1 : others) = do
                 , psFacts = s0Facts
                 , psRules = Map.unions (map psRules states)
                 , psFns = Map.unions (map psFns states)
+                , psValidated = Set.unions (map psValidated states)
                 , psGlobals = Map.unions (map psGlobals states)
                 , psGlobalFacts = nubOrd (concatMap psGlobalFacts states)
                 }
