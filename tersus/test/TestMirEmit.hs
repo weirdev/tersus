@@ -25,7 +25,11 @@ testMirEmit =
         "testMirEmit"
         [ TestCase "the reader is the same in the reader and in the emitter" sameReader
         , TestCase "the IR of a loop, interpreted" (readFile "examples/loops.tersus" >>= interpretedIr)
-        , TestCase "every example and program, natively" everyProgram
+        , TestParallel
+            "every example and program, natively"
+            ( [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
+                ++ [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
+            )
         , TestCase "what is not the MIR is refused" refusal
         ]
 
@@ -66,16 +70,15 @@ interpretedIr source = do
 
 
 
--- Every mode writes the IR of every program, and the data of the program read back from the data makes the same IR as the data
-everyProgram :: IO TestResult
-everyProgram = withProgram "examples/emit.tersus" "emit" $ \exe -> do
-    files <- mapM (\path -> (,) path <$> readFile path) nativeExamples
-    failures <- mapM (check exe) (files ++ validatedPrograms)
-    let (bad, counts) = unzip failures
-    pure $ case concat bad of
-        [] | sum counts >= 100 -> Nothing
-        [] -> Just ("only " ++ show (sum counts) ++ " functions were written")
-        problems -> Just (unlines (take 5 problems))
+-- Every mode writes the IR of a program, and the data of the program read back from the data makes the same IR
+-- as the data. One case per program, so the sweep runs at the harness's parallelism instead of one program
+-- after another inside a single case (withProgram builds the emitter executable once for the process).
+nativeCheck :: String -> String -> IO TestResult
+nativeCheck name source = withProgram "examples/emit.tersus" "emit" $ \exe -> do
+    (bad, _) <- check exe (name, source)
+    pure $ case bad of
+        [] -> Nothing
+        problems -> Just (unlines problems)
   where
     check exe (name, source) = case ownedSource source of
         Error e -> pure ([name ++ ": " ++ e], 0)

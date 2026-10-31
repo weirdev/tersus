@@ -18,8 +18,8 @@ testMirData :: Test
 testMirData =
     TestList
         "testMirData"
-        [ TestList "examples" [TestCase path (roundTripsAndIr <$> readFile path) | path <- nativeExamples]
-        , TestList "programs" [TestCase name (pure (roundTripsAndIr source)) | (name, source) <- validatedPrograms]
+        [ TestParallel "examples" [TestCase path (roundTripsAndIr <$> readFile path) | path <- nativeExamples]
+        , TestParallel "programs" [TestCase name (pure (roundTripsAndIr source)) | (name, source) <- validatedPrograms]
         , TestList
             "format"
             [ testCase "the command prints it" $

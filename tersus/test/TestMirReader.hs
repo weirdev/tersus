@@ -32,7 +32,11 @@ testMirReader =
             [ TestCase "the program of a loop" (readFile "examples/loops.tersus" >>= interpreted)
             , TestCase "names that are not ASCII" (interpreted "naïve = 3; café = naïve + 1; return café;")
             ]
-        , TestCase "every example and program, natively" everyProgram
+        , TestParallel
+            "every example and program, natively"
+            ( [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
+                ++ [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
+            )
         , TestCase "what is not the MIR is refused" refusals
         ]
 
@@ -109,13 +113,14 @@ builtPrograms = unsafePerformIO (newMVar Map.empty)
 withReader :: (FilePath -> IO TestResult) -> IO TestResult
 withReader = withProgram "examples/mir_reader.tersus" "mir-reader"
 
-everyProgram :: IO TestResult
-everyProgram = withReader $ \exe -> do
-    files <- mapM (\path -> (,) path <$> readFile path) nativeExamples
-    failures <- mapM (check exe) (files ++ validatedPrograms)
-    pure $ case concat failures of
+-- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
+-- inside a single case (withReader builds the reader executable once for the process).
+nativeCheck :: String -> String -> IO TestResult
+nativeCheck name source = withReader $ \exe -> do
+    failures <- check exe (name, source)
+    pure $ case failures of
         [] -> Nothing
-        bad -> Just (unlines (take 5 bad))
+        bad -> Just (unlines bad)
   where
     check exe (name, source) = case dataOf source of
         Error e -> pure [name ++ ": " ++ e]
