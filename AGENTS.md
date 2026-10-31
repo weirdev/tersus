@@ -55,7 +55,7 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   `TestArrays`, `TestBox`, `TestDeref`, `TestPointers`, `TestBorrow`,
   `TestCopies`, `TestEq`, `TestGenerics`, `TestSequence`, `TestStrings`, `TestBytes`,
   `TestConnectives`, `TestMirData`, `TestMirReader`, `TestMirVerify`,
-  `TestMirEmit` and `TestBootstrap`, with the shared harness in `TestHarness`.
+  `TestMirEmit`, `TestBootstrap` and `TestParity`, with the shared harness in `TestHarness`.
 
 ## Build, Test, and Development Commands
 Work from `tersus/`.

@@ -44,6 +44,7 @@ import TestEq
 import TestHashMap
 import TestHashSet
 import TestBuiltinRegistry
+import TestParity
 
 main :: IO ()
 main = do
@@ -152,6 +153,7 @@ allGroups =
     , testHashMap
     , testHashSet
     , testBuiltinRegistry
+    , testParity
     ]
 
 groupName :: Test -> String
