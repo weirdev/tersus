@@ -562,7 +562,7 @@ data Statement
       -- (if any) and the types it is given (`impl<T> Sequence<T> for Vec<T>`), the struct or enum, and the name of its type with the
       -- types and sizes of the impl (`Vec<'T>`, which `Self` stands for). The type checker
       -- checks them against the trait and hands them back as ordinary function definitions, so the lowering never sees it.
-      ImplDef (Maybe Name) [Arg] Name Name [Statement]
+      ImplDef (Maybe Name) [Arg] Name Name [Bound] [Statement]
     | -- fn f<S: Sequence<Int>, T>(...) ...: a function whose type parameters have bounds (`BoundedDef [(S, Sequence, [Int])] (the function)`),
       -- which the type checker keeps as a template and makes a function of for each type it is called with (see TypeCheck.templateCall).
       -- It does not reach the lowering.

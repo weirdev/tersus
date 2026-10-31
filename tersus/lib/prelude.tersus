@@ -58,6 +58,36 @@ trait Drop {
     fn drop(self: Self) -> Int [{ }] [{ }];
 };
 
+// What a key of a HashMap hashes to: a number from 0 to 2147483646, the same for values that are equal. The number is not made to
+// resist anyone: it spreads ordinary keys over the buckets of a map, and a key set chosen to collide makes the chains long (still
+// correct, just slow). A struct or an enum gets one by writing `impl Hash for T { fn hash(self: &Self) -> Int { ... }; };` and
+// combining the hashes of its fields with hashCombine; Int, Byte, Bool and String have theirs already.
+//
+// The mixing keeps every step in range with `%`: an Int traps on overflow and nothing wraps, so a hash that multiplied freely
+// would stop the program on keys it should hash. hashCombine(h, x) is one step of it (h is a hash so far, x any Int), and a
+// longer hash is a fold of it over the parts.
+trait Hash {
+    fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }];
+};
+
+fn hashCombine(h: Int, x: Int) -> Int [{ affirm h >= 0; affirm h < 2147483647; }] [{ affirm return >= 0; affirm return < 2147483647; }] {
+    r = x % 2147483647;
+    if r < 0 { r = r + 2147483647; };
+    return (h * 31 + r) % 2147483647;
+};
+
+impl Hash for Int {
+    fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { return hashCombine(17, self); };
+};
+
+impl Hash for Byte {
+    fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { return hashCombine(19, toInt(self)); };
+};
+
+impl Hash for Bool {
+    fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] { if self { return 1231; }; return 1237; };
+};
+
 // What a value that holds another is looked through to: `impl Deref<T> for W { fn deref(self: &Self) -> T { ... }; };` says that where a
 // struct or an enum is looked at (a field is read, `is`, `as`, a `match`, the base of an update, `shrinks`), a value of W is looked at
 // through the T its `deref` gives, as a Box is looked through to what it holds. The functions of T are not the functions of W: a method
