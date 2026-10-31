@@ -110,10 +110,11 @@ data LS = LS
     , lsLinear :: Set.Set Name -- the structs and enums that are linear
     , lsExterns :: Set.Set Variable -- the functions that are extern
     , lsDrops :: Set.Set Name -- the structs and enums that have a drop
+    , lsPrereg :: Map Variable [Name] -- the names given to the functions defined at the top, before any body is lowered (one for each definition of the name)
     }
 
 initialState :: [Statement] -> LS
-initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty
+initialState stmts = LS initialTcState Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty
 
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
@@ -225,8 +226,24 @@ uniqueName base = do
 
 -- Programs
 
+-- Every function defined at the top gets its name before any body is lowered, so a body finds the functions
+-- defined after it as it finds the ones before it. The names are given in the order of the definitions, as
+-- they were when each was given at its definition.
+registerTopLevel :: [Statement] -> L ()
+registerTopLevel stmts = do
+    modifyS (\s -> s{lsExterns = Set.union (lsExterns s) (Set.fromList [name | ExternDef name <- stmts])})
+    mapM_ register stmts
+  where
+    register (Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _))) = do
+        extern <- Set.member var . lsExterns <$> getS
+        assigned <- (\s -> Set.member var (lsAssigned s) && null sizes) <$> getS
+        name <- uniqueName (if extern then "extern " ++ var else var)
+        modifyS (\s -> s{lsPrereg = Map.insertWith (\new old -> old ++ new) var [name] (lsPrereg s), lsGlobals = if assigned then lsGlobals s else Map.insert var (name, functionType sizes types ptys rty) (lsGlobals s)})
+    register _ = return ()
+
 program :: [Statement] -> L M.Program
 program stmts = do
+    registerTopLevel stmts
     lowerStatements stmts
     open <- isOpen
     when open (terminate M.Return)
@@ -522,7 +539,14 @@ defineFunction var params ins outs (Signature ptys rty sizes types writes sigFro
         fnTy = functionType sizes types ptys rty
     -- (an extern function is named `extern f`, which no program can write: native code calls the C function f)
     extern <- Set.member var . lsExterns <$> getS
-    name <- uniqueName (if extern then "extern " ++ var else if atTop then var else bName enclosing ++ "::" ++ var)
+    name <-
+        if atTop
+            then do
+                prereg <- lsPrereg <$> getS
+                case Map.lookup var prereg of
+                    Just (n : rest) -> modifyS (\s -> s{lsPrereg = Map.insert var rest (lsPrereg s)}) >> return n
+                    _ -> uniqueName (if extern then "extern " ++ var else var)
+            else uniqueName (bName enclosing ++ "::" ++ var)
     -- (a function with sizes is called by name, which its sizes are given to: it has no value to put in a local)
     assigned <- (\s -> Set.member var (lsAssigned s) && null sizes) <$> getS
     -- (the bodies of the functions after it find a function at the top by name, whatever the program does to the variable)
