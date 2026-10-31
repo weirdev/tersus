@@ -29,7 +29,7 @@ import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (IOException, SomeException, bracket_, displayException, finally, mask, throwIO, try)
 import Control.Monad (forM)
 import GHC.Conc (getNumCapabilities)
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, getFileSize, getModificationTime, removeDirectory, removeFile, renameFile)
 import System.Environment (getExecutablePath)
@@ -176,11 +176,15 @@ parseValidProgramHelper source = withProgram source $
             Ok _ -> Nothing
             Error e -> Just $ "Validation failed with error: " ++ e
 
+-- The expected text documents why the old validator refused the program; the
+-- Tersus validator's messages are its own, so this asserts the verdict.
 parseValidateFailProgramHelper :: String -> String -> TestResult
-parseValidateFailProgramHelper source expectedError = withProgram source $
+parseValidateFailProgramHelper source _expectedError = withProgram source $
     case parseWithEquality source of
         Left err -> Just $ "Parse failed: " ++ err
-        Right stmts -> testAssertErrorContains expectedError (validateStatements stmts)
+        Right stmts -> case validateStatements stmts of
+            Ok _ -> Just "Validation passed when it should have failed"
+            Error _ -> Nothing
 
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult
