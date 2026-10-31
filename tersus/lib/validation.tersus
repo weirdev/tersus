@@ -1023,6 +1023,182 @@ fn deriveSumOrders(context: &ValidatorContext) -> ValidatorContext {
     return ValidatorContext { orders: facts, ..clone(context) };
 };
 
+
+struct LinTerm { term: Int, coeff: Int };
+
+impl Clone for LinTerm { };
+
+impl Copy for LinTerm { };
+
+struct LinFact { terms: List<LinTerm>, bound: Int };
+
+impl Clone for LinFact { };
+
+fn linCoeff(terms: &List<LinTerm>, term: Int) -> Int {
+    for t in terms {
+        if t.term = term { return t.coeff; };
+    };
+    return 0;
+};
+
+fn linAddTerm(terms: &List<LinTerm>, term: Int, coeff: Int) -> List<LinTerm> {
+    if coeff = 0 { return clone(terms); };
+    result = [];
+    found = false;
+    for t in terms {
+        if t.term = term {
+            found = true;
+            if t.coeff + coeff != 0 { result = push(result, LinTerm { term: term, coeff: t.coeff + coeff }); };
+        } else { result = push(result, clone(t)); };
+    };
+    if found = false { result = push(result, LinTerm { term: term, coeff: coeff }); };
+    return result;
+};
+
+fn linScale(terms: &List<LinTerm>, factor: Int) -> List<LinTerm> {
+    result = [];
+    for t in terms { result = push(result, LinTerm { term: t.term, coeff: t.coeff * factor }); };
+    return result;
+};
+
+fn linCombine(a: &LinFact, scaleA: Int, b: &LinFact, scaleB: Int) -> LinFact {
+    terms = linScale(a.terms, scaleA);
+    for t in b.terms { terms = linAddTerm(terms, t.term, t.coeff * scaleB); };
+    return LinFact { terms: terms, bound: scaleA * a.bound + scaleB * b.bound };
+};
+
+fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
+    terms = linAddTerm([], t1, c1);
+    terms = linAddTerm(terms, t2, c2);
+    return LinFact { terms: terms, bound: bound };
+};
+
+// The facts of a context as linear inequalities over terms: orders and
+// differences directly, equalities and the defining identities of sum,
+// difference, scale and size applications as equations.
+fn linFacts(context: &ValidatorContext) -> List<LinFact> {
+    facts = [];
+    for order in context.orders {
+        bound = 0;
+        if order.strict { bound = -1; };
+        facts = push(facts, linFact2(order.smaller, 1, order.greater, -1, bound));
+    };
+    for d in context.differences {
+        facts = push(facts, linFact2(d.left, 1, d.right, -1, d.bound));
+    };
+    for e in context.equalities {
+        facts = push(facts, linFact2(e.left, 1, e.right, -1, 0));
+        facts = push(facts, linFact2(e.left, -1, e.right, 1, 0));
+    };
+    for c in context.constants {
+        if c.kind = 0 {
+            facts = push(facts, linFact2(c.id, 1, c.id, 0, c.value));
+            facts = push(facts, linFact2(c.id, -1, c.id, 0, 0 - c.value));
+        };
+    };
+    for app in context.applications {
+        if app.function = -13 {
+            if size(app.arguments) = 1 {
+                facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+            };
+        };
+        if size(app.arguments) = 2 {
+            a = get(app.arguments, 0);
+            b = get(app.arguments, 1);
+            if app.function = -1 {
+                t = linAddTerm([], app.id, 1);
+                t = linAddTerm(t, a, -1);
+                t = linAddTerm(t, b, -1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+                t = linAddTerm([], app.id, -1);
+                t = linAddTerm(t, a, 1);
+                t = linAddTerm(t, b, 1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+            };
+            if app.function = -2 {
+                t = linAddTerm([], app.id, 1);
+                t = linAddTerm(t, a, -1);
+                t = linAddTerm(t, b, 1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+                t = linAddTerm([], app.id, -1);
+                t = linAddTerm(t, a, 1);
+                t = linAddTerm(t, b, -1);
+                facts = push(facts, LinFact { terms: t, bound: 0 });
+            };
+            if app.function = -3 {
+                av = integerValue(context, a);
+                if av is IntegerLookup::Found {
+                    c = (av as IntegerLookup::Found).value;
+                    t = linAddTerm([], app.id, 1);
+                    t = linAddTerm(t, b, 0 - c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                    t = linAddTerm([], app.id, -1);
+                    t = linAddTerm(t, b, c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                };
+                bv = integerValue(context, b);
+                if bv is IntegerLookup::Found {
+                    c = (bv as IntegerLookup::Found).value;
+                    t = linAddTerm([], app.id, 1);
+                    t = linAddTerm(t, a, 0 - c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                    t = linAddTerm([], app.id, -1);
+                    t = linAddTerm(t, a, c);
+                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                };
+            };
+        };
+    };
+    return facts;
+};
+
+// Fourier-Motzkin elimination over the (small) fact sets a goal produces:
+// eliminating every variable either derives 0 <= a negative bound, proving
+// the facts inconsistent, or it does not.
+fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
+    current = clone(facts);
+    for v in vars {
+        if size(current) > 300 { return false; };
+        pos = [];
+        neg = [];
+        zero = [];
+        for f in current {
+            c = linCoeff(f.terms, v);
+            if c > 0 { pos = push(pos, clone(f)); };
+            if c < 0 { neg = push(neg, clone(f)); };
+            if c = 0 { zero = push(zero, clone(f)); };
+        };
+        next = clone(zero);
+        for f in pos {
+            for g in neg {
+                cf = linCoeff(f.terms, v);
+                cg = linCoeff(g.terms, v);
+                next = push(next, linCombine(f, 0 - cg, g, cf));
+            };
+        };
+        current = next;
+        for f in current {
+            if size(f.terms) = 0 {
+                if f.bound < 0 { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+// Prove left - right <= bound by contradiction with the context's facts.
+fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
+    facts = linFacts(context);
+    facts = push(facts, linFact2(left, -1, right, 1, 0 - bound - 1));
+    vars = [];
+    for f in facts {
+        for t in f.terms {
+            if containsValue(vars, t.term) = false { vars = push(vars, t.term); };
+        };
+    };
+    return linContradiction(facts, vars);
+};
+
 fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool {
     recognized = false;
     if goal is ValidatorGoal::Equal { recognized = true; };
@@ -1088,11 +1264,13 @@ fn entailsGoalWithFacts(context: &ValidatorContext, goal: ValidatorGoal) -> Bool
     };
     if goal is ValidatorGoal::Less {
         g = goal as ValidatorGoal::Less;
-        return hasDifference(equalities, differences, g.left, g.right, -1);
+        if hasDifference(equalities, differences, g.left, g.right, -1) { return true; };
+        return linearEntails(context, g.left, g.right, -1);
     };
     if goal is ValidatorGoal::AtMost {
         g = goal as ValidatorGoal::AtMost;
-        return hasDifference(equalities, differences, g.left, g.right, 0);
+        if hasDifference(equalities, differences, g.left, g.right, 0) { return true; };
+        return linearEntails(context, g.left, g.right, 0);
     };
     if goal is ValidatorGoal::Difference {
         g = goal as ValidatorGoal::Difference;
