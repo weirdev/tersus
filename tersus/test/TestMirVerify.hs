@@ -8,7 +8,7 @@ import Cli (World (..), noWorld, runProgramIn)
 import Mir
 import MirData (forNative, writeProgram)
 import MirVerify (verifyProgram)
-import Pipeline (compileSource, ownedSource)
+import Pipeline (ownedSource)
 import TersusTypes (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
@@ -37,7 +37,11 @@ testMirVerify =
             , TestCase "an array of lists that does not fit in a frame is refused" (interpreted "xs = array(3000, 0); return get(xs, 0);" arrayOfLists)
             , TestCase "what is not the MIR is refused" refused
             ]
-        , TestCase "every example and program, natively" everyProgram
+        , TestParallel
+            "every example and program, natively"
+            ( [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
+                ++ [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
+            )
         ]
 
 goodSource :: String
@@ -49,8 +53,10 @@ sizedSource = "fn copyOf<n>(a: Array<Int, n>) -> Array<Int, n> [{ }] [{ }] { b =
 holderSource :: String
 holderSource = "struct Holder<T> { x: T }; fn take2(h: Holder<Array<Int, 2>>) -> Int [{ }] [{ }] { return get(h.x, 0); }; a = Holder<Array<Int, 2>> { x: #[1, 2] }; b = Holder<Array<Int, 3>> { x: #[1, 2, 3] }; return take2(a);"
 
-verifierSource :: IO String
-verifierSource = readFile "examples/mir_verify.tersus"
+-- The verifier compiled once for every interpreted case: compiling it is the expensive part, and every case
+-- runs the same program over a different input (the pattern of TestMirEmit's emitterProgram).
+verifierProgram :: IO (Result Program String)
+verifierProgram = readFile "examples/mir_verify.tersus" >>= compileOnce
 
 -- Whether the Haskell verifier accepts the program, as MirData writes it
 referenceAccepts :: Program -> Bool
@@ -61,8 +67,8 @@ referenceAccepts program = case verifyProgram (forNative program) of
 -- Run the verifier in the interpreter over the data of the mutated program, and compare the verdicts
 interpreted :: String -> (Program -> Program) -> IO TestResult
 interpreted source mutate = do
-    verifier <- verifierSource
-    pure $ case compileSource verifier of
+    verifier <- verifierProgram
+    pure $ case verifier of
         Error e -> Just ("the verifier does not compile: " ++ e)
         Ok verifierProgram -> case ownedSource source of
             Error e -> Just e
@@ -82,8 +88,8 @@ interpreted source mutate = do
 
 refused :: IO TestResult
 refused = do
-    verifier <- verifierSource
-    pure $ case compileSource verifier of
+    verifier <- verifierProgram
+    pure $ case verifier of
         Error e -> Just ("the verifier does not compile: " ++ e)
         Ok verifierProgram -> case runProgramIn noWorld{worldInput = ""} verifierProgram of
             Error e -> Just e
@@ -151,13 +157,14 @@ onEveryFunction change program =
 withVerifier :: (FilePath -> IO TestResult) -> IO TestResult
 withVerifier = withProgram "examples/mir_verify.tersus" "mir-verify"
 
-everyProgram :: IO TestResult
-everyProgram = withVerifier $ \exe -> do
-    files <- mapM (\path -> (,) path <$> readFile path) nativeExamples
-    failures <- mapM (check exe) (files ++ validatedPrograms)
-    pure $ case concat failures of
+-- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
+-- inside a single case (withVerifier builds the verifier executable once for the process).
+nativeCheck :: String -> String -> IO TestResult
+nativeCheck name source = withVerifier $ \exe -> do
+    failures <- check exe (name, source)
+    pure $ case failures of
         [] -> Nothing
-        bad -> Just (unlines (take 5 bad))
+        bad -> Just (unlines bad)
   where
     check exe (name, source) = case ownedSource source of
         Error e -> pure [name ++ ": " ++ e]
