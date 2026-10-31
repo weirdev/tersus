@@ -462,7 +462,7 @@ pattern TArray t n = TArrayOf t (SizeConst n)
 
 -- The declared parameter types and return type of a user function, its size parameters, which are the last parameters (of type Int),
 -- given by the call and not written in it, and its type parameters, which a call gives too
-data Signature = Signature [Type] Type [Variable] [Variable] [Variable] deriving (Show, Eq, Ord) -- parameter types, return type, size parameters, type parameters, writes footprint (REFERENCES.md)
+data Signature = Signature [Type] Type [Variable] [Variable] [Variable] [Variable] deriving (Show, Eq, Ord) -- parameter types, return type, size parameters, type parameters, writes footprint, and the parameters a reference result is from (REFERENCES.md)
 
 -- How a loop or function says that it ends. A loop has to say; a function that says nothing is guaranteed to
 -- terminate, and so may not call itself.

@@ -45,7 +45,7 @@ testBorrow =
                 "types"
                 [ testCase "a lent parameter is not assigned" (rejected "fn f(a: &List<Int>) -> Int { a = push(a, 1); return 0; }; return f([]);" "a is borrowed (&), so it is only read")
                 , testCase "a call gives the value, not a reference" (rejected "fn f(a: &List<Int>) -> Int { return 0; }; return f(3);" "argument 1 of f: expected List<Int>, got Int")
-                , testCase "a & is for a parameter or a local, not a result" (rejected "fn f() -> &List<Int> { return []; }; return 0;" "is written on a parameter or held by a local")
+                , testCase "a & result has to be from a parameter" (rejected "fn f() -> &List<Int> { return []; }; return 0;" "no parameter of it is a reference for the result to be from")
                 , testCase "nor a field" (rejected "struct S { a: &List<Int> }; return 0;" "is written on a parameter or held by a local")
                 , testCase "nor a Box" (rejected "fn f(a: Box<&Int>) -> Int { return 0; }; return 0;" "is written on a parameter or held by a local")
                 , testCase "a function value lends too" (valid "fn total(a: &List<Int>) -> Int { return size(a); }; f = total; return 0;")
@@ -86,6 +86,24 @@ testBorrow =
                 , testCase "the writes clause binds a reference a local holds" (rejected "struct Point { x: Int, y: Int }; fn bad(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { q = &mut (*p).y; *q = 9; return (*p).y; }; pt = Point { x: 1, y: 2 }; return bad(&mut pt);" "writes clause of the function does not allow")
                 , testCase "and a place given on to a call" (rejected "struct Point { x: Int, y: Int }; fn touch(q: &mut Int) -> Int [{ }] [{ }] { *q = 5; return *q; }; fn bad(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { z = touch(&mut (*p).y); return z; }; pt = Point { x: 1, y: 2 }; return bad(&mut pt);" "this call may change p.y")
                 , testCase "the writes clause allows its field through a local reference" (runs "struct Point { x: Int, y: Int }; fn good(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { q = &mut (*p).x; *q = 9; return (*p).x; }; pt = Point { x: 1, y: 2 }; return good(&mut pt);" (VInt 9))
+                ]
+            , TestList
+                "returned references"
+                [ testCase "a result that is a reference reads the place it is from" (runs "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ affirm *return = get(xs, 0); }] { return &get(xs, 0); }; ys = [10, 20, 30]; r = headOf(ys); return *r;" (VInt 10))
+                , testCase "the one reference parameter is what the result is from, without saying so" (runs "fn headOf(xs: &List<Int>) -> &Int [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; ys = [10, 20]; r = headOf(ys); return *r;" (VInt 10))
+                , testCase "a result may be from either of two parameters" (runs "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; x = 1; y = 2; r = choose(true, x, y); return *r;" (VInt 1))
+                , testCase "either candidate is frozen while the result is live" (rejected "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; x = 1; y = 2; r = choose(false, x, y); x = 9; return *r;" "cannot be assigned while it is borrowed")
+                , testCase "a returned reference goes through another function" (runs "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; fn again(ys: &List<Int>) -> &Int from ys [{ affirm size(ys) > 0; }] [{ }] { return headOf(ys); }; zs = [7, 8]; r = again(zs); return *r;" (VInt 7))
+                , testCase "and through a generic one" (runs "fn headOf<T>(xs: &List<T>) -> &T from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; ys = [10, 20]; r = headOf(ys); return *r;" (VInt 10))
+                , testCase "what the caller proves of the result comes from the contract" (valid "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ affirm *return = get(xs, 0); }] { return &get(xs, 0); }; ys = [10, 20]; r = headOf(ys); affirm *r = 10; return 0;")
+                , testCase "a reference to a local cannot be returned" (rejected "fn bad(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { local = [99]; return &get(local, 0); }; ys = [10, 20, 30]; r = bad(ys); return *r;" "is not a reference from xs")
+                , testCase "the place a result is from is frozen while it is live" (rejected "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; ys = [10, 20, 30]; r = headOf(ys); ys = [40, 50]; return *r;" "cannot be assigned while it is borrowed")
+                , testCase "several reference parameters and no from is refused" (rejected "fn pick(a: &Int, b: &Int) -> &Int { return a; }; x = 1; y = 2; r = pick(x, y); return *r;" "say which the result is from")
+                , testCase "an update reference cannot be returned yet" (rejected "fn upd(n: &mut Int) -> &mut Int from n [{ }] [{ }] { return n; }; x = 1; r = upd(&mut x); return *r;" "a returned update reference is not in the language yet")
+                , testCase "the program cannot return a reference" (rejected "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; ys = [10, 20]; return headOf(ys);" "the program cannot return a reference")
+                , testCase "a returned parameter is a reference to what the result says" (rejected "fn bad(x: &Bool) -> &Int from x { return x; }; b = true; r = bad(b); return *r;" "expected Int, got Bool")
+                , testCase "every candidate of a returned call counts, not only the first" (rejected "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; fn outer(xs: &Int) -> &Int from xs { local = 5; return choose(false, xs, &local); }; x = 1; r = outer(x); return *r;" "is not a reference from xs")
+                , testCase "a result that may be from several places still freezes them all through another call" (rejected "fn choose(flag: Bool, a: &Int, b: &Int) -> &Int from (a, b) { if flag { return a; } else { return b; }; }; fn identity(v: &Int) -> &Int from v { return v; }; x = 1; y = 2; r = choose(false, x, y); s = identity(r); y = 9; return *s;" "cannot be assigned while it is borrowed")
                 ]
             , TestList
                 "conflicts"

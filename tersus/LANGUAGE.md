@@ -1152,6 +1152,24 @@ fn increment(n: &mut Int) -> Int writes(n)
 - **`old(place)`** in a postcondition is the value the place had when the function was entered. It is the only way a promise relates the new value to the old one, and it may only name what an update parameter is to.
 - **An update makes a new version.** Facts proved about a value are about a version of it: after `*r = v;` or a call through `&mut`, what was proved about the place before is about its old version, not a fact about the new one (an `affirm` of the old fact is refused), and facts about a different field of the same struct are kept. In the interpreter the caller gets the new value when the call returns. Native code does not have references yet: a function with an update parameter, or a reference held by a local, is refused by `run` and `build` with that reason, while `eval` and `check` take it.
 
+#### Returning a reference
+
+A function may give back a reference to a place of one of its parameters: the result is written `-> &T from xs`, and the caller's reference is to the caller's place, frozen while it is live like any borrow.
+
+```tersus
+fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ affirm *return = get(xs, 0); }] {
+    return &get(xs, 0);
+};
+
+ys = [10, 20, 30];
+r = headOf(ys);
+return *r;   // 10; ys cannot be assigned or moved while r is live
+```
+
+- **`from` names the parameters the result may be from** (`from xs`, or `from (a, b)` when the body chooses between them). With exactly one reference parameter it may be left out; with several it is required. Every place the function returns has to be of one of them: returning a reference to a local is refused. With several candidates, all of them are frozen while the result is live, since which one it is is the callee's choice.
+- **In a contract, `return` is what the reference is to** (`*return` is the same thing written as a place), so a promise about the result is a promise about the caller's place.
+- A reference result is a local like any other reference: it can be read through, given on to a lent parameter, and returned by another function whose `from` it satisfies. It cannot be stored in a struct or a list, given through a function value, or returned by the program, and an update reference (`&mut T`) cannot be returned yet. Native code does not take a program that holds a reference in a local yet (see Updating through a reference).
+
 ## Moves, Clone And Copy
 
 A value is moved to where it is wanted, and a copy is made only where the program writes `clone`. Int, Byte, Bool and functions are *Copy*: they are copied wherever they are wanted, and a variable that holds one can be used again. Every other value is *moved* when it is given to a function, put in a struct, list or Box, assigned to another variable or returned, and the variable it came from holds nothing afterwards.

@@ -15,7 +15,7 @@ module MirEval
     ) where
 
 import Data.Char (chr)
-import Data.List (intercalate)
+import Data.List (elemIndex, intercalate)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 
@@ -320,8 +320,22 @@ runBlock program fn block frame =
                     argValues <- liftE (mapResults (operandValue frame') args)
                     resolved <- liftE (mapResults (resolveRef frame') argValues)
                     (result, finalParams) <- callFunction program f resolved
+                    -- (a result that is a reference to a place of an argument is that place in this frame)
+                    result' <- liftE $ case (f, result) of
+                        (MFn name, MRef l steps)
+                            | Just callee <- Map.lookup name (progFunctions program)
+                            , Just i <- elemIndex l (fnParams callee)
+                            , Copy cl <- args !! i -> Ok (case Map.lookup cl frame' of
+                                Just (MRef rl rs) -> MRef rl (rs ++ steps)
+                                _ -> MRef cl steps)
+                            | Just callee <- Map.lookup name (progFunctions program)
+                            , Just i <- elemIndex l (fnParams callee)
+                            , Move cl <- args !! i -> Ok (case Map.lookup cl frame' of
+                                Just (MRef rl rs) -> MRef rl (rs ++ steps)
+                                _ -> MRef cl steps)
+                        _ -> Ok result
                     frame'' <- liftE (writeBack program frame' f args finalParams)
-                    runBlock program fn next (Map.insert dest result frame'')
+                    runBlock program fn next (Map.insert dest result' frame'')
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
 
