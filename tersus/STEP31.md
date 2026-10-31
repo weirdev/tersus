@@ -157,3 +157,7 @@ Slices 5 to 7 are the bulk of the work. Slice 1 is the one that may change the p
    (`bootstrap/emitter.ll`). It is deleted in slice 10: the tests now stand on the emitter in Tersus, and the seed alone builds it.
 3. **Where the Tersus emitter lives at run time**: built lazily on first use from the seed and cached under a hash of what it is made of, so that
    `stack build` still does not need clang.
+4. **Where the seed lives** (supersedes the checked-in seed of slice 9): the seed IR is a GitHub release asset, one release per seed, and the repository
+   keeps only its SHA-256 (`bootstrap/emitter.sha256`). It stays portable IR (not a platform binary), is verified against that pin before it is built,
+   and is checked by the same fixpoint; a seed at `$TERSUS_SEED_FILE` or `bootstrap/emitter.ll` is used instead when present, so a machine with no
+   network keeps working. `stack build` needs neither clang nor a network for the seed; only the first `llvm`, `build` or `run` fetches it.

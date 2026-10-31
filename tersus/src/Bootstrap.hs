@@ -1,5 +1,7 @@
 module Bootstrap
     ( seedHash
+    , seedSha256
+    , seedUrl
     , emitterHash
     , stageZero
     , stageOne
@@ -11,14 +13,16 @@ module Bootstrap
     ) where
 
 import Control.Exception (IOException, evaluate, finally, try)
+import Data.Char (isHexDigit)
 import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, waitForProcess)
+import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, readProcessWithExitCode, waitForProcess)
 
 import qualified Data.Map.Strict as Map
 
@@ -28,23 +32,33 @@ import qualified Mir as M
 import MirData (writeProgram)
 import Native (buildExecutable)
 import Pipeline (ownedSource)
-import PreludeSource (emitterSource, listsSource, preludeSource, seedFingerprint, seedSource, stringSource)
+import PreludeSource (emitterSource, listsSource, preludeSource, seedSha256, stringSource)
 import Utils
 
 -- The lowering to LLVM IR that is written in Tersus (examples/emit.tersus, step 31 and STEP31.md) is the compiler's only emitter. An executable of it reads the MIR of a
 -- program as data (MirData) and writes its LLVM IR; `tersus build`, `llvm` and `run` use it. It is a
 -- program of the language that needs a compiler, so it is made in stages from a seed:
--- - the seed (bootstrap/emitter.ll) is the IR of an emitter, kept in the repository. It is the IR that the emitter wrote for its own source when the seed was made, and
+-- - the seed is the IR of an emitter. It is the IR that the emitter wrote for its own source when the seed was made, and
 --   it does not have to be the latest: it only has to be able to compile the emitter as it is now, which it can as long as the data it reads and the runtime it calls
---   are the same;
+--   are the same. The seed itself is not kept in the repository: it is a GitHub release asset (`seedUrl`), and the repository keeps only its SHA-256
+--   (bootstrap/emitter.sha256, embedded by `PreludeSource` as `seedSha256`). It is fetched once, verified against that pin, and kept in the cache
+--   directory of the user. A seed at $TERSUS_SEED_FILE, or a bootstrap/emitter.ll in the working tree, is used instead when present (and also verified),
+--   which is how a machine with no network keeps working;
 -- - stage 0 is the seed built with clang (`stageZero`);
 -- - stage 1 is the emitter as it is now, built from the IR that stage 0 writes for its source (`stageOne`). This is the one that compiles programs;
--- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it). Making a new seed is `tersus llvm examples/emit.tersus > bootstrap/emitter.ll.new && mv bootstrap/emitter.ll.new bootstrap/emitter.ll`: not a redirect straight into the seed, which the shell would truncate before the compiler runs, leaving `PreludeSource` to embed an empty seed it cannot then build the emitter from.
--- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang.
+-- - and the fixpoint is that stage 1 writes for the emitter the same IR as stage 0 did, so that stage 2 would be stage 1 again (the tests check it). Making a new seed is
+--   `tersus llvm examples/emit.tersus > emitter.ll.new`, then `sha256sum emitter.ll.new`, upload it as the asset `emitter.ll` of a new release tagged
+--   `bootstrap-<first 12 digits of that digest>`, and put the digest in bootstrap/emitter.sha256. Never redirect straight into a seed file that the
+--   running compiler is using: the shell truncates it before the compiler runs.
+-- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang and no network.
+
+-- The release the seed is fetched from: one release per seed, tagged for the seed it holds, so a release is never reused for a different seed
+seedUrl :: String
+seedUrl = "https://github.com/weirdev/tersus/releases/download/bootstrap-" ++ take 12 seedSha256 ++ "/emitter.ll"
 
 -- What stage 0 is made of: the seed and the runtime it is linked with
 seedHash :: String
-seedHash = fingerprint [seedFingerprint, runtimeSource]
+seedHash = fingerprint [seedSha256, runtimeSource]
 
 -- What stage 1 is made of: stage 0, the emitter, and the library every program has
 emitterHash :: String
@@ -52,7 +66,95 @@ emitterHash = fingerprint [seedHash, emitterSource, preludeSource, listsSource, 
 
 -- Stage 0: the seed built, at the path
 stageZero :: FilePath -> IO (Result () String)
-stageZero output = buildExecutable output seedSource
+stageZero output = do
+    seed <- seedText
+    case seed of
+        Error e -> pure (Error e)
+        Ok text -> buildExecutable output text
+
+seedText :: IO (Result String String)
+seedText = do
+    override <- lookupEnv "TERSUS_SEED_FILE"
+    case override of
+        Just path -> verifiedText path
+        Nothing -> do
+            local <- firstExisting ["bootstrap" </> "emitter.ll", "tersus" </> "bootstrap" </> "emitter.ll"]
+            case local of
+                Just path -> verifiedText path
+                Nothing -> cachedText
+  where
+    firstExisting [] = pure Nothing
+    firstExisting (path : rest) = do
+        present <- doesFileExist path
+        if present then pure (Just path) else firstExisting rest
+    cachedText = do
+        cache <- cacheDirectory
+        case cache of
+            Error e -> pure (Error e)
+            Ok dir -> do
+                let path = dir </> ("seed-" ++ seedHash ++ ".ll")
+                present <- doesFileExist path
+                if present
+                    then verifiedText path
+                    else do
+                        fetched <- downloadSeed dir path
+                        case fetched of
+                            Error e -> pure (Error e)
+                            Ok () -> verifiedText path
+
+downloadSeed :: FilePath -> FilePath -> IO (Result () String)
+downloadSeed dir path = do
+    (partial, handle) <- openTempFile dir "seed.ll.tmp"
+    hClose handle
+    outcome <- try (readProcessWithExitCode "curl" ["-fsSL", "-o", partial, seedUrl] "") :: IO (Either IOException (ExitCode, String, String))
+    case outcome of
+        Left e -> removeQuietly partial >> pure (Error ("Could not run curl to fetch the bootstrap seed from " ++ seedUrl ++ ": " ++ show e ++ ". Install curl, or set TERSUS_SEED_FILE to a seed file."))
+        Right (ExitFailure _, _, err) -> removeQuietly partial >> pure (Error ("Could not fetch the bootstrap seed from " ++ seedUrl ++ ": " ++ err ++ "Set TERSUS_SEED_FILE to a seed file to work without a network."))
+        Right (ExitSuccess, _, _) -> do
+            verified <- verifyFile partial
+            case verified of
+                Error e -> removeQuietly partial >> pure (Error e)
+                Ok () -> renameFile partial path >> pure (Ok ())
+
+verifiedText :: FilePath -> IO (Result String String)
+verifiedText path = do
+    verified <- verifyFile path
+    case verified of
+        Error e -> pure (Error e)
+        Ok () -> do
+            read' <- try (readBytes path) :: IO (Either IOException String)
+            pure $ case read' of
+                Left e -> Error ("Could not read the bootstrap seed " ++ path ++ ": " ++ show e)
+                Right text -> Ok text
+  where
+    readBytes p = do
+        handle <- openFile p ReadMode
+        hSetEncoding handle char8
+        contents <- hGetContents handle
+        _ <- evaluate (length contents)
+        hClose handle
+        pure contents
+
+verifyFile :: FilePath -> IO (Result () String)
+verifyFile path = do
+    outcome <- try (readProcessWithExitCode "sha256sum" [path] "") :: IO (Either IOException (ExitCode, String, String))
+    bySum <- case outcome of
+        Right (ExitSuccess, out, _) -> pure (Just out)
+        _ -> do
+            fallback <- try (readProcessWithExitCode "shasum" ["-a", "256", path] "") :: IO (Either IOException (ExitCode, String, String))
+            pure $ case fallback of
+                Right (ExitSuccess, out, _) -> Just out
+                _ -> Nothing
+    pure $ case bySum of
+        Nothing -> Error ("Could not run sha256sum or shasum to verify the bootstrap seed " ++ path ++ ".")
+        Just out
+            | takeWhile (/= ' ') out == seedSha256 && length seedSha256 == 64 && all isHexDigit seedSha256 -> Ok ()
+            | otherwise -> Error ("The bootstrap seed " ++ path ++ " does not match bootstrap/emitter.sha256 (" ++ seedSha256 ++ "): got " ++ takeWhile (/= ' ') out ++ ". Refusing to build it.")
+
+removeQuietly :: FilePath -> IO ()
+removeQuietly path = do
+    _ <- try (removeFile path) :: IO (Either IOException ())
+    pure ()
 
 -- Stage 1: the emitter as it is now, built at the path from the IR that the emitter at the first path writes for it
 stageOne :: FilePath -> FilePath -> IO (Result () String)

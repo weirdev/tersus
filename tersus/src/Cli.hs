@@ -68,7 +68,7 @@ usage =
         , "Use - as the file to read the program from standard input."
         , ""
         , "llvm, build and run write the LLVM IR with the emitter that is written in Tersus (examples/emit.tersus; see Bootstrap), which is built with clang the"
-        , "first time (from bootstrap/emitter.ll) and kept in the cache."
+        , "first time (from the bootstrap seed, a release asset pinned by bootstrap/emitter.sha256; $TERSUS_SEED_FILE overrides it) and kept in the cache."
         ]
 
 -- Splits the command line into a command and the file it applies to.
