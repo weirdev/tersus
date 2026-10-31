@@ -13,6 +13,21 @@ struct String {
 // (a copy of a String is made where a program writes clone(s))
 impl Clone for String { };
 
+impl Hash for String {
+    fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; affirm return < 2147483647; }] {
+        h = 23;
+        i = 0;
+        while i < size(self.bytes) [{
+            affirm i >= 0; affirm i <= size(self.bytes);
+            affirm h >= 0; affirm h < 2147483647;
+        }] shrinks size(self.bytes) - i {
+            h = hashCombine(h, toInt(get(self.bytes, i)));
+            i = i + 1;
+        };
+        return h;
+    };
+};
+
 impl String {
     // The text of a then the text of b: the bytes of a, then the bytes of b
     fn concat(self: Self, other: &String) -> Self [{ }] [{

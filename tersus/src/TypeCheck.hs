@@ -1381,9 +1381,9 @@ checkItem top ctx env stmt =
         TraitDef name params functions
             | top -> checkTrait name params functions >> return (ctx, env, [])
             | otherwise -> failTc "Type error: a trait can only be defined at the top of the program"
-        ImplDef trait traitArgs typeName selfName functions
+        ImplDef trait traitArgs typeName selfName bounds functions
             | top -> do
-                (ctx', env', functions') <- checkImpl ctx env trait traitArgs typeName selfName functions
+                (ctx', env', functions') <- checkImpl ctx env trait traitArgs typeName selfName bounds functions
                 return (ctx', env', functions')
             | otherwise -> failTc "Type error: an impl can only be written at the top of the program"
         BoundedDef bounds (Assign name (Val (VFunct params ins outs (NativeFunct signature term body) _)))
@@ -1959,19 +1959,25 @@ inferExprR ctx env expr =
         current <- tcCurrent <$> getState
         when (" as Drop>::drop" `isSuffixOf'` name && maybe True (\c -> take 9 c /= "Drop for ") current) $
             failTc ("Type error: " ++ name ++ " is a drop, which is called where a value goes out of scope, and not by the program")
-        unless (Map.member name (ctxFns ctx)) $
-            failTc ("Type error: " ++ name ++ " is not defined before this call (there is no such function, or its impl comes later)")
-        ft <- lookupVar ctx env name
-        ftz <- zonk ft
-        case ftz of
-            -- (a function of `impl<T> Vec<T>` has the types and sizes of the impl: the arguments decide them)
-            TForall sizes types inner -> do
-                (result, args') <- genericCall name sizes types inner inferred0
-                return (result, F (Var name) args')
-            _ -> do
-                inferred <- coerceArguments ft inferred0
-                result <- checkCall name ft (map fst inferred)
-                return (result, F (Var name) (map snd inferred))
+        templates <- tcTemplates <$> getState
+        case Map.lookup name templates of
+            Just template -> do
+                (result, instanceName', args', sizeGiven) <- templateCall name template inferred0
+                return (result, F (Var instanceName') (args' ++ sizeGiven))
+            Nothing -> do
+                unless (Map.member name (ctxFns ctx)) $
+                    failTc ("Type error: " ++ name ++ " is not defined before this call (there is no such function, or its impl comes later)")
+                ft <- lookupVar ctx env name
+                ftz <- zonk ft
+                case ftz of
+                    -- (a function of `impl<T> Vec<T>` has the types and sizes of the impl: the arguments decide them)
+                    TForall sizes types inner -> do
+                        (result, args') <- genericCall name sizes types inner inferred0
+                        return (result, F (Var name) args')
+                    _ -> do
+                        inferred <- coerceArguments ft inferred0
+                        result <- checkCall name ft (map fst inferred)
+                        return (result, F (Var name) (map snd inferred))
 
 -- The function that Type::f means: the one function of that name that the impls of Type define. If several do, the call has
 -- to say which, with Trait::f(x), <Type as Trait>::f(...) or <Type>::f(...).
@@ -2006,6 +2012,9 @@ ownerOfValue function ty = do
     case t of
         -- (a struct with types and sizes has the functions of its impl, whatever it is given)
         TNamed name -> return (maybe name fst (instanceOf name))
+        TInt -> return "Int"
+        TByte -> return "Byte"
+        TBool -> return "Bool"
         TList _ -> return "List"
         TVariant variant -> fst <$> ctorInfo variant
         TVar _ -> failTc ("Type error: the type of the value whose function " ++ function ++ " is called is not known yet; annotate it")
@@ -2109,8 +2118,42 @@ substSelf _ t = t
 -- The validator checks it like any function, and what it proves is that the impl may be used wherever the trait is: the
 -- trait's input contract must give the impl's (the call is checked against the impl's input contract), and the impl's
 -- output contract must give the trait's (the return is checked against it).
-checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Name -> [Statement] -> TC (Ctx, Env, [Statement])
-checkImpl ctx env trait traitArgs typeName selfName functions = do
+checkImpl :: Ctx -> Env -> Maybe Name -> [Arg] -> Name -> Name -> [Bound] -> [Statement] -> TC (Ctx, Env, [Statement])
+checkImpl ctx env trait traitArgs typeName selfName bounds functions
+    | not (null bounds) = do
+        case trait of
+            Just traitName -> failTc ("Type error: bounds on an impl of a trait are not yet supported (impl<...> " ++ traitName ++ " for " ++ typeName ++ "); write the functions as bounded functions or an inherent impl with bounds")
+            Nothing -> return ()
+        declared <- getState
+        let selfType = case (typeName, instanceOf selfName) of
+                ("List", Just (_, [ArgType t])) -> TList t
+                ("Box", Just (_, [ArgType t])) -> TBox t
+                ("Array", Just (_, [ArgType t, ArgSize s])) -> TArrayOf t s
+                ("Int", _) -> TInt
+                ("Byte", _) -> TByte
+                ("Bool", _) -> TBool
+                _ -> TNamed selfName
+            asSelf = substSelfAs selfName selfType
+            rewriteSig stmt = case stmt of
+                Assign name (Val (VFunct params ins outs (NativeFunct (Signature ptys rty sizes types writes from) term body) proofs)) -> Assign name (Val (VFunct params ins outs (NativeFunct (Signature (map asSelf ptys) (asSelf rty) sizes types writes from) term body) proofs))
+                _ -> stmt
+            functions' = map rewriteSig functions
+        forM_ bounds $ \(param, traitName, args) -> do
+            s <- getState
+            case Map.lookup traitName (tcTraitParams s) of
+                Nothing | Map.member traitName (tcTraits s) -> unless (null args) $ failTc ("Type error: trait " ++ traitName ++ " has no types, but the bound on " ++ param ++ " of the impl for " ++ typeName ++ " gives it some")
+                Nothing -> failTc ("Type error: unknown trait " ++ traitName ++ " in the bound on " ++ param ++ " of the impl for " ++ typeName)
+                Just params' -> when (length params' /= length args) $
+                    failTc ("Type error: trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params' ++ ">, which the bound on " ++ param ++ " of the impl for " ++ typeName ++ " gives " ++ show (length args))
+        forM_ functions' $ \stmt -> case stmt of
+            Assign name (Val (VFunct params ins outs (NativeFunct signature@(Signature _ _ _ sigTypes _ _) term body) _)) -> do
+                forM_ bounds $ \(param, traitName, _) -> unless (param `elem` sigTypes) $ failTc ("Type error: " ++ param ++ " is bounded by " ++ traitName ++ " in the impl for " ++ typeName ++ " but is not a type of " ++ name)
+                s <- getState
+                when (Map.member name (tcTemplates s) || Map.member name (ctxFns ctx)) $ failTc ("Type error: " ++ name ++ " is already defined")
+                putState s{tcTemplates = Map.insert name (Template bounds ctx params signature ins outs term body) (tcTemplates s), tcAssoc = Map.insertWith (\new old -> old ++ new) (typeName, implFunctionPart name) [Nothing] (tcAssoc s)}
+            _ -> failTc "Type error: an impl with bounds can only hold functions"
+        return (ctx, env, [])
+checkImpl ctx env trait traitArgs typeName selfName _bounds functions = do
     declared <- getState
     -- (a struct with parameters has them in the impl, `impl<T> Vec<T>`, and its type is a different one for each; a list is the one
     -- type with an impl that is not declared as a struct, and Self for it is a List of the type the impl names)
@@ -2118,10 +2161,13 @@ checkImpl ctx env trait traitArgs typeName selfName functions = do
             ("List", Just (_, [ArgType t])) -> TList t
             ("Box", Just (_, [ArgType t])) -> TBox t
             ("Array", Just (_, [ArgType t, ArgSize s])) -> TArrayOf t s
+            ("Int", _) -> TInt
+            ("Byte", _) -> TByte
+            ("Bool", _) -> TBool
             _ -> TNamed selfName
         asSelf = substSelfAs selfName selfType
         functions' = map (rewriteSignature asSelf) functions
-    unless (typeName `elem` ["List", "Box", "Array"] || Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
+    unless (typeName `elem` ["List", "Box", "Array", "Int", "Byte", "Bool"] || Map.member typeName (tcGenerics declared)) $ void (typeCtors typeName)
     -- (the type implements the trait from the first function on, so a function can call an earlier one through the trait; if the
     -- impl is not accepted the program is refused, so this is never seen)
     (required, traitParams) <- case trait of
@@ -2780,6 +2826,9 @@ traitArgumentsOf trait ty = do
             Nothing -> return (builtin e ["Sequence"] >>= nonEmpty)
         TNamed name -> return (maybe (own name []) (\(base, args) -> own base args) (instanceOf name))
         TVariant variant -> (\(enum, _) -> own enum []) <$> ctorInfo variant
+        TInt -> return (own "Int" [])
+        TByte -> return (own "Byte" [])
+        TBool -> return (own "Bool" [])
         _ -> return Nothing
   where
     nonEmpty xs = if null xs then Nothing else Just xs

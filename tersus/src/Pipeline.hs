@@ -82,9 +82,9 @@ libraries source = [("the prelude", preludeSource) | prelude] ++ [("the string l
     ws = names code
     ws' = zip ws (drop 1 ws)
     declares candidates = any (\(keyword, name) -> keyword `elem` ["struct", "enum", "trait"] && name `elem` candidates) ws'
-    preludeFree = not (declares ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref"])
+    preludeFree = not (declares ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash"])
     strings = preludeFree && not (declares ["String"]) && ("String" `elem` ws || '"' `elem` code)
-    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref"])
+    prelude = preludeFree && (strings || any (`elem` ws) ["Sequence", "Growable", "Clone", "Copy", "Drop", "Deref", "Hash", "hashCombine"])
     -- (the names in a text: runs of letters, digits and underscores)
     names text = case dropWhile (not . isNameChar) text of
         "" -> []
@@ -122,7 +122,7 @@ assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
         Block body -> (place, snd (statements place body))
         If c yes no -> (place, expression place c ++ snd (statements place yes) ++ snd (statements place no))
         While c _ _ body -> (place, expression place c ++ snd (statements place body))
-        ImplDef _ _ _ _ body -> (place, snd (statements place body))
+        ImplDef _ _ _ _ _ body -> (place, snd (statements place body))
         BoundedDef _ s -> (place, snd (statement place s))
         _ -> (place, [])
     expression place e = case e of

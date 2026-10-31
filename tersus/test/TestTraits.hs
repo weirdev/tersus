@@ -1,7 +1,10 @@
 module TestTraits (testTraits) where
 
+import MirEval (fromMirValue)
+import Pipeline (parseSource, runStatements, validateStatements)
 import TersusTypes
 import TestHarness
+import Utils
 
 -- Traits and impls: the functions of a type, how they are called, and what an impl has to meet
 testTraits :: Test
@@ -28,6 +31,17 @@ testTraits =
                 , "impl Code for Counter { fn label(self: Self) -> Int { return 2; }; fn make() -> Self { return Self { value: 20 }; }; };"
                 , "impl Counter { fn label(self: Self) -> Int { return 3; }; };"
                 ]
+        -- (the prelude is put in front of a program by the pipeline, so these programs are read as the command line reads them)
+        runsLib source expected = case parseSource source of
+            Error e -> Just ("Parse failed: " ++ e)
+            Ok stmts -> case runStatements stmts of
+                Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt expected))
+                Error e -> Just ("Evaluation failed with error: " ++ e)
+        validLib source = case parseSource source of
+            Error e -> Just ("Parse failed: " ++ e)
+            Ok stmts -> case validateStatements stmts of
+                Ok _ -> Nothing
+                Error e -> Just ("Validation failed with error: " ++ e)
         measure =
             unlines
                 [ "trait Measure { fn sides(self: Self) -> Int [{ }] [{ affirm return >= 0; }]; };"
@@ -108,7 +122,7 @@ testTraits =
                 , testCase "a function of the type is defined later" (rejected "c = Counter { value: 1 }; x = c.later(); impl Counter { fn later(self: Self) -> Int { return 1; }; };" "Counter::later is not defined before this call")
                 , testCase "wrong argument" (rejected "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus(true);" "argument 2 of <Counter>::plus: expected Int, got Bool")
                 , testCase "wrong number of arguments" (rejected "impl Counter { fn plus(self: Self, by: Int) -> Int { return by; }; }; x = Counter { value: 1 }.plus();" "<Counter>::plus takes 2 arguments, got 1")
-                , testCase "a method of an integer" (rejected "x = 5; y = x.double();" "double is called on a Int, which has no functions")
+                , testCase "a method of an integer" (rejected "x = 5; y = x.double();" "Int::double is not defined before this call")
                 , testCase "a trait function with no Self parameter, through the trait" (rejected "trait Make { fn make() -> Self; }; impl Make for Counter { fn make() -> Self { return Self { value: 0 }; }; }; c = Make::make();" "has no Self parameter to tell the type by")
                 , testCase "a function the trait lacks" (rejected "trait Make { }; x = Make::nothing(Counter { value: 1 });" "trait Make has no function nothing")
                 , testCase "a trait cannot read a field of Self" (rejected "trait Step { fn a(self: Self) -> Int [{ affirm self.value > 0; }]; };" "a trait does not know the fields of Self")
@@ -129,5 +143,20 @@ testTraits =
                 , testCase "a trait repeats a function" (parseFails "trait T { fn a() -> Int; fn a() -> Int; };")
                 , testCase "an impl is ended with a semicolon" (parseFails "struct S { a: Int }; impl S { } x = 1;")
                 , testCase "ordinary names that begin like keywords" (runs "implement = 1; traits = 2; return implement + traits;" 3)
+                ]
+            , TestList
+                "hashing and bounded impls"
+                [ testCase "the hash of an Int" (runsLib "return Hash::hash(42);" 569)
+                , testCase "the hash of a Bool" (runsLib "return Hash::hash(true) * 10 + Hash::hash(false);" 13547)
+                , testCase "the hash of a Byte" (runsLib "return Hash::hash(toByte(65));" 654)
+                , testCase "equal strings hash equal" (runsLib "s = \"hello\"; return Hash::hash(s) - Hash::hash(\"hello\");" 0)
+                , testCase "different strings hash different" (runsLib "if Hash::hash(\"hello\") = Hash::hash(\"world\") { return 1; }; return 0;" 0)
+                , testCase "hashCombine is in range" (validLib "fn f(h: Int, x: Int) -> Int [{ affirm h >= 0; affirm h < 2147483647; }] [{ affirm return >= 0; affirm return < 2147483647; }] { return hashCombine(h, x); }; return f(3, 4);")
+                , testCase "an impl for Int" (parseEvalProgramHelper "trait H { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; impl H for Int { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self % 10; }; }; return H::hash(42);" (Just (VInt 2)))
+                , testCase "a method of an Int from an impl" (parseEvalProgramHelper "impl Int { fn double(self: &Self) -> Int [{ }] [{ }] { return self * 2; }; }; return (5).double();" (Just (VInt 10)))
+                , testCase "a bounded impl calls a trait on its type" (runsLib "struct M<K, V> { x: K, y: V }; impl<K: Hash, V> M<K, V> { fn h(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return Hash::hash(self.x); }; }; return M<Int, Int> { x: 42, y: 1 }.h();" 569)
+                , testCase "a bounded impl method calls another" (runsLib "struct M<K, V> { x: K, y: V }; impl<K: Hash, V> M<K, V> { fn h(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return Hash::hash(self.x); }; fn h2(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return self.h() + 1; }; }; return M<Int, Int> { x: 42, y: 1 }.h2();" 570)
+                , testCase "the bound is checked at the call" (parseValidateFailProgramHelper "trait H { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; struct M<K, V> { x: K, y: V }; impl<K: H, V> M<K, V> { fn h(self: &Self) -> Int [{ }] [{ affirm return >= 0; }] { return H::hash(self.x); }; }; return M<Int, Int> { x: 42, y: 1 }.h();" "needs K to implement H")
+                , testCase "bounds on a trait impl are refused" (parseValidateFailProgramHelper "trait H { fn hash(self: &Self) -> Int [{ }] [{ affirm return >= 0; }]; }; trait G { fn g(self: &Self) -> Int; }; struct M<K, V> { x: K, y: V }; impl<K: H, V> G for M<K, V> { fn g(self: &Self) -> Int { return 1; }; }; return 0;" "bounds on an impl of a trait are not yet supported")
                 ]
             ]

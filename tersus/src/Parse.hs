@@ -875,7 +875,13 @@ implStatement :: Parser Statement
 implStatement = do
     keyword "impl"
     whitespace
-    implParams <- option [] (char '<' >> whitespace >> ((variable <* whitespace) `sepBy1` (char ',' >> whitespace)) <* char '>' <* whitespace)
+    rawNames <- option [] (lookAhead (char '<' >> whitespace >> (((variable <* whitespace) <* optional (char ':' >> balanced)) <* whitespace) `sepBy1` (char ',' >> whitespace)))
+    outerParams0 <- declTypeParams <$> getState
+    modifyState (\d -> d{declTypeParams = filter isTypeParameter rawNames})
+    parsedParams <- option [] (char '<' >> whitespace >> (implParameter <* whitespace) `sepBy1` (char ',' >> whitespace) <* char '>' <* whitespace)
+    modifyState (\d -> d{declTypeParams = outerParams0})
+    let implParams = map fst parsedParams
+        implBounds = [(name, trait, args) | (name, bs) <- parsedParams, (trait, args) <- bs]
     outerParams <- declTypeParams <$> getState
     -- (the types of the impl are written in the header)
     modifyState (\d -> d{declTypeParams = filter isTypeParameter implParams})
@@ -896,7 +902,7 @@ implStatement = do
         Nothing -> return (Nothing, [], first, firstArgs)
     modifyState (\d -> d{declTypeParams = outerParams})
     types <- declTypes <$> getState
-    when (typeName `notElem` ["List", "Box", "Array"] && not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
+    when (typeName `notElem` ["List", "Box", "Array", "Int", "Byte", "Bool"] && not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
     case (trait, Map.lookup first generics) of
         (Just traitName, Just params) | firstArgs == Nothing -> fail ("trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">: write impl " ++ traitName ++ "<" ++ intercalate ", " params ++ "> for " ++ typeName)
         (Just traitName, Nothing) | firstArgs /= Nothing -> fail ("trait " ++ traitName ++ " has no parameters")
@@ -920,8 +926,21 @@ implStatement = do
     functions <- curlyBracesParse (genericStatementBlock (implFunction typeName trait))
     modifyState (\d -> d{declSelf = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
     whitespace
-    return (ImplDef trait traitArgs typeName selfName functions)
+    return (ImplDef trait traitArgs typeName selfName implBounds functions)
   where
+    implParameter = do
+        name <- variable
+        whitespace
+        bounds <- option [] (char ':' >> whitespace >> boundArg `sepBy1` (char '+' >> whitespace))
+        return (name, bounds)
+    boundArg = do
+        trait <- variable
+        whitespace
+        args <- option [] (char '<' >> whitespace >> (typeAnnotation `sepBy1` skipWhitespace (char ',')) <* char '>')
+        whitespace
+        return (trait, args)
+    balanced = skipMany (void (noneOf "<>,") <|> nested)
+    nested = void (char '<') >> skipMany (void (noneOf "<>") <|> nested) >> void (char '>')
     -- the types of an array in an impl, `Array<T, n>`: a type and a size, as in a type
     arrayArguments = do
         element <- typeAnnotation
