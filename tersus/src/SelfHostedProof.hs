@@ -7,7 +7,8 @@ import qualified Data.Map.Strict as Map
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
 import StdLib (builtinFunct)
-import TersusTypes
+import Types
+import Syntax
 import Utils (Result (..), inIntRange, mapResult)
 
 data Enc = Enc

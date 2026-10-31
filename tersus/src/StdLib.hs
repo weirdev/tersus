@@ -11,7 +11,8 @@ module StdLib
 import Data.Map (fromList)
 
 import BuiltinRegistry
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- A builtin as a value: the parameter names of its registry entry, with the contract of a

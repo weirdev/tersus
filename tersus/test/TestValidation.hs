@@ -15,7 +15,8 @@ import MirValidate (Validated (..))
 import Pipeline (compileSource, validateStatements)
 import ProofState (allFacts, initialPState)
 import StdLib
-import TersusTypes
+import Types
+import Syntax
 import Utils
 import TestHarness
 

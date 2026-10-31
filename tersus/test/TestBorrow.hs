@@ -1,6 +1,6 @@
 module TestBorrow (testBorrow) where
 
-import TersusTypes
+import Syntax
 import TestHarness
 
 -- &T: a parameter that the function only reads. A call lends the value, so it is not copied for the call and the caller keeps it; in

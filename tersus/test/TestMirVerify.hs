@@ -9,7 +9,7 @@ import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirVerify (verifyProgram)
 import Pipeline (ownedSource)
-import TersusTypes (Type (..))
+import Types (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)

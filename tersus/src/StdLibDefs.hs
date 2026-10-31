@@ -10,7 +10,8 @@ import BuiltinRegistry (builtinDecls, stdBindings)
 import Parse (emptyDecls, parseStatementBlockWith)
 import PreludeSource (stdlibSource)
 import StdLib (builtinFunct, eqProof)
-import TersusTypes
+import Types
+import Syntax
 
 -- The standard library written in Tersus (lib/stdlib.tersus), parsed once. Each `builtin fn` there
 -- declares a builtin of BuiltinRegistry.builtinDecls: what it does is the builtin it names, and its contracts

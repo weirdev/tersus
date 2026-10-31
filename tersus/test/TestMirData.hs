@@ -8,7 +8,7 @@ import Cli (Command (..), runSource)
 import Mir
 import MirData
 import Pipeline (ownedSource)
-import TersusTypes (Arg (..), Type (..))
+import Types (Arg (..), Type (..))
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
 import Utils

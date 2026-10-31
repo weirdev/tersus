@@ -21,7 +21,8 @@ import BuiltinRegistry (SigScheme (..), ghostBuiltinByName, methodBuiltinByName,
 import Pretty (renderType)
 import StdLib
 import StdLibDefs (stdLibCtx)
-import TersusTypes
+import Types
+import Syntax
 import Utils
 
 -- Types are checked between parsing and validation. Parameters and return types are written in the

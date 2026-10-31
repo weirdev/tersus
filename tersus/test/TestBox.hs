@@ -1,6 +1,6 @@
 module TestBox (testBox) where
 
-import TersusTypes
+import Syntax
 import TestHarness
 
 -- Box<T>: a struct or an enum held in a Box. A Box has the value of what it holds, so it is looked into wherever the struct or the
