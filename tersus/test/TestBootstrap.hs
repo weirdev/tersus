@@ -1,12 +1,8 @@
 module TestBootstrap (testBootstrap) where
 
-import Control.Concurrent (forkIO, getNumCapabilities)
-import Control.Concurrent.MVar (newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, finally, mask, throwIO, try)
-import Control.Monad (forM)
+import Control.Exception (finally)
 import Data.Char (isHexDigit)
-import Data.List (isInfixOf, sort)
+import Data.List (sort)
 import System.Directory (copyFile, createDirectoryIfMissing, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, doesDirectoryExist)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
@@ -17,7 +13,7 @@ import MirData (writeProgram)
 import Pipeline (ownedSource)
 import PreludeSource (emitterSource)
 import TestHarness
-import TestNative (clangAvailable, nativeExamples, validatedPrograms)
+import TestNative (clangAvailable)
 import Utils
 
 -- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (examples/emit.tersus) is built from a seed, the IR of an emitter that is
@@ -25,8 +21,9 @@ import Utils
 -- - stage 0 is the seed built;
 -- - stage 1 is the emitter as it is now, made from the IR that stage 0 writes for it.
 -- The fixpoint is that stage 1 writes the same IR for the emitter as stage 0 does (so that the emitter built by stage 1 would be stage 1 again); stage 1 is the one
--- that compiles programs, and it has to write the IR of every example and every program that native code is tested with (what that IR does when it is built and run
--- is TestNative's to check). The cache that both stages are kept in is tested too. The stages need clang, and the tests pass without it.
+-- that compiles programs. That stage 1 writes the IR of every example and every program that native code is tested with is TestMirEmit's to check (it runs the
+-- emitter stage 1 built, in every mode, on the same programs), and what that IR does when it is built and run is TestNative's. The cache that both stages are
+-- kept in is tested too. The stages need clang, and the tests pass without it.
 testBootstrap :: Test
 testBootstrap =
     TestList
@@ -66,12 +63,6 @@ withDirectory name use = do
     createDirectoryIfMissing True dir
     use dir `finally` removeDirectoryRecursive dir
 
--- Every program that native code is tested with
-programs :: IO [(String, String)]
-programs = do
-    files <- forM nativeExamples (\path -> (,) path <$> readFile path)
-    pure (files ++ validatedPrograms)
-
 bootstrap :: IO TestResult
 bootstrap = do
     available <- clangAvailable
@@ -88,11 +79,9 @@ bootstrap = do
                     case built1 of
                         Error e -> pure (Just ("stage 1: " ++ e))
                         Ok one -> do
-                            all' <- programs
                             fixpoint <- sameEmitter zero one
-                            written <- parallelFor all' (writesIr one)
                             kept <- cache zero one
-                            pure $ case fixpoint ++ concat written of
+                            pure $ case fixpoint of
                                 [] -> kept
                                 found -> Just (unlines (take 5 found))
   where
@@ -109,28 +98,6 @@ bootstrap = do
         describe (Ok text) (Ok expected) = "wrote " ++ show (length text) ++ " bytes for " ++ show (length expected) ++ firstDifference text expected
         describe (Error e) _ = "failed: " ++ take 300 e
         describe _ (Error e) = "stage 0 failed: " ++ take 300 e
-    -- Stage 1 writes the IR of a program
-    writesIr exe (name, source) = case ownedSource source of
-        Error e -> pure [name ++ ": " ++ e]
-        Ok owned -> do
-            written <- emitWith exe (writeProgram owned)
-            pure $ case written of
-                Ok text | "@tersus_main" `isInfixOf` text -> []
-                Ok _ -> [name ++ ": the IR has no entry point"]
-                Error e -> [name ++ ": " ++ take 300 e]
-
--- The results of an action over each of a list, with as many at once as there are cores (the programs are independent, and what takes the time is the front end
--- and the emitter, which use one core each)
-parallelFor :: [a] -> (a -> IO b) -> IO [b]
-parallelFor xs action = do
-    cores <- getNumCapabilities
-    slots <- newQSem cores
-    vars <- forM xs $ \x -> do
-        var <- newEmptyMVar
-        _ <- forkIO (mask (\restore -> waitQSem slots >> (try (restore (action x)) >>= \r -> signalQSem slots >> putMVar var r)))
-        pure var
-    forM vars (\var -> takeMVar var >>= either (\e -> throwIO (e :: SomeException)) pure)
-
 -- Where the first line that differs is
 firstDifference :: String -> String -> String
 firstDifference output text = case [(n, a, b) | (n, a, b) <- zip3 [1 :: Int ..] (lines output) (lines text), a /= b] of
