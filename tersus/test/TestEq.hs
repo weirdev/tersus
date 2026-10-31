@@ -58,6 +58,8 @@ testEq =
                 "impls with a body"
                 [ testCase "a custom impl is called" (runs "struct P { x: Int, y: Int }; impl Eq for P { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] { if self.y != other.y { return false; }; if self.x != other.x { return false; }; return true; }; }; if P { x: 1, y: 2 } = P { x: 1, y: 2 } { return 1; }; return 0;" (VInt 1))
                 , testCase "a custom impl that does not give the equality" (rejected "struct P { x: Int, y: Int }; impl Eq for P { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.x = other.x; }; }; return 0;" "impl Eq for P: eq does not meet what Eq declares")
+                , testCase "Eq::eq on a word is the builtin comparison" (runs "if Eq::eq(1, 1) { if Eq::eq(true, false) = false { return 1; }; }; return 0;" (VInt 1))
+                , testCase "Eq::eq on a list and a Box of a sized array" (runs "xs = push([], Box::new(array(2, 1))); if xs = xs { if Box::new(#[1, 2]) = Box::new(#[1, 2]) { return 1; }; }; return 0;" (VInt 1))
                 , testCase "Int implements Eq by the language" (rejected "impl Eq for Int { fn eq(self: &Self, other: &Self) -> Bool { return true; }; }; return 0;" "Int implements Eq by the language")
                 ]
             , TestList

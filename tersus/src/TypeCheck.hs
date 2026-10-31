@@ -1963,8 +1963,12 @@ inferExprR ctx env expr =
                 case (Map.lookup path (tcTraits s), Map.member path (tcTypes s) || Map.member path (tcGenerics s)) of
                     (Just functions, _) -> do
                         inferred <- mapM (inferExprR ctx env) args
-                        owner <- ownerThroughTrait path functions function (map fst inferred)
-                        callResolved (implFunctionName owner (Just path) function) inferred
+                        primed <- primitiveTraitCall ctx env path functions function inferred
+                        case primed of
+                            Just done -> return done
+                            Nothing -> do
+                                owner <- ownerThroughTrait path functions function (map fst inferred)
+                                callResolved (implFunctionName owner (Just path) function) inferred
                     (Nothing, True) -> do
                         inferred <- mapM (inferExprR ctx env) args
                         resolveAssociated path function >>= \full -> callResolved full inferred
@@ -2126,6 +2130,25 @@ ownerThroughTrait trait functions function ats =
                     impls <- tcImpls <$> getState
                     unless (Set.member (trait, owner) impls) $ failTc ("Type error: " ++ owner ++ " does not implement " ++ trait)
                     return owner
+
+-- The words implement Eq by the language, so a call of Eq::eq on them is the builtin comparison rather than a function:
+-- `Eq::eq(a, b)` on words says what `a = b` does, and there is no impl of it to call
+primitiveTraitCall :: Ctx -> Env -> Name -> [TraitFn] -> Name -> [(Type, Expression)] -> TC (Maybe (Type, Expression))
+primitiveTraitCall ctx env "Eq" functions "eq" inferred = do
+    case [f | f <- functions, traitFnName f == "eq"] of
+        f : _ | length inferred == 2 -> do
+            let [a, b] = inferred
+            at' <- unref <$> zonk (fst a)
+            bt' <- unref <$> zonk (fst b)
+            if primitiveEq at' && primitiveEq bt'
+                then do
+                    let Signature ptys rty _ _ _ _ = traitFnSignature f
+                    expect "argument 1 of Eq::eq" at' (unref (fst a))
+                    expect "argument 2 of Eq::eq" bt' (unref (fst b))
+                    return (Just (rty, F (Val (VFunct [] [] [] (BuiltinFunct (Rel Eq)) [])) [snd a, snd b]))
+                else return Nothing
+        _ -> return Nothing
+primitiveTraitCall _ _ _ _ _ _ = return Nothing
 
 -- Traits and impls
 
@@ -2906,7 +2929,7 @@ primitiveEq t = case t of
 traitArgumentsOf :: Name -> Type -> TC (Maybe [Type])
 traitArgumentsOf "Eq" ty | primitiveEq ty = return (Just [])
 -- (a Box of an array of no size is compared by eqBoxedArrays of lib/eq.tersus when its elements are)
-traitArgumentsOf "Eq" (TBox (TArrayOf e SizeAny)) = fmap (const []) <$> traitArguments "Eq" e
+traitArgumentsOf "Eq" (TBox (TArrayOf e _)) = fmap (const []) <$> traitArguments "Eq" e
 traitArgumentsOf trait ty = do
     s <- getState
     let arity = length (Map.findWithDefault [] trait (tcTraitParams s))
