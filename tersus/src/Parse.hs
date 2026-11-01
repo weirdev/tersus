@@ -9,6 +9,9 @@ module Parse
     , Decls
     , emptyDecls
     , locating
+    , namePath
+    , renderPath
+    , splitPath
     , proof
     , semicolon
     , statement
@@ -542,11 +545,11 @@ structLiteral element cloned apply = do
     (name, declared) <- try $ do
         base <- qualifiedName
         ctors <- declCtors <$> getState
-        known <- maybe (fail "not a struct or variant") return (Map.lookup base ctors)
+        (matched, known) <- maybe (fail "not a struct or variant") return (lookupCtorPath base ctors)
         -- (a struct with sizes and types is written with them: Packet<4> { ... }, Vec<Int, 3> { ... })
         generics <- declGenerics <$> getState
-        args <- case Map.lookup base generics of
-            Just params | not (isVariant base) -> optionMaybe (try (whitespace >> genericArguments params))
+        args <- case Map.lookup matched generics of
+            Just params | not (isVariant matched) -> optionMaybe (try (whitespace >> genericArguments params))
             _ -> return Nothing
         let candidate = maybe base (instanceName base) args
         if null known && isVariant candidate
@@ -596,15 +599,52 @@ structFields element cloned0 apply name declared = do
                 | otherwise -> return (fieldOf from field)
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
 
--- Name or Enum::Variant
+-- Structured paths (Phase 0 of the module plan): the parser reads a name as a
+-- list of `::` segments of any length and does not decide what the segments
+-- mean. AST and MIR keep the flat rendering (segments joined by "::") exactly
+-- as before, so post-elaboration names are unchanged. Structured segments are
+-- carried only where the checker/parser must resolve a name against
+-- declarations known at parse time: type syntax (last-two-segments rule for
+-- the legacy Enum::Variant reading, longer chains are named types), struct /
+-- enum literals, match patterns and `is`/`as` (via `declaredCtor`, which may
+-- match a declared constructor by a suffix of the path), trait bounds and
+-- impl headers. Everywhere else (calls, proof terms, plain paths) only the
+-- flat joined name is kept, which is sufficient until the module loader
+-- (later phases) supplies the declarations a qualified name refers to.
+namePath :: Parser [Name]
+namePath = do
+    first <- variable
+    rest <- many (try (string "::" >> variable))
+    return (first : rest)
+
+renderPath :: [Name] -> Name
+renderPath = intercalate "::"
+
+splitPath :: Name -> [Name]
+splitPath name = case break (== ':') name of
+    (segment, ':' : ':' : rest) -> segment : splitPath rest
+    _ -> [name]
+
+-- A declared constructor for a path: the full path first, then suffixes of
+-- it (so `geo::Point` finds the locally declared `Point` at parse time).
+lookupCtorPath :: Name -> Map.Map Name [Variable] -> Maybe (Name, [Variable])
+lookupCtorPath path ctors = go (splitPath path)
+  where
+    go [] = Nothing
+    go segments@(_ : rest) = case Map.lookup (renderPath segments) ctors of
+        Just fields -> Just (renderPath segments, fields)
+        Nothing -> go rest
+
+-- Name or Enum::Variant or a longer module path
 qualifiedName :: Parser Name
 qualifiedName = do
-    first <- variable
-    second <- optionMaybe (try (string "::" >> variable))
-    -- (`Self::f` and `Self::Variant` name the struct or enum itself, and `Self { ... }` the struct with the types of the impl)
-    case second of
-        Just name -> (\owner -> owner ++ "::" ++ name) . selfBase <$> resolveSelf first
-        Nothing -> resolveSelf first
+    segments <- namePath
+    case segments of
+        [first] -> resolveSelf first
+        first : rest -> do
+            owner <- selfBase <$> resolveSelf first
+            return (renderPath (owner : rest))
+        [] -> fail "a name"
 
 -- The struct or enum that a type names, without the types it is given: Vec for Vec<'T>
 selfBase :: Name -> Name
@@ -615,7 +655,7 @@ declaredCtor :: Parser (Name, [Variable])
 declaredCtor = do
     name <- qualifiedName
     ctors <- declCtors <$> getState
-    maybe (fail ("Unknown struct or variant " ++ name)) (\fields -> return (name, fields)) (Map.lookup name ctors)
+    maybe (fail ("Unknown struct or variant " ++ name)) (\(_, fields) -> return (name, fields)) (lookupCtorPath name ctors)
 
 -- match scrutinee { Pattern => body, ... } where a pattern is a variant and the fields it binds:
 -- `Shape::Circle { radius: r }`. The body is a block in a statement and an expression after `=` or `return`.
@@ -660,19 +700,25 @@ desugarMatch :: Expression -> [(Name, [(Variable, Variable)], [Statement])] -> P
 desugarMatch _ [] = fail "A match needs at least one arm"
 desugarMatch scrutinee arms@((first, _, _) : _) = do
     types <- declTypes <$> getState
-    (typeName, variants) <- case [(t, vs) | (t, vs) <- Map.toList types, first `elem` vs] of
+    (typeName, variants) <- case [(t, vs) | (t, vs) <- Map.toList types, any (samePath first) vs] of
         found : _ -> return found
         [] -> fail ("Unknown variant " ++ first)
     let names = [name | (name, _, _) <- arms]
-    when (any (`notElem` variants) names) $ fail ("A match over " ++ typeName ++ " has an arm of another type")
+        uncovered = [variant | variant <- variants, not (any (samePath variant) names)]
+    when (any (\name -> not (any (samePath name) variants)) names) $ fail ("A match over " ++ typeName ++ " has an arm of another type")
     when (length (nub names) /= length names) $ fail ("A match over " ++ typeName ++ " repeats a variant")
-    when (not (null (variants \\ names))) $ fail ("A match over " ++ typeName ++ " does not cover " ++ unwords (variants \\ names))
+    when (not (null uncovered)) $ fail ("A match over " ++ typeName ++ " does not cover " ++ unwords uncovered)
     -- The scrutinee is evaluated once into a name no program can write. Each arm is a branch, whose own scope
     -- holds what it binds and first assigns; a match with one arm has no branch, so it gets a block to do so.
     return $ case arms of
         [(name, binds, body)] -> [Block (Let hidden scrutinee : bindings name binds ++ body)]
         _ -> Let hidden scrutinee : chain arms
   where
+    samePath a b = a == b || isSuffixPath a b || isSuffixPath b a
+    isSuffixPath short long =
+        let shortSegs = splitPath short
+            longSegs = splitPath long
+         in length shortSegs <= length longSegs && drop (length longSegs - length shortSegs) longSegs == shortSegs
     hidden = "$match"
     subject = Var hidden
     chain [] = []
@@ -794,7 +840,7 @@ functStatement = do
         bounds <- option [] (char ':' >> whitespace >> bound `sepBy1` (char '+' >> whitespace))
         return (name, bounds)
     bound = do
-        trait <- variable
+        trait <- qualifiedName
         whitespace
         args <- option [] (char '<' >> whitespace >> (typeAnnotation `sepBy1` skipWhitespace (char ',')) <* char '>')
         whitespace
@@ -892,10 +938,10 @@ implStatement = do
     let arguments name = case Map.lookup name generics of
             Just params -> optionMaybe (try (genericArguments params <* whitespace))
             Nothing -> return Nothing
-    first <- variable
+    first <- qualifiedName
     whitespace
     firstArgs <- arguments first
-    forType <- optionMaybe (keyword "for" >> whitespace >> variable <* whitespace)
+    forType <- optionMaybe (keyword "for" >> whitespace >> qualifiedName <* whitespace)
     (trait, traitArgs, typeName, typeArgs) <- case forType of
         Just t -> do
             -- (an impl can be written for a list, a Box and an array, `impl<T> Sequence<T> for List<T>`, whose impls are in
@@ -905,7 +951,7 @@ implStatement = do
         Nothing -> return (Nothing, [], first, firstArgs)
     modifyState (\d -> d{declTypeParams = outerParams})
     types <- declTypes <$> getState
-    when (typeName `notElem` ["List", "Box", "Array", "Int", "Byte", "Bool"] && not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
+    when (typeName `notElem` ["List", "Box", "Array", "Int", "Byte", "Bool"] && length (splitPath typeName) == 1 && not (Map.member typeName types)) $ fail ("impl for " ++ typeName ++ ", which is not a struct or enum declared before")
     case (trait, Map.lookup first generics) of
         (Just traitName, Just params) | firstArgs == Nothing -> fail ("trait " ++ traitName ++ " has parameters <" ++ intercalate ", " params ++ ">: write impl " ++ traitName ++ "<" ++ intercalate ", " params ++ "> for " ++ typeName)
         (Just traitName, Nothing) | firstArgs /= Nothing -> fail ("trait " ++ traitName ++ " has no parameters")
@@ -1019,7 +1065,7 @@ implStatement = do
         bounds <- option [] (char ':' >> whitespace >> boundArg `sepBy1` (char '+' >> whitespace))
         return (name, bounds)
     boundArg = do
-        trait <- variable
+        trait <- qualifiedName
         whitespace
         args <- option [] (char '<' >> whitespace >> (typeAnnotation `sepBy1` skipWhitespace (char ',')) <* char '>')
         whitespace
@@ -1092,37 +1138,45 @@ typeAnnotation = do
         whitespace
         TFn args <$> typeAnnotation
     namedType = do
-        name <- variable >>= resolveSelf
+        first <- variable >>= resolveSelf
+        rest <- many (try (string "::" >> variable))
+        let segments = first : rest
+            name = renderPath segments
         typeParams <- declTypeParams <$> getState
-        case name of
-            _ | name `elem` typeParams -> return (TParam name)
-            "Int" -> return TInt
-            "Byte" -> return TByte
-            "Bool" -> return TBool
-            _ | Just t <- wordType name -> return t
-            "List" -> TList <$> typeArgument
-            "Box" -> TBox <$> typeArgument
-            "Addr" -> TAddr <$> typeArgument
-            "Block" -> TBlock <$> typeArgument
-            "Uninit" -> TUninit <$> typeArgument
-            "Array" -> do
-                whitespace
-                void (char '<')
-                whitespace
-                element <- typeAnnotation
-                -- a size is a number, `?`, or a size parameter of the function, and one that is left out is `?`
-                size <- option SizeAny (char ',' >> whitespace >> sizeArgument)
-                whitespace
-                void (char '>')
-                return (TArrayOf element size)
-            _ -> do
-                variant <- optionMaybe (try (string "::" >> variable))
-                -- a struct with sizes and types is written with them, as Packet<4> and Vec<Int, 3>
-                generics <- declGenerics <$> getState
-                args <- case Map.lookup name generics of
-                    Just params | not (isJust variant) -> optionMaybe (try (genericArguments params))
-                    _ -> return Nothing
-                return (maybe (TNamed (maybe name (instanceName name) args)) (\v -> TVariant (name ++ "::" ++ v)) variant)
+        case segments of
+            [single] -> case single of
+                _ | single `elem` typeParams -> return (TParam single)
+                "Int" -> return TInt
+                "Byte" -> return TByte
+                "Bool" -> return TBool
+                _ | Just t <- wordType single -> return t
+                "List" -> TList <$> typeArgument
+                "Box" -> TBox <$> typeArgument
+                "Addr" -> TAddr <$> typeArgument
+                "Block" -> TBlock <$> typeArgument
+                "Uninit" -> TUninit <$> typeArgument
+                "Array" -> do
+                    whitespace
+                    void (char '<')
+                    whitespace
+                    element <- typeAnnotation
+                    -- a size is a number, `?`, or a size parameter of the function, and one that is left out is `?`
+                    size <- option SizeAny (char ',' >> whitespace >> sizeArgument)
+                    whitespace
+                    void (char '>')
+                    return (TArrayOf element size)
+                _ -> do
+                    -- a struct with sizes and types is written with them, as Packet<4> and Vec<Int, 3>
+                    generics <- declGenerics <$> getState
+                    args <- case Map.lookup single generics of
+                        Just params -> optionMaybe (try (genericArguments params))
+                        _ -> return Nothing
+                    return (TNamed (maybe single (instanceName single) args))
+            -- Two segments keep the legacy Enum::Variant reading; a longer
+            -- chain is a named type at a module path (its last segments are
+            -- not classified here).
+            [_, _] -> return (TVariant name)
+            _ -> return (TNamed name)
 
 -- A size is a number, `?`, or a size parameter of the function
 sizeArgument :: Parser Size
@@ -1326,7 +1380,7 @@ functionProof = do
 
 abstractProof :: Parser VariableProof
 abstractProof = do
-    p <- ATerm <$> variable
+    p <- ATerm <$> qualifiedName
     whitespace
     return p
 
@@ -1500,9 +1554,9 @@ qualifiedCall :: Parser Expression
 qualifiedCall = do
     void (char '<')
     whitespace
-    owner <- selfBase <$> (variable >>= resolveSelf)
+    owner <- selfBase <$> qualifiedName
     whitespace
-    trait <- optionMaybe (keyword "as" >> whitespace >> variable <* whitespace)
+    trait <- optionMaybe (keyword "as" >> whitespace >> qualifiedName <* whitespace)
     void (char '>')
     void (string "::")
     function <- variable

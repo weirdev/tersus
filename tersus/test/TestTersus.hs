@@ -43,6 +43,7 @@ import TestBootstrap
 import TestEq
 import TestHashMap
 import TestHashSet
+import TestModules
 
 main :: IO ()
 main = do
@@ -150,6 +151,7 @@ allGroups =
     , testEq
     , testHashMap
     , testHashSet
+    , testModules
     ]
 
 groupName :: Test -> String
