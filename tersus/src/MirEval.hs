@@ -516,7 +516,7 @@ runStatements frame (Assign dest rv : rest) = do
 intOrValue :: Frame -> Operand -> E MirValue
 intOrValue frame o = liftE (operandValue frame o)
 
--- The operations on memory, which change the heap (the permissions they were given are erased: see MirGhost)
+-- The operations on memory, which change the heap (the permissions they were given are erased by the ghost erasure)
 memoryOp :: ListOp -> Maybe ([MirValue] -> E MirValue)
 memoryOp op = case op of
     AddrAlloc -> Just (\args -> case args of

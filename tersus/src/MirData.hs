@@ -38,7 +38,7 @@ import Utils
 -- `const C`, a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. The statements are
 -- `assign L RVALUE`, `peek L RVALUE` and `drop L`; the terminators `goto B`, `switch O B B`, `call O N O... L B`, `return` and `unreachable`.
 --
--- `writeProgramWithGhosts` writes `tersus-mir 2` instead: the program as it is before its ghosts are erased (MirGhost), for the
+-- `writeProgramWithGhosts` writes `tersus-mir 2` instead: the program as it is before its ghosts are erased, for the
 -- eraser written in Tersus (examples/mir_erase.tersus). The only records it adds are the statements of the validator's part that
 -- the erasure acts on: `ghost` for a ghost statement (its contents do not survive erasure, and are not written), and
 -- `dissolve L` for the taking apart of the value of _L. The contracts and the specification of a function are not written

@@ -2162,6 +2162,8 @@ fn sequenceFits(p: &Program, funcs: &List<String>, f: &Function, e: &Type, o: &O
     ot = operandTy(p, funcs, f, o);
     if ot.ok {
         t = ot.ty;
+        if t is Type::TRef { t = Box::unbox(clone((t as Type::TRef).inner)); };
+        if t is Type::TMutRef { t = Box::unbox(clone((t as Type::TMutRef).inner)); };
         if t is Type::TArray && sub(p, e, Box::unbox((t as Type::TArray).elem)) { return true; };
         if t is Type::TBox {
             inner = Box::unbox((t as Type::TBox).inner);
@@ -2196,7 +2198,10 @@ fn listLike(p: &Program, funcs: &List<String>, f: &Function, o: &Operand) -> Boo
     ot = operandTy(p, funcs, f, o);
     if ot.ok {
         t = ot.ty;
-        return t is Type::TList || t is Type::TArray || (t is Type::TBox && Box::unbox((t as Type::TBox).inner) is Type::TArray);
+        inner = clone(t);
+        if t is Type::TRef { inner = Box::unbox(clone((t as Type::TRef).inner)); };
+        if t is Type::TMutRef { inner = Box::unbox(clone((t as Type::TMutRef).inner)); };
+        return inner is Type::TList || inner is Type::TArray || (inner is Type::TBox && Box::unbox((inner as Type::TBox).inner) is Type::TArray);
     };
     r = false;
     match clone(o) {

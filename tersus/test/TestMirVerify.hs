@@ -7,7 +7,7 @@ import System.Exit (ExitCode (..))
 import Cli (World (..), noWorld, runProgramIn)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
-import MirVerify (verifyProgram)
+import MirHousekeeping (verifyProgram)
 import Pipeline (ownedSource)
 import Types (Type (..))
 import TestHarness
@@ -15,26 +15,27 @@ import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir_verify.tersus): the checks of
--- MirVerify that apply to a program as MirData writes it (the shape, and the types of statements, switches and
--- calls), run over the data of a program and compared verdict by verdict with the Haskell verifyProgram of the
--- same program. Ghost erasure is not here: MirData.forNative has already erased what it would erase, and a data
--- form that still held it would be needed to check that in Tersus.
+-- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir_verify.tersus): the check that a program
+-- as MirData writes it is well formed (the shape, and the types of statements, switches and calls), run over the data of
+-- a program. The verdict of each case below is the one the check has to give; the native sweep compares the verdict with
+-- the one the host gives (MirHousekeeping, which runs this program), program by program. Ghost erasure is not here:
+-- MirData.forNative has already erased what it would erase, and a data form that still held it would be needed to check that in Tersus.
 testMirVerify :: Test
 testMirVerify =
     TestList
         "testMirVerify"
         [ TestList
             "interpreted"
-            [ TestCase "a well formed program is accepted" (interpreted goodSource id)
-            , TestCase "a program with a list is accepted" (interpreted "xs = [1, 2, 3]; return size(xs) + first(xs);" id)
-            , TestCase "no entry block" (interpreted goodSource noEntryBlock)
-            , TestCase "a local of no known type" (interpreted goodSource varLocal)
-            , TestCase "a switch on an Int" (interpreted goodSource switchOnInt)
-            , TestCase "a call of a function that is not there" (interpreted goodSource unknownCall)
-            , TestCase "an array with the same size parameter is accepted" (interpreted sizedSource id)
-            , TestCase "an instance with another array size is refused" (interpreted holderSource wrongHolderArg)
-            , TestCase "an array of lists that does not fit in a frame is refused" (interpreted "xs = array(3000, 0); return get(xs, 0);" arrayOfLists)
+            [ TestCase "a well formed program is accepted" (interpreted goodSource id True)
+            , TestCase "a program with a list is accepted" (interpreted "xs = [1, 2, 3]; return size(xs) + first(xs);" id True)
+            , TestCase "no entry block" (interpreted goodSource noEntryBlock False)
+            , TestCase "a local of no known type" (interpreted goodSource varLocal False)
+            , TestCase "a switch on an Int" (interpreted goodSource switchOnInt False)
+            , TestCase "a call of a function that is not there" (interpreted goodSource unknownCall False)
+            , TestCase "an array with the same size parameter is accepted" (interpreted sizedSource id True)
+            , TestCase "a named type that starts with a builtin's name is accepted" (interpreted integerSource id True)
+            , TestCase "an instance with another array size is refused" (interpreted holderSource wrongHolderArg False)
+            , TestCase "an array of lists that does not fit in a frame is refused" (interpreted "xs = array(3000, 0); return get(xs, 0);" arrayOfLists False)
             , TestCase "what is not the MIR is refused" refused
             ]
         , TestParallel
@@ -56,6 +57,9 @@ goodSource = "fn double(n: Int) -> Int [{ }] [{ }] { return n + n; }; if double(
 sizedSource :: String
 sizedSource = "fn copyOf<n>(a: Array<Int, n>) -> Array<Int, n> [{ }] [{ }] { b = a; return b; }; xs = #[1, 2]; return size(copyOf(xs));"
 
+integerSource :: String
+integerSource = "struct Integer { n: Int }; struct Holder<T> { x: T }; fn take<T>(h: Holder<T>) -> Int [{ }] [{ }] { return 1; }; a = Holder<Integer> { x: Integer { n: 3 } }; return take(a);"
+
 holderSource :: String
 holderSource = "struct Holder<T> { x: T }; fn take2(h: Holder<Array<Int, 2>>) -> Int [{ }] [{ }] { return get(h.x, 0); }; a = Holder<Array<Int, 2>> { x: #[1, 2] }; b = Holder<Array<Int, 3>> { x: #[1, 2, 3] }; return take2(a);"
 
@@ -64,15 +68,15 @@ holderSource = "struct Holder<T> { x: T }; fn take2(h: Holder<Array<Int, 2>>) ->
 verifierProgram :: IO (Result Program String)
 verifierProgram = readFile "examples/mir_verify.tersus" >>= compileOnce
 
--- Whether the Haskell verifier accepts the program, as MirData writes it
+-- Whether the host's check accepts the program, as MirData writes it
 referenceAccepts :: Program -> Bool
 referenceAccepts program = case verifyProgram (forNative program) of
     Ok () -> True
     Error _ -> False
 
--- Run the verifier in the interpreter over the data of the mutated program, and compare the verdicts
-interpreted :: String -> (Program -> Program) -> IO TestResult
-interpreted source mutate = do
+-- Run the verifier in the interpreter over the data of the mutated program, and compare its verdict with the one it has to give
+interpreted :: String -> (Program -> Program) -> Bool -> IO TestResult
+interpreted source mutate expected = do
     verifier <- verifierProgram
     pure $ case verifier of
         Error e -> Just ("the verifier does not compile: " ++ e)
@@ -81,7 +85,6 @@ interpreted source mutate = do
             Ok owned ->
                 let program = mutate owned
                     text = writeProgram program
-                    expected = referenceAccepts program
                  in case runProgramIn noWorld{worldInput = text} verifierProgram of
                         Error e -> Just e
                         Ok ((output, errors), _)

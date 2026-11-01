@@ -42,8 +42,11 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
 - `tersus/examples/`: example programs, all loaded and checked by
   `testExamples` (see Testing Guidelines). `examples/emit.tersus` is the LLVM
   emitter written in Tersus, and `examples/mir_reader.tersus` /
-  `examples/mir_verify.tersus` are the MIR reader and MIR checker written in
-  Tersus.
+  `examples/mir_verify.tersus` / `examples/mir_erase.tersus` are the MIR
+  reader, the MIR checker and the ghost erasure written in Tersus. The host
+  runs the checker and the erasure on the MIR as data (`MirHousekeeping`);
+  they are the production path, and the examples' expectations in
+  `test/TestPipeline.hs` say what running them with no input does.
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
   (see Build, Test, and Development Commands).

@@ -8,7 +8,6 @@ import qualified Data.Set as Set
 
 import qualified Mir as M
 import MirMoves (checkMoves, stripPositions)
-import MirVerify (verifyProgram)
 import Pretty (renderType)
 import StdLibDefs (stdLibCtx)
 import Types
@@ -281,11 +280,12 @@ program stmts = do
             m : rest -> (m, rest)
             [] -> (main', [])
         result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s))
-    case verifyProgram result of
-        Error e -> failL ("Lowering produced a malformed program: " ++ e)
-        Ok () -> case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) (lsDrops s) result else [] of
-            [] -> return (stripPositions result)
-            errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
+    -- (that the program is well formed is checked by the pipeline on what is lowered, with the checker
+    -- written in Tersus (MirHousekeeping): it is not checked here, so that the checker and the eraser can
+    -- themselves be lowered to be made from the seed)
+    case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) (lsDrops s) result else [] of
+        [] -> return (stripPositions result)
+        errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
 -- One type variable the checker never learned (the elements of a list that is never used) is an Int
 resolveFunction :: M.Function -> L M.Function
