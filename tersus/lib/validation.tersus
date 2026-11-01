@@ -2451,6 +2451,28 @@ fn forallEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int
 
 // A get at a symbolic index of a list of known size is one of its finitely
 // many elements: when every element is the goal's other side, the get is too.
+fn getCoveredByEqualRange(context: &ValidatorContext, equalities: &List<EqualityFact>, seq: Int, otherSeq: Int, index: Int) -> Bool {
+    for app in context.applications {
+        if app.function = -30 {
+            if size(app.arguments) = 5 {
+                bv = integerValue(context, get(app.arguments, 4));
+                if bv is IntegerLookup::Found {
+                    if (bv as IntegerLookup::Found).value = 0 {
+                        aSide = hasEquality(equalities, seq, get(app.arguments, 0)) && hasEquality(equalities, otherSeq, get(app.arguments, 1));
+                        bSide = hasEquality(equalities, seq, get(app.arguments, 1)) && hasEquality(equalities, otherSeq, get(app.arguments, 0));
+                        if aSide || bSide {
+                            if linearEntails(context, get(app.arguments, 2), index, 0) {
+                                if linearEntails(context, index, get(app.arguments, 3), -1) { return true; };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
 fn finiteGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
     for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
         if finiteGetSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
@@ -2491,9 +2513,10 @@ fn finiteGetSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getT
             for app in context.applications {
                 if app.function = -14 {
                     if size(app.arguments) = 2 {
-                        if hasEquality(equalities, get(app.arguments, 0), gf.seq) {
-                            if hasEquality(equalities, get(app.arguments, 1), kTerm) {
-                                if hasEquality(equalities, app.id, otherTerm) { elemFound = true; };
+                        if hasEquality(equalities, get(app.arguments, 1), kTerm) {
+                            if hasEquality(equalities, app.id, otherTerm) {
+                                if hasEquality(equalities, get(app.arguments, 0), gf.seq) { elemFound = true; };
+                                if getCoveredByEqualRange(context, equalities, gf.seq, get(app.arguments, 0), kTerm) { elemFound = true; };
                             };
                         };
                     };
