@@ -50,15 +50,49 @@ assumedInfo program name =
                 assumed = [p | ProofAssert p <- M.specEnsures spec, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
              in FnInfo names (M.specRequires spec) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name (M.readersOfInput program)) (M.specMutParams spec)
 
--- The group of a function defined at the top: the ones that call it and that it calls, in a cycle, or just
--- itself. A function defined inside another is in no group: it can call the one around it only under the
--- rule for that (both declared ~), which the recursive call itself checks.
+-- What a function depends on: the functions it calls or names, and the ones its contracts and proofs call,
+-- since a proof that calls a function uses its contract as a call in the code does. Nested functions are
+-- dependencies like any other: a cycle can pass through one.
+dependencies :: M.Program -> M.Function -> Set Name
+dependencies program fn = Set.intersection (Map.keysSet (M.progFunctions program)) (Set.union (M.functionsNamed fn) (Set.fromList (concatMap statementNames statements)))
+  where
+    spec = M.fnSpec fn
+    statements = M.specRequires spec ++ M.specEnsures spec ++ [vs | block <- Map.elems (M.fnBlocks fn), M.Ghost _ ghost <- M.blockStatements block, vs <- ghostStatements ghost]
+    ghostStatements (M.GhostValidation vs) = [vs]
+    ghostStatements (M.GhostAxiom _ _ ins outs) = ins ++ outs
+    ghostStatements (M.GhostProof _ _ ins outs body) = ins ++ outs ++ body
+    ghostStatements _ = []
+    statementNames (ProofAssert proof) = proofNames proof
+    statementNames (Assume proof) = proofNames proof
+    statementNames (AssignProofVar _ expr) = exprNames expr
+    statementNames (Rewrite rule) = ruleNames rule
+    proofNames (BVar var) = [var]
+    proofNames (ATerm var) = [var]
+    proofNames (FApp funct args) = proofNames funct ++ concatMap proofNames args
+    proofNames (Forall _ guards body) = concatMap proofNames guards ++ proofNames body
+    proofNames (CTerm (VFnRef n)) = [n]
+    proofNames _ = []
+    exprNames (Var var) = [var]
+    exprNames (F expr args) = exprNames expr ++ concatMap exprNames args
+    exprNames (Val (VFnRef n)) = [n]
+    exprNames _ = []
+    ruleNames (UserRewrite _ args) = concatMap proofNames args
+    ruleNames (Refl proof) = proofNames proof
+    ruleNames (CheckGtZero proof) = proofNames proof
+    ruleNames (CheckRel proof) = proofNames proof
+    ruleNames _ = []
+
+-- The group of a function defined at the top: the top-level functions that depend on it and that it
+-- depends on, in a cycle, or just itself. Only they are members (a cycle can still pass through a nested
+-- function, which is a dependency on the way). A function defined inside another is in no group of its
+-- own: it can call the one around it only under the rule for that (both declared ~), which the recursive
+-- call itself checks.
 callGroup :: M.Program -> Name -> Set Name
-callGroup program name = Set.filter (\other -> Set.member name (reach other)) (reach name)
+callGroup program name = Set.filter (\other -> Set.member other tops && Set.member name (reach other)) (reach name)
   where
     fns = M.progFunctions program
     tops = Map.keysSet (topLevelSources program)
-    callees n = maybe Set.empty (Set.intersection tops . M.functionsNamed) (Map.lookup n fns)
+    callees n = maybe Set.empty (dependencies program) (Map.lookup n fns)
     reach n = go Set.empty [n]
       where
         go seen [] = seen
