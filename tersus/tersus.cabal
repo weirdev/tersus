@@ -46,7 +46,9 @@ library
       DataCodec
       Ghost
       Hash
+      Interface
       Linear
+      Link
       LlvmRuntime
       Mir
       MirData
@@ -58,6 +60,7 @@ library
       MirMoves
       MirOwnership
       MirValidate
+      ModuleResolve
       Modules
       Native
       Parse

@@ -1,0 +1,7 @@
+// The second file of the geo module: it imports its sibling file by name.
+
+import modules::geo::shapes;
+
+fn doubledManhattan(p: &shapes::Point) -> Int [{ }] [{ }] {
+    return 2 * shapes::manhattan(p);
+};

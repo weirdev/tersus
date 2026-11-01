@@ -1,0 +1,6 @@
+// A single-file module: units/units.tersus is the whole module, so its
+// symbols are named at module level (modules::units::feetToInches).
+
+fn feetToInches(feet: Int) -> Int [{ }] [{ }] {
+    return feet * 12;
+};

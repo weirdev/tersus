@@ -1,0 +1,15 @@
+// The program: the entry module of the modules package. It imports the
+// geo, figures, parity and units modules and runs.
+
+import modules::geo;
+import modules::figures;
+import modules::parity::even::isEven;
+import modules::parity::odd::isOdd;
+import modules::units;
+
+label = "geo";
+p = geo::shapes::make(3, 4);
+mp = geo::shapes::manhattan(&p);
+dp = geo::extra::doubledManhattan(&p);
+f = figures::makeFigure(p, 2);
+return mp + figures::total(&f) + dp + isEven(10) + isOdd(7) + units::feetToInches(2) + size(label);
