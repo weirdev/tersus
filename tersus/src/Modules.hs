@@ -33,7 +33,8 @@ import qualified Data.Set as Set
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 
-import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, parseFileWith, renderPath)
+import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, parseFileWith, parseStatementBlockWith, renderPath)
+import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
 import TersusTypes
 
 data ModuleIdentity = ModuleIdentity
@@ -350,6 +351,7 @@ data LoadedFile = LoadedFile
     , loadedParsed :: ParsedFile
     , loadedDeclNames :: [Name]
     , loadedImports :: [ResolvedImport]
+    , loadedFileSource :: String
     }
     deriving (Show)
 
@@ -446,6 +448,7 @@ data PFile = PFile
     { pfEntry :: FileEntry
     , pfParsed :: ParsedFile
     , pfDecls :: [Name]
+    , pfSource :: String
     }
 
 data PModule = PModule
@@ -572,14 +575,14 @@ parseModule resolver entryPath layout moduleName = do
         texts <- mapM_M readEntry entries
         case parseModuleFiles resolver layout moduleId entries texts of
             Left err -> failM err
-            Right parsedFiles -> mapM_M checkOne (zip entries parsedFiles)
+            Right parsedFiles -> mapM_M checkOne (zip texts parsedFiles)
       where
         readEntry entry = case resolverReadFile resolver (fePath entry) of
             Nothing -> failM ("in module " ++ renderModuleId moduleId ++ ": file not found: " ++ fePath entry)
             Just text -> pureM (entry, text)
-        checkOne (entry, parsedFile) = case checkDeclarationsOnly moduleId entry (fePath entry == entryPath) (fileBody parsedFile) of
+        checkOne ((entry, source), parsedFile) = case checkDeclarationsOnly moduleId entry (fePath entry == entryPath) (fileBody parsedFile) of
             Left err -> failM err
-            Right () -> pureM (PFile entry parsedFile (declarationNames (fileBody parsedFile)))
+            Right () -> pureM (PFile entry parsedFile (declarationNames (fileBody parsedFile)) source)
 
 -- A file can name, in a struct or enum literal, a match pattern, an
 -- `is`/`as` test or explicit generic arguments, a type declared in
@@ -614,8 +617,15 @@ parseModuleFiles resolver layout moduleId ownEntries ownTexts =
             Right (parsedFile, d') -> go d' rest remaining ((fePath entry, parsedFile) : done)
             Left _ -> go d rest ((entry, text) : remaining) done
 
+libraryDecls :: Decls
+libraryDecls = foldl step emptyDecls [cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource]
+  where
+    step decls text = case parseStatementBlockWith decls text of
+        Right (_, decls') -> decls'
+        Left _ -> decls
+
 seedDecls :: Resolver -> Layout -> [FileEntry] -> Decls
-seedDecls resolver layout ownEntries = loop emptyDecls texts
+seedDecls resolver layout ownEntries = loop libraryDecls texts
   where
     layoutEntries = layRootFiles layout ++ concat (Map.elems (layModules layout))
     ordered = ownEntries ++ [entry | entry <- layoutEntries, fePath entry `notElem` map fePath ownEntries]
@@ -1121,6 +1131,7 @@ loadFromEntry resolver rawEntry = case discoverEntry resolver entryPath of
                                 (pfParsed pf)
                                 (pfDecls pf)
                                 (fromMaybe [] (Map.lookup (moduleId', feName (pfEntry pf)) (lsResolved finalState)))
+                                (pfSource pf)
                             | pf <- pmFiles pmod
                             ]
                             (sort (nub (declsOfModule pmod)))

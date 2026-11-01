@@ -7,11 +7,54 @@ import Data.List (isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
+import Data.Char (isAlphaNum)
+
 import qualified Mir as M
-import Modules (ModuleId, renderModuleId)
+import Modules (ModuleId, declarationNames, renderModuleId)
+import Parse (emptyDecls, parseStatementBlockWith)
+import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
 import qualified TersusTypes
-import TersusTypes (Name, Proof (..), Type (..), ValidationStatement (..), VariableProof, Value (..), instanceOf)
+import TersusTypes (Name, Proof (..), Statement (..), Type (..), ValidationStatement (..), VariableProof, Value (..), instanceOf)
 import Utils (Result (..), bindResult)
+
+libraryStatements :: [Statement]
+libraryStatements = fst (foldl step ([], emptyDecls) [cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource])
+  where
+    step (stmts, declared) text = case parseStatementBlockWith declared text of
+        Right (more, declared') -> (stmts ++ more, declared')
+        Left _ -> (stmts, declared)
+
+libraryDeclNames :: Set.Set Name
+libraryDeclNames = Set.fromList (declarationNames libraryStatements)
+
+libraryTypeNames :: Set.Set Name
+libraryTypeNames =
+    Set.fromList $
+        [name | StructDef name _ _ _ <- libraryStatements]
+            ++ [name | EnumDef name _ <- libraryStatements]
+            ++ [name | TraitDef name _ _ <- libraryStatements]
+
+isLibraryName :: Name -> Bool
+isLibraryName name = name `Set.member` libraryDeclNames || isLibraryImplName name
+  where
+    isLibraryImplName implName
+        | "<" `isPrefixOf` implName =
+            let inside = takeWhile (/= '>') (drop 1 implName)
+                parts = splitAs inside
+                bases = map baseName parts
+             in any (`Set.member` libraryTypeNames) bases
+        | otherwise = baseName (takeWhile (/= ':') implName) `Set.member` libraryTypeNames
+    splitAs text = case breakOn " as " text of
+        Just (owner, trait) -> [owner, trait]
+        Nothing -> [text]
+    baseName = takeWhile isAlphaNum
+    breakOn needle = go ""
+      where
+        go acc text
+            | needle `isPrefixOf` text = Just (reverse acc, drop (length needle) text)
+            | otherwise = case text of
+                c : rest -> go (c : acc) rest
+                [] -> Nothing
 
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
 linkPrograms [] = Error "link error: no modules to link"
@@ -43,6 +86,7 @@ mergeAll what entries = go Map.empty Map.empty entries
     go values origins ((modu, name, value) : rest) = case Map.lookup name values of
         Nothing -> go (Map.insert name value values) (Map.insert name modu origins) rest
         Just existing
+            | isLibraryName name -> go values origins rest
             | existing == value -> go values origins rest
             | otherwise -> Error ("link error: " ++ what ++ " " ++ name ++ " is defined by both module " ++ renderModuleId (origins Map.! name) ++ " and module " ++ renderModuleId modu ++ " with different definitions")
 
@@ -53,6 +97,7 @@ mergeFunctions units = go Map.empty Map.empty [(modu, fn) | (modu, program) <- u
     go functions origins ((modu, fn) : rest) = case Map.lookup (M.fnName fn) functions of
         Nothing -> go (Map.insert (M.fnName fn) fn functions) (Map.insert (M.fnName fn) modu origins) rest
         Just existing
+            | isLibraryName (M.fnName fn) -> go functions origins rest
             | sameFunction existing fn -> go functions origins rest
             | otherwise -> Error ("link error: function " ++ displayName (M.fnName fn) ++ " is defined by both module " ++ renderModuleId (origins Map.! M.fnName fn) ++ " and module " ++ renderModuleId modu ++ " with different definitions")
     displayName name = case externLocal name of

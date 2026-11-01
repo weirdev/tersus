@@ -843,5 +843,54 @@ testModuleCliFilesystem = TestCase "module-cli-filesystem" $ do
         removeDirectoryRecursive root
         return value
 
+testModuleLibraries :: Test
+testModuleLibraries =
+    testCaseSeq
+        "module-libraries"
+        [ expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; return geo::greetingSize();")
+            , ("app/geo/geo.tersus", "fn greetingSize() -> Int [{ }] [{ }] { s = \"hi\".concat(\"!\"); return size(s); };")
+            ]
+            "app/main.tersus"
+            "3"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; import app::other; return geo::greetingSize() + other::wordSize();")
+            , ("app/geo/geo.tersus", "fn greetingSize() -> Int [{ }] [{ }] { s = \"hi\".concat(\"!\"); return size(s); };")
+            , ("app/other/other.tersus", "fn wordSize() -> Int [{ }] [{ }] { s = \"abcd\"; return size(s); };")
+            ]
+            "app/main.tersus"
+            "7"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; m = geo::counts(); return m;")
+            , ("app/geo/geo.tersus", "fn counts() -> Int [{ }] [{ }] { counts = HashMap::new(); counts = counts.insert(\"the\", 40); counts = counts.insert(\"cat\", 1); counts = counts.insert(\"the\", 41); return counts.lookup(\"the\", 0) + counts.size(); };")
+            ]
+            "app/main.tersus"
+            "43"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; p = geo::make(21); return geo::twice(p);")
+            , ("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn twice(p: Point) -> Int [{ }] [{ }] { q = clone(p); if q = p { return p.x + q.x; }; return 0; };")
+            ]
+            "app/main.tersus"
+            "42"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; a = geo::make(5); b = geo::make(5); if a = b { return 1; }; return 0;")
+            , ("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
+            ]
+            "app/main.tersus"
+            "1"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; s = geo::greeting(); return size(s);")
+            , ("app/geo/geo.tersus", "fn greeting() -> String [{ }] [{ }] { return \"hi\".concat(\"!\"); };")
+            ]
+            "app/main.tersus"
+            "3"
+        ]
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleAssumptions, testModuleCliFilesystem]
+testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]

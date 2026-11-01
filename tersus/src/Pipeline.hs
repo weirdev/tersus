@@ -21,7 +21,7 @@ import Data.List (sortBy)
 import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Mir as M
-import Interface (ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv)
+import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv)
 import Link (linkPrograms, pruneProgram)
 import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
@@ -37,7 +37,7 @@ import Parse (ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, 
 import MirLists (lowerLists)
 import PreludeSource (cloneSource, eqSource, boxSource, listsSource, mapSource, preludeSource, setSource, stringSource)
 import Pretty (renderVarProof)
-import TersusTypes (Expression (..), FunctBody (..), Size (..), Statement (..), Type (..), ValidationStatement (..), Value (..), exprToProof, instanceOf)
+import TersusTypes (Expression (..), FunctBody (..), Signature (..), Size (..), Statement (..), Type (..), ValidationStatement (..), Value (..), exprToProof, instanceOf)
 import TypeCheck (elaborate, elaborateWith)
 import Utils
 
@@ -275,13 +275,48 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
                             Left err -> Error err
                             Right prepared -> case orphanCheck moduId prepared of
                                 Left err -> Error err
-                                Right () ->
-                                    let augmented = if needsDropTrait prepared then dropTraitStatements ++ prepared else prepared
-                                     in case elaborateWith env augmented of
-                                            Error err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
-                                            Ok (elaborated, state) -> case extractInterface moduId augmented elaborated state of
-                                                Error err -> Error err
-                                                Ok iface -> Ok (CompiledModule moduId elaborated iface)
+                                Right () -> case moduleLibraryStatements depInterfaces modu of
+                                    Left err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
+                                    Right libraryStmts ->
+                                        let withLibraries = libraryStmts ++ prepared
+                                            augmented = if needsDropTrait withLibraries then dropTraitStatements ++ withLibraries else withLibraries
+                                         in case elaborateWith env augmented of
+                                                Error err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
+                                                Ok (elaborated, state) -> case extractInterface moduId prepared elaborated state of
+                                                    Error err -> Error err
+                                                    Ok iface -> Ok (CompiledModule moduId elaborated iface)
+
+moduleLibraryStatements :: [ModuleInterface] -> Mod.LoadedModule -> Either String [Statement]
+moduleLibraryStatements depInterfaces modu = readLibraries (libraries moduleText) emptyDecls
+  where
+    moduleText = intercalate "\n" ([Mod.loadedFileSource file | file <- Mod.loadedModuleFiles modu] ++ [libraryTriggers])
+    libraryTriggers = intercalate " " [name | name <- ["String", "HashMap", "HashSet"], name `elem` dependencyTypeNames]
+    dependencyTypeNames = concatMap interfaceTypeNames depInterfaces
+    interfaceTypeNames iface =
+        Map.keys (ifTypes iface)
+            ++ Map.keys (ifGenerics iface)
+            ++ concatMap (concatMap (typeNames . snd) . snd) (Map.elems (ifCtors iface))
+            ++ concatMap (concatMap (typeNames . snd) . snd) (Map.elems (ifGenerics iface))
+            ++ concatMap signatureTypeNames (Map.elems (ifFunctions iface))
+    signatureTypeNames fn = let Signature params ret _ _ _ _ = fnSignature fn in concatMap typeNames (ret : params)
+    typeNames ty = case ty of
+        TNamed name -> [name]
+        TVariant name -> [name]
+        TList inner -> typeNames inner
+        TArrayOf inner _ -> typeNames inner
+        TBox inner -> typeNames inner
+        TAddr inner -> typeNames inner
+        TBlock inner -> typeNames inner
+        TUninit inner -> typeNames inner
+        TRef inner -> typeNames inner
+        TMutRef inner -> typeNames inner
+        TFn args ret -> concatMap typeNames (ret : args)
+        TForall _ _ inner -> typeNames inner
+        _ -> []
+    readLibraries [] _ = Right []
+    readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
+        Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
+        Right (stmts, declared') -> fmap (stmts ++) (readLibraries more declared')
 
 needsDropTrait :: [Statement] -> Bool
 needsDropTrait prepared = any implsDrop prepared && not (any declaresDrop prepared)

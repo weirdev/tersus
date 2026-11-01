@@ -49,19 +49,36 @@ lowerModuleWith env ifaces elaborated =
 seededModuleState :: ImportEnv -> [ModuleInterface] -> [Statement] -> LS
 seededModuleState env ifaces elaborated =
     (initialState elaborated)
-        { lsTc = seededTcState env
-        , lsTypes = Map.unions (map interfaceTypeDecls ifaces)
+        { lsTc = seededTcState env'
+        , lsTypes = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map interfaceTypeDecls ifaces))
         , lsFunctions = stubs
         , lsNames = Set.union (Set.fromList (Map.keys stubs)) (Set.singleton "main")
         , lsGlobals = Map.fromList [(name, (mirName, functionType sizes types ptys rty)) | (name, mirName, fn) <- stubList, let Signature ptys rty sizes types _ _ = fnSignature fn]
-        , lsGenerics = Map.unions (map ifGenerics ifaces)
-        , lsInvariants = Map.unions (map ifInvariants ifaces)
+        , lsGenerics = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifGenerics ifaces))
+        , lsInvariants = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifInvariants ifaces))
         , lsCopies = Set.unions (map ifCopies ifaces)
         , lsLinear = Set.unions (map ifLinear ifaces)
         , lsDrops = Set.unions (map ifDrops ifaces)
         , lsStubs = Set.fromList [mirName | (_, mirName, _) <- stubList]
         }
   where
+    ownNames =
+        Set.fromList $
+            concatMap
+                ownName
+                elaborated
+    ownName stmt = case stmt of
+        StructDef name _ _ _ -> [name]
+        EnumDef name variants -> name : map fst variants
+        TraitDef name _ _ -> [name]
+        _ -> []
+    env' =
+        env
+            { ieTypes = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (ieTypes env)
+            , ieCtors = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (ieCtors env)
+            , ieGenerics = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (ieGenerics env)
+            , ieTraits = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (ieTraits env)
+            }
     stubList = [(name, mirNameOf iface name, fn) | iface <- ifaces, (name, fn) <- Map.toList (ifFunctions iface)]
     mirNameOf iface name
         | name `Set.member` ifExterns iface = "extern " ++ name
