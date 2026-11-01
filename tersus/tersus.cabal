@@ -36,6 +36,7 @@ source-repository head
 library
   exposed-modules:
       Bootstrap
+      BuiltinRegistry
       Cli
       Compile
       Ghost
@@ -64,9 +65,12 @@ library
       SelfHostedMir
       SelfHostedProof
       StdLib
+      Solver
       StdLibDefs
-      TersusTypes
+      Syntax
+      Types
       TypeCheck
+      TypeCheckCore
       Utils
   other-modules:
       Paths_tersus
@@ -132,6 +136,7 @@ test-suite tersus-test
       TestArrays
       TestBasics
       TestBootstrap
+      TestBuiltinRegistry
       TestBorrow
       TestBox
       TestBytes

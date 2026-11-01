@@ -3,7 +3,7 @@ module TestCopies (testCopies) where
 import Data.List (isInfixOf)
 
 import Pipeline (compileSource)
-import TersusTypes
+import Syntax
 import TestHarness
 import Utils
 

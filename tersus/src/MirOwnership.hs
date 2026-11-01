@@ -16,7 +16,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirMono (monomorphize)
-import TersusTypes (Name, Type (..), Variable, instanceName)
+import Types (Name, Type (..), Variable, instanceName)
 
 -- Native code frees what a program makes, and updates a list in place, so it needs to know who owns each list and each
 -- struct or enum value. This pass makes that explicit in the MIR, after the program is validated, and without changing what

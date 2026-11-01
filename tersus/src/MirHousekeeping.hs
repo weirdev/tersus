@@ -25,7 +25,7 @@ import MirValidate (validateProgram)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import Seed (cachedSeed, emitterHash)
 import PreludeSource (boxSource, emitterSource, listsSource, mirEraseSource, mirVerifySource)
-import TersusTypes (Type (..))
+import Types (Type (..))
 import Utils
 
 -- The housekeeping of the MIR (REPLACING_HASKELL.md target 3) is done by the programs written in Tersus for

@@ -577,7 +577,7 @@ mid-implementation:
 6. **Concurrency and suspension.** Add transfer/share rules, synchronization
    contracts and frame/cancellation rules before enabling these uses.
 
-Every stage updates `TersusTypes`, elaboration, MIR serialization/verification,
+Every stage updates `Types`/`Syntax`, elaboration, MIR serialization/verification,
 the interpreter, ownership lowering and both LLVM emitters as needed, and also
 the self-hosted path: `SelfHostedMir` (which today reports `TRef` as
 unsupported), `examples/mir_reader.tersus`, `examples/emit.tersus` and the

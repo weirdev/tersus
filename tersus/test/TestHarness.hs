@@ -44,7 +44,9 @@ import MirEval (fromMirValue)
 import Native (cacheDirectory)
 import Parse
 import Pipeline (compileSource, ownedSource, parseWithEquality, runStatements, validateStatements)
-import TersusTypes
+import Types
+import Syntax
+import Solver
 import Utils
 
 type TestResult = Maybe String

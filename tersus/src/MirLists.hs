@@ -9,7 +9,7 @@ import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, listToMaybe)
 
 import Mir
-import TersusTypes (Arg (..), Name, Type (..), instanceName, mentionsParameter)
+import Types (Arg (..), Name, Type (..), instanceName, mentionsParameter)
 
 -- A list is checked, validated and run by the executor as a list. Native code has no list: a `List<T>` is the struct `StdList<T>` of
 -- lib/lists.tersus (the elements in an array on the heap, and how many are in use), and this makes the program that is validated the

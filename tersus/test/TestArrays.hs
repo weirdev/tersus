@@ -1,6 +1,6 @@
 module TestArrays (testArrays) where
 
-import TersusTypes
+import Syntax
 import TestHarness
 
 -- Array<T, N>: N elements held inline, wherever the array is made. The size is a constant and part of the type; the validator

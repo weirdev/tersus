@@ -10,8 +10,10 @@ import qualified Mir as M
 import MirMoves (checkMoves, stripPositions)
 import Pretty (renderType)
 import StdLibDefs (stdLibCtx)
-import TersusTypes
-import TypeCheck (Elaborated (..), arrayElement, elaborate, functionType)
+import Types
+import Syntax
+import TypeCheck (Elaborated (..), elaborate)
+import TypeCheckCore (arrayElement, functionType)
 import Utils
 
 -- Lowers a program that has passed validation to the MIR: control flow becomes blocks that jump, nested expressions

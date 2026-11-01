@@ -11,7 +11,7 @@ import qualified Mir as M
 import MirLower (lowerElaborated, lowerLibrary)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
-import TersusTypes (Expression (..), Statement (..), Value (..))
+import Syntax (Expression (..), Statement (..), Value (..))
 import TypeCheck (elaborate)
 import Utils
 

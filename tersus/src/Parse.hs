@@ -25,9 +25,10 @@ import Data.Char (isDigit, isLetter, isUpper)
 import Data.List (intercalate, isInfixOf, nub, (\\))
 import Data.Maybe (fromMaybe, isJust)
 
-import StdLib
+import BuiltinRegistry (builtinDecls, builtinSymbol, proofBuiltinByName)
 import Utils (inIntRange, utf8Bytes)
-import TersusTypes
+import Types
+import Syntax
 
 -- The parser remembers the structs and enums declared so far. A literal needs the fields of a constructor
 -- in declaration order (a struct is a constructor named like its type, a variant is Enum::Variant), and a
@@ -181,9 +182,9 @@ builtinStatement = do
     name <- variable
     whitespace
     (params, _, inputReqs, outputReqs, _, _) <- functHeader
-    builtin <- case lookup name stdlibBuiltinDecls of
+    builtin <- case lookup name builtinDecls of
         Just b -> return b
-        Nothing -> fail ("builtin fn " ++ name ++ " is not a builtin of the standard library (StdLib.stdlibBuiltinDecls)")
+        Nothing -> fail ("builtin fn " ++ name ++ " is not a builtin of the standard library (BuiltinRegistry.builtinDecls)")
     exported <- case traverse affirmed outputReqs of
         Just proofs -> return proofs
         Nothing -> fail ("builtin fn " ++ name ++ " promises only affirmations in its output contract")
@@ -215,8 +216,8 @@ splitAffirm (ProofAssert p) = concat <$> mapM (fmap wholeFacts . check) (conjunc
   where
     -- `affirm whole(b);` says that the permission b is all of its allocation: it starts at its start and is as long as it
     wholeFacts (ProofAssert (FApp (ATerm "whole") [b])) =
-        [ ProofAssert (FApp (CTerm (builtinFunct (Rel Eq))) [FApp (ATerm "start") [b], CTerm (VInt 0)])
-        , ProofAssert (FApp (CTerm (builtinFunct (Rel Eq))) [FApp (ATerm "cap") [b], FApp (ATerm "extent") [FApp (ATerm "origin") [b]]])
+        [ ProofAssert (FApp (CTerm (builtinSymbol (Rel Eq))) [FApp (ATerm "start") [b], CTerm (VInt 0)])
+        , ProofAssert (FApp (CTerm (builtinSymbol (Rel Eq))) [FApp (ATerm "cap") [b], FApp (ATerm "extent") [FApp (ATerm "origin") [b]]])
         ]
     wholeFacts other = [other]
     conjuncts (FApp (CTerm (VFunct _ _ _ (BuiltinFunct And) _)) [a, b]) = conjuncts a ++ conjuncts b
@@ -291,7 +292,7 @@ tupleAssign = do
     expr <- expression
     whitespace
     let held = "$tuple " ++ show (sourceLine position) ++ ":" ++ show (sourceColumn position)
-    return (Assign held expr : [Assign name (F (Val (builtinFunct (Field Nothing (show i)))) [Var held]) | (i, name) <- zip [0 :: Int ..] names])
+    return (Assign held expr : [Assign name (F (Val (builtinSymbol (Field Nothing (show i)))) [Var held]) | (i, name) <- zip [0 :: Int ..] names])
 
 -- `Vec { addr: a, len: n, blk: b } = e;`: a struct taken apart, each field to a name. Every field is moved to its name (as the parts of a tuple
 -- are), and the value is used up, so a drop it has (`impl Drop`) is not run: this is how a function that is given a value with a drop and
@@ -313,7 +314,7 @@ structAssign = do
     expr <- expression
     whitespace
     let held = "$struct " ++ show (sourceLine position) ++ ":" ++ show (sourceColumn position)
-    return (Assign held expr : [Assign var (F (Val (builtinFunct (Field Nothing field))) [Var held]) | (field, var) <- binds] ++ [Dissolve held])
+    return (Assign held expr : [Assign var (F (Val (builtinSymbol (Field Nothing field))) [Var held]) | (field, var) <- binds] ++ [Dissolve held])
   where
     bind = do
         field <- variable
@@ -416,7 +417,7 @@ countingLoop var lo hi invariant body = do
     when (assigns var body) $ fail ("The body of a for loop cannot assign its loop variable " ++ var)
     let loName = "$lo " ++ var
         hiName = "$hi " ++ var
-        bound rel name = ProofAssert (FApp (CTerm (builtinFunct (Rel rel))) [ATerm var, ATerm name])
+        bound rel name = ProofAssert (FApp (CTerm (builtinSymbol (Rel rel))) [ATerm var, ATerm name])
         step = Assign var (builtinApp Plus [Var var, Val (VInt 1)])
         remaining = builtinApp Minus [Var hiName, Var var]
     return
@@ -434,7 +435,7 @@ elementLoop place index element list invariant body = do
     return (Assign listName list : loop)
 
 builtinApp :: BuiltinFunct -> [Expression] -> Expression
-builtinApp name = F (Val (builtinFunct name))
+builtinApp name = F (Val (builtinSymbol name))
 
 -- Whether statements assign a variable, in a nested block, branch or loop (a function defined inside has a scope of its own)
 assigns :: Variable -> [Statement] -> Bool
@@ -556,7 +557,7 @@ structLiteral element cloned apply = do
                 whitespace
                 void (char '{')
                 return (candidate, known, fromMaybe [] args)
-    if null declared && isVariant name then whitespace >> return (apply (builtinFunct (Ctor name [] [])) []) else structFields element cloned apply name ctorArgs declared
+    if null declared && isVariant name then whitespace >> return (apply (builtinSymbol (Ctor name [] [])) []) else structFields element cloned apply name ctorArgs declared
   where
     isVariant = ("::" `isInfixOf`)
 
@@ -575,7 +576,7 @@ structFields element cloned0 apply name ctorArgs declared = do
     when (isJust base && all (`elem` map fst inits) declared) $
         fail ("Struct " ++ name ++ " literal gives every field, so ..base copies nothing")
     args <- mapM (argument own name base inits) declared
-    return (apply (builtinFunct (Ctor name ctorArgs declared)) args)
+    return (apply (builtinSymbol (Ctor name ctorArgs declared)) args)
   where
     fieldInit = do
         field <- variable
@@ -587,13 +588,13 @@ structFields element cloned0 apply name ctorArgs declared = do
         optional (char ',' >> whitespace)
         return (field, value')
     fieldOf from field
-        | "::" `isInfixOf` name = apply (builtinFunct (Field Nothing field)) [apply (builtinFunct (Cast name)) [from]]
-        | otherwise = apply (builtinFunct (Field (Just name) field)) [from]
+        | "::" `isInfixOf` name = apply (builtinSymbol (Field Nothing field)) [apply (builtinSymbol (Cast name)) [from]]
+        | otherwise = apply (builtinSymbol (Field (Just name) field)) [from]
     argument own name base inits field =
         case (lookup field inits, base) of
             (Just given, _) -> return given
             (Nothing, Just from)
-                | not own, Just inner <- cloned0 from -> return (apply (builtinFunct CloneOf) [fieldOf inner field])
+                | not own, Just inner <- cloned0 from -> return (apply (builtinSymbol CloneOf) [fieldOf inner field])
                 | otherwise -> return (fieldOf from field)
             (Nothing, Nothing) -> fail ("Struct " ++ name ++ " literal lacks field " ++ field)
 
@@ -679,9 +680,9 @@ desugarMatch scrutinee arms@((first, _, _) : _) = do
     chain [] = []
     chain [(name, binds, body)] = bindings name binds ++ body
     chain ((name, binds, body) : rest) =
-        [If (F (Val (builtinFunct (Is name))) [subject]) (bindings name binds ++ body) (chain rest)]
+        [If (F (Val (builtinSymbol (Is name))) [subject]) (bindings name binds ++ body) (chain rest)]
     -- Binding hides a variable of the same name outside the match instead of assigning it
-    bindings name binds = [Let var (F (Val (builtinFunct (Project name field))) [subject]) | (field, var) <- binds]
+    bindings name binds = [Let var (F (Val (builtinSymbol (Project name field))) [subject]) | (field, var) <- binds]
 
 -- match scrutinee { Pattern => { statements }, ... }
 matchStatement :: Parser [Statement]
@@ -726,13 +727,13 @@ withFields apply methods term = do
         whitespace
         return $ case (arguments, methods) of
             (Just args, Just (_, call)) -> \receiver -> call field receiver args
-            _ -> \acc -> apply (builtinFunct (Field Nothing field)) [acc]
+            _ -> \acc -> apply (builtinSymbol (Field Nothing field)) [acc]
     castSuffix = do
         keyword "as"
         whitespace
         (variant, _) <- declaredCtor
         whitespace
-        return (\acc -> apply (builtinFunct (Cast variant)) [acc])
+        return (\acc -> apply (builtinSymbol (Cast variant)) [acc])
 
 -- x.f(arguments) in an expression, before the checker has said which function f is
 methodCall :: Variable -> Expression -> [Expression] -> Expression
@@ -1266,8 +1267,8 @@ forallProof = do
         whitespace
         upper <- proof
         body <- forallBody
-        let geq = FApp (CTerm (builtinFunct (Rel GtEq))) [ATerm index, lower]
-            lt = FApp (CTerm (builtinFunct (Rel Lt))) [ATerm index, upper]
+        let geq = FApp (CTerm (builtinSymbol (Rel GtEq))) [ATerm index, lower]
+            lt = FApp (CTerm (builtinSymbol (Rel Lt))) [ATerm index, upper]
         return ([geq, lt], body)
     forallBody = do
         void (char ':')
@@ -1289,7 +1290,7 @@ nonInfixProof =
         <|> withFields proofApply Nothing (parensProof <|> structLiteral proof (const Nothing) proofApply <|> try functionProof <|> try abstractProof)
 
 infixProof :: Parser VariableProof
-infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinFunct funct)) [lproof, rproof]) (\funct proof' -> FApp (CTerm (builtinFunct funct)) [proof'])
+infixProof = infixLevels nonInfixProof (\funct lproof rproof -> FApp (CTerm (builtinSymbol funct)) [lproof, rproof]) (\funct proof' -> FApp (CTerm (builtinSymbol funct)) [proof'])
 
 -- old(e) in a postcondition: the entry value of the place e is of; *r in a proof: the value a reference is to.
 oldProof :: Parser VariableProof
@@ -1302,14 +1303,14 @@ oldProof = try $ do
     whitespace
     void (char ')')
     whitespace
-    return (FApp (CTerm (builtinFunct OldOf)) [inner])
+    return (FApp (CTerm (builtinSymbol OldOf)) [inner])
 
 derefProof :: Parser VariableProof
 derefProof = do
     void (char '*')
     whitespace
     operand <- nonInfixProof
-    return (FApp (CTerm (builtinFunct DerefOf)) [operand])
+    return (FApp (CTerm (builtinSymbol DerefOf)) [operand])
 
 parensProof :: Parser VariableProof
 parensProof = parensParse proof
@@ -1319,16 +1320,9 @@ parensProof = parensParse proof
 functionProof :: Parser VariableProof
 functionProof = do
     fname <- qualifiedName
-    let funct = case fname of
-            "size" -> CTerm (builtinFunct Size)
-            "first" -> CTerm (builtinFunct First)
-            "last" -> CTerm (builtinFunct Last)
-            "get" -> CTerm (builtinFunct Get)
-            "push" -> CTerm (builtinFunct Push)
-            "pop" -> CTerm (builtinFunct Pop)
-            "set" -> CTerm (builtinFunct Set)
-            "array" -> CTerm (builtinFunct NewArray)
-            _ -> ATerm fname
+    let funct = case proofBuiltinByName fname of
+            Just b -> CTerm (builtinSymbol b)
+            Nothing -> ATerm fname
     void (char '(')
     whitespace
     args <- proof `sepBy` skipWhitespace (char ',')
@@ -1344,7 +1338,7 @@ abstractProof = do
     return p
 
 concreteProof :: Parser VariableProof
-concreteProof = arrayLiteral (\items -> FApp (CTerm (builtinFunct ArrayFrom)) [CTerm items]) <|> (CTerm <$> value)
+concreteProof = arrayLiteral (\items -> FApp (CTerm (builtinSymbol ArrayFrom)) [CTerm items]) <|> (CTerm <$> value)
 
 -- #[1, 2, 3]: an array of constants, which is the list of them read as an array
 arrayLiteral :: (Value -> a) -> Parser a
@@ -1393,7 +1387,7 @@ nonInfixExpression =
         <|> derefExpression
         <|> notExpression
         <|> withFields expressionApply methods (structLiteral expression clonedBase expressionApply <|> try fExpression <|> qualifiedCall)
-        <|> arrayLiteral (\items -> F (Val (builtinFunct ArrayFrom)) [Val items])
+        <|> arrayLiteral (\items -> F (Val (builtinSymbol ArrayFrom)) [Val items])
         <|> withFields expressionApply methods stringLiteral
         <|> (Val <$> value)
         <|> withFields expressionApply methods (varExpression <|> parensExpression)
@@ -1406,14 +1400,14 @@ borrowExpression :: Parser Expression
 borrowExpression = do
     mutable <- try (string "&mut" >> whitespace >> return True) <|> (char '&' >> notFollowedBy (char '&') >> whitespace >> return False)
     place <- nonInfixExpression
-    return (F (Val (builtinFunct (if mutable then BorrowMutOf else BorrowOf))) [place])
+    return (F (Val (builtinSymbol (if mutable then BorrowMutOf else BorrowOf))) [place])
 
 derefExpression :: Parser Expression
 derefExpression = do
     void (char '*')
     whitespace
     operand <- nonInfixExpression
-    return (F (Val (builtinFunct DerefOf)) [operand])
+    return (F (Val (builtinSymbol DerefOf)) [operand])
 
 -- !a: the Bool that a is not. It binds tighter than any infix operator (`!a && b` is `(!a) && b`).
 notExpression :: Parser Expression
@@ -1421,7 +1415,7 @@ notExpression = do
     void (try (char '!' <* notFollowedBy (char '=')))
     whitespace
     operand <- nonInfixExpression
-    return (F (Val (builtinFunct Not)) [operand])
+    return (F (Val (builtinSymbol Not)) [operand])
 
 -- "text": a String (lib/string.tersus) of the UTF-8 bytes of the text. `\n`, `\r`, `\t`, `\0`, `\"`, `\\` and `\u{hex}` are the characters they name.
 stringLiteral :: Parser Expression
@@ -1436,7 +1430,7 @@ stringLiteralOf apply literal = do
     whitespace
     ctors <- declCtors <$> getState
     when (Map.lookup "String" ctors /= Just ["bytes"]) $ fail "a string literal needs the library String, which this program declares differently"
-    return (apply (builtinFunct (Ctor "String" [] ["bytes"])) [apply (builtinFunct BytesFrom) [literal (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))]])
+    return (apply (builtinSymbol (Ctor "String" [] ["bytes"])) [apply (builtinSymbol BytesFrom) [literal (VList (map (VInt . toInteger) (concatMap utf8Bytes chars)))]])
   where
     stringChar = noneOf "\"\\\n" <|> (char '\\' >> escape)
     escape =
@@ -1472,7 +1466,7 @@ parensExpression = do
     parts <- parensParse (expression `sepBy1` skipWhitespace (char ','))
     case parts of
         [single] -> return single
-        _ -> return (F (Val (builtinFunct (Ctor (tupleBase (length parts)) [] (map show [0 .. length parts - 1])))) parts)
+        _ -> return (F (Val (builtinSymbol (Ctor (tupleBase (length parts)) [] (map show [0 .. length parts - 1])))) parts)
 
 value :: Parser Value
 value = vbool <|> vint <|> vlist
@@ -1540,7 +1534,7 @@ fExpression = do
 
 infixExpression :: Parser Expression
 -- TODO: Function should be Var expression like fExpression produces not Val
-infixExpression = infixLevels nonInfixExpression (\funct lexpr rexpr -> F (Val (builtinFunct funct)) [lexpr, rexpr]) (\funct expr -> F (Val (builtinFunct funct)) [expr])
+infixExpression = infixLevels nonInfixExpression (\funct lexpr rexpr -> F (Val (builtinSymbol funct)) [lexpr, rexpr]) (\funct expr -> F (Val (builtinSymbol funct)) [expr])
 
 -- Infix operators in five levels, tightest first: `*` and `/`, then `+` and `-`, then the relations, then `&&`, then `||`.
 -- Each level associates left, so `a + 1 < b * 2` is `(a + 1) < (b * 2)`.

@@ -6,13 +6,15 @@ module StdLibDefs
 
 import qualified Data.Map as Map
 
+import BuiltinRegistry (builtinDecls, stdBindings)
 import Parse (emptyDecls, parseStatementBlockWith)
 import PreludeSource (stdlibSource)
-import StdLib (builtinFunct, eqProof, stdlibBuiltinDecls)
-import TersusTypes
+import StdLib (builtinFunct, eqProof)
+import Types
+import Syntax
 
 -- The standard library written in Tersus (lib/stdlib.tersus), parsed once. Each `builtin fn` there
--- declares a builtin of StdLib.stdlibBuiltinDecls: what it does is the builtin it names, and its contracts
+-- declares a builtin of BuiltinRegistry.builtinDecls: what it does is the builtin it names, and its contracts
 -- are the ones written there. This module, and not a Haskell literal, is what the checker, the lowering
 -- and the validator take those contracts from.
 stdlibTextDefs :: Map.Map BuiltinFunct Value
@@ -20,7 +22,7 @@ stdlibTextDefs = case parseStatementBlockWith emptyDecls stdlibSource of
     Left err -> error ("lib/stdlib.tersus does not parse: " ++ show err)
     Right (stmts, _) ->
         let defs = Map.fromList [(builtin, canonicalValue value) | Assign _ (Val value@(VFunct _ _ _ (BuiltinFunct builtin) _)) <- stmts]
-         in case [name | (name, builtin) <- stdlibBuiltinDecls, not (Map.member builtin defs)] of
+         in case [name | (name, builtin) <- builtinDecls, not (Map.member builtin defs)] of
                 [] -> defs
                 missing -> error ("lib/stdlib.tersus does not declare: " ++ unwords missing)
 
@@ -58,31 +60,9 @@ canonicalProof (CTerm value) = CTerm (canonical value)
 canonicalProof (Forall index guards body) = Forall index (map canonicalProof guards) (canonicalProof body)
 canonicalProof other = other
 
--- The names a program calls the standard library by
+-- The names a program calls the standard library by: the StdName bindings of BuiltinRegistry
 stdLibCtx :: Map.Map Variable Value
-stdLibCtx =
-    Map.fromList
-        ( [(name, stdlibBuiltin builtin) | (name, builtin) <- stdlibBuiltinDecls, name `elem` programNames]
-            ++ [ ("+", stdlibBuiltin Plus)
-               , ("-", stdlibBuiltin Minus)
-               , ("*", stdlibBuiltin Times)
-               , ("/", stdlibBuiltin Div)
-               , ("%", stdlibBuiltin Mod)
-               , ("=", stdlibBuiltin (Rel Eq))
-               , ("!=", stdlibBuiltin (Rel NotEq))
-               , ("<", stdlibBuiltin (Rel Lt))
-               , (">", stdlibBuiltin (Rel Gt))
-               , ("<=", stdlibBuiltin (Rel LtEq))
-               , (">=", stdlibBuiltin (Rel GtEq))
-               ]
-        )
-  where
-    programNames =
-        [ "size", "first", "last", "get", "push", "pop", "set", "array"
-        , "writeByte", "writeError", "readByte", "argCount", "argByte"
-        , "pathByte", "fileLoad", "fileByte", "storeByte", "fileStore"
-        , "toByte", "toInt"
-        ]
+stdLibCtx = Map.fromList [(name, stdlibBuiltin builtin) | (name, builtin) <- stdBindings]
 
 stdLibValCtx :: (Map.Map Variable Iota, [IotaProof])
 stdLibValCtx =

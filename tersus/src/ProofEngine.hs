@@ -28,7 +28,9 @@ import Data.Maybe (fromMaybe, isJust)
 
 import Linear
 import StdLib
-import TersusTypes
+import Types
+import Syntax
+import Solver
 import Utils
 
 type BuiltinEvaluator = BuiltinFunct -> [Value] -> Result Value String

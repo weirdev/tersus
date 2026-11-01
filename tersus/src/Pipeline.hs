@@ -20,7 +20,8 @@ import MirValidate (Validated, validateProgram)
 import MirLists (lowerLists)
 import PreludeSource (boxSource, listsSource)
 import Pretty (renderVarProof)
-import TersusTypes (Expression (..), FunctBody (..), Size (..), Statement (..), Type (..), ValidationStatement (..), Value (..), exprToProof)
+import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
+import Types (Size (..), Type (..))
 import Utils
 
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
