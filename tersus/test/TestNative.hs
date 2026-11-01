@@ -123,7 +123,7 @@ testNativeIr =
         [ TestCase "overflow-checked add" $
             withIr "return 1 + 2;" (\ir -> testAssertTrue ("@llvm.sadd.with.overflow.i64" `isInfixOf` ir && "@tersus_overflow" `isInfixOf` ir))
         , TestCase "comparison" $
-            withIr "x = 3; return x < 4;" (\ir -> testAssertTrue ("icmp slt i64" `isInfixOf` ir && "@\"type.Bool\"" `isInfixOf` ir))
+            withIr "x = 3; return x < 4;" (\ir -> testAssertTrue ("icmp slt i64" `isInfixOf` ir && not ("@\"type." `isInfixOf` ir)))
         , TestCase "function" $
             withIr "fn f(a: Int) -> Int { return a; }; return f(1);" (\ir -> testAssertTrue ("define internal i64 @\"fn.f\"(i64 %p.1)" `isInfixOf` ir && "call i64 @\"fn.f\"" `isInfixOf` ir))
         , TestCase "no return" $
@@ -131,21 +131,21 @@ testNativeIr =
         , TestCase "ghost statements are dropped" $
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
         , TestCase "a list is the struct of the library, which holds its elements in memory at an address" $
-            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.StdList<Int>\" = private constant" `isInfixOf` ir && "call i64 @tersus_addr_alloc" `isInfixOf` ir && "call i64 @tersus_addr_resize" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
-        , TestCase "a struct is held in the frame, as its fields, with a descriptor" $
-            withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir && not ("tersus_data_new" `isInfixOf` ir)))
+            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc" `isInfixOf` ir && "call i64 @tersus_addr_resize" `isInfixOf` ir && not ("@\"data." `isInfixOf` ir) && not ("tersus_clone" `isInfixOf` ir)))
+        , TestCase "a struct is held in the frame, as its fields" $
+            withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "define internal void @\"print.P\"" `isInfixOf` ir && not ("@\"data." `isInfixOf` ir) && not ("tersus_data_new" `isInfixOf` ir)))
         , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" $
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
         , TestCase "a Box takes room on the heap for what it holds" $
             withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.stdBoxNew<P>\"" `isInfixOf` ir))
         , TestCase "a Box of an array is a list of the library" $
-            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.stdListFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
+            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.stdListFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
         , TestCase "a Box is the struct of the library, freed by its drop" $
-            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<StdBox<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.stdBoxUnbox<Int>\"" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
+            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<StdBox<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.stdBoxUnbox<Int>\"" `isInfixOf` ir))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" $
-            withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[3 x i8] c\"\\C3\\A9\\00\"" `isInfixOf` ir))
+            withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "@tersus_writeByte(i64 195)" `isInfixOf` ir && "@tersus_writeByte(i64 169)" `isInfixOf` ir))
         , TestCase "a letter of four bytes" $
-            withIr "struct \x1D538 { \x1D539: Int }; return \x1D538 { \x1D539: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[5 x i8] c\"\\F0\\9D\\94\\B8\\00\"" `isInfixOf` ir))
+            withIr "struct \x1D538 { \x1D539: Int }; return \x1D538 { \x1D539: 1 };" (\ir -> testAssertTrue (all isAscii ir && "@tersus_writeByte(i64 240)" `isInfixOf` ir && "@tersus_writeByte(i64 184)" `isInfixOf` ir))
         , TestCase "a function with a non-ASCII name" $
             withIr "fn d\x00e9(n: Int) -> Int { return n + 1; }; return d\x00e9(1);" (\ir -> testAssertTrue (all isAscii ir && "@\"fn.d\\C3\\A9\"" `isInfixOf` ir))
         , TestCase "a program with non-ASCII names builds" $ buildsOnly "struct P { \x00e9: Int }; enum \x00d1 { \x00c4 { \x00f6: Int }, \x00dc }; fn d\x00e9(n: Int) -> Int { return n + 1; }; return \x00d1::\x00c4 { \x00f6: d\x00e9(1) };"
@@ -257,6 +257,8 @@ dataPrograms =
     , ("a list of structs with lists is used twice", "struct S { xs: List<Int> }; impl Clone for S { }; ss = push(push([], S { xs: [1] }), S { xs: [2, 3] }); tt = clone(ss); tt = set(tt, 0, S { xs: [] }); return ss;")
     , ("a struct with a list is passed and returned", "struct S { n: Int, xs: List<Int> }; fn grow(s: S) -> S { return S { n: s.n + 1, xs: push(s.xs, s.n) }; }; return grow(grow(S { n: 0, xs: [] }));")
     , ("a struct with a list is used twice", "struct S { n: Int, xs: List<Int> }; impl Clone for S { }; impl Eq for S { }; a = S { n: 1, xs: [2] }; b = clone(a); return b = a;")
+    , ("a struct with a drop is not copied", "struct S { xs: List<Int> }; impl Clone for S { }; a = S { xs: [1] }; b = clone(a); b = S { xs: [2] }; return a;")
+    , ("an array of a struct with a list", "struct S { xs: List<Int> }; impl Clone for S { }; a = array(2, S { xs: [1] }); b = clone(get(a, 0)); return push(b.xs, 2);")
     , ("a struct is updated in a loop", "struct S { n: Int, xs: List<Int> }; s = S { n: 0, xs: [] }; i = 0; while i < 100 [{ affirm i >= 0; }] shrinks 100 - i { s = S { n: s.n + 1, xs: push(s.xs, i) }; i = i + 1; }; return s.n + size(s.xs);")
     , ("a struct is assigned again", "struct S { xs: List<Int> }; s = S { xs: [1] }; s = S { xs: [2, 3] }; return s;")
     , ("a Box of a struct with a list", "struct S { xs: List<Int> }; b = Box::new(S { xs: [1, 2] }); c = b; return c.xs;")
