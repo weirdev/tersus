@@ -148,6 +148,7 @@ test-suite tersus-test
       TestMirReader
       TestMirVerify
       TestMirErase
+      TestParity
       TestNative
       TestOwnership
       TestPipeline
