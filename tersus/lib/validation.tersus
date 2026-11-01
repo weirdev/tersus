@@ -5202,6 +5202,10 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
 // has to hold at each back edge, and the value of the variant when the
 // iteration started. A stack of frames keeps an exit from a nested loop inside
 // the loop that encloses it.
+struct LoopTest { relation: Int, left: ValueRef, right: ValueRef };
+
+impl Clone for LoopTest { };
+
 struct LoopFrame {
     header: Int,
     region: List<Int>,
@@ -5227,7 +5231,7 @@ enum ExecutionEnd {
     // body is the block an iteration starts on, and region is the header and
     // every block that can get back to it; a block outside the region leaves
     // the loop and is walked after it.
-    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef, variantObject: ValueRef, variantFamily: Int, variantConstructor: Int },
+    Loop { exit: Int, body: Int, region: List<Int>, checks: List<ExecutionStep>, assumptions: List<ExecutionStep>, havoc: List<Int>, relation: Int, left: ValueRef, right: ValueRef, variant: ValueRef, variantMode: Int, variantOther: ValueRef, zero: ValueRef, variantObject: ValueRef, variantFamily: Int, variantConstructor: Int, orTests: List<LoopTest> },
     Unsupported,
 };
 
@@ -5841,48 +5845,67 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
                                                             if (zeroValue as IntegerLookup::Found).value != 0 { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
                                                         } else { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
                                                         if done = false {
-                                                            yesContext = assumeRelation(headerState.context, loop.relation, a, b);
-                                                            if loop.variantFamily >= 0 {
-                                                                variantObject = resolveValue(headerState, loop.variantObject);
-                                                                if variantObject is ValueLookup::Found {
-                                                                    yesContext = ValidatorContext { variants: push(clone(yesContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: true }), ..yesContext };
-                                                                };
-                                                            };
-                                                            if loop.variantMode = 0 {
-                                                                if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
-                                                                    finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
-                                                                };
-                                                            } else {
-                                                                if loop.variantMode = 1 {
-                                                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
-                                                                        finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
+                                                            tests = push([], LoopTest { relation: loop.relation, left: loop.left, right: loop.right });
+                                                            for extra in loop.orTests { tests = push(tests, clone(extra)); };
+                                                            negContext = clone(headerState.context);
+                                                            for test in tests {
+                                                                if done = false {
+                                                                    ta = a;
+                                                                    tb = b;
+                                                                    resolved = true;
+                                                                    lv = resolveValue(headerState, test.left);
+                                                                    rv = resolveValue(headerState, test.right);
+                                                                    if lv is ValueLookup::Found { if rv is ValueLookup::Found { ta = (lv as ValueLookup::Found).term; tb = (rv as ValueLookup::Found).term; } else { resolved = false; }; } else { resolved = false; };
+                                                                    if resolved = false { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
+                                                                    if done = false {
+                                                                        yesContext = assumeRelation(negContext, test.relation, ta, tb);
+                                                                        if loop.variantFamily >= 0 {
+                                                                            variantObject = resolveValue(headerState, loop.variantObject);
+                                                                            if variantObject is ValueLookup::Found {
+                                                                                yesContext = ValidatorContext { variants: push(clone(yesContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: true }), ..yesContext };
+                                                                            };
+                                                                        };
+                                                                        if loop.variantMode = 0 {
+                                                                            if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
+                                                                                finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
+                                                                            };
+                                                                        } else {
+                                                                            if loop.variantMode = 1 {
+                                                                                if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
+                                                                                    finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
+                                                                                };
+                                                                            };
+                                                                        };
+                                                                        if done = false {
+                                                                            protectedFacts = push(yesContext.equalities, EqualityFact { left: prior, right: prior });
+                                                                            protectedFacts = push(protectedFacts, EqualityFact { left: priorOther, right: priorOther });
+                                                                            protected = ValidatorContext { equalities: protectedFacts, ..yesContext };
+                                                                            yesState = ExecutionState { context: protected, ..clone(headerState) };
+                                                                            frame = LoopFrame { header: id, region: clone(loop.region), checks: appendSteps(loop.checks, candChecks), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: prior, priorOther: priorOther };
+                                                                            bodyResult = walkExecution(blocks, loop.body, yesState, fuel - 1, push(clone(loops), frame));
+                                                                            if bodyResult.status != 0 { finalResult = bodyResult; done = true; };
+                                                                        };
+                                                                        if done = false {
+                                                                            inverse = negateRelation(test.relation, ta, tb);
+                                                                            negContext = assumeRelation(negContext, inverse.relation, inverse.left, inverse.right);
+                                                                        };
                                                                     };
                                                                 };
                                                             };
                                                             if done = false {
-                                                                protectedFacts = push(yesContext.equalities, EqualityFact { left: prior, right: prior });
-                                                                protectedFacts = push(protectedFacts, EqualityFact { left: priorOther, right: priorOther });
-                                                                protected = ValidatorContext { equalities: protectedFacts, ..yesContext };
-                                                                yesState = ExecutionState { context: protected, ..clone(headerState) };
-                                                                frame = LoopFrame { header: id, region: clone(loop.region), checks: appendSteps(loop.checks, candChecks), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: prior, priorOther: priorOther };
-                                                                bodyResult = walkExecution(blocks, loop.body, yesState, fuel - 1, push(clone(loops), frame));
-                                                                if bodyResult.status != 0 { finalResult = bodyResult; done = true; };
+                                                                noContext = negContext;
+                                                                if loop.variantFamily >= 0 {
+                                                                    variantObject = resolveValue(headerState, loop.variantObject);
+                                                                    if variantObject is ValueLookup::Found {
+                                                                        noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
+                                                                    };
+                                                                };
+                                                                if contextContradictory(noContext) {
+                                                                    finalResult = ExecutionFlowResult { status: 0, block: id, step: -1, state: ExecutionState { context: clone(noContext), ..clone(headerState) } }; done = true;
+                                                                };
                                                                 if done = false {
-                                                                    inverse = negateRelation(loop.relation, a, b);
-                                                                    noContext = assumeRelation(headerState.context, inverse.relation, inverse.left, inverse.right);
-                                                                    if loop.variantFamily >= 0 {
-                                                                        variantObject = resolveValue(headerState, loop.variantObject);
-                                                                        if variantObject is ValueLookup::Found {
-                                                                            noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
-                                                                        };
-                                                                    };
-                                                                    if contextContradictory(noContext) {
-                                                                        finalResult = ExecutionFlowResult { status: 0, block: id, step: -1, state: ExecutionState { context: clone(noContext), ..clone(headerState) } }; done = true;
-                                                                    };
-                                                                    if done = false {
-                                                                        noState = ExecutionState { context: noContext, ..clone(headerState) };
-                                                                        finalResult = walkExecution(blocks, loop.exit, noState, fuel - 1, clone(loops)); done = true;
-                                                                    };
+                                                                    noState = ExecutionState { context: noContext, ..clone(headerState) };
+                                                                    finalResult = walkExecution(blocks, loop.exit, noState, fuel - 1, clone(loops)); done = true;
                                                                 };
                                                             };
                                                         };

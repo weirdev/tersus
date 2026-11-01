@@ -205,13 +205,19 @@ fn driverSteps(value: &DriverValue) -> List<ExecutionStep> {
     return out;
 };
 
+fn driverLoopTests(value: &DriverValue) -> List<LoopTest> {
+    result = [];
+    for item in driverItems(value) { result = push(result, LoopTest { relation: driverInt(driverField(item, 0)), left: driverValueRef(driverField(item, 1)), right: driverValueRef(driverField(item, 2)) }); };
+    return result;
+};
+
 fn driverEnd(value: &DriverValue) -> ExecutionEnd {
     name = driverName(value);
     if driverNameIs(name, "ExecutionEnd::Jump") { return ExecutionEnd::Jump { target: driverInt(driverField(value, 0)) }; };
     if driverNameIs(name, "ExecutionEnd::Branch") { return ExecutionEnd::Branch { yes: driverInt(driverField(value, 0)), no: driverInt(driverField(value, 1)), yesSteps: driverSteps(driverField(value, 2)), noSteps: driverSteps(driverField(value, 3)) }; };
     if driverNameIs(name, "ExecutionEnd::BooleanBranch") { return ExecutionEnd::BooleanBranch { yes: driverInt(driverField(value, 0)), no: driverInt(driverField(value, 1)), join: driverInt(driverField(value, 2)), value: driverValueRef(driverField(value, 3)), trueValue: driverValueRef(driverField(value, 4)), falseValue: driverValueRef(driverField(value, 5)) }; };
     if driverNameIs(name, "ExecutionEnd::Condition") { return ExecutionEnd::Condition { yes: driverInt(driverField(value, 0)), no: driverInt(driverField(value, 1)), relation: driverInt(driverField(value, 2)), left: driverValueRef(driverField(value, 3)), right: driverValueRef(driverField(value, 4)) }; };
-    if driverNameIs(name, "ExecutionEnd::Loop") { return ExecutionEnd::Loop { exit: driverInt(driverField(value, 0)), body: driverInt(driverField(value, 1)), region: driverInts(driverField(value, 2)), checks: driverSteps(driverField(value, 3)), assumptions: driverSteps(driverField(value, 4)), havoc: driverInts(driverField(value, 5)), relation: driverInt(driverField(value, 6)), left: driverValueRef(driverField(value, 7)), right: driverValueRef(driverField(value, 8)), variant: driverValueRef(driverField(value, 9)), variantMode: driverInt(driverField(value, 10)), variantOther: driverValueRef(driverField(value, 11)), zero: driverValueRef(driverField(value, 12)), variantObject: driverValueRef(driverField(value, 13)), variantFamily: driverInt(driverField(value, 14)), variantConstructor: driverInt(driverField(value, 15)) }; };
+    if driverNameIs(name, "ExecutionEnd::Loop") { return ExecutionEnd::Loop { exit: driverInt(driverField(value, 0)), body: driverInt(driverField(value, 1)), region: driverInts(driverField(value, 2)), checks: driverSteps(driverField(value, 3)), assumptions: driverSteps(driverField(value, 4)), havoc: driverInts(driverField(value, 5)), relation: driverInt(driverField(value, 6)), left: driverValueRef(driverField(value, 7)), right: driverValueRef(driverField(value, 8)), variant: driverValueRef(driverField(value, 9)), variantMode: driverInt(driverField(value, 10)), variantOther: driverValueRef(driverField(value, 11)), zero: driverValueRef(driverField(value, 12)), variantObject: driverValueRef(driverField(value, 13)), variantFamily: driverInt(driverField(value, 14)), variantConstructor: driverInt(driverField(value, 15)), orTests: driverLoopTests(driverField(value, 16)) }; };
     if driverNameIs(name, "ExecutionEnd::Unsupported") { return ExecutionEnd::Unsupported; };
     return ExecutionEnd::Done;
 };
