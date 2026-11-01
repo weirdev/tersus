@@ -335,7 +335,7 @@ coerceArguments ft inferred = do
         atz <- zonk at
         case (ptz, atz) of
             (TRef t, TRef u) -> expect "reference argument" t u >> return (withType ptz)
-            (TRef t, TMutRef u) -> expect "reference argument" t u >> return (withType ptz)
+            (TRef t, TMutRef u) -> expect "reference argument" t u >> return arg
             (TMutRef t, TMutRef u) -> expect "reference argument" t u >> checkCallWrites expr >> return (withType ptz)
             (TMutRef _, TRef _) -> failTc "Type error: a read reference (&T) cannot be given where an update reference (&mut T) is wanted: borrow the place for updating, as in &mut x"
             (TMutRef t, _) -> do
