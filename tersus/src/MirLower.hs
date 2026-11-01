@@ -51,20 +51,30 @@ lowerModuleWith _env ifaces elaborated@(Elaborated stmts _) =
         Right (p, finalState) -> Ok p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
 
 seededModuleState :: [ModuleInterface] -> Elaborated -> LS
-seededModuleState ifaces elaborated =
-    (initialState elaborated)
-        { lsTypes = Map.unions (map interfaceTypeDecls ifaces)
+seededModuleState ifaces elaboratedFull@(Elaborated elaborated _) =
+    (initialState elaboratedFull)
+        { lsTypes = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map interfaceTypeDecls ifaces))
         , lsFunctions = stubs
         , lsNames = Set.union (Set.fromList (Map.keys stubs)) (Set.singleton "main")
         , lsGlobals = Map.fromList [(name, (mirName, functionType sizes types ptys rty)) | (name, mirName, fn) <- stubList, let Signature ptys rty sizes types _ _ = fnSignature fn]
-        , lsGenerics = Map.unions (map ifGenerics ifaces)
-        , lsInvariants = Map.unions (map ifInvariants ifaces)
+        , lsGenerics = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifGenerics ifaces))
+        , lsInvariants = Map.filterWithKey (\name _ -> name `Set.notMember` ownNames) (Map.unions (map ifInvariants ifaces))
         , lsCopies = Set.unions (map ifCopies ifaces)
         , lsLinear = Set.unions (map ifLinear ifaces)
         , lsDrops = Set.unions (map ifDrops ifaces)
         , lsStubs = Set.fromList [mirName | (_, mirName, _) <- stubList]
         }
   where
+    ownNames =
+        Set.fromList $
+            concatMap
+                ownName
+                elaborated
+    ownName stmt = case stmt of
+        StructDef name _ _ _ -> [name]
+        EnumDef name variants -> name : map fst variants
+        TraitDef name _ _ -> [name]
+        _ -> []
     stubList = [(name, mirNameOf iface name, fn) | iface <- ifaces, (name, fn) <- Map.toList (ifFunctions iface)]
     mirNameOf iface name
         | name `Set.member` ifExterns iface = "extern " ++ name

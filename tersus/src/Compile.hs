@@ -1,6 +1,7 @@
 module Compile
     ( parseSource
     , parseWithEquality
+    , librariesFor
     , lowerSource
     , lowerStatements
     ) where
