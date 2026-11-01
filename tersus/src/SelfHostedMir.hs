@@ -1054,6 +1054,20 @@ statement rules (M.Assign (M.Local dest) (M.ListOp M.ToByte [source])) b0 = do
 statement rules (M.Assign (M.Local dest) (M.ListOp M.FromByte [source])) b = do
     (value, b') <- operand source b
     pure ([step "Assign" [("local", MInt (toInteger dest)), ("value", value)]], b')
+statement rules (M.Assign (M.Local dest) (M.ListOp (M.Narrow signed width) [source])) b0
+    | width >= 64 && signed = do
+        (value, b') <- operand source b0
+        pure ([step "Assign" [("local", MInt (toInteger dest)), ("value", value)]], b')
+    | otherwise = do
+        (value, b1) <- operand source b0
+        let (function, b2) = namedFunction "narrow" b1
+            (lowValue, highValue) = if signed
+                then (negate (2 ^ (width - 1)), 2 ^ (width - 1))
+                else (0, 2 ^ width)
+        (low, b3) <- operand (M.Const (M.CInt lowValue)) b2
+        (high, b4) <- operand (M.Const (M.CInt highValue)) b3
+        let ref = record "ValueRef::Local" [("local", MInt (toInteger dest))]
+        pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [value])], step "Assume" [("relation", MInt 3), ("left", low), ("right", ref)], step "Assume" [("relation", MInt 2), ("left", ref), ("right", high)]], b4)
 statement rules (M.Assign (M.Local dest) (M.ListOp op [source])) b
     | op `elem` [M.WriteByte, M.WriteError, M.PathByte, M.StoreByte] = do
     (value, b') <- operand source b
