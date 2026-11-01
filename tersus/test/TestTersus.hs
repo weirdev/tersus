@@ -48,6 +48,7 @@ import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
 import TestAstData
+import TestModules
 
 main :: IO ()
 main = do
@@ -169,6 +170,7 @@ originalGroups =
     , testEq
     , testHashMap
     , testHashSet
+    , testModules
     , testBuiltinRegistry
     , testSharedCache
     , testSharedCacheProbe
