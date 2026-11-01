@@ -1982,6 +1982,84 @@ impl Clone for SizeFact { };
 
 impl Copy for SizeFact { };
 
+
+// A reading of one list is also a reading of another when a `-30` fact
+// relates them (`get(a, base + j) = get(b, j)`): the corresponding index
+// in the other list is the sum application, or the index itself when the
+// offset is zero, and back the same way through the sum's parts.
+fn getFactsTranslated(context: &ValidatorContext, equalities: &List<EqualityFact>, term: Int) -> List<GetFact> {
+    facts = getFactsOf(context, equalities, term);
+    extra = [];
+    for gf in facts {
+        for app in context.applications {
+            if app.function = -30 {
+                if size(app.arguments) = 5 {
+                    a = get(app.arguments, 0);
+                    b = get(app.arguments, 1);
+                    base = get(app.arguments, 4);
+                    if hasEquality(equalities, gf.seq, b) {
+                        cand = shiftedIndex(context, equalities, base, gf.at);
+                        if cand is IntegerLookup::Found { extra = push(extra, GetFact { seq: a, at: (cand as IntegerLookup::Found).value, found: true }); };
+                    };
+                    if hasEquality(equalities, gf.seq, a) {
+                        bvA = integerValue(context, base);
+                        candB = 0;
+                        candBFound = false;
+                        if bvA is IntegerLookup::Found {
+                            if (bvA as IntegerLookup::Found).value = 0 { candB = gf.at; candBFound = true; };
+                        };
+                        for sum in context.applications {
+                            if sum.function = -1 {
+                                if size(sum.arguments) = 2 {
+                                    if hasEquality(equalities, sum.id, gf.at) {
+                                        if hasEquality(equalities, get(sum.arguments, 0), base) { candB = get(sum.arguments, 1); candBFound = true; };
+                                        if hasEquality(equalities, get(sum.arguments, 1), base) { candB = get(sum.arguments, 0); candBFound = true; };
+                                    };
+                                };
+                            };
+                        };
+                        if candBFound { extra = push(extra, GetFact { seq: b, at: candB, found: true }); };
+                    };
+                };
+            };
+        };
+    };
+    for f in extra { facts = push(facts, f); };
+    return facts;
+};
+
+// The term for `base + j`: the index itself when the offset is zero, the
+// constant of the sum when both sides are known, else an application of
+// the sum that the context already has.
+fn shiftedIndex(context: &ValidatorContext, equalities: &List<EqualityFact>, base: Int, j: Int) -> IntegerLookup {
+    bv = integerValue(context, base);
+    if bv is IntegerLookup::Found {
+        if (bv as IntegerLookup::Found).value = 0 { return IntegerLookup::Found { value: j }; };
+        jv = integerValue(context, j);
+        if jv is IntegerLookup::Found {
+            want = (bv as IntegerLookup::Found).value + (jv as IntegerLookup::Found).value;
+            for constant in context.constants {
+                if constant.kind = 0 {
+                    if constant.value = want { return IntegerLookup::Found { value: constant.id }; };
+                };
+            };
+            return IntegerLookup::Missing;
+        };
+    };
+    for sum in context.applications {
+        if sum.function = -1 {
+            if size(sum.arguments) = 2 {
+                if hasEquality(equalities, get(sum.arguments, 0), base) {
+                    if hasEquality(equalities, get(sum.arguments, 1), j) { return IntegerLookup::Found { value: sum.id }; };
+                };
+                if hasEquality(equalities, get(sum.arguments, 1), base) {
+                    if hasEquality(equalities, get(sum.arguments, 0), j) { return IntegerLookup::Found { value: sum.id }; };
+                };
+            };
+        };
+    };
+    return IntegerLookup::Missing;
+};
 fn sizeTermOf(context: &ValidatorContext, equalities: &List<EqualityFact>, seq: Int) -> SizeFact {
     for app in context.applications {
         if app.function = -13 {
@@ -2264,7 +2342,7 @@ fn forallEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int
 // A get at a symbolic index of a list of known size is one of its finitely
 // many elements: when every element is the goal's other side, the get is too.
 fn finiteGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
-    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+    for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
         if finiteGetSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
     };
     return false;
@@ -2326,7 +2404,7 @@ fn finiteGetEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: 
 // The bridge records `forall j in lo..hi: get(a, base + j) = c` as an
 // application of function -32 to (a, lo, hi, base, c).
 fn forallConstantSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
-    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+    for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
         if forallConstantSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
     };
     return false;
@@ -2394,7 +2472,7 @@ fn forallConstantSideFor(context: &ValidatorContext, analysis: &ContextAnalysis,
 // (mode 0) or `get(b, j) - d` (mode 1) as an application of function -33 to
 // (a, b, lo, hi, base, d, mode).
 fn forallShiftSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int) -> Bool {
-    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+    for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
         if forallShiftSideFor(context, analysis, getTerm, exprTerm, gf) { return true; };
     };
     return false;
@@ -2644,7 +2722,7 @@ fn entailsUnderEquality(context: &ValidatorContext, x: Int, y: Int, u: Int, v: I
 // The bridge records `forall j in lo..hi: get(a, base + j) != c` as an
 // application of function -31 to (a, lo, hi, base, c).
 fn forallDifferentSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
-    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+    for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
         if forallDifferentSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
     };
     return false;
