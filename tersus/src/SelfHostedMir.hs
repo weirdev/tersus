@@ -301,10 +301,10 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) args) b0
         BlockContents -> Just "blockcontents"
         UninitFilled -> Just "uninitfilled"
         UninitAt -> Just "uninitat"
-        AddrOffset -> Just "addroffset"
-        AddrCast -> Just "addrcast"
-        AddrToInt -> Just "addrtoint"
-        AddrFromInt -> Just "addrfromint"
+        AddrOffset -> Just "ghostop:addroffset"
+        AddrCast -> Just "ghostop:addrcast"
+        AddrToInt -> Just "ghostop:addrtoint"
+        AddrFromInt -> Just "ghostop:addrfromint"
         _ -> Nothing
 -- An operation on a permission in a proof (the parts of one, in the
 -- contract of another): an application, with what the operation needs

@@ -1333,6 +1333,52 @@ fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
 // The facts of a context as linear inequalities over terms: orders and
 // differences directly, equalities and the defining identities of sum,
 // difference, scale and size applications as equations.
+// The representative of a term under the known equalities: arithmetic
+// over applications only combines when the same value, reached through
+// equal terms (a projection of a pair and the pair's part, say), is one
+// variable, so applications and facts are read through representatives.
+fn canonicalTerm(known: &List<EqualityFact>, term: Int) -> Int {
+    rep = term;
+    changed = true;
+    while changed {
+        changed = false;
+        for f in known {
+            if f.left = rep || f.right = rep {
+                if f.left < rep { rep = f.left; changed = true; };
+                if f.right < rep { rep = f.right; changed = true; };
+            };
+        };
+    };
+    return rep;
+};
+
+// Every term the arithmetic reads is replaced by the representative of
+// its equality class: the same value reached through equal terms (a
+// projection of a pair and the pair's part, say) must be one variable,
+// or counts and sizes of it never combine.
+fn canonicalContext(context: &ValidatorContext) -> ValidatorContext {
+    known = closeContext(context);
+    equalities = [];
+    for f in context.equalities { equalities = push(equalities, EqualityFact { left: canonicalTerm(known, f.left), right: canonicalTerm(known, f.right) }); };
+    applications = [];
+    for app in context.applications {
+        args = [];
+        for arg in app.arguments { args = push(args, canonicalTerm(known, arg)); };
+        applications = push(applications, ApplicationTerm { id: canonicalTerm(known, app.id), function: app.function, arguments: args });
+    };
+    constants = [];
+    for c in context.constants { constants = push(constants, ConstantTerm { id: canonicalTerm(known, c.id), kind: c.kind, value: c.value }); };
+    orders = [];
+    for o in context.orders { orders = push(orders, OrderFact { smaller: canonicalTerm(known, o.smaller), greater: canonicalTerm(known, o.greater), strict: o.strict }); };
+    different = [];
+    for d in context.different { different = push(different, DisequalityFact { left: canonicalTerm(known, d.left), right: canonicalTerm(known, d.right) }); };
+    variants = [];
+    for v in context.variants { variants = push(variants, VariantFact { object: canonicalTerm(known, v.object), family: v.family, constructor: v.constructor, matches: v.matches }); };
+    differences = [];
+    for d in context.differences { differences = push(differences, DifferenceFact { left: canonicalTerm(known, d.left), right: canonicalTerm(known, d.right), bound: d.bound }); };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
+};
+
 fn linFacts(context: &ValidatorContext) -> List<LinFact> {
     facts = [];
     for order in context.orders {
@@ -1745,9 +1791,84 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
 };
 
 // Prove left - right <= bound by contradiction with the context's facts.
+fn dumpInt(v: Int) -> Int {
+    if v < 0 { writeByte(toByte(45)); return dumpInt(0 - v); };
+    if v >= 10 { out = dumpInt(v / 10); writeByte(toByte(48 + v % 10)); return out + 1; };
+    writeByte(toByte(48 + v));
+    return 1;
+};
+
+fn dumpLinFacts(facts: &List<LinFact>, gl: Int, gr: Int) -> Int {
+    total = 0;
+    writeByte(toByte(71));
+    writeByte(toByte(32));
+    total = dumpInt(gl);
+    writeByte(toByte(32));
+    total = dumpInt(gr);
+    writeByte(toByte(10));
+    for f in facts {
+        writeByte(toByte(70));
+        for t in f.terms {
+            writeByte(toByte(32));
+            total = dumpInt(t.term);
+            writeByte(toByte(58));
+            total = dumpInt(t.coeff);
+        };
+        writeByte(toByte(60));
+        total = dumpInt(f.bound);
+        writeByte(toByte(10));
+    };
+    return total;
+};
+
 fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
-    facts = linDedup(linFacts(context));
-    facts = push(facts, linFact2(left, -1, right, 1, 0 - bound - 1));
+    canon = canonicalContext(context);
+    known = closeContext(context);
+    goalLeft = canonicalTerm(known, left);
+    goalRight = canonicalTerm(known, right);
+    // Only the facts in the goal's own component of the term graph can
+    // bear on it; the rest would just spend the variable budget.
+    relevant = HashSet::new();
+    relevant = relevant.insert(goalLeft);
+    relevant = relevant.insert(goalRight);
+    growing = true;
+    while growing {
+        growing = false;
+        for f in canon.equalities {
+            if relevant.contains(f.left) || relevant.contains(f.right) {
+                if relevant.contains(f.left) = false { relevant = relevant.insert(f.left); growing = true; };
+                if relevant.contains(f.right) = false { relevant = relevant.insert(f.right); growing = true; };
+            };
+        };
+        for f in canon.orders {
+            if relevant.contains(f.smaller) || relevant.contains(f.greater) {
+                if relevant.contains(f.smaller) = false { relevant = relevant.insert(f.smaller); growing = true; };
+                if relevant.contains(f.greater) = false { relevant = relevant.insert(f.greater); growing = true; };
+            };
+        };
+        for f in canon.differences {
+            if relevant.contains(f.left) || relevant.contains(f.right) {
+                if relevant.contains(f.left) = false { relevant = relevant.insert(f.left); growing = true; };
+                if relevant.contains(f.right) = false { relevant = relevant.insert(f.right); growing = true; };
+            };
+        };
+        for app in canon.applications {
+            hit = relevant.contains(app.id);
+            for arg in app.arguments { if relevant.contains(arg) { hit = true; }; };
+            if hit {
+                if relevant.contains(app.id) = false { relevant = relevant.insert(app.id); growing = true; };
+                for arg in app.arguments { if relevant.contains(arg) = false { relevant = relevant.insert(arg); growing = true; }; };
+            };
+        };
+    };
+        kept = [];
+    for f in linFacts(canon) {
+        use = true;
+        for t in f.terms { if relevant.contains(t.term) = false { use = false; }; };
+        if use { kept = push(kept, clone(f)); };
+    };
+    facts = linDedup(kept);
+    facts = push(facts, linFact2(goalLeft, -1, goalRight, 1, 0 - bound - 1));
     if size(facts) > 160 { return false; };
     vars = [];
     for f in facts {
@@ -1755,7 +1876,27 @@ fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) 
             if containsValue(vars, t.term) = false { vars = push(vars, t.term); };
         };
     };
-    if size(vars) > 24 { return false; };
+    if size(vars) > 48 { return false; };
+    dumpLinFacts(facts, goalLeft, goalRight);
+    for app in context.applications {
+        if app.function = 22 || app.function = 34 || app.function = 32 {
+            writeByte(toByte(82));
+            writeByte(toByte(32));
+            total = dumpInt(app.id);
+            writeByte(toByte(32));
+            total = dumpInt(app.function);
+            for arg in app.arguments { writeByte(toByte(32)); total = dumpInt(arg); };
+            writeByte(toByte(10));
+        };
+    };
+    for f in known {
+        writeByte(toByte(69));
+        writeByte(toByte(32));
+        total = dumpInt(f.left);
+        writeByte(toByte(32));
+        total = dumpInt(f.right);
+        writeByte(toByte(10));
+    };
     return linContradiction(facts, vars);
 };
 
@@ -1999,7 +2140,11 @@ fn getFactsTranslated(context: &ValidatorContext, equalities: &List<EqualityFact
                     base = get(app.arguments, 4);
                     if hasEquality(equalities, gf.seq, b) {
                         cand = shiftedIndex(context, equalities, base, gf.at);
-                        if cand is IntegerLookup::Found { extra = push(extra, GetFact { seq: a, at: (cand as IntegerLookup::Found).value, found: true }); };
+                        if cand is IntegerLookup::Found {
+                            if linearEntails(context, get(app.arguments, 2), gf.at, 0) {
+                                if linearEntails(context, gf.at, get(app.arguments, 3), -1) { extra = push(extra, GetFact { seq: a, at: (cand as IntegerLookup::Found).value, found: true }); };
+                            };
+                        };
                     };
                     if hasEquality(equalities, gf.seq, a) {
                         bvA = integerValue(context, base);
@@ -2018,7 +2163,11 @@ fn getFactsTranslated(context: &ValidatorContext, equalities: &List<EqualityFact
                                 };
                             };
                         };
-                        if candBFound { extra = push(extra, GetFact { seq: b, at: candB, found: true }); };
+                        if candBFound {
+                            if linearEntails(context, get(app.arguments, 2), candB, 0) {
+                                if linearEntails(context, candB, get(app.arguments, 3), -1) { extra = push(extra, GetFact { seq: b, at: candB, found: true }); };
+                            };
+                        };
                     };
                 };
             };
