@@ -99,7 +99,7 @@ badCast = do
                             | otherwise -> Just ("got output " ++ show output ++ " and errors " ++ show errors ++ " for\n" ++ unlines text)
   where
     castLine line
-        | " block named \"Two\"" `isSuffixOf` line = take (length line - length "named \"Two\"") line ++ "array int const 2"
+        | " block named \"Two\" 0" `isSuffixOf` line = take (length line - length "named \"Two\" 0") line ++ "array int c 2"
         | otherwise = line
 
 castSource :: String
