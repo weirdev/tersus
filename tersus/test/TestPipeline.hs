@@ -525,7 +525,7 @@ testMirSelfHosted = TestList "testMirSelfHosted" [testSelfHostedEquality]
 
 -- Compare the Tersus equality closure with the reference solver over all graphs
 -- of four vertices, including disconnected graphs, cycles and reverse queries.
-=======testSelfHostedEquality :: Test
+testSelfHostedEquality :: Test
 testSelfHostedEquality = TestCase "self-hosted equality query" $ do
     putStrLn "Running self-hosted validator differential checks"
     source <- readFile "lib/validation.tersus"

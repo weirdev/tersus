@@ -1,7 +1,7 @@
 -- The bridge from MIR to the validator written in Tersus
 -- (lib/validation.tersus): encode is a data-only translation, and anything it
 -- does not fully model is reported as an Unmodeled verdict, never accepted.
-module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus) where
+module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode) where
 
 import Control.Monad (foldM)
 import Data.List (find, isPrefixOf, nub)

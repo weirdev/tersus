@@ -22,6 +22,7 @@ extra-source-files:
     examples/emit.tersus
     bootstrap/emitter.sha256
     lib/validation.tersus
+    lib/validation_driver.tersus
     lib/stdlib.tersus
     lib/box.tersus
     lib/map.tersus
@@ -57,6 +58,7 @@ library
       StdLib
       StdLibDefs
       TersusTypes
+      ValidatorNative
       TypeCheck
       Utils
   other-modules:

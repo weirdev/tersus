@@ -118,6 +118,24 @@ reference), and a joined term keeps the bounds both branches give it,
 including one that follows from a branch value (`0 <= 0 - n` from
 `n < 0`), which the `String::fromInt` shape needs.
 
+The validator no longer runs interpreted in production: it is compiled
+to native code once (with `lib/validation_driver.tersus` as its main
+program, which reads the bridge's encoded functions from standard
+input) and kept in the cache directory under a name made of the
+sources it is made of (`ValidatorNative`); `Pipeline` runs that
+program for every validation. It is compiled without being validated,
+as a bootstrap program is, and the interpreted validator remains only
+where the validator is itself the program under test
+(`TestPipeline`'s checks of `lib/validation.tersus`).
+
+Next in this target, concrete evaluation in the validator: the Haskell
+engine evaluates a proof term whose parts are all known (`Engine`'s
+constant values, so the size of `push(push([], v), v)` is 2 before any
+fact is consulted); the Tersus solver only knows terms already recorded
+as constants. Porting that evaluation (arithmetic, `size` and `get`
+of literal and pushed lists, at the states that ask for a value) is in
+scope here and comes before the remaining solver gaps.
+
 ### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
 
 `StdLib.hs` defines the builtins in Haskell; its own TODO says to write

@@ -11,6 +11,7 @@ module PreludeSource
     , emitterSource
     , stdlibSource
     , validationSource
+    , validationDriverSource
     , seedSha256
     ) where
 
@@ -104,6 +105,17 @@ validationSource =
     $( do
         addDependentFile "lib/validation.tersus"
         contents <- runIO (readFile "lib/validation.tersus")
+        lift contents
+     )
+
+-- The text of lib/validation_driver.tersus: the main program of the
+-- validator compiled to native code, put after validation.tersus for that
+-- build only (see ValidatorNative)
+validationDriverSource :: String
+validationDriverSource =
+    $( do
+        addDependentFile "lib/validation_driver.tersus"
+        contents <- runIO (readFile "lib/validation_driver.tersus")
         lift contents
      )
 
