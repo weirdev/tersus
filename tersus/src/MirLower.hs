@@ -867,6 +867,9 @@ lowerBuiltin b args = do
             TBox held -> return held
             _ -> failL "Box::unbox was given something that is not a Box"
         (ArrayFrom, [(M.Const (M.CList items), TList elementTy)]) -> return (TArray elementTy (fromIntegral (length items)))
+        (ArrayFromList, [(_, TList elementTy)]) -> do
+            size <- tc freshSize
+            return (TArrayOf elementTy size)
         (ArrayFrom, _) -> failL "an array literal was not made from a list of constants"
         _ -> builtinResult b tys
     rv <- case (pairParts b, b, map fst operands) of
@@ -879,13 +882,22 @@ lowerBuiltin b args = do
                     view <- newLocal Nothing elementTy
                     emit (M.Assign view (M.ListOp M.Get [a, i]))
                     old <- newLocal Nothing elementTy
-                    emit (M.Assign old (M.Clone (M.Copy view)))
+                    emit (M.Assign old (M.CopyOf (M.Copy view)))
                     changed <- newLocal Nothing containerTy
                     emit (M.Assign changed (M.ListOp M.Set [a, i, x]))
                     return (M.MakeData (typeName resultTy) [("0", M.Copy changed), ("1", M.Copy old)])
                 _ -> failL "The result of replace is not a pair"
         (_, _, ops) -> builtinRvalue b tys ops
-    return (PRvalue rv, result)
+    -- (a value built in the check of an instance of a template is built by the name the template wrote, which names
+    -- the parameters: the value is of the instance the check is of)
+    rv' <- case rv of
+        M.MakeData name fields | Just (base, _) <- instanceOf name -> do
+            resultTy <- tc (zonk result)
+            case resultTy of
+                TNamed concrete | Just (cbase, _) <- instanceOf concrete, base == cbase -> return (M.MakeData concrete fields)
+                _ -> return rv
+        _ -> return rv
+    return (PRvalue rv', result)
   where
     builtinResult b' tys' = case (b', tys') of
         (Field owner field, [structTy]) -> tc (readField owner field structTy)
@@ -934,6 +946,7 @@ builtinRvalue b tys ops =
         (Pop, [_]) -> return (M.ListOp M.Pop ops)
         (Set, [_, _, _]) -> return (M.ListOp M.Set ops)
         (NewArray, [_, _]) -> return (M.ListOp M.NewArray ops)
+        (ArrayFromList, [_]) -> return (M.ListOp M.FromList ops)
         -- (the list of the literal, held as an array)
         (ArrayFrom, [M.Const (M.CList items)]) -> return (M.Use (M.Const (M.CArray items)))
         (ArrayFrom, [o]) -> return (M.Use o)
@@ -973,7 +986,7 @@ builtinRvalue b tys ops =
         (BytesFrom, _) -> failL "A list of bytes is written with numbers from 0 to 255"
         (Unsize, [o]) -> return (M.Unsize o)
         (UnBox, [o]) -> return (M.Unbox o)
-        (CloneOf, [o]) -> return (M.Clone o)
+        (CloneOf, [o]) -> return (M.CopyOf o)
         (Is variant, [o]) -> return (M.IsVariant o variant)
         (Cast variant, [o]) -> return (M.AsVariant o variant)
         (Within, _) -> failL "within only exists in proofs"
@@ -1085,6 +1098,7 @@ builtinLabel b = case b of
     FromByte -> "toInt"
     BytesFrom -> "bytes_from"
     ArrayFrom -> "array_from"
+    ArrayFromList -> "array_from_list"
     Plus -> "add"
     Minus -> "sub"
     Times -> "mul"

@@ -1,0 +1,55 @@
+// What makes a copy of a value explicit: the trait `Clone` that `clone(x)` and `x.clone()` call. A program has this library in
+// front of it unless it declares a trait `Clone` of its own (see Pipeline.libraries), as with Eq. A value is moved to where it is
+// wanted, and a program that needs it again says `clone(x)`, which has the value of x.
+//
+// A struct or an enum implements it with `impl Clone for T { };` (which clones the fields, of the same variant for an enum, each
+// with its own Clone) or with an impl that has a body, whose clone has the value of the value it clones, as the trait says. A word
+// (Int, Byte, Bool, a fixed-width integer, an address) and a function are their own copy, which clone itself says
+// (TypeCheck.cloneCall), so they have no impl.
+trait Clone {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }];
+};
+
+// A list is cloned element by element, an array is too (Array::fromList moves the cloned elements in), and a Box is a new
+// Box of the clone of what it holds.
+impl<T: Clone> Clone for List<T> {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] {
+        out = [];
+        i = 0;
+        while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(self, j); }] shrinks size(self) - i {
+            out = push(out, clone(get(self, i)));
+            i = i + 1;
+        };
+        return out;
+    };
+};
+
+impl<T: Clone, n> Clone for Array<T, n> {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] {
+        out = [];
+        i = 0;
+        while i < size(self) [{ affirm i >= 0; affirm i <= size(self); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(self, j); }] shrinks size(self) - i {
+            out = push(out, clone(get(self, i)));
+            i = i + 1;
+        };
+        return Array::fromList(out);
+    };
+};
+
+impl<T: Clone> Clone for Box<T> {
+    fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] {
+        return Box::new(clone(Box::unbox(self)));
+    };
+};
+
+// (a Box of an array of no size is cloned element by element: `clone` on one is a call of this, since the impl for Box
+// above is for a Box of a value with a size, whose clone unboxes it)
+fn cloneBoxedArray<T: Clone>(b: &Box<Array<T>>) -> Box<Array<T>> [{ }] [{ affirm size(return) = size(b); affirm forall j in 0..size(b): get(return, j) = get(b, j); }] {
+    out = [];
+    i = 0;
+    while i < size(b) [{ affirm i >= 0; affirm i <= size(b); affirm size(out) = i; affirm forall j in 0..i: get(out, j) = get(b, j); }] shrinks size(b) - i {
+        out = push(out, clone(get(b, i)));
+        i = i + 1;
+    };
+    return Box::new(Array::fromList(out));
+};

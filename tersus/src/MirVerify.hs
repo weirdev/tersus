@@ -172,6 +172,11 @@ rvalueProblems env localTy d rv =
             TBox (TArrayOf e SizeAny) -> ints [n] ++ [expected e x | not (fits' e x)]
             _ -> ["Array::boxed needs a result that is a Box of an array of any size"]
         ListOp Pop [l] -> [expected d l | not (fits' d l)]
+        ListOp FromList [l] -> case (d, operandType env localTy l) of
+            -- (a list of native code is a StdList, lib/lists.tersus, whose elements move into the array)
+            (TArrayOf e _, Just (TNamed n)) | Just ("StdList", [ArgType e']) <- instanceOf n -> ["the result is " ++ renderType d ++ ", not an array of " ++ renderType e' | not (sub env e e')]
+            (TArrayOf e _, _) -> [expected (TList e) l | not (fits' (TList e) l)]
+            _ -> ["Array::fromList needs a result that is an array"]
         ListOp Push [l, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ [expected e x | not (fits' e x)])
         ListOp Set [l, i, x] -> withElement (\e -> [expected d l | not (fits' d l)] ++ ints [i] ++ [expected e x | not (fits' e x)])
         ListOp op os | Just problems <- pointerProblems op os -> problems
@@ -214,7 +219,7 @@ rvalueProblems env localTy d rv =
             Just (typeName, _) ->
                 [expected' ("a " ++ typeName) o | not (isValueOf typeName o)]
                     ++ ["the result is " ++ renderType d ++ ", not " ++ name | not (sub env d (TVariant name))]
-        Clone o -> [expected d o | not (fits' d o)]
+        CopyOf o -> [expected d o | not (fits' d o)]
         TakeField l name field -> rvalueProblems env localTy d (ReadField (Copy l) name field)
         Borrow _ _ mutable -> case d of
             TMutRef _ | mutable -> []
@@ -429,7 +434,7 @@ rvalueOperands (MakeData _ fields) = map snd fields
 rvalueOperands (ReadField o _ _) = [o]
 rvalueOperands (IsVariant o _) = [o]
 rvalueOperands (AsVariant o _) = [o]
-rvalueOperands (Clone o) = [o]
+rvalueOperands (CopyOf o) = [o]
 rvalueOperands (TakeField l _ _) = [Copy l]
 rvalueOperands (Borrow _ steps _) = [o | RefIndex o <- steps]
 rvalueOperands (Deref o) = [o]

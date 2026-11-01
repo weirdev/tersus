@@ -315,7 +315,6 @@ vecLibrary =
         , "    data: Box<Array<T>>,"
         , "    len: Int,"
         , "} invariant [{ affirm len >= 0; affirm len <= size(data); affirm size(data) >= 1; }];"
-        , "trait Clone { };"
         , "impl<T> Clone for Vec<T> { };"
         , "impl<T> Vec<T> {"
         , "    fn new(filler: T) -> Self [{ }] [{ affirm return.len = 0; }] {"

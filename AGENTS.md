@@ -16,7 +16,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
 - `tersus/lib/` (Tersus sources the Haskell implementation depends on):
   - `eq.tersus`: the trait `Eq` that `=` and `!=` call, and its impls for lists, arrays and Boxes, put in front of every program that does not
     declare a trait `Eq` (`Pipeline.libraries`). Embedded by `PreludeSource`.
-  - `prelude.tersus`: the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`
+  - `clone.tersus`: the trait `Clone` that `clone(x)` and `x.clone()` call, and its impls for lists, arrays and Boxes, put in front of every program that does not
+    declare a trait `Clone` (`Pipeline.libraries`). Embedded by `PreludeSource`.
+  - `prelude.tersus`: the traits `Sequence`, `Growable`, `Copy`, `Drop`
     and `Deref`, put in front of a program that mentions any of them and does
     not declare it (`Pipeline.libraries`). Embedded by `PreludeSource`.
   - `lists.tersus`: the list that native code is made of (`StdList`), and

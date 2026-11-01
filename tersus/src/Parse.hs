@@ -755,7 +755,8 @@ functStatement = do
     whitespace
     var <- variable
     whitespace
-    when (var == "clone") $ modifyState (\d -> d{declOwnClone = True})
+    inImpl <- declSelf <$> getState
+    when (var == "clone" && inImpl == Nothing) $ modifyState (\d -> d{declOwnClone = True})
     -- fn f<T, n>(...): what a call gives. A name that starts with a capital letter is a type (`T`, which the function knows nothing of);
     -- any other is a size, which is one of the last parameters of the function (an Int that the body and the contracts can read).
     -- Neither is written in a call.
@@ -929,9 +930,11 @@ implStatement = do
     -- (`impl Eq for T { };` is the impl that compares the fields, of the same variant for an enum, each with its own Eq: it is written
     -- out here as the program would write it, and the types of the impl have to implement Eq too)
     let standardEq = trait == Just "Eq" && null written && typeName `notElem` ["List", "Box", "Array", "Int", "Byte", "Bool"]
+    -- (`impl Clone for T { };` is the impl that clones the fields, of the same variant for an enum, each with its own Clone, as with Eq)
+    let standardClone = trait == Just "Clone" && null written && typeName `notElem` ["List", "Box", "Array", "Int", "Byte", "Bool"]
     fieldTypes <- declFieldTypes <$> getState
-    functions <- if standardEq then generated (standardEqFunction typeName (Map.findWithDefault [] typeName types) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else return written
-    let implBounds' = if standardEq then implBounds ++ [(p, "Eq", []) | p <- implParams, isTypeParameter p, (p, "Eq", []) `notElem` implBounds] else implBounds
+    functions <- if standardEq then generated (standardEqFunction typeName (Map.findWithDefault [] typeName types) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else if standardClone then generated (standardCloneFunction typeName (Map.findWithDefault [] typeName types) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else return written
+    let implBounds' = if standardEq then implBounds ++ [(p, "Eq", []) | p <- implParams, isTypeParameter p, (p, "Eq", []) `notElem` implBounds] else if standardClone then implBounds ++ [(p, "Clone", []) | p <- implParams, isTypeParameter p, (p, "Clone", []) `notElem` implBounds] else implBounds
     modifyState (\d -> d{declSelf = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
     whitespace
     return (ImplDef trait traitArgs typeName selfName implBounds' functions)
@@ -977,6 +980,39 @@ implStatement = do
                         ]
                         ++ "return false;"
          in "fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }] shrinks self { " ++ body ++ " };"
+    standardCloneFunction typeName variants fieldTypes =
+        let fieldsOf v = Map.findWithDefault [] v fieldTypes
+            -- (a field that holds the type itself in a list, a Box or an array is cloned here, element by element, so that
+            -- the clone of an element is a call of this function on a part of the value, as with Eq: an impl for the list
+            -- would call this function back, which no function can)
+            mentions t = case t of
+                TNamed n -> n == typeName || maybe False ((== typeName) . fst) (instanceOf n)
+                TList u -> mentions u
+                TBox u -> mentions u
+                TArrayOf u _ -> mentions u
+                _ -> False
+            isSelf t = case t of
+                TNamed n -> n == typeName || maybe False ((== typeName) . fst) (instanceOf n)
+                _ -> False
+            -- the statements that make the clone of one field in the local c, and the expression that is the clone
+            fieldClone (n, (f, ty)) src =
+                let c = "cloneField" ++ show (n :: Int)
+                    i = "cloneIndex" ++ show (n :: Int)
+                    loop make = c ++ " = []; " ++ i ++ " = 0; while " ++ i ++ " < size(" ++ src ++ ") [{ affirm " ++ i ++ " >= 0; affirm " ++ i ++ " <= size(" ++ src ++ "); affirm size(" ++ c ++ ") = " ++ i ++ "; affirm forall j in 0.." ++ i ++ ": get(" ++ c ++ ", j) = get(" ++ src ++ ", j); }] shrinks size(" ++ src ++ ") - " ++ i ++ " { " ++ c ++ " = push(" ++ c ++ ", clone(get(" ++ src ++ ", " ++ i ++ "))); " ++ i ++ " = " ++ i ++ " + 1; }; " ++ make
+                 in case ty of
+                        TList u | mentions u -> (loop "", c)
+                        TArrayOf u _ | mentions u -> (loop "", "Array::fromList(" ++ c ++ ")")
+                        TBox u | isSelf u -> ("", "Box::new(clone(Box::unbox(" ++ src ++ ")))")
+                        _ -> ("", "clone(" ++ src ++ ")")
+            build a v =
+                let parts = [fieldClone part (a ++ "." ++ f) | part@(_, (f, _)) <- zip [0 ..] (fieldsOf v)]
+                 in (concat (map fst parts), v ++ if null (fieldsOf v) then "" else " { " ++ intercalate ", " [f ++ ": " ++ e | ((_, (f, _)), (_, e)) <- zip (zip [0 ..] (fieldsOf v)) parts] ++ " }")
+            body = case variants of
+                [single] | not ("::" `isInfixOf` single) ->
+                    let parts = [fieldClone part ("self." ++ f) | part@(_, (f, _)) <- zip [0 ..] (fieldsOf single)]
+                     in concat (map fst parts) ++ "return Self { " ++ intercalate ", " [f ++ ": " ++ e | ((_, (f, _)), (_, e)) <- zip (zip [0 ..] (fieldsOf single)) parts] ++ " };"
+                _ -> concat [ "if self is " ++ v ++ " { " ++ let (pre, built) = build ("(self as " ++ v ++ ")") v in pre ++ "return " ++ built ++ "; }; " | v <- init variants ] ++ let (pre, built) = build ("(self as " ++ last variants ++ ")") (last variants) in pre ++ "return " ++ built ++ ";"
+         in "fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] shrinks self { " ++ body ++ " };"
     implParameter = do
         name <- variable
         whitespace

@@ -81,6 +81,12 @@ builtin fn array(n: Int, x: Int) -> List<Int> [{
     affirm forall j in 0..n: get(return, j) = x;
 }];
 
+// Array::fromList(list) is the array of the elements of a list, in their order: the list is taken, and its elements are moved in
+builtin fn arrayFromList(list: List<Int>) -> List<Int> [{ }] [{
+    affirm size(return) = size(list);
+    affirm forall j in 0..size(list): get(return, j) = get(list, j);
+}];
+
 // Array::boxed(n, x) promises what array(n, x) does, for an n that need not be a constant
 builtin fn arrayBoxed(n: Int, x: Int) -> List<Int> [{
     rewrite checkRel n >= 0;

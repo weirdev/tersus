@@ -244,7 +244,7 @@ testTermination =
             , parseValidProgramHelper "fn down(n: Int) -> Int ~ { return down(n); };"
             , -- Recursion over a structure: the call is given a field of the value
               parseValidProgramHelper (tree ++ "fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(l) + count(r) }; };")
-            , parseValidateFailProgramHelper (tree ++ "trait Clone { }; impl Clone for Tree { }; fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(clone(l)) + count(clone(t)) }; };") "Recursive call does not shrink the variant: t"
+            , parseValidateFailProgramHelper (tree ++ "impl Clone for Tree { }; fn count(t: Box<Tree>) -> Int shrinks t { return match t { Tree::Leaf => 1, Tree::Branch { left: l, right: r } => count(clone(l)) + count(clone(t)) }; };") "Recursive call does not shrink the variant: t"
             , parseValidProgramHelper (tree ++ "fn depth(t: Box<Tree>) -> Int { n = 0; while t is Tree::Branch shrinks t { t = (t as Tree::Branch).left; n = n + 1; }; return n; };")
             , parseValidateFailProgramHelper (tree ++ "fn depth(t: Box<Tree>) -> Int { n = 0; while t is Tree::Branch shrinks t { n = n + 1; }; return n; };") "Loop variant does not shrink: t"
             , -- Code that may not end makes a function that contains it say so

@@ -597,7 +597,7 @@ evalRvalue frame rv =
                 _ -> Error "A field can only be read from a struct"
         -- (a wrong cast is undefined behaviour, as in the evaluator of the AST: reading a field that is not there is the error)
         AsVariant o _ -> operandValue frame o
-        Clone o -> operandValue frame o
+        CopyOf o -> operandValue frame o
         TakeField l name field -> evalRvalue frame (ReadField (Copy l) name field)
         IsVariant o name ->
             operandValue frame o `bindResult` \v -> case v of
@@ -664,6 +664,7 @@ listOp ArgCount _ = Error "argCount is run by the statement that calls it"
 listOp ArgByte _ = Error "argByte is run by the statement that calls it"
 listOp op _ | op `elem` [PathByte, FileLoad, FileByte, StoreByte, FileStore] = Error "a file operation is run by the statement that calls it"
 listOp NewEmptyBoxed [] = Ok (MList [])
+listOp FromList [MList l] = Ok (MList l)
 listOp NewArray [MInt n, x]
     | n < 0 = Error "array needs a size that is not negative"
     | otherwise = Ok (MList (replicate (fromIntegral n) x))

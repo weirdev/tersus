@@ -298,7 +298,10 @@ forgetProofVar dest st = case Map.lookup dest (psLocalNames st) of
 
 execStatement :: Ctx -> PState -> M.Statement -> V PState
 execStatement cx st (M.Assign dest rv) = do
-    st1 <- assign st dest rv
+    st0 <- case rv of
+        M.ListOp M.FromList [src] -> checkFromListSize cx st dest src
+        _ -> return st
+    st1 <- assign st0 dest rv
     let st2 = case rv of
             M.Borrow root steps _ -> st1{psBorrows = Map.insert dest (root, steps) (psBorrows st1)}
             _ -> st1{psBorrows = Map.delete dest (psBorrows st1)}
@@ -355,7 +358,9 @@ assign st dest rv =
         M.MakeBox o -> assign st dest (M.Use o)
         M.Unbox o -> assign st dest (M.Use o)
         M.Unsize o -> assign st dest (M.Use o)
-        M.Clone o -> assign st dest (M.Use o)
+        M.CopyOf o -> assign st dest (M.Use o)
+        -- (an array made from a list has the value of the list: only its type says how many elements it has)
+        M.ListOp M.FromList [o] -> assign st dest (M.Use o)
         _ -> case rvalueCall rv of
             Nothing -> throwV "An operation the validator does not know"
             Just (builtin, operands) -> do
@@ -410,6 +415,28 @@ withTypeFacts fn l st =
         case [value | (param, M.LocalDecl _ (Just name)) <- Map.toList (M.fnLocals fn), name == p, param `elem` M.fnParams fn, Just value <- [Map.lookup param (psLocals st)]] of
             value : _ -> addFacts st [FApp eqProof [FApp (CTerm (builtinFunct Size)) [ATerm iota], ATerm value]]
             [] -> st
+
+-- (an array made from a list has as many elements as the list: where the type of the result gives the number, the list
+-- must be proved to have that many, since the size the type says is otherwise taken on trust from here on)
+checkFromListSize :: Ctx -> PState -> M.Local -> M.Operand -> V PState
+checkFromListSize cx st dest src = do
+    let fn = cxFn cx
+        destTy = M.localType <$> Map.lookup dest (M.fnLocals fn)
+    case destTy of
+        Just (TArray _ n) -> check (CTerm (VInt n)) (show n)
+        Just (TArrayOf _ (SizeParam p)) ->
+            case [value | (param, M.LocalDecl _ (Just name)) <- Map.toList (M.fnLocals fn), name == p, param `elem` M.fnParams fn, Just value <- [Map.lookup param (psLocals st)]] of
+                value : _ -> check (ATerm value) p
+                [] -> return st
+        _ -> return st
+  where
+    check wanted shown = do
+        term <- operandTerm st src
+        let proof = FApp eqProof [FApp (CTerm (builtinFunct Size)) [term], wanted]
+        st' <- evaluateCalls st [proof]
+        if Engine.entails proof (proofContext st')
+            then return st
+            else throwV ("Could not prove: the list given to Array::fromList has " ++ shown ++ " elements, as the array it is made into does")
 
 -- A value of a struct or a variant is that constructor applied to the fields of the value (which, with congruence, makes two
 -- values whose fields are equal equal)
@@ -758,7 +785,7 @@ upcoming cx b rules = concatMap fromBlock reachable
         M.MakeBox o -> [o]
         M.Unbox o -> [o]
         M.Unsize o -> [o]
-        M.Clone o -> [o]
+        M.CopyOf o -> [o]
         M.TakeField{} -> []
     rvalueTerm rv = case rv of
         M.Use o -> Just (atom o)

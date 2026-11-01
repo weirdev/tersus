@@ -27,9 +27,8 @@ struct Vec<T> {
     len: Int,
 } invariant [{ affirm len >= 0; affirm len <= size(data); affirm size(data) >= 1; }];
 
-// A Vec can be cloned if its elements can: the Box of an array is cloned with what it holds (the traits are declared here, since the program
-// declares its own Sequence and has not the prelude)
-trait Clone { };
+// A Vec can be cloned if its elements can: the Box of an array is cloned with what it holds (Clone is the trait of
+// lib/clone.tersus, which a program has unless it declares one of its own)
 impl<T> Clone for Vec<T> { };
 
 impl<T> Vec<T> {

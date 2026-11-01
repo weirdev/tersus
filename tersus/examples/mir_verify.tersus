@@ -90,7 +90,7 @@ enum Rvalue {
     ReadField { o: Operand, name: String, field: String },
     IsVariant { o: Operand, name: String },
     AsVariant { o: Operand, name: String },
-    Clone { o: Operand },
+    Copy { o: Operand },
     TakeField { local: Int, name: String, field: String },
     Borrow { root: Int, steps: List<RefStep>, mutable: Bool },
     Deref { o: Operand },
@@ -156,7 +156,7 @@ fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
     return w;
 };
 
-fn listWords() -> List<String> [{ }] [{ affirm size(return) = 45; }] {
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 46; }] {
     w = push([], "length");
     w = push(w, "first");
     w = push(w, "last");
@@ -202,6 +202,7 @@ fn listWords() -> List<String> [{ }] [{ affirm size(return) = 45; }] {
     w = push(w, "narrowI32");
     w = push(w, "narrowU16");
     w = push(w, "narrowU32");
+    w = push(w, "fromList");
     return w;
 };
 
@@ -643,7 +644,7 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
         if kw = "makebox" { return done(Rvalue::MakeBox { o: o.value }, o.pos); };
         if kw = "unbox" { return done(Rvalue::Unbox { o: o.value }, o.pos); };
         if kw = "unsize" { return done(Rvalue::Unsize { o: o.value }, o.pos); };
-        return done(Rvalue::Clone { o: o.value }, o.pos);
+        return done(Rvalue::Copy { o: o.value }, o.pos);
     };
     if kw = "binary" {
         op = wordAt(ts, next);
@@ -2020,7 +2021,7 @@ fn rvalueOperands(rv: &Rvalue) -> List<Operand> [{ }] [{ }] {
         Rvalue::ReadField { o: o, name: name, field: field } => { out = single(o); },
         Rvalue::IsVariant { o: o, name: name } => { out = single(o); },
         Rvalue::AsVariant { o: o, name: name } => { out = single(o); },
-        Rvalue::Clone { o: o } => { out = single(o); },
+        Rvalue::Copy { o: o } => { out = single(o); },
         Rvalue::TakeField { local: l, name: name, field: field } => { out = single(Operand::Copy { local: l }); },
         Rvalue::Borrow { root: root, steps: steps, mutable: m } => { out = refStepOperands(steps); },
         Rvalue::Deref { o: o } => { out = single(o); },
@@ -2348,6 +2349,15 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         return resultWhy(dst, Type::TInt);
     };
+    if op = 45 {
+        if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
+        if dst is Type::TArray {
+            e = Box::unbox((dst as Type::TArray).elem);
+            if !sequenceFits(p, funcs, f, e, argAt(args, 0)) { return expectedWhy(p, f, Type::TList { elem: Box::new(e) }, argAt(args, 0)); };
+            return out;
+        };
+        return one("Array::fromList needs a result that is an array");
+    };
     return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands"));
 };
 
@@ -2558,7 +2568,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                 if !sub(p, dst, Type::TVariant { name: clone(name) }) { out = push(out, "the result is ".then(renderType(dst)).then(", not ").then(name)); };
             };
         },
-        Rvalue::Clone { o: o } => {
+        Rvalue::Copy { o: o } => {
             if !fits(p, funcs, f, dst, o) { out = expectedWhy(p, f, dst, o); };
         },
         Rvalue::Borrow { root: root, steps: steps, mutable: m } => {

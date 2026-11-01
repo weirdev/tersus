@@ -350,7 +350,7 @@ evalRvalue rv =
                     return inner
                 (VS name fs, _) | isBoxStruct name, Just a <- listCell fs -> boxed a
                 _ -> return v
-        Clone o -> readOperand o >>= cloneVal
+        CopyOf o -> readOperand o >>= cloneVal
         TakeField l name field -> do
             f <- currentFrame
             case Map.lookup l (frameSlots f) of
@@ -733,7 +733,7 @@ planTests =
     , TestCase "a cast is read from the value itself" . pure $
         withOwned "enum S { A { r: Int }, C }; x = S::A { r: 4 }; return (x as S::A).r;" (\t -> testAssertEq (count "clone" t) 0 `orElseT` testAssertTrue (not (" as S::A;" `isInfixOf` t)))
     , TestCase "a parameter that is assigned a part is freed first" . pure $
-        withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "clone" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
+        withOwned "fn f(row: List<Int>, rows: List<List<Int>>) -> Int [{ affirm size(rows) > 0; }] [{ }] { row = get(rows, 0); return size(row); }; return f([1], [[2, 3]]);" (\t -> let f = functionText "f" t in testAssertEq (count "peek" f, count "copy" f) (1, 1) `orElseT` testAssertTrue ("drop _1" `isInfixOf` f))
     , TestCase "a copy of a parameter is one copy" . pure $
         withOwned "fn f(a: List<Int>) -> List<Int> [{ affirm size(a) > 0; }] [{ }] { out = clone(a); out = set(out, 0, size(a)); return out; }; return f([5]);" (\t -> testAssertEq (count "clone" (functionText "f" t)) 1)
     , TestCase "a value moved on every path is not dropped at the return" . pure $
@@ -816,10 +816,10 @@ windowTests :: [Test]
 windowTests =
     [ TestCase "a part is copied when what it is part of changes before it is read" . pure $
         let source = "rows = [[1, 2], [3]]; part = get(rows, 0); rows = set(rows, 0, [9]); return size(part);"
-         in onSource "the part" source `orElseT` either Just (\t -> testAssertTrue (count "clone" (functionText "main" t) >= 1)) (ownedText source)
+         in onSource "the part" source `orElseT` either Just (\t -> testAssertTrue (count "copy" (functionText "main" t) >= 1)) (ownedText source)
     , TestCase "a part is looked at when nothing changes before it is read" . pure $
         let source = "rows = [[1, 2], [3]]; n = size(get(rows, 0)); rows = set(rows, 0, [9]); return n + size(rows);"
-         in onSource "the part" source `orElseT` either Just (\t -> let m = functionText "main" t in testAssertEq (count "peek Get" m, count "clone" m) (1, 0)) (ownedText source)
+         in onSource "the part" source `orElseT` either Just (\t -> let m = functionText "main" t in testAssertEq (count "peek Get" m, count "copy" m) (1, 0)) (ownedText source)
     ]
   where
     orElseT Nothing b = b

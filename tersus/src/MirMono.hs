@@ -143,7 +143,7 @@ instantiate fn tys sizes =
         ReadField o name field -> ReadField (operand o) (named name) field
         IsVariant o name -> IsVariant (operand o) (named name)
         AsVariant o name -> AsVariant (operand o) (named name)
-        Clone o -> Clone (operand o)
+        CopyOf o -> CopyOf (operand o)
         Borrow root steps mutable -> Borrow root (map step steps) mutable
         Deref o -> Deref (operand o)
         TakeField l name field -> TakeField l (named name) field

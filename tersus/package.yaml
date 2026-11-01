@@ -10,6 +10,7 @@ extra-source-files:
 - lib/lists.tersus
 - lib/prelude.tersus
 - lib/eq.tersus
+- lib/clone.tersus
 - lib/string.tersus
 - examples/emit.tersus
 - bootstrap/emitter.sha256

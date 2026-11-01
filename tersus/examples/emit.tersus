@@ -96,7 +96,7 @@ enum Rvalue {
     ReadField { o: Operand, name: String, field: String },
     IsVariant { o: Operand, name: String },
     AsVariant { o: Operand, name: String },
-    Clone { o: Operand },
+    Copy { o: Operand },
     TakeField { local: Int, name: String, field: String },
     Borrow { root: Int, steps: List<RefStep>, mutable: Bool },
     Deref { o: Operand },
@@ -162,7 +162,7 @@ fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
     return w;
 };
 
-fn listWords() -> List<String> [{ }] [{ affirm size(return) = 45; }] {
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 46; }] {
     w = push([], "length");
     w = push(w, "first");
     w = push(w, "last");
@@ -208,6 +208,7 @@ fn listWords() -> List<String> [{ }] [{ affirm size(return) = 45; }] {
     w = push(w, "narrowI32");
     w = push(w, "narrowU16");
     w = push(w, "narrowU32");
+    w = push(w, "fromList");
     return w;
 };
 
@@ -650,7 +651,7 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
         if kw = "makebox" { return done(Rvalue::MakeBox { o: o.value }, o.pos); };
         if kw = "unbox" { return done(Rvalue::Unbox { o: o.value }, o.pos); };
         if kw = "unsize" { return done(Rvalue::Unsize { o: o.value }, o.pos); };
-        return done(Rvalue::Clone { o: o.value }, o.pos);
+        return done(Rvalue::Copy { o: o.value }, o.pos);
     };
     if kw = "binary" {
         op = wordAt(ts, next);
@@ -3390,6 +3391,26 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             at = g1.last;
             return fromPart(clone(g1), cx, dropsOld, ty, dest, at, false);
         };
+        // Array::fromList: the elements of the list move into the array, and only the buffer of the list is freed
+        if op = 45 && n = 1 && ty is Type::TArray && get(args, 0) is Operand::Move {
+            o = get(args, 0);
+            l = (o as Operand::Move).local;
+            elem = clone(Box::unbox((ty as Type::TArray).elem));
+            elemBytes = bytesIn(cx, elem);
+            g1 = ins(g, "m", "load i64, ptr ".then(slot(l)));
+            m = clone(g1.last);
+            g2 = ins(g1, "q", "getelementptr i8, ptr ".then(slot(l)).then(", i64 8"));
+            g3 = ins(clone(g2), "c", "load i64, ptr ".then(g2.last));
+            count = clone(g3.last);
+            g4 = ins(g3, "p", "inttoptr i64 ".then(m).then(" to ptr"));
+            p = clone(g4.last);
+            g5 = ins(g4, "b", "mul i64 ".then(count).then(", ").then(showInt(elemBytes)));
+            total = clone(g5.last);
+            g6 = zeroWords(g5, slot(l), 24);
+            g7 = freeOld(g6, cx, dropsOld, ty, dest);
+            g8 = emit(g7, "call void @llvm.memcpy.p0.p0.i64(ptr ".then(target).then(", ptr ").then(p).then(", i64 ").then(total).then(", i1 false)"));
+            return emit(g8, "call void @tersus_addr_free(i64 ".then(m).then(")"));
+        };
         if op = 7 && n = 2 && arr.ok {
             // (an array that owns something is made in room of its own, then what the destination held is freed and the elements move in)
             if dropsOld && owns {
@@ -3657,8 +3678,8 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
         t = g2.last;
         return emit(g2, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
     };
-    if rv is Rvalue::Clone {
-        g1 = cloneInto(g, cx, dest, lt.ty, (rv as Rvalue::Clone).o);
+    if rv is Rvalue::Copy {
+        g1 = cloneInto(g, cx, dest, lt.ty, (rv as Rvalue::Copy).o);
         if returned { return emit(g1, "store i1 true, ptr %returned"); };
         return g1;
     };

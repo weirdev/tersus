@@ -32,6 +32,7 @@ module TypeCheck
     , expect
     , zonk
     , freshVar
+    , freshSize
     ) where
 
 import Control.Monad (filterM, forM, forM_, unless, void, when)
@@ -426,7 +427,7 @@ ensureInstance name = do
     argKnown (p, ArgType ty) = do
         ty' <- zonk ty
         when (hasFunction ty') $ failTc ("Type error: the type " ++ p ++ " of " ++ name ++ " would be " ++ renderType ty' ++ ", and a type parameter is not a function")
-        checkType ty'
+        unless (mentionsParam ty') $ checkType ty'
 
 ctorInfo :: Name -> TC (Name, [(Variable, Type)])
 ctorInfo name = do
@@ -460,8 +461,37 @@ checkConstruct name fields argTys = do
     if map fst declared /= fields || length fields /= length argTys
         then failTc ("Type error: " ++ name ++ " is built with the wrong fields")
         else do
-            mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) fieldTy argTy) (zip declared argTys)
-            return (TNamed typeName)
+            scope <- tcTypeScope <$> getState
+            let stray = nub' [p | (_, ty) <- declared, p <- paramsOf ty, p `notElem` scope]
+            if null stray
+                then do
+                    mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) fieldTy argTy) (zip declared argTys)
+                    return (TNamed typeName)
+                else do
+                    vars <- mapM (const freshVar) stray
+                    let renamed = substitute [] (zip stray vars)
+                        typeName' = case instanceOf typeName of
+                            Just (base, args) -> instanceName base [case a of ArgType t -> ArgType (renamed t); other -> other | a <- args]
+                            Nothing -> typeName
+                    mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) (renamed fieldTy) argTy) (zip declared argTys)
+                    return (TNamed typeName')
+  where
+    paramsOf ty = case ty of
+        TParam p -> [p]
+        TList t -> paramsOf t
+        TBox t -> paramsOf t
+        TAddr t -> paramsOf t
+        TUninit t -> paramsOf t
+        TBlock t -> paramsOf t
+        TRef t -> paramsOf t
+        TMutRef t -> paramsOf t
+        TArrayOf t _ -> paramsOf t
+        TFn args ret -> concatMap paramsOf (ret : args)
+        TNamed n -> case instanceOf n of
+            Just (_, args) -> concat [paramsOf t | ArgType t <- args]
+            Nothing -> []
+        _ -> []
+    nub' = foldr (\x rest -> if x `elem` rest then rest else x : rest) []
 
 -- Reading a field; the base of an update must be the struct being built
 readField :: Maybe Name -> Variable -> Type -> TC Type
@@ -1037,6 +1067,7 @@ builtinType funct =
         CloneOf -> failTc "Type error: clone is called, as in clone(x) or x.clone(), and cannot be used as a value"
         NewArray -> failTc "Type error: array needs a size that is a constant, so it is written array(3, x) and cannot be used as a value"
         ArrayFrom -> failTc "Type error: an array literal #[...] cannot be used as a value"
+        ArrayFromList -> failTc "Type error: Array::fromList is called, as in Array::fromList(xs), and cannot be used as a value"
         NewBoxedArray -> failTc "Type error: Array::boxed is called, as in Array::boxed(n, x), and cannot be used as a value"
         NewEmptyArray -> failTc "Type error: Array::empty is called, as in Array::empty(), and cannot be used as a value"
         WriteByte -> return (TFn [TByte] TByte)
@@ -1402,6 +1433,13 @@ checkItem top ctx env stmt =
             | otherwise -> failTc "Type error: a trait can only be defined at the top of the program"
         ImplDef trait traitArgs typeName selfName bounds functions
             | top -> do
+                -- (a copy of a linear value would use it twice, and a copy of a value with a drop would be dropped twice)
+                when (trait == Just "Clone") $ do
+                    s <- getState
+                    when (Set.member typeName (tcLinear s)) $
+                        failTc ("Type error: impl Clone for " ++ typeName ++ ": " ++ typeName ++ " is linear, so a value of it is used exactly once and is never copied")
+                    when (Set.member typeName (tcDrops s)) $
+                        failTc ("Type error: impl Clone for " ++ typeName ++ ": " ++ typeName ++ " has a drop, and a copy of a value with a drop would be dropped twice")
                 (ctx', env', functions') <- checkImpl ctx env trait traitArgs typeName selfName bounds functions
                 return (ctx', env', functions')
             | otherwise -> failTc "Type error: an impl can only be written at the top of the program"
@@ -1750,6 +1788,19 @@ inferExprR ctx env expr =
                 let ty = TArrayOf elementTy SizeAny
                 return (TBox ty, F (Val (builtinFunct NewEmptyArray)) [])
             _ -> failTc ("Type error: Array::empty takes no arguments, got " ++ show (length args))
+        -- Array::fromList(xs): the array of the elements of a list, which is taken: its size is the size the result is used at
+        F (Var "Array::fromList") args -> case args of
+            [xs] -> do
+                (xt, xs') <- inferExprR ctx env xs
+                xtz <- zonk xt
+                case xtz of
+                    TList elementTy -> do
+                        size <- freshSize
+                        let ty = TArrayOf elementTy size
+                        arrayOk ty
+                        return (ty, F (Val (builtinFunct ArrayFromList)) [xs'])
+                    _ -> failTc ("Type error: Array::fromList takes a list, got " ++ renderType xtz)
+            _ -> failTc ("Type error: Array::fromList takes 1 argument, got " ++ show (length args))
         -- Array::uninit(n): n slots that hold nothing, in a Box that carries the size
         F (Var "Array::uninit") args -> case args of
             [n] -> inferExprR ctx env (F (Var "Array::boxed") [n, F (Var "Uninit::empty") []])
@@ -1762,7 +1813,7 @@ inferExprR ctx env expr =
                 (xt, x') <- inferExprR ctx env x
                 let ty = TArrayOf xt SizeAny
                 arrayOk ty
-                requireMarker "Clone" xt
+                requireClone xt
                 return (TBox ty, F (Val (builtinFunct NewBoxedArray)) [n', x'])
             _ -> failTc ("Type error: Array::boxed takes 2 arguments, got " ++ show (length args))
         F funct args
@@ -1774,7 +1825,7 @@ inferExprR ctx env expr =
                     (size, sizeArg) <- arraySize (constantInt n') n'
                     let ty = TArrayOf xt size
                     arrayOk ty
-                    requireMarker "Clone" xt
+                    requireClone xt
                     return (ty, F funct [sizeArg, x'])
                 _ -> failTc ("Type error: array takes 2 arguments, got " ++ show (length args))
         F (Val (VFunct _ _ _ (BuiltinFunct ArrayFrom) _)) [Val literal@(VList items)] -> do
@@ -1958,8 +2009,42 @@ inferExprR ctx env expr =
     cloneCall args = case args of
         [x] -> do
             (xt, x') <- inferExprR ctx env x
-            requireMarker "Clone" xt
-            return (xt, F (Val (builtinFunct CloneOf)) [x'])
+            xtz <- zonk xt
+            case xtz of
+                TBlock _ -> requireMarker "Clone" xt >> return (xt, x')
+                TUninit e -> do
+                    owning <- ownsHeap e
+                    if owning
+                        then requireMarker "Clone" xt >> return (xt, x')
+                        else return (xt, F (Val (builtinFunct CloneOf)) [x'])
+                -- (a word, an address or a function is its own copy: there is no impl of Clone for them to call)
+                TInt -> return (xt, x')
+                TByte -> return (xt, x')
+                TBool -> return (xt, x')
+                TWord _ _ -> return (xt, x')
+                TAddr _ -> return (xt, x')
+                TFn _ _ -> return (xt, x')
+                -- (a reference is a word: the copy of it is it)
+                TRef _ -> return (xt, x')
+                TMutRef _ -> return (xt, x')
+                -- (a type parameter of a function that is checked for all of its types at once (not a template, which is
+                -- checked for each of the types it is given, where this is the call of its Clone): the copy is the value
+                -- itself, as the copies the checker makes for its own reasons are, and no code of an impl runs for it)
+                TParam _ -> return (xt, F (Val (builtinFunct CloneOf)) [x'])
+                TVar _ -> return (xt, F (Val (builtinFunct CloneOf)) [x'])
+                _ | mentionsParam xtz -> return (xt, F (Val (builtinFunct CloneOf)) [x'])
+                -- (a Box of an array of no size is cloned element by element, as a Box of one is compared (lib/clone.tersus))
+                TBox (TArrayOf _ SizeAny) -> do
+                    s <- getState
+                    if Map.member "cloneBoxedArray" (tcTemplates s) || Map.member "cloneBoxedArray" (ctxFns ctx)
+                        then general (Var "cloneBoxedArray") [x]
+                        else traitCall "Clone" "clone" [x]
+                -- (a tuple is cloned part by part, as a struct is by its impl)
+                TNamed name | Just _ <- tupleGeneric (maybe name fst (instanceOf name)) -> do
+                    (_, fields) <- ctorInfo name
+                    parts <- mapM (\(field, _) -> cloneCall [F (Val (builtinFunct (Field (Just name) field))) [x']]) fields
+                    return (xt, F (Val (builtinFunct (Ctor name (map fst fields)))) (map snd parts))
+                _ -> traitCall "Clone" "clone" [x]
         _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
     methodCall method (receiver : args) = do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
@@ -2824,10 +2909,29 @@ declareTemplate ctx name bounds params signature@(Signature _ _ _ types _writes 
                 failTc ("Type error: trait " ++ trait ++ " has parameters <" ++ intercalate ", " params' ++ ">, which the bound on " ++ param ++ " of " ++ name ++ " gives " ++ show (length args))
     putState s{tcTemplates = Map.insert name (Template bounds ctx params signature ins outs term body) (tcTemplates s)}
 
--- Clone and Copy are traits with no functions, in lib/prelude.tersus, that a struct or enum says it has: `impl Clone for P { };` and
--- `impl Copy for P { };`. Int, Byte, Bool and functions have both, an array has what its elements have, and a list or a Box is Clone when its
--- elements are (never Copy). A type parameter of a function is taken to be Clone and not Copy: that is checked for the types it is given
--- when functions can say what their type parameters are.
+-- Whether a type is made of a type parameter, as the types of a function that is checked for all of its types at once are
+mentionsParam :: Type -> Bool
+mentionsParam ty = case ty of
+    TParam _ -> True
+    TVar _ -> False
+    TList t -> mentionsParam t
+    TBox t -> mentionsParam t
+    TAddr t -> mentionsParam t
+    TUninit t -> mentionsParam t
+    TBlock t -> mentionsParam t
+    TRef t -> mentionsParam t
+    TMutRef t -> mentionsParam t
+    TArrayOf t _ -> mentionsParam t
+    TFn args ret -> any mentionsParam (ret : args)
+    TNamed name -> case instanceOf name of
+        Just (_, args) -> or [mentionsParam t | ArgType t <- args]
+        Nothing -> False
+    _ -> False
+
+-- Copy is a trait with no functions, in lib/prelude.tersus, that a struct or enum says it has: `impl Copy for P { };`. (Clone is an
+-- ordinary trait, in lib/clone.tersus; this is what says whether a type has it where the checker still asks, for a Copy and for
+-- `array(n, x)`.) Int, Byte, Bool and functions have both, an array has what its elements have, and a list or a Box is Clone when its
+-- elements are (never Copy). A type parameter of a function is taken to be Clone and not Copy.
 implementsMarker :: Name -> Type -> TC Bool
 implementsMarker trait = go (0 :: Int) False
   where
@@ -2874,6 +2978,9 @@ implementsMarker trait = go (0 :: Int) False
                         fields <- concat <$> mapM (fmap snd . ctorInfo) ctors
                         and <$> mapM (go (depth + 1) lenient . snd) fields
                     else return True
+
+requireClone :: Type -> TC ()
+requireClone = requireMarker "Clone"
 
 -- A copy is made of a type that has Clone
 requireMarker :: Name -> Type -> TC ()
@@ -2956,6 +3063,16 @@ primitiveEq t = case t of
 
 traitArgumentsOf :: Name -> Type -> TC (Maybe [Type])
 traitArgumentsOf "Eq" ty | primitiveEq ty = return (Just [])
+traitArgumentsOf "Clone" ty | primitiveEq ty = return (Just [])
+traitArgumentsOf "Clone" (TWord _ _) = return (Just [])
+traitArgumentsOf "Clone" (TFn _ _) = return (Just [])
+traitArgumentsOf "Clone" (TAddr _) = return (Just [])
+-- (a type parameter is taken to implement Clone, which is checked for the types it is given where they are given)
+traitArgumentsOf "Clone" (TParam _) = return (Just [])
+traitArgumentsOf "Clone" (TVar _) = return (Just [])
+traitArgumentsOf "Clone" (TList e) = fmap (const []) <$> traitArguments "Clone" e
+traitArgumentsOf "Clone" (TArrayOf e _) = fmap (const []) <$> traitArguments "Clone" e
+traitArgumentsOf "Clone" (TBox e) = fmap (const []) <$> traitArguments "Clone" e
 -- (a Box of an array of no size is compared by eqBoxedArrays of lib/eq.tersus when its elements are)
 traitArgumentsOf "Eq" (TBox (TArrayOf e _)) = fmap (const []) <$> traitArguments "Eq" e
 traitArgumentsOf trait ty = do

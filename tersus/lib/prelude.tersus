@@ -44,11 +44,6 @@ impl<T> Sequence<T> for Box<Array<T>> {
     fn set(self: Self, i: Int, x: T) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }] { return set(self, i, x); };
 };
 
-// What makes a copy of a value explicit. A value is moved to where it is wanted, and a program that needs it again says `clone(x)` (or `x.clone()`),
-// which has the value of x. Int, Byte, Bool and functions are copied wherever they are wanted, and so is a struct or an enum that says it can be: a
-// type implements `Clone` with `impl Clone for T { };` (every field has to be Clone, and a list or a Box is when its elements are) and `Copy` with
-// `impl Copy for T { };` (it has to be Clone, and every field Copy: a list never is). An array has what its elements have.
-trait Clone { };
 trait Copy { };
 
 // What is done when a value goes out of scope: `impl Drop for T { fn drop(self: Self) -> Int { ... }; };` is called by native code where a value
