@@ -44,6 +44,7 @@ import TestEq
 import TestHashMap
 import TestHashSet
 import TestBuiltinRegistry
+import TestSharedCache
 
 main :: IO ()
 main = do
@@ -153,6 +154,8 @@ allGroups =
     , testHashMap
     , testHashSet
     , testBuiltinRegistry
+    , testSharedCache
+    , testSharedCacheProbe
     ]
 
 groupName :: Test -> String

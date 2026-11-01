@@ -8,7 +8,6 @@ import Cli (World (..), noWorld, runProgramIn)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (verifyProgram)
-import Pipeline (ownedSource)
 import Types (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
@@ -78,9 +77,10 @@ referenceAccepts program = case verifyProgram (forNative program) of
 interpreted :: String -> (Program -> Program) -> Bool -> IO TestResult
 interpreted source mutate expected = do
     verifier <- verifierProgram
+    ownedResult <- ownedOnce source
     pure $ case verifier of
         Error e -> Just ("the verifier does not compile: " ++ e)
-        Ok verifierProgram -> case ownedSource source of
+        Ok verifierProgram -> case ownedResult of
             Error e -> Just e
             Ok owned ->
                 let program = mutate owned

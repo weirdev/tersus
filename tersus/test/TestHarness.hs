@@ -19,23 +19,30 @@ module TestHarness
     , nativeInts
     , vecLibrary
     , compileOnce
+    , ownedOnce
+    , validatedOnce
     , mirDataOf
+    , encodeProgram
+    , decodeProgram
+    , sharedProgramCacheFile
     ) where
 
 import qualified Control.Exception as Exception
 import Control.Concurrent (forkIO, threadDelay)
-import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar)
+import Control.Concurrent.MVar (MVar, modifyMVar, newEmptyMVar, newMVar, putMVar, takeMVar, withMVar)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
-import Control.Exception (IOException, SomeException, bracket_, displayException, finally, mask, throwIO, try)
-import Control.Monad (forM)
+import Control.Exception (IOException, SomeException, bracket, bracket_, displayException, finally, mask, onException, throwIO, try)
+import Control.Monad (forM, when)
 import GHC.Conc (getNumCapabilities)
-import Data.List (isInfixOf)
+import Data.Char (isSpace)
+import Data.List (isInfixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectory, createDirectoryIfMissing, doesFileExist, getFileSize, getModificationTime, removeDirectory, removeFile, renameFile)
+import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getFileSize, getModificationTime, removeDirectory, removeDirectoryRecursive, removeFile, renameFile)
 import System.Environment (getExecutablePath)
 import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
+import System.IO (SeekMode (AbsoluteSeek), hClose, hPutStr, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
+import System.Posix.IO (FileLock, LockRequest (WriteLock), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
 
 import Hash (fingerprint)
 import Mir (Program)
@@ -43,7 +50,7 @@ import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
 import Parse
-import Pipeline (compileSource, ownedSource, parseWithEquality, runStatements, validateStatements)
+import Pipeline (compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
@@ -188,88 +195,176 @@ parseValidateFailProgramHelper source expectedError = withProgram source $
 withProgram :: String -> TestResult -> TestResult
 withProgram source = fmap (\message -> message ++ "\nProgram: " ++ take 500 source)
 
--- The compilation of a program, remembered for the process: cases that all use the same big program (the emitter of
--- examples/emit.tersus) validate it once instead of once per case. Compilation is pure, so a result stays valid.
+-- Lossless codec for a compiled program. MirData.writeProgram is lossy by design, so the shared
+-- cache uses derived Show/Read, which keep specs, invariants, generics and ghost contents.
+programCodecHeader :: String
+programCodecHeader = "tersus-test-program 1\n"
+
+encodeProgram :: Program -> String
+encodeProgram program = programCodecHeader ++ show program ++ "\n"
+
+decodeProgram :: String -> Result Program String
+decodeProgram text = case stripPrefix programCodecHeader text of
+    Nothing -> Error "not a tersus-test-program 1 entry"
+    Just body -> case reads body of
+        [(program, rest)] | all isSpace rest -> Ok program
+        _ -> Error "malformed tersus-test-program entry"
+
+-- The compilation of a program, remembered for the process and, when it succeeded, on disk:
+-- test groups run in processes of their own, so without the disk entry every group would
+-- validate the same big programs again. Only successful compilations are written; an error
+-- is remembered in this process (as compileOnce always did) and recomputed by others.
 compileOnce :: String -> IO (Result Program String)
-compileOnce source = modifyMVar compiledSources $ \cache ->
-    case Map.lookup source cache of
-        Just result -> pure (cache, result)
-        Nothing -> do
-            let result = compileSource source
-            _ <- Exception.evaluate result
-            pure (Map.insert source result cache, result)
+compileOnce source = sharedProgram "compile" source (compileSource source)
+
+ownedOnce :: String -> IO (Result Program String)
+ownedOnce source = sharedProgram "owned" source (ownedSource source)
+
+validatedOnce :: String -> IO (Result Program String)
+validatedOnce source = sharedProgram "validated" source (validatedSource source)
+
+sharedProgram :: String -> String -> Result Program String -> IO (Result Program String)
+sharedProgram stage source compute = do
+    known <- lookupCached
+    case known of
+        Just result -> pure result
+        Nothing -> withEntryThreadLock (stage, source) $ do
+            again <- lookupCached
+            case again of
+                Just result -> pure result
+                Nothing -> do
+                    result <- sharedOnDisk stage source compute
+                    modifyMVar compiledSources $ \cache -> pure (Map.insert (stage, source) result cache, result)
+  where
+    lookupCached = modifyMVar compiledSources $ \cache -> pure (cache, Map.lookup (stage, source) cache)
 
 {-# NOINLINE compiledSources #-}
-compiledSources :: MVar (Map.Map String (Result Program String))
+compiledSources :: MVar (Map.Map (String, String) (Result Program String))
 compiledSources = unsafePerformIO (newMVar Map.empty)
 
--- The MIR of a program as data (what MirData writes of Pipeline.ownedSource), shared between the groups that check
--- the same programs (TestMirData, TestMirReader, TestMirEmit, TestMirVerify): each group runs in a process of its
--- own, so without this every one of them pays the full type check and validation of every example and program again.
--- An entry is the data a validated compile wrote, kept in the cache directory under a name made of the source and of
--- the test binary as built (its size and modification time): a rebuild that changes the compiler or the harness
--- misses the cache and validates afresh, so an entry is only ever used by the binary whose validation produced its
--- kind. A source that does not compile is not remembered, so the case that asked reports why. Without a cache
--- directory the data is simply computed.
-mirDataOf :: String -> IO (Result String String)
-mirDataOf source = do
+-- Kernel locks are per process, so threads of one process take a per-entry MVar first; the
+-- map holds one lock per stage and source ever shared here, as compiledSources itself does.
+{-# NOINLINE entryLocks #-}
+entryLocks :: MVar (Map.Map (String, String) (MVar ()))
+entryLocks = unsafePerformIO (newMVar Map.empty)
+
+withEntryThreadLock :: (String, String) -> IO (Result Program String) -> IO (Result Program String)
+withEntryThreadLock key action = do
+    lock <- modifyMVar entryLocks $ \locks -> case Map.lookup key locks of
+        Just existing -> pure (locks, existing)
+        Nothing -> do
+            fresh <- newMVar ()
+            pure (Map.insert key fresh locks, fresh)
+    withMVar lock (\_ -> action)
+
+sharedOnDisk :: String -> String -> Result Program String -> IO (Result Program String)
+sharedOnDisk stage source compute = do
     cache <- cacheDirectory
     case cache of
         Error _ -> pure compute
         Ok dir -> do
             built <- binaryIdentity
-            let dataDir = dir </> "mir-data"
-                file = dataDir </> fingerprint [source, built]
-            present <- doesFileExist file
-            if present
-                then do
-                    cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
-                    pure $ case cached of
-                        Right text -> Ok text
-                        Left _ -> compute
-                else do
-                    made <- try (createDirectoryIfMissing True dataDir) :: IO (Either IOException ())
-                    case made of
-                        Left _ -> pure compute
-                        Right () -> do
-                            -- (one process compiles an entry while the others wait for it: on a cold cache the group
-                            -- processes would otherwise each validate the same program at the same time. The lock is a
-                            -- directory made for the entry, which only one process can make)
-                            let lock = file ++ ".lock"
-                                produce = do
-                                    let result = compute
-                                    case result of
-                                        Error _ -> pure result
-                                        Ok text -> do
-                                            (staging, handle) <- openTempFile dataDir "mir-data.tmp"
-                                            hClose handle
-                                            removeFile staging
-                                            writeFile staging text
-                                            renameFile staging file
-                                            pure result
-                            acquired <- try (createDirectory lock) :: IO (Either IOException ())
-                            case acquired of
-                                Right () -> produce `finally` removeDirectory lock
-                                Left _ -> do
-                                    waited <- waitForEntry file (120 :: Int)
+            let entryKey = fingerprint [stage, source, built, programCodecHeader]
+                dataDir = dir </> "test-programs"
+                file = dataDir </> entryKey
+            made <- try (createDirectoryIfMissing True dataDir) :: IO (Either IOException ())
+            case made of
+                Left _ -> pure compute
+                Right () -> do
+                    existing <- readEntry file
+                    case existing of
+                        Just program -> pure (Ok program)
+                        Nothing -> do
+                            let produce = do
+                                    -- another process may have written it while this one waited for the lock
+                                    waited <- readEntry file
                                     case waited of
-                                        Just text -> pure (Ok text)
-                                        -- (the holder may be gone, or slower than the wait: computing again is
-                                        -- always safe, the entry written is the same)
-                                        Nothing -> produce
+                                        Just program -> pure (Ok program)
+                                        Nothing -> case compute of
+                                            Error e -> pure (Error e)
+                                            Ok program -> do
+                                                written <- try (writeEntryAtomically dataDir file (encodeEntry entryKey program)) :: IO (Either IOException ())
+                                                case written of
+                                                    Right () -> pure (Ok program)
+                                                    Left _ -> pure (Ok program)
+                            locked <- withKernelLock file produce
+                            case locked of
+                                Just result -> pure result
+                                -- the entry cannot be locked (an unwritable directory, a full
+                                -- disk): computing without the cache is always safe
+                                Nothing -> pure compute
   where
-    waitForEntry file tries
-        | tries <= 0 = pure Nothing
-        | otherwise = do
-            present <- doesFileExist file
-            if present
-                then do
-                    cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
-                    pure $ case cached of
-                        Right text -> Just text
-                        Left _ -> Nothing
-                else threadDelay 500000 >> waitForEntry file (tries - 1)
-    compute = case ownedSource source of
+    readEntry file = do
+        present <- doesFileExist file
+        if not present
+            then pure Nothing
+            else do
+                built <- binaryIdentity
+                let entryKey = fingerprint [stage, source, built, programCodecHeader]
+                cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
+                pure $ case cached of
+                    Right text -> case decodeEntry entryKey text of
+                        Ok program -> Just program
+                        Error _ -> Nothing
+                    Left _ -> Nothing
+
+-- An entry carries the key it was filed under, so a well-formed program filed for another
+-- source, stage or build is a miss, not an answer.
+decodeEntry :: String -> String -> Result Program String
+decodeEntry key text = case stripPrefix (programCodecHeader ++ key ++ "\n") text of
+    Nothing -> Error "entry key mismatch"
+    Just body -> case reads body of
+        [(program, rest)] | all isSpace rest -> Ok program
+        _ -> Error "malformed tersus-test-program entry"
+
+encodeEntry :: String -> Program -> String
+encodeEntry key program = programCodecHeader ++ key ++ "\n" ++ show program ++ "\n"
+
+writeEntryAtomically :: FilePath -> FilePath -> String -> IO ()
+writeEntryAtomically dir file text = do
+    (staging, handle) <- openTempFile dir "entry.tmp"
+    hPutStr handle text
+    hClose handle
+    renameFile staging file
+
+-- One process compiles an entry while the others wait in the kernel for its lock: a file
+-- lock on the entry's lock file, held from before the entry is re-read until after it is
+-- written, and released by closing the descriptor -- by the bracket below, or by the kernel
+-- when the process dies, however it dies. Nothing about who holds it is kept on disk, so
+-- there is no stale state to reclaim and no wait after which a waiter duplicates work.
+-- Returns Nothing when the lock file cannot be opened or locked at all.
+withKernelLock :: FilePath -> IO (Result Program String) -> IO (Maybe (Result Program String))
+withKernelLock file produce = do
+    outcome <- try acquireUse :: IO (Either IOException (Result Program String))
+    pure $ case outcome of
+        Right result -> Just result
+        Left _ -> Nothing
+  where
+    acquireUse = bracket acquire closeFd (\_ -> produce)
+    acquire = do
+        fd <- openFd (file ++ ".lock") WriteOnly (Just 0o644) defaultFileFlags
+        waitToSetLock fd lockRequest `onException` closeFd fd
+        pure fd
+    lockRequest :: FileLock
+    lockRequest = (WriteLock, AbsoluteSeek, 0, 0)
+
+-- The cache file a stage and source use, when there is a cache directory (for cache tests).
+sharedProgramCacheFile :: String -> String -> IO (Maybe FilePath)
+sharedProgramCacheFile stage source = do
+    cache <- cacheDirectory
+    case cache of
+        Error _ -> pure Nothing
+        Ok dir -> do
+            built <- binaryIdentity
+            pure (Just (dir </> "test-programs" </> fingerprint [stage, source, built, programCodecHeader]))
+
+-- The MIR of a program as data (what MirData writes of Pipeline.ownedSource), shared between
+-- the groups that check the same programs: the owned program itself comes from the shared
+-- cache above, so the lossy data is written from the same validated program in every group.
+mirDataOf :: String -> IO (Result String String)
+mirDataOf source = do
+    owned <- ownedOnce source
+    pure $ case owned of
         Error e -> Error e
         Ok program -> Ok (writeProgram program)
 

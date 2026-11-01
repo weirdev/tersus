@@ -6,7 +6,6 @@ import System.Exit (ExitCode (..))
 import Cli (World (..), noWorld, runProgramIn)
 import Mir
 import MirData (readProgram, writeProgram)
-import Pipeline (ownedSource)
 import TestHarness
 import TestMirReader (withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
@@ -64,7 +63,8 @@ sameReader = do
 interpretedIr :: String -> IO TestResult
 interpretedIr source = do
     emitter <- emitterProgram
-    pure $ case ownedSource source of
+    ownedResult <- ownedOnce source
+    pure $ case ownedResult of
         Error e -> Just e
         Ok owned -> case mapResult fst (runEmitter noWorld{worldInput = writeProgram owned} emitter) of
             Error e -> Just e
