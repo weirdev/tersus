@@ -100,7 +100,18 @@ proofOperand _ (CTerm (VInt n)) b = do
 proofOperand _ (CTerm (VBool x)) b = do
     (v, b') <- operand (M.Const (M.CBool x)) b
     pure ([], v, b')
+proofOperand _ (CTerm (VList values)) b = do
+    constants <- mapM valueConstant values
+    (v, b') <- operand (M.Const (M.CList constants)) b
+    pure ([], v, b')
+  where
+    valueConstant (VInt n) = Just (M.CInt n)
+    valueConstant (VBool x) = Just (M.CBool x)
+    valueConstant (VList vs) = M.CList <$> mapM valueConstant vs
+    valueConstant (VData name fields) = M.CData name <$> mapM (\(f, v) -> (,) f <$> valueConstant v) fields
+    valueConstant _ = Nothing
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct ToByte) _)) [arg]) b = proofOperand env arg b
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct BytesFrom) _)) [arg]) b = proofOperand env arg b
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [arg]) b = proofOperand env arg b
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct FromByte) _)) [arg]) b = proofOperand env arg b
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Size) _)) [arg]) b0 = do
@@ -359,6 +370,135 @@ proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variantName)) _)) [a
     pure (prefix, require, b3)
 proofCheck _ _ _ = Nothing
 
+-- A forall over the elements of two lists, assumed as one fact (function
+-- -30) that the checker instantiates: `forall j in lo..hi: get(a, j) =
+-- get(b, j)`. Other forall shapes keep the havoced-instance encoding.
+forallFactSteps :: M.Env -> VariableProof -> Build -> Maybe ([MirValue], Build)
+forallFactSteps env (Forall index guards body) b0 = case body of
+    FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Eq)) _)) [x, y]
+        | Just (a1, base, c) <- constSide x y -> emitConst a1 base c
+        | Just (a1, base, c) <- constSide y x -> emitConst a1 base c
+      where
+        constSide g c = do
+            (list, off) <- getParts g
+            if mentionsIndex c then Nothing else Just ()
+            Just (list, maybe (CTerm (VInt 0)) id off, c)
+        emitConst a1 base c = do
+            lo <- guardLo
+            hi <- guardHi
+            (sA, refA, b1) <- proofOperand env a1 b0
+            (sC, refC, b2) <- proofOperand env c b1
+            (sLo, refLo, b3) <- proofOperand env lo b2
+            (sHi, refHi, b4) <- proofOperand env hi b3
+            (sBase, refBase, b5) <- proofOperand env base b4
+            let (i, b6) = fresh b5
+                local = negate i - 1
+                apply = step "ApplyFresh" [("local", MInt local), ("function", MInt (-32)), ("arguments", MList [refA, refLo, refHi, refBase, refC])]
+            pure (sA ++ sC ++ sLo ++ sHi ++ sBase ++ [apply], b6)
+    FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Eq)) _)) [x, y]
+        | Just (a1, base, a2, delta, mode) <- shiftSide x y -> emitShift a1 base a2 delta mode
+        | Just (a1, base, a2, delta, mode) <- shiftSide y x -> emitShift a1 base a2 delta mode
+      where
+        shiftSide g e = do
+            (listA, off) <- getParts g
+            (listB, delta, mode) <- shiftParts e
+            Just (listA, maybe (CTerm (VInt 0)) id off, listB, delta, mode)
+        shiftParts (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [g, d]) = do
+            (listB, off) <- getParts g
+            if off == Nothing && not (mentionsIndex d) then Just () else Nothing
+            Just (listB, d, 0)
+        shiftParts (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [d, g]) = do
+            (listB, off) <- getParts g
+            if off == Nothing && not (mentionsIndex d) then Just () else Nothing
+            Just (listB, d, 0)
+        shiftParts (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Minus) _)) [g, d]) = do
+            (listB, off) <- getParts g
+            if off == Nothing && not (mentionsIndex d) then Just () else Nothing
+            Just (listB, d, 1)
+        shiftParts _ = Nothing
+        emitShift a1 base a2 delta mode = do
+            lo <- guardLo
+            hi <- guardHi
+            (sA, refA, b1) <- proofOperand env a1 b0
+            (sB, refB, b2) <- proofOperand env a2 b1
+            (sLo, refLo, b3) <- proofOperand env lo b2
+            (sHi, refHi, b4) <- proofOperand env hi b3
+            (sBase, refBase, b5) <- proofOperand env base b4
+            (sD, refD, b6) <- proofOperand env delta b5
+            (sM, refM, b7) <- proofOperand env (CTerm (VInt mode)) b6
+            let (i, b8) = fresh b7
+                local = negate i - 1
+                apply = step "ApplyFresh" [("local", MInt local), ("function", MInt (-33)), ("arguments", MList [refA, refB, refLo, refHi, refBase, refD, refM])]
+            pure (sA ++ sB ++ sLo ++ sHi ++ sBase ++ sD ++ sM ++ [apply], b8)
+    FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Eq)) _)) [x, y] -> do
+        (listL, offL) <- getParts x
+        (listR, offR) <- getParts y
+        (a1, a2, base) <- case (offL, offR) of
+            (Nothing, Nothing) -> Just (listL, listR, CTerm (VInt 0))
+            (Just e, Nothing) -> Just (listL, listR, e)
+            (Nothing, Just e) -> Just (listR, listL, e)
+            (Just _, Just _) -> Nothing
+        lo <- guardLo
+        hi <- guardHi
+        (sA, refA, b1) <- proofOperand env a1 b0
+        (sB, refB, b2) <- proofOperand env a2 b1
+        (sLo, refLo, b3) <- proofOperand env lo b2
+        (sHi, refHi, b4) <- proofOperand env hi b3
+        (sBase, refBase, b5) <- proofOperand env base b4
+        let (i, b6) = fresh b5
+            local = negate i - 1
+            apply = step "ApplyFresh" [("local", MInt local), ("function", MInt (-30)), ("arguments", MList [refA, refB, refLo, refHi, refBase])]
+        pure (sA ++ sB ++ sLo ++ sHi ++ sBase ++ [apply], b6)
+    FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [x, y] -> do
+        (a1, base) <- getArg x
+        if indexOf x == Just index && not (mentionsIndex y) then Just () else Nothing
+        lo <- guardLo
+        hi <- guardHi
+        (sA, refA, b1) <- proofOperand env a1 b0
+        (sC, refC, b2) <- proofOperand env y b1
+        (sLo, refLo, b3) <- proofOperand env lo b2
+        (sHi, refHi, b4) <- proofOperand env hi b3
+        (sBase, refBase, b5) <- proofOperand env base b4
+        let (i, b6) = fresh b5
+            local = negate i - 1
+            apply = step "ApplyFresh" [("local", MInt local), ("function", MInt (-31)), ("arguments", MList [refA, refLo, refHi, refBase, refC])]
+        pure (sA ++ sC ++ sLo ++ sHi ++ sBase ++ [apply], b6)
+    _ -> Nothing
+  where
+    getParts (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [list, idx]) = case idx of
+        BVar i -> if i == index then Just (list, Nothing) else Nothing
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [e, BVar i] -> if i == index && not (mentionsIndex e) then Just (list, Just e) else Nothing
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [BVar i, e] -> if i == index && not (mentionsIndex e) then Just (list, Just e) else Nothing
+        _ -> Nothing
+    getParts _ = Nothing
+    mentionsIndex (BVar i) = i == index
+    mentionsIndex (FApp f args) = mentionsIndex f || any mentionsIndex args
+    mentionsIndex _ = False
+    indexOf (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [_, idx]) = case idx of
+        BVar i -> Just i
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [_, BVar i] -> Just i
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [BVar i, _] -> Just i
+        _ -> Nothing
+    indexOf _ = Nothing
+    -- get(a, base + j) or get(a, j): the list and the offset of the index
+    getArg (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [list, idx]) = case idx of
+        BVar i -> Just (list, CTerm (VInt 0))
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [e, BVar i] -> if mentions e then Nothing else Just (list, e)
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [BVar i, e] -> if mentions e then Nothing else Just (list, e)
+        _ -> Nothing
+      where
+        mentions (BVar i) = i == index
+        mentions (FApp f args) = mentions f || any mentions args
+        mentions _ = False
+    getArg _ = Nothing
+    guardLo = case [e | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel GtEq)) _)) [BVar i, e] <- guards, i == index] ++ [e | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Lt)) _)) [e, BVar i] <- guards, i == index] of
+        e : _ -> Just e
+        [] -> Nothing
+    guardHi = case [e | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Lt)) _)) [BVar i, e] <- guards, i == index] ++ [e | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Gt)) _)) [e, BVar i] <- guards, i == index] of
+        e : _ -> Just e
+        [] -> Nothing
+forallFactSteps _ _ _ = Nothing
+
 -- Evaluate total expressions before assuming a clause. The reference can
 -- assume partial expressions without proving their safety, so decline those
 -- rather than treating an unproved safety check as a validation failure.
@@ -368,20 +508,34 @@ contractSteps rules assume env clauses b0 = do
     pure (steps, b)
   where
     add (steps, subst, b) clause = case clause of
-        ProofAssert proof -> do
-            (prefix, checked, b') <- proofCheck env (substituteProof subst proof) b
-            if not assume || all droppable prefix then Just () else Nothing
-            encoded <- if assume then case checked of
-                MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
-                MData "ExecutionStep::RequireVariant" fields -> Just (MData "ExecutionStep::AssumeVariant" (fields ++ [("matches", MBool True)]))
-                _ -> Nothing
-              else Just checked
-            pure (steps ++ (if assume then filter keptStep prefix else prefix) ++ [encoded], subst, b')
+        ProofAssert proof
+            | assume, Just (fsteps, b') <- forallFactSteps env (substituteProof subst proof) b -> pure (steps ++ fsteps, subst, b')
+            | otherwise -> do
+                (prefix, checked, b') <- proofCheck env (substituteProof subst proof) b
+                if not assume || all droppable prefix then Just () else Nothing
+                encoded <- if assume then case checked of
+                    MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
+                    MData "ExecutionStep::RequireVariant" fields -> Just (MData "ExecutionStep::AssumeVariant" (fields ++ [("matches", MBool True)]))
+                    _ -> Nothing
+                  else Just checked
+                pure (steps ++ (if assume then filter keptStep prefix else prefix) ++ [encoded], subst, b')
         AssignProofVar var expr -> pure (steps, Map.insert var (substituteProof subst (exprToProof expr)) subst, b)
         Rewrite rule -> do
-            (more, b') <- if assume then assumeRewrite (substituteRule subst rule) b else rewriteSteps rules env (substituteRule subst rule) b
+            (more, b') <- if assume then assumeRule (substituteRule subst rule) b else rewriteSteps rules env (substituteRule subst rule) b
             pure (steps ++ more, subst, b')
         _ -> Nothing
+    assumeRule (UserRewrite name args) b = assumeRewrite (UserRewrite name args) b
+    assumeRule (CheckRel proof) b = assumeProof proof b
+    assumeRule (CheckGtZero proof) b = assumeProof (FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]) b
+    assumeRule (Refl proof) b = assumeProof (FApp eqVarProof [proof, proof]) b
+    assumeRule _ _ = Nothing
+    assumeProof proof b = do
+        (prefix, checked, b') <- proofCheck env proof b
+        if all droppable prefix then Just () else Nothing
+        encoded <- case checked of
+            MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
+            _ -> Nothing
+        pure (filter keptStep prefix ++ [encoded], b')
     -- A clause list that is itself assumed assumes a rewrite's inputs too:
     -- they are part of the same hypothesis.
     assumeRewrite (UserRewrite name args) b0 = do
@@ -870,12 +1024,27 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
     facts (TNamed name) b = do
         let base = maybe name fst (instanceOf name)
             clauses = Map.findWithDefault [] base invariants
-        if null clauses then Just ([], b) else do
-            case instanceOf name of Just _ -> Nothing; Nothing -> Just ()
-            fields <- case Map.lookup base types of Just (M.StructDecl fs) -> Just (map fst fs); _ -> Nothing
-            (projections, env, b1) <- foldM project ([], Map.empty, b) fields
-            (assumptions, b2) <- contractSteps rules True env clauses b1
-            pure (projections ++ assumptions, b2)
+        case Map.lookup base types of
+            Just (M.StructDecl fs) -> do
+                let fields = map fst fs
+                (projections, env, b1) <- foldM project ([], Map.empty, b) fields
+                let (constructor, b2) = namedFunction ("ctor:" ++ name) b1
+                    (i, b3) = fresh b2
+                    clocal = negate i - 1
+                    cref = record "ValueRef::Local" [("local", MInt clocal)]
+                    argRefs = [record "ValueRef::Local" [("local", MInt (localNum l))] | f <- fields, Just (M.Copy l) <- [Map.lookup f env]]
+                    create = step "ApplyFresh" [("local", MInt clocal), ("function", MInt constructor), ("arguments", MList argRefs)]
+                    known = assume 0 value cref
+                    (fieldIds, b4) = foldl (\(ids, bb) f -> let (fid, bb') = namedFunction ("field:" ++ f) bb in (ids ++ [fid], bb')) ([], b3) fields
+                    b5 = b4{ctorFields = nub ([(constructor, fid, toInteger idx) | (idx, fid) <- zip [0 ..] fieldIds] ++ ctorFields b4)}
+                (assumptions, b6) <- if null clauses then pure ([], b5) else case instanceOf name of Just _ -> Nothing; Nothing -> contractSteps rules True env clauses b5
+                pure (projections ++ [create, known] ++ assumptions, b6)
+            _ -> if null clauses then Just ([], b) else do
+                case instanceOf name of Just _ -> Nothing; Nothing -> Just ()
+                fields <- case Map.lookup base types of Just (M.StructDecl fs) -> Just (map fst fs); _ -> Nothing
+                (projections, env, b1) <- foldM project ([], Map.empty, b) fields
+                (assumptions, b2) <- contractSteps rules True env clauses b1
+                pure (projections ++ assumptions, b2)
     facts _ b = Just ([], b)
     sized size b = do
         (expected, b1) <- operand (M.Const (M.CInt size)) b
@@ -1194,7 +1363,9 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     invariant env (checks, assumptions, b) (ProofAssert p) = do
         (prefix, checkStep, b') <- proofCheck env p b
         assumption <- asAssumption checkStep
-        pure (checks ++ prefix ++ [checkStep], assumptions ++ prefix ++ [assumption], b')
+        case forallFactSteps env p b' of
+            Just (fsteps, _) -> pure (checks ++ prefix ++ [checkStep], assumptions ++ fsteps, b')
+            Nothing -> pure (checks ++ prefix ++ [checkStep], assumptions ++ prefix ++ [assumption], b')
     invariant _ _ _ = Nothing
     loopType current (steps, b) local = do
         (more, b') <- typeSteps rules types invariants current local b

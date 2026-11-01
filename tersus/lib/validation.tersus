@@ -1740,6 +1740,701 @@ fn entailsPartDisequality(context: &ValidatorContext, equalities: &List<Equality
     return false;
 };
 
+struct GetFact { seq: Int, at: Int, found: Bool };
+
+impl Clone for GetFact { };
+
+impl Copy for GetFact { };
+
+fn getFactOf(context: &ValidatorContext, equalities: &List<EqualityFact>, term: Int) -> GetFact {
+    for app in context.applications {
+        if app.function = -14 {
+            if size(app.arguments) = 2 {
+                if hasEquality(equalities, app.id, term) {
+                    return GetFact { seq: get(app.arguments, 0), at: get(app.arguments, 1), found: true };
+                };
+            };
+        };
+    };
+    return GetFact { seq: 0, at: 0, found: false };
+};
+
+struct SizeFact { term: Int, found: Bool };
+
+impl Clone for SizeFact { };
+
+impl Copy for SizeFact { };
+
+fn sizeTermOf(context: &ValidatorContext, equalities: &List<EqualityFact>, seq: Int) -> SizeFact {
+    for app in context.applications {
+        if app.function = -13 {
+            if size(app.arguments) = 1 {
+                if hasEquality(equalities, get(app.arguments, 0), seq) {
+                    return SizeFact { term: app.id, found: true };
+                };
+            };
+        };
+    };
+    return SizeFact { term: 0, found: false };
+};
+
+// The bridge records `forall j in lo..hi: get(a, j) = get(b, j)` as an
+// application of function -30 to (a, b, lo, hi). It proves an element
+// equality inside the range (and at the end point when that element is
+// known equal separately), and the equality of the lists themselves when
+// the range is the whole of two lists of one size.
+fn forallEqualPair(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    for app in context.applications {
+        if app.function = -30 {
+            if size(app.arguments) = 5 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                lo = get(app.arguments, 2);
+                hi = get(app.arguments, 3);
+                base = get(app.arguments, 4);
+                if lg.found {
+                    if rg.found {
+                        sameLists = false;
+                        pushed = false;
+                        innerList = a;
+                        if hasEquality(equalities, lg.seq, a) {
+                            if hasEquality(equalities, rg.seq, b) { sameLists = true; };
+                        };
+                        if hasEquality(equalities, lg.seq, b) {
+                            if hasEquality(equalities, rg.seq, a) { sameLists = true; };
+                        };
+                        for pushApp in context.applications {
+                            if pushApp.function = -16 {
+                                if size(pushApp.arguments) = 2 {
+                                    if hasEquality(equalities, pushApp.id, lg.seq) {
+                                        if hasEquality(equalities, get(pushApp.arguments, 0), a) {
+                                            if hasEquality(equalities, rg.seq, b) { sameLists = true; pushed = true; innerList = a; };
+                                        };
+                                        if hasEquality(equalities, get(pushApp.arguments, 0), b) {
+                                            if hasEquality(equalities, rg.seq, a) { sameLists = true; pushed = true; innerList = b; };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                        if sameLists {
+                            j = rg.at;
+                            offsetAt = lg.at;
+                            indexMatches = false;
+                            if hasEquality(equalities, offsetAt, j) { indexMatches = true; };
+                            for sum in context.applications {
+                                if sum.function = -1 {
+                                    if size(sum.arguments) = 2 {
+                                        if hasEquality(equalities, sum.id, offsetAt) {
+                                            if hasEquality(equalities, get(sum.arguments, 0), base) {
+                                                if hasEquality(equalities, get(sum.arguments, 1), j) { indexMatches = true; };
+                                            };
+                                            if hasEquality(equalities, get(sum.arguments, 1), base) {
+                                                if hasEquality(equalities, get(sum.arguments, 0), j) { indexMatches = true; };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                            if indexMatches = false {
+                                j = lg.at;
+                                offsetAt = rg.at;
+                                if hasEquality(equalities, offsetAt, j) { indexMatches = true; };
+                                for sum in context.applications {
+                                    if sum.function = -1 {
+                                        if size(sum.arguments) = 2 {
+                                            if hasEquality(equalities, sum.id, offsetAt) {
+                                                if hasEquality(equalities, get(sum.arguments, 0), base) {
+                                                    if hasEquality(equalities, get(sum.arguments, 1), j) { indexMatches = true; };
+                                                };
+                                                if hasEquality(equalities, get(sum.arguments, 1), base) {
+                                                    if hasEquality(equalities, get(sum.arguments, 0), j) { indexMatches = true; };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                            if indexMatches {
+                                if hasDifference(equalities, differences, lo, j, 0) {
+                                    below = hasDifference(equalities, differences, j, hi, -1);
+                                    if below = false { below = linearEntails(context, j, hi, -1); };
+                                    if below {
+                                        if pushed {
+                                            st = sizeTermOf(context, equalities, innerList);
+                                            if st.found {
+                                                if hasDifference(equalities, differences, lg.at, st.term, -1) { return true; };
+                                                if linearEntails(context, lg.at, st.term, -1) { return true; };
+                                            };
+                                        } else { return true; };
+                                    };
+                                    atMost = hasDifference(equalities, differences, j, hi, 0);
+                                    if atMost = false { atMost = linearEntails(context, j, hi, 0); };
+                                    if atMost {
+                                        alreadyStrict = false;
+                                        for o in context.orders {
+                                            if o.strict {
+                                                if hasEquality(equalities, o.smaller, j) {
+                                                    if hasEquality(equalities, o.greater, hi) { alreadyStrict = true; };
+                                                };
+                                            };
+                                        };
+                                        strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+                                        strictAnalysis = analyzeContext(strictContext);
+                                        if alreadyStrict = false && forallEqualPair(strictContext, strictAnalysis, left, right, lg, rg) {
+                                            eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+                                            eqAnalysis = analyzeContext(eqContext);
+                                            if eqAnalysis.contradictory { return true; };
+                                            if contextEqual(eqAnalysis.equalities, eqAnalysis.differences, left, right) { return true; };
+                                            for g in context.applications {
+                                                if g.function = -14 {
+                                                    if size(g.arguments) = 2 {
+                                                        gList = get(g.arguments, 0);
+                                                        if hasEquality(eqAnalysis.equalities, gList, a) || hasEquality(eqAnalysis.equalities, gList, lg.seq) {
+                                                            atEnd = false;
+                                                            if hasEquality(eqAnalysis.equalities, get(g.arguments, 1), hi) { atEnd = true; };
+                                                            for sum in context.applications {
+                                                                if sum.function = -1 {
+                                                                    if size(sum.arguments) = 2 {
+                                                                        if hasEquality(eqAnalysis.equalities, sum.id, get(g.arguments, 1)) {
+                                                                            if hasEquality(eqAnalysis.equalities, get(sum.arguments, 0), base) {
+                                                                                if hasEquality(eqAnalysis.equalities, get(sum.arguments, 1), hi) { atEnd = true; };
+                                                                            };
+                                                                            if hasEquality(eqAnalysis.equalities, get(sum.arguments, 1), base) {
+                                                                                if hasEquality(eqAnalysis.equalities, get(sum.arguments, 0), hi) { atEnd = true; };
+                                                                            };
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                            if atEnd {
+                                                                for h in context.applications {
+                                                                    if h.function = -14 {
+                                                                        if size(h.arguments) = 2 {
+                                                                            hList = get(h.arguments, 0);
+                                                                            if hasEquality(eqAnalysis.equalities, hList, b) || hasEquality(eqAnalysis.equalities, hList, rg.seq) {
+                                                                                hIndexOk = hasEquality(eqAnalysis.equalities, get(h.arguments, 1), hi);
+                                                                                if hIndexOk = false {
+                                                                                    if linearEntails(eqContext, get(h.arguments, 1), offsetAt, 0) {
+                                                                                        if linearEntails(eqContext, offsetAt, get(h.arguments, 1), 0) { hIndexOk = true; };
+                                                                                    };
+                                                                                };
+                                                                                if hIndexOk {
+                                                                                    if hasEquality(eqAnalysis.equalities, g.id, h.id) { return true; };
+                                                                                };
+                                                                            };
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+                listPair = false;
+                if hasEquality(equalities, left, a) {
+                    if hasEquality(equalities, right, b) { listPair = true; };
+                };
+                if hasEquality(equalities, left, b) {
+                    if hasEquality(equalities, right, a) { listPair = true; };
+                };
+                if listPair {
+                    sa = sizeTermOf(context, equalities, a);
+                    sb = sizeTermOf(context, equalities, b);
+                    if sa.found {
+                        if sb.found {
+                            if contextEqual(equalities, differences, sa.term, sb.term) {
+                                loValue = integerValue(context, lo);
+                                baseValue = integerValue(context, base);
+                                if loValue is IntegerLookup::Found {
+                                    if baseValue is IntegerLookup::Found {
+                                        if (loValue as IntegerLookup::Found).value = 0 {
+                                            if (baseValue as IntegerLookup::Found).value = 0 {
+                                                if hasEquality(equalities, hi, sa.term) { return true; };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// A term can be recorded as a get of several lists (a read through a push
+// or a set is the same term as the get of the list it reads through), so
+// try every recorded get of the two sides that a forall fact can speak of.
+fn forallEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    lg = getFactOf(context, equalities, left);
+    rg = getFactOf(context, equalities, right);
+    if forallEqualPair(context, analysis, left, right, lg, rg) { return true; };
+    for app in context.applications {
+        if app.function = -30 {
+            if size(app.arguments) = 5 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                for lapp in context.applications {
+                    if lapp.function = -14 {
+                        if size(lapp.arguments) = 2 {
+                            if hasEquality(equalities, lapp.id, left) {
+                                lseq = get(lapp.arguments, 0);
+                                lMatches = false;
+                                if hasEquality(equalities, lseq, a) { lMatches = true; };
+                                if hasEquality(equalities, lseq, b) { lMatches = true; };
+                                for pushApp in context.applications {
+                                    if pushApp.function = -16 {
+                                        if size(pushApp.arguments) = 2 {
+                                            if hasEquality(equalities, pushApp.id, lseq) {
+                                                if hasEquality(equalities, get(pushApp.arguments, 0), a) { lMatches = true; };
+                                                if hasEquality(equalities, get(pushApp.arguments, 0), b) { lMatches = true; };
+                                            };
+                                        };
+                                    };
+                                };
+                                if lMatches {
+                                    for rapp in context.applications {
+                                        if rapp.function = -14 {
+                                            if size(rapp.arguments) = 2 {
+                                                if hasEquality(equalities, rapp.id, right) {
+                                                    rseq = get(rapp.arguments, 0);
+                                                    rMatches = false;
+                                                    if hasEquality(equalities, rseq, a) { rMatches = true; };
+                                                    if hasEquality(equalities, rseq, b) { rMatches = true; };
+                                                    for pushApp2 in context.applications {
+                                                        if pushApp2.function = -16 {
+                                                            if size(pushApp2.arguments) = 2 {
+                                                                if hasEquality(equalities, pushApp2.id, rseq) {
+                                                                    if hasEquality(equalities, get(pushApp2.arguments, 0), a) { rMatches = true; };
+                                                                    if hasEquality(equalities, get(pushApp2.arguments, 0), b) { rMatches = true; };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                    if rMatches {
+                                                        lf = GetFact { seq: lseq, at: get(lapp.arguments, 1), found: true };
+                                                        rf = GetFact { seq: rseq, at: get(rapp.arguments, 1), found: true };
+                                                        if forallEqualPair(context, analysis, left, right, lf, rf) { return true; };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// A get at a symbolic index of a list of known size is one of its finitely
+// many elements: when every element is the goal's other side, the get is too.
+fn finiteGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    gf = getFactOf(context, equalities, getTerm);
+    if gf.found = false { return false; };
+    sz = sizeTermOf(context, equalities, gf.seq);
+    if sz.found = false { return false; };
+    nv = integerValue(context, sz.term);
+    if nv is IntegerLookup::Found {
+        n = (nv as IntegerLookup::Found).value;
+        if n < 0 { return false; };
+        if n > 64 { return false; };
+        zero = 0;
+        zeroFound = false;
+        for constant in context.constants {
+            if constant.kind = 0 {
+                if constant.value = 0 { zero = constant.id; zeroFound = true; };
+            };
+        };
+        if zeroFound = false { return false; };
+        if hasDifference(equalities, differences, zero, gf.at, 0) = false { return false; };
+        if hasDifference(equalities, differences, gf.at, sz.term, -1) = false { return false; };
+        for k in 0..n {
+            kTerm = 0;
+            kFound = false;
+            for constant in context.constants {
+                if constant.kind = 0 {
+                    if constant.value = k { kTerm = constant.id; kFound = true; };
+                };
+            };
+            if kFound = false { return false; };
+            elemFound = false;
+            for app in context.applications {
+                if app.function = -14 {
+                    if size(app.arguments) = 2 {
+                        if hasEquality(equalities, get(app.arguments, 0), gf.seq) {
+                            if hasEquality(equalities, get(app.arguments, 1), kTerm) {
+                                if hasEquality(equalities, app.id, otherTerm) { elemFound = true; };
+                            };
+                        };
+                    };
+                };
+            };
+            if elemFound = false { return false; };
+        };
+        return true;
+    };
+    return false;
+};
+
+fn finiteGetEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if finiteGetSide(context, analysis, left, right) { return true; };
+    return finiteGetSide(context, analysis, right, left);
+};
+
+// The bridge records `forall j in lo..hi: get(a, base + j) = c` as an
+// application of function -32 to (a, lo, hi, base, c).
+fn forallConstantSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    gf = getFactOf(context, equalities, getTerm);
+    if gf.found = false { return false; };
+    for app in context.applications {
+        if app.function = -32 {
+            if size(app.arguments) = 5 {
+                a = get(app.arguments, 0);
+                lo = get(app.arguments, 1);
+                hi = get(app.arguments, 2);
+                base = get(app.arguments, 3);
+                c = get(app.arguments, 4);
+                if hasEquality(equalities, gf.seq, a) {
+                    if hasEquality(equalities, otherTerm, c) {
+                        j = gf.at;
+                        jFound = false;
+                        bv = integerValue(context, base);
+                        if bv is IntegerLookup::Found {
+                            if (bv as IntegerLookup::Found).value = 0 { jFound = true; };
+                        };
+                        if jFound = false {
+                            for sum in context.applications {
+                                if sum.function = -1 {
+                                    if size(sum.arguments) = 2 {
+                                        if hasEquality(equalities, sum.id, gf.at) {
+                                            if hasEquality(equalities, get(sum.arguments, 0), base) { j = get(sum.arguments, 1); jFound = true; };
+                                            if hasEquality(equalities, get(sum.arguments, 1), base) { j = get(sum.arguments, 0); jFound = true; };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                        if jFound {
+                            if hasDifference(equalities, differences, lo, j, 0) {
+                                below = hasDifference(equalities, differences, j, hi, -1);
+                                if below = false { below = linearEntails(context, j, hi, -1); };
+                                if below { return true; };
+                                atMost = hasDifference(equalities, differences, j, hi, 0);
+                                if atMost = false { atMost = linearEntails(context, j, hi, 0); };
+                                if atMost {
+                                    strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+                                    strictAnalysis = analyzeContext(strictContext);
+                                    if forallConstantSide(strictContext, strictAnalysis, getTerm, otherTerm) {
+                                        eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+                                        eqAnalysis = analyzeContext(eqContext);
+                                        if eqAnalysis.contradictory { return true; };
+                                        if contextEqual(eqAnalysis.equalities, eqAnalysis.differences, getTerm, otherTerm) { return true; };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// The bridge records `forall j in lo..hi: get(a, base + j) = get(b, j) + d`
+// (mode 0) or `get(b, j) - d` (mode 1) as an application of function -33 to
+// (a, b, lo, hi, base, d, mode).
+fn forallShiftSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    gf = getFactOf(context, equalities, getTerm);
+    if gf.found = false { return false; };
+    for app in context.applications {
+        if app.function = -33 {
+            if size(app.arguments) = 7 {
+                a = get(app.arguments, 0);
+                b = get(app.arguments, 1);
+                lo = get(app.arguments, 2);
+                hi = get(app.arguments, 3);
+                base = get(app.arguments, 4);
+                delta = get(app.arguments, 5);
+                modeTerm = get(app.arguments, 6);
+                seqMatches = hasEquality(equalities, gf.seq, a);
+                viaPush = false;
+                if seqMatches = false {
+                    for pushApp in context.applications {
+                        if pushApp.function = -16 {
+                            if size(pushApp.arguments) = 2 {
+                                if hasEquality(equalities, pushApp.id, gf.seq) {
+                                    if hasEquality(equalities, get(pushApp.arguments, 0), a) { seqMatches = true; viaPush = true; };
+                                };
+                            };
+                        };
+                    };
+                };
+                if seqMatches {
+                    modeValue = integerValue(context, modeTerm);
+                    if modeValue is IntegerLookup::Found {
+                        mode = (modeValue as IntegerLookup::Found).value;
+                        j = gf.at;
+                        jFound = false;
+                        bv = integerValue(context, base);
+                        if bv is IntegerLookup::Found {
+                            if (bv as IntegerLookup::Found).value = 0 { jFound = true; };
+                        };
+                        if jFound = false {
+                            for sum in context.applications {
+                                if sum.function = -1 {
+                                    if size(sum.arguments) = 2 {
+                                        if hasEquality(equalities, sum.id, gf.at) {
+                                            if hasEquality(equalities, get(sum.arguments, 0), base) { j = get(sum.arguments, 1); jFound = true; };
+                                            if hasEquality(equalities, get(sum.arguments, 1), base) { j = get(sum.arguments, 0); jFound = true; };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                        if jFound {
+                            gb = 0;
+                            gbFound = false;
+                            for gapp in context.applications {
+                                if gapp.function = -14 {
+                                    if size(gapp.arguments) = 2 {
+                                        if hasEquality(equalities, get(gapp.arguments, 0), b) {
+                                            if hasEquality(equalities, get(gapp.arguments, 1), j) { gb = gapp.id; gbFound = true; };
+                                        };
+                                    };
+                                };
+                            };
+                            if gbFound {
+                                exprMatches = false;
+                                for eapp in context.applications {
+                                    if hasEquality(equalities, eapp.id, exprTerm) {
+                                        if size(eapp.arguments) = 2 {
+                                            u = get(eapp.arguments, 0);
+                                            v = get(eapp.arguments, 1);
+                                            if eapp.function = -1 {
+                                                if mode = 0 {
+                                                    if hasEquality(equalities, u, gb) {
+                                                        if hasEquality(equalities, v, delta) { exprMatches = true; };
+                                                    };
+                                                    if hasEquality(equalities, v, gb) {
+                                                        if hasEquality(equalities, u, delta) { exprMatches = true; };
+                                                    };
+                                                };
+                                            };
+                                            if eapp.function = -2 {
+                                                if mode = 1 {
+                                                    if hasEquality(equalities, u, gb) {
+                                                        if hasEquality(equalities, v, delta) { exprMatches = true; };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                                if exprMatches {
+                                    if hasDifference(equalities, differences, lo, j, 0) {
+                                        below = hasDifference(equalities, differences, j, hi, -1);
+                                        if below = false { below = linearEntails(context, j, hi, -1); };
+                                        if below {
+                                            if viaPush {
+                                                st = sizeTermOf(context, equalities, a);
+                                                if st.found {
+                                                    if hasDifference(equalities, differences, gf.at, st.term, -1) { return true; };
+                                                    if linearEntails(context, gf.at, st.term, -1) { return true; };
+                                                };
+                                            } else { return true; };
+                                        };
+                                        atMost = hasDifference(equalities, differences, j, hi, 0);
+                                        if atMost = false { atMost = linearEntails(context, j, hi, 0); };
+                                        if atMost {
+                                            strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+                                            strictAnalysis = analyzeContext(strictContext);
+                                            if forallShiftSide(strictContext, strictAnalysis, getTerm, exprTerm) {
+                                                eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+                                                eqAnalysis = analyzeContext(eqContext);
+                                                if eqAnalysis.contradictory { return true; };
+                                                if contextEqual(eqAnalysis.equalities, eqAnalysis.differences, getTerm, exprTerm) { return true; };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn forallShift(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if forallShiftSide(context, analysis, left, right) { return true; };
+    return forallShiftSide(context, analysis, right, left);
+};
+
+fn forallConstant(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if forallConstantSide(context, analysis, left, right) { return true; };
+    return forallConstantSide(context, analysis, right, left);
+};
+
+struct RelationFact { function: Int, left: Int, right: Int, found: Bool };
+
+impl Clone for RelationFact { };
+
+impl Copy for RelationFact { };
+
+fn relationFactOf(context: &ValidatorContext, equalities: &List<EqualityFact>, term: Int) -> RelationFact {
+    for app in context.applications {
+        if app.function >= -11 {
+            if app.function <= -6 {
+                if size(app.arguments) = 2 {
+                    if hasEquality(equalities, app.id, term) {
+                        return RelationFact { function: app.function, left: get(app.arguments, 0), right: get(app.arguments, 1), found: true };
+                    };
+                };
+            };
+        };
+    };
+    return RelationFact { function: 0, left: 0, right: 0, found: false };
+};
+
+fn entailsUnderEquality(context: &ValidatorContext, x: Int, y: Int, u: Int, v: Int) -> Bool {
+    widened = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: x, right: y }), ..clone(context) };
+    analysis = analyzeContext(widened);
+    if analysis.contradictory { return true; };
+    return contextEqual(analysis.equalities, analysis.differences, u, v);
+};
+
+// Two applications of Eq are the same boolean when their arguments match,
+// when both equalities fail, or when each equality gives the other (the
+// parts of a constructed value against the value itself).
+// The bridge records `forall j in lo..hi: get(a, base + j) != c` as an
+// application of function -31 to (a, lo, hi, base, c).
+fn forallDifferentSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    gf = getFactOf(context, equalities, getTerm);
+    if gf.found = false { return false; };
+    for app in context.applications {
+        if app.function = -31 {
+            if size(app.arguments) = 5 {
+                a = get(app.arguments, 0);
+                lo = get(app.arguments, 1);
+                hi = get(app.arguments, 2);
+                base = get(app.arguments, 3);
+                c = get(app.arguments, 4);
+                if hasEquality(equalities, gf.seq, a) {
+                    if hasEquality(equalities, otherTerm, c) {
+                        j = gf.at;
+                        jFound = false;
+                        bv = integerValue(context, base);
+                        if bv is IntegerLookup::Found {
+                            if (bv as IntegerLookup::Found).value = 0 { jFound = true; };
+                        };
+                        if jFound = false {
+                            for sum in context.applications {
+                                if sum.function = -1 {
+                                    if size(sum.arguments) = 2 {
+                                        if hasEquality(equalities, sum.id, gf.at) {
+                                            if hasEquality(equalities, get(sum.arguments, 0), base) { j = get(sum.arguments, 1); jFound = true; };
+                                            if hasEquality(equalities, get(sum.arguments, 1), base) { j = get(sum.arguments, 0); jFound = true; };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                        if jFound {
+                            if hasDifference(equalities, differences, lo, j, 0) {
+                                belowD = hasDifference(equalities, differences, j, hi, -1);
+                                if belowD = false { belowD = linearEntails(context, j, hi, -1); };
+                                if belowD { return true; };
+                                atMostD = hasDifference(equalities, differences, j, hi, 0);
+                                if atMostD = false { atMostD = linearEntails(context, j, hi, 0); };
+                                if atMostD {
+                                    strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+                                    strictAnalysis = analyzeContext(strictContext);
+                                    if forallDifferentSide(strictContext, strictAnalysis, getTerm, otherTerm) {
+                                        eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+                                        eqAnalysis = analyzeContext(eqContext);
+                                        if eqAnalysis.contradictory { return true; };
+                                        if contextDifferent(eqAnalysis.equalities, eqContext.applications, eqAnalysis.orders, eqContext.different, eqAnalysis.differences, getTerm, otherTerm) { return true; };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn forallDifferent(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if forallDifferentSide(context, analysis, left, right) { return true; };
+    return forallDifferentSide(context, analysis, right, left);
+};
+
+fn differentByParts(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    if entailsConstructorDisequality(equalities, context.applications, context.constructorFunctions, left, right) { return true; };
+    if entailsVariantDisequality(equalities, context.variants, left, right) { return true; };
+    if entailsConstructorArgumentDisequality(context, equalities, left, right) { return true; };
+    if contextWithin(context, left, right) { return true; };
+    if contextWithin(context, right, left) { return true; };
+    if entailsPartDisequality(context, equalities, analysis.orders, left, right) { return true; };
+    return contextDifferent(equalities, context.applications, analysis.orders, context.different, analysis.differences, left, right);
+};
+
+fn relationAppsEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    a = relationFactOf(context, equalities, left);
+    b = relationFactOf(context, equalities, right);
+    if a.found = false { return false; };
+    if b.found = false { return false; };
+    if a.function != b.function { return false; };
+    if a.function != -6 { return false; };
+    if contextEqual(equalities, differences, a.left, b.left) {
+        if contextEqual(equalities, differences, a.right, b.right) { return true; };
+    };
+    if contextEqual(equalities, differences, a.left, b.right) {
+        if contextEqual(equalities, differences, a.right, b.left) { return true; };
+    };
+    if differentByParts(context, analysis, a.left, a.right) {
+        if differentByParts(context, analysis, b.left, b.right) { return true; };
+    };
+    if entailsUnderEquality(context, a.left, a.right, b.left, b.right) {
+        if entailsUnderEquality(context, b.left, b.right, a.left, a.right) { return true; };
+    };
+    return false;
+};
+
 fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, goal: ValidatorGoal) -> Bool {
     if analysis.contradictory { return true; };
     if goal is ValidatorGoal::Equal {
@@ -1750,6 +2445,11 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
         } else {
             if congruenceEqual(context, g.left, g.right) { return true; };
         };
+        if forallEqual(context, analysis, g.left, g.right) { return true; };
+        if forallConstant(context, analysis, g.left, g.right) { return true; };
+        if forallShift(context, analysis, g.left, g.right) { return true; };
+        if finiteGetEqual(context, analysis, g.left, g.right) { return true; };
+        if relationAppsEqual(context, analysis, g.left, g.right) { return true; };
         if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
         return false;
     };
@@ -1761,6 +2461,7 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
         if contextWithin(context, g.left, g.right) { return true; };
         if contextWithin(context, g.right, g.left) { return true; };
         if entailsPartDisequality(context, analysis.equalities, analysis.orders, g.left, g.right) { return true; };
+        if forallDifferent(context, analysis, g.left, g.right) { return true; };
         return contextDifferent(analysis.equalities, context.applications, analysis.orders, context.different, analysis.differences, g.left, g.right);
     };
     if goal is ValidatorGoal::Less {
@@ -2736,6 +3437,12 @@ fn readThroughSequence(context: &ValidatorContext, result: Int, list: Int, index
                                                     current = original;
                                                     moved = true;
                                                 };
+                                                if moved = false {
+                                                    if linearEntails(context, index, lengthApp.id, -1) {
+                                                        current = original;
+                                                        moved = true;
+                                                    };
+                                                };
                                             };
                                         };
                                     };
@@ -3050,8 +3757,9 @@ fn assumeRelation(context: &ValidatorContext, relation: Int, left: Int, right: I
 // relation from those terms rather than from the current local bindings.
 fn assumeComparison(context: &ValidatorContext, term: Int, truth: Bool) -> ValidatorContext {
     state = clone(context);
+    equalities = semanticFacts(context.equalities, context.applications, context.constants);
     for app in context.applications {
-        if app.id = term {
+        if hasEquality(equalities, app.id, term) {
             if size(app.arguments) = 2 {
                 a = get(app.arguments, 0);
                 b = get(app.arguments, 1);
