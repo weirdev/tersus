@@ -10,7 +10,7 @@ import qualified Data.Map.Strict as Map
 import Mir
 import MirEval (MirValue (..), runProgram)
 import MirOwnership (insertOwnership, needsDrop)
-import MirVerify (verifyProgram)
+import MirHousekeeping (verifyProgram)
 import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline
@@ -491,7 +491,7 @@ listOp op os =
             s <- getSt
             putSt s{stHeap = Map.delete a (stHeap s)}
             pure (VI 0)
-        -- (an empty Uninit is cleared bytes, which own nothing; a value taken apart is cleared so, MirGhost)
+        -- (an empty Uninit is cleared bytes, which own nothing; a value taken apart is cleared so by the ghost erasure)
         (UninitEmpty, []) -> pure VNull
         _ -> failM ("list operation on the wrong operands: " ++ show op)
   where

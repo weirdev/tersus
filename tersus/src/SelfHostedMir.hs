@@ -9,7 +9,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
-import MirVerify (verifyProgram)
+import MirHousekeeping (verifyProgram)
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibValCtx)
 import TersusTypes

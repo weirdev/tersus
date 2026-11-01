@@ -1,17 +1,25 @@
 module Native
     ( cacheDirectory
+    , cachedProgram
     , buildExecutable
     , buildExecutableWith
     , buildExecutableFast
     , runExecutable
+    , runWithInput
+    , runWithInputFull
     ) where
 
-import Control.Exception (IOException, finally, try)
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
+import Control.Exception (IOException, evaluate, finally, try)
+import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (hClose, hPutStr, openTempFile)
-import System.Process (readProcessWithExitCode, rawSystem)
+import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
+import System.IO.Unsafe (unsafePerformIO)
+
+import qualified Data.Map.Strict as Map
+import System.Process (CreateProcess (..), StdStream (..), createProcess, proc, readProcessWithExitCode, rawSystem, waitForProcess)
 
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
@@ -105,6 +113,60 @@ runExecutable ir args = do
             Ok () -> Ok <$> rawSystem exe args)
         `finally` (try (removeFile exe) :: IO (Either IOException ()))
 
+-- What the executable at the path writes for the input: its output, or its reason (on the standard error) for refusing it. The bytes are read as they are.
+-- The input and the output go through files, not pipes: with the non-threaded runtime a thread that feeds a pipe is never run while the process is
+-- waited on, so a program fed through pipes stops both ways (a thread per pipe does not help there, and callers may run programs at the same time either way).
+runWithInput :: FilePath -> String -> IO (Result String String)
+runWithInput exe input = do
+    (code, out, err) <- runWithInputFull exe input
+    pure $ case code of
+        ExitSuccess -> Ok out
+        ExitFailure _ -> Error (dropWhileEnd' (== '\n') (decodeUtf8 err))
+  where
+    dropWhileEnd' p = reverse . dropWhile p . reverse
+
+-- The same with everything the executable did: its exit status, what it wrote, and what it wrote to the standard error. A program
+-- written in Tersus says it refuses its input on the standard error and gives 1 as its value, which the runtime writes and still
+-- exits with success, so a caller that has to tell a refusal from an answer reads those, not the status.
+runWithInputFull :: FilePath -> String -> IO (ExitCode, String, String)
+runWithInputFull exe input = do
+    outcome <- try run :: IO (Either IOException (ExitCode, String, String))
+    pure $ case outcome of
+        Left e -> (ExitFailure 1, "", "Could not run " ++ exe ++ ": " ++ show e)
+        Right done -> done
+  where
+    run = do
+        (inPath, inHandle) <- openTempFileAt "tersus-run-in.tmp"
+        (outPath, outHandle) <- openTempFileAt "tersus-run-out.tmp"
+        (errPath, errHandle) <- openTempFileAt "tersus-run-err.tmp"
+        finally
+            ( do
+                hSetEncoding inHandle char8
+                hPutStr inHandle input
+                hClose inHandle
+                hSetEncoding outHandle char8
+                hSetEncoding errHandle char8
+                readHandle <- openFile inPath ReadMode
+                hSetEncoding readHandle char8
+                (_, _, _, process) <- createProcess (proc exe []){std_in = UseHandle readHandle, std_out = UseHandle outHandle, std_err = UseHandle errHandle}
+                code <- waitForProcess process
+                hClose readHandle
+                hClose outHandle
+                hClose errHandle
+                out <- readBytes outPath
+                err <- readBytes errPath
+                pure (code, out, err)
+            )
+            (mapM_ removeFile [inPath, outPath, errPath])
+    openTempFileAt name = getTemporaryDirectory >>= \dir -> openTempFile dir name
+    readBytes path = do
+        handle <- openFile path ReadMode
+        hSetEncoding handle char8
+        contents <- hGetContents handle
+        _ <- evaluate (length contents)
+        hClose handle
+        pure contents
+
 -- A new file named after the template, with its extension kept, that holds the text
 writeTemporary :: FilePath -> String -> String -> IO FilePath
 writeTemporary dir template text = do
@@ -112,3 +174,41 @@ writeTemporary dir template text = do
     hPutStr handle text
     hClose handle
     return path
+
+-- A program in the cache, named for what it is made of: made by the action if it is not there. It is made under another name and moved, so that a build that is cut
+-- short leaves nothing that looks like the program.
+-- One build of a cached program at a time in this process: callers that reach a cold cache together (the cases of a
+-- parallel test group) would otherwise each build it. A lock for each of them, since building one of them builds the
+-- other first (the emitter is made by the seed).
+{-# NOINLINE cacheLocks #-}
+cacheLocks :: MVar (Map.Map String (MVar ()))
+cacheLocks = unsafePerformIO (newMVar Map.empty)
+
+cacheLock :: String -> IO (MVar ())
+cacheLock key = modifyMVar cacheLocks $ \locks -> case Map.lookup key locks of
+    Just lock -> pure (locks, lock)
+    Nothing -> do
+        lock <- newMVar ()
+        pure (Map.insert key lock locks, lock)
+
+cachedProgram :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
+cachedProgram kind hash what build = do
+    lock <- cacheLock (kind ++ hash)
+    withMVar lock $ \_ -> do
+        cache <- cacheDirectory
+        case cache of
+            Error e -> pure (Error e)
+            Ok dir -> do
+                let exe = dir </> (kind ++ "-" ++ hash)
+                present <- doesFileExist exe
+                if present
+                    then pure (Ok exe)
+                    else do
+                        hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
+                        (partial, handle) <- openTempFile dir (kind ++ ".tmp")
+                        hClose handle
+                        removeFile partial
+                        built <- build partial
+                        case built of
+                            Error e -> pure (Error e)
+                            Ok () -> renameFile partial exe >> pure (Ok exe)

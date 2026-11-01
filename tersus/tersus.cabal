@@ -21,6 +21,8 @@ extra-source-files:
     lib/string.tersus
     examples/emit.tersus
     bootstrap/emitter.sha256
+    examples/mir_verify.tersus
+    examples/mir_erase.tersus
     lib/validation.tersus
     lib/stdlib.tersus
     lib/box.tersus
@@ -35,6 +37,7 @@ library
   exposed-modules:
       Bootstrap
       Cli
+      Compile
       Ghost
       Hash
       Linear
@@ -42,14 +45,13 @@ library
       Mir
       MirData
       MirEval
-      MirGhost
+      MirHousekeeping
       MirLists
       MirLower
       MirMono
       MirMoves
       MirOwnership
       MirValidate
-      MirVerify
       Native
       Parse
       Pipeline
@@ -58,6 +60,7 @@ library
       ProofEngine
       ProofHelpers
       ProofState
+      Seed
       SelfHostedMir
       SelfHostedProof
       StdLib

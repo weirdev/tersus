@@ -1,7 +1,7 @@
-// The ghosts of a program, erased by a program in Tersus: what MirGhost does in Haskell, written here so that the Haskell can go.
+// The ghosts of a program, erased by a program in Tersus. The host runs this on every program (MirHousekeeping) after validation and before anything else. It is checked against the erasure it replaced by TestMirErase.
 // It reads the MIR as data before its ghosts are erased (`tersus mir --ghost-data`, version 2 of the data in MirData: the types
 // include `block T` and `uninit T`, and the statements include `ghost` and `dissolve L`), takes the permissions and the rest of
-// the validator's part out (MirGhost.eraseGhosts), makes each `Uninit<T>` a `T` (MirGhost.withoutUninit), refuses the
+// the validator's part out, makes each `Uninit<T>` a `T`, refuses the
 // `Block::cast`s whose slots are not the same size, and writes the program as version 1 of the data, as `tersus mir --data` writes it.
 //
 //     tersus mir --ghost-data examples/addresses.tersus | tersus run examples/mir_erase.tersus | tersus run examples/emit.tersus
@@ -1841,7 +1841,7 @@ fn typeText(t: &Type) -> String ~ {
 
 
 
-// ---- the erasure (MirGhost) ----
+// ---- the erasure ----
 
 // The operations that make a permission, whose indices in the table of the list operations are 35 to 42
 fn ghostOp(op: Int) -> Bool [{ }] [{ }] {
@@ -2049,6 +2049,14 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
     for pid in f.borrowed {
         if !isGhostLocal(types, f, pid) { borrowed = push(borrowed, pid); };
     };
+    mutBorrowed = [];
+    for pid in f.mutBorrowed {
+        if !isGhostLocal(types, f, pid) { mutBorrowed = push(mutBorrowed, pid); };
+    };
+    fromList = [];
+    for pid in f.from {
+        if !isGhostLocal(types, f, pid) { fromList = push(fromList, pid); };
+    };
     blocks = [];
     for b in blocks1 {
         stmts = [];
@@ -2065,8 +2073,7 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
     if f.hasReturn && ghostType(types, f.returns) { returns = Type::TInt; };
     return Function {
         name: clone(f.name), params: params, hasReturn: f.hasReturn, returns: returns,
-        sizeParams: clone(f.sizeParams), typeParams: clone(f.typeParams), borrowed: borrowed,
-        mutBorrowed: clone(f.mutBorrowed), from: clone(f.from),
+        sizeParams: clone(f.sizeParams), typeParams: clone(f.typeParams), borrowed: borrowed, mutBorrowed: mutBorrowed, from: fromList,
         locals: locals, blocks: blocks,
     };
 };
@@ -2378,7 +2385,7 @@ fn eraseProgram(p: &Program) -> Program ~ {
     return plainProgram(erased);
 };
 
-// ---- the casts of permissions (checkCasts of MirGhost) ----
+// ---- the casts of permissions ----
 
 fn constSizeText(arg: &String) -> Bool [{ }] [{ }] {
     if size(arg.bytes) = 0 { return false; };
@@ -2472,7 +2479,7 @@ fn castProblemIn(types: &List<TypeDecl>, f: &Function) -> String ~ {
                             lf = layoutOf(types, plainType(from));
                             lt = layoutOf(types, plainType(to));
                             if lf.size != lt.size || lt.align > lf.align {
-                                return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", whose slots are not the same size, or are aligned more strictly");
+                                return "in ".then(clone(f.name)).then(": Block::cast from ").then(typeText(from)).then(" to ").then(typeText(to)).then(", whose slots are not the same size, or are aligned more strictly (").then(showInt(lf.size)).then(",").then(showInt(lf.align)).then(") and (").then(showInt(lt.size)).then(",").then(showInt(lt.align)).then("), as bytes and alignment)");
                             };
                         };
                     };

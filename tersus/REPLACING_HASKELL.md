@@ -85,7 +85,7 @@ context skips them (`SelfHostedProof` declines a goal that mentions
 one). Those stay as named primitives the validator knows by contract,
 as today.
 
-### 3. MIR housekeeping in Tersus (deletes `MirData` 469, `MirVerify` 438, `MirGhost` 245)
+### 3. MIR housekeeping in Tersus (deleted `MirVerify` 438, `MirGhost` 245; `MirData` stays until target 6)
 
 The MIR-as-data format is already defined twice in Tersus (the reader in
 `examples/emit.tersus` and `examples/mir_reader.tersus`), and
@@ -96,12 +96,8 @@ as `MirVerify`. Erasing ghosts (`MirGhost`) is a small pass over the
 same types. Mostly transcription; do it while the format is fresh from
 target 1's bridge work.
 
-Status (2026-10-31): done, in the sense that every piece of the
-housekeeping now has a Tersus program checked against the Haskell it
-mirrors. The writer and the reader were already Tersus; the check is
-`examples/mir_verify.tersus` (`TestMirVerify` compares its verdict with
-`verifyProgram` on every example and test program, and on mutated
-programs it must refuse), and the erasure is
+Status (2026-10-31): done. The writer and the reader were already
+Tersus; the check is `examples/mir_verify.tersus` and the erasure is
 `examples/mir_erase.tersus`. For the erasure the data gained a
 version 2 (`MirData.writeProgramWithGhosts`, printed by `tersus mir
 --ghost-data` from a validated program before its ghosts are
@@ -110,15 +106,18 @@ the types `block` and `uninit` that version 1 already wrote, since a
 ghost statement's contents and a function's specification do not
 survive erasure and are not written. The eraser takes the permissions
 out, makes each `Uninit<T>` a `T`, refuses the `Block::cast`s whose
-slots are not the same size, and writes version 1; `TestMirErase`
-compares its output word for word with `withoutUninit (eraseGhosts
-p)` on every example and test program, interpreted and natively.
-What remains is the host's move, not more Tersus: the pipeline still
-runs the Haskell check and erasure, and `MirData` still writes what
-the emitter reads. When the host runs the two Tersus programs on the
-data instead (as it already runs the emitter), `MirVerify` and
-`MirGhost` can be deleted; `MirData`'s reader and writer stay until
-the data form itself goes (target 6).
+slots do not lay out alike, and writes version 1.
+
+The host has moved: `MirHousekeeping` runs the two Tersus programs on
+the MIR as data (cached native executables built from the seed, as
+the emitter is built, with the MIR executor as fallback) wherever the
+pipeline checked or erased a program, and `MirVerify.hs` and
+`MirGhost.hs` are deleted. The bridge keeps the Haskell signatures
+and verdicts, and puts back the parts of a program the data form
+does not carry (function specifications, generics, invariants and
+ghost statements). `TestMirVerify` and `TestMirErase` now compare the
+Tersus programs against the bridge. `MirData`'s reader and writer
+stay until the data form itself goes (target 6).
 
 ### 4. The MIR passes in Tersus (deletes `MirLower` 867, `MirOwnership` 501, `MirLists` 450, `MirMoves` 426, `MirMono` 213, and `Mir` 626)
 

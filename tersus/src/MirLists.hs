@@ -282,7 +282,7 @@ lowerFunction original fn =
         Ghost{} -> return ()
         Assign dest rv | Map.member dest boxedFromLists -> return ()
         Assign dest rv -> lowerAssign dest rv
-        -- (a value taken apart is cleared where it is, and what it held is not freed: see MirGhost)
+        -- (a value taken apart is cleared where it is, and what it held is not freed: see the ghost erasure)
         Peek _ (ListOp UninitEmpty []) -> emit stmt
         Peek dest rv -> lowerAssign dest rv
         Drop _ -> emit stmt
