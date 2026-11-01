@@ -1339,13 +1339,24 @@ fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
 // variable, so applications and facts are read through representatives.
 fn canonicalTerm(known: &List<EqualityFact>, term: Int) -> Int {
     rep = term;
+    reached = push([], term);
     changed = true;
     while changed {
         changed = false;
         for f in known {
-            if f.left = rep || f.right = rep {
-                if f.left < rep { rep = f.left; changed = true; };
-                if f.right < rep { rep = f.right; changed = true; };
+            if containsValue(reached, f.left) {
+                if containsValue(reached, f.right) = false {
+                    reached = push(reached, f.right);
+                    if f.right < rep { rep = f.right; };
+                    changed = true;
+                };
+            };
+            if containsValue(reached, f.right) {
+                if containsValue(reached, f.left) = false {
+                    reached = push(reached, f.left);
+                    if f.left < rep { rep = f.left; };
+                    changed = true;
+                };
             };
         };
     };
@@ -1791,36 +1802,6 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
 };
 
 // Prove left - right <= bound by contradiction with the context's facts.
-fn dumpInt(v: Int) -> Int {
-    if v < 0 { writeByte(toByte(45)); return dumpInt(0 - v); };
-    if v >= 10 { out = dumpInt(v / 10); writeByte(toByte(48 + v % 10)); return out + 1; };
-    writeByte(toByte(48 + v));
-    return 1;
-};
-
-fn dumpLinFacts(facts: &List<LinFact>, gl: Int, gr: Int) -> Int {
-    total = 0;
-    writeByte(toByte(71));
-    writeByte(toByte(32));
-    total = dumpInt(gl);
-    writeByte(toByte(32));
-    total = dumpInt(gr);
-    writeByte(toByte(10));
-    for f in facts {
-        writeByte(toByte(70));
-        for t in f.terms {
-            writeByte(toByte(32));
-            total = dumpInt(t.term);
-            writeByte(toByte(58));
-            total = dumpInt(t.coeff);
-        };
-        writeByte(toByte(60));
-        total = dumpInt(f.bound);
-        writeByte(toByte(10));
-    };
-    return total;
-};
-
 fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
     canon = canonicalContext(context);
     known = closeContext(context);
@@ -1877,26 +1858,6 @@ fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) 
         };
     };
     if size(vars) > 48 { return false; };
-    dumpLinFacts(facts, goalLeft, goalRight);
-    for app in context.applications {
-        if app.function = 22 || app.function = 34 || app.function = 32 {
-            writeByte(toByte(82));
-            writeByte(toByte(32));
-            total = dumpInt(app.id);
-            writeByte(toByte(32));
-            total = dumpInt(app.function);
-            for arg in app.arguments { writeByte(toByte(32)); total = dumpInt(arg); };
-            writeByte(toByte(10));
-        };
-    };
-    for f in known {
-        writeByte(toByte(69));
-        writeByte(toByte(32));
-        total = dumpInt(f.left);
-        writeByte(toByte(32));
-        total = dumpInt(f.right);
-        writeByte(toByte(10));
-    };
     return linContradiction(facts, vars);
 };
 
