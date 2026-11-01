@@ -339,11 +339,19 @@ rvalueProblems env localTy d rv =
         _ -> False
     -- a value of the type with this name, or of one of its variants
     isValueOf typeName o = case operandType env localTy o of
-        -- (a Box is looked into, and so is the struct a Box is made of in native code, lib/box.tersus)
+        -- (a Box is looked into, and so is the struct a Box is made of in native code, lib/box.tersus; a reference is looked through)
         Just (TBox t) -> namedMatches t typeName || sub env (TNamed typeName []) t
+        Just (TRef t) -> isTypeValueOf typeName t
+        Just (TMutRef t) -> isTypeValueOf typeName t
         Just t@(TNamed "StdBox" [ArgType held]) -> namedMatches t typeName || sub env (TNamed typeName []) t || namedMatches held typeName || sub env (TNamed typeName []) held
         Just t -> namedMatches t typeName || sub env (TNamed typeName []) t
         Nothing -> False
+    isTypeValueOf typeName t = case t of
+        TBox held -> namedMatches held typeName || sub env (TNamed typeName []) held
+        TRef held -> isTypeValueOf typeName held
+        TMutRef held -> isTypeValueOf typeName held
+        TNamed "StdBox" [ArgType held] -> namedMatches t typeName || sub env (TNamed typeName []) t || namedMatches held typeName || sub env (TNamed typeName []) held
+        _ -> namedMatches t typeName || sub env (TNamed typeName []) t
 
 -- The type a constructor builds, from its owner name and declared fields
 ctorType :: Env -> (Name, [(Variable, Type)]) -> Type
