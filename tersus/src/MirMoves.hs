@@ -13,7 +13,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirOwnership (Role (..), isProjection, operandLocal, roles)
-import TersusTypes (Name, Type (..), Variable, instanceOf, tupleGeneric)
+import TersusTypes (Name, Type (..), Variable, baseNameOf, instanceName, tupleGeneric)
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.
@@ -50,11 +50,11 @@ isCopyType copies program = go (0 :: Int)
             TUninit t -> not (ownsHeap program t) && go (depth + 1) t
             TArrayOf t _ -> go (depth + 1) t
             TRef t -> go (depth + 1) t
-            TNamed n -> declared depth n
+            TNamed base args -> declared depth (instanceName base args)
             TVariant v -> maybe False (declared depth) (ownerOf program v)
             _ -> False
     declared depth n =
-        let base = maybe n fst (instanceOf n)
+        let base = baseNameOf n
          in (base `Set.member` copies || isJust (tupleGeneric base)) && fieldsCopy depth n
     fieldsCopy depth n = case Map.lookup n (progTypes program) of
         Just (StructDecl fields) -> all (go (depth + 1) . snd) fields
@@ -70,8 +70,8 @@ ownsHeap program = go Set.empty
         TBox _ -> True
         TArrayOf t _ -> go seen t
         TUninit t -> go seen t
-        TNamed n | Set.member n seen -> False
-        TNamed n -> declared (Set.insert n seen) n
+        TNamed base args | Set.member (instanceName base args) seen -> False
+        TNamed base args -> declared (Set.insert (instanceName base args) seen) (instanceName base args)
         TVariant v -> maybe False (declared seen) (ownerOf program v)
         _ -> False
     declared seen n = case Map.lookup n (progTypes program) of
@@ -129,13 +129,13 @@ linearParts linear drops program = go (0 :: Int)
         | depth > 8 = []
         | otherwise = case ty of
             TBlock _ -> [[]]
-            TNamed n | maybe n fst (instanceOf n) `Set.member` drops -> []
-            TVariant v | Just n <- ownerOf program v, maybe n fst (instanceOf n) `Set.member` drops -> []
+            TNamed base _ | base `Set.member` drops -> []
+            TVariant v | Just n <- ownerOf program v, baseNameOf n `Set.member` drops -> []
             -- (an Uninit of a value that owns something is linear: what it holds is freed only by taking it out)
             TUninit t | ownsHeap program t -> [[]]
-            TNamed n | maybe n fst (instanceOf n) `Set.member` linear -> [[]]
-            TVariant v | Just n <- ownerOf program v, maybe n fst (instanceOf n) `Set.member` linear -> [[]]
-            TNamed n -> declared depth n
+            TNamed base _ | base `Set.member` linear -> [[]]
+            TVariant v | Just n <- ownerOf program v, baseNameOf n `Set.member` linear -> [[]]
+            TNamed base args -> declared depth (instanceName base args)
             TVariant v -> maybe [] (declared depth) (ownerOf program v)
             _ -> []
     declared depth n = case Map.lookup n (progTypes program) of
@@ -397,10 +397,10 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         AsVariant o _ | Just l <- operandLocal o, ownImpl l -> (consumed st l, es)
         _ -> (st, es)
     ownImpl l = case typeOf cx l of
-        TNamed n -> owned n
+        TNamed base _ -> owned base
         TVariant v -> maybe False owned (ownerOf (cxProgram cx) v)
         _ -> False
-    owned n = let base = maybe n fst (instanceOf n) in base `Set.member` cxLinear cx && implOwner (fnName (cxFn cx)) == Just base
+    owned base = base `Set.member` cxLinear cx && implOwner (fnName (cxFn cx)) == Just base
     consumed st l = let places = placesOf st l in st{stHeld = Map.filterWithKey (\h _ -> not (any (overlaps h) places)) (stHeld st)}
     ty = typeOf cx d
     -- (a part of a tuple that is taken apart, `(a, b) = e`, is taken out of it: the name has it, and not a view of the hidden tuple)
@@ -494,7 +494,7 @@ access cx pos (st, errs) (l, steps, role) = (st', errs ++ useErrs ++ moveErrs ++
     -- (a permission in the value that a drop is given is the drop's to use, once; one in any other value that is lent is not)
     dropsPermission q@(root, _) = permissionPlace q && Just root == cxDropSelf cx
     dropTypeOf root = case typeOf cx root of
-        TNamed n | maybe n fst (instanceOf n) `Set.member` cxDrops cx -> Just (maybe n fst (instanceOf n))
+        TNamed base _ | base `Set.member` cxDrops cx -> Just base
         _ -> Nothing
     st'
         | taking =
@@ -661,7 +661,7 @@ resultFromPlaces cx st callee args = case calleeName of
 
 -- The reference fields of a struct type, which a value of it holds loans in
 refFieldNames :: Cx -> Type -> [Variable]
-refFieldNames cx (TNamed name) = case Map.lookup name (progTypes (cxProgram cx)) of
+refFieldNames cx (TNamed base args) = case Map.lookup (instanceName base args) (progTypes (cxProgram cx)) of
     Just (StructDecl fields) -> [f | (f, ft) <- fields, case ft of TRef _ -> True; TMutRef _ -> True; _ -> False]
     _ -> []
 refFieldNames _ _ = []

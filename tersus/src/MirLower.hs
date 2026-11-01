@@ -286,7 +286,24 @@ resolveFunction :: M.Function -> L M.Function
 resolveFunction fn = do
     locals <- mapM (\d -> (\t -> d{M.localType = t}) <$> resolveType (M.localType d)) (M.fnLocals fn)
     returns <- mapM resolveType (M.fnReturns fn)
-    -- (a struct that is named by types that were not known when it was made, a tuple, has the name of what they came to)
+    -- (a struct that is named by types that were not known when it was made, a tuple, has the name of what they came to:
+    -- the name a MakeData writes is the resolved type of the local it is assigned to)
+    let resolveBlock (M.BasicBlock stmts term) = (\stmts' -> M.BasicBlock stmts' term) <$> mapM resolveStatement stmts
+        resolveStatement stmt = case stmt of
+            M.Assign l rv -> M.Assign l <$> resolveRvalue l rv
+            _ -> return stmt
+        resolveRvalue dest rv = case rv of
+            M.MakeData name fields
+                | Just (TNamed b a) <- M.localType <$> Map.lookup dest locals, baseNameOf name == b -> return (M.MakeData (instanceName b a) fields)
+            M.MakeData name fields -> (\n -> M.MakeData n fields) <$> resolveName name
+            M.ReadField o name field
+                | Just l <- operandLocalOf o, Just (TNamed b a) <- M.localType <$> Map.lookup l locals, baseNameOf name == b -> return (M.ReadField o (instanceName b a) field)
+            M.ReadField o name field -> (\n -> M.ReadField o n field) <$> resolveName name
+            _ -> return rv
+        resolveName name
+            | Just ty <- Map.lookup name oldNamed = typeName <$> resolveType ty
+            | otherwise = return name
+        operandLocalOf o = case o of M.Copy l -> Just l; M.Move l -> Just l; _ -> Nothing
     blocks <- mapM resolveBlock (M.fnBlocks fn)
     -- (an element that no use decided was not looked at when the array was made: what it came to is looked at now)
     mapM_ (mapM_ arrayHolds . universe . M.localType) (Map.elems locals)
@@ -297,27 +314,30 @@ resolveFunction fn = do
         TArrayOf t _ -> universe t
         TBox t -> universe t
         TFn args ret -> concatMap universe (ret : args)
+        TNamed _ args -> concat [universe u | ArgType u <- args]
         _ -> []
     arrayHolds ty = case ty of
         TArrayOf t _ | not (arrayElement t) -> failL ("Type error: an array holds values that have a size, not " ++ renderType t)
         _ -> return ()
-    resolveBlock (M.BasicBlock stmts term) = (\stmts' -> M.BasicBlock stmts' term) <$> mapM resolveStatement stmts
-    resolveStatement stmt = case stmt of
-        M.Assign l rv -> M.Assign l <$> resolveRvalue rv
-        _ -> return stmt
-    resolveRvalue rv = case rv of
-        M.MakeData name fields -> (\n -> M.MakeData n fields) <$> resolveName name
-        M.ReadField o name field -> (\n -> M.ReadField o n field) <$> resolveName name
-        _ -> return rv
-    resolveName name
-        | '?' `elem` name, Just _ <- instanceOf name = typeName <$> resolveType (TNamed name)
-        | otherwise = return name
+    -- the named types this function had before resolution, by rendered name
+    oldNamed = Map.fromList [(instanceName b a, TNamed b a) | ty <- map M.localType (Map.elems (M.fnLocals fn)) ++ maybe [] (: []) (M.fnReturns fn), (b, a) <- subs ty]
+    subs ty = case ty of
+        TNamed b a -> (b, a) : concat [subs u | ArgType u <- a]
+        TList u -> subs u
+        TArrayOf u _ -> subs u
+        TBox u -> subs u
+        TAddr u -> subs u
+        TBlock u -> subs u
+        TUninit u -> subs u
+        TRef u -> subs u
+        TFn as r -> concatMap subs (r : as)
+        _ -> []
 
 resolveType :: Type -> L Type
 resolveType ty = defaultType <$> tc (zonk ty)
   where
     defaultType (TVar _) = TInt
-    defaultType (TNamed name) | Just (base, args) <- instanceOf name = TNamed (instanceName base (map defaultArg args))
+    defaultType (TNamed base args) = TNamed base (map defaultArg args)
     defaultType (TAddr t) = TAddr (defaultType t)
     defaultType (TUninit t) = TUninit (defaultType t)
     defaultType (TBlock t) = TBlock (defaultType t)
@@ -332,7 +352,7 @@ resolveType ty = defaultType <$> tc (zonk ty)
 
 -- The name of the struct a type is (a tuple whose types were not all known when it was made is named again when they are: see resolveFunction)
 typeName :: Type -> Name
-typeName (TNamed name) = name
+typeName (TNamed base args) = instanceName base args
 typeName _ = ""
 
 -- Finished blocks, numbered in the order a walk from the entry reaches them; blocks nothing jumps to are dropped
@@ -891,17 +911,17 @@ lowerBuiltin b args = do
     -- (a value built in the check of an instance of a template is built by the name the template wrote, which names
     -- the parameters: the value is of the instance the check is of)
     rv' <- case rv of
-        M.MakeData name fields | Just (base, _) <- instanceOf name -> do
+        M.MakeData name fields | '<' `elem` name -> do
             resultTy <- tc (zonk result)
             case resultTy of
-                TNamed concrete | Just (cbase, _) <- instanceOf concrete, base == cbase -> return (M.MakeData concrete fields)
+                TNamed cbase _ | baseNameOf name == cbase -> return (M.MakeData (typeName resultTy) fields)
                 _ -> return rv
         _ -> return rv
     return (PRvalue rv', result)
   where
     builtinResult b' tys' = case (b', tys') of
         (Field owner field, [structTy]) -> tc (readField owner field structTy)
-        (Ctor name fields, _) -> tc (checkConstruct name fields tys')
+        (Ctor name ctorArgs fields, _) -> tc (checkConstruct (TNamed (baseNameOf name) ctorArgs) fields tys')
         _ -> tc (builtinType b' >>= \ft -> checkBuiltinCall (Just b') "call" ft tys')
 
 -- The forms that give two things, an address or a value and a permission: each is two operations, and the tuple of what they give
@@ -958,8 +978,8 @@ builtinRvalue b tys ops =
         (Rel rel, [x, y]) -> return (M.BinaryOp (M.Compare rel) x y)
         (Not, [x]) -> return (M.BinaryOp (M.Compare Eq) x (M.Const (M.CBool False)))
         -- (a tuple is a literal of the instance of its struct for the types of its parts)
-        (Ctor name fields, _) | Just _ <- tupleGeneric name, length fields == length ops -> return (M.MakeData (typeName (tupleType tys)) (zip fields ops))
-        (Ctor name fields, _) | length fields == length ops -> return (M.MakeData name (zip fields ops))
+        (Ctor name _ fields, _) | Just _ <- tupleGeneric name, length fields == length ops -> return (M.MakeData (typeName (tupleType tys)) (zip fields ops))
+        (Ctor name _ fields, _) | length fields == length ops -> return (M.MakeData name (zip fields ops))
         (Field owner field, [o]) -> do
             ctor <- maybe (structCtor (head tys)) return owner
             return (M.ReadField o ctor field)
@@ -1010,7 +1030,9 @@ structCtor ty = do
     t <- tc (zonk ty)
     case t of
         TBox inner -> structCtor inner
-        TNamed name -> do
+        TNamed base args -> do
+            let name = instanceName base args
+            tc (ensureInstance (TNamed base args))
             ctors <- tc (typeCtors name)
             case ctors of
                 [ctor] -> return ctor
@@ -1106,7 +1128,7 @@ builtinLabel b = case b of
     Mod -> "mod"
     Rel rel -> "compare_" ++ show rel
     Within -> "within"
-    Ctor name _ -> name
+    Ctor name _ _ -> name
     Field _ field -> "field_" ++ field
     Is variant -> "is_" ++ variant
     Project variant field -> variant ++ "." ++ field

@@ -40,7 +40,7 @@ intern term enc = case Map.lookup term (ids enc) of
             (fid, e1) <- intern f enc
             let e1a = if fieldFunction f then e1{fieldFunctions = fid : fieldFunctions e1} else e1
             (functionId, e1b) <- case f of
-                CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _)) _) -> intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) []))) e1a
+                CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _ _)) _) -> intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) [] []))) e1a
                 _ -> pure (fid, e1a)
             let e1c = if constructorFunction f then e1b{constructorFunctions = functionId : constructorFunctions e1b} else e1b
             (argIds, e2) <- internMany args e1c
@@ -48,9 +48,9 @@ intern term enc = case Map.lookup term (ids enc) of
                 app = record "ApplicationTerm" [("id", MInt i), ("function", MInt functionId), ("arguments", MList (map MInt argIds))]
                 e4 = e3{applications = app : applications e3}
             case f of
-                CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _)) _) -> do
-                    (family, e5) <- intern (CTerm (builtinFunct (Ctor ("enum:" ++ constructorFamily name) []))) e4
-                    (constructor, e6) <- intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) []))) e5
+                CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _ _)) _) -> do
+                    (family, e5) <- intern (CTerm (builtinFunct (Ctor ("enum:" ++ constructorFamily name) [] []))) e4
+                    (constructor, e6) <- intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) [] []))) e5
                     let fact = record "VariantFact" [("object", MInt i), ("family", MInt family), ("constructor", MInt constructor), ("matches", MBool True)]
                     pure (i, e6{variants = fact : variants e6})
                 _ -> pure (i, e4)
@@ -59,9 +59,9 @@ intern term enc = case Map.lookup term (ids enc) of
         CTerm (VData name fields) -> do
             let (i, e1) = freshTerm term enc
             (fieldIds, e2) <- internMany [CTerm value | (_, value) <- fields] e1
-            (family, e3) <- intern (CTerm (builtinFunct (Ctor ("enum:" ++ constructorFamily name) []))) e2
-            (constructor, e4) <- intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) []))) e3
-            (_, e5) <- intern (CTerm (builtinFunct (Ctor name (map fst fields)))) e4
+            (family, e3) <- intern (CTerm (builtinFunct (Ctor ("enum:" ++ constructorFamily name) [] []))) e2
+            (constructor, e4) <- intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) [] []))) e3
+            (_, e5) <- intern (CTerm (builtinFunct (Ctor name [] (map fst fields)))) e4
             let fact = record "VariantFact" [("object", MInt i), ("family", MInt family), ("constructor", MInt constructor), ("matches", MBool True)]
                 app = record "ApplicationTerm" [("id", MInt i), ("function", MInt constructor), ("arguments", MList (map MInt fieldIds))]
             pure (i, e5{applications = app : applications e5, variants = fact : variants e5, constructorFunctions = constructor : constructorFunctions e5})
@@ -73,7 +73,7 @@ fieldFunction (CTerm (VFunct _ _ _ (BuiltinFunct (Project _ _)) _)) = True
 fieldFunction _ = False
 
 constructorFunction :: IotaProof -> Bool
-constructorFunction (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor _ _)) _)) = True
+constructorFunction (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor _ _ _)) _)) = True
 constructorFunction _ = False
 
 constructorFamily :: Name -> Name
@@ -86,13 +86,13 @@ constructorFieldFacts enc =
     [ record "ConstructorField" [("constructor", MInt constructorId), ("field", MInt fieldId), ("index", MInt index)]
     | (constructorTerm, _) <- Map.toList (ids enc)
     , Just (name, fields) <- [constructorShape constructorTerm]
-    , Just constructorId <- [Map.lookup (CTerm (builtinFunct (Ctor ("ctor:" ++ name) []))) (ids enc)]
+    , Just constructorId <- [Map.lookup (CTerm (builtinFunct (Ctor ("ctor:" ++ name) [] []))) (ids enc)]
     , (index, field) <- zip [0 ..] fields
     , (fieldTerm, fieldId) <- Map.toList (ids enc)
     , selects name field fieldTerm
     ]
   where
-    constructorShape (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name fields)) _)) = Just (name, fields)
+    constructorShape (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _ fields)) _)) = Just (name, fields)
     constructorShape _ = Nothing
     selects _ field (CTerm (VFunct _ _ _ (BuiltinFunct (Field _ selected)) _)) = field == selected
     selects name field (CTerm (VFunct _ _ _ (BuiltinFunct (Project variant selected)) _)) = name == variant && field == selected
@@ -144,8 +144,8 @@ variantAssertion _ = Nothing
 
 variantFact :: Name -> Integer -> Enc -> Maybe Enc
 variantFact name object enc = do
-    (family, e1) <- intern (CTerm (builtinFunct (Ctor ("enum:" ++ constructorFamily name) []))) enc
-    (constructor, e2) <- intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) []))) e1
+    (family, e1) <- intern (CTerm (builtinFunct (Ctor ("enum:" ++ constructorFamily name) [] []))) enc
+    (constructor, e2) <- intern (CTerm (builtinFunct (Ctor ("ctor:" ++ name) [] []))) e1
     let fact = record "VariantFact" [("object", MInt object), ("family", MInt family), ("constructor", MInt constructor), ("matches", MBool True)]
     pure e2{variants = fact : variants e2}
 

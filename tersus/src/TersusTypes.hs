@@ -135,7 +135,7 @@ data BuiltinFunct
     | -- Within a b: a is a field of b, or a field of a field, and so on. Never parsed: it is how the validator checks
       -- that what a loop or function says shrinks has done so.
       Within
-    | Ctor Name [Variable]
+    | Ctor Name [Arg] [Variable]
     | Field (Maybe Name) Variable
     | -- Is Ctor tests which variant an enum value is; Project Ctor reads a field of a value known to be that variant
       Is Name
@@ -165,7 +165,7 @@ data Type = TInt | TByte | TBool
       -- toInt widens one, and I32::from(x) and the others narrow an Int with its range proved, as toByte does. Natively it is as many bytes in
       -- memory, and a word in a register.
       TWord Bool Integer
-    | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name | TVariant Name | TVar Int
+    | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name [Arg] | TVariant Name | TVar Int
     | -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`): the type of the function for any values of the sizes. A call
       -- gives each its value, so a use of one that is not a call has no type.
       TForall [Variable] [Variable] Type
@@ -206,48 +206,59 @@ isTypeName name = case name of
     [] -> False
 
 -- The type that a struct with parameters is for a list of sizes and types (`Packet<4>`, `Vec<Int, 3>`, and `Vec<'T, n>` in a function that has
--- the type T and the size n) is a struct of its own, named by them, with the fields of the declaration with them in. Everything after the
--- checker sees an ordinary struct; the name is how the checker and MirMono find the declaration and the arguments again.
+-- the type T and the size n) is a struct of its own, carrying its arguments structurally: `TNamed "Vec" [ArgType TInt, ArgSize (SizeConst 3)]`.
+-- Everything after the checker sees an ordinary struct; the base and arguments are how the checker and MirMono find the declaration again.
+-- The rendered name of an instance, for map keys, data names and human-readable messages. It is never parsed back.
 instanceName :: Name -> [Arg] -> Name
-instanceName base args = base ++ "<" ++ intercalate ", " (map argText args) ++ ">"
+instanceName base [] = base
+instanceName base args = base ++ "<" ++ intercalate ", " (map renderArg args) ++ ">"
 
-argText :: Arg -> String
-argText (ArgSize size) = sizeText size
-argText (ArgType ty) = typeText ty
+renderArg :: Arg -> String
+renderArg (ArgSize size) = renderSizeForName size
+renderArg (ArgType ty) = renderTypeForName ty
 
-sizeText :: Size -> String
-sizeText (SizeConst n) = show n
-sizeText SizeAny = "?"
-sizeText (SizeParam name) = name
-sizeText (SizeVar n) = "_" ++ show n
+renderSizeForName :: Size -> String
+renderSizeForName (SizeConst n) = show n
+renderSizeForName SizeAny = "?"
+renderSizeForName (SizeParam name) = name
+renderSizeForName (SizeVar n) = "_" ++ show n
 
--- A type as the name of an instance writes it (a type parameter has a ' before it, so that it is not a struct, and an unknown has a ?)
-typeText :: Type -> String
-typeText ty = case ty of
+-- A type as the rendered name of an instance writes it (a type parameter has a ' before it, so that it is not a struct, and an unknown has a ?)
+renderTypeForName :: Type -> String
+renderTypeForName ty = case ty of
     TInt -> "Int"
     TByte -> "Byte"
     TBool -> "Bool"
     TWord signed bits -> wordName signed bits
-    TList t -> "List<" ++ typeText t ++ ">"
-    TBox t -> "Box<" ++ typeText t ++ ">"
-    TAddr t -> "Addr<" ++ typeText t ++ ">"
-    TBlock t -> "Block<" ++ typeText t ++ ">"
-    TUninit t -> "Uninit<" ++ typeText t ++ ">"
-    TRef t -> "&" ++ typeText t
-    TMutRef t -> "&mut " ++ typeText t
-    TArrayOf t size -> "Array<" ++ typeText t ++ ", " ++ sizeText size ++ ">"
-    TFn args ret -> "fn(" ++ intercalate ", " (map typeText args) ++ ") -> " ++ typeText ret
+    TList t -> "List<" ++ renderTypeForName t ++ ">"
+    TBox t -> "Box<" ++ renderTypeForName t ++ ">"
+    TAddr t -> "Addr<" ++ renderTypeForName t ++ ">"
+    TBlock t -> "Block<" ++ renderTypeForName t ++ ">"
+    TUninit t -> "Uninit<" ++ renderTypeForName t ++ ">"
+    TRef t -> "&" ++ renderTypeForName t
+    TMutRef t -> "&mut " ++ renderTypeForName t
+    TArrayOf t size -> "Array<" ++ renderTypeForName t ++ ", " ++ renderSizeForName size ++ ">"
+    TFn args ret -> "fn(" ++ intercalate ", " (map renderTypeForName args) ++ ") -> " ++ renderTypeForName ret
     -- (a name that starts with a small letter has a ` before it, so that it is not read as a size)
-    TNamed name -> if bareLower name then '`' : name else name
+    TNamed base args -> if null args && bareLower base then '`' : base else instanceName base args
     TVariant name -> name
     TParam name -> '\'' : name
     TVar n -> '?' : show n
-    TForall _ _ t -> typeText t
+    TForall _ _ t -> renderTypeForName t
 
 bareLower :: Name -> Bool
 bareLower name = case name of
     c : rest -> isLower c && all isAlphaNum rest
     [] -> False
+
+-- The base of a rendered instance name or of any name, without parsing its arguments
+baseNameOf :: Name -> Name
+baseNameOf = takeWhile (/= '<')
+
+-- Whether a type is the named type a rendered name denotes
+namedMatches :: Type -> Name -> Bool
+namedMatches (TNamed base args) name = instanceName base args == name
+namedMatches _ _ = False
 
 -- A tuple, `(A, B)`, is an instance of a struct that the language declares for each number of parts, `Tuple2<A, B>`, whose fields are
 -- named by their places, `0` and `1` (read as `t.0`). Its literal `(a, b)` is a literal of that struct whose types are those of the parts.
@@ -255,7 +266,7 @@ tupleBase :: Int -> Name
 tupleBase n = "Tuple" ++ show n
 
 tupleType :: [Type] -> Type
-tupleType parts = TNamed (instanceName (tupleBase (length parts)) (map ArgType parts))
+tupleType parts = TNamed (tupleBase (length parts)) (map ArgType parts)
 
 -- The parameters and fields of the struct of the tuples of a number of parts, by its name
 tupleGeneric :: Name -> Maybe ([Variable], [(Variable, Type)])
@@ -267,112 +278,12 @@ tupleGeneric base = case stripPrefix "Tuple" base of
 
 -- The types of the parts of a tuple type
 tupleParts :: Type -> Maybe [Type]
-tupleParts (TNamed name)
-    | Just (base, args) <- instanceOf name, Just _ <- tupleGeneric base = mapM argType args
+tupleParts (TNamed base args)
+    | Just _ <- tupleGeneric base = mapM argType args
   where
     argType (ArgType t) = Just t
     argType _ = Nothing
 tupleParts _ = Nothing
-
--- The struct and the arguments that a name is the instance of
-instanceOf :: Name -> Maybe (Name, [Arg])
-instanceOf name =
-    case break (== '<') name of
-        (base, '<' : rest) | not (null base), not (null rest), last rest == '>' -> mapM readArg (splitArgs (init rest)) >>= \args -> Just (base, args)
-        _ -> Nothing
-  where
-    readArg text
-        | text == "?" = Just (ArgSize SizeAny)
-        | not (null text) && all isDigit text = Just (ArgSize (SizeConst (read text)))
-        | ('_' : digits) <- text, not (null digits), all isDigit digits = Just (ArgSize (SizeVar (read digits)))
-        | all isAlphaNum text, c : _ <- text, isLower c = Just (ArgSize (SizeParam text))
-        | otherwise = case readType text of
-            Just (ty, "") -> Just (ArgType ty)
-            _ -> Nothing
-
--- The pieces of the arguments of an instance, which a comma separates where no < > or ( ) is open
-splitArgs :: String -> [String]
-splitArgs = go (0 :: Int) ""
-  where
-    go _ acc [] = [reverse acc]
-    go depth acc ('-' : '>' : rest) = go depth ('>' : '-' : acc) rest
-    go depth acc (c : rest)
-        | c `elem` "<(" = go (depth + 1) (c : acc) rest
-        | c `elem` ">)" = go (depth - 1) (c : acc) rest
-        | c == ',' && depth == 0 = reverse acc : go depth "" (dropWhile (== ' ') rest)
-        | otherwise = go depth (c : acc) rest
-
--- A type from the text that typeText wrote, and what follows it
-readType :: String -> Maybe (Type, String)
-readType text =
-    case text of
-        '&' : 'm' : 'u' : 't' : ' ' : rest -> (\(t, r) -> (TMutRef t, r)) <$> readType rest
-        '&' : rest -> (\(t, r) -> (TRef t, r)) <$> readType rest
-        '\'' : rest -> let (name, r) = span isAlphaNum rest in if null name then Nothing else Just (TParam name, r)
-        '`' : rest -> let (name, r) = span isAlphaNum rest in if null name then Nothing else Just (TNamed name, r)
-        '?' : rest -> let (digits, r) = span isDigit rest in if null digits then Nothing else Just (TVar (read digits), r)
-        'f' : 'n' : '(' : rest -> do
-            (args, afterArgs) <- readTypes rest
-            ret <- stripPrefix' ") -> " afterArgs
-            (t, r) <- readType ret
-            Just (TFn args t, r)
-        _ -> do
-            let (name, afterName) = span (\c -> isAlphaNum c || c == ':') text
-            if null name
-                then Nothing
-                else case afterName of
-                    '<' : _ -> do
-                        let (inner, afterInner) = bracketed afterName
-                        let full = name ++ inner
-                        case name of
-                            "List" -> readOne inner >>= \t -> Just (TList t, afterInner)
-                            "Box" -> readOne inner >>= \t -> Just (TBox t, afterInner)
-                            "Addr" -> readOne inner >>= \t -> Just (TAddr t, afterInner)
-                            "Block" -> readOne inner >>= \t -> Just (TBlock t, afterInner)
-                            "Uninit" -> readOne inner >>= \t -> Just (TUninit t, afterInner)
-                            "Array" -> readArray inner >>= \t -> Just (t, afterInner)
-                            _ -> Just (TNamed full, afterInner)
-                    _ -> case name of
-                        "Int" -> Just (TInt, afterName)
-                        _ | Just t <- wordType name -> Just (t, afterName)
-                        "Byte" -> Just (TByte, afterName)
-                        "Bool" -> Just (TBool, afterName)
-                        _ | "::" `isInfixOf'` name -> Just (TVariant name, afterName)
-                        _ -> Just (TNamed name, afterName)
-  where
-    isInfixOf' needle hay = any (isPrefixOf needle) (tails' hay)
-    tails' [] = [[]]
-    tails' s@(_ : t) = s : tails' t
-    stripPrefix' prefix s = if prefix `isPrefixOf` s then Just (drop (length prefix) s) else Nothing
-    -- the text of a < > group from its first < to its matching >, and what follows
-    bracketed s = go (0 :: Int) "" s
-      where
-        go _ acc [] = (reverse acc, [])
-        go depth acc ('-' : '>' : rest) = go depth ('>' : '-' : acc) rest
-        go depth acc (c : rest)
-            | c == '<' = go (depth + 1) (c : acc) rest
-            | c == '>' = if depth == 1 then (reverse (c : acc), rest) else go (depth - 1) (c : acc) rest
-            | otherwise = go depth (c : acc) rest
-    readOne inner = case readType (init (drop 1 inner)) of
-        Just (t, "") -> Just t
-        _ -> Nothing
-    readArray inner = case splitArgs (init (drop 1 inner)) of
-        [element, size] -> do
-            (t, rest) <- readType element
-            if null rest then Just (TArrayOf t (readSize size)) else Nothing
-        _ -> Nothing
-    readSize size
-        | size == "?" = SizeAny
-        | not (null size) && all isDigit size = SizeConst (read size)
-        | ('_' : digits) <- size, not (null digits), all isDigit digits = SizeVar (read digits)
-        | otherwise = SizeParam size
-    readTypes s = case s of
-        ')' : rest -> Just ([], ')' : rest)
-        _ -> do
-            (t, rest) <- readType s
-            case rest of
-                ',' : ' ' : more -> readTypes more >>= \(ts, r) -> Just (t : ts, r)
-                _ -> Just ([t], rest)
 
 -- The fields of a struct with parameters, for the arguments it is given: the sizes and the types are put where the parameters are.
 -- Nothing if there are not as many, or one is a size where a type is wanted.
@@ -402,7 +313,7 @@ mentionsParameter ty = case ty of
     TMutRef t -> mentionsParameter t
     TArrayOf t size -> mentionsParameter t || sizeParam size
     TFn args ret -> any mentionsParameter (ret : args)
-    TNamed name | Just (_, args) <- instanceOf name -> any argParameter args
+    TNamed _ args -> any argParameter args
     _ -> False
   where
     sizeParam (SizeParam _) = True
@@ -430,7 +341,7 @@ substitute sizes types = go
         TFn args ret -> TFn (map go args) (go ret)
         TParam name | Just t <- lookup name types -> t
         TForall ss ts t -> TForall ss ts (substitute [(n, s) | (n, s) <- sizes, n `notElem` ss] [(n, u) | (n, u) <- types, n `notElem` ts] t)
-        TNamed name | Just (base, args) <- instanceOf name -> TNamed (instanceName base (map arg args))
+        TNamed base args -> TNamed base (map arg args)
         _ -> ty
     arg (ArgSize size) = ArgSize (sized size)
     arg (ArgType t) = ArgType (go t)
@@ -543,7 +454,7 @@ data Statement
     | Return Expression
     | ValidationStatement ValidationStatement
     | -- struct Name<sizes> { field: Type, ... }; it only matters to the type checker. A struct with sizes (`struct Packet<n> { body:
-      -- Array<Int, n> }`) is a type for each list of sizes, `Packet<4>`: see instanceName. The last field is the invariant, `struct Vec<T> {
+      -- Array<Int, n> }`) is a type for each list of sizes, `Packet<4>`: see TNamed. The last field is the invariant, `struct Vec<T> {
       -- data: Box<Array<T>>, len: Int } invariant [{ affirm len >= 0; }]`, which every value of the struct meets.
       StructDef Name [Variable] [(Variable, Type)] [ValidationStatement]
     | -- enum Name { Variant { field: Type, ... }, ... } with the variants' full names (Name::Variant)
@@ -562,7 +473,7 @@ data Statement
       -- (if any) and the types it is given (`impl<T> Sequence<T> for Vec<T>`), the struct or enum, and the name of its type with the
       -- types and sizes of the impl (`Vec<'T>`, which `Self` stands for). The type checker
       -- checks them against the trait and hands them back as ordinary function definitions, so the lowering never sees it.
-      ImplDef (Maybe Name) [Arg] Name Name [Bound] [Statement]
+      ImplDef (Maybe Name) [Arg] Name Type [Bound] [Statement]
     | -- fn f<S: Sequence<Int>, T>(...) ...: a function whose type parameters have bounds (`BoundedDef [(S, Sequence, [Int])] (the function)`),
       -- which the type checker keeps as a template and makes a function of for each type it is called with (see TypeCheck.templateCall).
       -- It does not reach the lowering.

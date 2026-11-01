@@ -1,13 +1,14 @@
 module TestMirData (testMirData) where
 
 import Data.Char (isAscii)
+import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 
 import Cli (Command (..), runSource)
 import Mir
 import MirData
 import Pipeline (ownedSource)
-import TersusTypes (Type (..))
+import TersusTypes (Arg (..), Type (..))
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
 import Utils
@@ -35,11 +36,19 @@ testMirData =
                                 then Nothing
                                 else Just text
                     Error e -> Just e
+            , testCase "a named type writes its arguments" $
+                case runSource MirText "struct Pair<T> { a: T, b: T }; p = Pair<Int> { a: 1, b: 2 }; return p.a;" of
+                    Ok text | any ("named \"Pair\" 1 type int" `isInfixOf`) (lines text) -> Nothing
+                    other -> Just ("not the data of a generic instance: " ++ show other)
             , testCase "a name of any bytes is ASCII and comes back" (names roundTripsNames)
             , testCase "the validator's part is not data" $
                 case ownedSource "fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; return f(2);" of
                     Ok program -> if readProgram (writeProgram program) == Ok (forNative program) && not (any isGhost (statements (forNative program))) then Nothing else Just "ghost statements were kept"
                     Error e -> Just e
+            ]
+        , TestList
+            "instances"
+            [ testCase "an instance introduced by another instance is declared" nestedInstanceIsDeclared
             ]
         , TestList
             "reading"
@@ -83,10 +92,41 @@ names program =
             Ok _ -> Just "another program"
             Error e -> Just e
 
+nestedInstanceIsDeclared :: TestResult
+nestedInstanceIsDeclared =
+    let program =
+            Program
+                { progTypes = Map.empty
+                , progFunctions = Map.empty
+                , progMain =
+                    Function
+                        { fnName = "main"
+                        , fnParams = []
+                        , fnReturns = Nothing
+                        , fnLocals = Map.fromList [(Local 0, LocalDecl (TNamed "Outer" [ArgType TInt]) Nothing)]
+                        , fnBlocks = Map.fromList [(BlockId 0, BasicBlock [] Return)]
+                        , fnSizeParams = []
+                        , fnTypeParams = []
+                        , fnBorrowed = []
+                        , fnSpec = emptySpec
+                        }
+                , progGenerics =
+                    Map.fromList
+                        [ ("Outer", (["T"], [("inner", TNamed "Inner" [ArgType (TParam "T")]), ("tag", TInt)]))
+                        , ("Inner", (["T"], [("value", TParam "T")]))
+                        ]
+                , progInvariants = Map.empty
+                }
+        completed = completeInstances program
+     in if Map.lookup "Outer<Int>" (progTypes completed) == Just (StructDecl [("inner", TNamed "Inner" [ArgType TInt]), ("tag", TInt)])
+            && Map.lookup "Inner<Int>" (progTypes completed) == Just (StructDecl [("value", TInt)])
+            then Nothing
+            else Just ("the nested instance was not declared: " ++ show (Map.toList (progTypes completed)))
+
 roundTripsNames :: Program
 roundTripsNames =
     Program
-        { progTypes = Map.fromList [(oddName, StructDecl [(oddName, TNamed oddName)])]
+        { progTypes = Map.fromList [(oddName, StructDecl [(oddName, TNamed oddName [])])]
         , progFunctions = Map.fromList [(oddName, fn oddName)]
         , progMain = fn "main"
         , progGenerics = Map.empty

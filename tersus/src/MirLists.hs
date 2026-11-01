@@ -9,7 +9,7 @@ import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, listToMaybe)
 
 import Mir
-import TersusTypes (Arg (..), Name, Type (..), instanceName, instanceOf, mentionsParameter)
+import TersusTypes (Arg (..), Name, Type (..), instanceName, mentionsParameter)
 
 -- A list is checked, validated and run by the executor as a list. Native code has no list: a `List<T>` is the struct `StdList<T>` of
 -- lib/lists.tersus (the elements in an array on the heap, and how many are in use), and this makes the program that is validated the
@@ -47,7 +47,7 @@ hasLists program =
         TRef t -> mentionsList t
         TMutRef t -> mentionsList t
         TFn args ret -> any mentionsList (ret : args)
-        TNamed n | Just (_, args) <- instanceOf n -> or [mentionsList t | ArgType t <- args]
+        TNamed _ args -> or [mentionsList t | ArgType t <- args]
         _ -> False
     hasListOperation fn = or [constantList c | BasicBlock stmts term <- Map.elems (fnBlocks fn), c <- concatMap statementConstants stmts ++ terminatorConstants term]
     constantList c = case c of
@@ -112,7 +112,7 @@ lowerLists library program
   where
     lowered =
         program
-            { progTypes = Map.fromList [(renameName n, renameDecl d) | (n, d) <- Map.toList (progTypes program)]
+            { progTypes = Map.fromList [(renameName (renamesForTypes (programTypes program)) n, renameDecl d) | (n, d) <- Map.toList (progTypes program)]
             , progFunctions = Map.map (lowerFunction program) (progFunctions program)
             , progMain = lowerFunction program (progMain program)
             , progGenerics = Map.map (\(params, fields) -> (params, [(f, listType t) | (f, t) <- fields])) (progGenerics program)
@@ -124,41 +124,56 @@ lowerLists library program
 -- The type that a list or a Box is: the struct of the library, with the type of the elements
 listType :: Type -> Type
 listType ty = case ty of
-    TList t -> TNamed (instanceName "StdList" [ArgType (listType t)])
+    TList t -> TNamed "StdList" [ArgType (listType t)]
     TArrayOf t size -> TArrayOf (listType t) size
-    TBox (TArrayOf t _) -> TNamed (instanceName "StdList" [ArgType (listType t)])
-    TBox t -> TNamed (boxStruct t)
+    TBox (TArrayOf t _) -> TNamed "StdList" [ArgType (listType t)]
+    TBox t -> boxStruct t
     TAddr t -> TAddr (listType t)
     TUninit t -> TUninit (listType t)
     TRef t -> TRef (listType t)
     TMutRef t -> TMutRef (listType t)
     TFn args ret -> TFn (map listType args) (listType ret)
-    TNamed n -> TNamed (renameName n)
+    TNamed base args -> TNamed base (map renameArg args)
     _ -> ty
 
--- The name of the struct that a Box of the type is
-boxStruct :: Type -> Name
-boxStruct t = instanceName "StdBox" [ArgType (listType t)]
+-- The struct that a Box of the type is
+boxStruct :: Type -> Type
+boxStruct t = TNamed "StdBox" [ArgType (listType t)]
+
+renameArg :: Arg -> Arg
+renameArg (ArgType t) = ArgType (listType t)
+renameArg other = other
 
 isArrayType :: Type -> Bool
 isArrayType t = case t of
     TArrayOf{} -> True
     _ -> False
 
--- The name of a struct made with types that are lists
-renameName :: Name -> Name
-renameName name = case instanceOf name of
-    Just (base, args) -> instanceName base (map arg args)
-    Nothing -> name
-  where
-    arg (ArgType t) = ArgType (listType t)
-    arg other = other
+-- The name of a struct made with types that are lists, from the types the program has (a data name is a rendered name)
+renameName :: Map Name Name -> Name -> Name
+renameName renames name = Map.findWithDefault name name renames
 
-renameConstant :: Constant -> Constant
-renameConstant c = case c of
-    CData name fields -> CData (renameName name) [(f, renameConstant v) | (f, v) <- fields]
-    CList cs -> CList (map renameConstant cs)
-    CArray cs -> CArray (map renameConstant cs)
+-- The rendered names that list lowering renames, built structurally from the types of a program
+renamesForTypes :: [Type] -> Map Name Name
+renamesForTypes tys = Map.fromList [(instanceName base args, instanceName base (map renameArg args)) | ty <- tys, (base, args) <- namedSubs ty]
+  where
+    namedSubs ty = case ty of
+        TNamed base args -> (base, args) : concat [namedSubs u | ArgType u <- args]
+        TList u -> namedSubs u
+        TArrayOf u _ -> namedSubs u
+        TBox u -> namedSubs u
+        TAddr u -> namedSubs u
+        TUninit u -> namedSubs u
+        TRef u -> namedSubs u
+        TFn as r -> concatMap namedSubs (r : as)
+        TForall _ _ u -> namedSubs u
+        _ -> []
+
+renameConstant :: Map Name Name -> Constant -> Constant
+renameConstant renames c = case c of
+    CData name fields -> CData (renameName renames name) [(f, renameConstant renames v) | (f, v) <- fields]
+    CList cs -> CList (map (renameConstant renames) cs)
+    CArray cs -> CArray (map (renameConstant renames) cs)
     _ -> c
 
 -- The state of lowering a function: its locals (with the temporaries that were added), the blocks that are finished, and the one being built
@@ -222,7 +237,7 @@ constantType c = case c of
     CInt _ -> Just TInt
     CBool _ -> Just TBool
     CList cs -> Just (TList (fromMaybe TInt (listToMaybe [t | x <- cs, Just t <- [constantType x]])))
-    CData name _ -> Just (if "::" `isInfixOf` name then TVariant name else TNamed name)
+    CData name _ -> Just (if "::" `isInfixOf` name then TVariant name else TNamed name [])
     _ -> Nothing
 
 lowerFunction :: Program -> Function -> Function
@@ -359,7 +374,7 @@ lowerFunction original fn =
                     _ -> TInt
         l <- operandFor listTy (head os)
         let struct = case listType listTy of
-                TNamed n -> n
+                TNamed base args -> instanceName base args
                 _ -> "StdList"
         case (op, drop 1 os) of
             -- (an element is read from the list where it is: a part that is only read is not copied)
@@ -405,12 +420,12 @@ lowerFunction original fn =
         MakeData name fs -> do
             let fieldTypes = fieldTypesOf name
             fs' <- mapM (\(f, o) -> (,) f <$> operandFor (fromMaybe TInt (lookup f fieldTypes)) o) fs
-            return (MakeData (renameName name) fs')
+            return (MakeData (renameName renames name) fs')
         ReadField o name f -> do
-            o' <- operandFor (if "::" `isInfixOf` name then TVariant name else TNamed name) o
-            return (ReadField o' (renameName name) f)
-        IsVariant o name -> return (IsVariant (renameOperand o) (renameName name))
-        AsVariant o name -> return (AsVariant (renameOperand o) (renameName name))
+            o' <- operandFor (if "::" `isInfixOf` name then TVariant name else TNamed name []) o
+            return (ReadField o' (renameName renames name) f)
+        IsVariant o name -> return (IsVariant (renameOperand o) (renameName renames name))
+        AsVariant o name -> return (AsVariant (renameOperand o) (renameName renames name))
         Borrow root steps upd -> return (Borrow root (map renameBorrowStep steps) upd)
         other -> return other
 
@@ -452,11 +467,12 @@ lowerFunction original fn =
         _ -> return []
 
     renameBorrowStep step = case step of
-        RefField name field -> RefField (renameName name) field
+        RefField name field -> RefField (renameName renames name) field
         RefIndex o -> RefIndex (renameOperand o)
 
+    renames = renamesForTypes (programTypes original)
     renameOperand o = case o of
-        Const c -> Const (renameConstant c)
+        Const c -> Const (renameConstant renames c)
         _ -> o
 
     -- The operand for a place that wants a value of the type: a constant that has a list in it is made first
@@ -485,10 +501,10 @@ lowerFunction original fn =
         CData name fs -> do
             let fieldTypes = fieldTypesOf name
             fs' <- mapM (\(f, v) -> (,) f <$> operandFor (fromMaybe TInt (lookup f fieldTypes)) (Const v)) fs
-            temp <- newTemp (if "::" `isInfixOf` name then TVariant name else TNamed name)
-            emit (Assign temp (MakeData (renameName name) fs'))
+            temp <- newTemp (if "::" `isInfixOf` name then TVariant name else TNamed name [])
+            emit (Assign temp (MakeData (renameName renames name) fs'))
             return (Copy temp)
-        _ -> return (Const (renameConstant c))
+        _ -> return (Const (renameConstant renames c))
 
 firstJust :: [Maybe a] -> Maybe a
 firstJust xs = listToMaybe [x | Just x <- xs]

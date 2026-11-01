@@ -35,6 +35,7 @@ import Utils
 --   `tersus llvm examples/emit.tersus > emitter.ll.new`, then `sha256sum emitter.ll.new`, upload it as the asset `emitter.ll` of a new release tagged
 --   `bootstrap-<first 12 digits of that digest>`, and put the digest in bootstrap/emitter.sha256. Never redirect straight into a seed file that the
 --   running compiler is using: the shell truncates it before the compiler runs.
+--   When a change breaks the data the seed reads (a MirData format change), that command cannot run until there is a seed that reads it: build the emitter as it is now with stage 0 fed the emitter's data in the format the seed reads (the same types with the old type words), which gives an emitter that reads the new format, and make the seed with it (`<that emitter>`, fed the new data by hand, in place of `tersus llvm`); upload the result as the asset of a new release as above and put its digest in bootstrap/emitter.sha256. The result is a seed only when it writes the same IR for the emitter again.
 -- Both are built when they are first needed and kept in the cache directory of the user, so that building this package needs no clang and no network.
 
 -- Stage 1: the emitter as it is now, built at the path from the IR that the emitter at the first path writes for it

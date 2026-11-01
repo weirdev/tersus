@@ -16,7 +16,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirMono (monomorphize)
-import TersusTypes (Name, Type (..), Variable)
+import TersusTypes (Name, Type (..), Variable, instanceName)
 
 -- Native code frees what a program makes, and updates a list in place, so it needs to know who owns each list and each
 -- struct or enum value. This pass makes that explicit in the MIR, after the program is validated, and without changing what
@@ -76,7 +76,7 @@ needsDrop program = owning
     owning ty = case ty of
         TBox{} -> True
         TArrayOf t _ -> owning t
-        TNamed n -> declared n
+        TNamed base args -> declared (instanceName base args)
         TVariant v -> maybe False declared (ownerOf v)
         _ -> False
     -- (the struct that a list is made of owns the memory at its address, which the runtime frees and copies with the elements in use)
@@ -407,7 +407,7 @@ type DropShape = [(Name, [(Name, Variable, Type)])]
 dropShape :: Program -> Map Local LocalDecl -> Local -> (DropShape, Bool)
 dropShape program locals l =
     case localType <$> Map.lookup l locals of
-        Just (TNamed n) -> (variantsOf [(n, decl) | decl <- maybe [] (: []) (Map.lookup n (progTypes program))], hasDrop n)
+        Just (TNamed base args) -> let n = instanceName base args in (variantsOf [(n, decl) | decl <- maybe [] (: []) (Map.lookup n (progTypes program))], hasDrop n)
         Just (TVariant v) -> (variantsOf [(n, decl) | (n, decl@(EnumDecl variants)) <- Map.toList (progTypes program), v `elem` map fst variants], maybe False hasDrop (ownerName v))
         _ -> ([], False)
   where
@@ -848,7 +848,7 @@ constantType program _ c =
     case c of
         CBool _ -> TBool
         CData name _ -> case Map.lookup name (progTypes program) of
-            Just StructDecl{} -> TNamed name
+            Just StructDecl{} -> TNamed name []
             _ -> TVariant name
         _ -> TInt
 

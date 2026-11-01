@@ -316,7 +316,7 @@ ghostType program = go (0 :: Int)
         | depth > 16 = False
         | otherwise = case ty of
             TBlock _ -> True
-            TNamed n -> case Map.lookup n (progTypes program) of
+            TNamed n _ -> case Map.lookup n (progTypes program) of
                 Just (StructDecl fields@(_ : _)) -> all (go (depth + 1) . snd) fields
                 _ -> False
             _ -> False
