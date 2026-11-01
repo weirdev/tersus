@@ -42,6 +42,18 @@ jobs:
           key: stack-work-${{ runner.os }}-${{ hashFiles('tersus/package.yaml', 'tersus/stack.yaml', 'tersus/src/**', 'tersus/app/**', 'tersus/test/**', 'tersus/lib/**', 'tersus/examples/**', 'tersus/bootstrap/**') }}
           restore-keys: stack-work-${{ runner.os }}-
 
+      # `build`, `llvm` and `run` write the IR with the emitter written in Tersus (examples/emit.tersus), which is built with clang the first time from the seed
+      # (a release asset pinned by bootstrap/emitter.sha256, fetched and verified on first use) and kept in ~/.cache/tersus under a name made from what it is made of, so a cache entry that is out of date is only not used.
+      # This has to be restored before the tests run: the test groups build the emitter (and the programs they build with it) into the same directory, and a restore
+      # after them only ever helped the two CLI checks at the end. A restore key of an older entry is still useful, for the same reason: what it holds is named
+      # for what it is made of, so what is out of date is only not used.
+      - name: Cache the emitter written in Tersus
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tersus
+          key: emitter-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/emitter.sha256', 'tersus/examples/emit.tersus', 'tersus/lib/*.tersus', 'tersus/src/LlvmRuntime.hs') }}
+          restore-keys: emitter-${{ runner.os }}-
+
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
       # reports "cannot find 'ld'". ld.bfd takes the same options, so let it answer to that name.
       - name: Provide ld.gold
@@ -56,14 +68,6 @@ jobs:
       # It loads examples/ relative to the package directory, so run from tersus/.
       - name: Test
         run: stack test
-
-      # `build`, `llvm` and `run` write the IR with the emitter written in Tersus (examples/emit.tersus), which is built with clang the first time from the seed
-      # (a release asset pinned by bootstrap/emitter.sha256, fetched and verified on first use) and kept in ~/.cache/tersus under a name made from what it is made of, so a cache entry that is out of date is only not used.
-      - name: Cache the emitter written in Tersus
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/tersus
-          key: emitter-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/emitter.sha256', 'tersus/examples/emit.tersus', 'tersus/lib/*.tersus', 'tersus/src/LlvmRuntime.hs') }}
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)
