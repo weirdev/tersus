@@ -5,7 +5,7 @@ module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateBy
 
 import Control.Monad (foldM)
 import Data.List (find, isPrefixOf, nub)
-import Data.Maybe (mapMaybe)
+import Data.Maybe (fromMaybe, mapMaybe)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
@@ -28,6 +28,9 @@ emptyBuild = Build 0 [] [] [] [] []
 
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
+
+localNum :: M.Local -> Integer
+localNum (M.Local n) = toInteger n
 
 fresh :: Build -> (Integer, Build)
 fresh b = (nextTerm b, b{nextTerm = nextTerm b + 1})
@@ -98,6 +101,7 @@ proofOperand _ (CTerm (VBool x)) b = do
     (v, b') <- operand (M.Const (M.CBool x)) b
     pure ([], v, b')
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct ToByte) _)) [arg]) b = proofOperand env arg b
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [arg]) b = proofOperand env arg b
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct FromByte) _)) [arg]) b = proofOperand env arg b
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Size) _)) [arg]) b0 = do
     (prefix, value, b1) <- proofOperand env arg b0
@@ -358,19 +362,52 @@ proofCheck _ _ _ = Nothing
 -- Evaluate total expressions before assuming a clause. The reference can
 -- assume partial expressions without proving their safety, so decline those
 -- rather than treating an unproved safety check as a validation failure.
-contractSteps :: Bool -> M.Env -> [ValidationStatement] -> Build -> Maybe ([MirValue], Build)
-contractSteps assume env clauses b0 = foldM add ([], b0) clauses
+contractSteps :: Rules -> Bool -> M.Env -> [ValidationStatement] -> Build -> Maybe ([MirValue], Build)
+contractSteps rules assume env clauses b0 = do
+    (steps, _, b) <- foldM add ([], Map.empty, b0) clauses
+    pure (steps, b)
   where
-    add (steps, b) (ProofAssert proof) = do
-        (prefix, checked, b') <- proofCheck env proof b
-        if not assume || all droppable prefix then Just () else Nothing
-        encoded <- if assume then case checked of
-            MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
-            MData "ExecutionStep::RequireVariant" fields -> Just (MData "ExecutionStep::AssumeVariant" (fields ++ [("matches", MBool True)]))
-            _ -> Nothing
-          else Just checked
-        pure (steps ++ (if assume then filter keptStep prefix else prefix) ++ [encoded], b')
-    add _ _ = Nothing
+    add (steps, subst, b) clause = case clause of
+        ProofAssert proof -> do
+            (prefix, checked, b') <- proofCheck env (substituteProof subst proof) b
+            if not assume || all droppable prefix then Just () else Nothing
+            encoded <- if assume then case checked of
+                MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
+                MData "ExecutionStep::RequireVariant" fields -> Just (MData "ExecutionStep::AssumeVariant" (fields ++ [("matches", MBool True)]))
+                _ -> Nothing
+              else Just checked
+            pure (steps ++ (if assume then filter keptStep prefix else prefix) ++ [encoded], subst, b')
+        AssignProofVar var expr -> pure (steps, Map.insert var (substituteProof subst (exprToProof expr)) subst, b)
+        Rewrite rule -> do
+            (more, b') <- if assume then assumeRewrite (substituteRule subst rule) b else rewriteSteps rules env (substituteRule subst rule) b
+            pure (steps ++ more, subst, b')
+        _ -> Nothing
+    -- A clause list that is itself assumed assumes a rewrite's inputs too:
+    -- they are part of the same hypothesis.
+    assumeRewrite (UserRewrite name args) b0 = do
+        (params, ins, outs, _) <- Map.lookup name rules
+        if length params == length args then Just () else Nothing
+        let substIn = buildSubst (Map.fromList (zip params args)) ins
+        inClauses <- instantiate substIn ins
+        (s1, b1) <- contractSteps rules True env inClauses b0
+        let substOut = buildSubst substIn outs
+        outClauses <- instantiate substOut outs
+        (s2, b2) <- contractSteps rules True env outClauses b1
+        pure (s1 ++ s2, b2)
+    assumeRewrite _ _ = Nothing
+    -- A clause list that is itself assumed assumes a rewrite's inputs too:
+    -- they are part of the same hypothesis.
+    assumeRewrite (UserRewrite name args) b0 = do
+        (params, ins, outs, _) <- Map.lookup name rules
+        if length params == length args then Just () else Nothing
+        let substIn = buildSubst (Map.fromList (zip params args)) ins
+        inClauses <- instantiate substIn ins
+        (s1, b1) <- contractSteps rules True env inClauses b0
+        let substOut = buildSubst substIn outs
+        outClauses <- instantiate substOut outs
+        (s2, b2) <- contractSteps rules True env outClauses b1
+        pure (s1 ++ s2, b2)
+    assumeRewrite _ _ = Nothing
     totalStep (MData "ExecutionStep::ApplyFresh" _) = True
     totalStep _ = False
     -- An assumed clause may mention a partial expression (a get, a division):
@@ -446,10 +483,10 @@ rewriteSteps rules env (UserRewrite name args) b0 = do
     if length params == length args then Just () else Nothing
     let substIn = buildSubst (Map.fromList (zip params args)) ins
     inClauses <- instantiate substIn ins
-    (checks, b1) <- contractSteps False env inClauses b0
+    (checks, b1) <- contractSteps rules False env inClauses b0
     let substOut = buildSubst substIn outs
     outClauses <- instantiate substOut outs
-    (assumptions, b2) <- contractSteps True env outClauses b1
+    (assumptions, b2) <- contractSteps rules True env outClauses b1
     pure (checks ++ assumptions, b2)
 rewriteSteps _ env (Refl proof) b0 = do
     (prefix, checked, b1) <- proofCheck env (FApp eqVarProof [proof, proof]) b0
@@ -654,7 +691,7 @@ statement rules (M.Ghost env (M.GhostValidation (ProofAssert proof))) b = do
     (prefix, s, b') <- proofCheck env proof b
     pure (prefix ++ [s], b')
 statement rules (M.Ghost env (M.GhostValidation (Rewrite rule))) b = rewriteSteps rules env rule b
-statement rules (M.Ghost env (M.GhostValidation (Assume proof))) b = contractSteps True env [ProofAssert proof] b
+statement rules (M.Ghost env (M.GhostValidation (Assume proof))) b = contractSteps rules True env [ProofAssert proof] b
 -- Definitions are skipped where they stand: a proof rule is checked once,
 -- generically (encodeRule), and an axiom is taken on trust.
 statement _ (M.Ghost _ (M.GhostProof _ _ _ _ _)) b = Just ([], b)
@@ -718,24 +755,29 @@ builtinCall name args (M.Local dest) b0 = case (name, args) of
 -- A direct call uses only contracts of bodies checked separately. Snapshot
 -- arguments before writing the result, and decline callees that reassign a
 -- parameter: their postconditions can refer to its final value.
-directCall :: M.Function -> M.Function -> [M.Operand] -> M.Local -> Maybe (Bool, MirValue) -> Bool -> Build -> Maybe ([MirValue], Build)
-directCall caller callee args (M.Local dest) termInfo recursiveCall b0 = do
+directCall :: Rules -> M.Function -> M.Function -> [M.Operand] -> M.Local -> Maybe (Bool, MirValue) -> Bool -> Build -> Maybe ([MirValue], [(Name, MirValue)], Build)
+directCall rules caller callee args (M.Local dest) termInfo recursiveCall b0 = do
     if length args == length params then Just () else Nothing
     if all validSizeArg (drop (length args - length (M.fnSizeParams callee)) args) then Just () else Nothing
     let calleeStmts = concatMap M.blockStatements (Map.elems (M.fnBlocks callee))
         calleeTerms = map M.blockTerminator (Map.elems (M.fnBlocks callee))
         reassignedNames = [name | local <- params, any (writesLocal local) calleeStmts || any (callWrites local) calleeTerms, Just name <- [M.localName =<< Map.lookup local (M.fnLocals callee)]]
         ensuredNames = concat [proofNames proof | ProofAssert proof <- M.specEnsures (M.fnSpec callee)]
-    if any (`elem` reassignedNames) ensuredNames then Nothing else Just ()
+    if any (\name -> name `elem` reassignedNames && name `notElem` M.specMutParams (M.fnSpec callee)) ensuredNames then Nothing else Just ()
+    case M.specFrom (M.fnSpec callee) of
+        [] -> Just ()
+        [from] -> if from `elem` map fst paramNameLocals then Just () else Nothing
+        _ -> Nothing
     case M.fnReturns callee of Just _ -> Just (); Nothing -> Nothing
     (snapshots, b1) <- foldM snapshot ([], b0) args
+    (postSteps, postLocals, b1') <- foldM (addPost snapshots) ([], [], b1) (zip params args)
     let bindings = Map.fromList (zip params [local | (local, _) <- snapshots])
         remap (M.Copy local) = M.Copy <$> Map.lookup local bindings
         remap constant@(M.Const _) = Just constant
         remap _ = Nothing
         env = Map.mapMaybe remap (M.specEnv (M.fnSpec callee))
-    (sizeChecks, withSizes) <- sizeParameterSteps False callee (map fst snapshots) b1
-    (checks, b2) <- contractSteps False env (M.specRequires (M.fnSpec callee)) withSizes
+    (sizeChecks, withSizes) <- sizeParameterSteps False callee (map fst snapshots) b1'
+    (checks, b2) <- contractSteps rules False env (M.specRequires (M.fnSpec callee)) withSizes
     (variantSteps, b2') <- case (termInfo, recursiveCall, M.specTermination (M.fnSpec callee)) of
         (Just (isParts, callerRef), True, Just term) -> do
             expr <- case term of
@@ -748,13 +790,26 @@ directCall caller callee args (M.Local dest) termInfo recursiveCall b0 = do
         (_, True, Nothing) -> impossible b2
         (_, _, Just MayDiverge) | not (mayDivergeFn caller) -> impossible b2
         _ -> pure ([], b2)
-    let resultEnv = Map.insert "return" (M.Copy (M.Local dest)) env
-    (assumptions, b3) <- contractSteps True resultEnv (M.specEnsures (M.fnSpec callee)) b2'
+    let postEnv = foldl (\e (name, postLocal, snapLocal) -> Map.insert name (M.Copy postLocal) (Map.insert ("$old " ++ name) (M.Copy snapLocal) e)) env [(name, post, snap) | (name, post, snap) <- postLocals]
+        resultEnv = Map.insert "return" (M.Copy (M.Local dest)) postEnv
+    (assumptions, b3) <- contractSteps rules True resultEnv (M.specEnsures (M.fnSpec callee)) b2'
     let (function, b4) = namedFunction ("call:" ++ M.fnName callee) b3
         argumentRefs = [record "ValueRef::Local" [("local", MInt (toInteger n))] | (M.Local n, _) <- snapshots]
-        result = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList argumentRefs)]
-    pure ([save | (_, save) <- snapshots] ++ sizeChecks ++ checks ++ variantSteps ++ [result] ++ assumptions, b4)
+        applyResult = step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList argumentRefs)]
+        result = case M.specFrom (M.fnSpec callee) of
+            [from] | Just (_, postLocal, _snapLocal) <- find (\(name, _, _) -> name == from) postLocals -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum postLocal)))])]
+            [from] | Just snapLocal <- lookup from (zip (map fst paramNameLocals) [local | (local, _) <- snapshots]) -> step "Assign" [("local", MInt (toInteger dest)), ("value", record "ValueRef::Local" [("local", MInt (toInteger (localNum snapLocal)))])]
+            _ -> applyResult
+    pure ([save | (_, save) <- snapshots] ++ postSteps ++ sizeChecks ++ checks ++ variantSteps ++ [result] ++ assumptions, [(name, record "ValueRef::Local" [("local", MInt (toInteger (localNum post)))]) | (name, post, _) <- postLocals], b4)
   where
+    paramNameLocals = [(n, p) | p <- params, Just d <- [Map.lookup p (M.fnLocals callee)], Just n <- [M.localName d]]
+    addPost snaps (steps, posts, b) (param, _) = case [name | (name, p) <- paramNameLocals, p == param] of
+        [name] | name `elem` M.specMutParams (M.fnSpec callee) -> do
+            let (i, b') = fresh b
+                postLocal = M.Local (negate (fromInteger i) - 1)
+                snapLocal = case lookup param (zip params [local | (local, _) <- snaps]) of Just l -> l; Nothing -> param
+            pure (steps ++ [step "Havoc" [("local", MInt (toInteger (localNum postLocal)))]], posts ++ [(name, postLocal, snapLocal)], b')
+        _ -> pure (steps, posts, b)
     -- A check no consistent context can prove (it still passes in a
     -- contradictory, unreachable one, as the reference treats such code).
     impossible b = do
@@ -796,8 +851,8 @@ sizeParameterSteps assume fn values b0
 
 -- Facts guaranteed by a value's type are trusted in the same places as in
 -- the reference validator: parameters and values assigned to typed locals.
-typeSteps :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> M.Function -> M.Local -> Build -> Maybe ([MirValue], Build)
-typeSteps types invariants fn local@(M.Local number) b0 = do
+typeSteps :: Rules -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> M.Function -> M.Local -> Build -> Maybe ([MirValue], Build)
+typeSteps rules types invariants fn local@(M.Local number) b0 = do
     decl <- Map.lookup local (M.fnLocals fn)
     facts (M.localType decl) b0
   where
@@ -819,7 +874,7 @@ typeSteps types invariants fn local@(M.Local number) b0 = do
             case instanceOf name of Just _ -> Nothing; Nothing -> Just ()
             fields <- case Map.lookup base types of Just (M.StructDecl fs) -> Just (map fst fs); _ -> Nothing
             (projections, env, b1) <- foldM project ([], Map.empty, b) fields
-            (assumptions, b2) <- contractSteps True env clauses b1
+            (assumptions, b2) <- contractSteps rules True env clauses b1
             pure (projections ++ assumptions, b2)
     facts _ b = Just ([], b)
     sized size b = do
@@ -917,6 +972,37 @@ fnValueLocals f = Map.fromList [(d, n) | (d, _) <- fnAssignments, Just n <- [res
             [M.Copy src] -> resolve (Set.insert d seen) src
             _ -> Nothing
 
+-- The place each reference local of a function is to, when the whole function
+-- agrees on it: a borrow, a copy of a reference, or a call that returns a
+-- reference from one of its arguments. A local that is lent two different
+-- places is outside the bridge's subset.
+borrowsOf :: Map.Map Name M.Function -> M.Function -> Maybe (Map.Map M.Local (M.Local, [M.RefStep]))
+borrowsOf functions fn = loop Map.empty
+  where
+    stmts = concatMap M.blockStatements (Map.elems (M.fnBlocks fn))
+    terms = map M.blockTerminator (Map.elems (M.fnBlocks fn))
+    seeds = [(d, (root, steps)) | M.Assign d (M.Borrow root steps _) <- stmts]
+    edges = [(d, src) | M.Assign d (M.Use (M.Copy src)) <- stmts] ++ [(d, src) | M.Assign d (M.Use (M.Move src)) <- stmts] ++ callEdges
+    callEdges =
+        [ (dest, src)
+        | M.Call (M.Const (M.CFn name)) args dest _ <- terms
+        , Just callee <- [Map.lookup name functions]
+        , [from] <- [M.specFrom (M.fnSpec callee)]
+        , Just idx <- [lookup from (zip (paramNamesOf callee) [0 ..])]
+        , idx < length args
+        , M.Copy src <- [args !! idx]
+        ]
+    paramNamesOf f = [n | p <- M.fnParams f, Just d <- [Map.lookup p (M.fnLocals f)], Just n <- [M.localName d]]
+    loop known = case extend known of
+        Nothing -> Nothing
+        Just m -> if m == known then Just known else loop m
+    extend known = do
+        m1 <- foldM (\m (d, place) -> put m d place) known seeds
+        foldM (\m (d, src) -> case Map.lookup src m of Just place -> put m d place; Nothing -> Just m) m1 edges
+    put m d place = case Map.lookup d m of
+        Nothing -> Just (Map.insert d place m)
+        Just p -> if p == place then Just m else Nothing
+
 -- The callees of a function, by name.
 callNamesOf :: M.Function -> [Name]
 callNamesOf f = [n | blk <- Map.elems (M.fnBlocks f), M.Call (M.Const (M.CFn n)) _ _ _ <- [M.blockTerminator blk]]
@@ -967,9 +1053,12 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 M.Const (M.CFn n) -> Just n
                 M.Copy local -> Map.lookup local (fnValueLocals fn)
                 _ -> Nothing
-            (callSteps, b2) <- case Map.lookup name functions of
-                Just callee -> directCall fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
-                _ -> builtinCall (stripBuiltin name) args dest b1
+            (callSteps, posts, b2) <- case Map.lookup name functions of
+                Just callee -> directCall rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+                _ -> do
+                    (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
+                    pure (cs, [], bb)
+            if null posts then Just () else Nothing
             (left, b3) <- operand (let (_, a, _) = compare in a) b2
             (right, b4) <- operand (let (_, _, c) = compare in c) b3
             let (r, _, _) = compare
@@ -977,8 +1066,8 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             Just (callSteps ++ loopExtra, loopEnd, b5)
         (Just _, _) -> Nothing
         (Nothing, M.Return) -> do
-            let env = Map.insert "return" (M.Copy (M.Local 0)) (M.specEnv (M.fnSpec fn))
-            (postconditions, b') <- contractSteps False env (M.specEnsures (M.fnSpec fn)) b1
+            let env = Map.insert "return" (M.Copy (M.Local 0)) (foldl (\e (name, local) -> Map.insert ("$old " ++ name) (M.Copy (M.Local (-(1000000 + fromInteger (localNum local))))) e) (M.specEnv (M.fnSpec fn)) [(name, p) | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just name <- [M.localName d], name `elem` M.specMutParams (M.fnSpec fn)])
+            (postconditions, b') <- contractSteps rules False env (M.specEnsures (M.fnSpec fn)) b1
             let resultCheck = case M.fnReturns fn of
                     Just _ -> [step "RequireDefined" [("value", localRef 0)]]
                     Nothing -> []
@@ -1010,11 +1099,17 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 M.Const (M.CFn n) -> Just n
                 M.Copy local -> Map.lookup local (fnValueLocals fn)
                 _ -> Nothing
-            (callSteps, b') <- case Map.lookup name functions of
-                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
-                _ -> builtinCall (stripBuiltin name) args dest b1
-            (typeFacts, b'') <- typeSteps types invariants fn dest b'
-            Just (callSteps ++ typeFacts, jump target, b'')
+            (callSteps, posts, b') <- case Map.lookup name functions of
+                Just callee | not ("builtin::" `isPrefixOf` name) -> directCall rules fn callee args dest termInfo (name == M.fnName fn || reachesName functions fn name (M.fnName fn)) b1
+                _ -> do
+                    (cs, bb) <- builtinCall (stripBuiltin name) args dest b1
+                    pure (cs, [], bb)
+            borrows <- borrowsOf functions fn
+            (mutSteps, b'') <- case Map.lookup name functions of
+                Just callee -> foldM (versionArg borrows callee posts) ([], b') (zip (M.fnParams callee) args)
+                _ -> pure ([], b')
+            (typeFacts, b''') <- typeSteps rules types invariants fn dest b''
+            Just (callSteps ++ mutSteps ++ typeFacts, jump target, b''')
         _ -> Nothing
     pure (record "ExecutionBlock" [("id", MInt (toInteger n)), ("steps", MList (steps ++ extra)), ("end", ending)], b2)
   where
@@ -1044,7 +1139,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 [ v
                 | member <- Set.toList region
                 , Just (M.BasicBlock blockStmts term) <- [Map.lookup member (M.fnBlocks fn)]
-                , v <- [d | M.Assign d _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> [])
+                , v <- [d | M.Assign d _ <- blockStmts] ++ [r | M.AssignRef r _ _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> []) ++ mutCallRoots term
                 ]
         if all (upperStable (M.loopEnv spec) assigned) (expressionVars upper) then Just () else Nothing
         (variantRef, b1) <- operand variant withCondition
@@ -1064,6 +1159,15 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
              ("variantObject", maybe (localRef (localNumber dummyLocal)) (\(object, _, _) -> object) variantTestInfo),
              ("variantFamily", MInt (maybe (-1) (\(_, familyId, _) -> familyId) variantTestInfo)),
              ("variantConstructor", MInt (maybe (-1) (\(_, _, constructorId) -> constructorId) variantTestInfo))], b4)
+    mutCallRoots (M.Call (M.Const (M.CFn name)) args _ _) = case Map.lookup name functions of
+        Just callee ->
+            [ root
+            | (pname, arg) <- zip [n | p <- M.fnParams callee, Just d <- [Map.lookup p (M.fnLocals callee)], Just n <- [M.localName d]] args
+            , pname `elem` M.specMutParams (M.fnSpec callee)
+            , Just (root, _) <- [case arg of M.Copy l -> Just (maybe (l, []) id (Map.lookup l (fromMaybe Map.empty (borrowsOf functions fn)))); M.Move l -> Just (maybe (l, []) id (Map.lookup l (fromMaybe Map.empty (borrowsOf functions fn)))); _ -> Nothing]
+            ]
+        _ -> []
+    mutCallRoots _ = []
     expressionVars expr = case expr of
         Var name -> [name]
         F (Var _) args -> concatMap expressionVars args
@@ -1093,7 +1197,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         pure (checks ++ prefix ++ [checkStep], assumptions ++ prefix ++ [assumption], b')
     invariant _ _ _ = Nothing
     loopType current (steps, b) local = do
-        (more, b') <- typeSteps types invariants current local b
+        (more, b') <- typeSteps rules types invariants current local b
         pure (steps ++ more, b')
     asAssumption (MData "ExecutionStep::Check" fields) = Just (MData "ExecutionStep::Assume" fields)
     asAssumption _ = Nothing
@@ -1107,7 +1211,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             (more, b') <- rewriteSteps rules env (substituteRule penv rule) b
             pure (steps ++ more, b', conditions, penv)
         M.Ghost env (M.GhostValidation (Assume proof)) -> do
-            (more, b') <- contractSteps True env [ProofAssert (substituteProof penv proof)] b
+            (more, b') <- contractSteps rules True env [ProofAssert (substituteProof penv proof)] b
             pure (steps ++ more, b', conditions, penv)
         M.Assign dest (M.BinaryOp (M.Compare r) a c) -> do
             (left, b1) <- operand a b
@@ -1118,18 +1222,37 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 rightLocal = negate y - 1
                 save i v = step "Assign" [("local", MInt i), ("value", v)]
             (more, b5) <- statement rules s b4
-            (typeFacts, b6) <- typeSteps types invariants fn dest b5
+            (typeFacts, b6) <- typeSteps rules types invariants fn dest b5
             pure (steps ++ [save leftLocal left, save rightLocal right] ++ more ++ typeFacts, b6,
                   Map.insert dest (r, localRef leftLocal, localRef rightLocal) conditions, penv)
+        M.Assign dest (M.Borrow root place _) -> do
+            (rootRef, b1) <- operand (M.Copy root) b
+            (pSteps, placeRef, b2) <- placeRefOf True rootRef place b1
+            (typeFacts, b3) <- typeSteps rules types invariants fn dest b2
+            pure (steps ++ pSteps ++ [step "Assign" [("local", MInt (localNumber dest)), ("value", placeRef)]] ++ typeFacts, b3, Map.delete dest conditions, penv)
+        M.AssignRef root place (M.Use value) -> do
+            borrows <- borrowsOf functions fn
+            (valueRef, b1) <- operand value b
+            let (i, b2) = fresh b1
+                tempLocal = negate i - 1
+                tempRef = localRef tempLocal
+                save = step "Assign" [("local", MInt tempLocal), ("value", valueRef)]
+            (rootRef, _) <- operand (M.Copy root) b2
+            (checkSteps, _, b3) <- placeRefOf True rootRef place b2
+            (updSteps, newRootRef, b4) <- updateRefOf rootRef place tempRef b3
+            (typeFacts, b5) <- typeSteps rules types invariants fn root b4
+            (rebindSteps, b6) <- rebindAfter borrows root b5
+            pure (steps ++ [save] ++ checkSteps ++ updSteps ++ [step "Assign" [("local", MInt (localNumber root)), ("value", newRootRef)]] ++ typeFacts ++ rebindSteps, b6, conditions, penv)
+        M.AssignRef _ _ _ -> Nothing
         M.Assign dest (M.MakeData name fields) -> do
             let base = maybe name fst (instanceOf name)
                 clauses = Map.findWithDefault [] base invariants
             case instanceOf name of
                 Just _ | not (null clauses) -> Nothing
                 _ -> Just ()
-            (checks, b1) <- contractSteps False (Map.fromList fields) clauses b
+            (checks, b1) <- contractSteps rules False (Map.fromList fields) clauses b
             (more, b2) <- statement rules s b1
-            (typeFacts, b3) <- typeSteps types invariants fn dest b2
+            (typeFacts, b3) <- typeSteps rules types invariants fn dest b2
             pure (steps ++ checks ++ more ++ typeFacts, b3, Map.delete dest conditions, penv)
         M.Assign dest (M.ListOp M.NewArray [lengthValue, _]) -> do
             decl <- Map.lookup dest (M.fnLocals fn)
@@ -1140,18 +1263,120 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                         _ -> Nothing
                 _ -> Just ()
             (more, b1) <- statement rules s b
-            (typeFacts, b2) <- typeSteps types invariants fn dest b1
+            (typeFacts, b2) <- typeSteps rules types invariants fn dest b1
             pure (steps ++ more ++ typeFacts, b2, Map.delete dest conditions, penv)
         M.Assign dest _ -> do
             (more, b') <- statement rules s b
-            (typeFacts, b'') <- typeSteps types invariants fn dest b'
-            pure (steps ++ more ++ typeFacts, b'', Map.delete dest conditions, penv)
+            (typeFacts, b'') <- typeSteps rules types invariants fn dest b'
+            borrows <- borrowsOf functions fn
+            (rebindSteps, b''') <- rebindAfter borrows dest b''
+            pure (steps ++ more ++ typeFacts ++ rebindSteps, b''', Map.delete dest conditions, penv)
         _ -> do
             (more, b') <- statement rules s b
             pure (steps ++ more, b', conditions, penv)
 
     localNumber (M.Local i) = toInteger i
     localRef i = record "ValueRef::Local" [("local", MInt i)]
+    -- The term for the value at a place, from a reference to its root. Making
+    -- a borrow checks the index steps; reading a place back after its root
+    -- changed does not (the reference validator checks a place only where
+    -- the borrow is made and where it is written through).
+    placeRefOf checked ref steps b0 = case steps of
+        [] -> Just ([], ref, b0)
+        M.RefField _ field : rest -> do
+            let (function, b1) = namedFunction ("field:" ++ field) b0
+                (i, b2) = fresh b1
+                local = negate i - 1
+                ref' = localRef local
+            (more, ref'', b3) <- placeRefOf checked ref' rest b2
+            pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [ref])]] ++ more, ref'', b3)
+        M.RefIndex index : rest -> do
+            (indexRef, b1) <- operand index b0
+            let (i, b2) = fresh b1
+                local = negate i - 1
+                ref' = localRef local
+            (first, b3) <- if checked then getSteps local ref indexRef b2 else pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt (-14)), ("arguments", MList [ref, indexRef])]], b2)
+            (more, ref'', b4) <- placeRefOf checked ref' rest b3
+            pure (first ++ more, ref'', b4)
+    -- A root whose place at the steps is given a new value: the new root,
+    -- built from the old one with that place replaced.
+    updateRefOf rootRef steps valueRef b0 = case steps of
+        [] -> Just ([], valueRef, b0)
+        M.RefField ctor field : rest -> do
+            (s1, innerRef, b1) <- placeRefOf False rootRef [M.RefField ctor field] b0
+            (s2, newInner, b2) <- updateRefOf innerRef rest valueRef b1
+            fields <- case Map.lookup ctor types of
+                Just (M.StructDecl fs) -> Just (map fst fs)
+                Just (M.EnumDecl variants) -> case [fs | (vname, fs) <- variants, vname == ctor || snd (break (== ':') ctor) == vname || ctor == vname] of
+                    fs : _ -> Just (map fst fs)
+                    [] -> Nothing
+                Nothing -> case [map fst fs | (ename, M.EnumDecl variants) <- Map.toList types, (vname, fs) <- variants, ename ++ "::" ++ vname == ctor] of
+                    fs : _ -> Just fs
+                    [] -> Nothing
+            (s3, argRefs, b3) <- foldM (fieldArg rootRef newInner field) ([], [], b2) fields
+            let (constructor, b4) = namedFunction ("ctor:" ++ ctor) b3
+                (i, b5) = fresh b4
+                local = negate i - 1
+                newRef = localRef local
+                create = step "ApplyFresh" [("local", MInt local), ("function", MInt constructor), ("arguments", MList argRefs)]
+            (projections, b6) <- foldM (projectNew newRef) ([], b5) (zip fields argRefs)
+            (checks, b7) <- invariantChecks ctor newRef argRefs fields b6
+            pure (s1 ++ s2 ++ s3 ++ [create] ++ projections ++ checks, newRef, b7)
+        M.RefIndex index : rest -> do
+            (indexRef, b1) <- operand index b0
+            (s1, elemRef, b2) <- placeRefOf False rootRef [M.RefIndex index] b1
+            (s2, newInner, b3) <- updateRefOf elemRef rest valueRef b2
+            let (i, b4) = fresh b3
+                local = negate i - 1
+                newRef = localRef local
+            (s3, b5) <- setSteps local rootRef indexRef newInner b4
+            pure (s1 ++ s2 ++ s3, newRef, b5)
+      where
+        fieldArg rootRef newInner wanted (steps', refs, b) f
+            | f == wanted = pure (steps', refs ++ [newInner], b)
+            | otherwise = do
+                let (function, b1) = namedFunction ("field:" ++ f) b
+                    (i, b2) = fresh b1
+                    local = negate i - 1
+                    ref = localRef local
+                pure (steps' ++ [step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [rootRef])]], refs ++ [ref], b2)
+        projectNew newRef (steps', b) (f, argRef) = do
+            let (function, b1) = namedFunction ("field:" ++ f) b
+                (i, b2) = fresh b1
+                local = negate i - 1
+                ref = localRef local
+            pure (steps' ++ [step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [newRef])], step "Assume" [("relation", MInt 0), ("left", ref), ("right", argRef)]], b2)
+        invariantChecks ctor newRef argRefs fields b = do
+            let base = maybe ctor fst (instanceOf ctor)
+                clauses = Map.findWithDefault [] base invariants
+            if null clauses then pure ([], b) else do
+                env <- case traverse refOperand (zip fields argRefs) of Just pairs -> Just (Map.fromList pairs); Nothing -> Nothing
+                (checks, b') <- contractSteps rules False env clauses b
+                pure (checks, b')
+          where
+            refOperand (f, MData "ValueRef::Local" fields') = case lookup "local" fields' of Just (MInt n) -> Just (f, M.Copy (M.Local (fromInteger n))); _ -> Nothing
+            refOperand _ = Nothing
+    -- After a call, what an update argument is to gets the version the
+    -- callee's contract gave it.
+    versionArg borrows callee posts (steps, b) (param, arg) = case [name | p <- [param], Just d <- [Map.lookup p (M.fnLocals callee)], Just name <- [M.localName d]] of
+        [name] -> case lookup name posts of
+            Nothing -> pure (steps, b)
+            Just postRef -> do
+                (root, placeSteps) <- case arg of
+                    M.Copy l -> Just (maybe (l, []) id (Map.lookup l borrows))
+                    M.Move l -> Just (maybe (l, []) id (Map.lookup l borrows))
+                    _ -> Nothing
+                (updSteps, newRootRef, b1) <- updateRefOf (localRef (localNumber root)) placeSteps postRef b
+                (rebindSteps, b2) <- rebindAfter borrows root b1
+                pure (steps ++ updSteps ++ [step "Assign" [("local", MInt (localNumber root)), ("value", newRootRef)]] ++ rebindSteps, b2)
+        _ -> pure (steps, b)
+    -- After a root gets a new version, the references to places of it are
+    -- bound again to the place in the new version.
+    rebindAfter borrows root b0 = foldM add ([], b0) [(ref, steps) | (ref, (r, steps)) <- Map.toList borrows, r == root, ref /= root]
+      where
+        add (steps, b) (ref, placeSteps) = do
+            (more, placeRef, b') <- placeRefOf False (localRef (localNumber root)) placeSteps b
+            pure (steps ++ more ++ [step "Assign" [("local", MInt (localNumber ref)), ("value", placeRef)]], b')
     jump (M.BlockId target) = record "ExecutionEnd::Jump" [("target", MInt (toInteger target))]
     -- The join of a branch is the first block both successors reach by straight
     -- jumps alone, when neither the branch nor the join is inside a loop region:
@@ -1236,7 +1461,7 @@ genericClauses :: Rules -> Bool -> M.Env -> [ValidationStatement] -> Build -> In
 genericClauses rules assumeMode env0 clauses b0 next0 = foldM go ([], b0, env0, next0) clauses
   where
     go (steps, b, env, next) (ProofAssert proof) = do
-        (more, b') <- contractSteps assumeMode env [ProofAssert proof] b
+        (more, b') <- contractSteps rules assumeMode env [ProofAssert proof] b
         pure (steps ++ more, b', env, next)
     go (steps, b, env, next) (AssignProofVar var expr) = do
         (prefix, ref, b') <- proofOperand env (exprToProof expr) b
@@ -1246,7 +1471,7 @@ genericClauses rules assumeMode env0 clauses b0 next0 = foldM go ([], b0, env0, 
         (more, b') <- rewriteSteps rules env rule b
         pure (steps ++ more, b', env, next)
     go (steps, b, env, next) (Assume proof) = do
-        (more, b') <- contractSteps True env [ProofAssert proof] b
+        (more, b') <- contractSteps rules True env [ProofAssert proof] b
         pure (steps ++ more, b', env, next)
 
 encodeFunction :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
@@ -1264,7 +1489,7 @@ encodeFunction types invariants functions rules allowCalls fn
         let (params, start) = foldl addParam ([], emptyBuild) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
-        (requires, withRequires) <- contractSteps True (M.specEnv spec) (M.specRequires spec) withSizes
+        (requires, withRequires) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
         let recursive = any (\name -> reachesName functions fn name (M.fnName fn)) (callNamesOf fn)
         (variantSteps, termInfo, withVariant) <- case M.specTermination spec of
             Just (Counting expr) -> do
@@ -1280,7 +1505,8 @@ encodeFunction types invariants functions rules allowCalls fn
                 pure (blocks ++ [v], b')
         (blocks, b) <- foldM addBlock ([], withVariant) (Map.toList (M.fnBlocks fn))
         let context = contextOf b
-            entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (paramFacts ++ sizeFacts ++ requires ++ variantSteps)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
+            oldSteps = [step "Assign" [("local", MInt (-(1000000 + localNum p))), ("value", record "ValueRef::Local" [("local", MInt (localNum p))])] | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just name <- [M.localName d], name `elem` M.specMutParams spec]
+            entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (paramFacts ++ sizeFacts ++ requires ++ variantSteps ++ oldSteps)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
         pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", localsMap params)], -1)
   where
     spec = M.fnSpec fn
@@ -1305,7 +1531,7 @@ encodeFunction types invariants functions rules allowCalls fn
             , ("count", MInt (toInteger (length bindings)))
             ]
     addType (steps, b) local = do
-        (more, b') <- typeSteps types invariants fn local b
+        (more, b') <- typeSteps rules types invariants fn local b
         pure (steps ++ more, b')
 
 encode :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
@@ -1334,7 +1560,7 @@ encode program
   where
     allFunctions = M.progMain program : Map.elems (M.progFunctions program)
     externFunction fn = "extern " `isPrefixOf` M.fnName fn
-    unsupportedFunction fn = any (unsupportedType . M.localType) (Map.elems (M.fnLocals fn)) || maybe False unsupportedType (M.fnReturns fn) || not (null (M.specFrom (M.fnSpec fn)))
+    unsupportedFunction fn = any (unsupportedType . M.localType) (Map.elems (M.fnLocals fn)) || maybe False unsupportedType (M.fnReturns fn)
     unsupportedDecl (M.StructDecl fields) = any (unsupportedType . snd) fields
     unsupportedDecl (M.EnumDecl variants) = any (any (unsupportedType . snd) . snd) variants
     unsupportedType t = case t of
@@ -1347,8 +1573,6 @@ encode program
         TFn args result -> any unsupportedType args || unsupportedType result
         TForall _ _ element -> unsupportedType element
         TUninit element -> unsupportedType element
-        TRef element -> unsupportedType element
-        TMutRef element -> unsupportedType element
         _ -> False
     isEnum M.EnumDecl{} = True
     isEnum _ = False
