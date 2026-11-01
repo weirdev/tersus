@@ -522,7 +522,7 @@ checkConstruct ty0 fields argTys0 = do
             let stray = nub' [p | (_, ty) <- declared, p <- paramsOf ty, p `notElem` scope]
             if null stray
                 then do
-                    mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) fieldTy argTy) (zip declared argTys)
+                    mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ ctorName) fieldTy argTy) (zip declared argTys)
                     return ty
                 else do
                     vars <- mapM (const freshVar) stray
@@ -530,7 +530,7 @@ checkConstruct ty0 fields argTys0 = do
                         ty' = case ty of
                             TNamed base args -> TNamed base [case a of ArgType t -> ArgType (renamed t); other -> other | a <- args]
                             _ -> ty
-                    mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ name) (renamed fieldTy) argTy) (zip declared argTys)
+                    mapM_ (\((field, fieldTy), argTy) -> expect ("field " ++ field ++ " of " ++ ctorName) (renamed fieldTy) argTy) (zip declared argTys)
                     return ty'
   where
     paramsOf ty = case ty of
