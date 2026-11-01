@@ -525,10 +525,11 @@ proofCheck _ _ _ = Nothing
 
 -- A forall over the elements of two lists, assumed as one fact (function
 -- -30) that the checker instantiates: `forall j in lo..hi: get(a, j) =
--- get(b, j)`. Other forall shapes keep the havoced-instance encoding.
+-- get(b, j)`. An index the guards exclude (`j != i`: the one slot an
+-- operation changed) splits the range at that index: one fact below it
+-- and one above it, so nothing is claimed of the changed slot.
 forallFactSteps :: M.Env -> VariableProof -> Build -> Maybe ([MirValue], Build)
 forallFactSteps env (Forall index guards body) b0
-    | any excluded guards = Nothing
     | otherwise = case body of
     FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Eq)) _)) [x, y]
         | Just (a1, base, c) <- constSide x y -> emitConst a1 base c
@@ -539,6 +540,7 @@ forallFactSteps env (Forall index guards body) b0
             if mentionsIndex c then Nothing else Just ()
             Just (list, maybe (CTerm (VInt 0)) id off, c)
         emitConst a1 base c = do
+            if any excluded guards then Nothing else Just ()
             lo <- guardLo
             hi <- guardHi
             (sA, refA, b1) <- proofOperand env a1 b0
@@ -572,6 +574,7 @@ forallFactSteps env (Forall index guards body) b0
             Just (listB, d, 1)
         shiftParts _ = Nothing
         emitShift a1 base a2 delta mode = do
+            if any excluded guards then Nothing else Just ()
             lo <- guardLo
             hi <- guardHi
             (sA, refA, b1) <- proofOperand env a1 b0
@@ -603,8 +606,24 @@ forallFactSteps env (Forall index guards body) b0
         let (i, b6) = fresh b5
             local = negate i - 1
             apply = step "ApplyFresh" [("local", MInt local), ("function", MInt (-30)), ("arguments", MList [refA, refB, refLo, refHi, refBase])]
-        pure (sA ++ sB ++ sLo ++ sHi ++ sBase ++ [apply], b6)
+            baseSteps = sA ++ sB ++ sLo ++ sHi ++ sBase
+        case exclusionProof of
+            Just excl -> do
+                (sE, refE, c1) <- proofOperand env excl b5
+                (sOne, refOne, c2) <- proofOperand env (CTerm (VInt 1)) c1
+                let (pi, c3) = fresh c2
+                    plocal = negate pi - 1
+                    plus = step "ApplyFresh" [("local", MInt plocal), ("function", MInt (-1)), ("arguments", MList [refE, refOne])]
+                    (i1, c4) = fresh c3
+                    below = step "ApplyFresh" [("local", MInt (negate i1 - 1)), ("function", MInt (-30)), ("arguments", MList [refA, refB, refLo, refE, refBase])]
+                    (i2, c5) = fresh c4
+                    above = step "ApplyFresh" [("local", MInt (negate i2 - 1)), ("function", MInt (-30)), ("arguments", MList [refA, refB, record "ValueRef::Local" [("local", MInt plocal)], refHi, refBase])]
+                pure (baseSteps ++ sE ++ sOne ++ [plus, below, above], c5)
+            Nothing
+                | any excluded guards -> Nothing
+                | otherwise -> pure (baseSteps ++ [apply], b6)
     FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [x, y] -> do
+        if any excluded guards then Nothing else Just ()
         (a1, base) <- getArg x
         if indexOf x == Just index && not (mentionsIndex y) then Just () else Nothing
         lo <- guardLo
@@ -628,6 +647,9 @@ forallFactSteps env (Forall index guards body) b0
     excluded (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [BVar i, _]) = i == index
     excluded (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [_, BVar i]) = i == index
     excluded _ = False
+    exclusionProof = case [e | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [BVar i, e] <- guards, i == index, not (mentionsIndex e)] ++ [e | FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [e, BVar i] <- guards, i == index, not (mentionsIndex e)] of
+        e : _ -> Just e
+        [] -> Nothing
     mentionsIndex (BVar i) = i == index
     mentionsIndex (FApp f args) = mentionsIndex f || any mentionsIndex args
     mentionsIndex _ = False
