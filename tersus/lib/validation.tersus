@@ -2473,6 +2473,81 @@ fn getCoveredByEqualRange(context: &ValidatorContext, equalities: &List<Equality
     return false;
 };
 
+fn constantOverList(context: &ValidatorContext, analysis: &ContextAnalysis, seq: Int, at: Int, otherTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    for app in context.applications {
+        if app.function = -32 {
+            if size(app.arguments) = 5 {
+                if hasEquality(equalities, seq, get(app.arguments, 0)) {
+                    if hasEquality(equalities, otherTerm, get(app.arguments, 4)) {
+                        if hasDifference(equalities, differences, get(app.arguments, 1), at, 0) {
+                            if hasDifference(equalities, differences, at, get(app.arguments, 2), -1) { return true; };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn setGetEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    if setGetSide(context, analysis, left, right) { return true; };
+    return setGetSide(context, analysis, right, left);
+};
+
+fn setGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    equalities = analysis.equalities;
+    for gf in getFactsOf(context, equalities, getTerm) {
+        for app in context.applications {
+            if app.function = -17 {
+                if size(app.arguments) = 3 {
+                    if hasEquality(equalities, app.id, gf.seq) {
+                        inner = get(app.arguments, 0);
+                        idx = get(app.arguments, 1);
+                        val = get(app.arguments, 2);
+                        if linearEntails(context, gf.at, idx, 0) {
+                            eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: gf.at, right: idx }), ..clone(context) };
+                            eqAnalysis = analyzeContext(eqContext);
+                            eqOk = eqAnalysis.contradictory;
+                            if eqOk = false { eqOk = contextEqual(eqAnalysis.equalities, eqAnalysis.differences, val, otherTerm); };
+                            if eqOk {
+                                ltContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: gf.at, greater: idx, strict: true }), ..clone(context) };
+                                ltAnalysis = analyzeContext(ltContext);
+                                if ltAnalysis.contradictory { return true; };
+                                if constantOverList(ltContext, ltAnalysis, inner, gf.at, otherTerm) { return true; };
+                                for fact in ltContext.applications {
+                                    if fact.function = -30 {
+                                        if size(fact.arguments) = 5 {
+                                            bv = integerValue(ltContext, get(fact.arguments, 4));
+                                            if bv is IntegerLookup::Found {
+                                                if (bv as IntegerLookup::Found).value = 0 {
+                                                    if linearEntails(ltContext, get(fact.arguments, 2), gf.at, 0) {
+                                                        if linearEntails(ltContext, gf.at, get(fact.arguments, 3), -1) {
+                                                            if hasEquality(ltAnalysis.equalities, inner, get(fact.arguments, 0)) {
+                                                                if constantOverList(ltContext, ltAnalysis, get(fact.arguments, 1), gf.at, otherTerm) { return true; };
+                                                            };
+                                                            if hasEquality(ltAnalysis.equalities, inner, get(fact.arguments, 1)) {
+                                                                if constantOverList(ltContext, ltAnalysis, get(fact.arguments, 0), gf.at, otherTerm) { return true; };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
 fn finiteGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
     for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
         if finiteGetSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
@@ -2974,6 +3049,7 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
         if forallShift(context, analysis, g.left, g.right) { return true; };
         if modIsSelf(context, analysis, g.left, g.right) { return true; };
         if finiteGetEqual(context, analysis, g.left, g.right) { return true; };
+        if setGetEqual(context, analysis, g.left, g.right) { return true; };
         if relationAppsEqual(context, analysis, g.left, g.right) { return true; };
         if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
         return false;
