@@ -1647,7 +1647,16 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     -- the body) is not in the region and is walked as an exit, as the reference
     -- validator does.
     encodeLoop spec yes no dummyLocal (r, a, c, variantTestInfo, withCondition) = do
-        if testChainToBody spec no yes && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
+        let orChainOf seen b
+                | Set.member b seen = Nothing
+                | otherwise = case Map.lookup b (M.fnBlocks fn) of
+                    Just (M.BasicBlock [M.Assign cond (M.BinaryOp (M.Compare r2) a2 c2)] (M.SwitchBool (M.Copy cond') y2 n2))
+                        | cond == cond' && y2 == yes -> do
+                            (exitB, rest) <- orChainOf (Set.insert b seen) n2
+                            Just (exitB, (r2, a2, c2) : rest)
+                    _ -> Just (b, [])
+        (exitBlock, orTestsRaw) <- orChainOf Set.empty no
+        if (testChainToBody spec no yes || not (null orTestsRaw)) && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
         let region = Map.findWithDefault (Set.singleton blockId) blockId (loopRegions fn)
             assigned = nub
                 [ v
@@ -1689,8 +1698,13 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         (zeroRef, b3) <- operand (M.Const (M.CInt 0)) b2
         (typeAssumptions, withTypes) <- foldM (loopType fn) ([], b3) assigned
         (checks, assumptions, b4) <- foldM (invariant (M.loopEnv spec)) (variantSteps, typeAssumptions, withTypes) (M.loopInvariant spec)
+        (orTestValues, b5) <- foldM (\(acc, bb) (r2, a2, c2) -> do
+            (lref, bb1) <- operand a2 bb
+            (rref, bb2) <- operand c2 bb1
+            let (k2, l2, r2') = normal r2 lref rref
+            Just (acc ++ [record "LoopTest" [("relation", MInt k2), ("left", l2), ("right", r2')]], bb2)) ([], b4) orTestsRaw
         let (kind, left, right) = normal r a c
-            M.BlockId exitId = no
+            M.BlockId exitId = exitBlock
             M.BlockId bodyId = yes
         let divergeGuard = if M.loopTermination spec == Just MayDiverge && not (mayDivergeFn fn) then [check 2 zeroRef zeroRef] else []
         pure (variantSteps ++ upperSteps ++ divergeGuard, record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
@@ -1700,7 +1714,8 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
              ("variantOther", upperRef), ("zero", zeroRef),
              ("variantObject", maybe (localRef (localNumber dummyLocal)) (\(object, _, _) -> object) variantTestInfo),
              ("variantFamily", MInt (maybe (-1) (\(_, familyId, _) -> familyId) variantTestInfo)),
-             ("variantConstructor", MInt (maybe (-1) (\(_, _, constructorId) -> constructorId) variantTestInfo))], b4)
+             ("variantConstructor", MInt (maybe (-1) (\(_, _, constructorId) -> constructorId) variantTestInfo)),
+             ("orTests", MList orTestValues)], b5)
     mutCallRoots (M.Call (M.Const (M.CFn name)) args _ _) = case Map.lookup name functions of
         Just callee ->
             [ root
@@ -1724,6 +1739,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             | Set.member b seen = False
             | otherwise = case Map.lookup b (M.fnBlocks fn) of
                 Just (M.BasicBlock _ (M.SwitchBool _ next no')) -> no' == exit && go (Set.insert b seen) next
+                Just (M.BasicBlock _ (M.Call _ _ _ target)) -> go (Set.insert b seen) target
                 _ -> False
     upperStable env assigned name = case Map.lookup name env of
         Just (M.Copy v) -> v `notElem` assigned
@@ -2098,7 +2114,6 @@ encode program0 = encodeMono withTemplates
 
 encodeMono :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
 encodeMono program
-    | Just fn <- find externFunction allFunctions = Left ("an extern function (" ++ M.fnName fn ++ ")")
     | Just fn <- find unsupportedFunction allFunctions = Left ("a type of a local, the result or a reference result of " ++ M.fnName fn)
     | Just (name, _) <- find (unsupportedDecl . snd) (Map.toList (M.progTypes program)) = Left ("a field type of " ++ name)
     | not (null (M.fnParams (M.progMain program))) = Left "a main function with parameters"
@@ -2121,7 +2136,7 @@ encodeMono program
         -- function that checks an impl against its trait (TypeCheck
         -- writes it beside the impl, and nothing calls it): it is
         -- checked as written, or a weaker impl would pass.
-        checked <- traverse encodeOne [fn | fn <- Map.elems functions, null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn))]
+        checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn))]
         main <- encodeOne (M.progMain program)
         let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
         pure (checked ++ ruleEntries ++ [main])
