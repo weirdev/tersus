@@ -2,6 +2,7 @@ module TestPipeline
     ( testExamples
     , testCli
     , testMir
+    , testMirSelfHosted
     , testIntRange
     , testPipeline
     ) where
@@ -493,7 +494,6 @@ testMir =
         , testMirWellFormed
         , testMirTypes
         , testMirRun
-        , testSelfHostedEquality
         , testStdlibInTersus
         , testCaseSeq
             "testMirCli"
@@ -520,6 +520,11 @@ testStdlibInTersus =
                     && Map.member "get" stdLibCtx
                     && Map.member "push" stdLibCtx
                 )
+
+-- A group of its own, so the suite's group processes balance: validating lib/validation.tersus and running its
+-- queries in the interpreter takes most of the time of the group it was in, and a group is a process.
+testMirSelfHosted :: Test
+testMirSelfHosted = TestList "testMirSelfHosted" [testSelfHostedEquality]
 
 -- Compare the Tersus equality closure with the reference solver over all graphs
 -- of four vertices, including disconnected graphs, cycles and reverse queries.

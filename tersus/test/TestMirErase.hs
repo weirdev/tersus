@@ -4,9 +4,10 @@ import Data.List (isInfixOf, isSuffixOf)
 import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
+import Mir (Program)
 import MirData (writeProgram, writeProgramWithGhosts)
 import MirGhost (eraseGhosts, withoutUninit)
-import Pipeline (compileSource, validatedSource)
+import Pipeline (validatedSource)
 import TestHarness
 import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
@@ -43,8 +44,10 @@ borrowSource = "xs = [1, 2, 3]; r = &xs; return size(*r) + get(*r, 0);"
 mutSource :: String
 mutSource = "x = 4; r = &mut x; *r = 9; return *r;"
 
-eraserSource :: IO String
-eraserSource = readFile "examples/mir_erase.tersus"
+-- The eraser compiled once for every interpreted case: compiling it is the expensive part, and every case
+-- runs the same program over a different input (the pattern of TestMirVerify's verifierProgram).
+eraserProgram :: IO (Result Program String)
+eraserProgram = readFile "examples/mir_erase.tersus" >>= compileOnce
 
 -- What the Haskell makes of the program before its ghosts are erased, as version 1 of the data
 expectedOf :: String -> Result String String
@@ -54,8 +57,8 @@ expectedOf source = case validatedSource source of
 
 interpreted :: String -> IO TestResult
 interpreted source = do
-    eraser <- eraserSource
-    pure $ case compileSource eraser of
+    eraser <- eraserProgram
+    pure $ case eraser of
         Error e -> Just ("the eraser does not compile: " ++ e)
         Ok eraserProgram -> case validatedSource source of
             Error e -> Just e
@@ -69,8 +72,8 @@ interpreted source = do
 
 refused :: IO TestResult
 refused = do
-    eraser <- eraserSource
-    pure $ case compileSource eraser of
+    eraser <- eraserProgram
+    pure $ case eraser of
         Error e -> Just ("the eraser does not compile: " ++ e)
         Ok eraserProgram -> case runProgramIn noWorld eraserProgram of
             Error e -> Just e
@@ -82,8 +85,8 @@ refused = do
 -- local the cast gives (a permission of Two, 8 bytes) is written as a permission of two Ints (16 bytes)
 badCast :: IO TestResult
 badCast = do
-    eraser <- eraserSource
-    pure $ case compileSource eraser of
+    eraser <- eraserProgram
+    pure $ case eraser of
         Error e -> Just ("the eraser does not compile: " ++ e)
         Ok eraserProgram -> case validatedSource castSource of
             Error e -> Just e
@@ -109,8 +112,8 @@ twoLine = "struct \"Two\" 2 \"a\" i32 \"b\" i32"
 -- (Haskell `Mir.layoutOf`: a Block<T> field takes no room, and an Uninit<T> field the room of a T): the eraser writes the program
 castAccepted :: String -> String -> IO TestResult
 castAccepted from to = do
-    eraser <- eraserSource
-    pure $ case compileSource eraser of
+    eraser <- eraserProgram
+    pure $ case eraser of
         Error e -> Just ("the eraser does not compile: " ++ e)
         Ok eraserProgram -> case validatedSource castSource of
             Error e -> Just e

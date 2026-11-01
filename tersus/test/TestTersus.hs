@@ -3,8 +3,9 @@ module TestTersus (main) where
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket_, displayException, try)
-import Control.Monad (forM, unless, when)
-import Data.List (foldl', isPrefixOf)
+import Control.Monad (forM, forM_, unless, when)
+import Data.List (elemIndex, foldl', isPrefixOf, sortBy)
+import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumProcessors)
 import System.Environment (getArgs, getExecutablePath)
@@ -88,6 +89,7 @@ allGroups =
     , testExamples
     , testCli
     , testMir
+    , testMirSelfHosted
     , testIntRange
     , testPipeline
     , testControlFlow
@@ -187,6 +189,32 @@ runInProcess selected = do
 -- Each group runs in a process of its own, so that a group's temporary files, locale and environment are its own, and
 -- several groups make progress at once. A child is given one group, so it runs in its process and prints no summary;
 -- its [PASS]/[FAIL]/[CRASH] lines are the counts here, and its exit status says whether it failed.
+-- The groups that take the longest, longest first: a group is a process and the run is over when the last of them
+-- ends, so the ones that take minutes are started first and the seconds-long ones fill in around them, instead of
+-- the longest only starting once everything before it in the list has had a process. The results are still taken
+-- in the order of the list of groups, so the output is unchanged.
+launchFirst :: [String]
+launchFirst =
+    [ "testMirVerify"
+    , "testNative"
+    , "testMir"
+    , "testMirSelfHosted"
+    , "testMirEmit"
+    , "testMirErase"
+    , "testBootstrap"
+    , "testMirReader"
+    , "testMirEmitPrograms"
+    , "testExamples"
+    , "testMirData"
+    , "testStrings"
+    , "testMirVerifyPrograms"
+    ]
+
+launchRank :: String -> Int
+launchRank name = case elemIndex name launchFirst of
+    Just rank -> rank
+    Nothing -> length launchFirst
+
 runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
 runInParallel jobs names = do
     self <- getExecutablePath
@@ -194,7 +222,9 @@ runInParallel jobs names = do
     sem <- newQSem jobs
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
-        _ <- forkIO $
+        pure (name, done)
+    forM_ (sortBy (comparing (launchRank . fst)) slots) $ \(name, done) ->
+        forkIO $
             bracket_ (waitQSem sem) (signalQSem sem) $ do
                 started <- getMonotonicTime
                 -- (the processors are shared between the groups that run at once: left to the package's -with-rtsopts=-N, every
@@ -206,9 +236,8 @@ runInParallel jobs names = do
                 outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
                 finished <- getMonotonicTime
                 putMVar done (name, finished - started, outcome)
-        pure done
     -- (the results are taken in the order of the list, so the output has the order it has without the processes)
-    outcomes <- forM slots $ \done -> takeMVar done >>= printOutcome
+    outcomes <- forM slots $ \(_, done) -> takeMVar done >>= printOutcome
     pure (foldr combineSummaries (testSummary 0 0) (map fst outcomes), all snd outcomes)
 
 printOutcome :: (String, Double, Either SomeException (ExitCode, String, String)) -> IO (TestSummary, Bool)
