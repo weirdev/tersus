@@ -18,7 +18,7 @@ import TersusTypes (Name, Type (..), Variable, instanceOf, tupleGeneric)
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.
 -- It runs on the MIR that lowering makes, before the program is validated (it is cheap, and a program that fails it has no meaning for
--- the passes after it), and `MirOwnership`, which inserted a `Clone` wherever a value was wanted twice, now finds none that the
+-- the passes after it), and `MirOwnership`, which inserted a `CopyOf` wherever a value was wanted twice, now finds none that the
 -- program did not write.
 --
 -- What the check follows is a *place*: a local and the fields (or the elements of a list) that are followed from it. It keeps the
@@ -364,7 +364,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
                 (Map.insert d (place, case typeOf cx d of TMutRef _ -> True; _ -> False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
         Use (Move src) -> (loans', transferExtras src, transferFields src True)
         Use (Copy src) -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
-        Clone o | Just src <- operandLocal o -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
+        CopyOf o | Just src <- operandLocal o -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
         _ -> (loans', Map.delete d (stExtraLoans base), clearedFields)
     transferExtras src = case Map.lookup src (stExtraLoans st1) of
         Just places -> Map.insert d places (Map.delete src (stExtraLoans base))

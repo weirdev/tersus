@@ -12,7 +12,7 @@ module TestBasics
 
 import Parse
 import MirEval (fromMirValue)
-import Pipeline (runStatements, validateStatements)
+import Pipeline (parseWithEquality, runStatements, validateStatements)
 import StdLib
 import TersusTypes
 import Utils
@@ -331,8 +331,8 @@ argPassingSource =
 
 testArgPassingByValue :: TestResult
 testArgPassingByValue =
-    case parseStatementBlock argPassingSource of
-        Left err -> Just $ "Parse failed: " ++ show err
+    case parseWithEquality argPassingSource of
+        Left err -> Just $ "Parse failed: " ++ err
         Right stmts ->
             case (validateStatements stmts, runStatements stmts) of
                 (Error e, _) -> Just $ "Validation failed with error: " ++ e

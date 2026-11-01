@@ -17,7 +17,7 @@ type Name = String
 data BuiltinFunct
     = Size | First | Last | Get | Push | Pop | Set | Plus | Minus | Times | Div | Mod
     | -- NewArray n x: an array of n copies of x, n being a constant. ArrayFrom is the array that a literal list of constants makes (`#[1, 2]`).
-      NewArray | ArrayFrom
+      NewArray | ArrayFrom | ArrayFromList
     | -- NewBoxedArray n x: Array::boxed(n, x), an array of n copies of x, n being any Int not negative, in a Box that carries the size
       NewBoxedArray
     | -- NewEmptyArray: Array::empty(), an array of no elements in a Box that carries the size 0, of any element type (no element is needed)

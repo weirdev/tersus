@@ -42,6 +42,16 @@ testArrays =
                 , testCase "a function can be given its own result" (runs "fn bump(a: Array<Int, 2>) -> Array<Int, 2> { return set(a, 0, get(a, 0) + 1); }; x = array(2, 1); x = bump(x); x = bump(x); return x;" (ints [3, 1]))
                 ]
             , TestList
+                "from a list"
+                [ testCase "the elements in their order" (runs "return Array::fromList([4, 5, 6]);" (ints [4, 5, 6]))
+                , testCase "from list operations" (runs "a = Array::fromList(push([1, 2], 3)); return get(a, 2) * 10 + size(a);" (VInt 33))
+                , testCase "of no elements" (runs "a = Array::fromList(pop([1])); return size(a);" (VInt 0))
+                , testCase "the list is taken" (parseValidateFailProgramHelper "xs = [1, 2]; a = Array::fromList(xs); return size(xs);" "was moved and cannot be used again")
+                , testCase "a size the context decides" (valid "fn f(a: Array<Int, 2>) -> Int { return get(a, 1); }; return f(Array::fromList([7, 8]));")
+                , testCase "of the wrong size for the context" (rejected "fn f(a: Array<Int, 2>) -> Int { return get(a, 1); }; return f(Array::fromList([7]));" "the list given to Array::fromList has 2 elements")
+                , testCase "not of a list" (rejected "return Array::fromList(3);" "Array::fromList takes a list")
+                ]
+            , TestList
                 "reading and replacing"
                 [ testCase "size" (runs "return size(array(4, 0));" (VInt 4))
                 , testCase "get, first and last" (runs "a = #[4, 5, 6]; return get(a, 1) * 100 + first(a) * 10 + last(a);" (VInt 546))
@@ -96,7 +106,7 @@ testArrays =
                 , testCase "an array that is too large for a frame" (rejected "return size(array(9000, 0));" "more than the 8192")
                 , testCase "arrays inside an array count" (rejected "fn f(a: Array<Array<Int, 100>, 100>) -> Int { return 0; }; return 0;" "takes 10000 words")
                 , testCase "an element that is a list" (runs "return array(2, [1]);" (VList [VList [VInt 1], VList [VInt 1]]))
-                , testCase "an element that is a struct" (runs "trait Clone { }; struct P { x: Int }; impl Clone for P { }; return size(array(2, P { x: 1 }));" (VInt 2))
+                , testCase "an element that is a struct" (runs "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct P { x: Int }; impl Clone for P { }; return size(array(2, P { x: 1 }));" (VInt 2))
                 , testCase "an element that is a function" (rejected "fn f() -> Int { return 1; }; return size(array(2, f));" "an array holds values that have a size (Int, Bool, a list, a struct, an enum, a Box or an array), not fn() -> Int")
                 , testCase "a literal is made of Int, Bool and arrays" (rejected "return size(#[[1], [2]]);" "an array literal holds Int, Bool or arrays of them, not List<Int>")
                 , testCase "an array of structs counts the words of the struct" (rejected "struct P { a: Int, b: Int, c: Int }; fn f(x: Array<P, 3000>) -> Int { return 0; }; return 0;" "takes 9000 words")
@@ -209,7 +219,7 @@ testArrays =
                 , testCase "an element is read" (runs "a = array(2, push(push([], 5), 6)); return size(get(a, 0)) + get(get(a, 1), 1);" (VInt 8))
                 , testCase "an element that is read and changed does not change the array" (runs "a = array(2, push([], 1)); l = clone(get(a, 0)); l = push(l, 7); return a;" (VList [VList [VInt 1], VList [VInt 1]]))
                 , testCase "an array of arrays of lists" (runs "a = array(2, array(2, push([], 5))); return clone(get(get(a, 1), 0));" (VList [VInt 5]))
-                , testCase "an array of structs that own lists" (runs "trait Clone { }; struct P { xs: List<Int>, n: Int }; impl Clone for P { }; a = array(2, P { xs: push([], 1), n: 7 }); a = set(a, 0, P { xs: [], n: 9 }); return a;" (VList [VData "P" [("xs", VList []), ("n", VInt 9)], VData "P" [("xs", VList [VInt 1]), ("n", VInt 7)]]))
+                , testCase "an array of structs that own lists" (runs "struct P { xs: List<Int>, n: Int }; impl Clone for P { }; a = array(2, P { xs: push([], 1), n: 7 }); a = set(a, 0, P { xs: [], n: 9 }); return a;" (VList [VData "P" [("xs", VList []), ("n", VInt 9)], VData "P" [("xs", VList [VInt 1]), ("n", VInt 7)]]))
                 , testCase "an array of Boxes" (runs "a = array(2, Box::new(5)); return Box::unbox(get(a, 1));" (VInt 5))
                 , testCase "arrays of lists are compared" (runs "return array(2, push([], 1)) = array(2, push([], 1));" (VBool True))
                 , testCase "and told apart" (runs "return array(2, push([], 1)) != array(2, []);" (VBool True))

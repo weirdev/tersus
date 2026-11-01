@@ -174,7 +174,7 @@ testNativeIr =
         , TestCase "a list that is lent is not copied for the call" $
             withIr "fn total(a: &List<Int>) -> Int { return size(a); }; l = push([], 1); return total(l) + total(l);" (\ir -> testAssertTrue (not ("call void @tersus_clone" `isInfixOf` ir)))
         , TestCase "a list that is cloned for a call is copied, and one that is moved is not" $
-            withIr "fn total(a: List<Int>) -> Int { return size(a); }; l = push([], 1); return total(clone(l)) + total(l);" (\ir -> testAssertTrue ("call void @tersus_clone" `isInfixOf` ir))
+            withIr "fn total(a: List<Int>) -> Int { return size(a); }; l = push([], 1); return total(clone(l)) + total(l);" (\ir -> testAssertTrue ("Clone>::clone" `isInfixOf` ir))
         , TestCase "an array that is lent is read where it is, and one that is given is copied into the function" $
             withIr "fn ends(a: &Array<Int, 4>) -> Int { return get(a, 0) + get(a, 3); }; x = #[1, 2, 3, 4]; return ends(x);" (\ir -> testAssertTrue ("define internal i64 @\"fn.ends\"(ptr %l.1)" `isInfixOf` ir))
         , TestCase "an array that is given has room of its own in the function" $

@@ -96,7 +96,7 @@ enum Rvalue {
     ReadField { o: Operand, name: String, field: String },
     IsVariant { o: Operand, name: String },
     AsVariant { o: Operand, name: String },
-    Clone { o: Operand },
+    Copy { o: Operand },
     TakeField { local: Int, name: String, field: String },
     Borrow { root: Int, steps: List<RefStep>, mutable: Bool },
     Deref { o: Operand },
@@ -162,7 +162,7 @@ fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
     return w;
 };
 
-fn listWords() -> List<String> [{ }] [{ affirm size(return) = 53; }] {
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 54; }] {
     w = push([], "length");
     w = push(w, "first");
     w = push(w, "last");
@@ -216,6 +216,7 @@ fn listWords() -> List<String> [{ }] [{ affirm size(return) = 53; }] {
     w = push(w, "uninitGet");
     w = push(w, "uninitTake");
     w = push(w, "uninitDiscard");
+    w = push(w, "fromList");
     return w;
 };
 
@@ -665,7 +666,7 @@ fn rvalueAt(ts: &List<Token>, pos: Int) -> Parsed<Rvalue> [{ affirm pos >= 0; af
         if kw = "unbox" { return done(Rvalue::Unbox { o: o.value }, o.pos); };
         if kw = "unsize" { return done(Rvalue::Unsize { o: o.value }, o.pos); };
         if kw = "deref" { return done(Rvalue::Deref { o: o.value }, o.pos); };
-        return done(Rvalue::Clone { o: o.value }, o.pos);
+        return done(Rvalue::Copy { o: o.value }, o.pos);
     };
     if kw = "binary" {
         op = wordAt(ts, next);
@@ -1307,7 +1308,7 @@ fn printRvalue(rv: &Rvalue) -> Int ~ {
         },
         Rvalue::IsVariant { o: o, name: name } => { n = " isvariant".print() + printOperand(o) + printName(name); },
         Rvalue::AsVariant { o: o, name: name } => { n = " asvariant".print() + printOperand(o) + printName(name); },
-        Rvalue::Clone { o: o } => { n = " clone".print() + printOperand(o); },
+        Rvalue::Copy { o: o } => { n = " clone".print() + printOperand(o); },
         Rvalue::TakeField { local: l, name: name, field: field } => {
             n = " takefield".print() + printInt(l) + printName(name) + printName(field);
         },
@@ -1939,7 +1940,7 @@ fn eraseRvalue(types: &List<TypeDecl>, f: &Function, rv: &Rvalue) -> Rvalue ~ {
         Rvalue::ReadField { o: o, name: name, field: field } => { },
         Rvalue::IsVariant { o: o, name: name } => { },
         Rvalue::AsVariant { o: o, name: name } => { },
-        Rvalue::Clone { o: o } => { },
+        Rvalue::Copy { o: o } => { },
         Rvalue::TakeField { local: l, name: name, field: field } => { },
         Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => { },
         Rvalue::Deref { o: o } => { },
@@ -2292,7 +2293,7 @@ fn plainRvalue(rv: &Rvalue) -> Rvalue ~ {
         Rvalue::ReadField { o: o, name: name, field: field } => { r = Rvalue::ReadField { o: plainOperand(o), name: plainName(name), field: clone(field) }; },
         Rvalue::IsVariant { o: o, name: name } => { r = Rvalue::IsVariant { o: plainOperand(o), name: plainName(name) }; },
         Rvalue::AsVariant { o: o, name: name } => { r = Rvalue::AsVariant { o: plainOperand(o), name: plainName(name) }; },
-        Rvalue::Clone { o: o } => { r = Rvalue::Clone { o: plainOperand(o) }; },
+        Rvalue::Copy { o: o } => { r = Rvalue::Copy { o: plainOperand(o) }; },
         Rvalue::TakeField { local: l, name: name, field: field } => { r = Rvalue::TakeField { local: l, name: plainName(name), field: clone(field) }; },
         Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => { r = Rvalue::Borrow { root: root, steps: plainRefSteps(steps), mutable: mutable }; },
         Rvalue::Deref { o: o } => { r = Rvalue::Deref { o: plainOperand(o) }; },

@@ -11,7 +11,7 @@ testTraits :: Test
 testTraits =
     let types =
             unlines
-                [ "trait Clone { }; trait Copy { };"
+                [ "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; trait Copy { };"
                 , "enum Shape { Circle { radius: Int }, Rect { width: Int, height: Int }, Empty };"
                 , "struct Counter { value: Int };"
                 , "impl Clone for Shape { }; impl Copy for Shape { };"

@@ -186,7 +186,7 @@ rvalueTokens rv = case rv of
     ReadField o name field -> "readfield" : operandTokens o ++ [quote name, quote field]
     IsVariant o name -> "isvariant" : operandTokens o ++ [quote name]
     AsVariant o name -> "asvariant" : operandTokens o ++ [quote name]
-    Clone o -> "clone" : operandTokens o
+    CopyOf o -> "clone" : operandTokens o
     TakeField l name field -> ["takefield", localText l, quote name, quote field]
     Borrow root steps mutable -> (if mutable then "borrowmut" else "borrow") : localText root : show (length steps) : concatMap refStepTokens steps
     Deref o -> "deref" : operandTokens o
@@ -230,7 +230,7 @@ binOps = [(binOpWord op, op) | op <- [Add, Sub, Mul, Div, Mod] ++ map Compare [E
 listOps :: [(String, ListOp)]
 listOps =
     [ ("length", Length), ("first", First), ("last", Last), ("get", Get), ("push", Push), ("pop", Pop), ("set", Set)
-    , ("newArray", NewArray), ("newBoxed", NewBoxed), ("newEmptyBoxed", NewEmptyBoxed)
+    , ("newArray", NewArray), ("newBoxed", NewBoxed), ("newEmptyBoxed", NewEmptyBoxed), ("fromList", FromList)
     , ("writeByte", WriteByte), ("writeError", WriteError), ("readByte", ReadByte), ("argCount", ArgCount), ("argByte", ArgByte)
     , ("pathByte", PathByte), ("fileLoad", FileLoad), ("fileByte", FileByte), ("storeByte", StoreByte), ("fileStore", FileStore)
     , ("toByte", ToByte), ("fromByte", FromByte)
@@ -398,7 +398,7 @@ rvalueP = word >>= \w -> case w of
     "readfield" -> ReadField <$> operandP <*> name <*> name
     "isvariant" -> IsVariant <$> operandP <*> name
     "asvariant" -> AsVariant <$> operandP <*> name
-    "clone" -> Clone <$> operandP
+    "clone" -> CopyOf <$> operandP
     "takefield" -> TakeField <$> local <*> name <*> name
     "borrow" -> Borrow <$> local <*> (int >>= \n -> replicateM n refStepP) <*> pure False
     "borrowmut" -> Borrow <$> local <*> (int >>= \n -> replicateM n refStepP) <*> pure True

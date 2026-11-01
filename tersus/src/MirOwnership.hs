@@ -32,7 +32,7 @@ import TersusTypes (Name, Type (..), Variable)
 --   * It reads it (`size`, `==`, `is`, the list of a `get`): nothing happens.
 --   * It takes it (`y = x`, `push(x, v)` and `set` for the list and the element, a call, a list or a struct that is made,
 --     the return value): the local gives it up. If the local is not used again that is a `Move`, and otherwise the operand
---     is a `Clone` of the local, which nothing else shares.
+--     is a `CopyOf` of the local, which nothing else shares.
 --
 -- Every parameter is owned by the function, and a function returns what it owns, so a call is the same wherever the
 -- function came from.
@@ -43,7 +43,7 @@ import TersusTypes (Name, Type (..), Variable)
 --     the value is freed with it.
 --   * A temporary that is only read, by statements that follow it in the same block and before anything takes or changes
 --     what it was read from, `Peek`s at the value. It owns nothing, so it is not freed and costs nothing.
---   * Otherwise it is a `Clone`.
+--   * Otherwise it is a `CopyOf`.
 --
 -- A local is freed (`Drop`) when it is assigned, and all that a function owns when it returns. A local that has been moved
 -- from holds nothing, and dropping that does nothing.
@@ -103,6 +103,7 @@ roles rv =
         BinaryOp _ a b -> [(a, Read), (b, Read)]
         ListOp Push [l, x] -> [(l, Consume), (x, Consume)]
         ListOp Pop [l] -> [(l, Consume)]
+        ListOp FromList [l] -> [(l, Consume)]
         ListOp Set [l, i, x] -> [(l, Consume), (i, Read), (x, Consume)]
         -- (a value written to memory is moved there; a permission that an operation changes is taken by it, and one it only looks at is lent)
         ListOp AddrWrite (p : i : x : rest) -> [(p, Read), (i, Read), (x, Consume)] ++ [(b, Consume) | b <- rest]
@@ -121,7 +122,7 @@ roles rv =
         ReadField o _ _ -> [(o, Read)]
         IsVariant o _ -> [(o, Read)]
         AsVariant o _ -> [(o, Consume)]
-        Clone o -> [(o, Read)]
+        CopyOf o -> [(o, Read)]
         TakeField l _ _ -> [(Copy l, Read)]
         -- (a reference owns nothing: its root is not moved or copied into it, and reading through it owns nothing either)
         Borrow _ steps _ -> [(o, Read) | RefIndex o <- steps]
@@ -760,7 +761,7 @@ rewriteStatement cx b k after (Assign d rv)
         (pre, post, operands) <- rewriteOperands cx after' (roles rv)
         pure $ case (pre, withOperands rv operands) of
             -- `y = x` of a value that is used again is the copy itself
-            ([Assign t copy@(Clone _)], Use (Move t')) | t == t' -> [Assign d copy] ++ post
+            ([Assign t copy@(CopyOf _)], Use (Move t')) | t == t' -> [Assign d copy] ++ post
             (_, rv') -> pre ++ [Assign d rv'] ++ post
   where
     after' = forgetLocal d after
@@ -775,7 +776,7 @@ rewriteStatement cx b k after (Assign d rv)
                 (pre, post, operands) <- rewriteOperands cx after' (roles rv)
                 alias <- freshLocal (typeOf cx d)
                 markAlias alias
-                pure (pre ++ [Peek alias (withOperands rv operands), Assign d (Clone (Copy alias))] ++ post)
+                pure (pre ++ [Peek alias (withOperands rv operands), Assign d (CopyOf (Copy alias))] ++ post)
 
 -- Whether a temporary can look at a part of a value instead of owning a copy: it is given a value once, only read, by
 -- statements after it in its block, and none of them takes or changes what it was read from or uses it in a way that
@@ -827,7 +828,7 @@ rewriteOperands cx after' operands = go consumed operands
             if left > 0 || l `Set.member` stillLive || l `Set.member` readHere
                 then do
                     copy <- freshLocal (typeOf cx l)
-                    pure ([Assign copy (Clone (Copy l))], [], Move copy, remaining')
+                    pure ([Assign copy (CopyOf (Copy l))], [], Move copy, remaining')
                 else pure ([], [], Move l, remaining')
     one remaining o@(Const c) Read
         | isHeapConstant c = do
@@ -866,7 +867,7 @@ withOperands rv operands =
         (ReadField _ name field, [o]) -> ReadField o name field
         (IsVariant _ name, [o]) -> IsVariant o name
         (AsVariant _ name, [o]) -> AsVariant o name
-        (Clone _, [o]) -> Clone o
+        (CopyOf _, [o]) -> CopyOf o
         (Borrow root steps mutable, os) -> Borrow root (rewriteRefSteps steps os) mutable
         (Deref _, [o]) -> Deref o
         _ -> rv

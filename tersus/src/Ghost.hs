@@ -23,6 +23,7 @@ module Ghost
     , maxJoinCandidates
     , checkInvariant
     , invariantFacts
+    , evaluateCalls
     ) where
 
 import Control.Monad (foldM, when)
@@ -162,7 +163,7 @@ rvalueCall rv =
         M.MakeBox _ -> Nothing
         M.Unbox _ -> Nothing
         M.Unsize _ -> Nothing
-        M.Clone _ -> Nothing
+        M.CopyOf _ -> Nothing
         M.TakeField{} -> Nothing
         M.Borrow{} -> Nothing
         M.Deref _ -> Nothing
@@ -185,6 +186,7 @@ rvalueCall rv =
         M.NewArray -> NewArray
         M.NewBoxed -> NewBoxedArray
         M.NewEmptyBoxed -> NewEmptyArray
+        M.FromList -> ArrayFromList
         M.WriteByte -> WriteByte
         M.WriteError -> WriteError
         M.ReadByte -> ReadByte

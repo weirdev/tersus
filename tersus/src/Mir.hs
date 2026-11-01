@@ -162,7 +162,7 @@ data Rvalue
       -- not changed or checked, and the local that gets it has the variant's type, so its fields can be read.
       AsVariant Operand Name
     | -- A copy of the value that shares nothing with it (MirOwnership)
-      Clone Operand
+      CopyOf Operand
     | -- The field of the value the local owns, taken out of it: the local does not hold it any more (MirOwnership)
       TakeField Local Name Variable
     | -- A reference to a place of a local (REFERENCES.md): the root local, the steps from it to the place, and whether
@@ -191,7 +191,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 -- the permission b too, which only the validator reads. The Block operations make a permission and are ghost: the validator has them, and
 -- they are erased (see MirGhost) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
 -- and AddrDropRange, which give the permission after, give 0.
-data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
+data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | FromList | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
     | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree
     | BlockNew | BlockTaken | BlockResized | BlockSplitLo | BlockSplitHi | BlockJoin | BlockAssume | BlockCast
     | -- Uninit<T>: an empty one, one that holds x, a view of what one holds, what one holds moved out, and an empty one used up. Natively
@@ -320,7 +320,7 @@ completeInstancesWith erased program
         ReadField o name _ -> name : operandNames o
         IsVariant o name -> name : operandNames o
         AsVariant o name -> name : operandNames o
-        Clone o -> operandNames o
+        CopyOf o -> operandNames o
         Borrow _ steps _ -> concatMap operandNames [o | RefIndex o <- steps]
         Deref o -> operandNames o
         TakeField _ name _ -> [name]
@@ -538,7 +538,7 @@ renderRvalue (MakeData name fields) = name ++ " { " ++ intercalate ", " [f ++ ":
 renderRvalue (ReadField o name field) = "(" ++ renderOperand o ++ " as " ++ name ++ ")." ++ field
 renderRvalue (IsVariant o name) = renderOperand o ++ " is " ++ name
 renderRvalue (AsVariant o name) = renderOperand o ++ " as " ++ name
-renderRvalue (Clone o) = "clone " ++ renderOperand o
+renderRvalue (CopyOf o) = "copy " ++ renderOperand o
 renderRvalue (TakeField l name field) = "take (" ++ show l ++ " as " ++ name ++ ")." ++ field
 renderRvalue (Borrow root steps mutable) = (if mutable then "&mut " else "&") ++ show root ++ concatMap step steps
   where
@@ -654,7 +654,7 @@ operandsOfRvalue rv = case rv of
     ReadField o _ _ -> [o]
     IsVariant o _ -> [o]
     AsVariant o _ -> [o]
-    Clone o -> [o]
+    CopyOf o -> [o]
     TakeField{} -> []
     Borrow _ steps _ -> [o | RefIndex o <- steps]
     Deref o -> [o]

@@ -14,7 +14,7 @@ testDeref =
         prelude =
             unlines
                 [ "trait Deref<T> { fn deref(self: &Self) -> T [{ }] [{ }]; };"
-                , "trait Clone { };"
+                , "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; };"
                 , "struct P { x: Int, y: Int };"
                 , "impl Clone for P { };"
                 , "struct W { v: P };"
@@ -23,7 +23,7 @@ testDeref =
         enumPrelude =
             unlines
                 [ "trait Deref<T> { fn deref(self: &Self) -> T [{ }] [{ }]; };"
-                , "trait Clone { };"
+                , "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; };"
                 , "enum E { A { v: Int }, B };"
                 , "impl Clone for E { };"
                 , "struct WE { v: E };"

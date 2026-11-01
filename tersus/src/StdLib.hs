@@ -277,6 +277,8 @@ evalBuiltinFunct NewArray [VInt n, x]
 evalBuiltinFunct NewArray _ = Error "array takes a size and an element"
 evalBuiltinFunct NewBoxedArray args = evalBuiltinFunct NewArray args
 evalBuiltinFunct NewEmptyArray [] = Ok (VList [])
+evalBuiltinFunct ArrayFromList [VList l] = Ok (VList l)
+evalBuiltinFunct ArrayFromList _ = Error "Array::fromList takes a list"
 evalBuiltinFunct WriteByte [VInt b] = Ok (VInt b)
 evalBuiltinFunct WriteByte _ = Error "writeByte takes one byte"
 evalBuiltinFunct WriteError [VInt b] = Ok (VInt b)
@@ -561,6 +563,7 @@ stdlibBuiltinDecls =
     , ("pop", Pop)
     , ("set", Set)
     , ("array", NewArray)
+    , ("arrayFromList", ArrayFromList)
     , ("arrayBoxed", NewBoxedArray)
     , ("arrayEmpty", NewEmptyArray)
     , ("writeByte", WriteByte)
@@ -592,7 +595,7 @@ stdlibBuiltinDecls =
 stdlibDeclaredParams :: [(BuiltinFunct, [Variable])]
 stdlibDeclaredParams =
     [ (Size, ["list"]), (First, ["list"]), (Last, ["list"]), (Get, ["list", "index"])
-    , (Push, ["list", "x"]), (Pop, ["list"]), (Set, ["list", "index", "x"]), (NewArray, ["n", "x"])
+    , (Push, ["list", "x"]), (Pop, ["list"]), (Set, ["list", "index", "x"]), (NewArray, ["n", "x"]), (ArrayFromList, ["list"])
     , (NewBoxedArray, ["n", "x"]), (NewEmptyArray, []), (WriteByte, ["b"]), (WriteError, ["b"])
     , (ReadByte, []), (ArgCount, []), (ArgByte, ["i", "j"]), (PathByte, ["b"]), (FileLoad, [])
     , (FileByte, ["i"]), (StoreByte, ["b"]), (FileStore, []), (ToByte, ["x"]), (FromByte, ["b"])

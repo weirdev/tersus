@@ -91,7 +91,7 @@ operandsOf rv = case rv of
     ReadField o _ _ -> [o]
     IsVariant o _ -> [o]
     AsVariant o _ -> [o]
-    Clone o -> [o]
+    CopyOf o -> [o]
     TakeField{} -> []
     Borrow _ steps _ -> [o | RefIndex o <- steps]
     Deref o -> [o]
@@ -228,12 +228,39 @@ constantType c = case c of
 lowerFunction :: Program -> Function -> Function
 lowerFunction original fn =
     fn
-        { fnLocals = Map.map (\d -> d{localType = listType (localType d)}) (stLocals final)
+        { fnLocals = Map.mapWithKey (\l d -> d{localType = if Map.member l boxedFromLists then TInt else listType (localType d)}) (stLocals final)
         , fnReturns = fmap listType (fnReturns fn)
         , fnBlocks = Map.fromList (stDone final)
         , fnSpec = emptySpec
         }
   where
+    -- (a Box of an array made from a list is the list itself, as a Box of an array is a StdList: the elements are
+    -- already in their own memory, and making an inline array of them first would need a size the type does not give)
+    boxedFromLists =
+        Map.fromList
+            [ (l, src)
+            | Assign l (ListOp FromList [src]) <- allStatements
+            , useCount l == 1
+            , Assign dest (MakeBox o) <- allStatements
+            , operandLocal o == Just l
+            , Just (TBox TArrayOf{}) <- [localType <$> Map.lookup dest (fnLocals fn)]
+            ]
+    allStatements = [s | BasicBlock ss _ <- Map.elems (fnBlocks fn), s <- ss]
+    allOperands = concatMap statementOperands allStatements ++ concatMap terminatorOperands [t | BasicBlock _ t <- Map.elems (fnBlocks fn)]
+    useCount l = length [() | o <- allOperands, operandLocal o == Just l]
+    statementOperands s = case s of
+        Assign _ rv -> operandsOf rv
+        Peek _ rv -> operandsOf rv
+        AssignRef _ steps rv -> operandsOf rv ++ [o | RefIndex o <- steps]
+        _ -> []
+    terminatorOperands t = case t of
+        SwitchBool o _ _ -> [o]
+        Call callee args _ _ -> callee : args
+        _ -> []
+    operandLocal o = case o of
+        Copy l -> Just l
+        Move l -> Just l
+        Const _ -> Nothing
     ((), final) = runM (mapM_ lowerBlock (Map.toList (fnBlocks fn))) start
     start =
         St
@@ -253,6 +280,7 @@ lowerFunction original fn =
 
     lowerStatement stmt = case stmt of
         Ghost{} -> return ()
+        Assign dest rv | Map.member dest boxedFromLists -> return ()
         Assign dest rv -> lowerAssign dest rv
         -- (a value taken apart is cleared where it is, and what it held is not freed: see MirGhost)
         Peek _ (ListOp UninitEmpty []) -> emit stmt
@@ -268,6 +296,7 @@ lowerFunction original fn =
             (ListOp NewBoxed [n, x], _) | TBox (TArrayOf element _) <- destTy -> operandFor element x >>= \x' -> callTo "stdListFilled" [n, x'] dest
             (ListOp NewEmptyBoxed [], _) | TBox TArrayOf{} <- destTy -> callTo "stdListNew" [] dest
             (Unsize o, _) -> emit (Assign dest (Use (renameOperand o)))
+            (MakeBox o, _) | Just l <- operandLocal o, Just src <- Map.lookup l boxedFromLists -> emit (Assign dest (Use src))
             (MakeBox o, _) | TBox held <- destTy, not (isArrayType held) -> operandFor held o >>= \o' -> callTo "stdBoxNew" [o'] dest
             (Unbox o, Just _) -> callTo "stdBoxUnbox" [renameOperand o] dest
             _ -> lowerOther dest destTy rv
@@ -346,6 +375,7 @@ lowerFunction original fn =
             (Push, [x]) -> operandFor element x >>= \x' -> callTo "stdListPush" [l, x'] dest
             (Pop, []) -> callTo "stdListPop" [l] dest
             (Set, [i, x]) -> operandFor element x >>= \x' -> callTo "stdListSet" [l, i, x'] dest
+            (FromList, []) -> emit (Assign dest (ListOp FromList [l]))
             _ -> emit (Assign dest (ListOp op os))
 
     lowerRvalue destTy rv = case rv of

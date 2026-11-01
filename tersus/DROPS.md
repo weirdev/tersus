@@ -1,6 +1,8 @@
 # Drops, linear types and raw pointers (design)
 
 > **Reconciled (2026-10-30, `REFERENCES.md` stage 1).** Two statements below are superseded and are marked where they stand: user-defined drops are built, and the built `drop` takes `self: Self`, not `&Self` (`POINTERS.md`, Status item 9 is the record of the built form; `examples/drops.tersus` exercises it). And `&mut T` now exists as a nonescaping update reference (`REFERENCES.md` stages 2-3, `LANGUAGE.md` "Updating through a reference"); a drop still takes `Self`, because it consumes the value — `&mut` was not needed for it and is not used by it. The rest of this document remains the design for what is not built (linear types, raw pointers).
+>
+> **Reconciled (2026-10-31).** `Clone` is now an ordinary trait with a `clone` of its own (`LANGUAGE.md`, Moves, Clone And Copy), so the `Clone` with a body that "Copying" below proposes is built, and an `impl Clone` for a type with a drop or a linear type is refused. The MIR's internal copy is `CopyOf`, not a call of it.
 
 > **Provisional.** This is a plan, not a decision, and it was revised once already: the first draft assumed implicit copies, and explicit `Clone`/`Copy` and the `MirMoves` check were built before any of it. Expect more changes when the drops are started (the flag word, the moment a drop runs and the `eval` change are open, see Decisions). Where the text says "now", it means the code as of the explicit-copies change.
 

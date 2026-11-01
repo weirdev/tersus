@@ -21,7 +21,7 @@ import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
 import MirLists (lowerLists)
-import PreludeSource (eqSource, boxSource, listsSource, mapSource, preludeSource, setSource, stringSource)
+import PreludeSource (cloneSource, eqSource, boxSource, listsSource, mapSource, preludeSource, setSource, stringSource)
 import Pretty (renderVarProof)
 import TersusTypes (Expression (..), FunctBody (..), Size (..), Statement (..), Type (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (elaborate)
@@ -44,11 +44,18 @@ parseSource source = parseSourceWith True source
 -- A program with the equality library in front of it (unless it declares a trait Eq), as `=` on any type but a word needs, and with no
 -- other library: how the tests of the language read a program
 parseWithEquality :: String -> Either String [Statement]
-parseWithEquality source = case [text | ("the equality library", text) <- libraries source] of
+parseWithEquality source = case [text | (name, text) <- libraries source, name `elem` ["the clone library", "the equality library"]] of
     [] -> either (Left . show) (Right . fst) (parseStatementBlockWith emptyDecls source)
-    text : _ -> case parseStatementBlockWith emptyDecls text of
-        Left err -> Left ("Parse error in the equality library: " ++ show err)
+    texts -> case readLibs emptyDecls texts of
+        Left err -> Left err
         Right (library, declared) -> either (Left . show) (Right . (library ++) . fst) (parseStatementBlockWith declared source)
+  where
+    readLibs declared [] = Right ([], declared)
+    readLibs declared (text : more) = case parseStatementBlockWith declared text of
+        Left err -> Left ("Parse error in a library: " ++ show err)
+        Right (library, declared') -> case readLibs declared' more of
+            Left err -> Left err
+            Right (rest, final) -> Right (library ++ rest, final)
 
 -- (the library of lists is the one program that may use the names that a program may not)
 parseSourceWith :: Bool -> String -> Result [Statement] String
@@ -89,7 +96,7 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
 -- has a literal, lib/map.tersus (the struct `HashMap`) if it mentions `HashMap`, and lib/set.tersus (the struct `HashSet`,
 -- which is made of a map) if it mentions `HashSet`
 libraries :: String -> [(String, String)]
-libraries source = [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps] ++ [("the set library", setSource) | sets]
+libraries source = [("the clone library", cloneSource) | not (declares ["Clone"])] ++ [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps] ++ [("the set library", setSource) | sets]
   where
     code = withoutText source
     ws = names code

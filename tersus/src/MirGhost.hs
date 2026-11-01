@@ -211,7 +211,7 @@ withoutUninit program =
         ReadField o n f -> ReadField (operand o) (name n) f
         IsVariant o n -> IsVariant (operand o) (name n)
         AsVariant o n -> AsVariant (operand o) (name n)
-        Clone o -> Clone (operand o)
+        CopyOf o -> CopyOf (operand o)
         TakeField l n f -> TakeField l (name n) f
         Borrow root steps mut -> Borrow root (map refStep steps) mut
         Deref o -> Deref (operand o)

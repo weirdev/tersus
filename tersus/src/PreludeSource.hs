@@ -3,6 +3,7 @@
 module PreludeSource
     ( preludeSource
     , eqSource
+    , cloneSource
     , listsSource
     , boxSource
     , stringSource
@@ -30,6 +31,15 @@ eqSource =
     $( do
         addDependentFile "lib/eq.tersus"
         contents <- runIO (readFile "lib/eq.tersus")
+        lift contents
+     )
+
+-- The text of lib/clone.tersus: the trait Clone, which clone calls, and its impls for lists, arrays and Boxes
+cloneSource :: String
+cloneSource =
+    $( do
+        addDependentFile "lib/clone.tersus"
+        contents <- runIO (readFile "lib/clone.tersus")
         lift contents
      )
 
