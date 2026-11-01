@@ -5,13 +5,17 @@ module TestModules
 import Control.Exception (try, SomeException)
 import Control.Monad (when)
 import Data.List (isInfixOf)
+import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removeDirectoryRecursive)
 import System.FilePath ((</>))
 
+import Cli (Command (..), World (..), noWorld, runPackageFiles)
 import Interface
+import qualified Mir as M
+import MirEval (renderMirValue, runProgram)
 import Modules
 import Parse
-import Pipeline (CompiledModule (..), CompiledPackage (..), compileModules, compileSource)
+import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesToOwned, compileModulesToProgram, compileSource)
 import TersusTypes
 import TestHarness
 import TypeCheck (elaborate)
@@ -612,5 +616,232 @@ testModuleCheckWithin =
         , ("app/geo/b.tersus", "import app::geo::a; fn fb(x: Int) -> Int [{ }] [{ }] { if x > 0 { return a::fa(0); }; return x; };")
         ]
 
+-- Phase 4/5: per-module lowering, linking and the pipeline/CLI path.
+
+programPkg :: Files -> FilePath -> Either String M.Program
+programPkg files entry = case loadPkg files entry of
+    Left err -> Left err
+    Right pkg -> case compileModulesToProgram pkg of
+        Error err -> Left err
+        Ok program -> Right program
+
+ownedPkg :: Files -> FilePath -> Either String M.Program
+ownedPkg files entry = case loadPkg files entry of
+    Left err -> Left err
+    Right pkg -> case compileModulesToOwned pkg of
+        Error err -> Left err
+        Ok program -> Right program
+
+expectRuns :: Files -> FilePath -> String -> TestResult
+expectRuns files entry expected = case programPkg files entry of
+    Left err -> Just ("Expected package to compile and run, got: " ++ err)
+    Right program -> case runProgram program of
+        Error err -> Just ("Expected package to run, got: " ++ err)
+        Ok value -> testAssertEq (fmap renderMirValue value) (Just expected)
+
+expectProgramError :: Files -> FilePath -> String -> TestResult
+expectProgramError files entry needle = case programPkg files entry of
+    Left err ->
+        if needle `isInfixOf` err
+            then Nothing
+            else Just ("Expected program error containing " ++ show needle ++ ", got: " ++ err)
+    Right program -> Just ("Expected program failure containing " ++ show needle ++ ", got functions: " ++ show (Map.keys (M.progFunctions program)))
+
+linkGeo :: String
+linkGeo = "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; }; fn unrelated(x: Int) -> Int [{ }] [{ }] { return x * 2; };"
+
+testModuleLinkEval :: Test
+testModuleLinkEval =
+    testCaseSeq
+        "module-link-eval"
+        [ expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; p = geo::Point { x: 3 }; q = geo::make(4); return geo::area(p) + geo::area(q);")
+            , ("app/geo/geo.tersus", linkGeo)
+            ]
+            "app/main.tersus"
+            "7"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; s = geo::Shape::Circle { r: 5 }; y = 0; match s { geo::Shape::Circle { r: r } => { y = r; }, geo::Shape::Square { s: q } => { y = q; } }; return y;")
+            , ("app/geo/geo.tersus", "enum Shape { Circle { r: Int }, Square { s: Int } };")
+            ]
+            "app/main.tersus"
+            "5"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::geo::Point; p = Point { x: 5 }; return p.x;")
+            , ("app/geo/geo.tersus", linkGeo)
+            ]
+            "app/main.tersus"
+            "5"
+        ]
+
+testModuleLinkPrune :: Test
+testModuleLinkPrune =
+    testCaseSeq
+        "module-link-prune"
+        [ case ownedPkg selectiveFiles "app/main.tersus" of
+            Left err -> Just ("selective package should compile to owned MIR: " ++ err)
+            Right program ->
+                let rendered = M.renderProgram program
+                 in testAssertTrue (not ("unrelated" `isInfixOf` rendered))
+                        <> testAssertTrue (not ("make" `isInfixOf` rendered))
+                        <> testAssertTrue ("Point" `isInfixOf` rendered)
+        , case programPkg selectiveFiles "app/main.tersus" of
+            Left err -> Just ("selective package should compile: " ++ err)
+            Right program -> testAssertTrue (not ("unrelated" `isInfixOf` M.renderProgram program))
+        ]
+  where
+    selectiveFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo::geo::Point; p = Point { x: 5 }; return p.x;")
+        , ("app/geo/geo.tersus", linkGeo)
+        ]
+
+testModuleLinkGenerics :: Test
+testModuleLinkGenerics =
+    testCaseSeq
+        "module-link-generics"
+        [ expectRuns genericFiles "app/main.tersus" "9"
+        , case ownedPkg genericFiles "app/main.tersus" of
+            Left err -> Just ("generic package should compile to owned MIR: " ++ err)
+            Right program -> testAssertTrue ("pick<" `isInfixOf` M.renderProgram program)
+        ]
+  where
+    genericFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; struct Local { v: Int }; l = Local { v: 9 }; r = geo::pick(l); return r.v;")
+        , ("app/geo/geo.tersus", "fn pick<T>(x: T) -> T [{ }] [{ }] { return x; };")
+        ]
+
+testModuleLinkDrop :: Test
+testModuleLinkDrop =
+    testCaseSeq
+        "module-link-drop"
+        [ expectRuns dropFiles "app/main.tersus" "2"
+        , case ownedPkg dropFiles "app/main.tersus" of
+            Left err -> Just ("drop package should compile to owned MIR: " ++ err)
+            Right program ->
+                let rendered = M.renderProgram program
+                 in testAssertTrue ("<app$geo$geo$Token as Drop>::drop" `isInfixOf` rendered)
+                        <> testAssertTrue ("drop " `isInfixOf` rendered)
+        ]
+  where
+    dropFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; t = geo::Token::new(2); return t.n;")
+        , ("app/geo/geo.tersus", "struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };")
+        ]
+
+testModuleLinkMutual :: Test
+testModuleLinkMutual =
+    testCaseSeq
+        "module-link-mutual"
+        [ expectRuns mutualFiles "app/main.tersus" "0"
+        , expectErr cycleFiles "app/main.tersus" "module import cycle: app::a -> app::b -> app::a"
+        ]
+  where
+    mutualFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; return geo::a::fa(1);")
+        , ("app/geo/a.tersus", "import app::geo::b; fn fa(x: Int) -> Int [{ }] [{ }] ~ { if x > 0 { return b::fb(0); }; return x; };")
+        , ("app/geo/b.tersus", "import app::geo::a; fn fb(x: Int) -> Int [{ }] [{ }] ~ { return a::fa(x); };")
+        ]
+    cycleFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::a; x = 1;")
+        , ("app/a/a.tersus", "import app::b; " ++ fnDecl "fa")
+        , ("app/b/b.tersus", "import app::a; " ++ fnDecl "fb")
+        ]
+
+testModuleLinkRoot :: Test
+testModuleLinkRoot =
+    testCaseSeq
+        "module-link-root"
+        [ case (programPkg rootFiles "app/main.tersus", compileSource rootSource) of
+            (Left err, _) -> Just ("root package should compile: " ++ err)
+            (_, Error err) -> Just ("single-file equivalent should compile: " ++ err)
+            (Right packaged, Ok single) -> testAssertEq packaged single
+        ]
+  where
+    rootSource = "fn add(a: Int, b: Int) -> Int [{ }] [{ }] { return a + b; }; return add(1, 2);"
+    rootFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", rootSource)
+        ]
+
+testModuleLinkExtern :: Test
+testModuleLinkExtern =
+    testCaseSeq
+        "module-link-extern"
+        [ case programPkg externFiles "app/main.tersus" of
+            Left err -> Just ("identical externs should link: " ++ err)
+            Right program -> testAssertEq [name | name <- Map.keys (M.progFunctions program), name == "extern cfunc"] ["extern cfunc"]
+        , expectProgramError conflictFiles "app/main.tersus" "extern fn cfunc"
+        , expectProgramError conflictFiles "app/main.tersus" "app::geo"
+        , expectProgramError conflictFiles "app/main.tersus" "app::other"
+        ]
+  where
+    externDecl ret = "extern fn cfunc(x: Int) -> " ++ ret ++ " [{ }] [{ }]; fn use(x: Int) -> Int [{ }] [{ }] { return cfunc(x); };"
+    externFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; import app::other; return geo::use(1) + other::use(1);")
+        , ("app/geo/geo.tersus", externDecl "Int")
+        , ("app/other/other.tersus", externDecl "Int")
+        ]
+    conflictFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; import app::other; return geo::use(1) + other::use(1);")
+        , ("app/geo/geo.tersus", externDecl "Int")
+        , ("app/other/other.tersus", "extern fn cfunc(x: Int) -> Bool [{ }] [{ }]; fn use(x: Int) -> Int [{ }] [{ }] { if cfunc(x) { return 1; }; return 0; };")
+        ]
+
+testModuleAssumptions :: Test
+testModuleAssumptions =
+    testCaseSeq
+        "module-assumptions"
+        [ case loadPkg assumptionFiles "app/main.tersus" of
+            Left err -> Just ("assumption package should load: " ++ err)
+            Right pkg -> case compileModules pkg of
+                Error err -> Just ("assumption package should compile: " ++ err)
+                Ok compiled ->
+                    let found = assumptionsOfPackage compiled
+                     in testAssertTrue (any ("in module app::geo: axiom nonnegAxiom" `isInfixOf`) found)
+                            <> testAssertTrue (any ("in module app::geo: extern fn cfunc" `isInfixOf`) found)
+        ]
+  where
+    assumptionFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; return geo::use(1);")
+        , ("app/geo/geo.tersus", "axiom nonnegAxiom(x) [{ }] [{ affirm x >= 0; }]; extern fn cfunc(x: Int) -> Int [{ }] [{ }]; fn use(x: Int) -> Int [{ }] [{ }] { return x; };")
+        ]
+
+testModuleCliFilesystem :: Test
+testModuleCliFilesystem = TestCase "module-cli-filesystem" $ do
+    let root = "/tmp/tersus-modules-phase5-test"
+        pkgDir = root </> "app"
+    exists <- doesDirectoryExist root
+    when exists (removeDirectoryRecursive root)
+    result <- try (runFs root pkgDir) :: IO (Either SomeException TestResult)
+    return (case result of
+        Left ex -> Just ("CLI filesystem case crashed: " ++ show ex)
+        Right value -> value)
+  where
+    runFs root pkgDir = do
+        createDirectoryIfMissing True (pkgDir </> "geo")
+        writeFile (pkgDir </> "package.tersus") ""
+        writeFile (pkgDir </> "main.tersus") "import app::geo; p = geo::Point { x: 3 }; return geo::area(p);"
+        writeFile (pkgDir </> "geo" </> "geo.tersus") "struct Point { x: Int }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };"
+        loaded <- loadFromFilesystem (pkgDir </> "main.tersus")
+        value <- case loaded of
+            Left err -> return (Just ("filesystem load failed: " ++ err))
+            Right (PackageResult pkg) -> return (case runPackageFiles noWorld Interpret pkg of
+                Error err -> Just ("package eval failed: " ++ err)
+                Ok ((output, _), _) -> if output == "3" then Nothing else Just ("expected package eval to print 3, got: " ++ show output))
+            Right other -> return (Just ("expected a package result, got: " ++ show other))
+        removeDirectoryRecursive root
+        return value
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin]
+testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleAssumptions, testModuleCliFilesystem]

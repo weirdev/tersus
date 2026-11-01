@@ -7,6 +7,7 @@ module Cli
     , noWorld
     , runSourceIn
     , runSourceFiles
+    , runPackageFiles
     , runProgramIn
     , readWorldFile
     , writeWorldFiles
@@ -27,6 +28,7 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import Mir (Program, renderProgram)
 import MirData (writeProgram, writeProgramWithGhosts)
+import Modules (LoadedPackage)
 import MirEval (Outcome (..), RunEnv (..), renderMirValue, runProgramEnv)
 import Pipeline
 import TersusTypes
@@ -140,6 +142,18 @@ runProgramIn world program =
         Error e -> Error ("Evaluation failed: " ++ e)
         -- (what the program wrote, then its value: the same text as an executable prints)
         Ok o -> Ok ((decodeUtf8 (outStdout o) ++ maybe "" renderMirValue (outValue o), decodeUtf8 (outStderr o)), outFiles o)
+
+runPackageFiles :: World -> Command -> LoadedPackage -> Result ((String, String), [(FilePath, String)]) String
+runPackageFiles _ Check pkg = mapResult (\_ -> (("OK", ""), [])) (compileModulesToProgram pkg)
+runPackageFiles world Interpret pkg = compileModulesToProgram pkg `bindResult` runProgramIn world
+runPackageFiles _ Mir pkg = mapResult (\program -> ((renderProgram program, ""), [])) (compileModulesToProgram pkg)
+runPackageFiles _ Owned pkg = mapResult (\program -> ((renderProgram program, ""), [])) (compileModulesToOwned pkg)
+runPackageFiles _ MirText pkg = mapResult (\program -> ((writeProgram program, ""), [])) (compileModulesToOwned pkg)
+runPackageFiles _ GhostText pkg = mapResult (\program -> ((writeProgramWithGhosts program, ""), [])) (compileModulesValidated pkg)
+runPackageFiles _ Assumptions pkg = case compileModules pkg of
+    Error err -> Error err
+    Ok compiled -> let found = assumptionsOfPackage compiled in Ok ((if null found then "No assumptions" else intercalate "\n" found, ""), [])
+runPackageFiles _ _ _ = Error "not a command that is run on its own"
 
 runOther :: String -> Command -> String -> Result String String
 runOther _ Mir source = mapResult renderProgram (compileSource source)
