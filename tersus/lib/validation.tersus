@@ -1368,14 +1368,20 @@ fn linFacts(context: &ValidatorContext) -> List<LinFact> {
                 if bv is IntegerLookup::Found {
                     divisor = (bv as IntegerLookup::Found).value;
                     if divisor > 0 {
-                        if knownNonnegative(context, a) {
-                            t = linAddTerm([], app.id, divisor);
-                            t = linAddTerm(t, a, -1);
-                            facts = push(facts, LinFact { terms: t, bound: 0 });
-                            t = linAddTerm([], a, 1);
-                            t = linAddTerm(t, app.id, 0 - divisor);
-                            facts = push(facts, LinFact { terms: t, bound: divisor - 1 });
-                        };
+                        t = linAddTerm([], app.id, divisor);
+                        t = linAddTerm(t, a, -1);
+                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                        t = linAddTerm([], a, 1);
+                        t = linAddTerm(t, app.id, 0 - divisor);
+                        facts = push(facts, LinFact { terms: t, bound: divisor - 1 });
+                    };
+                    if divisor < 0 {
+                        t = linAddTerm([], app.id, divisor);
+                        t = linAddTerm(t, a, -1);
+                        facts = push(facts, LinFact { terms: t, bound: 0 - divisor - 1 });
+                        t = linAddTerm([], a, 1);
+                        t = linAddTerm(t, app.id, 0 - divisor);
+                        facts = push(facts, LinFact { terms: t, bound: 0 });
                     };
                 };
             };
@@ -1384,9 +1390,143 @@ fn linFacts(context: &ValidatorContext) -> List<LinFact> {
                 if bv is IntegerLookup::Found {
                     divisor = (bv as IntegerLookup::Found).value;
                     if divisor > 0 {
-                        if knownNonnegative(context, a) {
-                            facts = push(facts, linFact2(app.id, 1, app.id, 0, divisor - 1));
-                            facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+                        facts = push(facts, linFact2(app.id, 1, app.id, 0, divisor - 1));
+                        facts = push(facts, linFact2(app.id, -1, app.id, 0, 0));
+                    };
+                    if divisor < 0 {
+                        facts = push(facts, linFact2(app.id, 1, app.id, 0, 0));
+                        facts = push(facts, linFact2(app.id, -1, app.id, 0, 0 - divisor - 1));
+                    };
+                    if divisor != 0 {
+                        for other in context.applications {
+                            if other.function = -4 {
+                                if size(other.arguments) = 2 {
+                                    if hasEquality(context.equalities, get(other.arguments, 0), a) {
+                                        if hasEquality(context.equalities, get(other.arguments, 1), b) {
+                                            t = linAddTerm([], a, 1);
+                                            t = linAddTerm(t, other.id, 0 - divisor);
+                                            t = linAddTerm(t, app.id, -1);
+                                            facts = push(facts, LinFact { terms: t, bound: 0 });
+                                            t = linAddTerm([], a, -1);
+                                            t = linAddTerm(t, other.id, divisor);
+                                            t = linAddTerm(t, app.id, 1);
+                                            facts = push(facts, LinFact { terms: t, bound: 0 });
+                                        };
+                                    };
+                                };
+                            };
+                            if divisor > 0 {
+                                if other.function = -5 {
+                                    if size(other.arguments) = 2 {
+                                        if hasEquality(context.equalities, get(other.arguments, 1), b) {
+                                            x = get(other.arguments, 0);
+                                            for sumApp in context.applications {
+                                                if sumApp.function = -1 {
+                                                    if size(sumApp.arguments) = 2 {
+                                                        if hasEquality(context.equalities, sumApp.id, a) {
+                                                            if hasEquality(context.equalities, get(sumApp.arguments, 0), x) {
+                                                                ry = get(sumApp.arguments, 1);
+                                                                for modY in context.applications {
+                                                                    if modY.function = -5 {
+                                                                        if size(modY.arguments) = 2 {
+                                                                            if hasEquality(context.equalities, get(modY.arguments, 0), ry) {
+                                                                                if hasEquality(context.equalities, get(modY.arguments, 1), b) {
+                                                                                    t = linAddTerm([], app.id, 1);
+                                                                                    t = linAddTerm(t, other.id, -1);
+                                                                                    t = linAddTerm(t, modY.id, -1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                    t = linAddTerm([], app.id, -1);
+                                                                                    t = linAddTerm(t, other.id, 1);
+                                                                                    t = linAddTerm(t, modY.id, 1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: divisor });
+                                                                                };
+                                                                            };
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                            if hasEquality(context.equalities, get(sumApp.arguments, 1), x) {
+                                                                ry = get(sumApp.arguments, 0);
+                                                                for modY in context.applications {
+                                                                    if modY.function = -5 {
+                                                                        if size(modY.arguments) = 2 {
+                                                                            if hasEquality(context.equalities, get(modY.arguments, 0), ry) {
+                                                                                if hasEquality(context.equalities, get(modY.arguments, 1), b) {
+                                                                                    t = linAddTerm([], app.id, 1);
+                                                                                    t = linAddTerm(t, other.id, -1);
+                                                                                    t = linAddTerm(t, modY.id, -1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                    t = linAddTerm([], app.id, -1);
+                                                                                    t = linAddTerm(t, other.id, 1);
+                                                                                    t = linAddTerm(t, modY.id, 1);
+                                                                                    facts = push(facts, LinFact { terms: t, bound: divisor });
+                                                                                };
+                                                                            };
+                                                                        };
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                                if sumApp.function = -2 {
+                                                    if size(sumApp.arguments) = 2 {
+                                                        if hasEquality(context.equalities, sumApp.id, a) {
+                                                            kv = integerValue(context, get(sumApp.arguments, 1));
+                                                            if kv is IntegerLookup::Found {
+                                                                if (kv as IntegerLookup::Found).value % divisor = 0 {
+                                                                    if hasEquality(context.equalities, get(sumApp.arguments, 0), x) {
+                                                                        t = linAddTerm([], app.id, 1);
+                                                                        t = linAddTerm(t, other.id, -1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                        t = linAddTerm([], app.id, -1);
+                                                                        t = linAddTerm(t, other.id, 1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                            for sumApp in context.applications {
+                                                if sumApp.function = -1 {
+                                                    if size(sumApp.arguments) = 2 {
+                                                        if hasEquality(context.equalities, sumApp.id, a) {
+                                                            kv = integerValue(context, get(sumApp.arguments, 1));
+                                                            if kv is IntegerLookup::Found {
+                                                                if (kv as IntegerLookup::Found).value % divisor = 0 {
+                                                                    if hasEquality(context.equalities, get(sumApp.arguments, 0), x) {
+                                                                        t = linAddTerm([], app.id, 1);
+                                                                        t = linAddTerm(t, other.id, -1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                        t = linAddTerm([], app.id, -1);
+                                                                        t = linAddTerm(t, other.id, 1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                    };
+                                                                };
+                                                            };
+                                                            kv = integerValue(context, get(sumApp.arguments, 0));
+                                                            if kv is IntegerLookup::Found {
+                                                                if (kv as IntegerLookup::Found).value % divisor = 0 {
+                                                                    if hasEquality(context.equalities, get(sumApp.arguments, 1), x) {
+                                                                        t = linAddTerm([], app.id, 1);
+                                                                        t = linAddTerm(t, other.id, -1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                        t = linAddTerm([], app.id, -1);
+                                                                        t = linAddTerm(t, other.id, 1);
+                                                                        facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
+                                        };
+                                    };
+                                };
+                            };
                         };
                     };
                 };
@@ -2292,6 +2432,82 @@ fn forallShiftSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTe
     return false;
 };
 
+// `a % d` is `a` itself when `0 <= a < d`.
+fn modIsSelf(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    zero = 0;
+    zeroFound = false;
+    for constant in context.constants {
+        if constant.kind = 0 {
+            if constant.value = 0 { zero = constant.id; zeroFound = true; };
+        };
+    };
+    if zeroFound = false { return false; };
+    for app in context.applications {
+        if app.function = -5 {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                d = get(app.arguments, 1);
+                dv = integerValue(context, d);
+                if dv is IntegerLookup::Found {
+                    if (dv as IntegerLookup::Found).value > 0 {
+                        matches = false;
+                        if hasEquality(equalities, app.id, left) {
+                            if hasEquality(equalities, a, right) { matches = true; };
+                        };
+                        if hasEquality(equalities, app.id, right) {
+                            if hasEquality(equalities, a, left) { matches = true; };
+                        };
+                        if matches {
+                            if hasDifference(equalities, differences, zero, a, 0) {
+                                if hasDifference(equalities, differences, a, d, -1) { return true; };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+// A dividend whose remainder is known differs from any value with another
+// remainder.
+fn modDifferent(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    equalities = analysis.equalities;
+    for app in context.applications {
+        if app.function = -5 {
+            if size(app.arguments) = 2 {
+                a = get(app.arguments, 0);
+                d = get(app.arguments, 1);
+                dv = integerValue(context, d);
+                if dv is IntegerLookup::Found {
+                    if (dv as IntegerLookup::Found).value > 0 {
+                        rv = integerValue(context, app.id);
+                        if rv is IntegerLookup::Found {
+                            r = (rv as IntegerLookup::Found).value;
+                            if hasEquality(equalities, a, left) {
+                                ov = integerValue(context, right);
+                                if ov is IntegerLookup::Found {
+                                    if (ov as IntegerLookup::Found).value % (dv as IntegerLookup::Found).value != r { return true; };
+                                };
+                            };
+                            if hasEquality(equalities, a, right) {
+                                ov = integerValue(context, left);
+                                if ov is IntegerLookup::Found {
+                                    if (ov as IntegerLookup::Found).value % (dv as IntegerLookup::Found).value != r { return true; };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return false;
+};
+
 fn forallShift(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
     if forallShiftSide(context, analysis, left, right) { return true; };
     return forallShiftSide(context, analysis, right, left);
@@ -2448,6 +2664,7 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
         if forallEqual(context, analysis, g.left, g.right) { return true; };
         if forallConstant(context, analysis, g.left, g.right) { return true; };
         if forallShift(context, analysis, g.left, g.right) { return true; };
+        if modIsSelf(context, analysis, g.left, g.right) { return true; };
         if finiteGetEqual(context, analysis, g.left, g.right) { return true; };
         if relationAppsEqual(context, analysis, g.left, g.right) { return true; };
         if linearEntails(context, g.left, g.right, 0) { return linearEntails(context, g.right, g.left, 0); };
@@ -2462,6 +2679,7 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
         if contextWithin(context, g.right, g.left) { return true; };
         if entailsPartDisequality(context, analysis.equalities, analysis.orders, g.left, g.right) { return true; };
         if forallDifferent(context, analysis, g.left, g.right) { return true; };
+        if modDifferent(context, analysis, g.left, g.right) { return true; };
         return contextDifferent(analysis.equalities, context.applications, analysis.orders, context.different, analysis.differences, g.left, g.right);
     };
     if goal is ValidatorGoal::Less {

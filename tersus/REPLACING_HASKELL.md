@@ -73,64 +73,50 @@ are deleted together (the bridges exist only to feed a Haskell host).
 Status (2026-10-31, PR #94): the flip is made. `Pipeline` validates only
 through `lib/validation.tersus`, fed by `SelfHostedMir`; the Haskell
 validator, `SelfHostedProof` and `dev/parity` are deleted, and a program
-the bridge does not model is refused, never passed. The bridge still
-refuses three things master gained after the branch started, so the
-corpus that uses them fails with "does not model yet" until they are
-modeled. The plan for each, in the order to do them:
+the bridge does not model is refused, never passed.
 
-1. Equality as the trait `Eq` (`lib/eq.tersus`). `=` on anything but a
-   word is now a call of an `eq` impl, which the bridge already models
-   as a call with a contract (`return = (self = other)`). What is
-   missing is proving the impls: the old engine's equality by parts
-   (a disequality by refuting the equality, two lists equal by their
-   sizes and a `forall` over their elements, two constructions equal
-   by their fields, and `c = (a rel b)` from the relation), and the
-   facts it added at branches and locals (a struct is its constructor
-   applied to its fields; a value that tested as none of the other
-   variants is the last one). These are entailment rules in
-   `validation.tersus` plus constructed-value facts the bridge emits
-   from the types it already reads.
-2. References (REFERENCES.md, stages 1 to 5). A reference is the
-   version of its place, as in the old validator, so no new proof
-   terms are needed, only bookkeeping in the bridge: `&place` binds the
-   reference local to the place's term (a field read or a `get`, with
-   the index bound checked as `get` checks it); `*r` is a copy;
-   `AssignRef root steps v` gives the root a new term (the whole value,
-   a construction with one field replaced, or a `set`, so the invariant
-   and the bound are checked as a construction and a `set` are); after
-   any new version of a root, the reference locals borrowing it are
-   rebound. The borrow of each reference local is found statically
-   per function and the function is refused when two borrows of one
-   local disagree. A call with update parameters gets a fresh term per
-   updated argument, the callee's promise read with the parameter as
-   that term and `old(p)` as the argument's term, and the root rebound;
-   the callee is checked with `old(p)` as the entry term. Loops treat
-   the roots that `AssignRef` and update calls write as assigned.
-   Returned references (`from`) and holders follow from the same
-   rebinding once the callee's `from` list says which argument's place
-   the result is.
-3. `Hash`, `HashMap` and `HashSet` (`lib/prelude.tersus`,
-   `lib/map.tersus`, `lib/set.tersus`). Nothing new reaches the MIR:
-   bounded impls are templates the checker instantiates. What the
-   libraries need from the validator is arithmetic it does not have
-   yet: `x % n` for a positive `n` in `0..n` (and the identity
-   `x = n * (x / n) + x % n` that `hashCombine` rests on), and the
-   list-of-lists frame facts of `bucketPut`. These go in with the
-   division-family linear arithmetic gap that already fails several
-   test cases.
+Since then the three things master had gained have been modeled. For
+equality, a relation used as a value is the comparison application
+itself, a struct local is its constructor applied to its fields, a
+branch derives the relation from any comparison term equal to the
+branched one, and two relation applications are one boolean when their
+arguments match, both fail, or each gives the other. References are the
+version of their place: the bridge finds each reference local's borrow
+statically, gives a written root a new term (a construction with one
+field replaced, or a `set`), rebinds the borrows of a root after it
+changes, and gives update parameters fresh post-call terms with `old()`
+read from an entry snapshot; returned references are the argument's
+place. `testBorrow` passes outright.
 
-The validator itself now uses `HashMap` and `HashSet`, so every
-validation runs those libraries interpreted. Since the rebase the
-solver has been sped up without changing its verdicts (equality and
-difference searches work on class representatives, one context
-analysis serves every goal asked of a context at a branch, and the
-interpreter skips its reference bookkeeping at calls when the program
-makes no reference), and a joined term now keeps the bounds both
-branches give it, including one that follows from a branch value
-(`0 <= 0 - n` from `n < 0`), which the `String::fromInt` shape needs.
-What still blocks it is item 1's other half: proving a list equality
-from a `forall` over its elements, which the bridge assumes only for
-one fresh index. The validator's own self-check needs item 3.
+A `forall` over list elements is no longer assumed only for one fresh
+index. The bridge records it as one fact the checker instantiates:
+two lists elementwise equal (function -30, the offset on either side),
+elements different from a value (-31), elements equal to a value (-32),
+and elements shifted from another list's (-33). The checker
+instantiates a fact inside its range and at its end point, by a case
+split on the index, reading through a push where the list was built by
+one, and it proves a `get` of a list of known size from its elements.
+With that, the list and string `Eq` impls prove, and `String::concat`,
+`String::slice` and `String::find` check.
+
+What remains open is item 3 of the original list: `Hash`, `HashMap`
+and `HashSet` need arithmetic the solver does not have yet (`x % n` in
+`0..n` for positive `n`, the division identity `hashCombine` rests on,
+and the bucket frame facts of `bucketPut`), which is the same
+division-family gap that fails several arithmetic cases. The
+validator's own self-check (`testMir` on `lib/validation.tersus`)
+needs that arithmetic and has not finished in this environment; it is
+still unverified.
+
+The validator itself uses `HashMap` and `HashSet`, so every validation
+runs those libraries interpreted. Since the rebase the solver has been
+sped up without changing its verdicts (equality and difference
+searches work on class representatives, one context analysis serves
+every goal asked of a context at a branch, and the interpreter skips
+its reference bookkeeping at calls when the program makes no
+reference), and a joined term keeps the bounds both branches give it,
+including one that follows from a branch value (`0 <= 0 - n` from
+`n < 0`), which the `String::fromInt` shape needs.
 
 ### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
 

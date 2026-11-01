@@ -1289,6 +1289,14 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     -- validator does.
     encodeLoop spec yes no dummyLocal (r, a, c, variantTestInfo, withCondition) = do
         if testChainToBody spec no yes && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
+        (genVariant, withCondition') <- case M.loopTermination spec of
+            Just (Counting expr) -> case expr of
+                Var _ -> Just (Nothing, withCondition)
+                F (Val (VFunct _ _ _ (BuiltinFunct Minus) _)) [_, Var _] -> Just (Nothing, withCondition)
+                _ -> do
+                    (vSteps, vRef, b') <- exprOperand (M.loopEnv spec) expr withCondition
+                    Just (Just (vSteps, vRef), b')
+            _ -> Just (Nothing, withCondition)
         (mode, variant, variantLocal, upper) <- case M.loopTermination spec of
             Just (Counting (Var name)) -> case Map.lookup name (M.loopEnv spec) of
                 Just op@(M.Copy v) -> Just (0, op, v, Val (VInt 0))
@@ -1296,13 +1304,14 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             Just (Counting (F (Val (VFunct _ _ _ (BuiltinFunct Minus) _)) [upperExpr, Var name])) -> do
                 counter <- Map.lookup name (M.loopEnv spec)
                 case counter of M.Copy v -> Just (1, counter, v, upperExpr); _ -> Nothing
+            Just (Counting _) -> Just (0, M.Const (M.CInt 0), dummyLocal, Val (VInt 0))
             Just (Parts (Var name)) -> case Map.lookup name (M.loopEnv spec) of
                 Just op@(M.Copy v) -> Just (3, op, v, Val (VInt 0))
                 _ -> Nothing
             Just MayDiverge -> Just (2, M.Const (M.CInt 0), dummyLocal, Val (VInt 0))
             _ -> Nothing
         decl <- Map.lookup variantLocal (M.fnLocals fn)
-        if mode >= 2 || M.localType decl == TInt then Just () else Nothing
+        if mode >= 2 || M.localType decl == TInt || genVariant /= Nothing then Just () else Nothing
         let region = Map.findWithDefault (Set.singleton blockId) blockId (loopRegions fn)
             assigned = nub
                 [ v
@@ -1311,16 +1320,20 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
                 , v <- [d | M.Assign d _ <- blockStmts] ++ [r | M.AssignRef r _ _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> []) ++ mutCallRoots term
                 ]
         if all (upperStable (M.loopEnv spec) assigned) (expressionVars upper) then Just () else Nothing
-        (variantRef, b1) <- operand variant withCondition
+        (variantRef, variantSteps, b1) <- case genVariant of
+            Just (vSteps, vRef) -> Just (vRef, vSteps, withCondition')
+            Nothing -> do
+                (vRef, b') <- operand variant withCondition'
+                Just (vRef, [], b')
         (upperSteps, upperRef, b2) <- exprOperand (M.loopEnv spec) upper b1
         (zeroRef, b3) <- operand (M.Const (M.CInt 0)) b2
         (typeAssumptions, withTypes) <- foldM (loopType fn) ([], b3) assigned
-        (checks, assumptions, b4) <- foldM (invariant (M.loopEnv spec)) ([], typeAssumptions, withTypes) (M.loopInvariant spec)
+        (checks, assumptions, b4) <- foldM (invariant (M.loopEnv spec)) (variantSteps, typeAssumptions, withTypes) (M.loopInvariant spec)
         let (kind, left, right) = normal r a c
             M.BlockId exitId = no
             M.BlockId bodyId = yes
         let divergeGuard = if M.loopTermination spec == Just MayDiverge && not (mayDivergeFn fn) then [check 2 zeroRef zeroRef] else []
-        pure (upperSteps ++ divergeGuard, record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
+        pure (variantSteps ++ upperSteps ++ divergeGuard, record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
              ("region", MList [MInt (toInteger number) | M.BlockId number <- Set.toList region]),
              ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map (MInt . localNumber) assigned)),
              ("relation", MInt kind), ("left", left), ("right", right), ("variant", variantRef), ("variantMode", MInt mode),
