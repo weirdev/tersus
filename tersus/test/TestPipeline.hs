@@ -26,7 +26,7 @@ import SelfHostedMir (validateMirSubset)
 import Parse
 import StdLib
 import StdLibDefs (stdLibCtx, stdlibBuiltin)
-import TypeCheck (elaborate)
+import TypeCheck (Elaborated (..), elaborate)
 import TersusTypes
 import Utils
 import TestHarness
@@ -322,6 +322,9 @@ testMirStructure =
         , -- A statement after a return is not lowered
           withMir "return 1; x = 2; return x;" $ \p ->
             testAssertEq (length (blocksOf (mainFunction p)), Map.size (M.fnLocals (mainFunction p))) (1, 1)
+        , -- An assignment through a reference after a return is not lowered either
+          withMir "x = 0; r = &mut x; return 0; *r = 1;" $ \p ->
+            testAssertEq (length (blocksOf (mainFunction p))) 1
         , -- A function in a function is lifted to the top, and a function at the top keeps its name
           withMir "fn outer(n: Int) -> Int { fn inner(m: Int) -> Int { return m + 1; }; return inner(n); }; return outer(1);" $ \p ->
             testAssertEq (Map.keys (M.progFunctions p)) ["outer", "outer::inner"]
@@ -1063,7 +1066,7 @@ testPipeline =
           testAssertErrorContains "Validation failed" (compileSource "x = 1; affirm x = 2;")
         , -- The checked program has each `shrinks` clause resolved, and is the one that gets lowered
           case parseSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; };" `bindResult` elaborate of
-            Ok stmts -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))
+            Ok (Elaborated stmts _) -> testAssertTrue (not (null [() | While _ _ (Just (Counting _)) _ <- stmts]))
             Error e -> Just e
         , case compileSource "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" of
             Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program), Map.size (M.fnBlocks (M.progMain program))) (Ok (Just "3"), 4)
