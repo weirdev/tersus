@@ -1,5 +1,7 @@
 module TestHashSet (testHashSet) where
 
+import Data.List (isInfixOf)
+
 import MirEval (fromMirValue)
 import Pipeline (parseSource, runStatements, validateStatements)
 import Types
@@ -24,6 +26,9 @@ testHashSet =
             Ok stmts -> case validateStatements stmts of
                 Ok _ -> Nothing
                 Error e -> Just ("Validation failed with error: " ++ e)
+        rejected source expected = case parseSource source of
+            Error e -> if expected `isInfixOf` e then Nothing else Just ("Expected failure containing: " ++ show expected ++ "\nGot: " ++ e)
+            Ok stmts -> testAssertErrorContains expected (validateStatements stmts)
      in TestList
             "testHashSet"
             [ TestList
@@ -46,5 +51,12 @@ testHashSet =
                 [ testCase "every key, in some order" (runs "s = HashSet::new().insert(1).insert(2).insert(1); t = 0; for k in s.elements() { t = t + k * 10; }; return t + size(s.elements()) * 100 + s.size();" 232)
                 , testCase "past the spread, everything is found" (runs "s = HashSet::new(); i = 0; while i < 40 [{ affirm i >= 0; affirm i <= 40; }] shrinks 40 - i { s = s.insert(i); i = i + 1; }; t = 0; for k in s.elements() { t = t + k; }; return s.size() * 10000 + t;" 400780)
                 , testCase "removed after the spread" (runs "s = HashSet::new(); i = 0; while i < 40 [{ affirm i >= 0; affirm i <= 40; }] shrinks 40 - i { s = s.insert(i); i = i + 1; }; s = s.remove(0).remove(39); r = s.size() * 100; if s.contains(0) { r = r + 10; }; if s.contains(20) { r = r + 1; }; return r;" 3801)
+                ]
+            , TestList
+                "elements by reference"
+                [ testCase "every key by reference, in some order" (runs "s = HashSet::new().insert(1).insert(2).insert(1); t = 0; n = 0; total = s.size(); while n < total [{ affirm n >= 0; affirm n <= total; }] shrinks total - n { k = s.elementRef(n); t = t + *k * 10; n = n + 1; }; return t + total * 100 + s.size();" 232)
+                , testCase "by reference past the spread, everything is found" (runs "s = HashSet::new(); i = 0; while i < 40 [{ affirm i >= 0; affirm i <= 40; }] shrinks 40 - i { s = s.insert(i); i = i + 1; }; t = 0; n = 0; total = s.size(); while n < total [{ affirm n >= 0; affirm n <= total; }] shrinks total - n { k = s.elementRef(n); t = t + *k; n = n + 1; }; return s.size() * 10000 + t;" 400780)
+                , testCase "elementRef where the key is a precondition" (valid "fn useIt(s: &HashSet<Int>) -> Int [{ affirm size(s.map.buckets) >= 1; affirm findNth(s.map.buckets, 1).1 >= 0; }] [{ }] { k = s.elementRef(1); return *k; }; return 0;")
+                , testCase "the set cannot be moved while an elementRef is live" (rejected "fn bad(s: HashSet<Int>) -> Int [{ affirm size(s.map.buckets) >= 1; affirm findNth(s.map.buckets, 0).1 >= 0; }] [{ }] { k = s.elementRef(0); s = s.insert(9); return *k; }; return 0;" "cannot be moved while that borrow is live")
                 ]
             ]
