@@ -120,6 +120,21 @@ testSequence =
                 , testCase "a call with the wrong number of arguments" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return 0; }; return total([1], [2]);" "total takes 1 arguments, got 2")
                 ]
             , TestList
+                "getRef"
+                [ testCase "a list element is read where it is" (runsAs "xs = [10, 20, 30]; r = Sequence::getRef(xs, 1); return *r;" "20")
+                , testCase "as a method and through the trait" (runsAs "xs = [10, 20, 30]; r = xs.getRef(2); s = Sequence::getRef(xs, 0); return *r * 10 + *s;" "310")
+                , testCase "an element that is not Copy is read without a clone" (runsAs "rows = [[1, 2], [3]]; r = Sequence::getRef(rows, 0); return size(*r);" "2")
+                , testCase "an array element is read where it is" (runsAs "a = #[10, 20, 30]; r = Sequence::getRef(a, 2); return *r;" "30")
+                , testCase "a Box of an array element is read where it is" (runsAs "b = Array::boxed(3, 7); r = Sequence::getRef(b, 1); return *r;" "7")
+                , testCase "a string byte is read where it is" (runsAs "s = \"ab\"; r = s.getRef(1); return toInt(*r);" "98")
+                , testCase "the source is frozen while the reference is live" (errorHas "xs = [10, 20, 30]; r = Sequence::getRef(xs, 0); xs = [40, 50]; return *r;" "cannot be assigned while it is borrowed")
+                , testCase "an array's source is frozen while the reference is live" (errorHas "a = #[10, 20, 30]; r = Sequence::getRef(a, 0); a = #[40, 50, 60]; return *r;" "cannot be assigned while it is borrowed")
+                , testCase "through a generic bound, read locally" (runsAs "fn pickVal<S: Sequence<E>, E>(s: &S, i: Int) -> E [{ affirm i >= 0; affirm i < size(s); }] [{ affirm return = get(s, i); }] { r = s.getRef(i); return clone(*r); }; xs = [10, 20, 30]; return pickVal(xs, 1);" "20")
+                , testCase "through a generic bound on an array, read locally" (runsAs "fn pickVal<S: Sequence<E>, E>(s: &S, i: Int) -> E [{ affirm i >= 0; affirm i < size(s); }] [{ affirm return = get(s, i); }] { r = Sequence::getRef(s, i); return clone(*r); }; a = #[10, 20, 30]; return pickVal(a, 2);" "30")
+                , testCase "a generic bound cannot return the reference onward" (errorHas "fn pick<S: Sequence<E>, E>(s: &S, i: Int) -> &E from s [{ affirm i >= 0; affirm i < size(s); }] [{ affirm *return = get(s, i); }] { return Sequence::getRef(s, i); }; xs = [10, 20, 30]; r = pick(xs, 1); return *r;" "what the result is from is not known")
+                , testCase "an index past the end is refused" (errorHas "xs = [10, 20, 30]; r = Sequence::getRef(xs, 3); return *r;" "Could not prove: i < size(self)")
+                ]
+            , TestList
                 "methods of lists"
                 [ testCase "a list has its functions as methods" (runs "l = [1, 2, 3]; return l.size() + l.get(1) + l.first() + l.last();" (VInt 9))
                 , testCase "push and set" (runs "l = [1]; l = l.push(5).push(6).set(0, 9); return l.get(0) * 100 + l.get(2) * 10 + l.size();" (VInt 963))
@@ -171,7 +186,7 @@ testSequence =
   where
     -- A struct that implements the trait of the prelude: a number n of the same element a
     counter =
-        "struct Three { a: Int, n: Int } invariant [{ affirm n >= 0; }]; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = self.a; }] { return self.a; }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { a: x, n: self.n }; }; }; impl Growable<Int> for Three { fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { a: x, n: self.n + 1 }; }; }; "
+        "struct Three { a: Int, n: Int } invariant [{ affirm n >= 0; }]; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = self.a; }] { return self.a; }; fn getRef(self: &Self, i: Int) -> &Int from self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm *return = get(self, i); }] { return &self.a; }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { a: x, n: self.n }; }; }; impl Growable<Int> for Three { fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { a: x, n: self.n + 1 }; }; }; "
     compiles source = case compileSource source of
         Ok _ -> Nothing
         Error e -> Just ("Failed: " ++ e)
