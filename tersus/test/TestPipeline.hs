@@ -1106,6 +1106,9 @@ testPipeline =
         , -- A program that declares its own enum or trait named String is read without the string library
           testAssertEq (mapResult (const ()) (compileSource "enum String { Empty }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
         , testAssertEq (mapResult (const ()) (compileSource "trait String { fn size(self: Self) -> Int; }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
+        , -- A program that declares its own prelude trait is read without the prelude or the libraries that need it, so String is not a struct there
+          testAssertEq (mapResult (const ()) (compileSource "trait Sequence { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
+        , testAssertEq (mapResult (const ()) (compileSource "trait String { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
         , -- The names native code makes a list and a Box of are reserved from what a program declares, not from its text
           testAssertErrorContains "StdList is reserved" (parseSource "struct StdList { x: Int }; return 1;")
         , case parseSource "// struct StdList\nreturn 1;" of
