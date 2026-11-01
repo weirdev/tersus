@@ -5,13 +5,15 @@ module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateBy
 
 import Control.Monad (foldM)
 import Data.List (find, isPrefixOf, nub)
-import Data.Maybe (fromMaybe, mapMaybe)
+import Data.Maybe (fromMaybe, isJust, mapMaybe)
+import Control.Applicative ((<|>))
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
 import MirGhost (eraseGhosts)
 import MirLower (lowerElaborated)
+import MirMono (monomorphizeForValidation)
 import MirVerify (verifyProgram)
 import Libraries (parseSourceWith)
 import PreludeSource (validationSource)
@@ -21,10 +23,10 @@ import TersusTypes
 import TypeCheck (elaborate)
 import Utils (Result (..), bindResult, inIntRange)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)] }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] [] []
+emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0
 
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
@@ -135,8 +137,11 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [list, index]
     let (i, b3) = fresh b2
         local = negate i - 1
         ref = record "ValueRef::Local" [("local", MInt local)]
-    (steps, b4) <- getSteps local listRef indexRef b3
-    pure (listSteps ++ indexSteps ++ steps, ref, b4)
+        -- A get in a proof is a term, as in the reference: its bounds are
+        -- checked where a get runs in code, not where one is written in a
+        -- contract or an affirm.
+        steps = [step "ApplyFresh" [("local", MInt local), ("function", MInt (-14)), ("arguments", MList [listRef, indexRef])]]
+    pure (listSteps ++ indexSteps ++ steps, ref, b3)
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct Push) _)) [list, value]) b0 = do
     (listSteps, listRef, b1) <- proofOperand env list b0
     (valueSteps, valueRef, b2) <- proofOperand env value b1
@@ -174,11 +179,24 @@ proofOperand env (FApp (ATerm name) args) b0
             local = negate i - 1
             ref = record "ValueRef::Local" [("local", MInt local)]
             apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList refs)]
-        pure (prefixes ++ [apply], ref, b3)
+        (facts, b4) <- proofCallFacts callee refs local b3
+        pure (prefixes ++ [apply] ++ facts, ref, b4)
   where
     evalArg (steps, refs, b) arg = do
         (more, ref, b') <- proofOperand env arg b
         pure (steps ++ more, refs ++ [ref], b')
+
+-- A method named in a proof of its own impl is named by its source
+-- name (sz), where the environment binds the function it denotes by
+-- its full name (<HM>::sz): the one the name is the source name of.
+proofOperand env (FApp (ATerm name) args) b
+    | Map.notMember name env
+    , [full] <- [key | (key, M.Const (M.CFn _)) <- Map.toList env, sourceNameOf key == name] =
+        proofOperand env (FApp (ATerm full) args) b
+  where
+    sourceNameOf key = case break (== ':') (reverse key) of
+        (revSuffix, ':' : ':' : _) -> reverse revSuffix
+        _ -> key
 -- Builtins also occur in proofs under their source names (size, get, ...);
 -- they denote the builtin only when the name is not a program value.
 proofOperand env (FApp (ATerm name) args) b
@@ -329,6 +347,39 @@ setSteps dest listRef indexRef valueRef b0 = do
     (bounds, b2) <- getSteps (negate i - 1) listRef indexRef b1
     let update = step "Set" [("local", MInt dest), ("list", listRef), ("index", indexRef), ("value", valueRef)]
     pure (bounds ++ [update], b2)
+
+-- What a call in a proof is worth beyond the call application itself:
+-- the callee's ensures, with its parameters bound to the argument
+-- terms and its result to the application's term, as a call in the
+-- code is worth. One level only: a contract whose proofs call again
+-- leaves those inner calls as applications.
+proofCallFacts :: Name -> [MirValue] -> Integer -> Build -> Maybe ([MirValue], Build)
+proofCallFacts callee refs result b
+    | Just fn <- Map.lookup callee (buildFunctions b)
+    , M.specTermination (M.fnSpec fn) == Just MayDiverge = Nothing
+    | buildInline b > 0 = pure ([], b)
+    | Just fn <- Map.lookup callee (buildFunctions b)
+    , length argLocals == length argRefs
+    , let params = take (length (M.fnParams fn) - length (M.fnSizeParams fn)) (M.fnParams fn)
+    , length params == length argRefs = do
+        let bindings = Map.fromList [(p, M.Copy (M.Local (fromInteger n))) | (p, n) <- zip params argLocals]
+            substitute op = case op of
+                M.Copy l | Just replacement <- Map.lookup l bindings -> replacement
+                M.Move l | Just replacement <- Map.lookup l bindings -> replacement
+                _ -> op
+            env = Map.insert "return" (M.Copy (M.Local (fromInteger result))) (Map.map substitute (M.specEnv (M.fnSpec fn)))
+            deeper = b{buildInline = buildInline b + 1}
+        (required, b1) <- contractSteps (buildRules b) False env (M.specRequires (M.fnSpec fn)) deeper
+        (promised, b2) <- contractSteps (buildRules b) True env (M.specEnsures (M.fnSpec fn)) b1
+        pure (required ++ promised, b2{buildInline = buildInline b})
+    | otherwise = pure ([], b)
+  where
+    argLocals = [n | ref <- refs, Just n <- [refLocal ref]]
+    argRefs = refs
+    refLocal (MData "ValueRef::Local" fields) = case lookup "local" fields of
+        Just (MInt n) -> Just n
+        _ -> Nothing
+    refLocal _ = Nothing
 
 proofCheck :: M.Env -> VariableProof -> Build -> Maybe ([MirValue], MirValue, Build)
 proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel r)) _)) [a, b]) b0 = do
@@ -512,13 +563,13 @@ contractSteps rules assume env clauses b0 = do
             | assume, Just (fsteps, b') <- forallFactSteps env (substituteProof subst proof) b -> pure (steps ++ fsteps, subst, b')
             | otherwise -> do
                 (prefix, checked, b') <- proofCheck env (substituteProof subst proof) b
-                if not assume || all droppable prefix then Just () else Nothing
+                if not assume || callsFunction env (substituteProof subst proof) || all droppable prefix then Just () else Nothing
                 encoded <- if assume then case checked of
                     MData "ExecutionStep::Check" fields -> Just (MData "ExecutionStep::Assume" fields)
                     MData "ExecutionStep::RequireVariant" fields -> Just (MData "ExecutionStep::AssumeVariant" (fields ++ [("matches", MBool True)]))
                     _ -> Nothing
                   else Just checked
-                pure (steps ++ (if assume then filter keptStep prefix else prefix) ++ [encoded], subst, b')
+                pure (steps ++ (if assume && not (callsFunction env (substituteProof subst proof)) then filter keptStep prefix else prefix) ++ [encoded], subst, b')
         AssignProofVar var expr -> pure (steps, Map.insert var (substituteProof subst (exprToProof expr)) subst, b)
         Rewrite rule -> do
             (more, b') <- if assume then assumeRule (substituteRule subst rule) b else rewriteSteps rules env (substituteRule subst rule) b
@@ -576,6 +627,24 @@ contractSteps rules assume env clauses b0 = do
     droppable value = keptStep value || case value of
         MData "ExecutionStep::Check" _ -> True
         _ -> False
+    -- A clause that calls a program function: what the call needs (the
+    -- callee's requires) is an obligation wherever the clause is used,
+    -- assumed or checked, so the checks the call produced are kept.
+    callsFunction env proof = case proof of
+        FApp (ATerm name) _ -> isCall name
+        FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel _)) _)) [x, y] -> callsFunction env x || callsFunction env y
+        FApp f args -> callsFunction env f || any (callsFunction env) args
+        Forall _ _ body -> callsFunction env body
+        _ -> False
+      where
+        isCall name = case Map.lookup name env of
+            Just (M.Const (M.CFn _)) -> True
+            _ -> case [key | (key, M.Const (M.CFn _)) <- Map.toList env, sourceSuffix key == name] of
+                [_] -> True
+                _ -> False
+        sourceSuffix key = case break (== ':') (reverse key) of
+            (revSuffix, ':' : ':' : _) -> reverse revSuffix
+            _ -> key
 
 -- A rewrite rule: its parameters, input clauses, output clauses, and (for a
 -- proof, not an axiom) the body that is checked once, generically.
@@ -853,6 +922,10 @@ statement _ (M.Ghost _ (M.GhostAxiom _ _ _ _)) b = Just ([], b)
 -- Function bodies are checked independently before the main graph. Function
 -- definitions have already been checked for uniqueness and placement.
 statement _ (M.Ghost _ M.GhostFunction{}) b = Just ([], b)
+-- Taking a value apart uses it up; its fields keep the values (the
+-- reads of them are the statements of their own).
+statement _ (M.Ghost _ (M.GhostDissolve _)) b = Just ([], b)
+statement _ (M.Ghost _ (M.GhostPosition _ _)) b = Just ([], b)
 statement _ _ _ = Nothing
 
 
@@ -1024,7 +1097,7 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
     facts (TNamed name) b = do
         let base = maybe name fst (instanceOf name)
             clauses = Map.findWithDefault [] base invariants
-        case Map.lookup base types of
+        case Map.lookup name types <|> Map.lookup base types of
             Just (M.StructDecl fs) -> do
                 let fields = map fst fs
                 (projections, env, b1) <- foldM project ([], Map.empty, b) fields
@@ -1037,11 +1110,10 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
                     known = assume 0 value cref
                     (fieldIds, b4) = foldl (\(ids, bb) f -> let (fid, bb') = namedFunction ("field:" ++ f) bb in (ids ++ [fid], bb')) ([], b3) fields
                     b5 = b4{ctorFields = nub ([(constructor, fid, toInteger idx) | (idx, fid) <- zip [0 ..] fieldIds] ++ ctorFields b4)}
-                (assumptions, b6) <- if null clauses then pure ([], b5) else case instanceOf name of Just _ -> Nothing; Nothing -> contractSteps rules True env clauses b5
+                (assumptions, b6) <- if null clauses then pure ([], b5) else contractSteps rules True env clauses b5
                 pure (projections ++ [create, known] ++ assumptions, b6)
             _ -> if null clauses then Just ([], b) else do
-                case instanceOf name of Just _ -> Nothing; Nothing -> Just ()
-                fields <- case Map.lookup base types of Just (M.StructDecl fs) -> Just (map fst fs); _ -> Nothing
+                fields <- case Map.lookup name types <|> Map.lookup base types of Just (M.StructDecl fs) -> Just (map fst fs); _ -> Nothing
                 (projections, env, b1) <- foldM project ([], Map.empty, b) fields
                 (assumptions, b2) <- contractSteps rules True env clauses b1
                 pure (projections ++ assumptions, b2)
@@ -1088,6 +1160,22 @@ exprOperand env expr b0 = case expr of
         pure ([], v, b1)
     F (Var "size") [arg] -> apply1 "size" (-13) arg
     F (Val (VFunct _ _ _ (BuiltinFunct Size) _)) [arg] -> apply1 "size" (-13) arg
+    -- A trait method in a loop bound or variant (size of a Vec, say) is a
+    -- call of the impl's function, as it is in a proof.
+    F (Var name) args
+        | Just (M.Const (M.CFn callee)) <- Map.lookup name env -> do
+            (prefixes, refs, b1) <- foldM evalArg ([], [], b0) args
+            let (function, b2) = namedFunction ("call:" ++ callee) b1
+                (i, b3) = fresh b2
+                local = negate i - 1
+                ref = record "ValueRef::Local" [("local", MInt local)]
+                apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList refs)]
+            (facts, b4) <- proofCallFacts callee refs local b3
+            pure (prefixes ++ [apply] ++ facts, ref, b4)
+      where
+        evalArg (steps, refs, b) arg = do
+            (more, ref, b') <- exprOperand env arg b
+            pure (steps ++ more, refs ++ [ref], b')
     F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [arg] -> do
         (steps, value, b1) <- exprOperand env arg b0
         let (function, b2) = namedFunction ("field:" ++ field) b1
@@ -1432,9 +1520,6 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         M.Assign dest (M.MakeData name fields) -> do
             let base = maybe name fst (instanceOf name)
                 clauses = Map.findWithDefault [] base invariants
-            case instanceOf name of
-                Just _ | not (null clauses) -> Nothing
-                _ -> Just ()
             (checks, b1) <- contractSteps rules False (Map.fromList fields) clauses b
             (more, b2) <- statement rules s b1
             (typeFacts, b3) <- typeSteps rules types invariants fn dest b2
@@ -1671,7 +1756,7 @@ encodeFunction types invariants functions rules allowCalls fn
     | any wrongSizeName (zip sizeParams (M.fnSizeParams fn)) = Nothing
     | Map.member (M.BlockId (-1)) (M.fnBlocks fn) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild) (M.fnParams fn)
+        let (params, start) = foldl addParam ([], emptyBuild{buildFunctions = functions, buildRules = rules}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires, withRequires) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
@@ -1720,7 +1805,22 @@ encodeFunction types invariants functions rules allowCalls fn
         pure (steps ++ more, b')
 
 encode :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
-encode program
+-- Generic functions are checked as the copies a call decides (MirMono
+-- makes them for native code after validation there; the validator
+-- written in Tersus is given the same copies, so a call of a generic
+-- function names the copy of it the call decides).
+encode program0 = encodeMono withTemplates
+  where
+    mono = monomorphizeForValidation program0
+    -- A contract can name a generic function nothing calls (a method
+    -- the contract measures by, like size): monomorphisation keeps
+    -- only the copies a call decides, so the templates stay beside
+    -- them as the contracts' sources (they are not checked as
+    -- functions, only where a call decides their types).
+    withTemplates = mono { M.progFunctions = Map.union (M.progFunctions mono) (Map.filter (\fn -> not (null (M.fnTypeParams fn))) (M.progFunctions program0)), M.progTypes = Map.union (M.progTypes mono) (M.progTypes program0) }
+
+encodeMono :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
+encodeMono program
     | Just fn <- find externFunction allFunctions = Left ("an extern function (" ++ M.fnName fn ++ ")")
     | Just fn <- find unsupportedFunction allFunctions = Left ("a type of a local, the result or a reference result of " ++ M.fnName fn)
     | Just (name, _) <- find (unsupportedDecl . snd) (Map.toList (M.progTypes program)) = Left ("a field type of " ++ name)
@@ -1729,8 +1829,8 @@ encode program
     | length names /= length (nub names) = Left "two functions with one name"
     | any (\name -> Map.member name (fst stdLibValCtx)) names = Left "a function named like a builtin"
     | length targets /= length (nub targets) = Left "two definitions of one function"
-    | length targets /= length [() | name <- Map.keys (M.progFunctions program), not ("builtin::" `isPrefixOf` name)] = Left "a function with no definition"
-    | any (\name -> Map.notMember name (M.progFunctions program)) targets = Left "a definition of a function that is not there"
+    | any (\name -> name `notElem` targets && not (isInstanceName name)) [name | name <- Map.keys (M.progFunctions program), not ("builtin::" `isPrefixOf` name)] = Left "a function with no definition"
+    | any (\(_, called) -> Map.notMember called (M.progFunctions program)) functionCalls = Left "a definition of a function that is not there"
     | any (\(name, fn) -> name /= M.fnName fn) (Map.toList (M.progFunctions program)) = Left "a function filed under another name"
     | otherwise = do
         let functions = M.progFunctions program
@@ -1738,7 +1838,13 @@ encode program
             types = M.progTypes program
         rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
         let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction types invariants functions rules' True fn)
-        checked <- traverse encodeOne (Map.elems functions)
+        -- A function with type parameters is a template: it is checked
+        -- only where a call decides its types, as its instances in the
+        -- program (the reference does the same). The one exception is a
+        -- function that checks an impl against its trait (TypeCheck
+        -- writes it beside the impl, and nothing calls it): it is
+        -- checked as written, or a weaker impl would pass.
+        checked <- traverse encodeOne [fn | fn <- Map.elems functions, null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn))]
         main <- encodeOne (M.progMain program)
         let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
         pure (checked ++ ruleEntries ++ [main])
@@ -1766,6 +1872,21 @@ encode program
         (blockId, block') <- Map.toList (M.fnBlocks fn), M.Ghost _ (M.GhostFunction name source top) <- M.blockStatements block']
     names = [source | (_, _, _, source, _) <- definitions]
     targets = [name | (_, _, name, _, _) <- definitions]
+    -- The copies monomorphisation made (MirMono's instance names): they
+    -- have no definition marker of their own, and are defined by the
+    -- template's.
+    instanceNames = [name | name <- Map.keys (M.progFunctions program), isInstanceName name]
+    instanceBases = mapMaybe instanceBase instanceNames
+    instanceBase name = case [take i name | (i, '<') <- zip [0 ..] name, balancedSuffix (drop i name)] of
+        base : _ -> Just base
+        [] -> Nothing
+    isInstanceName name = or [balancedSuffix (drop i name) | (i, '<') <- zip [0 ..] name]
+    balancedSuffix suffix = go suffix (0 :: Int)
+      where
+        go [] depth = depth == 0
+        go ('<' : rest) depth = go rest (depth + 1)
+        go ('>' : rest) depth = depth > 0 && go rest (depth - 1)
+        go (_ : rest) depth = go rest depth
     definitionOrder = Map.fromList (zip targets [0 :: Int ..])
     functionCalls = [(name, called) | (name, fn) <- Map.toList (M.progFunctions program),
         block' <- Map.elems (M.fnBlocks fn), M.Call (M.Const (M.CFn called)) _ _ _ <- [M.blockTerminator block']]
