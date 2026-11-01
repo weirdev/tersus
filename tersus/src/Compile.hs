@@ -28,7 +28,7 @@ parseSource source = parseSourceWith True source
 -- A program with the equality library in front of it (unless it declares a trait Eq), as `=` on any type but a word needs, and with no
 -- other library: how the tests of the language read a program
 parseWithEquality :: String -> Either String [Statement]
-parseWithEquality source = case parseStatementBlockWith probeDecls source of
+parseWithEquality source = case probeParse probeDecls emptyDecls source of
     Left err -> Left (show err)
     Right (probed, _) ->
         case [entry | entry@(name, _) <- [("the clone library", cloneSource), ("the equality library", eqSource)], not (declaresLibrary name probed)] of
@@ -41,6 +41,19 @@ parseWithEquality source = case parseStatementBlockWith probeDecls source of
         "the clone library" -> "Clone" `elem` concatMap declaredNames probed
         _ -> "Eq" `elem` concatMap declaredNames probed
 
+-- The first reading of a program, with the declarations the libraries make (probeDecls). A program that
+-- declares a name a library would have given it is read over that declaration (Parse.shadowedCtors), but a
+-- declaration of one library name can also make the other libraries unwanted -- declaring a prelude trait
+-- makes the string library unwanted, so a seeded String constructor must not make `if String { ... }` a
+-- struct literal in this reading. If the seeded reading fails, the program is therefore read again with no
+-- declarations: a program that needs no library is decided from that reading, and a program that does need
+-- one fails the seeded reading, whose error is kept.
+probeParse seeded plain source = case parseStatementBlockWith seeded source of
+    Left err -> case parseStatementBlockWith plain source of
+        Right probed -> Right probed
+        Left _ -> Left err
+    Right probed -> Right probed
+
 -- A program is first read with no library in front of it but the declarations the prelude and the
 -- string library make known to it (probeDecls), so that what in it needs a library can be read at
 -- all: a string literal needs the shape of the library `String`, and an impl of a trait of the
@@ -52,7 +65,7 @@ parseWithEquality source = case parseStatementBlockWith probeDecls source of
 
 -- (the library of lists is the one program that may use the names that a program may not)
 parseSourceWith :: Bool -> String -> Result [Statement] String
-parseSourceWith reserving source = case parseStatementBlockWith (locating probeDecls) source of
+parseSourceWith reserving source = case probeParse (locating probeDecls) (locating emptyDecls) source of
     Left err -> Error ("Parse error: " ++ show err)
     Right (probed, _) -> finish (librariesFor probed)
   where
