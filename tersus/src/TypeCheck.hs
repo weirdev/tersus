@@ -4,6 +4,7 @@ module TypeCheck
     , elaborateWith
     , ImportEnv (..)
     , emptyImportEnv
+    , seededTcState
     , Template (..)
     , renderType
       -- What MirLower needs to give every local of the MIR its type: the checker's monad and the steps of inferExpr

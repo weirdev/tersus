@@ -33,7 +33,7 @@ import qualified Data.Set as Set
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 
-import Parse (Import (..), ParsedFile (..), emptyDecls, locating, parseFileWith, renderPath)
+import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, parseFileWith, renderPath)
 import TersusTypes
 
 data ModuleIdentity = ModuleIdentity
@@ -561,26 +561,77 @@ parseModule resolver entryPath layout moduleName = do
     case Map.lookup moduleId (lsParsed state) of
         Just parsed -> pureM parsed
         Nothing -> do
-            files <- mapM_M parseOne (layoutModuleFiles layout moduleName)
+            files <- parseFiles
             let parsed = PModule layout moduleId moduleName files
             modifyM (\s -> s{lsParsed = Map.insert moduleId parsed (lsParsed s)})
             pureM parsed
   where
-    parseOne entry = case resolverReadFile resolver (fePath entry) of
-        Nothing -> failM ("in module " ++ renderModuleId (layoutModuleId layout moduleName) ++ ": file not found: " ++ fePath entry)
-        Just text -> case parseFileWith (locating emptyDecls) text of
-            Left err ->
-                failM
-                    ( "parse error in module "
-                        ++ renderModuleId (layoutModuleId layout moduleName)
-                        ++ " file "
-                        ++ fePath entry
-                        ++ ": "
-                        ++ show err
-                    )
-            Right (parsedFile, _) -> case checkDeclarationsOnly (layoutModuleId layout moduleName) entry (fePath entry == entryPath) (fileBody parsedFile) of
-                Left err -> failM err
-                Right () -> pureM (PFile entry parsedFile (declarationNames (fileBody parsedFile)))
+    moduleId = layoutModuleId layout moduleName
+    entries = layoutModuleFiles layout moduleName
+    parseFiles = do
+        texts <- mapM_M readEntry entries
+        case parseModuleFiles resolver layout moduleId entries texts of
+            Left err -> failM err
+            Right parsedFiles -> mapM_M checkOne (zip entries parsedFiles)
+      where
+        readEntry entry = case resolverReadFile resolver (fePath entry) of
+            Nothing -> failM ("in module " ++ renderModuleId moduleId ++ ": file not found: " ++ fePath entry)
+            Just text -> pureM (entry, text)
+        checkOne (entry, parsedFile) = case checkDeclarationsOnly moduleId entry (fePath entry == entryPath) (fileBody parsedFile) of
+            Left err -> failM err
+            Right () -> pureM (PFile entry parsedFile (declarationNames (fileBody parsedFile)))
+
+-- A file can name, in a struct or enum literal, a match pattern, an
+-- `is`/`as` test or explicit generic arguments, a type declared in
+-- another file of its package (its own module or an imported one), and
+-- the parser needs that type's constructors before it can read the
+-- file at all. So the files of a package are parsed iteratively: the
+-- declarations of every file that parses are accumulated and the
+-- remaining files are retried with them, until every file parses or a
+-- round makes no progress. A file that still does not parse is
+-- reported with the error it gives on its own, exactly as a
+-- single-file parse reports it.
+parseModuleFiles :: Resolver -> Layout -> ModuleId -> [FileEntry] -> [(FileEntry, String)] -> Either String [ParsedFile]
+parseModuleFiles resolver layout moduleId ownEntries ownTexts =
+    let seed = seedDecls resolver layout ownEntries
+        ordered = [entry | (entry, _) <- ownTexts]
+     in case iterateParses seed ownTexts [] of
+            Right done -> Right [parsedFile | entry <- ordered, Just parsedFile <- [lookup (fePath entry) done]]
+            Left (entry, text) -> case parseFileWith (locating emptyDecls) text of
+                Left err -> Left ("parse error in module " ++ renderModuleId moduleId ++ " file " ++ fePath entry ++ ": " ++ show err)
+                Right _ -> Left ("parse error in module " ++ renderModuleId moduleId ++ " file " ++ fePath entry ++ ": could not be parsed with the declarations of its package")
+  where
+    iterateParses _ [] done = Right done
+    iterateParses decls pending done = case pass decls pending of
+        (decls', [], done') -> iterateParses decls' [] (done ++ done')
+        (decls', remaining, done')
+            | length remaining == length pending -> Left (head remaining)
+            | otherwise -> iterateParses decls' remaining (done ++ done')
+    pass decls pending = go decls pending [] []
+      where
+        go d [] remaining done = (d, reverse remaining, reverse done)
+        go d ((entry, text) : rest) remaining done = case parseFileWith (locating d) text of
+            Right (parsedFile, d') -> go d' rest remaining ((fePath entry, parsedFile) : done)
+            Left _ -> go d rest ((entry, text) : remaining) done
+
+seedDecls :: Resolver -> Layout -> [FileEntry] -> Decls
+seedDecls resolver layout ownEntries = loop emptyDecls texts
+  where
+    layoutEntries = layRootFiles layout ++ concat (Map.elems (layModules layout))
+    ordered = ownEntries ++ [entry | entry <- layoutEntries, fePath entry `notElem` map fePath ownEntries]
+    texts = [(entry, text) | entry <- ordered, Just text <- [resolverReadFile resolver (fePath entry)]]
+    loop decls [] = decls
+    loop decls pending = case pass decls pending of
+        (decls', []) -> decls'
+        (decls', remaining)
+            | length remaining == length pending -> decls
+            | otherwise -> loop decls' remaining
+    pass decls pending = go decls pending []
+      where
+        go d [] remaining = (d, reverse remaining)
+        go d ((entry, text) : rest) remaining = case parseFileWith (locating d) text of
+            Right (_, d') -> go d' rest remaining
+            Left _ -> go d rest ((entry, text) : remaining)
 
 -- Import resolution.
 

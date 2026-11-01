@@ -43,7 +43,9 @@ canonicalForFile :: LoadedPackage -> LoadedFile -> Name -> Name
 canonicalForFile pkg file local = canonicalName (fileIdentity pkg file) local
 
 fileIdentity :: LoadedPackage -> LoadedFile -> ModuleIdentity
-fileIdentity pkg file = fileModuleIdentity (packagePackageName pkg) (maybe "" id (moduleName (loadedFileModule file))) (loadedFileStem file ++ ".tersus")
+fileIdentity pkg file
+    | loadedFileModule file == packageEntryModule pkg = rootModuleIdentity (packagePackageName pkg) (loadedFileStem file ++ ".tersus")
+    | otherwise = fileModuleIdentity (packagePackageName pkg) (maybe "" id (moduleName (loadedFileModule file))) (loadedFileStem file ++ ".tersus")
 
 variantCanonical :: LoadedPackage -> LoadedFile -> Name -> Name
 variantCanonical pkg file variant = case splitOn "::" variant of
