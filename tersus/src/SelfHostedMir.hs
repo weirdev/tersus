@@ -275,6 +275,74 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel r)) _)) [a, b]) b
         ref = record "ValueRef::Local" [("local", MInt local)]
         apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [x, y])]
     pure (leftSteps ++ rightSteps ++ [apply], ref, b3)
+-- What a permission is (its base, its size, its ghost arrays, ...): an
+-- application the contracts relate, as a field is.
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) args) b0
+    | Just name <- accessorName f = do
+        (prefixes, refs, b1) <- foldM evalArg ([], [], b0) args
+        let (function, b2) = namedFunction name b1
+            (i, b3) = fresh b2
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+            apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList refs)]
+        pure (prefixes ++ [apply], ref, b3)
+  where
+    evalArg (steps, refs, b) arg = do
+        (more, ref, b') <- proofOperand env arg b
+        pure (steps ++ more, refs ++ [ref], b')
+    accessorName g = case g of
+        BlockBase -> Just "blockbase"
+        BlockCap -> Just "blockcap"
+        BlockOrigin -> Just "blockorigin"
+        BlockStart -> Just "blockstart"
+        BlockExtent -> Just "blockextent"
+        BlockCount -> Just "blockcount"
+        BlockFilled -> Just "blockfilled"
+        BlockContents -> Just "blockcontents"
+        UninitFilled -> Just "uninitfilled"
+        UninitAt -> Just "uninitat"
+        AddrOffset -> Just "addroffset"
+        AddrCast -> Just "addrcast"
+        AddrToInt -> Just "addrtoint"
+        AddrFromInt -> Just "addrfromint"
+        _ -> Nothing
+-- An operation on a permission in a proof (the parts of one, in the
+-- contract of another): an application, with what the operation needs
+-- and promises, as a call in the code is worth.
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) args) b0
+    | Just _ <- pointerFunctName f = do
+        (prefixes, refs, b1) <- foldM evalArg ([], [], b0) args
+        let (function, b2) = namedFunction ("ghostop:" ++ pointerFunctName' f) b1
+            (i, b3) = fresh b2
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+            apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList refs)]
+        (facts, b4) <- builtinCallFacts f refs local b3
+        pure (prefixes ++ [apply] ++ facts, ref, b4)
+  where
+    evalArg (steps, refs, b) arg = do
+        (more, ref, b') <- proofOperand env arg b
+        pure (steps ++ more, refs ++ [ref], b')
+    pointerFunctName g = case g of
+        BlockNew -> Just ()
+        BlockTaken -> Just ()
+        BlockResized -> Just ()
+        BlockSplitLo -> Just ()
+        BlockSplitHi -> Just ()
+        BlockJoin -> Just ()
+        BlockAssume -> Just ()
+        BlockCast -> Just ()
+        _ -> Nothing
+    pointerFunctName' g = case g of
+        BlockNew -> "blocknew"
+        BlockTaken -> "blocktaken"
+        BlockResized -> "blockresized"
+        BlockSplitLo -> "blocksplitlo"
+        BlockSplitHi -> "blocksplithi"
+        BlockJoin -> "blockjoin"
+        BlockAssume -> "blockassume"
+        BlockCast -> "blockcast"
+        _ -> "op"
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) [a, b]) b0 = do
     op <- case f of
         Plus -> Just M.Add
@@ -299,6 +367,25 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) [a, b]) b0 = do
         (zero, b'') <- operand (M.Const (M.CInt 0)) b'
         pure ([check 1 y zero], b'')
 proofOperand _ _ _ = Nothing
+
+-- What a call of an operation on a permission is worth: what it needs
+-- (checked) and what it promises (assumed of the application's term),
+-- one level deep, as proofCallFacts does for a function of the program.
+builtinCallFacts :: BuiltinFunct -> [MirValue] -> Integer -> Build -> Maybe ([MirValue], Build)
+builtinCallFacts funct refs result b
+    | buildInline b > 0 = pure ([], b)
+    | Just (params, ins, outs) <- builtinSpecOf funct
+    , length argOperands == length refs
+    , length params == length refs = do
+        let env = Map.insert "return" (M.Copy (M.Local (fromInteger result))) (Map.fromList (zip params argOperands))
+            deeper = b{buildInline = buildInline b + 1}
+        (required, b1) <- contractSteps (buildRules b) False env ins deeper
+        (promised, b2) <- contractSteps (buildRules b) True env outs b1
+        pure (required ++ promised, b2{buildInline = buildInline b})
+    | otherwise = pure ([], b)
+  where
+    argOperands = [op | ref <- refs, Just op <- [refOperandOf b ref]]
+
 
 check :: Integer -> MirValue -> MirValue -> MirValue
 check relation a b = step "Check" [("relation", MInt relation), ("left", a), ("right", b)]
@@ -348,6 +435,19 @@ setSteps dest listRef indexRef valueRef b0 = do
     let update = step "Set" [("local", MInt dest), ("list", listRef), ("index", indexRef), ("value", valueRef)]
     pure (bounds ++ [update], b2)
 
+-- The operand a step's value reference names, where it names a local
+-- or a literal: what a contract is bound with at a call.
+refOperandOf :: Build -> MirValue -> Maybe M.Operand
+refOperandOf b (MData "ValueRef::Local" fields) = case lookup "local" fields of
+    Just (MInt n) -> Just (M.Copy (M.Local (fromInteger n)))
+    _ -> Nothing
+refOperandOf b (MData "ValueRef::Term" fields) = case lookup "term" fields of
+    Just (MInt t) -> case [c | (c, i) <- literalIds b, i == t] of
+        c : _ -> Just (M.Const c)
+        [] -> Nothing
+    _ -> Nothing
+refOperandOf _ _ = Nothing
+
 -- What a call in a proof is worth beyond the call application itself:
 -- the callee's ensures, with its parameters bound to the argument
 -- terms and its result to the application's term, as a call in the
@@ -359,10 +459,10 @@ proofCallFacts callee refs result b
     , M.specTermination (M.fnSpec fn) == Just MayDiverge = Nothing
     | buildInline b > 0 = pure ([], b)
     | Just fn <- Map.lookup callee (buildFunctions b)
-    , length argLocals == length argRefs
+    , length argOperands == length argRefs
     , let params = take (length (M.fnParams fn) - length (M.fnSizeParams fn)) (M.fnParams fn)
     , length params == length argRefs = do
-        let bindings = Map.fromList [(p, M.Copy (M.Local (fromInteger n))) | (p, n) <- zip params argLocals]
+        let bindings = Map.fromList (zip params argOperands)
             substitute op = case op of
                 M.Copy l | Just replacement <- Map.lookup l bindings -> replacement
                 M.Move l | Just replacement <- Map.lookup l bindings -> replacement
@@ -374,12 +474,8 @@ proofCallFacts callee refs result b
         pure (required ++ promised, b2{buildInline = buildInline b})
     | otherwise = pure ([], b)
   where
-    argLocals = [n | ref <- refs, Just n <- [refLocal ref]]
+    argOperands = [op | ref <- refs, Just op <- [refOperandOf b ref]]
     argRefs = refs
-    refLocal (MData "ValueRef::Local" fields) = case lookup "local" fields of
-        Just (MInt n) -> Just n
-        _ -> Nothing
-    refLocal _ = Nothing
 
 proofCheck :: M.Env -> VariableProof -> Build -> Maybe ([MirValue], MirValue, Build)
 proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel r)) _)) [a, b]) b0 = do
@@ -412,7 +508,13 @@ proofCheck env (Forall index guards body) b0 = do
         totalStep _ = False
     (guardSteps, b2) <- foldM assumeGuard ([], b1) guards
     (bodyPrefix, checked, b3) <- proofCheck env' body b2
-    pure (havoc : guardSteps ++ bodyPrefix, checked, b3)
+    -- The check is scoped to the havoced index: everything the guards and
+    -- the body made of it is forgotten once the body is checked, because
+    -- an index whose guards cannot hold (an empty range) must not leave
+    -- the context contradictory for what follows.
+    let (fi, b4) = fresh b3
+        forget = step "ApplyFresh" [("local", MInt (negate fi - 1)), ("function", MInt (-40)), ("arguments", MList [record "ValueRef::Local" [("local", MInt local)]])]
+    pure (havoc : guardSteps ++ bodyPrefix ++ [checked], forget, b4)
 proofCheck env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Is variantName)) _)) [arg]) b0 = do
     (prefix, value, b1) <- proofOperand env arg b0
     let (familyId, b2) = namedFunction ("enum:" ++ takeWhile (/= ':') variantName) b1
@@ -425,7 +527,9 @@ proofCheck _ _ _ = Nothing
 -- -30) that the checker instantiates: `forall j in lo..hi: get(a, j) =
 -- get(b, j)`. Other forall shapes keep the havoced-instance encoding.
 forallFactSteps :: M.Env -> VariableProof -> Build -> Maybe ([MirValue], Build)
-forallFactSteps env (Forall index guards body) b0 = case body of
+forallFactSteps env (Forall index guards body) b0
+    | any excluded guards = Nothing
+    | otherwise = case body of
     FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel Eq)) _)) [x, y]
         | Just (a1, base, c) <- constSide x y -> emitConst a1 base c
         | Just (a1, base, c) <- constSide y x -> emitConst a1 base c
@@ -521,7 +625,9 @@ forallFactSteps env (Forall index guards body) b0 = case body of
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [e, BVar i] -> if i == index && not (mentionsIndex e) then Just (list, Just e) else Nothing
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct Plus) _)) [BVar i, e] -> if i == index && not (mentionsIndex e) then Just (list, Just e) else Nothing
         _ -> Nothing
-    getParts _ = Nothing
+    excluded (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [BVar i, _]) = i == index
+    excluded (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel NotEq)) _)) [_, BVar i]) = i == index
+    excluded _ = False
     mentionsIndex (BVar i) = i == index
     mentionsIndex (FApp f args) = mentionsIndex f || any mentionsIndex args
     mentionsIndex _ = False
@@ -561,6 +667,11 @@ contractSteps rules assume env clauses b0 = do
     add (steps, subst, b) clause = case clause of
         ProofAssert proof
             | assume, Just (fsteps, b') <- forallFactSteps env (substituteProof subst proof) b -> pure (steps ++ fsteps, subst, b')
+            -- A forall that is not one of the fact shapes is assumed as
+            -- nothing: the havoced-instance encoding assumes the guards
+            -- for one index, and an index whose guards cannot hold would
+            -- make the whole context contradictory.
+            | assume, Forall _ _ _ <- substituteProof subst proof -> pure (steps, subst, b)
             | otherwise -> do
                 (prefix, checked, b') <- proofCheck env (substituteProof subst proof) b
                 if not assume || callsFunction env (substituteProof subst proof) || all droppable prefix then Just () else Nothing
@@ -580,6 +691,7 @@ contractSteps rules assume env clauses b0 = do
     assumeRule (CheckGtZero proof) b = assumeProof (FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]) b
     assumeRule (Refl proof) b = assumeProof (FApp eqVarProof [proof, proof]) b
     assumeRule _ _ = Nothing
+    assumeProof (Forall _ _ _) b = pure ([], b)
     assumeProof proof b = do
         (prefix, checked, b') <- proofCheck env proof b
         if all droppable prefix then Just () else Nothing
@@ -617,10 +729,7 @@ contractSteps rules assume env clauses b0 = do
     totalStep _ = False
     -- An assumed clause may mention a partial expression (a get, a division):
     -- the reference assumes it without proving it safe, so its safety checks
-    -- are dropped rather than required. A forall is assumed through the
-    -- havoced index its check introduces: that fresh term is one nothing
-    -- else can name, so the assumed body cannot be used at another index.
-    -- Anything else unmodelled declines.
+    -- are dropped rather than required. Anything else unmodelled declines.
     keptStep (MData "ExecutionStep::Havoc" _) = True
     keptStep (MData "ExecutionStep::Assume" _) = True
     keptStep value = totalStep value
@@ -740,6 +849,79 @@ functionId op = case op of
     M.Compare LtEq -> -9
     M.Compare Gt -> -10
     M.Compare GtEq -> -11
+
+-- The operations on addresses and permissions (POINTERS.md), and on
+-- Uninit: what they need and what they promise is what the standard
+-- library's builtin says of them (StdLib), with the permission's ghost
+-- arrays read as the lists the proofs read them as.
+pointerSpec :: M.ListOp -> Maybe ([Variable], [ValidationStatement], [ValidationStatement])
+pointerSpec op = do
+    funct <- case op of
+        M.AddrNull -> Just AddrNull
+        M.AddrOffset -> Just AddrOffset
+        M.AddrCast -> Just AddrCast
+        M.AddrToInt -> Just AddrToInt
+        M.AddrFromInt -> Just AddrFromInt
+        M.AddrAlloc -> Just AddrAlloc
+        M.AddrGet -> Just AddrGet
+        M.AddrWrite -> Just AddrWrite
+        M.AddrTake -> Just AddrTake
+        M.AddrDropValue -> Just AddrDropValue
+        M.AddrDropRange -> Just AddrDropRange
+        M.AddrResize -> Just AddrResize
+        M.AddrFree -> Just AddrFree
+        M.BlockNew -> Just BlockNew
+        M.BlockTaken -> Just BlockTaken
+        M.BlockResized -> Just BlockResized
+        M.BlockSplitLo -> Just BlockSplitLo
+        M.BlockSplitHi -> Just BlockSplitHi
+        M.BlockJoin -> Just BlockJoin
+        M.BlockAssume -> Just BlockAssume
+        M.BlockCast -> Just BlockCast
+        M.UninitEmpty -> Just UninitEmpty
+        M.UninitNew -> Just UninitNew
+        M.UninitGet -> Just UninitGet
+        M.UninitTake -> Just UninitTake
+        M.UninitDiscard -> Just UninitDiscard
+        _ -> Nothing
+    builtinSpecOf funct
+
+-- The name of an operation on a permission, shared by the statement
+-- that runs it and a proof that names its result.
+ghostOpShort :: M.ListOp -> String
+ghostOpShort op = case op of
+    M.AddrNull -> "addrnull"
+    M.AddrOffset -> "addroffset"
+    M.AddrCast -> "addrcast"
+    M.AddrToInt -> "addrtoint"
+    M.AddrFromInt -> "addrfromint"
+    M.AddrAlloc -> "addralloc"
+    M.AddrGet -> "addrget"
+    M.AddrWrite -> "addrwrite"
+    M.AddrTake -> "addrtake"
+    M.AddrDropValue -> "addrdropvalue"
+    M.AddrDropRange -> "addrdroprange"
+    M.AddrResize -> "addrresize"
+    M.AddrFree -> "addrfree"
+    M.BlockNew -> "blocknew"
+    M.BlockTaken -> "blocktaken"
+    M.BlockResized -> "blockresized"
+    M.BlockSplitLo -> "blocksplitlo"
+    M.BlockSplitHi -> "blocksplithi"
+    M.BlockJoin -> "blockjoin"
+    M.BlockAssume -> "blockassume"
+    M.BlockCast -> "blockcast"
+    M.UninitEmpty -> "uninitempty"
+    M.UninitNew -> "uninitnew"
+    M.UninitGet -> "uninitget"
+    M.UninitTake -> "uninittake"
+    M.UninitDiscard -> "uninitdiscard"
+    _ -> "op"
+
+builtinSpecOf :: BuiltinFunct -> Maybe ([Variable], [ValidationStatement], [ValidationStatement])
+builtinSpecOf funct = case builtinFunct funct of
+    VFunct params ins outs _ extra -> Just (params, ins, outs ++ map ProofAssert extra)
+    _ -> Nothing
 
 statement :: Rules -> M.Statement -> Build -> Maybe ([MirValue], Build)
 statement _ (M.Assign (M.Local dest) (M.Use (M.Const (M.CFn _)))) b =
@@ -884,6 +1066,64 @@ statement rules (M.Assign (M.Local dest) (M.ListOp op args)) b
                 M.FileByte -> [step "Assume" [("relation", MInt 3), ("left", low), ("right", ref)], step "Assume" [("relation", MInt 2), ("left", ref), ("right", high)]]
                 _ -> [step "Assume" [("relation", MInt 3), ("left", zero), ("right", ref)]]
         pure (step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList refs)] : bounds, b5)
+statement rules (M.Assign (M.Local dest) (M.ListOp op args)) b0
+    | Just (params, ins, outs) <- pointerSpec op = do
+        if length params == length args then Just () else Nothing
+        -- The arguments are read as they are, into terms of their own,
+        -- before the result is the local's value: one local can be both
+        -- an argument and the result (b = Addr::write(p, i, x, b)), and
+        -- what the operation needs and promises is read of each in its
+        -- own time.
+        (snapshots, snapped, b1) <- foldM snapshot ([], [], b0) args
+        let env = Map.fromList (zip params snapped ++ [("return", M.Copy (M.Local dest))])
+            (function, b2) = namedFunction ("ghostop:" ++ ghostOpShort op) b1
+        (argRefs, b3) <- foldM (\(rs, bb) a -> do (r, bb') <- operand a bb; pure (rs ++ [r], bb')) ([], b2) snapped
+        (required, b4) <- contractSteps rules False env ins b3
+        (promised, b5) <- contractSteps rules True env outs b4
+        (framed, b6) <- frameSteps op snapped (toInteger dest) b5
+        pure (snapshots ++ required ++ [step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList argRefs)]] ++ promised ++ framed, b6)
+  where
+    -- A slot written (or emptied) is a set on the permission's ghost
+    -- arrays, so what the checker knows of a set is known of the block
+    -- after: every other slot as it was, without a forall said again.
+    snapshot (steps, ops, b) arg = do
+        (ref, b1) <- operand arg b
+        let (i, b2) = fresh b1
+            local = M.Local (negate (fromInteger i) - 1)
+        pure (steps ++ [step "Assign" [("local", MInt (toInteger (localNum local))), ("value", ref)]], ops ++ [M.Copy local], b2)
+    frameSteps operation operands dest bIn = case (operation, operands) of
+        (M.AddrWrite, [_, indexOp, valueOp, blockOp]) -> written dest blockOp indexOp (Just valueOp) True bIn
+        (M.AddrDropValue, [_, indexOp, blockOp]) -> written dest blockOp indexOp Nothing False bIn
+        _ -> pure ([], bIn)
+    written dest blockOp indexOp valueOp filled bIn = do
+        (blockRef, b1) <- operand blockOp bIn
+        (indexRef, b2) <- operand indexOp b1
+        (destRef, b3) <- operand (M.Copy (M.Local (fromInteger dest))) b2
+        (f1, srcFilled, b4) <- ghostApp "blockfilled" blockRef b3
+        (f2, dstFilled, b5) <- ghostApp "blockfilled" destRef b4
+        (flagRef, b6) <- operand (M.Const (M.CBool filled)) b5
+        (f3, setFilled, b7) <- setResult srcFilled indexRef flagRef b6
+        (rest, b8) <- case valueOp of
+            Just vOp -> do
+                (valueRef, c1) <- operand vOp b7
+                (g1, srcContents, c2) <- ghostApp "blockcontents" blockRef c1
+                (g2, dstContents, c3) <- ghostApp "blockcontents" destRef c2
+                (g3, setContents, c4) <- setResult srcContents indexRef valueRef c3
+                pure (g1 ++ g2 ++ g3 ++ [assumeEq dstContents setContents], c4)
+            Nothing -> pure ([], b7)
+        pure (f1 ++ f2 ++ f3 ++ [assumeEq dstFilled setFilled] ++ rest, b8)
+    ghostApp name argRef bIn =
+        let (function, b1) = namedFunction name bIn
+            (i, b2) = fresh b1
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+         in pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [argRef])]], ref, b2)
+    setResult listRef indexRef valueRef bIn =
+        let (i, b1) = fresh bIn
+            local = negate i - 1
+            ref = record "ValueRef::Local" [("local", MInt local)]
+         in pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt (-17)), ("arguments", MList [listRef, indexRef, valueRef])]], ref, b1)
+    assumeEq a b = step "Assume" [("relation", MInt 0), ("left", a), ("right", b)]
 statement rules (M.Assign (M.Local dest) (M.ListOp M.FileStore [])) b0 = do
     let (function, b1) = namedFunction "fileStore" b0
     (minusOne, b2) <- operand (M.Const (M.CInt (-1))) b1
@@ -1464,10 +1704,16 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         _ -> Nothing
     invariant env (checks, assumptions, b) (ProofAssert p) = do
         (prefix, checkStep, b') <- proofCheck env p b
-        assumption <- asAssumption checkStep
         case forallFactSteps env p b' of
             Just (fsteps, _) -> pure (checks ++ prefix ++ [checkStep], assumptions ++ fsteps, b')
-            Nothing -> pure (checks ++ prefix ++ [checkStep], assumptions ++ prefix ++ [assumption], b')
+            -- A forall in any other shape is checked but not assumed (see
+            -- contractSteps): assuming one index of it could contradict
+            -- the context when its guards cannot hold.
+            Nothing -> case p of
+                Forall _ _ _ -> pure (checks ++ prefix ++ [checkStep], assumptions, b')
+                _ -> do
+                    assumption <- asAssumption checkStep
+                    pure (checks ++ prefix ++ [checkStep], assumptions ++ prefix ++ [assumption], b')
     invariant _ _ _ = Nothing
     loopType current (steps, b) local = do
         (more, b') <- typeSteps rules types invariants current local b
@@ -1855,9 +2101,9 @@ encodeMono program
     unsupportedDecl (M.StructDecl fields) = any (unsupportedType . snd) fields
     unsupportedDecl (M.EnumDecl variants) = any (any (unsupportedType . snd) . snd) variants
     unsupportedType t = case t of
-        TWord{} -> True
-        TAddr{} -> True
-        TBlock{} -> True
+        TWord{} -> False
+        TAddr{} -> False
+        TBlock{} -> False
         TList element -> unsupportedType element
         TArrayOf element _ -> unsupportedType element
         TBox element -> unsupportedType element
