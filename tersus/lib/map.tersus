@@ -3,9 +3,11 @@
 //
 // A HashMap<K, V> is the entries with one key in buckets chosen by the hash of the key: `hash(k) % size(buckets)` is the bucket,
 // and the entries of a bucket are scanned with `=` on their keys, so a key type needs an impl of Hash (lib/prelude.tersus) and
-// one of Eq (lib/eq.tersus). A map is a value like a list: insert and remove give a new map, lookup clones the value
-// out, and the map owns its entries. When the count reaches four times the number of buckets the entries are spread over twice
-// as many, so a map built by inserting is built in time in proportion to its count.
+// one of Eq (lib/eq.tersus). A map is a value like a list: insert and remove give a new map, lookup and fetch clone the value
+// out, and the map owns its entries. lookupRef and entryRef instead read a value or an entry where it is, as a reference from
+// the map, and entries() clones every entry out where entryRef(n) gives the nth one by reference. When the count reaches four
+// times the number of buckets the entries are spread over twice as many, so a map built by inserting is built in time in
+// proportion to its count.
 //
 // What a caller can rely on today is the contracts on the count (insert adds at most one, remove takes at most one) and
 // contains saying the same as the scan it is. That lookup of a key that was inserted finds it is true when a map runs, and
@@ -44,6 +46,26 @@ fn findIn<K: Eq, V>(entries: &List<Entry<K, V>>, k: &K) -> Int [{ }] [{ affirm r
     return -1;
 };
 
+// The bucket and the place in it of the nth entry in bucket order, as (bucket, place), with place -1 when there is no nth
+// entry: the scan entryRef is, as findIn is the scan lookup is
+fn findNth<K, V>(buckets: &List<List<Entry<K, V>>>, n: Int) -> (Int, Int) [{ affirm size(buckets) >= 1; affirm n >= 0; }] [{
+    affirm return.0 >= 0; affirm return.0 < size(buckets); affirm return.1 >= -1; affirm return.1 < size(get(buckets, return.0));
+}] {
+    seen = 0;
+    b = 0;
+    while b < size(buckets) [{
+        affirm b >= 0; affirm b <= size(buckets); affirm seen >= 0; affirm seen <= n;
+    }] shrinks size(buckets) - b {
+        bucket = &get(buckets, b);
+        if n - seen < size(bucket) {
+            return (b, n - seen);
+        };
+        seen = seen + size(bucket);
+        b = b + 1;
+    };
+    return (0, 0 - 1);
+};
+
 // The buckets with the entry for (k, v) in the bucket idx: in the place `at` of the entry the key already has (which findIn gives), or at
 // its end when `at` is -1
 fn bucketPut<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int, k: K, v: V) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= -1; affirm at < size(get(buckets, idx)); }] [{
@@ -59,12 +81,14 @@ fn bucketPut<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int, k: K, v:
 
 // The buckets with the entry at `at` taken out of the bucket idx (the bucket rebuilt without it; the others are the lists they were)
 fn bucketRemove<K, V>(buckets: List<List<Entry<K, V>>>, idx: Int, at: Int) -> List<List<Entry<K, V>>> [{ affirm idx >= 0; affirm idx < size(buckets); affirm at >= 0; affirm at < size(get(buckets, idx)); }] [{ affirm size(return) = size(buckets); }] {
-    entries = clone(get(buckets, idx));
+    entries = &get(buckets, idx);
     kept = [];
     i = 0;
-    for e in entries {
+    while i < size(entries) [{
+        affirm i >= 0; affirm i <= size(entries);
+    }] shrinks size(entries) - i {
         if i != at {
-            kept = push(kept, clone(e));
+            kept = push(kept, clone(get(entries, i)));
         };
         i = i + 1;
     };
@@ -141,9 +165,16 @@ impl<K: Hash + Eq, V> HashMap<K, V> {
 
     // The value at k, which the caller says is there
     fn fetch(self: &Self, k: &K) -> V [{ affirm findIn(get(self.buckets, Hash::hash(k) % size(self.buckets)), k) >= 0; }] [{ }] {
-        entries = &get(self.buckets, indexFor(size(self.buckets), k));
-        i = findIn(entries, k);
-        return clone(get(entries, i).value);
+        r = self.lookupRef(k);
+        return clone(*r);
+    };
+
+    // A reference to the nth entry in the order of entries(), which the caller says is there: the entry is read where
+    // it is, not cloned out, where entries() clones every entry
+    fn entryRef(self: &Self, n: Int) -> &Entry<K, V> from self [{ affirm n >= 0; affirm findNth(self.buckets, n).1 >= 0; }] [{ }] {
+        loc = findNth(self.buckets, n);
+        bucket = &get(self.buckets, loc.0);
+        return &get(bucket, loc.1);
     };
 
     // Every entry of the map, in bucket order (which order that is says nothing about the keys)

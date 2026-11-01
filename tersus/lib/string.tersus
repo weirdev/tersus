@@ -261,6 +261,10 @@ impl Sequence<Byte> for String {
         return get(self.bytes, i);
     };
 
+    fn getRef(self: &Self, i: Int) -> &Byte from self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm *return = get(self.bytes, i); }] {
+        return &get(self.bytes, i);
+    };
+
     fn set(self: Self, i: Int, x: Byte) -> Self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm size(return.bytes) = size(self.bytes); affirm get(return.bytes, i) = x; }] {
         return Self { bytes: set(self.bytes, i, x) };
     };

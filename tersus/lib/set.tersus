@@ -56,4 +56,13 @@ impl<K: Hash + Eq> HashSet<K> {
         };
         return result;
     };
+
+    // A reference to the nth key in the order of elements(), which the caller says is there: the key is read where
+    // it is, not cloned out, where elements() clones every key
+    fn elementRef(self: &Self, n: Int) -> &K from self [{ affirm n >= 0; affirm size(self.map.buckets) >= 1; affirm findNth(self.map.buckets, n).1 >= 0; }] [{ }] {
+        loc = findNth(self.map.buckets, n);
+        bucket = &get(self.map.buckets, loc.0);
+        e = &get(bucket, loc.1);
+        return &(*e).key;
+    };
 };
