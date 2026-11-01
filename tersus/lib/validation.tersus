@@ -1439,6 +1439,24 @@ fn linFacts(context: &ValidatorContext) -> List<LinFact> {
                                                                                     t = linAddTerm(t, other.id, 1);
                                                                                     t = linAddTerm(t, modY.id, 1);
                                                                                     facts = push(facts, LinFact { terms: t, bound: divisor });
+                                                                                    kvx = integerValue(context, other.id);
+                                                                                    kvy = integerValue(context, modY.id);
+                                                                                    if kvx is IntegerLookup::Found {
+                                                                                        if kvy is IntegerLookup::Found {
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value >= divisor {
+                                                                                                t = linAddTerm([], app.id, 1);
+                                                                                                t = linAddTerm(t, other.id, -1);
+                                                                                                t = linAddTerm(t, modY.id, -1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 - divisor });
+                                                                                            };
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value < divisor {
+                                                                                                t = linAddTerm([], app.id, -1);
+                                                                                                t = linAddTerm(t, other.id, 1);
+                                                                                                t = linAddTerm(t, modY.id, 1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                            };
+                                                                                        };
+                                                                                    };
                                                                                 };
                                                                             };
                                                                         };
@@ -1460,6 +1478,24 @@ fn linFacts(context: &ValidatorContext) -> List<LinFact> {
                                                                                     t = linAddTerm(t, other.id, 1);
                                                                                     t = linAddTerm(t, modY.id, 1);
                                                                                     facts = push(facts, LinFact { terms: t, bound: divisor });
+                                                                                    kvx = integerValue(context, other.id);
+                                                                                    kvy = integerValue(context, modY.id);
+                                                                                    if kvx is IntegerLookup::Found {
+                                                                                        if kvy is IntegerLookup::Found {
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value >= divisor {
+                                                                                                t = linAddTerm([], app.id, 1);
+                                                                                                t = linAddTerm(t, other.id, -1);
+                                                                                                t = linAddTerm(t, modY.id, -1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 - divisor });
+                                                                                            };
+                                                                                            if (kvx as IntegerLookup::Found).value + (kvy as IntegerLookup::Found).value < divisor {
+                                                                                                t = linAddTerm([], app.id, -1);
+                                                                                                t = linAddTerm(t, other.id, 1);
+                                                                                                t = linAddTerm(t, modY.id, 1);
+                                                                                                facts = push(facts, LinFact { terms: t, bound: 0 });
+                                                                                            };
+                                                                                        };
+                                                                                    };
                                                                                 };
                                                                             };
                                                                         };
@@ -4798,6 +4834,210 @@ fn contextContradictory(context: &ValidatorContext) -> Bool {
     return false;
 };
 
+struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int };
+
+impl Clone for InferSubject { };
+
+impl Copy for InferSubject { };
+
+struct InferGoal { relation: Int, left: Int, right: Int, assumes: List<ExecutionStep>, checks: List<ExecutionStep> };
+
+impl Clone for InferGoal { };
+
+struct LoopCandidates { assumes: List<ExecutionStep>, checks: List<ExecutionStep> };
+
+impl Clone for LoopCandidates { };
+
+fn appendSteps(a: &List<ExecutionStep>, b: &List<ExecutionStep>) -> List<ExecutionStep> {
+    out = clone(a);
+    for i in 0..size(b) { out = push(out, clone(get(b, i))); };
+    return out;
+};
+
+fn subjectRef(subject: &InferSubject) -> ValueRef {
+    if subject.isSize { return ValueRef::Local { local: subject.temp }; };
+    return ValueRef::Local { local: subject.local };
+};
+
+fn subjectSteps(subject: &InferSubject) -> List<ExecutionStep> {
+    if subject.isSize {
+        return push([], ExecutionStep::ApplyFresh { local: subject.temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) });
+    };
+    return [];
+};
+
+// Relations between the locals a loop assigns and the values it does not
+// touch, that hold when the loop is reached: counters keep their distance,
+// a list built one element per iteration has the size of its counter, and
+// two counters keep the sum they start with. A candidate is assumed at the
+// header and checked again at the back edge, so keeping one is sound; the
+// ones the body does not keep make the check fail, as the reference's
+// inferred invariants do when the program goes on to use them.
+fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<InferGoal> {
+    work = clone(initial);
+    assigned = [];
+    anchors = [];
+    index = 0;
+    for binding in initial.locals.entries() {
+        if binding.key >= 0 {
+            if containsValue(havoc, binding.key) {
+                if size(assigned) < 12 {
+                    assigned = push(assigned, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value });
+                };
+            } else {
+                if size(anchors) < 12 {
+                    anchors = push(anchors, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value });
+                };
+            };
+        };
+    };
+    extraAssigned = [];
+    for subject in assigned {
+        if size(assigned) + size(extraAssigned) < 12 {
+            temp = 0 - 7000000 - index * 4;
+            index = index + 1;
+            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
+            if made.status = 0 {
+                work = made.state;
+                term = resolveValue(work, ValueRef::Local { local: temp });
+                if term is ValueLookup::Found {
+                    extraAssigned = push(extraAssigned, InferSubject { local: subject.local, isSize: true, temp: temp, term: (term as ValueLookup::Found).term });
+                };
+            };
+        };
+    };
+    for subject in extraAssigned { assigned = push(assigned, subject); };
+    extraAnchors = [];
+    for subject in anchors {
+        if size(anchors) + size(extraAnchors) < 12 {
+            temp = 0 - 7000000 - index * 4;
+            index = index + 1;
+            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
+            if made.status = 0 {
+                work = made.state;
+                term = resolveValue(work, ValueRef::Local { local: temp });
+                if term is ValueLookup::Found {
+                    extraAnchors = push(extraAnchors, InferSubject { local: subject.local, isSize: true, temp: temp, term: (term as ValueLookup::Found).term });
+                };
+            };
+        };
+    };
+    for subject in extraAnchors { anchors = push(anchors, subject); };
+    goals = [];
+    candIndex = 0;
+    for subj in assigned {
+        kv = integerValue(work.context, subj.term);
+        if kv is IntegerLookup::Found {
+            k = (kv as IntegerLookup::Found).value;
+            kTerm = 0;
+            kFound = false;
+            for constant in work.context.constants {
+                if constant.kind = 0 {
+                    if constant.value = k { kTerm = constant.id; kFound = true; };
+                };
+            };
+            if kFound {
+                if size(goals) < 128 {
+                    goals = push(goals, InferGoal { relation: 3, left: kTerm, right: subj.term, assumes: appendSteps(subjectSteps(subj), push([], ExecutionStep::Assume { relation: 3, left: ValueRef::Term { term: kTerm }, right: subjectRef(subj) })), checks: appendSteps(subjectSteps(subj), push([], ExecutionStep::Check { relation: 3, left: ValueRef::Term { term: kTerm }, right: subjectRef(subj) })) });
+                    goals = push(goals, InferGoal { relation: 3, left: subj.term, right: kTerm, assumes: appendSteps(subjectSteps(subj), push([], ExecutionStep::Assume { relation: 3, left: subjectRef(subj), right: ValueRef::Term { term: kTerm } })), checks: appendSteps(subjectSteps(subj), push([], ExecutionStep::Check { relation: 3, left: subjectRef(subj), right: ValueRef::Term { term: kTerm } })) });
+                };
+            };
+        };
+    };
+    for i in 0..size(assigned) {
+        for j in 0..size(assigned) {
+            if i < j {
+                s1 = get(assigned, i);
+                s2 = get(assigned, j);
+                k1 = integerValue(work.context, s1.term);
+                k2 = integerValue(work.context, s2.term);
+                if k1 is IntegerLookup::Found {
+                    if k2 is IntegerLookup::Found {
+                        delta = (k1 as IntegerLookup::Found).value - (k2 as IntegerLookup::Found).value;
+                        if size(goals) < 128 {
+                            if delta = 0 {
+                                goals = push(goals, InferGoal { relation: 0, left: s1.term, right: s2.term, assumes: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })), checks: appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: subjectRef(s2) })) });
+                            } else {
+                                dTerm = 0;
+                                dFound = false;
+                                for constant in work.context.constants {
+                                    if constant.kind = 0 {
+                                        if constant.value = delta { dTerm = constant.id; dFound = true; };
+                                    };
+                                };
+                                if dFound {
+                                    temp = 0 - 7100000 - candIndex * 4;
+                                    candIndex = candIndex + 1;
+                                    made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s2)), ValueRef::Term { term: dTerm }) }));
+                                    if made.status = 0 {
+                                        work = made.state;
+                                        sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                                        if sumTerm is ValueLookup::Found {
+                                            addSteps = push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s2)), ValueRef::Term { term: dTerm }) });
+                                            goals = push(goals, InferGoal { relation: 0, left: s1.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })) });
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    for subj in assigned {
+        for anchor in anchors {
+            if size(goals) < 128 {
+                sameTerm = hasEquality(work.context.equalities, subj.term, anchor.term);
+                keepEqual = true;
+                if subj.isSize = false {
+                    if anchor.isSize = false {
+                        if sameTerm { keepEqual = false; };
+                    };
+                };
+                if keepEqual {
+                    goals = push(goals, InferGoal { relation: 0, left: subj.term, right: anchor.term, assumes: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(subj), right: subjectRef(anchor) })), checks: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Check { relation: 0, left: subjectRef(subj), right: subjectRef(anchor) })) });
+                };
+                goals = push(goals, InferGoal { relation: 3, left: subj.term, right: anchor.term, assumes: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Assume { relation: 3, left: subjectRef(subj), right: subjectRef(anchor) })), checks: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Check { relation: 3, left: subjectRef(subj), right: subjectRef(anchor) })) });
+                goals = push(goals, InferGoal { relation: 3, left: anchor.term, right: subj.term, assumes: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Assume { relation: 3, left: subjectRef(anchor), right: subjectRef(subj) })), checks: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Check { relation: 3, left: subjectRef(anchor), right: subjectRef(subj) })) });
+            };
+        };
+    };
+    for i in 0..size(assigned) {
+        for j in 0..size(assigned) {
+            if i < j {
+                s1 = get(assigned, i);
+                s2 = get(assigned, j);
+                for anchor in anchors {
+                    if size(goals) < 128 {
+                        temp = 0 - 7100000 - candIndex * 4;
+                        candIndex = candIndex + 1;
+                        made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
+                        if made.status = 0 {
+                            work = made.state;
+                            sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                            if sumTerm is ValueLookup::Found {
+                                addSteps = push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) });
+                                goals = push(goals, InferGoal { relation: 0, left: (sumTerm as ValueLookup::Found).term, right: anchor.term, assumes: appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), subjectSteps(anchor)), push([], ExecutionStep::Assume { relation: 0, left: ValueRef::Local { local: temp }, right: subjectRef(anchor) })), checks: appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), subjectSteps(anchor)), push([], ExecutionStep::Check { relation: 0, left: ValueRef::Local { local: temp }, right: subjectRef(anchor) })) });
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    analysis = analyzeContext(work.context);
+    kept = [];
+    for gi in 0..size(goals) {
+        goal = clone(get(goals, gi));
+        holds = false;
+        if goal.relation = 0 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::Equal { left: goal.left, right: goal.right }); };
+        if goal.relation = 3 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::AtMost { left: goal.left, right: goal.right }); };
+        if holds { kept = push(kept, goal); };
+    };
+    return kept;
+};
+
 fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     if fuel = 0 { return ExecutionFlowResult { status: 4, block: id, step: -1, state: clone(initial) }; };
     if size(loops) > 0 {
@@ -4828,79 +5068,143 @@ fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &Execu
             if loop.relation > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.variantMode < 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
             if loop.variantMode > 3 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; };
-            arbitrary = clone(initial);
-            for local in loop.havoc {
-                changed = executeSteps(arbitrary, push([], ExecutionStep::Havoc { local: local }));
-                if changed.status != 0 { return ExecutionFlowResult { status: changed.status, block: id, step: -1, state: changed.state }; };
-                arbitrary = changed.state;
-            };
-            assumed = executeSteps(arbitrary, loop.assumptions);
-            if assumed.status != 0 { return ExecutionFlowResult { status: assumed.status, block: id, step: assumed.failedAt, state: assumed.state }; };
-            header = executeSteps(assumed.state, (*block).steps);
-            if header.status != 0 { return ExecutionFlowResult { status: header.status, block: id, step: header.failedAt, state: header.state }; };
-            left = resolveValue(header.state, loop.left);
-            right = resolveValue(header.state, loop.right);
-            old = resolveValue(header.state, loop.variant);
-            zero = resolveValue(header.state, loop.zero);
-            other = resolveValue(header.state, loop.variantOther);
-            if left is ValueLookup::Found {
-                if right is ValueLookup::Found {
-                    if old is ValueLookup::Found {
-                        if zero is ValueLookup::Found {
-                            if other is ValueLookup::Found {
-                                a = (left as ValueLookup::Found).term;
-                                b = (right as ValueLookup::Found).term;
-                                prior = (old as ValueLookup::Found).term;
-                                priorOther = (other as ValueLookup::Found).term;
-                                z = (zero as ValueLookup::Found).term;
-                                zeroValue = integerValue(header.state.context, z);
-                                if zeroValue is IntegerLookup::Found {
-                                    if (zeroValue as IntegerLookup::Found).value != 0 { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
-                                } else { return ExecutionFlowResult { status: 2, block: id, step: -1, state: header.state }; };
-                                yesContext = assumeRelation(header.state.context, loop.relation, a, b);
-                                if loop.variantFamily >= 0 {
-                                    variantObject = resolveValue(header.state, loop.variantObject);
-                                    if variantObject is ValueLookup::Found {
-                                        yesContext = ValidatorContext { variants: push(clone(yesContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: true }), ..yesContext };
-                                    };
-                                };
-                                if loop.variantMode = 0 {
-                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
-                                        return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
-                                    };
-                                } else {
-                                    if loop.variantMode = 1 {
-                                        if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
-                                            return ExecutionFlowResult { status: 1, block: id, step: -1, state: header.state };
+            inferredGoals = inferLoopCandidateGoals(initial, loop.havoc);
+            survivors = clone(inferredGoals);
+            finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) };
+            done = false;
+            for attempt in 0..size(inferredGoals) + 2 {
+                if done = false {
+                    candAssumes = [];
+                    candChecks = [];
+                    candCheckPos = [];
+                    pos = size(loop.checks);
+                    for gi in 0..size(survivors) {
+                        g = get(survivors, gi);
+                        for si in 0..size(g.assumes) { candAssumes = push(candAssumes, clone(get(g.assumes, si))); };
+                        for si in 0..size(g.checks) { candChecks = push(candChecks, clone(get(g.checks, si))); };
+                        candCheckPos = push(candCheckPos, pos + size(g.checks) - 1);
+                        pos = pos + size(g.checks);
+                    };
+                    arbitrary = clone(initial);
+                    for local in loop.havoc {
+                        if done = false {
+                            changed = executeSteps(arbitrary, push([], ExecutionStep::Havoc { local: local }));
+                            if changed.status != 0 { finalResult = ExecutionFlowResult { status: changed.status, block: id, step: -1, state: clone(changed.state) }; done = true; };
+                            if done = false { arbitrary = changed.state; };
+                        };
+                    };
+                    if done = false {
+                        assumed = executeSteps(arbitrary, loop.assumptions);
+                        if assumed.status != 0 { finalResult = ExecutionFlowResult { status: assumed.status, block: id, step: assumed.failedAt, state: clone(assumed.state) }; done = true; };
+                        if done = false {
+                            assumed = executeSteps(assumed.state, candAssumes);
+                            if assumed.status != 0 { finalResult = ExecutionFlowResult { status: assumed.status, block: id, step: assumed.failedAt, state: clone(assumed.state) }; done = true; };
+                            if done = false {
+                                header = executeSteps(assumed.state, (*block).steps);
+                                if header.status != 0 { finalResult = ExecutionFlowResult { status: header.status, block: id, step: header.failedAt, state: clone(header.state) }; done = true; };
+                                if done = false {
+                                    headerState = clone(header.state);
+                                    left = resolveValue(headerState, loop.left);
+                                    right = resolveValue(headerState, loop.right);
+                                    old = resolveValue(headerState, loop.variant);
+                                    zero = resolveValue(headerState, loop.zero);
+                                    other = resolveValue(headerState, loop.variantOther);
+                                    if left is ValueLookup::Found {
+                                        if right is ValueLookup::Found {
+                                            if old is ValueLookup::Found {
+                                                if zero is ValueLookup::Found {
+                                                    if other is ValueLookup::Found {
+                                                        a = (left as ValueLookup::Found).term;
+                                                        b = (right as ValueLookup::Found).term;
+                                                        prior = (old as ValueLookup::Found).term;
+                                                        priorOther = (other as ValueLookup::Found).term;
+                                                        z = (zero as ValueLookup::Found).term;
+                                                        zeroValue = integerValue(headerState.context, z);
+                                                        if zeroValue is IntegerLookup::Found {
+                                                            if (zeroValue as IntegerLookup::Found).value != 0 { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
+                                                        } else { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(headerState) }; done = true; };
+                                                        if done = false {
+                                                            yesContext = assumeRelation(headerState.context, loop.relation, a, b);
+                                                            if loop.variantFamily >= 0 {
+                                                                variantObject = resolveValue(headerState, loop.variantObject);
+                                                                if variantObject is ValueLookup::Found {
+                                                                    yesContext = ValidatorContext { variants: push(clone(yesContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: true }), ..yesContext };
+                                                                };
+                                                            };
+                                                            if loop.variantMode = 0 {
+                                                                if entailsGoal(yesContext, ValidatorGoal::AtMost { left: z, right: prior }) = false {
+                                                                    finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
+                                                                };
+                                                            } else {
+                                                                if loop.variantMode = 1 {
+                                                                    if entailsGoal(yesContext, ValidatorGoal::AtMost { left: prior, right: priorOther }) = false {
+                                                                        finalResult = ExecutionFlowResult { status: 1, block: id, step: -1, state: clone(headerState) }; done = true;
+                                                                    };
+                                                                };
+                                                            };
+                                                            if done = false {
+                                                                protectedFacts = push(yesContext.equalities, EqualityFact { left: prior, right: prior });
+                                                                protectedFacts = push(protectedFacts, EqualityFact { left: priorOther, right: priorOther });
+                                                                protected = ValidatorContext { equalities: protectedFacts, ..yesContext };
+                                                                yesState = ExecutionState { context: protected, ..clone(headerState) };
+                                                                frame = LoopFrame { header: id, region: clone(loop.region), checks: appendSteps(loop.checks, candChecks), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: prior, priorOther: priorOther };
+                                                                bodyResult = walkExecution(blocks, loop.body, yesState, fuel - 1, push(clone(loops), frame));
+                                                                if bodyResult.status != 0 { finalResult = bodyResult; done = true; };
+                                                                if done = false {
+                                                                    inverse = negateRelation(loop.relation, a, b);
+                                                                    noContext = assumeRelation(headerState.context, inverse.relation, inverse.left, inverse.right);
+                                                                    if loop.variantFamily >= 0 {
+                                                                        variantObject = resolveValue(headerState, loop.variantObject);
+                                                                        if variantObject is ValueLookup::Found {
+                                                                            noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
+                                                                        };
+                                                                    };
+                                                                    if contextContradictory(noContext) {
+                                                                        finalResult = ExecutionFlowResult { status: 0, block: id, step: -1, state: ExecutionState { context: clone(noContext), ..clone(headerState) } }; done = true;
+                                                                    };
+                                                                    if done = false {
+                                                                        noState = ExecutionState { context: noContext, ..clone(headerState) };
+                                                                        finalResult = walkExecution(blocks, loop.exit, noState, fuel - 1, clone(loops)); done = true;
+                                                                    };
+                                                                };
+                                                            };
+                                                        };
+                                                    };
+                                                };
+                                            };
                                         };
                                     };
+                                    if done = false { finalResult = ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) }; done = true; };
                                 };
-                                // Keep the prior variant live even if its local is overwritten.
-                                protectedFacts = push(yesContext.equalities, EqualityFact { left: prior, right: prior });
-                                protectedFacts = push(protectedFacts, EqualityFact { left: priorOther, right: priorOther });
-                                protected = ValidatorContext { equalities: protectedFacts, ..yesContext };
-                                yesState = ExecutionState { context: protected, ..clone(header.state) };
-                                frame = LoopFrame { header: id, region: clone(loop.region), checks: clone(loop.checks), variant: loop.variant, variantMode: loop.variantMode, variantOther: loop.variantOther, prior: prior, priorOther: priorOther };
-                                bodyResult = walkExecution(blocks, loop.body, yesState, fuel - 1, push(clone(loops), frame));
-                                if bodyResult.status != 0 { return bodyResult; };
-                                inverse = negateRelation(loop.relation, a, b);
-                                noContext = assumeRelation(header.state.context, inverse.relation, inverse.left, inverse.right);
-                                if loop.variantFamily >= 0 {
-                                    variantObject = resolveValue(header.state, loop.variantObject);
-                                    if variantObject is ValueLookup::Found {
-                                        noContext = ValidatorContext { variants: push(clone(noContext.variants), VariantFact { object: (variantObject as ValueLookup::Found).term, family: loop.variantFamily, constructor: loop.variantConstructor, matches: false }), ..noContext };
+                            };
+                        };
+                    };
+                    if done {
+                        if finalResult.status != 0 {
+                            if size(survivors) > 0 {
+                                dropIndex = -1;
+                                if finalResult.block = id {
+                                    for ci in 0..size(candCheckPos) {
+                                        if get(candCheckPos, ci) = finalResult.step { dropIndex = ci; };
                                     };
                                 };
-                                if contextContradictory(noContext) {
-                                    return ExecutionFlowResult { status: 0, block: id, step: -1, state: ExecutionState { context: noContext, ..header.state } };
+                                if dropIndex >= 0 {
+                                    nextSurvivors = [];
+                                    for ci in 0..size(survivors) {
+                                        if ci != dropIndex { nextSurvivors = push(nextSurvivors, clone(get(survivors, ci))); };
+                                    };
+                                    survivors = nextSurvivors;
+                                    done = false;
+                                } else {
+                                    survivors = [];
+                                    done = false;
                                 };
-                                noState = ExecutionState { context: noContext, ..header.state };
-                                return walkExecution(blocks, loop.exit, noState, fuel - 1, loops);
                             };
                         };
                     };
                 };
             };
+            return finalResult;
             return ExecutionFlowResult { status: 2, block: id, step: -1, state: clone(initial) };
         };
         if end is ExecutionEnd::Condition {

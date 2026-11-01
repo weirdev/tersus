@@ -1289,10 +1289,18 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
     -- validator does.
     encodeLoop spec yes no dummyLocal (r, a, c, variantTestInfo, withCondition) = do
         if testChainToBody spec no yes && yes /= blockId && no /= blockId && no /= yes then Just () else Nothing
+        let region = Map.findWithDefault (Set.singleton blockId) blockId (loopRegions fn)
+            assigned = nub
+                [ v
+                | member <- Set.toList region
+                , Just (M.BasicBlock blockStmts term) <- [Map.lookup member (M.fnBlocks fn)]
+                , v <- [d | M.Assign d _ <- blockStmts] ++ [r | M.AssignRef r _ _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> []) ++ mutCallRoots term
+                ]
         (genVariant, withCondition') <- case M.loopTermination spec of
             Just (Counting expr) -> case expr of
                 Var _ -> Just (Nothing, withCondition)
-                F (Val (VFunct _ _ _ (BuiltinFunct Minus) _)) [_, Var _] -> Just (Nothing, withCondition)
+                F (Val (VFunct _ _ _ (BuiltinFunct Minus) _)) [upperExpr, Var _]
+                    | all (upperStable (M.loopEnv spec) assigned) (expressionVars upperExpr) -> Just (Nothing, withCondition)
                 _ -> do
                     (vSteps, vRef, b') <- exprOperand (M.loopEnv spec) expr withCondition
                     Just (Just (vSteps, vRef), b')
@@ -1312,14 +1320,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             _ -> Nothing
         decl <- Map.lookup variantLocal (M.fnLocals fn)
         if mode >= 2 || M.localType decl == TInt || genVariant /= Nothing then Just () else Nothing
-        let region = Map.findWithDefault (Set.singleton blockId) blockId (loopRegions fn)
-            assigned = nub
-                [ v
-                | member <- Set.toList region
-                , Just (M.BasicBlock blockStmts term) <- [Map.lookup member (M.fnBlocks fn)]
-                , v <- [d | M.Assign d _ <- blockStmts] ++ [r | M.AssignRef r _ _ <- blockStmts] ++ (case term of M.Call _ _ d _ -> [d]; _ -> []) ++ mutCallRoots term
-                ]
-        if all (upperStable (M.loopEnv spec) assigned) (expressionVars upper) then Just () else Nothing
+        if genVariant /= Nothing || all (upperStable (M.loopEnv spec) assigned) (expressionVars upper) then Just () else Nothing
         (variantRef, variantSteps, b1) <- case genVariant of
             Just (vSteps, vRef) -> Just (vRef, vSteps, withCondition')
             Nothing -> do
@@ -1336,7 +1337,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         pure (variantSteps ++ upperSteps ++ divergeGuard, record "ExecutionEnd::Loop" [("exit", MInt (toInteger exitId)), ("body", MInt (toInteger bodyId)),
              ("region", MList [MInt (toInteger number) | M.BlockId number <- Set.toList region]),
              ("checks", MList checks), ("assumptions", MList assumptions), ("havoc", MList (map (MInt . localNumber) assigned)),
-             ("relation", MInt kind), ("left", left), ("right", right), ("variant", variantRef), ("variantMode", MInt mode),
+             ("relation", MInt kind), ("left", left), ("right", right), ("variant", variantRef), ("variantMode", MInt (if genVariant /= Nothing then 0 else mode)),
              ("variantOther", upperRef), ("zero", zeroRef),
              ("variantObject", maybe (localRef (localNumber dummyLocal)) (\(object, _, _) -> object) variantTestInfo),
              ("variantFamily", MInt (maybe (-1) (\(_, familyId, _) -> familyId) variantTestInfo)),
