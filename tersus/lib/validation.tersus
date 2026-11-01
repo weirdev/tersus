@@ -1285,7 +1285,9 @@ fn linGcd(a: Int, b: Int) -> Int {
 
 fn linFloorDiv(a: Int, g: Int) -> Int {
     if a >= 0 { return a / g; };
-    return 0 - ((0 - a + g - 1) / g);
+    q = a / g;
+    if a % g = 0 { return q; };
+    return q - 1;
 };
 
 // Over integers a fact may be divided through by the gcd of its
@@ -1300,9 +1302,28 @@ fn linNormalize(fact: &LinFact) -> LinFact {
 };
 
 fn linCombine(a: &LinFact, scaleA: Int, b: &LinFact, scaleB: Int) -> LinFact {
-    terms = linScale(a.terms, scaleA);
-    for t in b.terms { terms = linAddTerm(terms, t.term, t.coeff * scaleB); };
-    return linNormalize(LinFact { terms: terms, bound: scaleA * a.bound + scaleB * b.bound });
+    // The reference reasons over mathematical integers; a running
+    // program cannot. A combination whose bound (or a coefficient) is
+    // not representable is dropped, by returning a fact that says
+    // nothing: 0 <= the greatest integer.
+    boundA = safeProduct(scaleA, a.bound);
+    if boundA is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+    boundB = safeProduct(scaleB, b.bound);
+    if boundB is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+    bound = safeBoundSum((boundA as SumResult::Sum).value, (boundB as SumResult::Sum).value);
+    if bound is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+    terms = [];
+    for t in a.terms {
+        p = safeProduct(t.coeff, scaleA);
+        if p is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+        terms = linAddTerm(terms, t.term, (p as SumResult::Sum).value);
+    };
+    for t in b.terms {
+        p = safeProduct(t.coeff, scaleB);
+        if p is SumResult::Overflow { return LinFact { terms: [], bound: 9223372036854775807 }; };
+        terms = linAddTerm(terms, t.term, (p as SumResult::Sum).value);
+    };
+    return linNormalize(LinFact { terms: terms, bound: (bound as SumResult::Sum).value });
 };
 
 fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
@@ -1331,7 +1352,12 @@ fn linFacts(context: &ValidatorContext) -> List<LinFact> {
     for c in context.constants {
         if c.kind = 0 {
             facts = push(facts, linFact2(c.id, 1, c.id, 0, c.value));
-            facts = push(facts, linFact2(c.id, -1, c.id, 0, 0 - c.value));
+            // (the least integer has no negation a program can write;
+            // the fact it would give, that the term is at least that
+            // integer, says nothing, so it is left out)
+            if c.value > -9223372036854775807 - 1 {
+                facts = push(facts, linFact2(c.id, -1, c.id, 0, 0 - c.value));
+            };
         };
     };
     for app in context.applications {
@@ -2720,11 +2746,23 @@ fn entailsGoalAnalyzed(context: &ValidatorContext, analysis: &ContextAnalysis, g
     };
     if goal is ValidatorGoal::Less {
         g = goal as ValidatorGoal::Less;
+        lv = integerValue(context, g.left);
+        if lv is IntegerLookup::Found {
+            if (lv as IntegerLookup::Found).value <= -1 {
+                if isSizeTerm(context.applications, g.right) { return true; };
+            };
+        };
         if hasDifference(analysis.equalities, analysis.differences, g.left, g.right, -1) { return true; };
         return linearEntails(context, g.left, g.right, -1);
     };
     if goal is ValidatorGoal::AtMost {
         g = goal as ValidatorGoal::AtMost;
+        lv = integerValue(context, g.left);
+        if lv is IntegerLookup::Found {
+            if (lv as IntegerLookup::Found).value <= 0 {
+                if isSizeTerm(context.applications, g.right) { return true; };
+            };
+        };
         if hasDifference(analysis.equalities, analysis.differences, g.left, g.right, 0) { return true; };
         return linearEntails(context, g.left, g.right, 0);
     };
