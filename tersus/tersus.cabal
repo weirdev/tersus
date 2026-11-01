@@ -58,6 +58,7 @@ library
       MirMoves
       MirOwnership
       MirValidate
+      Modules
       Native
       Parse
       Pipeline
@@ -165,6 +166,7 @@ test-suite tersus-test
       TestMirEval
       TestMirReader
       TestMirVerify
+      TestModules
       TestNative
       TestOwnership
       TestPipeline
