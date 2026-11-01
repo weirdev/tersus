@@ -1,10 +1,14 @@
 module TypeCheck
     ( typeCheck
     , elaborate
+    , elaborateWith
+    , ImportEnv (..)
+    , emptyImportEnv
+    , Template (..)
     , renderType
       -- What MirLower needs to give every local of the MIR its type: the checker's monad and the steps of inferExpr
     , TC
-    , TcState
+    , TcState (..)
     , initialTcState
     , runTcState
     , valueType
@@ -63,6 +67,50 @@ elaborate stmts =
         Left err -> Error err
         Right stmts' -> Ok stmts'
 
+data ImportEnv = ImportEnv
+    { ieTypes :: Map Name [Name]
+    , ieCtors :: Map Name (Name, [(Variable, Type)])
+    , ieGenerics :: Map Name ([Variable], [(Variable, Type)])
+    , ieTraits :: Map Name [TraitFn]
+    , ieTraitParams :: Map Name [Variable]
+    , ieFunctions :: Map Name Type
+    , ieImpls :: Set.Set (Name, Name)
+    , ieAssoc :: Map (Name, Name) [Maybe Name]
+    , ieImplArgs :: Map (Name, Name) (Name, [Arg])
+    , ieImplBounds :: Map (Name, Name) [Bound]
+    , ieLinear :: Set.Set Name
+    , ieDrops :: Set.Set Name
+    , ieRefResults :: Map Name ([Variable], [Variable])
+    , iePredeclareOwn :: Bool
+    }
+    deriving (Show, Eq)
+
+emptyImportEnv :: ImportEnv
+emptyImportEnv = ImportEnv Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty Map.empty False
+
+elaborateWith :: ImportEnv -> [Statement] -> Result ([Statement], TcState) String
+elaborateWith env stmts =
+    case runTcState (checkProgramWith env stmts) (seededTcState env) of
+        Left err -> Error err
+        Right (stmts', state) -> Ok (stmts', state)
+
+seededTcState :: ImportEnv -> TcState
+seededTcState env =
+    initialTcState
+        { tcTypes = Map.union (ieTypes env) (tcTypes initialTcState)
+        , tcCtors = Map.union (ieCtors env) (tcCtors initialTcState)
+        , tcGenerics = Map.union (ieGenerics env) (tcGenerics initialTcState)
+        , tcTraits = Map.union (ieTraits env) (tcTraits initialTcState)
+        , tcTraitParams = Map.union (ieTraitParams env) (tcTraitParams initialTcState)
+        , tcImpls = Set.union (ieImpls env) (tcImpls initialTcState)
+        , tcAssoc = Map.union (ieAssoc env) (tcAssoc initialTcState)
+        , tcImplArgs = Map.union (ieImplArgs env) (tcImplArgs initialTcState)
+        , tcImplBounds = Map.union (ieImplBounds env) (tcImplBounds initialTcState)
+        , tcLinear = Set.union (ieLinear env) (tcLinear initialTcState)
+        , tcDrops = Set.union (ieDrops env) (tcDrops initialTcState)
+        , tcRefResults = Map.union (ieRefResults env) (tcRefResults initialTcState)
+        }
+
 
 -- The checking monad: a substitution for the type variables, a counter for new ones, and failure
 
@@ -102,6 +150,7 @@ data TcState = TcState
     , tcRefOrigins :: Map Variable [Variable] -- what each local that holds references (or a value that holds them) is from: the roots of its places
     , tcImplBounds :: Map (Name, Name) [Bound] -- for a trait and a type whose impl of it has bounds (`impl<T: Eq> Eq for List<T>`), the bounds
     , tcCompanions :: Map Name [Name] -- for a function of an impl with bounds, the template of the check of it against its trait, made with it
+    , tcPredeclared :: Set.Set Name
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -123,7 +172,7 @@ runTc :: TC a -> Either String a
 runTc tc = fmap fst (runTcState tc initialTcState)
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty Set.empty
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -587,9 +636,12 @@ declareType name = declareTypeWith name [name]
 declareTypeWith :: Name -> [Name] -> TC ()
 declareTypeWith name ctors = do
     s <- getState
-    if Map.member name (tcTypes s) || Map.member name (tcTraits s)
-        then failTc ("Type already defined: " ++ name)
-        else putState s{tcTypes = Map.insert name ctors (tcTypes s)}
+    if Set.member name (tcPredeclared s)
+        then putState s{tcTypes = Map.insert name ctors (tcTypes s), tcPredeclared = Set.delete name (tcPredeclared s)}
+        else
+            if Map.member name (tcTypes s) || Map.member name (tcTraits s)
+                then failTc ("Type already defined: " ++ name)
+                else putState s{tcTypes = Map.insert name ctors (tcTypes s)}
 
 -- Whether a type uses the struct being declared with a type argument that is made of the parameters without being one of them
 selfExpands :: Name -> Type -> Bool
@@ -614,16 +666,24 @@ selfExpands name ty = case ty of
 declareGeneric :: Name -> [Variable] -> [(Variable, Type)] -> TC ()
 declareGeneric name params fields = do
     s <- getState
-    if Map.member name (tcTypes s) || Map.member name (tcTraits s) || Map.member name (tcGenerics s)
-        then failTc ("Type already defined: " ++ name)
-        else do
+    if Set.member name (tcPredeclared s)
+        then do
+            putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s), tcPredeclared = Set.delete name (tcPredeclared s)}
             when (length params /= length (nubSizes params)) $ failTc ("Type error: " ++ name ++ " names a parameter twice")
-            putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s)}
             when (any (selfExpands name . snd) fields) $
                 failTc ("Type error: " ++ name ++ " uses itself with a type made of its own parameters, which would make a struct for each depth (Node<List<T>> inside Node<T>): a struct that holds itself gives its own parameters as they are")
-            -- (the fields are checked with the sizes and types in scope, and the struct may hold itself in a Box)
             withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkFieldType . snd) fields)
             checkFinite name [fields]
+        else
+            if Map.member name (tcTypes s) || Map.member name (tcTraits s) || Map.member name (tcGenerics s)
+                then failTc ("Type already defined: " ++ name)
+                else do
+                    when (length params /= length (nubSizes params)) $ failTc ("Type error: " ++ name ++ " names a parameter twice")
+                    putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s)}
+                    when (any (selfExpands name . snd) fields) $
+                        failTc ("Type error: " ++ name ++ " uses itself with a type made of its own parameters, which would make a struct for each depth (Node<List<T>> inside Node<T>): a struct that holds itself gives its own parameters as they are")
+                    withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkFieldType . snd) fields)
+                    checkFinite name [fields]
   where
     nubSizes = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
@@ -1398,13 +1458,67 @@ functionType sizes types ptys rty = TForall sizes types (TFn ptys rty)
 -- Programs
 
 checkProgram :: [Statement] -> TC [Statement]
-checkProgram stmts = snd <$> checkStatements True (Ctx gathered Nothing) [Map.empty] stmts
+checkProgram stmts = checkProgramWith emptyImportEnv stmts
+
+checkProgramWith :: ImportEnv -> [Statement] -> TC [Statement]
+checkProgramWith env stmts = do
+    when (iePredeclareOwn env) $ do
+        predeclareOwn stmts
+        checkOwnFinite stmts
+    snd <$> checkStatements True (Ctx gathered Nothing) [Map.empty] stmts
   where
-    -- the signature of every function defined at the top is known before any body is checked, so a function
-    -- can call the ones defined after it (and they can call it back). A name the language itself gives a
-    -- meaning (a builtin, or a ghost function of proofs such as `filled`) is not gathered: in a proof
-    -- before its definition such a name is the language's, as it was when it was only seen after it.
-    gathered = Map.fromList [(var, functionType sizes types ptys rty) | Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _)) <- stmts, not (Map.member var stdLibCtx), ghostFunction var == Nothing]
+    gathered =
+        Map.union
+            (Map.fromList [(var, functionType sizes types ptys rty) | Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _)) <- stmts, not (Map.member var stdLibCtx), ghostFunction var == Nothing])
+            (ieFunctions env)
+
+predeclareOwn :: [Statement] -> TC ()
+predeclareOwn stmts = do
+    s <- getState
+    let add stmt st = case stmt of
+            StructDef name params fields _
+                | null params -> st{tcTypes = Map.insert name [name] (tcTypes st), tcCtors = Map.insert name (name, fields) (tcCtors st), tcPredeclared = Set.insert name (tcPredeclared st)}
+                | otherwise -> st{tcGenerics = Map.insert name (params, fields) (tcGenerics st), tcPredeclared = Set.insert name (tcPredeclared st)}
+            EnumDef name variants ->
+                st
+                    { tcTypes = Map.insert name (map fst variants) (tcTypes st)
+                    , tcCtors = foldr (\(variant, fields) m -> Map.insert variant (name, fields) m) (tcCtors st) variants
+                    , tcPredeclared = Set.insert name (tcPredeclared st)
+                    }
+            TraitDef name params functions -> st{tcTraits = Map.insert name functions (tcTraits st), tcTraitParams = Map.insert name params (tcTraitParams st), tcPredeclared = Set.insert name (tcPredeclared st)}
+            _ -> st
+    putState (foldr add s stmts)
+
+checkOwnFinite :: [Statement] -> TC ()
+checkOwnFinite stmts =
+    case findCycle graph of
+        Just cycle -> failTc ("Type error: " ++ head cycle ++ " holds itself by value, so it would have no size: hold the recursion in a Box (cycle: " ++ intercalate " -> " cycle ++ ")")
+        Nothing -> return ()
+  where
+    graph = Map.fromListWith (++) [(name, heldBases fields) | (name, fields) <- ownTypes]
+    ownTypes =
+        [(name, map snd fields) | StructDef name _ fields _ <- stmts]
+            ++ [(name, concatMap (map snd . snd) variants) | EnumDef name variants <- stmts]
+    heldBases fields = concatMap heldBase fields
+    heldBase ty = case ty of
+        TNamed name -> [maybe name fst (instanceOf name)]
+        TVariant variant -> [takeWhile (/= ':') variant]
+        TArrayOf inner _ -> heldBase inner
+        _ -> []
+    findCycle g = snd (foldl step (Set.empty, Nothing) (Map.keys g))
+      where
+        step (visited, found) node = case found of
+            Just _ -> (visited, found)
+            Nothing -> dfs visited [] node
+        dfs visited stack node
+            | node `elem` stack = (visited, Just (dropWhile (/= node) stack ++ [node]))
+            | Set.member node visited = (visited, Nothing)
+            | otherwise = go (Set.insert node visited) (stack ++ [node]) [target | target <- Map.findWithDefault [] node g, Map.member target g]
+          where
+            go visited' _ [] = (visited', Nothing)
+            go visited' stack' (next : rest) = case dfs visited' stack' next of
+                (visited'', Just cycle) -> (visited'', Just cycle)
+                (visited'', Nothing) -> go visited'' stack' rest
 
 -- Statements run in order; a top-level function is visible to the functions after it, and the
 -- returned environment holds the variables the statements defined in the innermost scope.
@@ -2259,8 +2373,12 @@ primitiveTraitCall _ _ _ _ _ _ = return Nothing
 -- mistake in the trait is reported at the trait and not at its first impl
 checkTrait :: Name -> [Variable] -> [TraitFn] -> TC ()
 checkTrait name params functions = do
+    s0 <- getState
+    let wasPredeclared = Set.member name (tcPredeclared s0)
+    when wasPredeclared $ putState s0{tcPredeclared = Set.delete name (tcPredeclared s0)}
     s <- getState
-    when (Map.member name (tcTraits s) || Map.member name (tcTypes s)) $ failTc ("Type error: " ++ name ++ " is already defined")
+    when (Map.member name (tcTypes s)) $ failTc ("Type error: " ++ name ++ " is already defined")
+    when (Map.member name (tcTraits s) && not wasPredeclared) $ failTc ("Type error: " ++ name ++ " is already defined")
     putState s{tcTypes = Map.insert "Self" [] (tcTypes s), tcTraitSelf = Just (functions ++ concat (Map.elems (tcTraits s)))}
     -- (the types of the trait are types in its signatures and contracts)
     withGenerics [] params $ forM_ functions $ \f -> do

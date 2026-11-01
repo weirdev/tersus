@@ -147,7 +147,7 @@ canonicalizeDeclarations identity statements
             Assign
                 (renameAssignName name)
                 (Val (VFunct params ins outs (renameBody body) exported))
-        other -> renameStatement other
+        other -> other
     renameAssignName name
         | Set.member name locals = canonicalName identity name
         | '<' `elem` name = renameImplFunction name
@@ -189,6 +189,10 @@ canonicalizeDeclarations identity statements
                 (renameNamed selfName)
                 [(param, canon boundTrait, map renameType args) | (param, boundTrait, args) <- bounds]
                 (map renameFunction functions)
+        ExternDef name -> ExternDef (canon name)
+        LinearDef name -> LinearDef (canon name)
+        CopyDef name -> CopyDef (canon name)
+        DropDef name -> DropDef (canon name)
         other -> other
 
 -- ---------------------------------------------------------------------------

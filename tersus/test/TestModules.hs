@@ -8,9 +8,10 @@ import Data.List (isInfixOf)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removeDirectoryRecursive)
 import System.FilePath ((</>))
 
+import Interface
 import Modules
 import Parse
-import Pipeline (compileSource)
+import Pipeline (CompiledModule (..), CompiledPackage (..), compileModules, compileSource)
 import TersusTypes
 import TestHarness
 import TypeCheck (elaborate)
@@ -457,5 +458,159 @@ testLoaderFilesystem = TestCase "loader-filesystem" $ do
         removeDirectoryRecursive dir
         return value
 
+-- Phase 3: per-module checking against interfaces.
+
+compilePkg :: Files -> FilePath -> Either String CompiledPackage
+compilePkg files entry = case loadPkg files entry of
+    Left err -> Left err
+    Right pkg -> case compileModules pkg of
+        Error err -> Left err
+        Ok compiled -> Right compiled
+
+expectCompiles :: Files -> FilePath -> TestResult
+expectCompiles files entry = case compilePkg files entry of
+    Left err -> Just ("Expected modules to compile, got: " ++ err)
+    Right _ -> Nothing
+
+expectCompileError :: Files -> FilePath -> String -> TestResult
+expectCompileError files entry needle = case compilePkg files entry of
+    Left err ->
+        if needle `isInfixOf` err
+            then Nothing
+            else Just ("Expected compile error containing " ++ show needle ++ ", got: " ++ err)
+    Right compiled -> Just ("Expected compile failure containing " ++ show needle ++ ", got modules: " ++ show (map (renderModuleId . compiledModuleId) (compiledModules compiled)))
+
+compiledNamed :: CompiledPackage -> String -> Maybe CompiledModule
+compiledNamed compiled name = case [modu | modu <- compiledModules compiled, renderModuleId (compiledModuleId modu) == name] of
+    modu : _ -> Just modu
+    [] -> Nothing
+
+geoFiles :: String -> Files
+geoFiles mainSource =
+    [ ("app/package.tersus", "")
+    , ("app/main.tersus", mainSource)
+    , ("app/geo/geo.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };")
+    ]
+
+testModuleCheckBasic :: Test
+testModuleCheckBasic =
+    testCaseSeq
+        "module-check-basic"
+        [ expectCompiles (geoFiles "import app::geo; p = geo::make(3); return geo::area(p);") "app/main.tersus"
+        , expectCompiles (geoFiles "import app::geo as g; p = g::make(3); return g::area(p);") "app/main.tersus"
+        , expectCompiles (geoFiles "import app::geo; p = app::geo::geo::make(3); return app::geo::geo::area(p);") "app/main.tersus"
+        , expectCompiles (geoFiles "import app::geo::geo::Point; import app::geo::geo::make; import app::geo::geo::area; p = make(3); return area(p);") "app/main.tersus"
+        , expectCompiles (geoFiles "import app::geo { Point, make, area }; p = make(3); return area(p);") "app/main.tersus"
+        , expectCompiles
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::shapes; p = shapes::make(4); return shapes::area(p);")
+            , ("app/geo/shapes.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };")
+            , ("app/geo/extra.tersus", "fn extra(x: Int) -> Int [{ }] [{ }] { return x + 1; };")
+            ]
+            "app/main.tersus"
+        , expectCompileError
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "p = geo::make(3); return p.x;")
+            , ("app/other.tersus", "import app::geo; struct Local { x: Int };")
+            , ("app/geo/geo.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
+            ]
+            "app/main.tersus"
+            "covering import"
+        , expectCompileError
+            (geoFiles "import app::geo { Point }; struct Point { x: Int }; p = geo::make(3); return p.x;")
+            "app/main.tersus"
+            "ambiguous"
+        , expectCompiles
+            (geoFiles "import app::geo; struct Wrapper { p: geo::Point, n: Int }; fn get(w: Wrapper) -> Int [{ }] [{ }] { return w.p.x + w.n; }; p = geo::make(3); w = Wrapper { p: p, n: 1 }; return get(w);")
+            "app/main.tersus"
+        ]
+
+testModuleCheckTraits :: Test
+testModuleCheckTraits =
+    testCaseSeq
+        "module-check-traits"
+        [ expectCompiles traitFiles "app/main.tersus"
+        , case compilePkg traitFiles "app/main.tersus" of
+            Left err -> Just ("trait package should compile: " ++ err)
+            Right compiled -> case compiledNamed compiled "app::geo" of
+                Just modu ->
+                    testAssertTrue (("app$geo$geo$Scalable", "app$geo$geo$Point") `elem` foldr (:) [] (ifImpls (compiledInterface modu)))
+                Nothing -> Just "expected a compiled app::geo module"
+        , expectCompiles
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; fn use(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return >= 0; affirm geo::positive(return) = return; }] { return geo::positive(x); }; return use(1);")
+            , ("app/geo/geo.tersus", "fn positive(x: Int) -> Int [{ affirm x >= 0; }] [{ affirm return >= 0; }] { return x; };")
+            ]
+            "app/main.tersus"
+        , case compilePkg axiomFiles "app/main.tersus" of
+            Left err -> Just ("axiom package should compile: " ++ err)
+            Right compiled -> case compiledNamed compiled "app" of
+                Just modu ->
+                    if "app$geo$geo$nonnegAxiom" `isInfixOf` show (compiledStatements modu)
+                        then Nothing
+                        else Just ("expected the cross-module axiom name in elaborated root statements, got: " ++ show (compiledStatements modu))
+                Nothing -> Just "expected a compiled root module"
+        , expectCompileError boundedFiles "app/main.tersus" "bounded function"
+        , expectCompileError boundedFiles "app/main.tersus" "cannot be exported"
+        , expectCompileError orphanFiles "app/main.tersus" "orphan impl"
+        , case compilePkg externFiles "app/main.tersus" of
+            Left err -> Just ("extern package should compile: " ++ err)
+            Right compiled -> case compiledNamed compiled "app::geo" of
+                Just modu -> testAssertTrue ("app$geo$geo$cfunc" `elem` foldr (:) [] (ifExterns (compiledInterface modu)))
+                Nothing -> Just "expected a compiled app::geo module"
+        ]
+  where
+    traitFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; p = geo::make(3); return p.scale(4);")
+        , ("app/geo/geo.tersus", "trait Scalable { fn scale(self: &Self, k: Int) -> Int [{ }] [{ }]; }; struct Point { x: Int }; impl Scalable for Point { fn scale(self: &Self, k: Int) -> Int [{ }] [{ }] { return self.x * k; }; }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
+        ]
+    axiomFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo::geo::nonnegAxiom; fn use(x: Int) -> Int [{ }] [{ rewrite nonnegAxiom return; affirm return >= 0; }] { return x; }; return use(1);")
+        , ("app/geo/geo.tersus", "axiom nonnegAxiom(x) [{ }] [{ affirm x >= 0; }];")
+        ]
+    boundedFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; return geo::marked(1);")
+        , ("app/geo/geo.tersus", "trait Marker { }; fn marked<S: Marker>(x: Int) -> Int [{ }] [{ }] { return x; };")
+        ]
+    orphanFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::other; x = 1;")
+        , ("app/other/other.tersus", "import app::geo; impl geo::Scalable for geo::Point { fn scale(self: &Self, k: Int) -> Int [{ }] [{ }] { return self.x * k; }; };")
+        , ("app/geo/geo.tersus", "trait Scalable { fn scale(self: &Self, k: Int) -> Int [{ }] [{ }]; }; struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
+        ]
+    externFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; return geo::cfunc(1);")
+        , ("app/geo/geo.tersus", "extern fn cfunc(x: Int) -> Int [{ }] [{ }];")
+        ]
+
+testModuleCheckWithin :: Test
+testModuleCheckWithin =
+    testCaseSeq
+        "module-check-within"
+        [ expectCompiles withinFiles "app/main.tersus"
+        , expectCompileError
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; x = 1;")
+            , ("app/geo/left.tersus", "import app::geo::right; struct Left { r: right::Right };")
+            , ("app/geo/right.tersus", "import app::geo::left; struct Right { l: left::Left };")
+            ]
+            "app/main.tersus"
+            "holds itself"
+        ]
+  where
+    withinFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; a = geo::shapes::make(3); b = geo::extra::makeOther(4); return geo::extra::area(a) + geo::extra::getOther(b) + geo::use::areaFull(a) + geo::a::fa(1);")
+        , ("app/geo/shapes.tersus", "struct Point { x: Int }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
+        , ("app/geo/extra.tersus", "import app::geo::shapes; struct Point { y: Int }; fn makeOther(y: Int) -> Point [{ }] [{ }] { return Point { y: y }; }; fn getOther(p: Point) -> Int [{ }] [{ }] { return p.y; }; fn area(p: shapes::Point) -> Int [{ }] [{ }] { return p.x; };")
+        , ("app/geo/use.tersus", "import app::geo; fn areaFull(p: app::geo::shapes::Point) -> Int [{ }] [{ }] { return app::geo::extra::area(p); };")
+        , ("app/geo/a.tersus", "import app::geo::b; fn fa(x: Int) -> Int [{ }] [{ }] { return b::fb(x); };")
+        , ("app/geo/b.tersus", "import app::geo::a; fn fb(x: Int) -> Int [{ }] [{ }] { if x > 0 { return a::fa(0); }; return x; };")
+        ]
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem]
+testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin]
