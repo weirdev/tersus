@@ -24,6 +24,7 @@ testBorrow =
                 , testCase "an array is lent" (runs "fn ends(a: &Array<Int, 4>) -> Int { return get(a, 0) + get(a, 3); }; x = #[1, 2, 3, 4]; return ends(x) + get(x, 1);" (VInt 7))
                 , testCase "a struct is lent" (runs "struct S { xs: List<Int>, n: Int }; fn count(s: &S) -> Int { return size(s.xs) + s.n; }; s = S { xs: push([], 1), n: 10 }; return count(s) + size(s.xs);" (VInt 12))
                 , testCase "an Int is lent too" (runs "fn twice(n: &Int) -> Int { return n * 2; }; return twice(4);" (VInt 8))
+                , testCase "an update borrow is given to a read reference parameter" (runs "fn read(n: &Int) -> Int { return n; }; x = 1; return read(&mut x);" (VInt 1))
                 , testCase "a lent parameter is passed on to a lent one" (runs "fn inner(a: &List<Int>) -> Int { return size(a); }; fn outer(a: &List<Int>) -> Int { return inner(a) + inner(a) + size(a); }; return outer(push([], 1));" (VInt 3))
                 , testCase "and to one that is owned, which gets a copy" (runs "fn owner(a: List<Int>) -> Int { return size(push(a, 1)); }; fn mixed(a: &List<Int>) -> Int { return owner(clone(a)) + size(a); }; return mixed(push([], 1));" (VInt 3))
                 , testCase "a lent parameter is returned as a copy" (runs "fn same(a: &List<Int>) -> List<Int> { return clone(a); }; l = push([], 5); m = same(l); m = push(m, 6); return l;" (VList [VInt 5]))
