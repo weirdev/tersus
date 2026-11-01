@@ -34,7 +34,8 @@ import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 
 import Parse (Import (..), ParsedFile (..), emptyDecls, locating, parseFileWith, renderPath)
-import TersusTypes
+import Syntax
+import Types hiding (baseNameOf)
 
 data ModuleIdentity = ModuleIdentity
     { identityPackageDir :: FilePath
@@ -108,7 +109,7 @@ canonicalizeDeclarations identity statements
         | Set.member name locals = canonicalName identity name
         | otherwise = name
     renameType ty = case ty of
-        TNamed name -> TNamed (renameNamed name)
+        TNamed base args -> TNamed (canon base) (map renameArg args)
         TVariant name -> TVariant (renameVariant name)
         TList t -> TList (renameType t)
         TArrayOf t size -> TArrayOf (renameType t) size
@@ -121,9 +122,9 @@ canonicalizeDeclarations identity statements
         TFn args ret -> TFn (map renameType args) (renameType ret)
         TForall sizes types t -> TForall sizes types (renameType t)
         other -> other
-    renameNamed name = case instanceOf name of
-        Just (base, args) -> instanceName (canon base) (map renameArg args)
-        Nothing -> canon name
+    renameNamed name = case break (== '<') name of
+        (base, rest@('<' : _)) -> canon base ++ rest
+        _ -> canon name
     renameArg (ArgType t) = ArgType (renameType t)
     renameArg other = other
     renameVariant name =
@@ -147,7 +148,7 @@ canonicalizeDeclarations identity statements
             Assign
                 (renameAssignName name)
                 (Val (VFunct params ins outs (renameBody body) exported))
-        other -> renameStatement other
+        other -> other
     renameAssignName name
         | Set.member name locals = canonicalName identity name
         | '<' `elem` name = renameImplFunction name
@@ -189,6 +190,10 @@ canonicalizeDeclarations identity statements
                 (renameType selfName)
                 [(param, canon boundTrait, map renameType args) | (param, boundTrait, args) <- bounds]
                 (map renameFunction functions)
+        ExternDef name -> ExternDef (canon name)
+        LinearDef name -> LinearDef (canon name)
+        CopyDef name -> CopyDef (canon name)
+        DropDef name -> DropDef (canon name)
         other -> other
 
 -- ---------------------------------------------------------------------------

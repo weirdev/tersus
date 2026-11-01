@@ -3,6 +3,9 @@ module Pipeline
     , parseWithEquality
     , validatedSource
     , compileSource
+    , CompiledModule (..)
+    , CompiledPackage (..)
+    , compileModules
     , ownedSource
     , nativeProgram
     , validateStatements
@@ -10,9 +13,15 @@ module Pipeline
     , assumptionsOf
     ) where
 
+import Data.List (sortBy)
+import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Mir as M
 import Compile (lowerSource, lowerStatements, parseSource, parseWithEquality)
+import Interface (ModuleInterface, extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv)
+import ModuleResolve (rewriteFileReferences)
+import qualified Modules as Mod
+import Parse (ParsedFile (..))
 import MirOwnership (expandRefWrites, insertOwnership)
 import MirHousekeeping (eraseGhosts, verifyProgram, validatedListLibrary)
 import qualified MirHousekeeping as Housekeeping
@@ -21,7 +30,8 @@ import MirValidate (Validated, validateProgram)
 import MirLists (lowerLists)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
-import Types (Size (..), Type (..))
+import TypeCheck (Elaborated (..), elaborateWith)
+import Types (Size (..), Type (..), baseNameOf)
 import Utils
 
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
@@ -139,6 +149,78 @@ runStatements stmts =
             Ok () -> Ok program
             Error e -> Error ("Lowering produced a malformed program: " ++ e))
             `bindResult` eraseGhosts `bindResult` runProgram
+
+data CompiledModule = CompiledModule
+    { compiledModuleId :: Mod.ModuleId
+    , compiledStatements :: [Statement]
+    , compiledInterface :: ModuleInterface
+    }
+    deriving (Show)
+
+data CompiledPackage = CompiledPackage
+    { compiledEntryModule :: Mod.ModuleId
+    , compiledModules :: [CompiledModule]
+    }
+    deriving (Show)
+
+compileModules :: Mod.LoadedPackage -> Result CompiledPackage String
+compileModules pkg = go (Mod.packageModules pkg) Map.empty []
+  where
+    go [] _ done = Ok (CompiledPackage (Mod.packageEntryModule pkg) (reverse done))
+    go (modu : rest) interfaces done =
+        case compileOne interfaces modu of
+            Error err -> Error err
+            Ok compiled -> go rest (Map.insert (Mod.loadedModuleId modu) (compiledInterface compiled) interfaces) (compiled : done)
+    compileOne interfaces modu =
+        let moduId = Mod.loadedModuleId modu
+            depInterfaces = [interfaces Map.! dep | dep <- Mod.loadedDependencies modu, Map.member dep interfaces]
+            missing = [dep | dep <- Mod.loadedDependencies modu, not (Map.member dep interfaces)]
+         in if not (null missing)
+                then Error ("in module " ++ Mod.renderModuleId moduId ++ ": dependency " ++ Mod.renderModuleId (head missing) ++ " was not compiled before it (the loader gives modules dependencies first)")
+                else
+                    let env = predeclareOwnEnv (mergeInterfacesImportEnv depInterfaces)
+                     in case prepareModule pkg modu of
+                            Left err -> Error err
+                            Right prepared -> case orphanCheck moduId prepared of
+                                Left err -> Error err
+                                Right () -> case elaborateWith env prepared of
+                                    Error err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
+                                    Ok (Elaborated elaboratedStmts _, state) -> case extractInterface moduId prepared elaboratedStmts state of
+                                        Error err -> Error err
+                                        Ok iface -> Ok (CompiledModule moduId elaboratedStmts iface)
+
+prepareModule :: Mod.LoadedPackage -> Mod.LoadedModule -> Either String [Statement]
+prepareModule pkg modu = do
+    perFile <- mapM prepareFile (Mod.loadedModuleFiles modu)
+    Right (reorderModuleStatements (concat perFile))
+  where
+    prepareFile file =
+        let identity = Mod.fileModuleIdentity (Mod.packagePackageName pkg) (maybe "" id (Mod.moduleName (Mod.loadedFileModule file))) (Mod.loadedFileStem file ++ ".tersus")
+            canonical = Mod.canonicalizeDeclarations identity (fileBody (Mod.loadedParsed file))
+         in case rewriteFileReferences pkg file canonical of
+                Left err -> Left ("in module " ++ Mod.renderModuleId (Mod.loadedModuleId modu) ++ " file " ++ Mod.loadedFileName file ++ ": " ++ err)
+                Right rewritten -> Right rewritten
+
+reorderModuleStatements :: [Statement] -> [Statement]
+reorderModuleStatements = sortBy (comparing category)
+  where
+    category :: Statement -> Int
+    category stmt = case stmt of
+        StructDef{} -> 0
+        EnumDef{} -> 0
+        TraitDef{} -> 0
+        ImplDef{} -> 1
+        _ -> 2
+
+orphanCheck :: Mod.ModuleId -> [Statement] -> Either String ()
+orphanCheck modu statements = case [message | ImplDef (Just trait) _ typeName _ _ _ <- statements, Just message <- [orphanMessage trait typeName]] of
+    message : _ -> Left message
+    [] -> Right ()
+  where
+    orphanMessage trait typeName
+        | nameInModule modu trait || nameInModule modu (baseOf typeName) = Nothing
+        | otherwise = Just ("in module " ++ Mod.renderModuleId modu ++ ": orphan impl: impl " ++ trait ++ " for " ++ typeName ++ " defines neither a trait nor a type of this module; an impl must live in the module of its trait or of its type")
+    baseOf name = baseNameOf name
 
 stage :: String -> Result a String -> Result a String
 stage _ (Ok a) = Ok a

@@ -2,6 +2,10 @@ module TypeCheck
     ( typeCheck
     , elaborate
     , Elaborated (..)
+    , elaborateWith
+    , ImportEnv (..)
+    , emptyImportEnv
+    , seededTcState
     , PreparedPrefix
     , preparePrefix
     , elaborateAfter
@@ -61,6 +65,116 @@ elaborateAfter (PreparedPrefix ctx env prefix prefixTypes state) stmts =
 
 elaborate :: [Statement] -> Result Elaborated String
 elaborate stmts = preparePrefix (gatheredSignatures stmts) [] `bindResult` \prefix -> elaborateAfter prefix stmts
+
+data ImportEnv = ImportEnv
+    { ieTypes :: Map Name [Name]
+    , ieCtors :: Map Name (Name, [(Variable, Type)])
+    , ieGenerics :: Map Name ([Variable], [(Variable, Type)])
+    , ieTraits :: Map Name [TraitFn]
+    , ieTraitParams :: Map Name [Variable]
+    , ieFunctions :: Map Name Type
+    , ieImpls :: Set.Set (Name, Name)
+    , ieAssoc :: Map (Name, Name) [Maybe Name]
+    , ieImplArgs :: Map (Name, Name) (Type, [Arg])
+    , ieImplBounds :: Map (Name, Name) [Bound]
+    , ieLinear :: Set.Set Name
+    , ieDrops :: Set.Set Name
+    , ieRefResults :: Map Name ([Variable], [Variable])
+    , iePredeclareOwn :: Bool
+    }
+    deriving (Show, Eq)
+
+emptyImportEnv :: ImportEnv
+emptyImportEnv = ImportEnv Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty Map.empty False
+
+elaborateWith :: ImportEnv -> [Statement] -> Result (Elaborated, TcState) String
+elaborateWith env stmts =
+    case runTcState checked (seededTcState env) of
+        Left err -> Error err
+        Right (elaborated, state) -> Ok (elaborated, state)
+  where
+    checked = do
+        (stmts', types) <- checkProgramWith env stmts
+        resolved <- mapM zonk types
+        return (Elaborated stmts' resolved)
+
+seededTcState :: ImportEnv -> TcState
+seededTcState env =
+    initialTcState
+        { tcTypes = Map.union (ieTypes env) (tcTypes initialTcState)
+        , tcCtors = Map.union (ieCtors env) (tcCtors initialTcState)
+        , tcGenerics = Map.union (ieGenerics env) (tcGenerics initialTcState)
+        , tcTraits = Map.union (ieTraits env) (tcTraits initialTcState)
+        , tcTraitParams = Map.union (ieTraitParams env) (tcTraitParams initialTcState)
+        , tcImpls = Set.union (ieImpls env) (tcImpls initialTcState)
+        , tcAssoc = Map.union (ieAssoc env) (tcAssoc initialTcState)
+        , tcImplArgs = Map.union (ieImplArgs env) (tcImplArgs initialTcState)
+        , tcImplBounds = Map.union (ieImplBounds env) (tcImplBounds initialTcState)
+        , tcLinear = Set.union (ieLinear env) (tcLinear initialTcState)
+        , tcDrops = Set.union (ieDrops env) (tcDrops initialTcState)
+        , tcRefResults = Map.union (ieRefResults env) (tcRefResults initialTcState)
+        }
+
+checkProgram :: [Statement] -> TC ([Statement], [Type])
+checkProgram stmts = checkProgramWith emptyImportEnv stmts
+
+checkProgramWith :: ImportEnv -> [Statement] -> TC ([Statement], [Type])
+checkProgramWith env stmts = do
+    when (iePredeclareOwn env) $ do
+        predeclareOwn stmts
+        checkOwnFinite stmts
+    (_, stmts', types) <- checkStatements True (Ctx gathered Nothing) [Map.empty] stmts
+    return (stmts', types)
+  where
+    gathered = Map.union (gatheredSignatures stmts) (ieFunctions env)
+
+predeclareOwn :: [Statement] -> TC ()
+predeclareOwn stmts = do
+    s <- getState
+    let add stmt st = case stmt of
+            StructDef name params fields _
+                | null params -> st{tcTypes = Map.insert name [name] (tcTypes st), tcCtors = Map.insert name (name, fields) (tcCtors st), tcPredeclared = Set.insert name (tcPredeclared st)}
+                | otherwise -> st{tcGenerics = Map.insert name (params, fields) (tcGenerics st), tcPredeclared = Set.insert name (tcPredeclared st)}
+            EnumDef name variants ->
+                st
+                    { tcTypes = Map.insert name (map fst variants) (tcTypes st)
+                    , tcCtors = foldr (\(variant, fields) m -> Map.insert variant (name, fields) m) (tcCtors st) variants
+                    , tcPredeclared = Set.insert name (tcPredeclared st)
+                    }
+            TraitDef name params functions -> st{tcTraits = Map.insert name functions (tcTraits st), tcTraitParams = Map.insert name params (tcTraitParams st), tcPredeclared = Set.insert name (tcPredeclared st)}
+            _ -> st
+    putState (foldr add s stmts)
+
+checkOwnFinite :: [Statement] -> TC ()
+checkOwnFinite stmts =
+    case findCycle graph of
+        Just cycle -> failTc ("Type error: " ++ head cycle ++ " holds itself by value, so it would have no size: hold the recursion in a Box (cycle: " ++ intercalate " -> " cycle ++ ")")
+        Nothing -> return ()
+  where
+    graph = Map.fromListWith (++) [(name, heldBases fields) | (name, fields) <- ownTypes]
+    ownTypes =
+        [(name, map snd fields) | StructDef name _ fields _ <- stmts]
+            ++ [(name, concatMap (map snd . snd) variants) | EnumDef name variants <- stmts]
+    heldBases fields = concatMap heldBase fields
+    heldBase ty = case ty of
+        TNamed name _ -> [name]
+        TVariant variant -> [takeWhile (/= ':') variant]
+        TArrayOf inner _ -> heldBase inner
+        _ -> []
+    findCycle g = snd (foldl step (Set.empty, Nothing) (Map.keys g))
+      where
+        step (visited, found) node = case found of
+            Just _ -> (visited, found)
+            Nothing -> dfs visited [] node
+        dfs visited stack node
+            | node `elem` stack = (visited, Just (dropWhile (/= node) stack ++ [node]))
+            | Set.member node visited = (visited, Nothing)
+            | otherwise = go (Set.insert node visited) (stack ++ [node]) [target | target <- Map.findWithDefault [] node g, Map.member target g]
+          where
+            go visited' _ [] = (visited', Nothing)
+            go visited' stack' (next : rest) = case dfs visited' stack' next of
+                (visited'', Just cycle) -> (visited'', Just cycle)
+                (visited'', Nothing) -> go visited'' stack' rest
 
 -- An expression looked through one step, by a call of its type's `deref` where it has a Deref impl. Nothing for a Box (whose
 -- look-through the language gives, in the type) and for anything that is not looked through.
@@ -1023,8 +1137,12 @@ primitiveTraitCall _ _ _ _ _ _ = return Nothing
 -- mistake in the trait is reported at the trait and not at its first impl
 checkTrait :: Name -> [Variable] -> [TraitFn] -> TC ()
 checkTrait name params functions = do
+    s0 <- getState
+    let wasPredeclared = Set.member name (tcPredeclared s0)
+    when wasPredeclared $ putState s0{tcPredeclared = Set.delete name (tcPredeclared s0)}
     s <- getState
-    when (Map.member name (tcTraits s) || Map.member name (tcTypes s)) $ failTc ("Type error: " ++ name ++ " is already defined")
+    when (Map.member name (tcTypes s)) $ failTc ("Type error: " ++ name ++ " is already defined")
+    when (Map.member name (tcTraits s) && not wasPredeclared) $ failTc ("Type error: " ++ name ++ " is already defined")
     putState s{tcTypes = Map.insert "Self" [] (tcTypes s), tcTraitSelf = Just (functions ++ concat (Map.elems (tcTraits s)))}
     -- (the types of the trait are types in its signatures and contracts)
     withGenerics [] params $ forM_ functions $ \f -> do

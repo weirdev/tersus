@@ -71,6 +71,7 @@ data TcState = TcState
     , tcRefOrigins :: Map Variable [Variable] -- what each local that holds references (or a value that holds them) is from: the roots of its places
     , tcImplBounds :: Map (Name, Name) [Bound] -- for a trait and a type whose impl of it has bounds (`impl<T: Eq> Eq for List<T>`), the bounds
     , tcCompanions :: Map Name [Name] -- for a function of an impl with bounds, the template of the check of it against its trait, made with it
+    , tcPredeclared :: Set.Set Name -- the types a module predeclared from its own declarations, which their definitions may then redeclare
     }
 
 -- A function whose type parameters have bounds (`fn total<S: Sequence<Int>>(s: &S) -> Int`): its definition, the bounds and the functions it can
@@ -89,7 +90,7 @@ data Template = Template
 newtype TC a = TC (TcState -> Either String (a, TcState))
 
 initialTcState :: TcState
-initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty
+initialTcState = TcState Map.empty 0 Map.empty Map.empty Nothing Map.empty Set.empty Map.empty Map.empty [] Map.empty [] [] [] [] Nothing Map.empty Nothing Map.empty Map.empty Map.empty [] [] Set.empty Set.empty False Map.empty Map.empty Nothing [] Map.empty Map.empty Map.empty Set.empty
 
 runTcState :: TC a -> TcState -> Either String (a, TcState)
 runTcState (TC f) = f
@@ -561,9 +562,12 @@ declareType name = declareTypeWith name [name]
 declareTypeWith :: Name -> [Name] -> TC ()
 declareTypeWith name ctors = do
     s <- getState
-    if Map.member name (tcTypes s) || Map.member name (tcTraits s)
-        then failTc ("Type already defined: " ++ name)
-        else putState s{tcTypes = Map.insert name ctors (tcTypes s)}
+    if Set.member name (tcPredeclared s)
+        then putState s{tcTypes = Map.insert name ctors (tcTypes s), tcPredeclared = Set.delete name (tcPredeclared s)}
+        else
+            if Map.member name (tcTypes s) || Map.member name (tcTraits s)
+                then failTc ("Type already defined: " ++ name)
+                else putState s{tcTypes = Map.insert name ctors (tcTypes s)}
 
 -- Whether a type uses the struct being declared with a type argument that is made of the parameters without being one of them
 selfExpands :: Name -> Type -> Bool
@@ -588,16 +592,25 @@ selfExpands name ty = case ty of
 declareGeneric :: Name -> [Variable] -> [(Variable, Type)] -> TC ()
 declareGeneric name params fields = do
     s <- getState
-    if Map.member name (tcTypes s) || Map.member name (tcTraits s) || Map.member name (tcGenerics s)
-        then failTc ("Type already defined: " ++ name)
-        else do
+    if Set.member name (tcPredeclared s)
+        then do
+            putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s), tcPredeclared = Set.delete name (tcPredeclared s)}
             when (length params /= length (nubSizes params)) $ failTc ("Type error: " ++ name ++ " names a parameter twice")
-            putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s)}
             when (any (selfExpands name . snd) fields) $
                 failTc ("Type error: " ++ name ++ " uses itself with a type made of its own parameters, which would make a struct for each depth (Node<List<T>> inside Node<T>): a struct that holds itself gives its own parameters as they are")
-            -- (the fields are checked with the sizes and types in scope, and the struct may hold itself in a Box)
             withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkFieldType . snd) fields)
             checkFinite name [fields]
+        else
+            if Map.member name (tcTypes s) || Map.member name (tcTraits s) || Map.member name (tcGenerics s)
+                then failTc ("Type already defined: " ++ name)
+                else do
+                    when (length params /= length (nubSizes params)) $ failTc ("Type error: " ++ name ++ " names a parameter twice")
+                    putState s{tcGenerics = Map.insert name (params, fields) (tcGenerics s)}
+                    when (any (selfExpands name . snd) fields) $
+                        failTc ("Type error: " ++ name ++ " uses itself with a type made of its own parameters, which would make a struct for each depth (Node<List<T>> inside Node<T>): a struct that holds itself gives its own parameters as they are")
+                    -- (the fields are checked with the sizes and types in scope, and the struct may hold itself in a Box)
+                    withGenerics (filter (not . isTypeName) params) (filter isTypeName params) (mapM_ (checkFieldType . snd) fields)
+                    checkFinite name [fields]
   where
     nubSizes = foldr (\x acc -> if x `elem` acc then acc else x : acc) []
 
