@@ -1,4 +1,4 @@
-module MirLower (lowerProgram, lowerElaborated, lowerLibrary) where
+module MirLower (lowerProgram, lowerElaborated, lowerLibrary, lowerModuleWith) where
 
 import Control.Monad (forM, unless, when)
 import Data.List (intercalate)
@@ -6,6 +6,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
+import Interface (InterfaceFunction (..), ModuleInterface (..))
 import qualified Mir as M
 import MirMoves (checkMoves, stripPositions)
 import Pretty (renderType)
@@ -13,7 +14,7 @@ import StdLib (builtinFunct)
 import StdLibDefs (stdLibCtx)
 import Types
 import Syntax
-import TypeCheck (Elaborated (..), elaborate)
+import TypeCheck (Elaborated (..), ImportEnv, elaborate)
 import TypeCheckCore (arrayElement, functionType)
 import Utils
 
@@ -42,6 +43,65 @@ lowerWith checking elaborated@(Elaborated stmts _) =
     case runL (program stmts) ((initialState elaborated){lsChecking = checking}) of
         Left e -> Error e
         Right (p, _) -> Ok p
+
+lowerModuleWith :: ImportEnv -> [ModuleInterface] -> Elaborated -> Result M.Program String
+lowerModuleWith _env ifaces elaborated@(Elaborated stmts _) =
+    case runL (program stmts) (seededModuleState ifaces elaborated) of
+        Left e -> Error e
+        Right (p, finalState) -> Ok p{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs finalState) (M.progFunctions p)}
+
+seededModuleState :: [ModuleInterface] -> Elaborated -> LS
+seededModuleState ifaces elaborated =
+    (initialState elaborated)
+        { lsTypes = Map.unions (map interfaceTypeDecls ifaces)
+        , lsFunctions = stubs
+        , lsNames = Set.union (Set.fromList (Map.keys stubs)) (Set.singleton "main")
+        , lsGlobals = Map.fromList [(name, (mirName, functionType sizes types ptys rty)) | (name, mirName, fn) <- stubList, let Signature ptys rty sizes types _ _ = fnSignature fn]
+        , lsGenerics = Map.unions (map ifGenerics ifaces)
+        , lsInvariants = Map.unions (map ifInvariants ifaces)
+        , lsCopies = Set.unions (map ifCopies ifaces)
+        , lsLinear = Set.unions (map ifLinear ifaces)
+        , lsDrops = Set.unions (map ifDrops ifaces)
+        , lsStubs = Set.fromList [mirName | (_, mirName, _) <- stubList]
+        }
+  where
+    stubList = [(name, mirNameOf iface name, fn) | iface <- ifaces, (name, fn) <- Map.toList (ifFunctions iface)]
+    mirNameOf iface name
+        | name `Set.member` ifExterns iface = "extern " ++ name
+        | otherwise = name
+    stubs = Map.fromList [(mirName, stubFunction mirName fn) | (_, mirName, fn) <- stubList]
+
+stubFunction :: Name -> InterfaceFunction -> M.Function
+stubFunction mirName fn =
+    let Signature ptys rty sizes types _ _ = fnSignature fn
+        params = [M.Local (i + 1) | i <- [0 .. length ptys - 1]]
+        locals = Map.fromList ((M.Local 0, M.LocalDecl rty Nothing) : [(l, M.LocalDecl ty (Just v)) | (l, ty, v) <- zip3 params ptys (fnParams fn)])
+     in M.Function
+            { M.fnName = mirName
+            , M.fnParams = params
+            , M.fnReturns = Just rty
+            , M.fnLocals = locals
+            , M.fnSizeParams = sizes
+            , M.fnTypeParams = types
+            , M.fnBorrowed = []
+            , M.fnMutBorrowed = []
+            , M.fnFrom = [l | (l, v) <- zip params (fnParams fn), v `elem` froms]
+            , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)
+            , M.fnSpec = M.emptySpec{M.specRequires = fnRequires fn, M.specEnsures = fnEnsures fn, M.specTermination = fnTermination fn, M.specMutParams = [v | (v, ty) <- zip (fnParams fn) ptys, isMutRefType ty], M.specFrom = froms}
+            }
+  where
+    Signature _ _ _ _ _ froms = fnSignature fn
+
+interfaceTypeDecls :: ModuleInterface -> Map Name M.TypeDecl
+interfaceTypeDecls iface =
+    Map.fromList
+        [ (name, decl)
+        | (name, variants) <- Map.toList (ifTypes iface)
+        , name `Map.notMember` ifGenerics iface
+        , let decl = if variants == [name] then M.StructDecl (fieldsOf name) else M.EnumDecl [(variant, fieldsOf variant) | variant <- variants]
+        ]
+  where
+    fieldsOf ctor = maybe [] snd (Map.lookup ctor (ifCtors iface))
 
 -- The lowering monad: state, and failure for what should not happen to a program that has been checked
 newtype L a = L {runL :: LS -> Either String (a, LS)}
@@ -118,10 +178,11 @@ data LS = LS
     , lsExterns :: Set.Set Variable -- the functions that are extern
     , lsDrops :: Set.Set Name -- the structs and enums that have a drop
     , lsPrereg :: Map Variable [Name] -- the names given to the functions defined at the top, before any body is lowered (one for each definition of the name)
+    , lsStubs :: Set.Set Name -- imported functions seeded as stubs: present while lowering, never part of the unit
     }
 
 initialState :: Elaborated -> LS
-initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty
+initialState (Elaborated stmts types) = LS types Map.empty Map.empty (Set.singleton "main") Map.empty (assignedNames stmts) (newBuilder "main" True Nothing) Map.empty Map.empty True Set.empty Set.empty Set.empty Set.empty Map.empty Set.empty
 -- The variables that statements assign (or bind with let), other than the names of the functions they define. A function
 -- whose name is one of them may be replaced by another value (`f = size;`), so its name is a local of its own; the
 -- others are known functions, and a call of one is a call by name.
@@ -281,10 +342,11 @@ program stmts = do
             m : rest -> (m, rest)
             [] -> (main', [])
         result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s))
+        moveProgram = if Set.null (lsStubs s) then result else result{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs s) (M.progFunctions result)}
     -- (that the program is well formed is checked by the pipeline on what is lowered, with the checker
     -- written in Tersus (MirHousekeeping): it is not checked here, so that the checker and the eraser can
     -- themselves be lowered to be made from the seed)
-    case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) (lsDrops s) result else [] of
+    case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) (lsDrops s) moveProgram else [] of
         [] -> return (stripPositions result)
         errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
