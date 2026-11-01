@@ -14,6 +14,7 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
 import qualified Data.Map as Map
 import Cli
+import Modules (LoadResult (..), loadFromFilesystem)
 import qualified Mir as M
 import MirEval
 import MirLower
@@ -69,11 +70,22 @@ orElse :: TestResult -> TestResult -> TestResult
 orElse Nothing other = other
 orElse failure _ = failure
 
+testModulesPackageExample :: Test
+testModulesPackageExample = TestCase "examples/modules/app/main.tersus" $ do
+    loaded <- loadFromFilesystem "examples/modules/app/main.tersus"
+    pure $ case loaded of
+        Left err -> Just ("modules example should load: " ++ err)
+        Right (PackageResult pkg) -> case runPackageFiles noWorld Interpret pkg of
+            Error err -> Just ("modules example should run: " ++ err)
+            Ok ((output, _), _) -> testAssertEq output "64"
+        Right other -> Just ("modules example should be a package, got: " ++ show other)
+
 testExamples :: Test
 testExamples =
     TestList
         "testExamples"
-        [ testExampleFile "examples/basics.tersus" (ExpectReturn (VInt 6))
+        [ testModulesPackageExample
+        , testExampleFile "examples/basics.tersus" (ExpectReturn (VInt 6))
         , testExampleFile "examples/functions.tersus" (ExpectReturn (VInt 21))
         , testExampleFile "examples/booleans.tersus" (ExpectReturn (VBool True))
         , testExampleFile "examples/proofs.tersus" ExpectValid

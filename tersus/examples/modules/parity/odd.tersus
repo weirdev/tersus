@@ -1,0 +1,8 @@
+// Odd, the other half of the parity pair.
+
+import modules::parity::even;
+
+fn isOdd(n: Int) -> Int [{ affirm n >= 0; }] [{ }] shrinks n {
+    if n = 0 { return 0; };
+    return even::isEven(n - 1);
+};

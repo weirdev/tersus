@@ -79,6 +79,26 @@ Each program in the top-level directory passes validation, and its concrete eval
 | `element_facts.tersus` | What `set` and `push` say about elements: the element just written, repeated in a function's output contract and used by its caller | returns `106` |
 | `early_return.tersus` | Guard clauses: `return` inside an `if` ends the function, and the rest is validated under the guard | returns `104` |
 
+## A package: modules
+
+`modules/` is not a set of standalone programs: it is one package (its `package.tersus` marker), run from its entry file:
+
+```
+stack run tersus-exe -- eval examples/modules/app/main.tersus   # prints 64
+stack run tersus-exe -- check examples/modules/app/main.tersus  # prints OK
+```
+
+The files are declarations-only modules, except the entry file, which runs. `testExamples` checks the package through the module pipeline with that result; the other top-level examples are single files checked on their own.
+
+| File | Shows |
+| --- | --- |
+| `modules/app/main.tersus` | The entry program: imports the modules below, builds a point and a figure, calls the parity pair and the units conversion, writes a string literal (so its module gets the string library), and returns `64` |
+| `modules/geo/shapes.tersus` | A `Point` struct with `make` and `manhattan`, the first file of the two-file `geo` module |
+| `modules/geo/extra.tersus` | The second file of `geo`: imports its sibling file `shapes` by name and doubles its `manhattan` |
+| `modules/figures/figures.tersus` | A module importing `geo`: a whole-module import for its functions, and a selective single-type import (`import modules::geo::shapes::Point;`) used bare for its `Figure` struct |
+| `modules/parity/even.tersus`, `modules/parity/odd.tersus` | A mutually recursive pair inside one module: the two files import each other, and `isEven` / `isOdd` call each other on a smaller number, each saying it shrinks |
+| `modules/units/units.tersus` | Single-file collapse: the `units` module is this one file, so `feetToInches` is named at module level as `units::feetToInches` |
+
 ### The safe-access pattern
 
 `first` and `last` require a non-empty list. A function can carry that requirement in its input contract:

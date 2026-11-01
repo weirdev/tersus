@@ -1,0 +1,18 @@
+// Figures built on geo points: a whole-module import for geo's functions,
+// and a selective import of the single type Point, used bare.
+
+import modules::geo;
+import modules::geo::shapes::Point;
+
+struct Figure {
+    origin: Point,
+    scale: Int,
+};
+
+fn makeFigure(p: Point, scale: Int) -> Figure [{ }] [{ }] {
+    return Figure { origin: p, scale: scale };
+};
+
+fn total(f: &Figure) -> Int [{ }] [{ }] {
+    return geo::shapes::manhattan(&f.origin) * f.scale;
+};

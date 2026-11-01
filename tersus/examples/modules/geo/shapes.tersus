@@ -1,0 +1,14 @@
+// Points in the geo module: the first of its two files.
+
+struct Point {
+    x: Int,
+    y: Int,
+};
+
+fn make(x: Int, y: Int) -> Point [{ }] [{ }] {
+    return Point { x: x, y: y };
+};
+
+fn manhattan(p: &Point) -> Int [{ }] [{ }] {
+    return p.x + p.y;
+};

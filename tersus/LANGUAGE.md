@@ -46,6 +46,46 @@ stack run -- build program.tersus -o program   # validate, then compile to an ex
 
 `build` writes the IR and the C runtime to uniquely named files in the temporary directory, runs `clang -O2` on them, and removes those files; it needs `clang` on the path. The executable prints the return value as `eval` does and stops on an `Integer overflow` with the same message and exit status. Native code handles every type of the language, and values print as `eval` prints them. It does not check what validation proved (a divisor that is not 0, an index in range), so a program that validates cannot trip them, and a bug in the validator would be undefined behaviour here and an error in `eval`.
 
+## Modules
+
+A program may be split into a package. A package is a directory containing an (empty) `package.tersus` marker; the package name is the directory's name. The package root is one module (the root module), and each immediate subdirectory holding `.tersus` files is one more module, named for the directory. Directories deeper than that are not modules. The file given to the CLI is the entry file: only it may contain statements that run. Every other file in a package is declarations only (functions, structs, enums, traits, impls, `extern fn`, `axiom` and `proof` declarations): "modules declare, programs run". A file with no `package.tersus` in any ancestor is a standalone program, as before, and reading one from standard input (`-`) does not support `import`.
+
+Files name each other with a logical import at the top of the file, before any declaration:
+
+```tersus
+import modules::geo;                          // the whole geo module
+import modules::geo as g;                     // the same, with its names under g::
+import modules::geo::shapes { Point, make };  // only these names, bare
+import modules::geo::shapes::Point;           // the single type Point, bare
+```
+
+An import path is `package[::module[::file[::symbol]]]`, rooted at a package name: this package, or a sibling package beside it (a directory next to the package root that also has a `package.tersus`). It is not a string and not a file-system path. The forms above differ only in what an importer may name and how; what is linked is decided by reachability from the entry program, not by the form (see Linking).
+
+| Import | What may be written in the importing file |
+| --- | --- |
+| `import pkg::mod;` | `mod::file::Name`, `pkg::mod::file::Name`, and `mod::Name` for a collapsed module (below) |
+| `import pkg::mod as g;` | the same with `g` in place of `mod`: `g::file::Name`, and `g::Name` when collapsed |
+| `import pkg::mod::file;` | `file::Name`, plus the qualified spellings under the module as above |
+| `import pkg::mod::file { A, B };` | `A` and `B` bare, plus the file spellings above |
+| `import pkg::mod::file::Type;` | `Type` bare (a selective single-type import) |
+| `import pkg;` | the root module's names as `pkg::file::Name` (and `pkg::Name` when its module is collapsed) |
+
+A name declared in another file or module may be used only through a covering import: a whole-module, file or symbol import (or a name listed in its `{ }`), spelled in one of the forms its import makes available. Writing a name that another file declares without such an import is an error that says so, and a name in `{ }` that the target does not declare is an error listing what it does declare. Importing is not re-export: a file sees only the modules it imports itself, though everything its program needs is still linked.
+
+**Single-file collapse.** A module whose directory holds exactly one `.tersus` file named after the directory (for the root module, named after the package) contributes that file's symbols at module level: `modules::units::feetToInches` names a symbol of `units/units.tersus`. When the directory grows a second file the collapsed spelling stops working, and the error gives the full `package::module::file::symbol` spelling to write instead.
+
+**Cycles and recursion.** An import cycle between two different modules is an error (`module import cycle: ...`). Files of the same module may import each other (a mutually recursive pair in one module, as in `examples/modules/parity/`), and their functions may call each other only as ordinary mutual recursion: each must say what shrinks, as within one file. A type in one file of a module may hold a type of another file of that module only as an ordinary type may; holding itself by value, directly or through other structs, is still refused.
+
+**Impl coherence.** An `impl Trait for Type` must live in the module of its trait or of its type; otherwise it is an orphan impl and is refused.
+
+**Bounded functions.** A function with bounds on its types (`fn f<S: Sequence<Int>>`) cannot be exported from a module: declaring one in a file of a package (other than as the compiler's own implicit libraries) is refused, because such a function is a template checked at each call. Unbounded generic functions and structs cross modules as signatures and are made for the types their importers use, as within a file.
+
+**Implicit libraries.** Each module of a package gets the same implicit libraries a single-file program with its text would get, decided from the union of that module's own files' text (and from the library types, such as `String`, that the interfaces of its direct dependencies expose): `Clone` and `Eq` unless the module declares those traits, and the prelude, `String`, `HashMap` and `HashSet` libraries when its text mentions what they provide (`Pipeline.libraries`). Two modules that both need the same library link cleanly: the library is linked once, by its library name, not by comparing the copies. A module that declares, say, its own `trait Clone` gets no clone library, exactly as a single-file program would not.
+
+**Canonical names and linking.** Declarations of the entry module keep their bare names, so a standalone program and the entry module of a package produce the same names as before. A declaration of any other module is named `package$module$file$Local` in the MIR (for example `modules$geo$shapes$Point`); the file segment is present even for a collapsed module. After every module is checked and lowered on its own against the interfaces of the modules it imports, the units are linked: the same library or `extern fn` name from two modules is kept once (a conflicting `extern fn` is a link error naming both modules), an unrelated declaration of the same canonical name with a different definition is a link error, and everything unreachable from the entry program is pruned. The linked program is then validated once, as a whole. `tersus assumptions` for a package lists each module's axioms and externs prefixed with its module.
+
+A worked package is in `examples/modules/` (see `examples/README.md`): package `modules`, its entry module `app` (`app/main.tersus`, which runs), a two-file `geo` module, a `figures` module importing `geo` with a selective single-type import, a mutually recursive `parity` pair, and the single-file-collapse `units` module.
+
 ## How Validation Works
 
 Checking every proposition a real program could need is not feasible, so validation is a bounded search that is sound but incomplete:
@@ -2004,7 +2044,7 @@ return a;                             // [[1], [2, 3], [1]]
 - No block comments; only `//` line comments.
 - Function bodies are evaluated with their argument bindings, the standard library, and the top-level functions defined before them. They do not capture other variables (no lexical closures), a function can call itself and the other functions defined at the top of the program, and a function name can be defined only once.
 - Traits are checked and called, not used as types: a function over "any type that implements `Measure`" is a function with a bound (see Bounded types), made for each type it is called with, so `Measure::size(x)` is `Type::size(x)` for the type of `x`, decided when the program is checked. Impls are for structs and enums, and for a list, a Box, an array, `Int`, `Byte` and `Bool`, with no default bodies, no associated types or constants, and the contracts of a trait speak of `Self` only through the functions of the trait. A trait does not say whether its functions end, so a generic function over a trait would have to assume the worst, which is why generics are not in this step.
-- The CLI runs one file at a time and has no REPL or multi-file programs; the libraries there are (the prelude, the string library and the map library) are put in front of a program that mentions what they give it.
+- The CLI has no REPL. A standalone file, or `-` on standard input, is one program with no imports; a file inside a package (see Modules) is compiled with the modules it imports and linked into one program, and every command (`check`, `eval`, `mir`, `owned`, `llvm`, `build`, `run`, `assumptions`) works on that linked program.
 - The validator does not follow a call of a function that is a value: a function that takes `g: fn(Int) -> Int` and calls `g(n)` is refused (`Function object not validated`), though it type checks and runs. A function can still be passed around, stored in a list or a struct, and returned.
 - Source files are read as UTF-8 whatever the locale is (and `tersus` prints in UTF-8), so a program with a letter that is not ASCII in a name loads under any locale.
 - A program has no input or output: it computes and returns one value, which `run` and an executable print.

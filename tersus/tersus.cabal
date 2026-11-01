@@ -37,7 +37,9 @@ library
       Cli
       Ghost
       Hash
+      Interface
       Linear
+      Link
       LlvmRuntime
       Mir
       MirData
@@ -50,6 +52,7 @@ library
       MirOwnership
       MirValidate
       MirVerify
+      ModuleResolve
       Modules
       Native
       Parse
