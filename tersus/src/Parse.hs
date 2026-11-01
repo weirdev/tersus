@@ -29,7 +29,7 @@ import qualified Data.Map as Map
 
 import Control.Monad (unless, void, when)
 import Data.Char (isDigit, isLetter, isUpper)
-import Data.List (intercalate, isInfixOf, nub, (\\))
+import Data.List (intercalate, isInfixOf, maximumBy, nub, (\\))
 import Data.Maybe (isJust)
 
 import StdLib
@@ -723,9 +723,9 @@ desugarMatch :: Expression -> [(Name, [(Variable, Variable)], [Statement])] -> P
 desugarMatch _ [] = fail "A match needs at least one arm"
 desugarMatch scrutinee arms@((first, _, _) : _) = do
     types <- declTypes <$> getState
-    (typeName, variants) <- case [(t, vs) | (t, vs) <- Map.toList types, any (samePath first) vs] of
-        found : _ -> return found
+    (typeName, variants) <- case [(length (splitPath variant), found) | found@(_, vs) <- Map.toList types, variant <- vs, samePath first variant] of
         [] -> fail ("Unknown variant " ++ first)
+        candidates -> return (snd (maximumBy (\a b -> compare (fst a) (fst b)) candidates))
     let names = [name | (name, _, _) <- arms]
         uncovered = [variant | variant <- variants, not (any (samePath variant) names)]
     when (any (\name -> not (any (samePath name) variants)) names) $ fail ("A match over " ++ typeName ++ " has an arm of another type")

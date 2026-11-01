@@ -46,6 +46,33 @@ testPaths =
         , showsPath "a::b::check" "fn f(x: Int) -> Int [{ affirm a::b::check(x); }] [{ }] { return x; };"
         ]
 
+testMatchOverReference :: Test
+testMatchOverReference =
+    testCaseSeq
+        "match-over-reference"
+        [ case compileSource refProgram of
+            Ok _ -> Nothing
+            Error err -> Just ("Expected match over &RefStep to compile, got: " ++ err)
+        , showsPath "geo::RefStep::Field" widenedProgram
+        , case parsed otherArmProgram of
+            Left err ->
+                if "has an arm of another type" `isInfixOf` err
+                    then Nothing
+                    else Just ("Expected arm-of-another-type error, got: " ++ err)
+            Right statements -> Just ("Expected arm-of-another-type failure, got: " ++ show statements)
+        ]
+  where
+    decls = "struct Field { name: Int, ty: Int }; enum RefStep { Field { ctor: Int, field: Int }, Index { o: Int } }; "
+    refProgram =
+        decls
+            ++ "fn pick(step: &RefStep) -> Int [{ }] [{ }] { n = 0; match step { RefStep::Field { ctor: c, field: f } => { n = c + f; }, RefStep::Index { o: o } => { n = o; }, }; return n; }; s = RefStep::Field { ctor: 1, field: 2 }; return pick(&s);"
+    widenedProgram =
+        decls
+            ++ "fn pick(step: &RefStep) -> Int [{ }] [{ }] { n = 0; match step { geo::RefStep::Field { ctor: c, field: f } => { n = c + f; }, geo::RefStep::Index { o: o } => { n = o; }, }; return n; };"
+    otherArmProgram =
+        decls
+            ++ "enum Other { Index { o: Int } }; fn pick(step: &RefStep) -> Int [{ }] [{ }] { n = 0; match step { RefStep::Field { ctor: c, field: f } => { n = c + f; }, Other::Index { o: o } => { n = o; }, }; return n; };"
+
 testCanonical :: Test
 testCanonical =
     testCaseSeq
@@ -431,4 +458,4 @@ testLoaderFilesystem = TestCase "loader-filesystem" $ do
         return value
 
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem]
+testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem]
