@@ -410,6 +410,7 @@ skipStatements = mapM_ skipStatement
 skipStatement :: Statement -> L ()
 skipStatement stmt = case stmt of
     Assign _ (Val (VFunct _ _ _ (NativeFunct _ _ body) _)) -> skipStatements body
+    AssignDeref lhs expr -> skipExpr expr >> skipExpr lhs
     Assign _ expr -> skipExpr expr
     Let _ expr -> skipExpr expr
     Return expr -> skipExpr expr
