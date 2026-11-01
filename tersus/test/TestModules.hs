@@ -6,6 +6,7 @@ import Data.List (isInfixOf)
 
 import Modules
 import Parse
+import Pipeline (compileSource)
 import TersusTypes
 import TestHarness
 import TypeCheck (elaborate)
@@ -76,5 +77,57 @@ testCanonical =
     programA = "struct Point { x: Int }; fn area(p: Point) -> Int [{ }] [{ }] { return p.x; };"
     programB = programA
 
+testImports :: Test
+testImports =
+    testCaseSeq
+        "imports"
+        [ case parseFile "import a::b::c; x = 1;" of
+            Left err -> Just ("Parse failed: " ++ show err)
+            Right parsed -> testAssertEq (fileImports parsed) [Import ["a", "b", "c"] Nothing Nothing 1 1]
+        , case parseFile "import a::b::c as x; x = 1;" of
+            Left err -> Just ("Parse failed: " ++ show err)
+            Right parsed -> testAssertEq (fileImports parsed) [Import ["a", "b", "c"] (Just "x") Nothing 1 1]
+        , case parseFile "import a::b::c { A, B }; x = 1;" of
+            Left err -> Just ("Parse failed: " ++ show err)
+            Right parsed -> testAssertEq (fileImports parsed) [Import ["a", "b", "c"] Nothing (Just ["A", "B"]) 1 1]
+        , case parseFile "import a::b::c as x { A }; x = 1;" of
+            Left err -> Just ("Parse failed: " ++ show err)
+            Right parsed -> testAssertEq (fileImports parsed) [Import ["a", "b", "c"] (Just "x") (Just ["A"]) 1 1]
+        , case parseFile "\nimport a::b;\nimport c::d as e { F };\nx = 1;" of
+            Left err -> Just ("Parse failed: " ++ show err)
+            Right parsed ->
+                testAssertEq
+                    (fileImports parsed)
+                    [Import ["a", "b"] Nothing Nothing 2 1, Import ["c", "d"] (Just "e") (Just ["F"]) 3 1]
+                    <> testAssertEq (length (fileBody parsed)) 1
+        , case parseFile "x = 1; import a::b;" of
+            Left err ->
+                if "before any declaration" `isInfixOf` show err
+                    then Nothing
+                    else Just ("Expected import-after-declaration error, got: " ++ show err)
+            Right parsed -> Just ("Expected parse failure, got: " ++ show parsed)
+        , case parseFile "import a::b {};" of
+            Left err ->
+                if "must not be empty" `isInfixOf` show err
+                    then Nothing
+                    else Just ("Expected empty-list error, got: " ++ show err)
+            Right parsed -> Just ("Expected parse failure, got: " ++ show parsed)
+        , case parseFile "import a::b {  };" of
+            Left err ->
+                if "must not be empty" `isInfixOf` show err
+                    then Nothing
+                    else Just ("Expected empty-list error, got: " ++ show err)
+            Right parsed -> Just ("Expected parse failure, got: " ++ show parsed)
+        , case compileSource "import a::b::c; x = 1;" of
+            Error err ->
+                if "imports are not linked yet" `isInfixOf` err
+                    then Nothing
+                    else Just ("Expected not-linked error, got: " ++ err)
+            Ok _ -> Just "Expected a file with imports to be rejected for now"
+        , case compileSource "x = 1; return x;" of
+            Ok _ -> Nothing
+            Error err -> Just ("Expected existing single-file program to compile, got: " ++ err)
+        ]
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testCanonical]
+testModules = TestList "testModules" [testPaths, testCanonical, testImports]

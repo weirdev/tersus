@@ -6,6 +6,10 @@ module Parse
     , parseStatement
     , parseStatementBlock
     , parseStatementBlockWith
+    , parseFile
+    , parseFileWith
+    , Import (..)
+    , ParsedFile (..)
     , Decls
     , emptyDecls
     , locating
@@ -49,6 +53,21 @@ data Decls = Decls
 
 emptyDecls :: Decls
 emptyDecls = Decls Map.empty Map.empty Nothing [] Map.empty [] False False Map.empty
+
+data Import = Import
+    { importPath :: [Name]
+    , importAlias :: Maybe Name
+    , importNames :: Maybe [Name]
+    , importLine :: Int
+    , importColumn :: Int
+    }
+    deriving (Show, Eq, Ord)
+
+data ParsedFile = ParsedFile
+    { fileImports :: [Import]
+    , fileBody :: [Statement]
+    }
+    deriving (Show, Eq, Ord)
 
 -- The declarations from which a program is parsed with the place of each of its statements kept
 locating :: Decls -> Decls
@@ -132,7 +151,11 @@ located = do
 
 -- A match is rewritten as the statements it stands for, so it can be several statements
 statements :: Parser [Statement]
-statements = matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> structAssign <|> assumeStatements <|> linearStatement <|> externStatement <|> builtinStatement <|> affirmStatements <|> (pure <$> statement)
+statements = misplacedImport <|> matchAssign <|> matchReturn <|> matchStatement <|> forStatement <|> tupleAssign <|> structAssign <|> assumeStatements <|> linearStatement <|> externStatement <|> builtinStatement <|> affirmStatements <|> (pure <$> statement)
+  where
+    misplacedImport = do
+        void (try (keyword "import" >> whitespace))
+        fail "import statements must come before any declaration in a file"
 
 -- `linear struct T { ... };` and `linear enum T { ... };`: a type whose values are used exactly once (the declaration, and the mark)
 linearStatement :: Parser [Statement]
@@ -1628,6 +1651,45 @@ topLevelWrap p = do
     -- whitespace?
     eof -- Ensure we have parsed the whole input
     return result
+
+importDecl :: Parser Import
+importDecl = do
+    position <- getPosition
+    keyword "import"
+    whitespace
+    segments <- namePath
+    whitespace
+    alias <- optionMaybe (try (keyword "as" >> whitespace >> variable <* whitespace))
+    names <- optionMaybe importNameList
+    whitespace
+    void (char ';')
+    whitespace
+    return (Import segments alias names (sourceLine position) (sourceColumn position))
+  where
+    importNameList = do
+        void (char '{')
+        whitespace
+        empty <- optionMaybe (char '}')
+        case empty of
+            Just _ -> fail "an import name list must not be empty"
+            Nothing -> do
+                names <- (variable <* whitespace) `sepBy1` (char ',' >> whitespace)
+                void (char '}')
+                whitespace
+                return names
+
+fileParser :: Parser ParsedFile
+fileParser = do
+    whitespace
+    imports <- many importDecl
+    body <- statementBlock
+    return (ParsedFile imports body)
+
+parseFile :: String -> Either ParseError ParsedFile
+parseFile = runParser (topLevelWrap fileParser) emptyDecls ""
+
+parseFileWith :: Decls -> String -> Either ParseError (ParsedFile, Decls)
+parseFileWith decls = runParser (topLevelWrap (do parsed <- fileParser; declared <- getState; return (parsed, declared))) decls ""
 
 -- Function to run the parser
 parseStatement :: String -> Either ParseError Statement

@@ -19,7 +19,8 @@ import MirGhost (eraseGhosts, withoutUninit)
 import MirLower (lowerElaborated, lowerLibrary)
 import MirValidate (Validated, validateProgram)
 import Data.Char (isAlphaNum)
-import Parse (emptyDecls, locating, parseStatementBlockWith)
+import Data.List (intercalate)
+import Parse (ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, parseStatementBlockWith, renderPath)
 import MirLists (lowerLists)
 import PreludeSource (cloneSource, eqSource, boxSource, listsSource, mapSource, preludeSource, setSource, stringSource)
 import Pretty (renderVarProof)
@@ -60,15 +61,20 @@ parseWithEquality source = case [text | (name, text) <- libraries source, name `
 -- (the library of lists is the one program that may use the names that a program may not)
 parseSourceWith :: Bool -> String -> Result [Statement] String
 parseSourceWith reserving source = case libraries source of
-    [] -> case parseStatementBlockWith (locating emptyDecls) source of
+    [] -> case parseFileWith (locating emptyDecls) source of
         Left err -> Error ("Parse error: " ++ show err)
-        Right (stmts, _) -> checked stmts
+        Right (ParsedFile imports stmts, _) -> notLinked imports stmts
     texts -> case readLibraries texts emptyDecls of
         Left err -> Error err
-        Right (library, declared) -> case parseStatementBlockWith (locating declared) source of
+        Right (library, declared) -> case parseFileWith (locating declared) source of
             Left err -> Error ("Parse error: " ++ show err)
-            Right (stmts, _) -> checked stmts `bindResult` \stmts' -> Ok (library ++ stmts')
+            Right (ParsedFile imports stmts, _) -> case notLinked imports stmts of
+                Error err -> Error err
+                Ok stmts' -> Ok (library ++ stmts')
   where
+    notLinked imports stmts
+        | null imports = checked stmts
+        | otherwise = Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
     readLibraries [] declared = Right ([], declared)
     readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
         Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
