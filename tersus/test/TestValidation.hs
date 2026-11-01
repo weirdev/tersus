@@ -7,11 +7,17 @@ module TestValidation
     , testParseValFail
     , testCallsUseContracts
     , testRecursion
+    , testValidationCache
     ) where
 
+import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (evaluate)
+import System.Timeout (timeout)
+import Compile (lowerSource, lowerStatements, parseSource)
+import qualified Mir as M
 import qualified Data.Map as Map
 import Parse
-import MirValidate (Validated (..))
+import MirValidate (Validated (..), ValidationCache, emptyValidationCache, validationCacheHits, validateProgram, validateProgramWithCache, validateProgramUncached)
 import Pipeline (compileSource, validateStatements)
 import ProofState (allFacts, initialPState)
 import StdLib
@@ -573,3 +579,115 @@ factsAtStart small large =
             | otherwise -> Just "the facts at the start grow with the number of functions"
         (Error e, _) -> Just e
         (_, Error e) -> Just e
+
+identity :: String
+identity = "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n; }; "
+
+cloneProgram :: String -> String
+cloneProgram suffix = "x = [1, 2, 3]; y = clone(x); z = clone(y); " ++ suffix
+
+cachedPair :: String -> String -> Result (Validated, ValidationCache, M.Program) String
+cachedPair before after =
+    lowerSource True before `bindResult` \first ->
+        validateProgramWithCache emptyValidationCache first `bindResult` \(_, cache) ->
+            lowerSource True after `bindResult` \second ->
+                validateProgramWithCache cache second `bindResult` \(validated, cache') ->
+                    Ok (validated, cache', second)
+
+reuse :: String -> String -> TestResult
+reuse before after = case cachedPair before after of
+    Error e -> Just e
+    Ok (validated, cache, program) ->
+        if validationCacheHits cache == 0
+            then Just "Expected a function-validation cache hit"
+            else testAssertEq (show (Ok validated :: Result Validated String)) (show (validateProgramUncached program))
+
+miss :: String -> String -> TestResult
+miss before after = case cachedPair before after of
+    Error e -> Just e
+    Ok (validated, cache, program) ->
+        if validationCacheHits cache /= 0
+            then Just "Changed validation inputs reused an entry"
+            else testAssertEq (show (Ok validated :: Result Validated String)) (show (validateProgramUncached program))
+
+rejectChanged :: String -> String -> TestResult
+rejectChanged = rejectChangedWith id
+
+rejectChangedWith :: (M.Program -> M.Program) -> String -> String -> TestResult
+rejectChangedWith transform before after = case lowerSource True before of
+    Error e -> Just e
+    Ok first -> case validateProgramWithCache emptyValidationCache (transform first) of
+        Error e -> Just ("Warm-up failed: " ++ e)
+        Ok (_, cache) -> case lowerSource True after of
+            Error e -> Just ("Changed program did not lower: " ++ e)
+            Ok second -> case (validateProgramWithCache cache (transform second), validateProgramUncached (transform second)) of
+                (Error cached, Error uncached) -> testAssertEq cached uncached
+                (Ok _, _) -> Just "Changed program was incorrectly accepted"
+                (_, Ok _) -> Just "Uncached validator unexpectedly accepted the changed program"
+
+unreachedDefinitions :: M.Program -> M.Program
+unreachedDefinitions program = program{M.progMain = main'{M.fnBlocks = Map.insert (M.BlockId 999) (M.BasicBlock definitions M.Return) stripped}}
+  where
+    main' = M.progMain program
+    blocks = M.fnBlocks main'
+    isDefinition (M.Ghost _ M.GhostFunction{}) = True
+    isDefinition _ = False
+    definitions = [stmt | block <- Map.elems blocks, stmt <- M.blockStatements block, isDefinition stmt]
+    stripped = Map.map (\block -> block{M.blockStatements = filter (not . isDefinition) (M.blockStatements block)}) blocks
+
+frontendParity :: String -> TestResult
+frontendParity source = case parseSource source of
+    Error e -> Just e
+    Ok stmts -> testAssertEq (lowerSource True source) (lowerStatements stmts)
+
+concurrentReuse :: IO (Maybe String)
+concurrentReuse = do
+    finished <- timeout 10000000 $ do
+        slots <- mapM (\i -> do
+            slot <- newEmptyMVar
+            _ <- forkIO $ do
+                let result = case lowerSource True (identity ++ "return identity(" ++ show i ++ ");") of
+                        Error e -> Just e
+                        Ok program -> testAssertEq (show (validateProgram program)) (show (validateProgramUncached program))
+                _ <- evaluate (forceTestResult result)
+                putMVar slot result
+            return slot) [1 .. 8 :: Int]
+        mapM takeMVar slots
+    return $ case finished of
+        Nothing -> Just "Concurrent validation did not finish"
+        Just results -> case [e | Just e <- results] of
+            [] -> Nothing
+            e : _ -> Just e
+
+testValidationCache :: Test
+testValidationCache = TestList "testValidationCache"
+    [ TestCase "concurrent process-cache parity" concurrentReuse
+    , testCase "common function hit with changed main" (reuse (identity ++ "return identity(3);") (identity ++ "return identity(4);"))
+    , testCase "library instance hits and fresh-iota replay" (reuse (cloneProgram "a = size(z); affirm a = 3; return a;") (cloneProgram "a = size(z); affirm a = 3; return a + 1;"))
+    , testCase "main assertions still checked" (rejectChanged (identity ++ "return identity(3);") (identity ++ "affirm 1 = 2; return identity(3);"))
+    , testCase "changed body" (rejectChanged (identity ++ "return identity(3);") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n + 1; }; return identity(3);")
+    , testCase "changed contract" (rejectChanged (identity ++ "return identity(3);") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n + 1; }] { return n; }; return identity(3);")
+    , testCase "changed type declaration" (miss "struct Item { value: Int }; fn use(x: Item) -> Int { return 1; }; return 0;" "struct Item { value: Bool }; fn use(x: Item) -> Int { return 1; }; return 0;")
+    , testCase "changed generic declaration" (miss "struct Item<T> { value: T }; fn use(x: Item<Int>) -> Int { return 1; }; return 0;" "struct Item<T> { value: T, other: Int }; fn use(x: Item<Int>) -> Int { return 1; }; return 0;")
+    , testCase "unreached function still checked" (rejectChangedWith unreachedDefinitions (identity ++ "return 0;") "fn identity(n: Int) -> Int [{ }] [{ affirm return = n; }] { return n + 1; }; return 0;")
+    , testCase "changed invariant" (rejectChanged "struct Item { value: Int } invariant [{ affirm value >= 0; }]; fn make() -> Item { return Item { value: 0 }; }; return 0;" "struct Item { value: Int } invariant [{ affirm value > 0; }]; fn make() -> Item { return Item { value: 0 }; }; return 0;")
+    , testCase "changed callee contract" (rejectChanged "fn value() -> Int [{ }] [{ affirm return = 0; }] { return 0; }; fn use() -> Int [{ }] [{ affirm return = 0; }] { return value(); }; return use();" "fn value() -> Int [{ }] [{ affirm return = 1; }] { return 1; }; fn use() -> Int [{ }] [{ affirm return = 0; }] { return value(); }; return use();")
+    , testCase "changed proof-only dependency" (rejectChanged "fn value() -> Int [{ }] [{ affirm return = 0; }] { return 0; }; fn use() -> Int { affirm value() = 0; return 0; }; return use();" "fn value() -> Int [{ }] [{ affirm return = 1; }] { return 1; }; fn use() -> Int { affirm value() = 0; return 0; }; return use();")
+    , testCase "changed global axiom" (rejectChanged "axiom known(x) [{ }] [{ affirm 1 = 2; }]; fn use() -> Int { rewrite known(0); affirm 1 = 2; return 0; }; return 0;" "axiom known(x) [{ }] [{ }]; fn use() -> Int { rewrite known(0); affirm 1 = 2; return 0; }; return 0;")
+    , testCase "changed global assumption" (rejectChanged (identity ++ "assume 1 = 2; affirm 1 = 2; return 0;") (identity ++ "assume 1 = 1; affirm 1 = 2; return 0;"))
+    , testCase "assumptions at the definition invalidate reuse" (miss ("assume 1 = 1; " ++ identity ++ "return identity(3);") ("assume 2 = 2; " ++ identity ++ "return identity(3);"))
+    , testCase "mutual recursion hits" (reuse mutual (mutual ++ "affirm 1 = 1;"))
+    , testCase "mutual recursion changed member" (rejectChanged mutual brokenMutual)
+    , testCase "changed function-input reader" (miss "fn value() -> Int { return 0; }; return 0;" "fn value() -> Int { return readByte(); }; return 0;")
+    , testCase "large program uses uncached validation" (miss largeProgram largeProgram)
+    , testCase "library prefix and whole-program elaboration agree" (frontendParity (cloneProgram "return size(z);"))
+    , testCase "forward function signatures preserved" (frontendParity "fn first(n: Int) -> Int { return second(n); }; fn second(n: Int) -> Int { return n; }; return first(1);")
+    , testCase "prepared prefix does not retain user declarations" (frontendParity "struct Item { value: Int }; x = Item { value: 1 }; return x.value;")
+    , testCase "next program can redefine the same type" (frontendParity "struct Item { value: Bool }; x = Item { value: true }; return x.value;")
+    , testCase "string and prelude prefix parity" (frontendParity "x = \"hello\"; return size(x);")
+    , testCase "user-owned trait prefix parity" (frontendParity "trait Eq { fn eq(self: &Self, other: &Self) -> Bool; }; return 1;")
+    ]
+  where
+    largeProgram = concat ["fn f" ++ show i ++ "() -> Int { return " ++ show i ++ "; }; " | i <- [1 .. 65 :: Int]] ++ "return 0;"
+    mutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n - 1); }; }; return even(4);"
+    brokenMutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n); }; }; return even(4);"

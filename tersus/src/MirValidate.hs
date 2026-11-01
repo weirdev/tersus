@@ -1,8 +1,14 @@
 module MirValidate
     ( Validated (..)
     , validateProgram
+    , validateProgramWithCache
+    , validateProgramUncached
+    , ValidationCache
+    , emptyValidationCache
+    , validationCacheHits
     ) where
 
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Monad (filterM, foldM, forM_, unless, when)
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (isInfixOf, isPrefixOf, sort)
@@ -11,6 +17,7 @@ import qualified Data.Map as Map
 import Data.Maybe (fromMaybe, isNothing, listToMaybe)
 import Data.Set (Set)
 import qualified Data.Set as Set
+import System.IO.Unsafe (unsafePerformIO)
 
 import Ghost
 import qualified Mir as M
@@ -101,8 +108,25 @@ callGroup program name = Set.filter (\other -> Set.member other tops && Set.memb
             | Set.member x seen = go seen xs
             | otherwise = go (Set.insert x seen) (Set.toList (callees x) ++ xs)
 
+{-# NOINLINE processValidationCache #-}
+processValidationCache :: MVar ValidationCache
+processValidationCache = unsafePerformIO (newMVar emptyValidationCache)
+
+{-# NOINLINE validateProgram #-}
 validateProgram :: M.Program -> Result Validated String
-validateProgram program = runV $ do
+validateProgram program = unsafePerformIO $ modifyMVar processValidationCache $ \cache ->
+    case validateProgramWithCache cache program of
+        Error e -> pure (cache, Error e)
+        Ok (validated, cache') -> pure (cache', Ok validated)
+
+validateProgramWithCache :: ValidationCache -> M.Program -> Result (Validated, ValidationCache) String
+validateProgramWithCache cache = runVWithCache cache . validateProgramV
+
+validateProgramUncached :: M.Program -> Result Validated String
+validateProgramUncached = runV . validateProgramV
+
+validateProgramV :: M.Program -> V Validated
+validateProgramV program = do
     let main' = M.progMain program
         seeded = (initialPState program){psFns = Map.fromList [(name, assumedInfo program name) | name <- Map.keys (topLevelSources program)]}
         st0 = withFunctions main' seeded
@@ -641,8 +665,25 @@ inImplCheck name action =
                 Error e ->
                     throwV ("impl " ++ trait ++ " for " ++ owner ++ ": " ++ function ++ " does not meet what " ++ trait ++ " declares (its input contract must follow from " ++ trait ++ "'s, and its output contract must give " ++ trait ++ "'s): " ++ e)
 
+-- A body only inspects main to find top-level definition names. The incoming solver is rebuilt
+-- before use; every other proof-state field and every program declaration belongs in the key.
+functionValidationKey :: PState -> Name -> Bool -> String
+functionValidationKey st name top = show
+    ( name, top
+    , (M.progTypes program, M.progFunctions program, M.progGenerics program, M.progInvariants program, topLevelSources program)
+    , (psLocals st, psLocalNames st, psVars st, psView st, psFacts st, psGlobalFacts st, psGlobals st)
+    , (psRules st, psFns st, psInBody st, psTerminates st, psReaders st, psBorrows st, psValidated st)
+    )
+  where
+    program = psProgram st
+
 validateFunction :: PState -> Name -> Bool -> V FnInfo
-validateFunction st name top = do
+validateFunction st name top
+    | Map.size (M.progFunctions (psProgram st)) > 64 = validateFunctionBody st name top
+    | otherwise = memoFunction (functionValidationKey st name top) (validateFunctionBody st name top)
+
+validateFunctionBody :: PState -> Name -> Bool -> V FnInfo
+validateFunctionBody st name top = do
     fn <- maybe (throwV ("Undefined function: " ++ name)) return (Map.lookup name (M.progFunctions (psProgram st)))
     let spec = M.fnSpec fn
         term = M.specTermination spec

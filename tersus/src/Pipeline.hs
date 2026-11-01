@@ -14,11 +14,11 @@ import qualified Data.Map as Map
 import qualified Mir as M
 import Compile (lowerSource, lowerStatements, parseSource, parseWithEquality)
 import MirOwnership (expandRefWrites, insertOwnership)
-import MirHousekeeping (eraseGhosts, verifyProgram)
+import MirHousekeeping (eraseGhosts, verifyProgram, validatedListLibrary)
+import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
 import MirValidate (Validated, validateProgram)
 import MirLists (lowerLists)
-import PreludeSource (boxSource, listsSource)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import Types (Size (..), Type (..))
@@ -78,11 +78,8 @@ validatedSource source =
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
-compileSource = compileWith True
-
-compileWith :: Bool -> String -> Result M.Program String
-compileWith reserving source =
-    lowerSource reserving source `bindResult` \program ->
+compileSource source =
+    lowerSource True source `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
             stage "Validation failed: " (validateProgram checked) `bindResult` \_ ->
                 eraseGhosts checked
@@ -121,8 +118,8 @@ nativeProgram = lowerLists listLibrary . expandRefWrites
 
 -- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once
 listLibrary :: M.Program
-listLibrary = case compileWith False (listsSource ++ "\n" ++ boxSource) of
-    Ok program -> program
+listLibrary = case checkedLowered validatedListLibrary of
+    Ok _ -> Housekeeping.listLibrary
     Error e -> error ("lib/lists.tersus and lib/box.tersus do not compile: " ++ e)
 
 -- Checks and validates a program given as statements

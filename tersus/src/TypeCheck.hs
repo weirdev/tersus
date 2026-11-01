@@ -2,6 +2,10 @@ module TypeCheck
     ( typeCheck
     , elaborate
     , Elaborated (..)
+    , PreparedPrefix
+    , preparePrefix
+    , elaborateAfter
+    , gatheredSignatures
     ) where
 
 import Control.Monad (filterM, forM, forM_, unless, void, when)
@@ -37,16 +41,26 @@ typeCheck stmts = mapResult (const ()) (elaborate stmts)
 data Elaborated = Elaborated [Statement] [Type]
     deriving (Show)
 
-elaborate :: [Statement] -> Result Elaborated String
-elaborate stmts =
-    case runTcState checked initialTcState of
+data PreparedPrefix = PreparedPrefix Ctx Env [Statement] [Type] TcState
+
+preparePrefix :: Map Variable Type -> [Statement] -> Result PreparedPrefix String
+preparePrefix gathered stmts = case runTcState (checkStatementsWithContext True (Ctx gathered Nothing) [Map.empty] stmts) initialTcState of
+    Left err -> Error err
+    Right ((ctx, env, stmts', types), state) -> Ok (PreparedPrefix ctx env stmts' types state)
+
+elaborateAfter :: PreparedPrefix -> [Statement] -> Result Elaborated String
+elaborateAfter (PreparedPrefix ctx env prefix prefixTypes state) stmts =
+    case runTcState checked state of
         Left err -> Error err
         Right (elaborated, _) -> Ok elaborated
   where
     checked = do
-        (stmts', types) <- checkProgram stmts
-        resolved <- mapM zonk types
-        return (Elaborated stmts' resolved)
+        (_, stmts', types) <- checkStatements True ctx env stmts
+        resolved <- mapM zonk (prefixTypes ++ types)
+        return (Elaborated (prefix ++ stmts') resolved)
+
+elaborate :: [Statement] -> Result Elaborated String
+elaborate stmts = preparePrefix (gatheredSignatures stmts) [] `bindResult` \prefix -> elaborateAfter prefix stmts
 
 -- An expression looked through one step, by a call of its type's `deref` where it has a Deref impl. Nothing for a Box (whose
 -- look-through the language gives, in the type) and for anything that is not looked through.
@@ -80,27 +94,29 @@ checkInvariant ctx fields invariant = do
     (_, checked) <- checkValidations ctx [Map.fromList fields] invariant
     return checked
 
-checkProgram :: [Statement] -> TC ([Statement], [Type])
-checkProgram stmts = do
-    (_, stmts', types) <- checkStatements True (Ctx gathered Nothing) [Map.empty] stmts
-    return (stmts', types)
-  where
-    -- the signature of every function defined at the top is known before any body is checked, so a function
-    -- can call the ones defined after it (and they can call it back). A name the language itself gives a
-    -- meaning (a builtin, or a ghost function of proofs such as `filled`) is not gathered: in a proof
-    -- before its definition such a name is the language's, as it was when it was only seen after it.
-    gathered = Map.fromList [(var, functionType sizes types ptys rty) | Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _)) <- stmts, not (Map.member var stdLibCtx), ghostFunction var == Nothing]
+-- The signature of every function defined at the top is known before any body is checked, so a function
+-- can call the ones defined after it (and they can call it back). A name the language itself gives a
+-- meaning (a builtin, or a ghost function of proofs such as `filled`) is not gathered: in a proof
+-- before its definition such a name is the language's, as it was when it was only seen after it.
+gatheredSignatures :: [Statement] -> Map Variable Type
+gatheredSignatures stmts = Map.fromList [(var, functionType sizes types ptys rty) | Assign var (Val (VFunct _ _ _ (NativeFunct (Signature ptys rty sizes types _ _) _ _) _)) <- stmts, not (Map.member var stdLibCtx), ghostFunction var == Nothing]
+
 -- Statements run in order; a top-level function is visible to the functions after it, and the
 -- returned environment holds the variables the statements defined in the innermost scope.
 checkStatements :: Bool -> Ctx -> Env -> [Statement] -> TC (Env, [Statement], [Type])
-checkStatements _ _ env [] = return (env, [], [])
-checkStatements top ctx env (stmt : rest) = do
+checkStatements top ctx env stmts = do
+    (_, env', stmts', types) <- checkStatementsWithContext top ctx env stmts
+    return (env', stmts', types)
+
+checkStatementsWithContext :: Bool -> Ctx -> Env -> [Statement] -> TC (Ctx, Env, [Statement], [Type])
+checkStatementsWithContext _ ctx env [] = return (ctx, env, [], [])
+checkStatementsWithContext top ctx env (stmt : rest) = do
     (ctx', env', stmts', types) <- checkItem top ctx env stmt
     -- (the functions that templates were made into while it was checked come before it)
     made <- if top then takeEmitted else return []
     let (madeStmts, madeTypes) = unzip made
-    (envAfter, rest', restTypes) <- checkStatements top ctx' env' rest
-    return (envAfter, madeStmts ++ stmts' ++ rest', concat madeTypes ++ types ++ restTypes)
+    (ctxAfter, envAfter, rest', restTypes) <- checkStatementsWithContext top ctx' env' rest
+    return (ctxAfter, envAfter, madeStmts ++ stmts' ++ rest', concat madeTypes ++ types ++ restTypes)
 
 takeEmitted :: TC [(Statement, [Type])]
 takeEmitted = do

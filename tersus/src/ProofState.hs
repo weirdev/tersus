@@ -1,6 +1,11 @@
 module ProofState
     ( V
     , runV
+    , runVWithCache
+    , ValidationCache
+    , emptyValidationCache
+    , validationCacheHits
+    , memoFunction
     , throwV
     , liftR
     , tryV
@@ -42,7 +47,7 @@ import Solver
 import Utils
 
 -- The validator draws fresh iotas from one sequence, so that the states of different paths never share an iota
-newtype V a = V {stepV :: Int -> Result (a, Int) String}
+newtype V a = V {stepV :: (Int, Maybe ValidationCache) -> Result (a, (Int, Maybe ValidationCache)) String}
 
 instance Functor V where
     fmap f (V g) = V (\n -> mapResult (\(a, n') -> (f a, n')) (g n))
@@ -55,7 +60,33 @@ instance Monad V where
     V g >>= f = V (\n -> g n `bindResult` \(a, n') -> stepV (f a) n')
 
 runV :: V a -> Result a String
-runV v = mapResult fst (stepV v 0)
+runV v = mapResult fst (stepV v (0, Nothing))
+
+runVWithCache :: ValidationCache -> V a -> Result (a, ValidationCache) String
+runVWithCache cache v = mapResult (\(a, (_, memo)) -> (a, fromMaybe cache memo)) (stepV v (0, Just cache))
+
+data ValidationCache = ValidationCache (Map (String, Int) (FnInfo, Int)) Int
+
+emptyValidationCache :: ValidationCache
+emptyValidationCache = ValidationCache Map.empty 0
+
+validationCacheHits :: ValidationCache -> Int
+validationCacheHits (ValidationCache _ hits) = hits
+
+memoFunction :: String -> V FnInfo -> V FnInfo
+memoFunction key action = V $ \start@(n, cache) ->
+    case cache of
+        Nothing -> stepV action start
+        Just (ValidationCache entries hits) ->
+            if length (take 65537 key) > 65536
+                then stepV action start
+                else case Map.lookup (key, n) entries of
+                    Just (info, next) -> Ok (info, (next, Just (ValidationCache entries (hits + 1))))
+                    Nothing -> stepV action start `bindResult` \(info, (next, memo)) ->
+                        let ValidationCache entries' hits' = fromMaybe emptyValidationCache memo
+                            bounded = if Map.size entries' >= 64 then Map.empty else entries'
+                            saved = ValidationCache (Map.insert (key, n) (info, next) bounded) hits'
+                         in Ok (info, (next, Just saved))
 
 throwV :: String -> V a
 throwV e = V (\_ -> Error e)
@@ -70,10 +101,10 @@ tryV (V g) = V (\n -> case g n of
     Error e -> Ok (Error e, n))
 
 fresh :: V Iota
-fresh = V (\n -> Ok (iotaAt n, n + 1))
+fresh = V (\(n, memo) -> Ok (iotaAt n, (n + 1, memo)))
 
 freshN :: Int -> V [Iota]
-freshN k = V (\n -> Ok (map iotaAt [n .. n + k - 1], n + k))
+freshN k = V (\(n, memo) -> Ok (map iotaAt [n .. n + k - 1], (n + k, memo)))
 
 -- a0, b0, ..., z0, a1, ...
 iotaAt :: Int -> Iota
@@ -92,8 +123,10 @@ data FnInfo = FnInfo
     , fnReads :: Bool -- reads the standard input: what it gives is not determined by its arguments, so two calls are not the same value
     , fnMutParams :: [Variable] -- the parameters a call may update (&mut T): the caller gets a new version of what each is to (REFERENCES.md)
     }
+    deriving (Show)
 
 data FnKind = KBuiltin BuiltinFunct | KUser Name
+    deriving (Show)
 
 -- The state at a point of a path through a function: what is known (the facts about the values) and which value each local
 -- has. Values never change, an assignment gives the local a new one, so a fact stays true for the rest of the path.
