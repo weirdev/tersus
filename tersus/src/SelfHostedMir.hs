@@ -1078,6 +1078,15 @@ statement rules (M.Assign (M.Local dest) (M.ListOp op args)) b0
         let env = Map.fromList (zip params snapped ++ [("return", M.Copy (M.Local dest))])
             (function, b2) = namedFunction ("ghostop:" ++ ghostOpShort op) b1
         (argRefs, b3) <- foldM (\(rs, bb) a -> do (r, bb') <- operand a bb; pure (rs ++ [r], bb')) ([], b2) snapped
+        -- An operation that makes a new address or permission is not a
+        -- function of its arguments: doing it twice makes two things, so
+        -- its application carries a tag no other application has.
+        (argRefs, b3) <- if op `elem` [M.AddrAlloc, M.BlockNew, M.UninitNew, M.UninitEmpty]
+            then do
+                let (tag, bx) = fresh b3
+                (tagRef, bx') <- operand (M.Const (M.CInt tag)) bx
+                pure (argRefs ++ [tagRef], bx')
+            else pure (argRefs, b3)
         (required, b4) <- contractSteps rules False env ins b3
         (promised, b5) <- contractSteps rules True env outs b4
         (framed, b6) <- frameSteps op snapped (toInteger dest) b5
