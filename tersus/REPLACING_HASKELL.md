@@ -99,14 +99,22 @@ one, and it proves a `get` of a list of known size from its elements.
 With that, the list and string `Eq` impls prove, and `String::concat`,
 `String::slice` and `String::find` check.
 
-What remains open is item 3 of the original list: `Hash`, `HashMap`
-and `HashSet` need arithmetic the solver does not have yet (`x % n` in
-`0..n` for positive `n`, the division identity `hashCombine` rests on,
-and the bucket frame facts of `bucketPut`), which is the same
-division-family gap that fails several arithmetic cases. The
-validator's own self-check (`testMir` on `lib/validation.tersus`)
-needs that arithmetic and has not finished in this environment; it is
-still unverified.
+Generic code is checked as the copies a call decides: the bridge is
+given the monomorphised program (`MirMono`'s copies with their
+contracts kept), with the templates beside the copies as the sources
+of contracts that name a function nothing calls. A call written in a
+proof carries its contract with it (the callee's requires are an
+obligation wherever the clause is used, its ensures are assumed of
+the application's term), and a function declared `~` may not be
+called in a proof at all. The function that checks an impl against
+its trait is checked as written, or a weaker impl would pass. With
+that, `HashMap` and `HashSet` check: their tests pass, including the
+spread past four entries. The checker's arithmetic no longer traps
+the compiled validator on values like the least integer: a linear
+combination whose bound is not representable is dropped rather than
+computed, and a size is known never negative. The validator's own
+self-check (`testMir` on `lib/validation.tersus`) has not finished in
+this environment; it is still unverified.
 
 The validator itself uses `HashMap` and `HashSet`, so every validation
 runs those libraries interpreted. Since the rebase the solver has been
@@ -128,13 +136,11 @@ as a bootstrap program is, and the interpreted validator remains only
 where the validator is itself the program under test
 (`TestPipeline`'s checks of `lib/validation.tersus`).
 
-Next in this target, concrete evaluation in the validator: the Haskell
-engine evaluates a proof term whose parts are all known (`Engine`'s
-constant values, so the size of `push(push([], v), v)` is 2 before any
-fact is consulted); the Tersus solver only knows terms already recorded
-as constants. Porting that evaluation (arithmetic, `size` and `get`
-of literal and pushed lists, at the states that ask for a value) is in
-scope here and comes before the remaining solver gaps.
+Concrete evaluation is in the validator: a term whose parts are all
+known is recorded as the constant it evaluates to (arithmetic,
+`size` and `get` of literal, pushed and made lists), as the Haskell
+engine's constant values did, and loop invariants are inferred from
+what the entry state proves, in the families the reference infers.
 
 ### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
 
