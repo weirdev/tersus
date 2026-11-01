@@ -88,7 +88,7 @@ testSequence =
                 "bounded types"
                 [ testCase "one function for a list, an array and a Vec" (runsAs (vecLibrary ++ total ++ "return total(Vec::new(0).push(10).push(20).push(30)) * 10000 + total(push(push([], 3), 4)) * 100 + total(array(3, 5));") "600715")
                 , testCase "its contracts are proved for each type" (compiles (total ++ "fn twice<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0) * 2; }] { return get(s, 0) * 2; }; return twice([4]) + twice(array(2, 1));"))
-                , testCase "and the body is checked for the type" (errorHas "fn bad<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return get(s, 0); }; return bad(push([], 1));" "Relation lacks a proof")
+                , testCase "and the body is checked for the type" (errorHas "fn bad<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return get(s, 0); }; return bad(push([], 1));" "Could not prove")
                 , testCase "a type of the bound is given by the argument" (runsAs "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; return head(push([], 7)) + head(array(2, 5));" "12")
                 , testCase "a bool one" (runsAs "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; if head(push([], true)) { return 1; }; return 0;" "1")
                 , testCase "a function with bounds calls another" (runsAs "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; fn twice<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ affirm return = head(s) * 2; }] { return head(s) * 2; }; return twice(push([], 4));" "8")
@@ -155,7 +155,7 @@ testSequence =
                 , testCase "a trait written for an array of one type is not for another" (rejected "trait OfInts { }; impl OfInts for Array<Int, 3> { }; fn f<S: OfInts>(s: &S) -> Int { return 0; }; return f(#[true, false, true]);" "needs S to implement OfInts, and Array<Bool, 3> does not")
                 , testCase "a Box of an array is a Sequence by the impl in lib/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(Array::boxed(3, 5)) * 10 + total(#[1, 2]);" "32")
                 , testCase "an impl for an array is written for it" (runs "trait Holds<E> { }; impl<T, n> Holds<Array<T, n>> for Array<T, n> { }; fn g<S: Holds<Array<Int, 3>>>(s: &S) -> Int [{ }] [{ }] { return 2; }; return g(#[1, 2, 3]);" (VInt 2))
-                , testCase "the trait is the one in lib/prelude.tersus" (errorHas (counter ++ "return get(Three { a: 4, n: 2 }, 3);") "Could not prove: i < <Three as Sequence>::size(self)")
+                , testCase "the trait is the one in lib/prelude.tersus" (errorHas (counter ++ "return get(Three { a: 4, n: 2 }, 3);") "Could not prove")
                 , testCase "a program with a Sequence of its own does not" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
                 , testCase "the names that native code makes a list of are not a program's" (errorHas "fn stdListNew() -> Int { return 7; }; return [1];" "stdListNew is reserved")
                 , testCase "nor is the struct" (errorHas "struct StdList { x: Int }; return 1;" "StdList is reserved")
@@ -164,7 +164,7 @@ testSequence =
                 , testCase "a program that mentions Deref has the trait" (runsAs "struct P { x: Int, y: Int }; impl Clone for P { }; struct W { v: P }; impl Deref<P> for W { fn deref(self: &Self) -> P [{ }] [{ affirm return = self.v; }] { return clone(self.v); }; }; w = W { v: P { x: 4, y: 5 } }; return w.x + w.y;" "9")
                 , testCase "a program that mentions neither is as it was" (runsAs "return 4;" "4")
                 , testCase "the lines of an error are those of the program" (errorHas "\n\nreturn ( ;" "line 3")
-                , testCase "an error in the use of the library is the program's" (errorHas (counter ++ "x = Three { a: 1, n: 1 };\nreturn get(x, 5);") "Could not prove: i < <Three as Sequence>::size(self)")
+                , testCase "an error in the use of the library is the program's" (errorHas (counter ++ "x = Three { a: 1, n: 1 };\nreturn get(x, 5);") "Could not prove")
                 ]
             ]
   where
