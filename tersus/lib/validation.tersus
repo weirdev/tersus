@@ -1284,10 +1284,8 @@ fn linGcd(a: Int, b: Int) -> Int {
 };
 
 fn linFloorDiv(a: Int, g: Int) -> Int {
-    if a >= 0 { return a / g; };
-    q = a / g;
-    if a % g = 0 { return q; };
-    return q - 1;
+    // (/ is floor division, as the division facts say it is)
+    return a / g;
 };
 
 // Over integers a fact may be divided through by the gcd of its
@@ -1961,6 +1959,23 @@ fn getFactOf(context: &ValidatorContext, equalities: &List<EqualityFact>, term: 
     return GetFact { seq: 0, at: 0, found: false };
 };
 
+// Every recorded reading of a term: a value produced by a sequence
+// operation is also the reading of what it came from (a pushed, set or
+// popped list), so one term can be a get of several lists.
+fn getFactsOf(context: &ValidatorContext, equalities: &List<EqualityFact>, term: Int) -> List<GetFact> {
+    facts = [];
+    for app in context.applications {
+        if app.function = -14 {
+            if size(app.arguments) = 2 {
+                if hasEquality(equalities, app.id, term) {
+                    facts = push(facts, GetFact { seq: get(app.arguments, 0), at: get(app.arguments, 1), found: true });
+                };
+            };
+        };
+    };
+    return facts;
+};
+
 struct SizeFact { term: Int, found: Bool };
 
 impl Clone for SizeFact { };
@@ -2249,10 +2264,15 @@ fn forallEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int
 // A get at a symbolic index of a list of known size is one of its finitely
 // many elements: when every element is the goal's other side, the get is too.
 fn finiteGetSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+        if finiteGetSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
+    };
+    return false;
+};
+
+fn finiteGetSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact) -> Bool {
     equalities = analysis.equalities;
     differences = analysis.differences;
-    gf = getFactOf(context, equalities, getTerm);
-    if gf.found = false { return false; };
     sz = sizeTermOf(context, equalities, gf.seq);
     if sz.found = false { return false; };
     nv = integerValue(context, sz.term);
@@ -2306,10 +2326,15 @@ fn finiteGetEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: 
 // The bridge records `forall j in lo..hi: get(a, base + j) = c` as an
 // application of function -32 to (a, lo, hi, base, c).
 fn forallConstantSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+        if forallConstantSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
+    };
+    return false;
+};
+
+fn forallConstantSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact) -> Bool {
     equalities = analysis.equalities;
     differences = analysis.differences;
-    gf = getFactOf(context, equalities, getTerm);
-    if gf.found = false { return false; };
     for app in context.applications {
         if app.function = -32 {
             if size(app.arguments) = 5 {
@@ -2369,10 +2394,15 @@ fn forallConstantSide(context: &ValidatorContext, analysis: &ContextAnalysis, ge
 // (mode 0) or `get(b, j) - d` (mode 1) as an application of function -33 to
 // (a, b, lo, hi, base, d, mode).
 fn forallShiftSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int) -> Bool {
+    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+        if forallShiftSideFor(context, analysis, getTerm, exprTerm, gf) { return true; };
+    };
+    return false;
+};
+
+fn forallShiftSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact) -> Bool {
     equalities = analysis.equalities;
     differences = analysis.differences;
-    gf = getFactOf(context, equalities, getTerm);
-    if gf.found = false { return false; };
     for app in context.applications {
         if app.function = -33 {
             if size(app.arguments) = 7 {
@@ -2614,10 +2644,15 @@ fn entailsUnderEquality(context: &ValidatorContext, x: Int, y: Int, u: Int, v: I
 // The bridge records `forall j in lo..hi: get(a, base + j) != c` as an
 // application of function -31 to (a, lo, hi, base, c).
 fn forallDifferentSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
+    for gf in getFactsOf(context, analysis.equalities, getTerm) {
+        if forallDifferentSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
+    };
+    return false;
+};
+
+fn forallDifferentSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact) -> Bool {
     equalities = analysis.equalities;
     differences = analysis.differences;
-    gf = getFactOf(context, equalities, getTerm);
-    if gf.found = false { return false; };
     for app in context.applications {
         if app.function = -31 {
             if size(app.arguments) = 5 {
@@ -4048,7 +4083,66 @@ fn recordEvaluatedSize(state: &ExecutionState, list: Int) -> ExecutionState {
     return clone(state);
 };
 
+// Every fact that mentions a term is dropped when the term is forgotten.
+// Facts learned under an assumption scoped to one term (the havoced index
+// of a checked forall, whose guards are assumed for the check) must not
+// outlive that assumption: an index whose guards cannot hold would
+// otherwise leave the context contradictory and prove everything after.
+// Forgetting only removes facts, so it can never prove a new goal.
+fn termForgotten(tainted: &List<Int>, term: Int) -> Bool {
+    for t in tainted { if t = term { return true; }; };
+    return false;
+};
+
+fn forgetTerm(context: &ValidatorContext, root: Int) -> ValidatorContext {
+    tainted = push([], root);
+    for round in 0..size(context.applications) + 1 {
+        for app in context.applications {
+            if termForgotten(tainted, app.id) = false {
+                hit = false;
+                for arg in app.arguments { if termForgotten(tainted, arg) { hit = true; }; };
+                if hit { tainted = push(tainted, app.id); };
+            };
+        };
+    };
+    applications = [];
+    for app in context.applications {
+        keep = termForgotten(tainted, app.id) = false;
+        for arg in app.arguments { if termForgotten(tainted, arg) { keep = false; }; };
+        if keep { applications = push(applications, clone(app)); };
+    };
+    equalities = [];
+    for fact in context.equalities {
+        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { equalities = push(equalities, clone(fact)); }; };
+    };
+    orders = [];
+    for fact in context.orders {
+        if termForgotten(tainted, fact.smaller) = false { if termForgotten(tainted, fact.greater) = false { orders = push(orders, clone(fact)); }; };
+    };
+    different = [];
+    for fact in context.different {
+        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { different = push(different, clone(fact)); }; };
+    };
+    differences = [];
+    for fact in context.differences {
+        if termForgotten(tainted, fact.left) = false { if termForgotten(tainted, fact.right) = false { differences = push(differences, clone(fact)); }; };
+    };
+    variants = [];
+    for fact in context.variants {
+        if termForgotten(tainted, fact.object) = false { variants = push(variants, clone(fact)); };
+    };
+    constants = [];
+    for fact in context.constants {
+        if termForgotten(tainted, fact.id) = false { constants = push(constants, clone(fact)); };
+    };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
+};
+
 fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
+    if function = -40 {
+        if size(args) = 1 { return forgetTerm(context, get(args, 0)); };
+        return clone(context);
+    };
     if size(args) != 2 { return clone(context); };
     a = get(args, 0);
     b = get(args, 1);
