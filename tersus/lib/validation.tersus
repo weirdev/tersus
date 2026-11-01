@@ -3839,6 +3839,177 @@ fn addDivisionOrders(context: &ValidatorContext, result: Int, dividend: Int, div
     return ValidatorContext { orders: facts, ..clone(context) };
 };
 
+// The value of a term whose parts are all known: arithmetic on known
+// values, the size of a list made of known pushes, and an element read
+// at a known index of one. This is what the reference engine's constant
+// evaluation gives its inference; anything not wholly known is Missing.
+fn evalApplication(context: &ValidatorContext, id: Int) -> ApplicationTerm {
+    for app in context.applications {
+        if app.id = id { return clone(app); };
+    };
+    return ApplicationTerm { id: id, function: 0, arguments: [] };
+};
+
+fn evalHasApplication(context: &ValidatorContext, id: Int) -> Bool {
+    for app in context.applications {
+        if app.id = id { return true; };
+    };
+    return false;
+};
+
+fn evalListSize(context: &ValidatorContext, list: Int, depth: Int) -> IntegerLookup {
+    if evalHasApplication(context, list) = false { return IntegerLookup::Missing; };
+    app = evalApplication(context, list);
+    if app.function = -12 { return IntegerLookup::Found { value: size(app.arguments) }; };
+    if app.function = -15 { return IntegerLookup::Found { value: size(app.arguments) }; };
+    if app.function = -16 {
+        if depth = 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 2 {
+            inner = evalListSize(context, get(app.arguments, 0), depth - 1);
+            if inner is IntegerLookup::Found { return IntegerLookup::Found { value: (inner as IntegerLookup::Found).value + 1 }; };
+        };
+    };
+    if app.function = -19 {
+        if size(app.arguments) = 2 { return evalTermValue(context, get(app.arguments, 0), depth - 1); };
+    };
+    return IntegerLookup::Missing;
+};
+
+fn evalListGet(context: &ValidatorContext, list: Int, index: Int, depth: Int) -> IntegerLookup {
+    if evalHasApplication(context, list) = false { return IntegerLookup::Missing; };
+    app = evalApplication(context, list);
+    if app.function = -12 {
+        if index >= 0 { if index < size(app.arguments) { return evalTermValue(context, get(app.arguments, index), depth); }; };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -15 {
+        if index >= 0 { if index < size(app.arguments) { return evalTermValue(context, get(app.arguments, index), depth); }; };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -16 {
+        if depth = 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 2 {
+            innerSize = evalListSize(context, get(app.arguments, 0), depth - 1);
+            if innerSize is IntegerLookup::Found {
+                if index = (innerSize as IntegerLookup::Found).value { return evalTermValue(context, get(app.arguments, 1), depth - 1); };
+                if index < (innerSize as IntegerLookup::Found).value { return evalListGet(context, get(app.arguments, 0), index, depth - 1); };
+            };
+        };
+    };
+    if app.function = -17 {
+        if depth = 0 { return IntegerLookup::Missing; };
+        if size(app.arguments) = 3 {
+            changed = evalTermValue(context, get(app.arguments, 1), depth - 1);
+            if changed is IntegerLookup::Found {
+                if index = (changed as IntegerLookup::Found).value { return evalTermValue(context, get(app.arguments, 2), depth - 1); };
+                return evalListGet(context, get(app.arguments, 0), index, depth - 1);
+            };
+        };
+    };
+    if app.function = -19 {
+        if size(app.arguments) = 2 {
+            length = evalTermValue(context, get(app.arguments, 0), depth - 1);
+            if length is IntegerLookup::Found {
+                if index >= 0 { if index < (length as IntegerLookup::Found).value { return evalTermValue(context, get(app.arguments, 1), depth - 1); }; };
+            };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
+fn evalTermValue(context: &ValidatorContext, term: Int, depth: Int) -> IntegerLookup {
+    known = integerValue(context, term);
+    if known is IntegerLookup::Found { return known; };
+    if depth = 0 { return IntegerLookup::Missing; };
+    if evalHasApplication(context, term) = false { return IntegerLookup::Missing; };
+    app = evalApplication(context, term);
+    if app.function = -13 {
+        if size(app.arguments) = 1 { return evalListSize(context, get(app.arguments, 0), depth - 1); };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -14 {
+        if size(app.arguments) = 2 {
+            index = evalTermValue(context, get(app.arguments, 1), depth - 1);
+            if index is IntegerLookup::Found { return evalListGet(context, get(app.arguments, 0), (index as IntegerLookup::Found).value, depth - 1); };
+        };
+        return IntegerLookup::Missing;
+    };
+    if size(app.arguments) != 2 { return IntegerLookup::Missing; };
+    a = evalTermValue(context, get(app.arguments, 0), depth - 1);
+    if a is IntegerLookup::Missing { return IntegerLookup::Missing; };
+    b = evalTermValue(context, get(app.arguments, 1), depth - 1);
+    if b is IntegerLookup::Missing { return IntegerLookup::Missing; };
+    av = (a as IntegerLookup::Found).value;
+    bv = (b as IntegerLookup::Found).value;
+    if app.function = -1 {
+        if av > 0 { if bv > 9223372036854775807 - av { return IntegerLookup::Missing; }; };
+        if av < 0 { if bv < -9223372036854775808 - av { return IntegerLookup::Missing; }; };
+        return IntegerLookup::Found { value: av + bv };
+    };
+    if app.function = -2 {
+        if bv < 0 { if av > 9223372036854775807 + bv { return IntegerLookup::Missing; }; };
+        if bv > 0 { if av < -9223372036854775808 + bv { return IntegerLookup::Missing; }; };
+        return IntegerLookup::Found { value: av - bv };
+    };
+    if app.function = -3 {
+        product = safeProduct(av, bv);
+        if product is SumResult::Sum { return IntegerLookup::Found { value: (product as SumResult::Sum).value }; };
+        return IntegerLookup::Missing;
+    };
+    if app.function = -4 {
+        if bv = 0 { return IntegerLookup::Missing; };
+        if av = -9223372036854775808 { if bv = -1 { return IntegerLookup::Missing; }; };
+        return IntegerLookup::Found { value: av / bv };
+    };
+    if app.function = -5 {
+        if bv = 0 { return IntegerLookup::Missing; };
+        if av = -9223372036854775808 { if bv = -1 { return IntegerLookup::Found { value: 0 }; }; };
+        return IntegerLookup::Found { value: av % bv };
+    };
+    return IntegerLookup::Missing;
+};
+
+// A term whose value concrete evaluation knows is recorded as a
+// constant, so the searches see it like any other known value.
+fn recordEvaluatedValue(state: &ExecutionState, term: Int) -> ExecutionState {
+    out = clone(state);
+    if integerValue(state.context, term) is IntegerLookup::Missing {
+        value = evalTermValue(state.context, term, 6);
+        if value is IntegerLookup::Found {
+            out = ExecutionState { context: ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: term, kind: 0, value: (value as IntegerLookup::Found).value }), ..clone(state.context) }, locals: clone(state.locals) };
+        };
+    };
+    return recordEvaluatedSize(out, term);
+};
+
+// The size of a list whose elements concrete evaluation can count is
+// recorded on the size application of the list, like a known value.
+fn recordEvaluatedSize(state: &ExecutionState, list: Int) -> ExecutionState {
+    found = evalListSize(state.context, list, 6);
+    if found is IntegerLookup::Found {
+        for app in state.context.applications {
+            if app.function = -13 {
+                if size(app.arguments) = 1 {
+                    if get(app.arguments, 0) = list {
+                        if integerValue(state.context, app.id) is IntegerLookup::Missing {
+                            context = ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: app.id, kind: 0, value: (found as IntegerLookup::Found).value }), ..clone(state.context) };
+                            return ExecutionState { context: context, locals: clone(state.locals) };
+                        };
+                        return clone(state);
+                    };
+                };
+            };
+        };
+        fresh = freshValue(state);
+        if fresh is ValueLookup::Found {
+            app = ApplicationTerm { id: (fresh as ValueLookup::Found).term, function: -13, arguments: push([], list) };
+            context = ValidatorContext { applications: push(clone(state.context.applications), app), constants: push(clone(state.context.constants), ConstantTerm { id: (fresh as ValueLookup::Found).term, kind: 0, value: (found as IntegerLookup::Found).value }), ..clone(state.context) };
+            return ExecutionState { context: context, locals: clone(state.locals) };
+        };
+    };
+    return clone(state);
+};
+
 fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
     if size(args) != 2 { return clone(context); };
     a = get(args, 0);
@@ -4484,7 +4655,7 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                 withApp = ValidatorContext { applications: apps, ..state.context };
                 context = builtinFacts(withApp, apply.function, apply.result, terms);
                 locals = bindLocal(state.locals, apply.local, apply.result);
-                state = ExecutionState { context: context, locals: locals };
+                state = recordEvaluatedValue(ExecutionState { context: context, locals: locals }, apply.result);
             } else {
                 return ExecutionResult { status: 2, failedAt: i, state: state };
             };
@@ -4509,7 +4680,7 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                     withApp = ValidatorContext { applications: apps, ..state.context };
                     context = builtinFacts(withApp, apply.function, resultId, terms);
                     locals = bindLocal(state.locals, apply.local, resultId);
-                    state = ExecutionState { context: context, locals: locals };
+                    state = recordEvaluatedValue(ExecutionState { context: context, locals: locals }, resultId);
                   } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                 };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
@@ -4526,6 +4697,8 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                         pushed = pushSequence(state, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
                         if pushed.status != 0 { return ExecutionResult { status: pushed.status, failedAt: i, state: pushed.state }; };
                         state = pushed.state;
+                        madeTerm = resolveValue(state, ValueRef::Local { local: pushStep.local });
+                        if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
                     } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
@@ -4555,6 +4728,8 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                         result = setSequence(state, setStep.local, (list as ValueLookup::Found).term, (index as ValueLookup::Found).term, (value as ValueLookup::Found).term);
                         if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
                         state = result.state;
+                        madeTerm = resolveValue(state, ValueRef::Local { local: setStep.local });
+                        if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
                     } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
                 } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
@@ -4567,6 +4742,8 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
                 result = popSequence(state, popStep.local, (list as ValueLookup::Found).term);
                 if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
                 state = result.state;
+                madeTerm = resolveValue(state, ValueRef::Local { local: popStep.local });
+                if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
             } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
         };
         if step is ExecutionStep::NewArray {
@@ -4834,7 +5011,7 @@ fn contextContradictory(context: &ValidatorContext) -> Bool {
     return false;
 };
 
-struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int };
+struct InferSubject { local: Int, isSize: Bool, temp: Int, term: Int, kind: Int, indexTerm: Int };
 
 impl Clone for InferSubject { };
 
@@ -4856,12 +5033,16 @@ fn appendSteps(a: &List<ExecutionStep>, b: &List<ExecutionStep>) -> List<Executi
 
 fn subjectRef(subject: &InferSubject) -> ValueRef {
     if subject.isSize { return ValueRef::Local { local: subject.temp }; };
+    if subject.kind = 2 { return ValueRef::Local { local: subject.temp }; };
     return ValueRef::Local { local: subject.local };
 };
 
 fn subjectSteps(subject: &InferSubject) -> List<ExecutionStep> {
     if subject.isSize {
         return push([], ExecutionStep::ApplyFresh { local: subject.temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) });
+    };
+    if subject.kind = 2 {
+        return push([], ExecutionStep::ApplyFresh { local: subject.temp, function: -14, arguments: push(push([], ValueRef::Local { local: subject.local }), ValueRef::Term { term: subject.indexTerm }) });
     };
     return [];
 };
@@ -4881,19 +5062,19 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
     for binding in initial.locals.entries() {
         if binding.key >= 0 {
             if containsValue(havoc, binding.key) {
-                if size(assigned) < 12 {
-                    assigned = push(assigned, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value });
+                if size(assigned) < 8 {
+                    assigned = push(assigned, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value, kind: 0, indexTerm: 0 });
                 };
             } else {
                 if size(anchors) < 12 {
-                    anchors = push(anchors, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value });
+                    anchors = push(anchors, InferSubject { local: binding.key, isSize: false, temp: 0, term: binding.value, kind: 0, indexTerm: 0 });
                 };
             };
         };
     };
     extraAssigned = [];
     for subject in assigned {
-        if size(assigned) + size(extraAssigned) < 12 {
+        if size(assigned) + size(extraAssigned) < 8 {
             temp = 0 - 7000000 - index * 4;
             index = index + 1;
             made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -13, arguments: push([], ValueRef::Local { local: subject.local }) }));
@@ -4901,7 +5082,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                 work = made.state;
                 term = resolveValue(work, ValueRef::Local { local: temp });
                 if term is ValueLookup::Found {
-                    extraAssigned = push(extraAssigned, InferSubject { local: subject.local, isSize: true, temp: temp, term: (term as ValueLookup::Found).term });
+                    extraAssigned = push(extraAssigned, InferSubject { local: subject.local, isSize: true, temp: temp, term: (term as ValueLookup::Found).term, kind: 1, indexTerm: 0 });
                 };
             };
         };
@@ -4917,23 +5098,57 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                 work = made.state;
                 term = resolveValue(work, ValueRef::Local { local: temp });
                 if term is ValueLookup::Found {
-                    extraAnchors = push(extraAnchors, InferSubject { local: subject.local, isSize: true, temp: temp, term: (term as ValueLookup::Found).term });
+                    extraAnchors = push(extraAnchors, InferSubject { local: subject.local, isSize: true, temp: temp, term: (term as ValueLookup::Found).term, kind: 1, indexTerm: 0 });
                 };
             };
         };
     };
     for subject in extraAnchors { anchors = push(anchors, subject); };
+    extraElems = [];
+    for subject in assigned {
+        if subject.kind = 0 {
+            listSize = evalListSize(work.context, subject.term, 6);
+            if listSize is IntegerLookup::Found {
+                count = (listSize as IntegerLookup::Found).value;
+                if count > 3 { count = 3; };
+                for k in 0..count {
+                    if size(assigned) + size(extraElems) < 8 {
+                        kTerm = 0;
+                        kFound = false;
+                        for constant in work.context.constants {
+                            if constant.kind = 0 {
+                                if kFound = false { if constant.value = k { kTerm = constant.id; kFound = true; }; };
+                            };
+                        };
+                        if kFound {
+                            temp = 0 - 7000000 - index * 4;
+                            index = index + 1;
+                            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -14, arguments: push(push([], ValueRef::Local { local: subject.local }), ValueRef::Term { term: kTerm }) }));
+                            if made.status = 0 {
+                                work = made.state;
+                                term = resolveValue(work, ValueRef::Local { local: temp });
+                                if term is ValueLookup::Found {
+                                    extraElems = push(extraElems, InferSubject { local: subject.local, isSize: false, temp: temp, term: (term as ValueLookup::Found).term, kind: 2, indexTerm: kTerm });
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    for subject in extraElems { assigned = push(assigned, subject); };
     goals = [];
     candIndex = 0;
     for subj in assigned {
-        kv = integerValue(work.context, subj.term);
+        kv = evalTermValue(work.context, subj.term, 6);
         if kv is IntegerLookup::Found {
             k = (kv as IntegerLookup::Found).value;
             kTerm = 0;
             kFound = false;
             for constant in work.context.constants {
                 if constant.kind = 0 {
-                    if constant.value = k { kTerm = constant.id; kFound = true; };
+                    if kFound = false { if constant.value = k { kTerm = constant.id; kFound = true; }; };
                 };
             };
             if kFound {
@@ -4949,8 +5164,8 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             if i < j {
                 s1 = get(assigned, i);
                 s2 = get(assigned, j);
-                k1 = integerValue(work.context, s1.term);
-                k2 = integerValue(work.context, s2.term);
+                k1 = evalTermValue(work.context, s1.term, 6);
+                k2 = evalTermValue(work.context, s2.term, 6);
                 if k1 is IntegerLookup::Found {
                     if k2 is IntegerLookup::Found {
                         delta = (k1 as IntegerLookup::Found).value - (k2 as IntegerLookup::Found).value;
@@ -4962,7 +5177,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                                 dFound = false;
                                 for constant in work.context.constants {
                                     if constant.kind = 0 {
-                                        if constant.value = delta { dTerm = constant.id; dFound = true; };
+                                        if dFound = false { if constant.value = delta { dTerm = constant.id; dFound = true; }; };
                                     };
                                 };
                                 if dFound {
@@ -4977,6 +5192,34 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
                                             goals = push(goals, InferGoal { relation: 0, left: s1.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })) });
                                         };
                                     };
+                                } else {
+                                    c1 = 0;
+                                    c1Found = false;
+                                    c2 = 0;
+                                    c2Found = false;
+                                    for constant in work.context.constants {
+                                        if constant.kind = 0 {
+                                            if c1Found = false { if constant.value = (k1 as IntegerLookup::Found).value { c1 = constant.id; c1Found = true; }; };
+                                            if c2Found = false { if constant.value = (k2 as IntegerLookup::Found).value { c2 = constant.id; c2Found = true; }; };
+                                        };
+                                    };
+                                    if c1Found {
+                                        if c2Found {
+                                            tempD = 0 - 7200000 - candIndex * 4;
+                                            candIndex = candIndex + 1;
+                                            temp = 0 - 7100000 - candIndex * 4;
+                                            candIndex = candIndex + 1;
+                                            deltaSteps = push(push([], ExecutionStep::ApplyFresh { local: tempD, function: -2, arguments: push(push([], ValueRef::Term { term: c1 }), ValueRef::Term { term: c2 }) }), ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s2)), ValueRef::Local { local: tempD }) });
+                                            madeD = executeSteps(work, deltaSteps);
+                                            if madeD.status = 0 {
+                                                work = madeD.state;
+                                                sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                                                if sumTerm is ValueLookup::Found {
+                                                    goals = push(goals, InferGoal { relation: 0, left: s1.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), deltaSteps), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), deltaSteps), push([], ExecutionStep::Check { relation: 0, left: subjectRef(s1), right: ValueRef::Local { local: temp } })) });
+                                                };
+                                            };
+                                        };
+                                    };
                                 };
                             };
                         };
@@ -4988,13 +5231,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
     for subj in assigned {
         for anchor in anchors {
             if size(goals) < 128 {
-                sameTerm = hasEquality(work.context.equalities, subj.term, anchor.term);
                 keepEqual = true;
-                if subj.isSize = false {
-                    if anchor.isSize = false {
-                        if sameTerm { keepEqual = false; };
-                    };
-                };
                 if keepEqual {
                     goals = push(goals, InferGoal { relation: 0, left: subj.term, right: anchor.term, assumes: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Assume { relation: 0, left: subjectRef(subj), right: subjectRef(anchor) })), checks: appendSteps(appendSteps(subjectSteps(subj), subjectSteps(anchor)), push([], ExecutionStep::Check { relation: 0, left: subjectRef(subj), right: subjectRef(anchor) })) });
                 };
@@ -5008,17 +5245,177 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             if i < j {
                 s1 = get(assigned, i);
                 s2 = get(assigned, j);
-                for anchor in anchors {
-                    if size(goals) < 128 {
-                        temp = 0 - 7100000 - candIndex * 4;
-                        candIndex = candIndex + 1;
-                        made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
-                        if made.status = 0 {
-                            work = made.state;
-                            sumTerm = resolveValue(work, ValueRef::Local { local: temp });
-                            if sumTerm is ValueLookup::Found {
-                                addSteps = push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) });
-                                goals = push(goals, InferGoal { relation: 0, left: (sumTerm as ValueLookup::Found).term, right: anchor.term, assumes: appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), subjectSteps(anchor)), push([], ExecutionStep::Assume { relation: 0, left: ValueRef::Local { local: temp }, right: subjectRef(anchor) })), checks: appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), subjectSteps(anchor)), push([], ExecutionStep::Check { relation: 0, left: ValueRef::Local { local: temp }, right: subjectRef(anchor) })) });
+                kv1 = evalTermValue(work.context, s1.term, 6);
+                kv2 = evalTermValue(work.context, s2.term, 6);
+                bothKnown = false;
+                if kv1 is IntegerLookup::Found { if kv2 is IntegerLookup::Found { bothKnown = true; }; };
+                if bothKnown = false {
+                    offset = 0;
+                    if kv1 is IntegerLookup::Found { offset = offset + (kv1 as IntegerLookup::Found).value; };
+                    if kv2 is IntegerLookup::Found { offset = offset + (kv2 as IntegerLookup::Found).value; };
+                    for anchor in anchors {
+                        if size(goals) < 128 {
+                            temp = 0 - 7100000 - candIndex * 4;
+                            candIndex = candIndex + 1;
+                            made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
+                            if made.status = 0 {
+                                work = made.state;
+                                sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                                if sumTerm is ValueLookup::Found {
+                                    rightSteps = subjectSteps(anchor);
+                                    rightRef = subjectRef(anchor);
+                                    rightTerm = anchor.term;
+                                    buildRight = true;
+                                    if offset != 0 {
+                                        oTerm = 0;
+                                        oFound = false;
+                                        for constant in work.context.constants {
+                                            if constant.kind = 0 {
+                                                if oFound = false { if constant.value = offset { oTerm = constant.id; oFound = true; }; };
+                                            };
+                                        };
+                                        if oFound {
+                                            tempR = 0 - 7300000 - candIndex * 4;
+                                            candIndex = candIndex + 1;
+                                            madeR = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: tempR, function: -1, arguments: push(push([], subjectRef(anchor)), ValueRef::Term { term: oTerm }) }));
+                                            if madeR.status = 0 {
+                                                work = madeR.state;
+                                                rTerm = resolveValue(work, ValueRef::Local { local: tempR });
+                                                if rTerm is ValueLookup::Found {
+                                                    rightTerm = (rTerm as ValueLookup::Found).term;
+                                                    rightSteps = appendSteps(subjectSteps(anchor), push([], ExecutionStep::ApplyFresh { local: tempR, function: -1, arguments: push(push([], subjectRef(anchor)), ValueRef::Term { term: oTerm }) }));
+                                                    rightRef = ValueRef::Local { local: tempR };
+                                                } else { buildRight = false; };
+                                            } else { buildRight = false; };
+                                        } else { buildRight = false; };
+                                    };
+                                    if buildRight {
+                                        addSteps = push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) });
+                                        goals = push(goals, InferGoal { relation: 0, left: (sumTerm as ValueLookup::Found).term, right: rightTerm, assumes: appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), rightSteps), push([], ExecutionStep::Assume { relation: 0, left: ValueRef::Local { local: temp }, right: rightRef })), checks: appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), rightSteps), push([], ExecutionStep::Check { relation: 0, left: ValueRef::Local { local: temp }, right: rightRef })) });
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    analysis0 = analyzeContext(work.context);
+    trimmed = [];
+    for gi in 0..size(goals) {
+        goal = clone(get(goals, gi));
+        holds = false;
+        if goal.relation = 0 { holds = entailsGoalAnalyzed(work.context, analysis0, ValidatorGoal::Equal { left: goal.left, right: goal.right }); };
+        if goal.relation = 3 { holds = entailsGoalAnalyzed(work.context, analysis0, ValidatorGoal::AtMost { left: goal.left, right: goal.right }); };
+        if holds { trimmed = push(trimmed, goal); };
+    };
+    goals = trimmed;
+    analysis = analyzeContext(work.context);
+    entailedEqs = [];
+    for gi in 0..size(goals) {
+        goal = clone(get(goals, gi));
+        if goal.relation = 0 {
+            if entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::Equal { left: goal.left, right: goal.right }) { entailedEqs = push(entailedEqs, goal); };
+        };
+    };
+    for eg in entailedEqs {
+        for subj in assigned {
+            if subj.term = eg.left {
+                if evalTermValue(work.context, subj.term, 6) is IntegerLookup::Missing {
+                for other in assigned {
+                    if other.term != subj.term {
+                        kv = evalTermValue(work.context, other.term, 6);
+                        if kv is IntegerLookup::Found {
+                            k = (kv as IntegerLookup::Found).value;
+                            anchorSubject = subj;
+                            anchorFound = false;
+                            for cand in anchors {
+                                if cand.term = eg.right { anchorSubject = cand; anchorFound = true; };
+                            };
+                            if anchorFound {
+                            if size(goals) < 128 {
+                                tempA = 0 - 7400000 - candIndex * 4;
+                                candIndex = candIndex + 1;
+                                temp = 0 - 7500000 - candIndex * 4;
+                                candIndex = candIndex + 1;
+                                innerSteps = [];
+                                innerRef = subjectRef(anchorSubject);
+                                if k != 0 {
+                                    negConst = 0;
+                                    negFound = false;
+                                    for constant in work.context.constants {
+                                        if constant.kind = 0 {
+                                            if negFound = false { if constant.value = 0 - k { negConst = constant.id; negFound = true; }; };
+                                        };
+                                    };
+                                    if negFound {
+                                        innerSteps = push([], ExecutionStep::ApplyFresh { local: tempA, function: -1, arguments: push(push([], subjectRef(anchorSubject)), ValueRef::Term { term: negConst }) });
+                                        innerRef = ValueRef::Local { local: tempA };
+                                    };
+                                };
+                                if k = 0 {
+                                    pairSteps = appendSteps(appendSteps(appendSteps(subjectSteps(subj), subjectSteps(other)), subjectSteps(anchorSubject)), push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(other)), innerRef) }));
+                                    made = executeSteps(work, pairSteps);
+                                    if made.status = 0 {
+                                        work = made.state;
+                                        sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                                        if sumTerm is ValueLookup::Found {
+                                            goals = push(goals, InferGoal { relation: 0, left: subj.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(pairSteps, push([], ExecutionStep::Assume { relation: 0, left: subjectRef(subj), right: ValueRef::Local { local: temp } })), checks: appendSteps(pairSteps, push([], ExecutionStep::Check { relation: 0, left: subjectRef(subj), right: ValueRef::Local { local: temp } })) });
+                                        };
+                                    };
+                                } else {
+                                    if size(innerSteps) > 0 {
+                                        pairSteps = appendSteps(appendSteps(appendSteps(appendSteps(subjectSteps(subj), subjectSteps(other)), subjectSteps(anchorSubject)), innerSteps), push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(other)), innerRef) }));
+                                        made = executeSteps(work, pairSteps);
+                                        if made.status = 0 {
+                                            work = made.state;
+                                            sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                                            if sumTerm is ValueLookup::Found {
+                                                goals = push(goals, InferGoal { relation: 0, left: subj.term, right: (sumTerm as ValueLookup::Found).term, assumes: appendSteps(pairSteps, push([], ExecutionStep::Assume { relation: 0, left: subjectRef(subj), right: ValueRef::Local { local: temp } })), checks: appendSteps(pairSteps, push([], ExecutionStep::Check { relation: 0, left: subjectRef(subj), right: ValueRef::Local { local: temp } })) });
+                                            };
+                                        };
+                                    };
+                                };
+                            };
+                        };
+                    };
+                };
+                };
+            };
+        };
+    };
+        };
+    for i in 0..size(assigned) {
+        for j in 0..size(assigned) {
+            if i < j {
+                s1 = get(assigned, i);
+                s2 = get(assigned, j);
+                kv1 = evalTermValue(work.context, s1.term, 6);
+                kv2 = evalTermValue(work.context, s2.term, 6);
+                if kv1 is IntegerLookup::Found {
+                    if kv2 is IntegerLookup::Found {
+                        if size(goals) < 128 {
+                            total = (kv1 as IntegerLookup::Found).value + (kv2 as IntegerLookup::Found).value;
+                            sumConst = 0;
+                            sumFound = false;
+                            for constant in work.context.constants {
+                                if constant.kind = 0 {
+                                    if sumFound = false { if constant.value = total { sumConst = constant.id; sumFound = true; }; };
+                                };
+                            };
+                            if sumFound {
+                                temp = 0 - 7100000 - candIndex * 4;
+                                candIndex = candIndex + 1;
+                                made = executeSteps(work, push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) }));
+                                if made.status = 0 {
+                                    work = made.state;
+                                    sumTerm = resolveValue(work, ValueRef::Local { local: temp });
+                                    if sumTerm is ValueLookup::Found {
+                                        addSteps = push([], ExecutionStep::ApplyFresh { local: temp, function: -1, arguments: push(push([], subjectRef(s1)), subjectRef(s2)) });
+                                        goals = push(goals, InferGoal { relation: 0, left: (sumTerm as ValueLookup::Found).term, right: sumConst, assumes: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), push([], ExecutionStep::Assume { relation: 0, left: ValueRef::Local { local: temp }, right: ValueRef::Term { term: sumConst } })), checks: appendSteps(appendSteps(appendSteps(subjectSteps(s1), subjectSteps(s2)), addSteps), push([], ExecutionStep::Check { relation: 0, left: ValueRef::Local { local: temp }, right: ValueRef::Term { term: sumConst } })) });
+                                    };
+                                };
                             };
                         };
                     };
@@ -5033,7 +5430,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         holds = false;
         if goal.relation = 0 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::Equal { left: goal.left, right: goal.right }); };
         if goal.relation = 3 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::AtMost { left: goal.left, right: goal.right }); };
-        if holds { kept = push(kept, goal); };
+        if holds { if size(kept) < 32 { kept = push(kept, goal); }; };
     };
     return kept;
 };
