@@ -42,6 +42,20 @@ namedFunction name b = case lookup name (namedFunctions b) of
     Just i -> (i, b)
     Nothing -> let (i, b') = fresh b in (i, b'{namedFunctions = (name, i) : namedFunctions b'})
 
+-- A block's ghost arrays have one entry per slot: the size of the
+-- filled (or contents) array of a block is the block's capacity.
+arraySizeSteps :: MirValue -> MirValue -> Build -> ([MirValue], Build)
+arraySizeSteps arrayRef blockRef b0 =
+    let (capFunction, b1) = namedFunction "blockcap" b0
+        (ci, b2) = fresh b1
+        capLocal = negate ci - 1
+        (si, b3) = fresh b2
+        sizeLocal = negate si - 1
+     in ( [ step "ApplyFresh" [("local", MInt capLocal), ("function", MInt capFunction), ("arguments", MList [blockRef])]
+          , step "ApplyFresh" [("local", MInt sizeLocal), ("function", MInt (-13)), ("arguments", MList [arrayRef])]
+          , step "Assume" [("relation", MInt 0), ("left", record "ValueRef::Local" [("local", MInt sizeLocal)]), ("right", record "ValueRef::Local" [("local", MInt capLocal)])] ]
+        , b3 )
+
 literal :: M.Constant -> Build -> Maybe (Integer, Build)
 literal c b = case lookup c (literalIds b) of
     Just i -> Just (i, b)
@@ -285,7 +299,10 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct f) _)) args) b0
             local = negate i - 1
             ref = record "ValueRef::Local" [("local", MInt local)]
             apply = step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList refs)]
-        pure (prefixes ++ [apply], ref, b3)
+        (sizeSteps, b4) <- case f of
+            _ | (f == BlockFilled || f == BlockContents), [blockRef] <- refs -> Just (arraySizeSteps ref blockRef b3)
+            _ -> Just ([], b3)
+        pure (prefixes ++ [apply] ++ sizeSteps, ref, b4)
   where
     evalArg (steps, refs, b) arg = do
         (more, ref, b') <- proofOperand env arg b
@@ -1162,7 +1179,8 @@ statement rules (M.Assign (M.Local dest) (M.ListOp op args)) b0
             (i, b2) = fresh b1
             local = negate i - 1
             ref = record "ValueRef::Local" [("local", MInt local)]
-         in pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [argRef])]], ref, b2)
+            (sizeSteps, b3) = if name == "blockfilled" || name == "blockcontents" then arraySizeSteps ref argRef b2 else ([], b2)
+         in pure ([step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [argRef])]] ++ sizeSteps, ref, b3)
     setResult listRef indexRef valueRef bIn =
         let (i, b1) = fresh bIn
             local = negate i - 1
