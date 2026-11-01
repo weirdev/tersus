@@ -1142,12 +1142,17 @@ impl Clone for FlowResult { };
 impl Copy for FlowResult { };
 
 // Block tables hold a reference to each block of the source list, not a clone of
-// it. They are built as literals in validateFlow/validateExecution and read
-// through flowBlockAt/executionBlockAt: HashMap::insert and lookupRef cannot
+// it. They are built as literals in validateFlow/validateExecution, hashed over
+// as many buckets as there are blocks, and read through
+// flowBlockAt/executionBlockAt: HashMap::insert and lookupRef cannot
 // hold reference values today (insert returns a rebuilt map whose references
 // are not all from its value argument, and lookupRef of a reference value
 // would be a reference to a reference).
 fn storedRef<T>(r: &T) -> &T from r { return r; };
+
+fn flowEntryCopy(e: &Entry<Int, &FlowBlock>) -> Entry<Int, &FlowBlock> from e [{ }] [{ }] {
+    return Entry<Int, &FlowBlock> { key: e.key, value: storedRef(e.value) };
+};
 
 fn flowBlockAt(table: &HashMap<Int, &FlowBlock>, id: Int) -> &FlowBlock from table [{ affirm findIn(get(table.buckets, Hash::hash(id) % size(table.buckets)), id) >= 0; }] [{ }] {
     entries = &get(table.buckets, indexFor(size(table.buckets), id));
@@ -1211,11 +1216,28 @@ fn validateFlow(blocks: &List<FlowBlock>, entry: Int, initial: &ValidatorContext
     if uniqueFlowBlocks(blocks) = false {
         return FlowResult { status: 3, block: entry, step: -1 };
     };
-    entries = [];
-    for i in 0..size(blocks) {
-        entries = push(entries, Entry<Int, &FlowBlock> { key: get(blocks, i).id, value: &get(blocks, i) });
+    bucketCount = size(blocks) + 1;
+    buckets = [];
+    b = 0;
+    while b < bucketCount [{ affirm b >= 0; affirm b <= bucketCount; affirm size(buckets) = b; }] shrinks bucketCount - b {
+        buckets = push(buckets, []);
+        b = b + 1;
     };
-    table = HashMap<Int, &FlowBlock> { buckets: push([], entries), count: size(blocks) };
+    for i in 0..size(blocks) [{ affirm size(buckets) = bucketCount; }] {
+        idx = indexFor(bucketCount, get(blocks, i).id);
+        bucket = &get(buckets, idx);
+        kept = [];
+        n = size(*bucket);
+        j = 0;
+        while j < n [{ affirm j >= 0; affirm j <= n; affirm n = size(*bucket); }] shrinks n - j {
+            e = &get(*bucket, j);
+            kept = push(kept, flowEntryCopy(e));
+            j = j + 1;
+        };
+        kept = push(kept, Entry<Int, &FlowBlock> { key: get(blocks, i).id, value: &get(blocks, i) });
+        buckets = set(buckets, idx, kept);
+    };
+    table = HashMap<Int, &FlowBlock> { buckets: buckets, count: size(blocks) };
     return walkFlow(table, entry, initial, size(blocks));
 };
 
@@ -2626,6 +2648,10 @@ struct ExecutionFlowResult { status: Int, block: Int, step: Int, state: Executio
 
 impl Clone for ExecutionFlowResult { };
 
+fn executionEntryCopy(e: &Entry<Int, &ExecutionBlock>) -> Entry<Int, &ExecutionBlock> from e [{ }] [{ }] {
+    return Entry<Int, &ExecutionBlock> { key: e.key, value: storedRef(e.value) };
+};
+
 fn executionBlockAt(table: &HashMap<Int, &ExecutionBlock>, id: Int) -> &ExecutionBlock from table [{ affirm findIn(get(table.buckets, Hash::hash(id) % size(table.buckets)), id) >= 0; }] [{ }] {
     entries = &get(table.buckets, indexFor(size(table.buckets), id));
     i = findIn(entries, id);
@@ -2893,10 +2919,27 @@ fn validateExecution(blocks: &List<ExecutionBlock>, entry: Int, initial: &Execut
     if uniqueExecutionBlocks(blocks) = false {
         return ExecutionFlowResult { status: 3, block: entry, step: -1, state: clone(initial) };
     };
-    entries = [];
-    for i in 0..size(blocks) {
-        entries = push(entries, Entry<Int, &ExecutionBlock> { key: get(blocks, i).id, value: &get(blocks, i) });
+    bucketCount = size(blocks) + 1;
+    buckets = [];
+    b = 0;
+    while b < bucketCount [{ affirm b >= 0; affirm b <= bucketCount; affirm size(buckets) = b; }] shrinks bucketCount - b {
+        buckets = push(buckets, []);
+        b = b + 1;
     };
-    table = HashMap<Int, &ExecutionBlock> { buckets: push([], entries), count: size(blocks) };
+    for i in 0..size(blocks) [{ affirm size(buckets) = bucketCount; }] {
+        idx = indexFor(bucketCount, get(blocks, i).id);
+        bucket = &get(buckets, idx);
+        kept = [];
+        n = size(*bucket);
+        j = 0;
+        while j < n [{ affirm j >= 0; affirm j <= n; affirm n = size(*bucket); }] shrinks n - j {
+            e = &get(*bucket, j);
+            kept = push(kept, executionEntryCopy(e));
+            j = j + 1;
+        };
+        kept = push(kept, Entry<Int, &ExecutionBlock> { key: get(blocks, i).id, value: &get(blocks, i) });
+        buckets = set(buckets, idx, kept);
+    };
+    table = HashMap<Int, &ExecutionBlock> { buckets: buckets, count: size(blocks) };
     return walkExecution(table, entry, initial, 2 * size(blocks) + 2, [], []);
 };
