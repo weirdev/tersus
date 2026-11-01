@@ -13,7 +13,8 @@ import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Mir as M
 import MirLower (lowerElaborated, lowerLibrary)
-import Parse (Decls, emptyDecls, locating, parseStatementBlockWith)
+import Data.List (intercalate)
+import Parse (Decls, ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, parseStatementBlockWith, renderPath)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
 import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Statement (..), Termination (..), TraitFn (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated, PreparedPrefix, elaborate, elaborateAfter, gatheredSignatures, preparePrefix)
@@ -74,16 +75,8 @@ probeParse seeded plain source = case parseStatementBlockWith seeded source of
 -- declarations of the libraries it has in front of it or with none. A program that declares one
 -- of those names itself declares it as it is read, over the library's, so its reading is the one
 -- that decides, and the second reading is the one that refuses what the library would have allowed.
-
--- The first reading of a program, with the declarations the libraries make (probeDecls). A program that
--- declares a name a library would have given it is read over that declaration (Parse.shadowedCtors), but a
--- declaration of one library name can also make the other libraries unwanted -- declaring a prelude trait
--- makes the string library unwanted, so a seeded String constructor must not make `if String { ... }` a
--- struct literal in this reading. If the seeded reading fails, the program is therefore read again with no
--- declarations: a program that needs no library is decided from that reading, and a program that does need
--- one fails the seeded reading, whose error is kept.
-probeParse seeded plain source = case parseStatementBlockWith seeded source of
-    Left err -> case parseStatementBlockWith plain source of
+probeParseFile seeded plain source = case parseFileWith seeded source of
+    Left err -> case parseFileWith plain source of
         Right probed -> Right probed
         Left _ -> Left err
     Right probed -> Right probed
@@ -93,16 +86,19 @@ parseSourceWith :: Bool -> String -> Result [Statement] String
 parseSourceWith reserving source = mapResult (\(_, library, stmts) -> library ++ stmts) (parseSourceParts reserving source)
 
 parseSourceParts :: Bool -> String -> Result ([String], [Statement], [Statement]) String
-parseSourceParts reserving source = case probeParse (locating probeDecls) (locating emptyDecls) source of
+parseSourceParts reserving source = case probeParseFile (locating probeDecls) (locating emptyDecls) source of
     Left err -> Error ("Parse error: " ++ show err)
-    Right (probed, _) ->
-        let names = map fst (librariesFor probed)
+    Right (probedFile, _) ->
+        let names = map fst (librariesFor (fileBody probedFile))
          in case parsedLibraries names of
                 Left err -> Error err
-                Right (library, declared) -> case parseStatementBlockWith (locating declared) source of
+                Right (library, declared) -> case parseFileWith (locating declared) source of
                     Left err -> Error ("Parse error: " ++ show err)
-                    Right (stmts, _) -> checked stmts `bindResult` \stmts' -> Ok (names, library, stmts')
+                    Right (ParsedFile imports stmts, _) -> notLinked imports stmts `bindResult` \raw -> checked raw `bindResult` \stmts' -> Ok (names, library, stmts')
   where
+    notLinked imports stmts
+        | null imports = Ok stmts
+        | otherwise = Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
     checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, and a Box of the struct StdBox and the functions stdBox... of lib/box.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
 
 readLibraries :: [(String, String)] -> Decls -> Either String ([Statement], Decls)
