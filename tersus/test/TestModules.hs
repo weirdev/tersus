@@ -2,7 +2,11 @@ module TestModules
     ( testModules
     ) where
 
+import Control.Exception (try, SomeException)
+import Control.Monad (when)
 import Data.List (isInfixOf)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removeDirectoryRecursive)
+import System.FilePath ((</>))
 
 import Modules
 import Parse
@@ -129,5 +133,302 @@ testImports =
             Error err -> Just ("Expected existing single-file program to compile, got: " ++ err)
         ]
 
+-- Loader tests (Phase 2): everything is in-memory through the resolver
+-- except one filesystem case at the end.
+
+type Files = [(FilePath, String)]
+
+fnDecl :: String -> String
+fnDecl name = "fn " ++ name ++ "(x: Int) -> Int [{ }] [{ }] { return x; };"
+
+loadPkg :: Files -> FilePath -> Either String LoadedPackage
+loadPkg files entry = case loadFromEntry (resolverFromFiles files) entry of
+    Left err -> Left err
+    Right (PackageResult pkg) -> Right pkg
+    Right (StandaloneResult _ _) -> Left "expected a package, got a standalone program"
+
+expectErr :: Files -> FilePath -> String -> TestResult
+expectErr files entry needle = case loadPkg files entry of
+    Left err ->
+        if needle `isInfixOf` err
+            then Nothing
+            else Just ("Expected error containing " ++ show needle ++ ", got: " ++ err)
+    Right pkg -> Just ("Expected load failure containing " ++ show needle ++ ", got: " ++ show (map (renderModuleId . loadedModuleId) (packageModules pkg)))
+
+moduleOrder :: LoadedPackage -> [String]
+moduleOrder pkg = map (renderModuleId . loadedModuleId) (packageModules pkg)
+
+resolvedIn :: LoadedPackage -> String -> String -> [ResolvedImport]
+resolvedIn pkg moduleName fileName =
+    concat
+        [ loadedImports file
+        | modu <- packageModules pkg
+        , renderModuleId (loadedModuleId modu) == moduleName
+        , file <- loadedModuleFiles modu
+        , loadedFileName file == fileName
+        ]
+
+basePkg :: Files
+basePkg =
+    [ ("app/package.tersus", "")
+    , ("app/main.tersus", "import app::geo; x = 1;")
+    , ("app/geo/geo.tersus", "struct Point { x: Int }; " ++ fnDecl "area")
+    ]
+
+collapsePkg :: Files
+collapsePkg =
+    [ ("app/package.tersus", "")
+    , ("app/main.tersus", "import app::geo::Point; import app::geo::geo; import app::geo; import app::geo::geo::Point; x = 1;")
+    , ("app/geo/geo.tersus", "struct Point { x: Int }; " ++ fnDecl "area")
+    ]
+
+multiFilePkg :: Files
+multiFilePkg =
+    [ ("app/package.tersus", "")
+    , ("app/main.tersus", "import app::geo; x = 1;")
+    , ("app/geo/shapes.tersus", "struct Point { x: Int };")
+    , ("app/geo/extra.tersus", "import app::geo::shapes::Point; " ++ fnDecl "area")
+    ]
+
+testLoaderDiscovery :: Test
+testLoaderDiscovery =
+    testCaseSeq
+        "loader-discovery"
+        [ testAssertEq (discoverEntry (resolverFromFiles basePkg) "app/geo/geo.tersus") (InPackage "app" "app")
+        , testAssertEq (discoverEntry (resolverFromFiles basePkg) "app/main.tersus") (InPackage "app" "app")
+        , testAssertEq (discoverEntry (resolverFromFiles [("lonely/main.tersus", "x = 1;")]) "lonely/main.tersus") (Standalone "lonely/main.tersus")
+        , case loadPkg basePkg "app/geo/geo.tersus" of
+            Left err -> Just ("entry in module dir should load: " ++ err)
+            Right pkg -> testAssertEq (packageEntryModule pkg) (ModuleId "app" (Just "geo"))
+        , case loadPkg basePkg "app/main.tersus" of
+            Left err -> Just ("entry in package root should load: " ++ err)
+            Right pkg -> testAssertEq (packageEntryModule pkg) (ModuleId "app" Nothing)
+        , case loadFromEntry (resolverFromFiles [("lonely/main.tersus", "x = 1;")]) "lonely/main.tersus" of
+            Right (StandaloneResult _ _) -> Nothing
+            other -> Just ("expected standalone result, got: " ++ show other)
+        , case loadFromEntry (resolverFromFiles [("lonely/main.tersus", "import a::b; x = 1;")]) "lonely/main.tersus" of
+            Left err ->
+                if "standalone" `isInfixOf` err && "imports are not supported" `isInfixOf` err
+                    then Nothing
+                    else Just ("expected standalone-import error, got: " ++ err)
+            Right result -> Just ("expected standalone import to fail, got: " ++ show result)
+        ]
+
+testLoaderGraph :: Test
+testLoaderGraph =
+    testCaseSeq
+        "loader-graph"
+        [ case loadPkg multiFilePkg "app/main.tersus" of
+            Left err -> Just ("multi-file module should load: " ++ err)
+            Right pkg ->
+                let geo = [modu | modu <- packageModules pkg, loadedModuleId modu == ModuleId "app" (Just "geo")]
+                 in case geo of
+                        [modu] ->
+                            testAssertEq (map loadedFileName (loadedModuleFiles modu)) ["extra.tersus", "shapes.tersus"]
+                                <> testAssertTrue ("Point" `elem` loadedModuleDeclNames modu && "area" `elem` loadedModuleDeclNames modu)
+                        _ -> Just ("expected exactly one geo module, got: " ++ show (moduleOrder pkg))
+        , case loadPkg chainPkg "app/main.tersus" of
+            Left err -> Just ("chain should load: " ++ err)
+            Right pkg -> testAssertEq (moduleOrder pkg) ["app::b", "app::a", "app"]
+        , case loadPkg diamondPkg "app/main.tersus" of
+            Left err -> Just ("diamond should load: " ++ err)
+            Right pkg -> testAssertEq (moduleOrder pkg) ["app::c", "app::a", "app::b", "app"]
+        , expectErr cyclePkg "app/main.tersus" "module import cycle: app::a -> app::b -> app::a"
+        , case loadPkg selfPkg "app/main.tersus" of
+            Left err -> Just ("self-import should be ignored: " ++ err)
+            Right pkg -> testAssertEq (moduleOrder pkg) ["app::geo", "app"]
+        , case loadPkg
+            [ ("pkgs/app/package.tersus", "")
+            , ("pkgs/app/main.tersus", "import lib::geo; x = 1;")
+            , ("pkgs/lib/package.tersus", "")
+            , ("pkgs/lib/geo/geo.tersus", "struct Point { x: Int };")
+            ]
+            "pkgs/app/main.tersus" of
+            Left err -> Just ("sibling package should load: " ++ err)
+            Right pkg -> testAssertEq (moduleOrder pkg) ["lib::geo", "app"]
+        , case loadPkg aliasPkg "app/main.tersus" of
+            Left err -> Just ("different aliases in different files should load: " ++ err)
+            Right pkg ->
+                testAssertEq (map importAlias (map resolvedImport (resolvedIn pkg "app" "main.tersus"))) [Just "g"]
+                    <> testAssertEq (map importAlias (map resolvedImport (resolvedIn pkg "app" "other.tersus"))) [Just "gg"]
+        ]
+  where
+    chainPkg =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::a; x = 1;")
+        , ("app/a/a.tersus", "import app::b; " ++ fnDecl "fa")
+        , ("app/b/b.tersus", fnDecl "fb")
+        ]
+    diamondPkg =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::a; import app::b; x = 1;")
+        , ("app/a/a.tersus", "import app::c; " ++ fnDecl "fa")
+        , ("app/b/b.tersus", "import app::c; " ++ fnDecl "fb")
+        , ("app/c/c.tersus", fnDecl "fc")
+        ]
+    cyclePkg =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::a; x = 1;")
+        , ("app/a/a.tersus", "import app::b; " ++ fnDecl "fa")
+        , ("app/b/b.tersus", "import app::a; " ++ fnDecl "fb")
+        ]
+    selfPkg =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; x = 1;")
+        , ("app/geo/geo.tersus", "import app::geo; struct Point { x: Int };")
+        ]
+    aliasPkg =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo as g; x = 1;")
+        , ("app/other.tersus", "import app::geo as gg; struct Local { x: Int };")
+        , ("app/geo/geo.tersus", "struct Point { x: Int };")
+        ]
+
+testLoaderErrors :: Test
+testLoaderErrors =
+    testCaseSeq
+        "loader-errors"
+        [ expectErr
+            [("app/package.tersus", ""), ("app/main.tersus", "import otherpkg::geo; x = 1;"), ("app/geo/geo.tersus", "struct Point { x: Int };")]
+            "app/main.tersus"
+            "package \"otherpkg\" not found"
+        , expectErr
+            [("app/package.tersus", ""), ("app/main.tersus", "import app::nope; x = 1;"), ("app/geo/geo.tersus", "struct Point { x: Int };")]
+            "app/main.tersus"
+            "\"nope\" is not a module of package app"
+        , expectErr
+            [("app/package.tersus", ""), ("app/main.tersus", "import app::nope; x = 1;"), ("app/geo/geo.tersus", "struct Point { x: Int };")]
+            "app/main.tersus"
+            "modules are: geo"
+        , expectErr
+            [("app/package.tersus", ""), ("app/main.tersus", "import app::geo::shapes::Nope; x = 1;"), ("app/geo/shapes.tersus", "struct Point { x: Int };")]
+            "app/main.tersus"
+            "symbol Nope is not declared in file shapes of module geo; it declares: Point"
+        , expectErr
+            [("app/package.tersus", ""), ("app/main.tersus", "import app::geo::shapes { Nope }; x = 1;"), ("app/geo/shapes.tersus", "struct Point { x: Int };")]
+            "app/main.tersus"
+            "name Nope is not declared there; it declares: Point"
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; x = 1;")
+            , ("app/geo/geo.tersus", "struct Point { x: Int };")
+            , ("app/geo/bad.tersus", "struct Other { y: Int };\nx = 1;")
+            ]
+            "app/main.tersus"
+            "modules declare, programs run"
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; x = 1;")
+            , ("app/geo/bad.tersus", "x = 1;")
+            ]
+            "app/main.tersus"
+            "geo/bad.tersus"
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; x = 1;")
+            , ("app/geo/geo.tersus", "struct { x: Int };")
+            ]
+            "app/main.tersus"
+            "parse error in module app::geo file app/geo/geo.tersus"
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::Point; x = 1;")
+            , ("app/geo.tersus", "struct Point { x: Int };")
+            , ("app/geo/geo.tersus", "struct Point { x: Int };")
+            ]
+            "app/main.tersus"
+            "ambiguous import"
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::deep; x = 1;")
+            , ("app/geo/geo.tersus", "struct Point { x: Int };")
+            , ("app/geo/deep/deep.tersus", "struct Deep { x: Int };")
+            ]
+            "app/main.tersus"
+            "deeper nesting is not a module"
+        ]
+
+testLoaderLevels :: Test
+testLoaderLevels =
+    testCaseSeq
+        "loader-levels"
+        [ case loadPkg collapsePkg "app/main.tersus" of
+            Left err -> Just ("collapse package should load: " ++ err)
+            Right pkg ->
+                let resolved = resolvedIn pkg "app" "main.tersus"
+                 in testAssertEq
+                        (map resolvedLevel resolved)
+                        [LevelSymbol, LevelFile, LevelModule, LevelSymbol]
+                        <> testAssertEq (map resolvedTargetFile resolved) [Just "geo", Just "geo", Nothing, Just "geo"]
+                        <> testAssertEq (map resolvedTargetSymbol resolved) [Just "Point", Nothing, Nothing, Just "Point"]
+                        <> testAssertEq (map resolvedCanonical resolved) ["app$geo$geo$Point", "app$geo$geo", "app$geo", "app$geo$geo$Point"]
+        , case loadPkg multiFilePkg "app/main.tersus" of
+            Left err -> Just ("multi-file package should load: " ++ err)
+            Right pkg ->
+                let sibling = resolvedIn pkg "app::geo" "extra.tersus"
+                 in testAssertEq (map resolvedLevel sibling) [LevelSymbol]
+                        <> testAssertEq (map resolvedTargetModule sibling) [ModuleId "app" (Just "geo")]
+        , case loadPkg
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::shapes; x = 1;")
+            , ("app/geo/shapes.tersus", "struct Point { x: Int };")
+            , ("app/geo/extra.tersus", fnDecl "area")
+            ]
+            "app/main.tersus" of
+            Left err -> Just ("file-level import should load: " ++ err)
+            Right pkg -> testAssertEq (map resolvedLevel (resolvedIn pkg "app" "main.tersus")) [LevelFile]
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::Point; x = 1;")
+            , ("app/geo/geo.tersus", "struct Point { x: Int };")
+            , ("app/geo/extra.tersus", fnDecl "area")
+            ]
+            "app/main.tersus"
+            "write app::geo::geo::Point instead of app::geo::Point"
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::Point; x = 1;")
+            , ("app/geo/geo.tersus", "struct Point { x: Int };")
+            , ("app/geo/extra.tersus", fnDecl "area")
+            ]
+            "app/main.tersus"
+            "has grown to 2 files"
+        , expectErr
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo::Point; x = 1;")
+            , ("app/geo/shapes.tersus", "struct Point { x: Int };")
+            , ("app/geo/extra.tersus", fnDecl "area")
+            ]
+            "app/main.tersus"
+            "write app::geo::shapes::Point"
+        ]
+
+testLoaderFilesystem :: Test
+testLoaderFilesystem = TestCase "loader-filesystem" $ do
+    let root = "/tmp/tersus-modules-phase2-test"
+        pkgDir = root </> "app"
+    exists <- doesDirectoryExist root
+    when exists (removeDirectoryRecursive root)
+    result <- try (runFs root pkgDir) :: IO (Either SomeException TestResult)
+    return (case result of
+        Left ex -> Just ("filesystem loader crashed: " ++ show ex)
+        Right value -> value)
+  where
+    runFs root pkgDir = do
+        createDirectoryIfMissing True (pkgDir </> "geo")
+        writeFile (pkgDir </> "package.tersus") ""
+        writeFile (pkgDir </> "main.tersus") "import app::geo; x = 1;"
+        writeFile (pkgDir </> "geo" </> "geo.tersus") "struct Point { x: Int };"
+        loaded <- loadFromFilesystem (pkgDir </> "main.tersus")
+        return (case loaded of
+            Left err -> Just ("filesystem load failed: " ++ err)
+            Right (PackageResult pkg) -> testAssertEq (moduleOrder pkg) ["app::geo", "app"]
+            Right other -> Just ("expected a package result, got: " ++ show other))
+        `finallyRemove` root
+    finallyRemove action dir = do
+        value <- action
+        removeDirectoryRecursive dir
+        return value
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testCanonical, testImports]
+testModules = TestList "testModules" [testPaths, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem]
