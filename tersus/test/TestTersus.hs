@@ -47,6 +47,7 @@ import TestHashSet
 import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
+import TestAstData
 
 main :: IO ()
 main = do
@@ -172,6 +173,8 @@ originalGroups =
     , testSharedCache
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups
+    , testAstData
+    , testAstReader
     ]
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)

@@ -135,6 +135,15 @@ serialization as data, like the MIR's, that both sides read and write.
 The second is the better course: it keeps this target independent, and
 the serialization is deleted when the frontend lands.
 
+Status (2026-11-01): the bridge is implemented. `AstData` reads and writes
+parsed syntax and the complete `Elaborated` wrapper (including ordered
+expression-occurrence types); `examples/ast_reader.tersus` defines the
+syntax as typed arena payloads and reads/writes the same versioned records.
+It reuses the MIR `Type` and `Size`, preserves contracts and builtin
+metadata, and includes no solver or Iota state. The bridge is developmental:
+no frontend or lowering stage has moved to Tersus yet. See `AST_DATA.md`
+for its checked APIs, format, explicit type/size limits and corpus tests.
+
 ### 5. Retire `MirEval` (572 lines) instead of porting it
 
 `eval` is the reference interpreter that native code is tested against
@@ -146,6 +155,12 @@ emitter. It can only go when the host does (target 7). Until then its
 test role is irreplaceable, so nothing about it changes.
 
 ### 6. The frontend in Tersus (deletes `TypeCheck` 2,241 and `Parse` 1,377, the largest files left)
+
+The aim is still to replace the frontend, but its data bridge is now in
+place: `examples/ast_reader.tersus` defines the syntax of `Syntax` and the
+needed `Types` values as Tersus structs/enums, and exchanges parsed or
+elaborated syntax with `AstData` (`AST_DATA.md`). It is not a source parser
+or type checker.
 
 Nothing can be deleted end to end until source text can enter a Tersus
 program, so this gates the finish even though it is the hardest part.

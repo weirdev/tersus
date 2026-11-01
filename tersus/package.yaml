@@ -13,6 +13,8 @@ extra-source-files:
 - lib/clone.tersus
 - lib/string.tersus
 - examples/emit.tersus
+- examples/ast_reader.tersus
+- AST_DATA.md
 - bootstrap/emitter.sha256
 - examples/mir_verify.tersus
 - examples/mir_erase.tersus
