@@ -1182,11 +1182,19 @@ typeAnnotation = do
                 rest <- many (try (string "::" >> variable))
                 case (first : rest) of
                     [single] -> namedTypeOf single
-                    -- Two segments keep the legacy Enum::Variant reading; a longer
-                    -- chain is a named type at a module path (its last segments are
-                    -- not classified here).
-                    [_, _] -> return (TVariant (renderPath (first : rest)))
-                    segments -> return (TNamed (renderPath segments) [])
+                    segments -> do
+                        generics <- declGenerics <$> getState
+                        let params = firstJust [Map.lookup (renderPath (drop i segments)) generics | i <- [0 .. length segments - 1]]
+                            firstJust [] = Nothing
+                            firstJust (x : xs) = case x of Just _ -> x; Nothing -> firstJust xs
+                        args <- case params of
+                            Just ps -> optionMaybe (try (whitespace >> genericArguments ps))
+                            Nothing -> return Nothing
+                        case args of
+                            Just found -> return (TNamed (renderPath segments) found)
+                            Nothing -> case segments of
+                                [_, _] -> return (TVariant (renderPath segments))
+                                _ -> return (TNamed (renderPath segments) [])
     namedTypeOf rawName = do
         name <- resolveSelf rawName
         typeParams <- declTypeParams <$> getState

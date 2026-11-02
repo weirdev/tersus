@@ -346,7 +346,8 @@ rewriteImplFull maps name = case stripPrefix "<" name of
 rewriteValue :: Maps -> Set.Set Variable -> Set.Set Name -> Value -> Either String Value
 rewriteValue maps bound typeParams value = case value of
     VData name fields -> do
-        name' <- rewriteCtorName maps name
+        base' <- rewriteCtorName maps (baseNameOf name)
+        let name' = base' ++ drop (length (baseNameOf name)) name
         fields' <- mapM (\(field, fieldValue) -> (,) field <$> rewriteValue maps bound typeParams fieldValue) fields
         Right (VData name' fields')
     VList values -> VList <$> mapM (rewriteValue maps bound typeParams) values
@@ -368,7 +369,7 @@ rewriteFunctParts maps bound typeParams params ins outs body = do
             (statements', _) <- rewriteStatements maps bound' (typeParams `Set.union` Set.fromList (signatureTypes signature)) statements
             Right (NativeFunct signature' termination' statements')
         BuiltinFunct builtin -> case builtin of
-            Ctor name fields -> rewriteCtorBuiltin maps name fields
+            Ctor name cargs fields -> rewriteCtorBuiltin maps name cargs fields
             Field owner field -> do
                 owner' <- maybe (Right Nothing) (\name -> Just <$> rewriteNamedString maps typeParams name) owner
                 Right (BuiltinFunct (Field owner' field))
@@ -385,9 +386,13 @@ rewriteFunctParts maps bound typeParams params ins outs body = do
     Right (ins', outs', body')
   where
     signatureTypes (Signature _ _ sizes types _ _) = types ++ sizes
-    rewriteCtorBuiltin maps' name fields = do
-        name' <- rewriteCtorName maps' name
-        Right (BuiltinFunct (Ctor name' fields))
+    rewriteCtorBuiltin maps' name cargs fields = do
+        name' <- rewriteCtorName maps' (baseNameOf name)
+        cargs' <- mapM rewriteCtorArg cargs
+        Right (BuiltinFunct (Ctor (instanceName name' cargs') cargs' fields))
+      where
+        rewriteCtorArg (ArgType inner) = ArgType <$> rewriteType maps' typeParams inner
+        rewriteCtorArg other = Right other
 
 rewriteSignature :: Maps -> Set.Set Name -> Signature -> Either String Signature
 rewriteSignature maps typeParams (Signature params ret sizes types writes from) =
