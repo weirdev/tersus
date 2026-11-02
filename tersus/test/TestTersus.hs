@@ -82,6 +82,7 @@ allGroups =
     , testValidateWithExpectedMatch
     , testValidateWithExpectedMismatch
     , testValidationFail
+    , testValidationCache
     , testUserRewriteValidation
     , testProofEngine
     , testParseVal

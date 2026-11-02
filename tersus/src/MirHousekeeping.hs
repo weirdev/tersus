@@ -1,6 +1,8 @@
 module MirHousekeeping
     ( verifyProgram
     , eraseGhosts
+    , validatedListLibrary
+    , listLibrary
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
@@ -234,14 +236,17 @@ ownedProgramOf source =
 
 -- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once, its
 -- ghosts erased with the eraser itself (it holds a permission, in a contract's ghost local)
-listLibrary :: Program
-listLibrary = case lowerSource False (listsSource ++ "\n" ++ boxSource) of
+validatedListLibrary :: Program
+validatedListLibrary = case lowerSource False (listsSource ++ "\n" ++ boxSource) of
     Error e -> error ("lib/lists.tersus and lib/box.tersus do not lower: " ++ e)
     Ok program -> case validateProgram program of
         Error e -> error ("lib/lists.tersus and lib/box.tersus do not validate: " ++ e)
-        Ok _ -> case eraseGhosts program of
-            Error e -> error ("lib/lists.tersus and lib/box.tersus are not erased: " ++ e)
-            Ok erased -> erased
+        Ok _ -> program
+
+listLibrary :: Program
+listLibrary = case eraseGhosts validatedListLibrary of
+    Error e -> error ("lib/lists.tersus and lib/box.tersus are not erased: " ++ e)
+    Ok erased -> erased
 
 -- Runs a program of the housekeeping with what a user of it gives on the standard input: what it wrote, what
 -- it wrote to the standard error, and its value. The interpreter reads the world the program is not given, so
