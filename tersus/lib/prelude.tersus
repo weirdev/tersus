@@ -57,7 +57,8 @@ trait Copy { };
 // What is done when a value goes out of scope: `impl Drop for T { fn drop(self: Self) -> Int { ... }; };` is called by native code where a value
 // of T is freed (at the end of the scope of the local that holds it, when it is given another value, or when what holds it is freed), before
 // what its fields own is freed. It is how a type that holds a permission (POINTERS.md) frees the memory it is for, so such a type is not
-// linear: its drop is its use. A program does not call it, and a type with a drop is not Clone or Copy.
+// linear: its drop is its use. A program does not call it, and a type with a drop is not Copy (a Clone of one is
+// the clone the type writes, which makes a value of its own to be dropped, as a list's does).
 trait Drop {
     fn drop(self: Self) -> Int [{ }] [{ }];
 };

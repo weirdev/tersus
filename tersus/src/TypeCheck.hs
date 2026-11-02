@@ -1303,8 +1303,10 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput _bounds functions = do
             when (traitName == "Drop") $ do
                 s' <- getState
                 when (Set.member typeName (tcLinear s')) $ failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " is linear, so it is used by the program and not dropped")
-                when (Set.member ("Clone", typeName) (tcImpls s') || Set.member ("Copy", typeName) (tcImpls s')) $
-                    failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " is Clone, and a copy of a value with a drop would be dropped twice")
+                -- (a Clone of a value with a drop is the clone the type writes, which makes a value of its own to
+                -- be dropped, as a list's does; a Copy is a copy of the words themselves, and each would be dropped)
+                when (Set.member ("Copy", typeName) (tcImpls s')) $
+                    failTc ("Type error: impl Drop for " ++ typeName ++ ": " ++ typeName ++ " is Copy, and a copy of a value with a drop would be dropped twice")
                 -- (a drop frees the memory a value holds: native code tells a value that was moved out by its bytes being 0, which a value
                 -- that holds memory never is, since the address of an allocation is not 0, so a type with a drop holds a permission)
                 holding <- case Map.lookup typeName (tcGenerics s') of
