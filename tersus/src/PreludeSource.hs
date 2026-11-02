@@ -1,7 +1,8 @@
 {-# LANGUAGE TemplateHaskell #-}
 
 module PreludeSource
-    ( preludeSource
+    ( typesSource
+    , preludeSource
     , eqSource
     , cloneSource
     , listsSource
@@ -31,6 +32,15 @@ compilerSourceHash =
             contents <- runIO (readFile path)
             pure [file, contents]) files
         lift (fingerprint (concat inputs))
+     )
+
+-- The text of lib/types.tersus: the structs List and Box, which every program has
+typesSource :: String
+typesSource =
+    $( do
+        addDependentFile "lib/types.tersus"
+        contents <- runIO (readFile "lib/types.tersus")
+        lift contents
      )
 
 -- The text of lib/prelude.tersus, read when this module is compiled

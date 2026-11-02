@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module TestOwnership
     ( testOwnership
     , runOwned
@@ -16,7 +18,7 @@ import Modules (LoadResult (..), loadFromFilesystem)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), Variable)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
 import TestHarness
 import Utils
 
