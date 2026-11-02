@@ -81,7 +81,7 @@ pointersErased =
         , "main \"main\" params 0 returns some int sizeparams 0 typeparams 0 borrowed 0"
         , "local 0 none int"
         , "local 1 none addr int"
-        , "local 3 some \"$tuple 1:1\" named \"Tuple2<Addr<Int>, Block<Int>>\""
+        , "local 3 some \"$tuple 1:1\" named \"Tuple2\" 2 type addr int type block int"
         , "local 4 some \"p\" addr int"
         , "local 6 some \"x\" int"
         , "local 7 none int"

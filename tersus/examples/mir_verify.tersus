@@ -1800,28 +1800,67 @@ fn textSize(text: &String) -> Size [{ }] [{ }] {
     return Size::SParam { name: clone(text) };
 };
 
+fn typeWordPrefix(text: &String, word: &String) -> Bool [{ }] [{ }] {
+    if !text.startsWith(word) { return false; };
+    n = size(word.bytes);
+    if n = size(text.bytes) { return true; };
+    if n >= size(text.bytes) { return false; };
+    c = toInt(get(text.bytes, n));
+    return c = 44 || c = 41 || c = 62 || c = 32;
+};
+
 fn textTypeAt(s: &String, pos: Int) -> TextParse ~ {
     bad = TextParse { ok: false, ty: Type::TInt, pos: pos };
     if pos < 0 { return bad; };
     if pos >= size(s.bytes) { return bad; };
     rest = safeSlice(s, pos, size(s.bytes));
-    if rest.startsWith("Int") { return TextParse { ok: true, ty: Type::TInt, pos: pos + 3 }; };
-    if rest.startsWith("Byte") { return TextParse { ok: true, ty: Type::TByte, pos: pos + 4 }; };
-    if rest.startsWith("Bool") { return TextParse { ok: true, ty: Type::TBool, pos: pos + 4 }; };
+    if rest.startsWith("fn(") {
+        args = [];
+        next = pos + 3;
+        if next >= size(s.bytes) { return bad; };
+        while next < size(s.bytes) && toInt(get(s.bytes, next)) != 41 [{ affirm next >= 0; affirm next <= size(s.bytes); }] ~ {
+            a = textTypeAt(s, next);
+            if !a.ok || a.pos <= next || a.pos >= size(s.bytes) { return bad; };
+            args = push(args, a.ty);
+            next = a.pos;
+            if toInt(get(s.bytes, next)) = 44 {
+                next = next + 1;
+                if next < size(s.bytes) && toInt(get(s.bytes, next)) = 32 { next = next + 1; };
+                if next >= size(s.bytes) || toInt(get(s.bytes, next)) = 41 { return bad; };
+            } else if toInt(get(s.bytes, next)) != 41 { return bad; };
+        };
+        if next >= size(s.bytes) || !safeSlice(s, next, size(s.bytes)).startsWith(") -> ") { return bad; };
+        ret = textTypeAt(s, next + 5);
+        if !ret.ok { return bad; };
+        return TextParse { ok: true, ty: Type::TFn { args: args, ret: Box::new(ret.ty) }, pos: ret.pos };
+    };
+    if typeWordPrefix(rest, "Int") { return TextParse { ok: true, ty: Type::TInt, pos: pos + 3 }; };
+    if typeWordPrefix(rest, "Byte") { return TextParse { ok: true, ty: Type::TByte, pos: pos + 4 }; };
+    if typeWordPrefix(rest, "Bool") { return TextParse { ok: true, ty: Type::TBool, pos: pos + 4 }; };
     if rest.startsWith("List<") {
         inner = textTypeAt(s, pos + 5);
-        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        if !inner.ok || inner.pos < 0 || inner.pos >= size(s.bytes) || toInt(get(s.bytes, inner.pos)) != 62 { return bad; };
         return TextParse { ok: true, ty: Type::TList { elem: Box::new(inner.ty) }, pos: inner.pos + 1 };
     };
     if rest.startsWith("Box<") {
         inner = textTypeAt(s, pos + 4);
-        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        if !inner.ok || inner.pos < 0 || inner.pos >= size(s.bytes) || toInt(get(s.bytes, inner.pos)) != 62 { return bad; };
         return TextParse { ok: true, ty: Type::TBox { inner: Box::new(inner.ty) }, pos: inner.pos + 1 };
     };
     if rest.startsWith("Addr<") {
         inner = textTypeAt(s, pos + 5);
-        if !inner.ok || inner.pos >= size(s.bytes) { return bad; };
+        if !inner.ok || inner.pos < 0 || inner.pos >= size(s.bytes) || toInt(get(s.bytes, inner.pos)) != 62 { return bad; };
         return TextParse { ok: true, ty: Type::TAddr { inner: Box::new(inner.ty) }, pos: inner.pos + 1 };
+    };
+    if rest.startsWith("Uninit<") {
+        inner = textTypeAt(s, pos + 7);
+        if !inner.ok || inner.pos < 0 || inner.pos >= size(s.bytes) || toInt(get(s.bytes, inner.pos)) != 62 { return bad; };
+        return TextParse { ok: true, ty: Type::TUninit { inner: Box::new(inner.ty) }, pos: inner.pos + 1 };
+    };
+    if rest.startsWith("&mut ") {
+        inner = textTypeAt(s, pos + 5);
+        if !inner.ok { return bad; };
+        return TextParse { ok: true, ty: Type::TMutRef { inner: Box::new(inner.ty) }, pos: inner.pos };
     };
     if rest.startsWith("&") {
         inner = textTypeAt(s, pos + 1);
@@ -1830,12 +1869,12 @@ fn textTypeAt(s: &String, pos: Int) -> TextParse ~ {
     };
     if rest.startsWith("'") {
         end = pos + 1;
-        while end < size(s.bytes) && toInt(get(s.bytes, end)) != 44 && toInt(get(s.bytes, end)) != 62 [{ affirm end >= 0; affirm end <= size(s.bytes); }] ~ { end = end + 1; };
+        while end < size(s.bytes) && toInt(get(s.bytes, end)) != 44 && toInt(get(s.bytes, end)) != 62 && toInt(get(s.bytes, end)) != 41 [{ affirm end >= 0; affirm end <= size(s.bytes); }] ~ { end = end + 1; };
         return TextParse { ok: true, ty: Type::TParam { name: safeSlice(s, pos + 1, end) }, pos: end };
     };
     if rest.startsWith("Array<") {
         inner = textTypeAt(s, pos + 6);
-        if !inner.ok { return bad; };
+        if !inner.ok || inner.pos < 0 || inner.pos >= size(s.bytes) || toInt(get(s.bytes, inner.pos)) != 44 { return bad; };
         end = inner.pos;
         if end < 0 { end = 0; };
         if end > size(s.bytes) { end = size(s.bytes); };
@@ -1843,9 +1882,10 @@ fn textTypeAt(s: &String, pos: Int) -> TextParse ~ {
         while end < size(s.bytes) && depth > 0 [{ affirm end >= 0; affirm end <= size(s.bytes); }] ~ {
             c = toInt(get(s.bytes, end));
             if c = 60 { depth = depth + 1; };
-            if c = 62 { depth = depth - 1; };
+            if c = 62 && !(end > 0 && toInt(get(s.bytes, end - 1)) = 45) { depth = depth - 1; };
             end = end + 1;
         };
+        if depth != 0 || end <= 0 || toInt(get(s.bytes, end - 1)) != 62 { return bad; };
         // The size after the comma is part of the type (`Array<Int, 2>` is not `Array<Int, 3>`)
         arrSize = Size::SAny;
         if inner.pos >= 0 && inner.pos < size(s.bytes) {
@@ -1865,8 +1905,9 @@ fn textTypeAt(s: &String, pos: Int) -> TextParse ~ {
     depth = 0;
     while end < size(s.bytes) [{ affirm end >= 0; affirm end <= size(s.bytes); }] ~ {
         c = toInt(get(s.bytes, end));
-        if c = 60 { depth = depth + 1; };
-        if c = 62 { if depth = 0 { return TextParse { ok: true, ty: Type::TNamed { name: safeSlice(s, pos, end), base: safeSlice(s, pos, end), argc: 0, argTokens: [] }, pos: end }; }; depth = depth - 1; };
+        if c = 60 || c = 40 { depth = depth + 1; };
+        if c = 41 { if depth = 0 { return TextParse { ok: true, ty: Type::TNamed { name: safeSlice(s, pos, end), base: safeSlice(s, pos, end), argc: 0, argTokens: [] }, pos: end }; }; depth = depth - 1; };
+        if c = 62 && !(end > pos && toInt(get(s.bytes, end - 1)) = 45) { if depth = 0 { return TextParse { ok: true, ty: Type::TNamed { name: safeSlice(s, pos, end), base: safeSlice(s, pos, end), argc: 0, argTokens: [] }, pos: end }; }; depth = depth - 1; };
         if c = 44 && depth = 0 { return TextParse { ok: true, ty: Type::TNamed { name: safeSlice(s, pos, end), base: safeSlice(s, pos, end), argc: 0, argTokens: [] }, pos: end }; };
         end = end + 1;
     };
@@ -1885,12 +1926,21 @@ fn isWordType(t: &Type) -> Bool {
 };
 
 fn sub(p: &Program, wanted: &Type, actual: &Type) -> Bool ~ {
+    return subType(p, wanted, actual, false);
+};
+
+fn subType(p: &Program, wanted: &Type, actual: &Type, strict: Bool) -> Bool ~ {
     if wanted is Type::TParam { return true; };
     if actual is Type::TParam { return true; };
-    if wanted is Type::TRef { return sub(p, Box::unbox((wanted as Type::TRef).inner), actual); };
-    if actual is Type::TRef { return sub(p, wanted, Box::unbox((actual as Type::TRef).inner)); };
+    if strict {
+        if (wanted is Type::TRef) != (actual is Type::TRef) || (wanted is Type::TMutRef) != (actual is Type::TMutRef) { return false; };
+        if wanted is Type::TRef && actual is Type::TRef { return subType(p, Box::unbox((wanted as Type::TRef).inner), Box::unbox((actual as Type::TRef).inner), true); };
+        if wanted is Type::TMutRef && actual is Type::TMutRef { return subType(p, Box::unbox((wanted as Type::TMutRef).inner), Box::unbox((actual as Type::TMutRef).inner), true); };
+    };
+    if wanted is Type::TRef { return subType(p, Box::unbox((wanted as Type::TRef).inner), actual, strict); };
+    if actual is Type::TRef { return subType(p, wanted, Box::unbox((actual as Type::TRef).inner), strict); };
     if wanted is Type::TList && actual is Type::TList {
-        return sub(p, Box::unbox((wanted as Type::TList).elem), Box::unbox((actual as Type::TList).elem));
+        return subType(p, Box::unbox((wanted as Type::TList).elem), Box::unbox((actual as Type::TList).elem), strict);
     };
     if wanted is Type::TArray && actual is Type::TArray {
         ws = (wanted as Type::TArray).size;
@@ -1903,13 +1953,13 @@ fn sub(p: &Program, wanted: &Type, actual: &Type) -> Bool ~ {
             Size::SVar { n: vn } => { same = actualSize is Size::SVar && (actualSize as Size::SVar).n = vn; },
         };
         if !same { return false; };
-        return sub(p, Box::unbox((wanted as Type::TArray).elem), Box::unbox((actual as Type::TArray).elem));
+        return subType(p, Box::unbox((wanted as Type::TArray).elem), Box::unbox((actual as Type::TArray).elem), strict);
     };
     if wanted is Type::TBox && actual is Type::TBox {
-        return sub(p, Box::unbox((wanted as Type::TBox).inner), Box::unbox((actual as Type::TBox).inner));
+        return subType(p, Box::unbox((wanted as Type::TBox).inner), Box::unbox((actual as Type::TBox).inner), strict);
     };
     if wanted is Type::TAddr && actual is Type::TAddr {
-        return sub(p, Box::unbox((wanted as Type::TAddr).inner), Box::unbox((actual as Type::TAddr).inner));
+        return subType(p, Box::unbox((wanted as Type::TAddr).inner), Box::unbox((actual as Type::TAddr).inner), strict);
     };
     if wanted is Type::TNamed && actual is Type::TVariant {
         info = ctorInfo(p, (actual as Type::TVariant).name);
@@ -1935,7 +1985,7 @@ fn sub(p: &Program, wanted: &Type, actual: &Type) -> Bool ~ {
                 } else {
                     xp = textType(x);
                     yp = textType(y);
-                    if !xp.ok || !yp.ok || !sub(p, xp.ty, yp.ty) { ok = false; };
+                    if !xp.ok || !yp.ok || !subType(p, xp.ty, yp.ty, strict) { ok = false; };
                 };
             };
             };
@@ -1947,12 +1997,16 @@ fn sub(p: &Program, wanted: &Type, actual: &Type) -> Bool ~ {
         wa = (wanted as Type::TFn).args;
         aa = (actual as Type::TFn).args;
         if size(wa) != size(aa) { return false; };
-        if !sub(p, Box::unbox((wanted as Type::TFn).ret), Box::unbox((actual as Type::TFn).ret)) { return false; };
+        wr = Box::unbox((wanted as Type::TFn).ret);
+        ar = Box::unbox((actual as Type::TFn).ret);
+        if !subType(p, wr, ar, true) { return false; };
         i = 0;
         ok = true;
         while i < size(wa) && i < size(aa) [{ affirm i >= 0; affirm i <= size(wa); affirm i <= size(aa); }] ~ {
             if i < size(aa) {
-                if !sub(p, get(wa, i), get(aa, i)) { ok = false; };
+                wt = get(wa, i);
+                at = get(aa, i);
+                if !subType(p, wt, at, true) { ok = false; };
             };
             i = i + 1;
         };

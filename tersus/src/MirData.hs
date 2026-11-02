@@ -347,6 +347,7 @@ typeP = word >>= \w -> case w of
     "array" -> TArrayOf <$> typeP <*> sizeP
     "box" -> TBox <$> typeP
     "addr" -> TAddr <$> typeP
+    "uninit" -> TUninit <$> typeP
     "block" -> TBlock <$> typeP
     "fn" -> int >>= \n -> replicateM n typeP >>= \args -> TFn args <$> typeP
     "named" -> name >>= \base -> int >>= \n -> TNamed base <$> replicateM n argP

@@ -10,11 +10,14 @@ import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (verifyProgram)
 import MirOwnership (insertOwnership)
+import MirLower (lowerProgram)
+import Parse (parseStatementBlock)
+import Pipeline (nativeProgram)
 import PreludeSource (boxSource, listsSource)
 import Types (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
-import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
+import TestNative (nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
 import Utils
 
 -- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir_verify.tersus): the check that a program
@@ -47,7 +50,10 @@ testMirVerify =
             ( TestCase "raw lists and Boxes library" (rawInterpreted True rawLibrary)
                 : [TestCase name (rawInterpreted expected (Ok text)) | (name, text, expected) <- blockCases]
             )
-        , TestCase "pre-erasure library and Block cases, natively" rawNative
+        , TestCase "Uninit function type round trips through MIR data" uninitRoundTrip
+        , TestList "function-list identity, interpreted"
+            [TestCase name (rawInterpreted expected input) | (name, input, expected) <- functionCases]
+        , TestCase "pre-erasure and function-list cases, natively" rawNative
         , TestParallel
             "every example, natively"
             [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
@@ -150,7 +156,10 @@ rawNative = withVerifier $ \exe -> case rawLibrary of
     Error e -> pure (Just e)
     Ok library -> do
         failures <- mapM (check exe) (("raw lists and Boxes library", library, True) : blockCases)
-        pure $ case [failure | Just failure <- failures] of
+        functionFailures <- mapM (\(name, input, expected) -> case input of
+            Error e -> pure (Just (name ++ ": " ++ e))
+            Ok text -> check exe (name, text, expected)) functionCases
+        pure $ case [failure | Just failure <- failures ++ functionFailures] of
             [] -> Nothing
             bad -> Just (unlines bad)
   where
@@ -161,6 +170,91 @@ rawNative = withVerifier $ \exe -> case rawLibrary of
                 || not expected && code == ExitSuccess && sameText output "1" && not (null errors) && not ("not the MIR as data" `isInfixOf` errors)
                 then Nothing
                 else Just (name ++ ": expected " ++ show expected ++ ", got " ++ show (code, output, errors))
+
+uninitRoundTrip :: IO TestResult
+uninitRoundTrip = pure $ case [input | (name, input, _) <- functionCases, name == "function list Uninit argument"] of
+    [Ok text] -> case readProgram text of
+        Error e -> Just e
+        Ok program -> case Map.lookup "probe" (progFunctions program) >>= Map.lookup (Local 0) . fnLocals of
+            Nothing -> Just "the Uninit fixture has no return local"
+            Just decl -> case testAssertEq (localType decl) (TFn [TUninit TInt] TInt) of
+                Just e -> Just e
+                Nothing -> case readProgram (writeProgram program) of
+                    Error e -> Just e
+                    Ok restored -> testAssertEq restored (forNative program)
+    _ -> Just "there is no Uninit function fixture"
+
+functionCases :: [(String, Result String String, Bool)]
+functionCases =
+    [ ("existing function program: " ++ name, sourceData name, True)
+    | name <- ["in a list", "a function that lends is a value"]
+    ]
+        ++ [(name, Ok (fixture element result borrowed), expected) | (name, element, result, borrowed, expected) <- signatures]
+        ++ [("function list malformed " ++ label ++ " closer", Ok (fixtureWithLocal (badName, goodType) goodType False ("named \"StdList<" ++ badName ++ ">\" 0")), False) | (label, badName, goodType) <- malformed]
+  where
+    sourceData name = case lookup name unvalidatedPrograms of
+        Nothing -> Error ("no function program named " ++ name)
+        Just source -> case parseStatementBlock source of
+            Left e -> Error (show e)
+            Right stmts -> mapResult (writeProgram . insertOwnership . nativeProgram) (lowerProgram stmts)
+    ordinary = ("fn(Int) -> Int", "fn 1 int int")
+    borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
+    namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")
+    signatures =
+        [ ("function list exact signature", ordinary, ordinary, False, True)
+        , ("function list through a borrowed list", ordinary, ordinary, True, True)
+        , ("function list zero arguments", ("fn() -> Int", "fn 0 int"), ("fn() -> Int", "fn 0 int"), False, True)
+        , ("function list two arguments", ("fn(Int, Bool) -> Int", "fn 2 int bool int"), ("fn(Int, Bool) -> Int", "fn 2 int bool int"), False, True)
+        , ("function list borrowed argument", borrowedArg, borrowedArg, False, True)
+        , ("function list nested argument", ("fn(fn(Int) -> Int) -> Int", "fn 1 fn 1 int int int"), ("fn(fn(Int) -> Int) -> Int", "fn 1 fn 1 int int int"), False, True)
+        , ("function list nested result", ("fn() -> fn(Int) -> Int", "fn 0 fn 1 int int"), ("fn() -> fn(Int) -> Int", "fn 0 fn 1 int int"), False, True)
+        , ("function list named argument with builtin prefix", namedArg, namedArg, False, True)
+        , ("function list wrong argument", ordinary, ("fn(Bool) -> Int", "fn 1 bool int"), False, False)
+        , ("function list wrong result", ordinary, ("fn(Int) -> Bool", "fn 1 int bool"), False, False)
+        , ("function list missing argument", ordinary, ("fn() -> Int", "fn 0 int"), False, False)
+        , ("function list extra argument", ordinary, ("fn(Int, Int) -> Int", "fn 2 int int int"), False, False)
+        , ("function list borrowed argument is not owned", borrowedArg, ("fn(List<Int>) -> Int", "fn 1 list int int"), False, False)
+        , ("function list read reference is not mutable", borrowedArg, ("fn(&mut List<Int>) -> Int", "fn 1 mutref list int int"), False, False)
+        , ("function list mutable argument", ("fn(&mut List<Int>) -> Int", "fn 1 mutref list int int"), ("fn(&mut List<Int>) -> Int", "fn 1 mutref list int int"), False, True)
+        , ("function list borrowed result is not owned", ("fn() -> &Integer", "fn 0 ref named \"Integer\" 0"), ("fn() -> Integer", "fn 0 named \"Integer\" 0"), False, False)
+        , ("function list read result is not mutable", ("fn() -> &Integer", "fn 0 ref named \"Integer\" 0"), ("fn() -> &mut Integer", "fn 0 mutref named \"Integer\" 0"), False, False)
+        , ("function list nested List reference", ("fn(List<&Int>) -> Int", "fn 1 list ref int int"), ("fn(List<Int>) -> Int", "fn 1 list int int"), False, False)
+        , ("function list nested Box reference", ("fn(Box<&Int>) -> Int", "fn 1 box ref int int"), ("fn(Box<Int>) -> Int", "fn 1 box int int"), False, False)
+        , ("function list nested Addr reference", ("fn(Addr<&Int>) -> Int", "fn 1 addr ref int int"), ("fn(Addr<Int>) -> Int", "fn 1 addr int int"), False, False)
+        , ("function list nested Array reference", ("fn(Array<&Int, 2>) -> Int", "fn 1 array ref int c 2 int"), ("fn(Array<Int, 2>) -> Int", "fn 1 array int c 2 int"), False, False)
+        , ("function list nested named reference", ("fn(Holder<&Int>) -> Int", "fn 1 named \"Holder\" 1 type ref int int"), ("fn(Holder<Int>) -> Int", "fn 1 named \"Holder\" 1 type int int"), False, False)
+        , ("function list nested function reference", ("fn(fn(List<&Int>) -> Int) -> Int", "fn 1 fn 1 list ref int int int"), ("fn(fn(List<Int>) -> Int) -> Int", "fn 1 fn 1 list int int int"), False, False)
+        , ("function list nested result reference", ("fn() -> List<&Int>", "fn 0 list ref int"), ("fn() -> List<Int>", "fn 0 list int"), False, False)
+        , ("function list array argument", ("fn(Array<Int, 2>) -> Int", "fn 1 array int c 2 int"), ("fn(Array<Int, 2>) -> Int", "fn 1 array int c 2 int"), False, True)
+        , ("function list Uninit argument", ("fn(Uninit<Int>) -> Int", "fn 1 uninit int int"), ("fn(Uninit<Int>) -> Int", "fn 1 uninit int int"), False, True)
+        , ("function list explicit generic argument", ("fn(List<'T>) -> Int", "fn 1 list param \"T\" int"), ("fn(List<Int>) -> Int", "fn 1 list int int"), False, True)
+        , ("function list named argument is not builtin", namedArg, ordinary, False, False)
+        ]
+    malformed =
+        [ ("List", "fn(List<Int)) -> Int", "fn 1 list int int")
+        , ("Box", "fn(Box<Int)) -> Int", "fn 1 box int int")
+        , ("Addr", "fn(Addr<Int)) -> Int", "fn 1 addr int int")
+        , ("Array", "fn(Array<Int, 2)) -> Int", "fn 1 array int c 2 int")
+        , ("Uninit", "fn(Uninit<Int)) -> Int", "fn 1 uninit int int")
+        ]
+    fixture element@(_, elementType) (_, resultType) borrowed =
+        fixtureWithLocal element resultType borrowed ("named \"StdList\" 1 type " ++ elementType)
+    fixtureWithLocal (elementName, elementType) resultType borrowed listType = unlines
+        [ "tersus-mir 1"
+        , "struct \"Integer\" 1 \"n\" int"
+        , "struct \"StdList<" ++ elementName ++ ">\" 3 \"addr\" addr " ++ elementType ++ " \"len\" int \"cap\" int"
+        , "function \"probe\" params 1 1 returns some " ++ resultType ++ " sizeparams 0 typeparams " ++ (if "param \"T\"" `isInfixOf` elementType then "1 \"T\"" else "0") ++ " borrowed " ++ if borrowed then "1 1" else "0"
+        , "local 0 none " ++ resultType
+        , "local 1 none " ++ listType
+        , "block 0"
+        , "assign 0 listop get 2 copy 1 const int 0"
+        , "return"
+        , "end"
+        , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+        , "block 0"
+        , "return"
+        , "end"
+        ]
 
 blockCases :: [(String, String, Bool)]
 blockCases = concatMap cases signatures
