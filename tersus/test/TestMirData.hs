@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module TestMirData (testMirData) where
 
 import Data.Char (isAscii)
@@ -8,7 +10,7 @@ import Cli (Command (..), runSource)
 import Mir
 import MirData
 import Pipeline (ownedSource)
-import Types (Arg (..), Type (..))
+import Types (Arg (..), Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)
 import Utils

@@ -164,7 +164,7 @@ data Type = TInt | TByte | TBool
       -- toInt widens one, and I32::from(x) and the others narrow an Int with its range proved, as toByte does. Natively it is as many bytes in
       -- memory, and a word in a register.
       TWord Bool Integer
-    | TList Type | TArrayOf Type Size | TBox Type | TFn [Type] Type | TNamed Name [Arg] | TVariant Name | TVar Int
+    | TArrayOf Type Size | TFn [Type] Type | TNamed Name [Arg] | TVariant Name | TVar Int
     | -- A function with size parameters (`fn dot<n>(a: Array<Int, n>, ...)`): the type of the function for any values of the sizes. A call
       -- gives each its value, so a use of one that is not a call has no type.
       TForall [Variable] [Variable] Type
@@ -197,6 +197,16 @@ data Size = SizeConst Integer | SizeAny | SizeParam Name | SizeVar Int
 -- What a struct with parameters is given: a size, or a type
 data Arg = ArgSize Size | ArgType Type
     deriving (Show, Eq, Ord)
+
+-- A list and a Box are structs of the prelude (`lib/prelude.tersus`), declared like any other struct with a type
+-- parameter, so their types are named instances and a use whose element type is not known yet carries that unknown
+-- in its argument, to be decided by inference like the argument of any other struct. These patterns are how the
+-- rest of the compiler speaks of them; the operations on them and their proof facts are not part of the type.
+pattern TList :: Type -> Type
+pattern TList t = TNamed "List" [ArgType t]
+
+pattern TBox :: Type -> Type
+pattern TBox t = TNamed "Box" [ArgType t]
 
 -- A parameter that starts with a capital letter is a type, and any other is a size
 isTypeName :: Variable -> Bool

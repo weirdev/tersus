@@ -889,6 +889,7 @@ ownerOfValue :: Name -> Type -> TC Name
 ownerOfValue function ty = do
     t <- zonk ty
     case t of
+        other@TBox{} -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions: call it on the value inside, as in Box::unbox(b)." ++ function ++ "(...)")
         -- (a struct with types and sizes has the functions of its impl, whatever it is given)
         TNamed base _ -> return base
         TInt -> return "Int"
@@ -897,7 +898,6 @@ ownerOfValue function ty = do
         TList _ -> return "List"
         TVariant variant -> fst <$> ctorInfo variant
         TVar _ -> failTc ("Type error: the type of the value whose function " ++ function ++ " is called is not known yet; annotate it")
-        other@TBox{} -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions: call it on the value inside, as in Box::unbox(b)." ++ function ++ "(...)")
         other -> failTc ("Type error: " ++ function ++ " is called on a " ++ renderType other ++ ", which has no functions")
 
 -- The type that owns an impl, for a call through a trait: a struct or enum, a list, an array and a Box, which are the types an
@@ -1022,8 +1022,6 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput bounds functions
     | not (null bounds) = do
         let selfName = case selfTypeInput of TNamed b a -> instanceName b a; other -> renderType other
             selfType = case (typeName, selfTypeInput) of
-                ("List", TNamed _ [ArgType t]) -> TList t
-                ("Box", TNamed _ [ArgType t]) -> TBox t
                 ("Array", TNamed _ [ArgType t, ArgSize s]) -> TArrayOf t s
                 ("Int", _) -> TInt
                 ("Byte", _) -> TByte
@@ -1094,8 +1092,6 @@ checkImpl ctx env trait traitArgs typeName selfTypeInput _bounds functions = do
     -- (a struct with parameters has them in the impl, `impl<T> Vec<T>`, and its type is a different one for each; a list is the one
     -- type with an impl that is not declared as a struct, and Self for it is a List of the type the impl names)
     let selfType = case (typeName, selfTypeInput) of
-            ("List", TNamed _ [ArgType t]) -> TList t
-            ("Box", TNamed _ [ArgType t]) -> TBox t
             ("Array", TNamed _ [ArgType t, ArgSize s]) -> TArrayOf t s
             ("Int", _) -> TInt
             ("Byte", _) -> TByte
@@ -1428,7 +1424,7 @@ structOwner :: Type -> TC (Maybe Name)
 structOwner ty = do
     t <- zonk ty
     return $ case t of
-        TNamed base _ -> Just base
+        TNamed base _ | base `notElem` ["List", "Box"] -> Just base
         _ -> Nothing
 
 -- (a name in a proof is a variable of the program or the builtin of that name, as for an expression)

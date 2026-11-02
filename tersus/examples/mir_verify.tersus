@@ -1853,6 +1853,20 @@ fn sub(p: &Program, wanted: &Type, actual: &Type) -> Bool ~ {
     if wanted is Type::TList && actual is Type::TList {
         return sub(p, Box::unbox((wanted as Type::TList).elem), Box::unbox((actual as Type::TList).elem));
     };
+    // (a list and a Box are named types in the checker and their own shapes here, so a name a field read was
+    // written against and the shape of the value it is read from are two spellings of one type)
+    if wanted is Type::TNamed && actual is Type::TList {
+        wa = instanceArgs((wanted as Type::TNamed).name);
+        if beforeAngle((wanted as Type::TNamed).name) != "List" || size(wa) != 1 { return false; };
+        et = textType(get(wa, 0));
+        return et.ok && sub(p, et.ty, Box::unbox((actual as Type::TList).elem));
+    };
+    if wanted is Type::TNamed && actual is Type::TBox {
+        wa = instanceArgs((wanted as Type::TNamed).name);
+        if beforeAngle((wanted as Type::TNamed).name) != "Box" || size(wa) != 1 { return false; };
+        et = textType(get(wa, 0));
+        return et.ok && sub(p, et.ty, Box::unbox((actual as Type::TBox).inner));
+    };
     if wanted is Type::TArray && actual is Type::TArray {
         ws = (wanted as Type::TArray).size;
         actualSize = (actual as Type::TArray).size;

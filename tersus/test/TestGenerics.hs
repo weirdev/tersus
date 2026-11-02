@@ -111,4 +111,11 @@ testGenerics =
                 , testCase "a trait is implemented for these" (runs "struct Box2<T> { a: T, b: T }; trait Counted { fn count(self: &Self) -> Int; }; impl<T> Counted for Box2<T> { fn count(self: &Self) -> Int { return 2; }; }; return Box2<Int> { a: 1, b: 2 }.count();" (VInt 2))
                 , testCase "the impl comes before its calls" (rejected "struct Box2<T> { a: T, b: T }; x = Box2<Int> { a: 1, b: 2 }; return x.first();" "is not defined before this call")
                 ]
+            , TestList
+                "a list and a Box are structs of the prelude"
+                [ testCase "the fields of a list can be named" (runs "fn count<T>(l: &List<T>) -> Int { return l.len; }; return count(push(push([], 1), 2));" (VInt 2))
+                , testCase "a list is made for a type decided later" (runs "fn noFields() -> List<Int> { return []; }; return size(push(noFields(), 3));" (VInt 1))
+                , testCase "a Box of an array of no size checks" (valid "b = Box::new(#[4, 5, 6]); return size(b) * 10 + get(b, 1);")
+                , testCase "a permission may not be an element" (rejected "fn f(x: List<Block<Int>>) -> Int { return 0; }; return 0;" "a list")
+                ]
             ]

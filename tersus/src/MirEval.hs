@@ -595,6 +595,10 @@ evalRvalue frame rv =
                 MData actual fields
                     | actual /= plain name -> Error ("Expected a " ++ name ++ " but got a " ++ actual)
                     | otherwise -> maybe (Error ("Variant " ++ name ++ " has no field " ++ field)) Ok (lookup field fields)
+                -- (a list is a struct of the prelude in the checker, and a value of one here: its length is the
+                -- number of elements, and its capacity is not a thing the interpreter keeps, so it is the length)
+                MList elements
+                    | field == "len" || field == "cap" -> Ok (MInt (toInteger (length elements)))
                 _ -> Error "A field can only be read from a struct"
         -- (a wrong cast is undefined behaviour, as in the evaluator of the AST: reading a field that is not there is the error)
         AsVariant o _ -> operandValue frame o

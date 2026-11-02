@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module MirData
     ( writeProgram
     , writeProgramWithGhosts
@@ -9,7 +11,7 @@ import Control.Monad (replicateM)
 import qualified Data.Map.Strict as Map
 
 import Mir
-import Types (Arg (..), Name, Rel (..), Size (..), Type (..), Variable)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
 import Utils
 
 -- The MIR of a program as text that a program can read (`tersus mir --data`): what native code is made from, and nothing else. It is the

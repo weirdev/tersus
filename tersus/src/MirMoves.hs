@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module MirMoves
     ( checkMoves
     , isCopyType
@@ -13,7 +15,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirOwnership (Role (..), isProjection, operandLocal, roles)
-import Types (Name, Type (..), Variable, baseNameOf, instanceName, tupleGeneric)
+import Types (Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.
@@ -129,6 +131,10 @@ linearParts linear drops program = go (0 :: Int)
         | depth > 8 = []
         | otherwise = case ty of
             TBlock _ -> [[]]
+            -- (a list and a Box are structs of the prelude, but no value of one holds a permission: an element may
+            -- not be one, so there is no linear part inside one for this pass to follow)
+            TList _ -> []
+            TBox _ -> []
             TNamed base _ | base `Set.member` drops -> []
             TVariant v | Just n <- ownerOf program v, baseNameOf n `Set.member` drops -> []
             -- (an Uninit of a value that owns something is linear: what it holds is freed only by taking it out)

@@ -10,7 +10,7 @@ import Data.Char (isAlphaNum)
 import qualified Mir as M
 import MirLower (lowerElaborated, lowerLibrary)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
-import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
+import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource, typesSource)
 import Syntax (Expression (..), Statement (..), Value (..))
 import TypeCheck (elaborate)
 import Utils
@@ -24,10 +24,10 @@ import Utils
 parseSource :: String -> Result [Statement] String
 parseSource source = parseSourceWith True source
 
--- A program with the equality library in front of it (unless it declares a trait Eq), as `=` on any type but a word needs, and with no
--- other library: how the tests of the language read a program
+-- A program with the list and Box types and the equality library in front of it (unless it declares those names
+-- itself), as `=` on any type but a word needs, and with no other library: how the tests of the language read a program
 parseWithEquality :: String -> Either String [Statement]
-parseWithEquality source = case [text | (name, text) <- libraries source, name `elem` ["the clone library", "the equality library"]] of
+parseWithEquality source = case [text | (name, text) <- libraries source, name `elem` ["the list and Box types", "the clone library", "the equality library"]] of
     [] -> either (Left . show) (Right . fst) (parseStatementBlockWith emptyDecls source)
     texts -> case readLibs emptyDecls texts of
         Left err -> Left err
@@ -74,12 +74,12 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
     reserved name = name `elem` ["StdList", "StdBox"] || take 7 name == "stdList" || take 6 name == "stdBox"
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
--- unchanged: lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares), lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`) if it mentions any of them (or
+-- unchanged: lib/types.tersus (the structs `List` and `Box`, which a program has whether it names them or not), lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares), lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`) if it mentions any of them (or
 -- `hashCombine`), lib/string.tersus (the struct `String` that a string literal is a value of, which needs the traits) if it mentions `String` or
 -- has a literal, lib/map.tersus (the struct `HashMap`) if it mentions `HashMap`, and lib/set.tersus (the struct `HashSet`,
 -- which is made of a map) if it mentions `HashSet`
 libraries :: String -> [(String, String)]
-libraries source = [("the clone library", cloneSource) | not (declares ["Clone"])] ++ [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps] ++ [("the set library", setSource) | sets]
+libraries source = [("the list and Box types", typesSource) | not (declares ["List"]) && not (declares ["Box"])] ++ [("the clone library", cloneSource) | not (declares ["Clone"])] ++ [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps] ++ [("the set library", setSource) | sets]
   where
     code = withoutText source
     ws = names code

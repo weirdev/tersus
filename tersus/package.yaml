@@ -7,6 +7,7 @@ maintainer:          "weirdev@outlook.com"
 copyright:           "2024"
 
 extra-source-files:
+- lib/types.tersus
 - lib/lists.tersus
 - lib/prelude.tersus
 - lib/eq.tersus

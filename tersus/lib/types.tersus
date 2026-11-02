@@ -1,0 +1,29 @@
+// The types a program has whether it names them or not: a list and a Box are structs of the library, declared
+// like any other struct with a type parameter, and put in front of every program that does not declare a type
+// of one of those names itself (see Compile.libraries). A use of one whose element type is not known yet is
+// decided by inference as the use of any other struct is.
+
+// A list: the elements in memory at an address, with the permission to it, how many of them are in use and how
+// many there is room for. What a list does (`size`, `get`, `set`, `push` and the rest, and the facts a proof
+// about one uses) is said by the traits and impls of lib/prelude.tersus and the contracts they are checked
+// against; the value that native code is made of is this same struct (see MirLists).
+struct List<T> {
+    addr: Addr<T>,
+    len: Int,
+    cap: Int,
+    ghost blk: Block<T>,
+} invariant [{
+    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len;
+    affirm len >= 0; affirm len <= cap;
+    affirm forall j in 0..len: filled(blk, j) = true;
+    affirm forall j in len..cap: filled(blk, j) = false;
+}];
+
+// A Box: room for one value in memory at an address, with the permission to it. `Box::new` and `Box::unbox` and
+// the look through a Box at what it holds are the language items a library cannot write (see LANGUAGE.md).
+struct Box<T> {
+    addr: Addr<T>,
+    ghost blk: Block<T>,
+} invariant [{
+    affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true;
+}];

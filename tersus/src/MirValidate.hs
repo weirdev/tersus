@@ -379,8 +379,12 @@ assign st dest rv =
 -- The invariant of the struct that a type is, or that a Box of the type holds, as facts about a value of the type
 typeInvariants :: PState -> Type -> IotaProof -> [IotaProof]
 typeInvariants st ty value = case ty of
-    TNamed base args -> invariantFacts st (instanceName base args) value
+    -- (a Box is its contents in a proof, so the invariant of what it holds is the one that is said of it)
     TBox inner -> typeInvariants st inner value
+    -- (a list is not said of by the invariant of the struct it is made of: what a proof knows of a list is what
+    -- the contracts of its operations say, as it was before a list was a struct)
+    TList _ -> []
+    TNamed base args -> invariantFacts st (instanceName base args) value
     _ -> []
 
 -- What the type of a local says of its value: an array has the size of its type, wherever it came from, so a contract or a
@@ -407,6 +411,10 @@ withTypeFacts fn l st =
         _ -> st
   where
     structFacts ty value = case ty of
+        -- (a list and a Box are structs in the checker, but in a proof a Box is what it holds and a list is what
+        -- its operations say: neither is said of as a value built from its fields)
+        TList _ -> []
+        TBox _ -> []
         TNamed base args | Just (M.StructDecl _) <- Map.lookup (instanceName base args) (M.progTypes (psProgram st)) -> constructedFacts st (instanceName base args) args value
         TRef t -> structFacts t value
         _ -> []

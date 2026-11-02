@@ -7,6 +7,9 @@
 // what the impl's `size` promises. A struct that implements it has `size(v)`, `get(v, i)`, `set(v, i, x)` and `push(v, x)` as calls of
 // its impl, and `v.size()` and `Sequence::size(v)` are the same call (see examples/vec.tersus).
 
+// A list and a Box are structs declared in lib/types.tersus, which every program has; the impls of the traits
+// below for them are here.
+
 trait Sequence<E> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
     fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];

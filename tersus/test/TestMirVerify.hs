@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module TestMirVerify (testMirVerify, testMirVerifyPrograms) where
 
 import Data.List (isInfixOf)
@@ -9,7 +11,7 @@ import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (verifyProgram)
 import Pipeline (ownedSource)
-import Types (Type (..))
+import Types (Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)

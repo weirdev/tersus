@@ -853,12 +853,13 @@ rewriteOld other = other
 
 -- Every struct a type names must be declared
 checkType :: Type -> TC ()
-checkType ty@(TNamed base args) = ensureInstance ty >> (() <$ typeCtors (instanceName base args))
-checkType (TVariant name) = () <$ ctorInfo name
+-- (a list and a Box are prelude structs, but what may be an element of one is said here, before the instance of
+-- the struct is made: no permission may be held in one, and the one place an array of no size can be is behind a Box)
 checkType (TList t) = noGhostIn "a list" t >> checkType t
--- (a Box holds any type that has a size; the one place an array of no size can be is behind it)
 checkType (TBox t@(TArrayOf e SizeAny)) = checkType e >> arrayOk t
 checkType (TBox t) = noGhostIn "a Box" t >> checkType t
+checkType ty@(TNamed base args) = ensureInstance ty >> (() <$ typeCtors (instanceName base args))
+checkType (TVariant name) = () <$ ctorInfo name
 checkType (TAddr t) = addressable t
 checkType (TUninit t) = noGhostIn "an Uninit" t >> checkType t
 checkType (TBlock t) = addressable t

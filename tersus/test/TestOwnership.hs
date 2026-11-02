@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module TestOwnership
     ( testOwnership
     , runOwned
@@ -15,7 +17,7 @@ import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import Types (Name, Rel (..), Size (..), Type (..), Variable)
+import Types (Name, Rel (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
 import TestHarness
 import Utils
 

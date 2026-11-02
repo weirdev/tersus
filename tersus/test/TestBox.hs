@@ -74,7 +74,7 @@ testBox =
                 , testCase "unbox takes one argument" (rejected (point ++ "b = Box::new(P { x: 1, y: 2 }); return Box::unbox(b, b);") "Box::unbox takes 1 argument, got 2")
                 , testCase "Box::new takes one value" (rejected (point ++ "return Box::new(P { x: 1, y: 2 }, 3);") "Box::new takes 1 argument, got 2")
                 , testCase "a Box of a Box" (runs "return Box::unbox(Box::unbox(Box::new(Box::new(3))));" (VInt 3))
-                , testCase "Box is not a name for a struct" (parseFails "struct Box { x: Int }; return 0;")
+                , testCase "a struct named Box of the program's own is its own" (runs "struct Box { x: Int }; b = Box { x: 5 }; return b.x;" (VInt 5))
                 , testCase "a Box needs a type" (parseFails "fn f(b: Box) -> Int { return 0; }; return 0;")
                 ]
             , TestList
