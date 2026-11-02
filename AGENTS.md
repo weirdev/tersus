@@ -105,9 +105,15 @@ Work from `tersus/`.
   file the running compiler is using: the shell truncates it before the
   compiler runs.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`,
-  which runs each group in a process of its own;
+  which runs each registered group in a process of its own with `-N1`;
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
+  `testNative`, `testMirEmit`, `testMirVerify` and `testMirSelfHosted` each
+  register four batches named `<original>:1/4` through `<original>:4/4`.
+  Selecting an original name selects all its batches; shard filters intersect
+  the full-suite assignment. Self-hosted batches share one shard and its full
+  validated-program cache; Native memory-limit cases stay ordered in one batch.
+  `testBootstrap` remains one private cold group.
 - `ghci` then `:load Pipeline`: quick interactive workflow noted in
   `tersus/README.md`.
 

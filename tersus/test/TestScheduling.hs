@@ -4,13 +4,20 @@ module TestScheduling
     , selectGroupNames
     , assignShards
     , groupWeight
+    , splitTestGroups
+    , groupName
+    , leafPaths
     , testScheduling
     ) where
 
+import Control.Exception (evaluate)
 import Data.Char (isDigit)
-import Data.List (foldl', isPrefixOf, minimumBy, sort, sortBy)
+import Data.IORef (modifyIORef', newIORef, readIORef)
+import Data.List (delete, foldl', isPrefixOf, minimumBy, sort, sortBy)
 import Data.Ord (comparing)
-import TestHarness (Test (..), testAssertEq, testAssertTrue, testCase)
+import System.Mem.StableName (makeStableName)
+import TestHarness (Test (..), TestResult, testAssertEq, testAssertTrue, testCase)
+import TestPipeline (selfHostedFamilyManifest)
 
 data Arguments = Arguments
     { argumentJobs :: Maybe Int
@@ -65,8 +72,11 @@ selectGroupNames arguments names
     | otherwise = Right [name | name <- names, requested name, inShard name]
   where
     chosen = argumentGroups arguments
-    unknown = [name | name <- chosen, name `notElem` names]
-    requested name = null chosen || name `elem` chosen
+    expansion name = [registered | registered <- names,
+        registered == name || (name ++ ":") `isPrefixOf` registered]
+    unknown = [name | name <- chosen, null (expansion name)]
+    expanded = concatMap expansion chosen
+    requested name = null chosen || name `elem` expanded
     assignments = case argumentShard arguments of
         Nothing -> []
         Just (_, count) -> assignShards count names
@@ -79,26 +89,49 @@ assignShards count names
     | count <= 0 = []
     | otherwise = [(name, index) | (_, index, assigned) <- bins, name <- reverse assigned]
   where
+    selfHosted = filter isSelfHosted names
+    units = [selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)]
     bins = foldl' assign [(0, index, []) | index <- [1 .. min count (length names)]]
-        (sortBy (comparing (negate . groupWeight)) names)
-    assign shards name =
+        (sortBy (comparing (negate . shardWeight)) units)
+    assign shards unit =
         let (_, target, _) = minimumBy (comparing (\(weight, index, _) -> (weight, index))) shards
-         in [if index == target then (weight + groupWeight name, index, name : assigned) else shard
+         in [if index == target then (weight + shardWeight unit, index, reverse unit ++ assigned) else shard
             | shard@(weight, index, assigned) <- shards]
 
--- Seconds from the full cold four-core run on 2026-11-02; unprofiled groups still run, with weight 1.
+isSelfHosted :: String -> Bool
+isSelfHosted = isPrefixOf "testMirSelfHosted:"
+
+shardWeight :: [String] -> Int
+shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted name)]
+    + case [groupWeight name | name <- names, isSelfHosted name] of
+        [] -> 0
+        work -> 434 + maximum work
+
+-- Cold CI group seconds on 2026-11-02; self-hosted launch weights exclude shared compilation.
 groupWeight :: String -> Int
-groupWeight name = case lookup name weights of
+groupWeight name = case lookup name selfHostedWork of
     Just weight -> weight
-    Nothing -> 1
+    Nothing -> case break (== ':') name of
+        (original, ':' : suffix) -> case break (== '/') suffix of
+            (indexText, '/' : countText) -> case (positiveInt indexText, positiveInt countText) of
+                (Just index, Just count) | index <= count ->
+                    let (weight, remainder) = groupWeight original `divMod` count
+                     in weight + if index <= remainder then 1 else 0
+                _ -> 1
+            _ -> 1
+        _ -> case lookup name weights of
+            Just weight -> weight
+            Nothing -> 1
   where
+    selfHostedWork = [("testMirSelfHosted:" ++ show index ++ "/4", weight)
+        | (index, weight) <- zip [1 :: Int ..] [25, 58, 34, 40]]
     weights =
-        [ ("testMirEmit", 643)
-        , ("testMirVerify", 584)
-        , ("testNative", 506)
-        , ("testBootstrap", 448)
+        [ ("testMirEmit", 567)
+        , ("testMirVerify", 634)
+        , ("testNative", 661)
+        , ("testBootstrap", 449)
         , ("testMir", 298)
-        , ("testMirSelfHosted", 267)
+        , ("testMirSelfHosted", 157)
         , ("testMirErase", 141)
         , ("testExamples", 119)
         , ("testStrings", 72)
@@ -111,8 +144,58 @@ groupWeight name = case lookup name weights of
         , ("testMirVerifyPrograms", 2)
         ]
 
-testScheduling :: [String] -> Test
-testScheduling names = TestList "testScheduling"
+groupName :: Test -> String
+groupName (TestCase name _) = name
+groupName (TestList name _) = name
+groupName (TestParallel name _) = name
+
+leafTests :: Test -> [Test]
+leafTests test@TestCase{} = [test]
+-- These cases overwrite and execute the same memory_limit file, so they must stay in one process.
+leafTests test@(TestList "memory" _) = [test]
+leafTests (TestList name tests) = [TestList name [leaf] | test <- tests, leaf <- leafTests test]
+leafTests (TestParallel name tests) = [TestParallel name [leaf] | test <- tests, leaf <- leafTests test]
+
+leafActions :: Test -> [([String], IO TestResult)]
+leafActions (TestCase name action) = [([name], action)]
+leafActions (TestList name tests) = under name tests
+leafActions (TestParallel name tests) = under name tests
+
+under :: String -> [Test] -> [([String], IO TestResult)]
+under name tests = [(name : path, action) | test <- tests, (path, action) <- leafActions test]
+
+leafPaths :: Test -> [[String]]
+leafPaths = map fst . leafActions
+
+splitTestGroups :: Int -> Test -> [Test]
+splitTestGroups count original
+    | count <= 1 = [original]
+    | otherwise =
+        [TestList (groupName original ++ ":" ++ show index ++ "/" ++ show batchCount)
+            (map snd (sortBy (comparing fst) leaves))
+        | (_, index, leaves) <- bins]
+  where
+    units = zip [0 :: Int ..] (leafTests original)
+    batchCount = min count (length units)
+    bins = foldl' assign [(0, index, []) | index <- [1 .. batchCount]]
+        (sortBy (comparing (negate . unitWeight . snd)) units)
+    assign batches unit@(_, test) =
+        let (_, target, _) = minimumBy (comparing (\(weight, index, _) -> (weight, index))) batches
+         in [if index == target then (weight + unitWeight test, index, unit : leaves) else batch
+            | batch@(weight, index, leaves) <- batches]
+    unitWeight :: Test -> Int
+    unitWeight test = case concat (leafPaths test) of
+        path | "examples/emit.tersus" `elem` path || "examples/mir_reader.tersus" `elem` path -> 30
+        path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
+        path | "MIR loops" `elem` path -> 32
+        path | "MIR branches" `elem` path -> 16
+        path | any (`elem` path) ["MIR contracts", "MIR sequences", "MIR data", "MIR list updates"] -> 8
+        path | "interpreted" `elem` path || "pre-erasure, interpreted" `elem` path
+            || "function-list identity, interpreted" `elem` path || "call metadata, interpreted" `elem` path -> 5
+        _ -> length (leafPaths test)
+
+testScheduling :: [String] -> [(Test, [Test])] -> Test
+testScheduling names batches = TestList "testScheduling"
     [ testCase "no flags preserve the full suite" $
         testAssertEq (parseArguments [] >>= (`selectGroupNames` names)) (Right names)
     , testCase "job forms and group filters are preserved" $
@@ -141,9 +224,9 @@ testScheduling names = TestList "testScheduling"
         testAssertTrue (null (assignShards 3 []) && null (assignShards 0 names) && null (assignShards (-1) names))
     , testCase "unprofiled groups are retained and ties are deterministic" $
         testAssertEq (assignShards 2 ["newA", "newB", "newC"]) [("newA", 1), ("newC", 1), ("newB", 2)]
-    , testCase "largest measured groups are spread before small groups" $
-        testAssertEq (assignShards 3 ["testNative", "testMirVerify", "testMirEmit", "testBootstrap"])
-            [("testMirEmit", 1), ("testMirVerify", 2), ("testNative", 3), ("testBootstrap", 3)]
+    , testCase "largest measured registered groups are spread before small groups" $
+        testAssertEq (assignShards 3 ["testNative:1/4", "testMirVerify:1/4", "testMirEmit:1/4", "testBootstrap"])
+            [("testBootstrap", 1), ("testNative:1/4", 2), ("testMirVerify:1/4", 3), ("testMirEmit:1/4", 3)]
     , testCase "three shard estimated loads differ by at most one short group" $
         testAssertTrue (maximum loads - minimum loads <= 11)
     , testCase "CLI and cold bootstrap are covered exactly once" $
@@ -155,10 +238,61 @@ testScheduling names = TestList "testScheduling"
         testAssertTrue (isLeft (selectGroupNames (Arguments Nothing ["noSuchGroup"] False (Just (99, 99))) names))
     , testCase "huge valid shard counts do not allocate one bin per empty shard" $
         testAssertEq (selectGroupNames (Arguments Nothing [] False (Just (maxBound, maxBound))) names) (Right [])
+    , testCase "all old leaf paths occur exactly once in the registered batches" $
+        testAssertTrue (all (\(original, split) ->
+            sort (leafPaths original) == sort (concatMap (map (drop 1) . leafPaths) split)) batches)
+    , TestCase "batches keep the original case action objects" $ do
+        preserved <- mapM sameActions batches
+        pure (testAssertTrue (and preserved))
+    , testCase "each expensive group has four nonempty registered batches and no original duplicate" $
+        testAssertTrue (all (\(original, split) -> length split == 4
+            && groupName original `notElem` names
+            && all (\batch -> groupName batch `elem` names && not (null (leafPaths batch))) split) batches)
+    , testCase "batch weights sum to their original measured weight" $
+        testAssertTrue (all (\(original, split) ->
+            sum (map (groupWeight . groupName) split) == groupWeight (groupName original)) batches)
+    , testCase "old aliases expand to all batches without duplicates" $
+        testAssertTrue (all aliasComplete batches)
+    , testCase "alias filters intersect the full-suite shard assignment" $
+        testAssertTrue (all (\batch -> all (aliasFiltered batch) [1 .. 4]) batches)
+    , testCase "child batch names with punctuation select only that batch" $
+        testAssertTrue (all (\(_, split) -> all (\batch ->
+            (parseArguments [groupName batch, "--child"] >>= (`selectGroupNames` names))
+                == Right [groupName batch]) split) batches)
+    , TestCase "mixed fixed and parallel leaves execute once with every prefix retained" $ do
+        seen <- newIORef ([] :: [Int])
+        let leaf index = TestCase "duplicate label" (modifyIORef' seen (index :) >> pure Nothing)
+            fixture = TestList "root" [TestParallel "parallel" [leaf 1, leaf 2], TestList "fixed" [leaf 3, leaf 4]]
+            split = splitTestGroups 4 fixture
+        results <- mapM snd (concatMap leafActions split)
+        executed <- readIORef seen
+        pure (testAssertTrue (sort executed == [1,2,3,4]
+            && results == replicate 4 Nothing
+            && sort (leafPaths fixture) == sort (concatMap (map (drop 1) . leafPaths) split)))
+    , testCase "all 1562 original self-hosted query assertions remain in their families" $
+        testAssertEq selfHostedFamilyManifest
+            [("equality graphs", 1056), ("products", 225), ("relations", 68), ("execution", 23),
+             ("MIR contracts", 41), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
+             ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 21), ("bridges", 20)]
+    , testCase "self-hosted cache-sharing batches belong to one shard for every count" $
+        testAssertTrue (all (\count ->
+            length (unique [index | (name, index) <- assignShards count names, isSelfHosted name]) == 1)
+            [1 .. length names + 1])
+    , testCase "other original groups remain individually shardable" $
+        testAssertEq (map snd (assignShards 4 ["testNative:1/4", "testNative:2/4", "testNative:3/4", "testNative:4/4"]))
+            [1,2,3,4]
+    , testCase "self-hosted startup is charged once plus parallel warmed query work" $
+        let selfHosted = filter isSelfHosted names
+         in testAssertEq (shardWeight selfHosted) (434 + maximum (map groupWeight selfHosted))
+    , testCase "fixed native memory_limit users stay ordered in one batch" $
+        testAssertTrue (all memorySerial batches)
+    , testCase "small and empty trees never create empty batches" $
+        testAssertTrue (null (splitTestGroups 4 (TestList "empty" []))
+            && map groupName (splitTestGroups 4 (testCase "single" Nothing)) == ["single:1/1"])
     ]
   where
     assignments = assignShards 3 names
-    loads = [sum [groupWeight name | (name, assigned) <- assignments, assigned == index] | index <- [1 .. 3]]
+    loads = [shardWeight [name | (name, assigned) <- assignments, assigned == index] | index <- [1 .. 3]]
     complete count =
         let assigned = assignShards count names
             selected = [selectGroupNames (Arguments Nothing [] False (Just (index, count))) names | index <- [1 .. count]]
@@ -166,9 +300,30 @@ testScheduling names = TestList "testScheduling"
             && all (\(_, index) -> index >= 1 && index <= count) assigned
             && fmap (sort . concat) (sequence selected) == Right (sort names)
     filtered index =
-        let chosen = ["testCli", "testBootstrap", "testMirEmit"]
+        let chosen = ["testCli", "testBootstrap"] ++ [groupName batch | (_, split) <- batches, batch <- take 1 split]
          in selectGroupNames (Arguments Nothing chosen False (Just (index, 3))) names
             == Right [name | name <- names, name `elem` chosen, lookup name assignments == Just index]
+    aliasComplete (original, split) =
+        let alias = groupName original
+            expected = map groupName split
+         in selectGroupNames (Arguments Nothing [alias] False Nothing) names == Right expected
+            && selectGroupNames (Arguments Nothing (alias : expected ++ [alias]) False Nothing) names == Right expected
+    aliasFiltered (original, split) index =
+        selectGroupNames (Arguments Nothing [groupName original] False (Just (index, 4))) names
+            == Right [groupName batch | batch <- split,
+                lookup (groupName batch) (assignShards 4 names) == Just index]
+    memorySerial (original, split) =
+        let originalPaths = filter (elem "memory") (leafPaths original)
+            holders = [filter (elem "memory") (map (drop 1) (leafPaths batch)) | batch <- split]
+         in null originalPaths || filter (not . null) holders == [originalPaths]
+    sameActions (original, split) = do
+        before <- identities (leafActions original)
+        after <- identities [(drop 1 path, action) | batch <- split, (path, action) <- leafActions batch]
+        pure (length before == length after && null (foldl' (flip delete) after before))
+    identities = mapM (\(path, action) -> do
+        stable <- evaluate action >>= makeStableName
+        pure (path, stable))
+    unique :: Eq a => [a] -> [a]
     unique = foldl' (\seen name -> if name `elem` seen then seen else name : seen) []
     invalidShards = ["", "1", "0/3", "1/0", "4/3", "-1/3", "1/-3", "1/3/2", "1//3", "/3", "1/", "one/3", "1/three", "1.0/3", " 1/3", "1/3 ", "1/+3", show (toInteger (maxBound :: Int) + 1) ++ "/3", "1/" ++ show (toInteger (maxBound :: Int) + 1)]
     isLeft (Left _) = True

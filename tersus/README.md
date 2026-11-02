@@ -2,6 +2,21 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 See [LANGUAGE.md](LANGUAGE.md) for the current syntax and language constructs.
 
+## Tests
+
+`stack test --test-arguments='-j 4'` runs up to four group processes, each
+with one Haskell capability. Native, MIR emitter, MIR verifier and self-hosted
+validator tests are each split into four batches. Original names such as
+`testNative` select all four; `testNative:2/4` selects just that batch.
+`--shard k/n` intersects these selections with the full-suite shard assignment.
+All original leaf actions and prefix labels are retained. Native memory-limit
+cases stay together because they execute one shared file. Self-hosted query
+families share `TestHarness.compileOnce`, which validates the full validator
+source and caches its lossless program across processes. Their four batches
+stay on one shard to avoid repeating that cold compilation on every runner;
+other batches remain individually shardable. The bootstrap test still runs as
+a single group with its own cold cache.
+
 ## Validator written in Tersus
 
 `lib/validation.tersus` starts a Tersus implementation of validation alongside the

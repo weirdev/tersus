@@ -3,6 +3,7 @@ module TestPipeline
     , testCli
     , testMir
     , testMirSelfHosted
+    , selfHostedFamilyManifest
     , testIntRange
     , testPipeline
     ) where
@@ -525,20 +526,26 @@ testStdlibInTersus =
                     && Map.member "push" stdLibCtx
                 )
 
--- A group of its own, so the suite's group processes balance: validating lib/validation.tersus and running its
--- queries in the interpreter takes most of the time of the group it was in, and a group is a process.
 testMirSelfHosted :: Test
-testMirSelfHosted = TestList "testMirSelfHosted" [testSelfHostedEquality]
+testMirSelfHosted = TestList "testMirSelfHosted"
+    [ TestList name
+        [ TestCase (show queryIndex) $ do
+            source <- readFile "lib/validation.tersus"
+            compiled <- compileOnce source
+            pure $ case compiled of
+                Error e -> Just ("Could not validate the Tersus validator: " ++ e)
+                Ok program -> snd (selfHostedQueryFamilies program !! familyIndex) !! queryIndex
+        | queryIndex <- [0 .. count - 1]
+        ]
+    | (familyIndex, (name, count)) <- zip [0 ..] selfHostedFamilyManifest
+    ]
 
--- Compare the Tersus equality closure with the reference solver over all graphs
--- of four vertices, including disconnected graphs, cycles and reverse queries.
-testSelfHostedEquality :: Test
-testSelfHostedEquality = TestCase "self-hosted equality query" $ do
-    putStrLn "Running self-hosted validator differential checks"
-    source <- readFile "lib/validation.tersus"
-    pure $ case compileSource source of
-        Error e -> Just ("Could not validate the Tersus validator: " ++ e)
-        Ok program ->
+selfHostedFamilyManifest :: [(String, Int)]
+selfHostedFamilyManifest =
+    [(name, length queries) | (name, queries) <- selfHostedQueryFamilies (error "query metadata forced the validator")]
+
+selfHostedQueryFamilies :: M.Program -> [(String, [TestResult])]
+selfHostedQueryFamilies program =
             let fact (a, b) = MData "EqualityFact" [("left", MInt a), ("right", MInt b)]
                 eq :: Integer -> Integer -> IotaProof
                 eq a b = FApp eqProof [ATerm (Iota (show a)), ATerm (Iota (show b))]
@@ -790,9 +797,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                 withinOuter = ATerm (Iota "outer value")
                 withinInner = FApp (CTerm (builtinFunct (Field Nothing "x"))) [withinOuter]
                 checkWithinBridge = testAssertEq (querySelfHosted program [] (FApp (CTerm (builtinFunct Within)) [withinInner, withinOuter])) (Ok (Just True))
-             in foldr orElse Nothing
-                    ( [check graph a b | graph <- graphs, a <- [0..3], b <- [0..3]] ++
-                      [checkProduct a b (productResult a b) | a <- productValues, b <- productValues] ++
+             in [ ("equality graphs", [check graph a b | graph <- graphs, a <- [0..3], b <- [0..3]])
+                , ("products", [checkProduct a b (productResult a b) | a <- productValues, b <- productValues])
+                , ("relations",
                       [ checkCongruence 10 11, checkCongruence 12 13, checkCongruence 10 14
                       , checkOrder 0 4, checkOrder 1 3, checkOrder 4 0, checkOrder 0 0
                       , checkMixed 0 4 True, checkMixed 0 4 False, checkMixed 0 2 True, checkMixed 0 2 False
@@ -823,7 +830,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkBoundCongruence
                       , checkProofSteps, checkProofOrder, checkUnknownStep, checkUnknownGoal
                       , checkFlow, checkFlowBadBranch, checkFlowCycle, checkFlowMissing, checkFlowDuplicate, checkFlowUnsupported
-                      , checkExecution executionSteps 0 (-1), checkExecution [assignLocal 0 (localRef 99)] 2 0
+                      ])
+                , ("execution",
+                      [ checkExecution executionSteps 0 (-1), checkExecution [assignLocal 0 (localRef 99)] 2 0
                       , checkSavedComparison (-6) True 0 0 1, checkSavedComparison (-6) False 1 0 1
                       , checkSavedComparison (-7) True 1 0 1, checkSavedComparison (-7) False 0 0 1
                       , checkSavedComparison (-8) True 2 0 1, checkSavedComparison (-8) False 3 1 0
@@ -836,7 +845,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkBooleanBranch (boolConstants ++ [constant (0,0,2), constant (1,0,1)]) (99,1) [execBlock 1 [] execEndDone] 0
                       , checkBooleanBranch boolConstants (1,2) [execBlock 1 [] execEndDone, execBlock 2 [joinCheck] execEndDone] 2
                       , checkBooleanJoin 3 0, checkBooleanJoin 4 1, checkBooleanJoinKnown 0
-                      , checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)
+                      ])
+                , ("MIR contracts",
+                      [ checkMirSubset "x = 1; y = x; affirm y = 1; return y;" (Just True)
                       , checkMirSubset "x = 1; affirm x = 2; return x;" (Just False)
                       , checkMirSubset "x = 5; below = x < 6; affirm below = true; return 0;" (Just True)
                       , checkMirSubset "x = 5; below = x < 6; affirm below = false; return 0;" (Just False)
@@ -877,7 +888,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "fn g(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; fn f(x: Int) -> Int [{ }] [{ affirm return = x; }] { return g(x); }; return f(2);" (Just True)
                       , checkMirSubset "fn g(x: Int) -> Int [{ affirm x > 0; }] { return x; }; fn f(x: Int) -> Int { return g(x); }; return f(1);" (Just False)
                       , checkMirSubset "fn f(x: Int) -> Int { return f(x); }; return f(1);" Nothing
-                      , checkMirSubset "return 7 / 1;" (Just True)
+                      ])
+                , ("MIR arithmetic",
+                      [ checkMirSubset "return 7 / 1;" (Just True)
                       , checkMirSubset "return 7 / 0;" (Just False)
                       , checkMirSubset "x = 1; y = x + 1; affirm y = 2; return y;" (Just True)
                       , checkMirSubset "x = 1; y = x + 1; affirm y = 3; return y;" (Just False)
@@ -899,7 +912,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "x = 3; y = x * 4; affirm y = 12; return y;" (Just True)
                       , checkMirSubset "x = 3; y = x * 4; affirm y = 13; return y;" (Just False)
                       , checkMirSubset "x = -3; y = x * 4; affirm y = -12; return y;" (Just True)
-                      , checkMirSubset "xs = [1, 2]; affirm size(xs) = 2; return size(xs);" (Just True)
+                      ])
+                , ("MIR sequences",
+                      [ checkMirSubset "xs = [1, 2]; affirm size(xs) = 2; return size(xs);" (Just True)
                       , checkMirSubset "xs = [1, 2]; affirm size(xs) = 3; return size(xs);" (Just False)
                       , checkMirSubset "xs = []; affirm size(xs) = 0; return 0;" (Just True)
                       , checkMirSubset "xs = [[1], [2, 3]]; affirm size(xs) = 2; return size(xs);" (Just True)
@@ -931,7 +946,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = [4, 5]; affirm last(xs) = 5; return last(xs);" (Just True)
                       , checkMirSubset "xs = [4, 5]; affirm last(xs) = 4; return 0;" (Just False)
                       , checkMirSubset "xs = []; return last(xs);" (Just False)
-                      , checkMirSubset "struct P { x: Int }; p = P { x: 4 }; affirm p.x = 4; return p.x;" (Just True)
+                      ])
+                , ("MIR data",
+                      [ checkMirSubset "struct P { x: Int }; p = P { x: 4 }; affirm p.x = 4; return p.x;" (Just True)
                       , checkMirSubset "struct P { x: Int }; p = P { x: 4 }; affirm p.x = 5; return p.x;" (Just False)
                       , checkMirSubset "struct P { x: Int }; p = P { x: 4 }; b = Box::new(p); affirm b.x = 4; return b.x;" (Just True)
                       , checkMirSubset "struct P { x: Int }; p = P { x: 4 }; p = P { x: p.x + 1 }; affirm p.x = 5; return p.x;" (Just True)
@@ -952,7 +969,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "extern fn labs(x: Int) -> Int [{ }] [{ affirm return >= 0; }]; a = labs(0 - 3); affirm a >= 0; return a;" Nothing
                       , checkMirSubset "(p, b) = Addr::alloc(1); b = Addr::write(p, 0, 7, b); x = Addr::get(p, 0, b); return x + Addr::free(p, b);" Nothing
                       , checkMirSubset "x = I32::from(3); return toInt(x);" Nothing
-                      , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm size(xs) = 2; affirm get(xs, 1) = 5; return 0;" (Just True)
+                      ])
+                , ("MIR list updates",
+                      [ checkMirSubset "xs = [4]; xs = push(xs, 5); affirm size(xs) = 2; affirm get(xs, 1) = 5; return 0;" (Just True)
                       , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm get(xs, 1) = 4; return 0;" (Just False)
                       , checkMirSubset "xs = []; xs = push(xs, 5); affirm size(xs) = 1; return get(xs, 0);" (Just True)
                       , checkMirSubset "xs = [4]; xs = push(xs, 5); affirm get(xs, 0) = 4; return 0;" (Just True)
@@ -971,7 +990,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = #[4, 5]; xs = set(xs, 0, 9); affirm get(xs, 1) = 5; return get(xs, 0);" (Just True)
                       , checkMirSubset "xs = [4, 5]; affirm get(set(xs, 1, 9), 1) = 9; return 0;" (Just True)
                       , checkMirSubset "affirm 1 / 0 = 1; return 0;" (Just False)
-                      , checkMirSubset "x = 1; if x = 1 { return 1; } else { return 2; };" (Just True)
+                      ])
+                , ("MIR branches",
+                      [ checkMirSubset "x = 1; if x = 1 { return 1; } else { return 2; };" (Just True)
                       , checkMirSubset ("x = 1; " ++ concat (replicate 8 "if x = 1 { x = 1; } else { x = 1; }; ") ++ "affirm x = 1; return x;") (Just True)
                       , checkMirSubset "x = 1; if x = 1 { affirm x = 2; } else { return 0; }; return 1;" (Just False)
                       , checkMirSubset "flag = true; if flag { return 1; } else { affirm 0 = 1; return 0; };" (Just True)
@@ -985,7 +1006,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "x = 0; if x != 0 { return 3 / x; } else { return 0; };" (Just True)
                       , checkMirSubset "x = 1; flag = x != 0; x = 0; if flag { return 3 / x; } else { return 0; };" (Just False)
                       , checkMirSubset "x = 1; y = 2; if x < y { x = 3; } else { x = 3; }; affirm x = 3; return x;" (Just True)
-                      , checkMirSubset "i = 2; while i > 0 [{ affirm i >= 0; }] shrinks i { i = i - 1; }; affirm i = 0; return i;" (Just True)
+                      ])
+                , ("MIR loops",
+                      [ checkMirSubset "i = 2; while i > 0 [{ affirm i >= 0; }] shrinks i { i = i - 1; }; affirm i = 0; return i;" (Just True)
                       , checkMirSubset "i = 2; while i > 0 [{ }] shrinks i { i = i - 1; }; return i;" (Just True)
                       , checkMirSubset "fn scale(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > 0; }] { return 2 * x; }; return scale(3);" (Just True)
                       , checkMirSubset "fn scale(x: Int) -> Int [{ affirm x > 0; }] [{ affirm return > x; }] { return 2 * x; }; return scale(3);" (Just True)
@@ -1006,7 +1029,9 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , checkMirSubset "xs = [1]; for i in 0..size(xs) { if i > 0 { affirm i >= 1; }; }; return 0;" (Just True)
                       , checkMirSubset "fn f(xs: List<Int>) -> Int { affirm size(xs) >= 0; return 0; }; return f([]);" (Just True)
                       , checkMirSubset "fn f(xs: List<Int>) -> Int { affirm size(xs) >= 1; return 0; }; return f([]);" (Just False)
-                      , checkVariantGoal "Different" 0 1 True, checkVariantGoal "Equal" 0 1 False
+                      ])
+                , ("bridges",
+                      [ checkVariantGoal "Different" 0 1 True, checkVariantGoal "Equal" 0 1 False
                       , checkConstructorGoal "Equal" 11 1 True, checkConstructorGoal "Equal" 11 0 False
                       , checkWithin 12 10 True, checkWithin 10 12 False, checkWithin 10 10 False
                       , checkCommonContext, checkMergeStates
@@ -1015,7 +1040,8 @@ testSelfHostedEquality = TestCase "self-hosted equality query" $ do
                       , testAssertEq (querySelfHosted program [] (BVar "i")) (Ok Nothing)
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
                       , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
-                      ] )
+                      ])
+                ]
 
 -- Int is 64 bits: literals must fit, and arithmetic that leaves the range stops the program
 testIntRange :: Test

@@ -1,4 +1,4 @@
-module TestTersus (main) where
+module TestTersus (main, allGroups) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
@@ -81,7 +81,17 @@ main = do
     select arguments = (,) arguments <$> selectGroupNames arguments (map groupName allGroups)
 
 allGroups :: [Test]
-allGroups =
+allGroups = concatMap registered originalGroups
+  where
+    registered original = case lookup (groupName original) [(groupName tree, split) | (tree, split) <- batchedGroups] of
+        Just split -> split
+        Nothing -> [original]
+
+batchedGroups :: [(Test, [Test])]
+batchedGroups = [(original, splitTestGroups 4 original) | original <- [testNative, testMirEmit, testMirVerify, testMirSelfHosted]]
+
+originalGroups :: [Test]
+originalGroups =
     [ testParse
     , testParseEval
     , testValidateWithExpectedMatch
@@ -161,13 +171,8 @@ allGroups =
     , testBuiltinRegistry
     , testSharedCache
     , testSharedCacheProbe
-    , testScheduling (map groupName allGroups)
+    , testScheduling (map groupName allGroups) batchedGroups
     ]
-
-groupName :: Test -> String
-groupName (TestList name _) = name
-groupName (TestParallel name _) = name
-groupName (TestCase name _) = name
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)
 runInProcess selected = do
@@ -194,12 +199,7 @@ runInParallel jobs names = do
             bracket_ (waitQSem sem) (signalQSem sem) $ do
                 started <- getMonotonicTime
                 putStrLn ("[START] " ++ name)
-                -- (the processors are shared between the groups that run at once: left to the package's -with-rtsopts=-N, every
-                -- child would take as many capabilities as the machine has processors, so N children would make N times N of them and their
-                -- threads and parallel garbage collectors would compete for the same cores. Each child is given its share of them,
-                -- which is also the number of cases of a TestParallel it runs at once)
-                processors <- getNumProcessors
-                let arguments = [name, "--child", "+RTS", "-N" ++ show (max 1 (processors `div` jobs)), "-RTS"]
+                let arguments = [name, "--child", "+RTS", "-N1", "-RTS"]
                 outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
                 finished <- getMonotonicTime
                 putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
