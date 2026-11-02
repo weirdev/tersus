@@ -1572,12 +1572,18 @@ fn noTy() -> TyRes [{ }] [{ }] {
 };
 
 fn findLocal(f: &Function, id: Int) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(f.locals); }] {
+    locals = &f.locals;
     i = 0;
-    while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] shrinks size(f.locals) - i {
-        if get(f.locals, i).id = id { return i; };
+    while i < size(locals) [{ affirm i >= 0; affirm i <= size(locals); }] shrinks size(locals) - i {
+        l = &get(locals, i);
+        if localHasId(l, id) { return i; };
         i = i + 1;
     };
     return 0 - 1;
+};
+
+fn localHasId(l: &LocalDecl, id: Int) -> Bool [{ }] [{ }] {
+    return l.id = id;
 };
 
 fn declared(f: &Function, id: Int) -> Bool [{ }] [{ }] {
@@ -1616,18 +1622,37 @@ fn noCtor() -> CtorInfo [{ }] [{ }] {
 };
 
 fn ctorInfo(p: &Program, name: &String) -> CtorInfo [{ }] [{ }] {
-    for d in p.types {
-        match d {
-            TypeDecl::DStruct { name: dn, fields: fields } => {
-                if dn = name { return CtorInfo { ok: true, typeName: clone(dn), fields: clone(fields) }; };
-            },
-            TypeDecl::DEnum { name: dn, variants: variants } => {
-                for v in variants {
-                    if v.name = name { return CtorInfo { ok: true, typeName: clone(dn), fields: clone(v.fields) }; };
-                };
-            },
+    types = &p.types;
+    i = 0;
+    while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
+        d = &get(types, i);
+        info = ctorInDecl(d, name);
+        if info.ok { return info; };
+        i = i + 1;
+    };
+    return noCtor();
+};
+
+fn ctorInDecl(d: &TypeDecl, name: &String) -> CtorInfo [{ }] [{ }] {
+    if d is TypeDecl::DStruct {
+        if (d as TypeDecl::DStruct).name = name {
+            return CtorInfo { ok: true, typeName: clone((d as TypeDecl::DStruct).name), fields: clone((d as TypeDecl::DStruct).fields) };
+        };
+    } else {
+        variants = (d as TypeDecl::DEnum).variants;
+        j = 0;
+        while j < size(variants) [{ affirm j >= 0; affirm j <= size(variants); }] shrinks size(variants) - j {
+            v = &get(variants, j);
+            info = ctorInVariant(v, (d as TypeDecl::DEnum).name, name);
+            if info.ok { return info; };
+            j = j + 1;
         };
     };
+    return noCtor();
+};
+
+fn ctorInVariant(v: &Variant, owner: &String, name: &String) -> CtorInfo [{ }] [{ }] {
+    if v.name = name { return CtorInfo { ok: true, typeName: clone(owner), fields: clone(v.fields) }; };
     return noCtor();
 };
 
@@ -1639,12 +1664,18 @@ fn fieldType(fields: &List<Field>, name: &String) -> TyRes [{ }] [{ }] {
 };
 
 fn findBlock(f: &Function, id: Int) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(f.blocks); }] {
+    blocks = &f.blocks;
     i = 0;
-    while i < size(f.blocks) [{ affirm i >= 0; affirm i <= size(f.blocks); }] shrinks size(f.blocks) - i {
-        if get(f.blocks, i).id = id { return i; };
+    while i < size(blocks) [{ affirm i >= 0; affirm i <= size(blocks); }] shrinks size(blocks) - i {
+        b = &get(blocks, i);
+        if blockHasId(b, id) { return i; };
         i = i + 1;
     };
     return 0 - 1;
+};
+
+fn blockHasId(b: &MirBlock, id: Int) -> Bool [{ }] [{ }] {
+    return b.id = id;
 };
 
 fn typeEq(a: &Type, b: &Type) -> Bool ~ {

@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.39.1.
+-- This file has been generated from package.yaml by hpack version 0.34.6.
 --
 -- see: https://github.com/sol/hpack
 
@@ -18,6 +18,7 @@ extra-source-files:
     lib/lists.tersus
     lib/prelude.tersus
     lib/eq.tersus
+    lib/clone.tersus
     lib/string.tersus
     examples/emit.tersus
     bootstrap/emitter.sha256
@@ -64,13 +65,13 @@ library
       Seed
       SelfHostedMir
       SelfHostedProof
-      StdLib
       Solver
+      StdLib
       StdLibDefs
       Syntax
-      Types
       TypeCheck
       TypeCheckCore
+      Types
       Utils
   other-modules:
       Paths_tersus
@@ -136,27 +137,33 @@ test-suite tersus-test
       TestArrays
       TestBasics
       TestBootstrap
-      TestBuiltinRegistry
       TestBorrow
       TestBox
+      TestBuiltinRegistry
       TestBytes
       TestConnectives
       TestControl
       TestCopies
       TestData
+      TestDeref
+      TestEq
       TestGenerics
       TestHarness
+      TestHashMap
+      TestHashSet
       TestMirData
       TestMirEmit
+      TestMirErase
+      TestMirEval
       TestMirReader
       TestMirVerify
-      TestMirErase
       TestNative
       TestOwnership
       TestPipeline
       TestPointers
       TestProofs
       TestSequence
+      TestSharedCache
       TestStrings
       TestTraits
       TestValidation
@@ -175,4 +182,5 @@ test-suite tersus-test
     , process
     , template-haskell
     , tersus
+    , unix
   default-language: Haskell2010

@@ -11,7 +11,8 @@ import Bootstrap
 import Cli (Command (..), makesIr)
 import MirData (writeProgram)
 import Pipeline (ownedSource)
-import PreludeSource (emitterSource)
+import Hash (fingerprint)
+import PreludeSource (boxSource, cloneSource, emitterSource, eqSource, listsSource, preludeSource, stringSource)
 import TestHarness
 import TestNative (clangAvailable)
 import Utils
@@ -31,13 +32,14 @@ testBootstrap =
         [ TestCase "the hashes of what the emitter is made of" hashShape
         , TestCase "the seed pin and its release" seedPin
         , TestCase "the commands that make IR" commands
-        , TestCase "the seed, stage 0 and stage 1 are a fixpoint, and the cache keeps them" bootstrap
+        , TestCase "cold bootstrap reaches a fixpoint and preserves cache entries" coldBootstrap
         ]
 
 hashShape :: IO TestResult
 hashShape =
     pure $
         if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
+            && emitterHash == fingerprint [seedHash, emitterSource, preludeSource, listsSource, stringSource, cloneSource, eqSource, boxSource]
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, emitterHash))
 
@@ -70,6 +72,12 @@ withDirectory name use = do
     if exists then removeDirectoryRecursive dir else pure ()
     createDirectoryIfMissing True dir
     use dir `finally` removeDirectoryRecursive dir
+
+coldBootstrap :: IO TestResult
+coldBootstrap = withDirectory "tersus-bootstrap-cold" $ \home -> do
+    saved <- lookupEnv "XDG_CACHE_HOME"
+    let restore = maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME") saved
+    (setEnv "XDG_CACHE_HOME" home >> bootstrap) `finally` restore
 
 bootstrap :: IO TestResult
 bootstrap = do

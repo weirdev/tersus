@@ -1,9 +1,14 @@
 module TestMirEmit (testMirEmit, testMirEmitPrograms) where
 
 import Data.List (isInfixOf, isPrefixOf)
+import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
+import Compile (lowerSource)
+import MirOwnership (insertOwnership)
+import qualified MirEval as Eval
+import Types (Type (..))
 import Mir
 import MirData (readProgram, writeProgram)
 import TestHarness
@@ -22,6 +27,9 @@ testMirEmit =
     TestList
         "testMirEmit"
         [ TestCase "the reader is the same in the reader and in the emitter" sameReader
+        , TestCase "field offsets borrow the type table instead of cloning it" borrowedTypeTable
+        , TestCase "hot emitter operations move Gen instead of cloning its history" threadedGen
+        , TestCase "type closure preserves ordered duplicate and dependency traversal" orderedTypeClosure
         , TestCase "the IR of a loop, interpreted" (readFile "examples/loops.tersus" >>= interpretedIr)
         , TestParallel
             "every example, natively"
@@ -59,6 +67,63 @@ sameReader = do
         if null (readerOf reader) || readerOf reader /= readerOf emitter
             then Just "the text between '// ---- the reader:' and '// ---- end of the reader ----' differs between examples/mir_reader.tersus and examples/emit.tersus"
             else Nothing
+
+borrowedTypeTable :: IO TestResult
+borrowedTypeTable = do
+    source <- readFile "examples/emit.tersus"
+    pure $ case lowerSource True source of
+        Error e -> Just e
+        Ok program -> case Map.lookup "fieldOffset" (progFunctions (insertOwnership program)) of
+            Nothing -> Just "the emitter has no fieldOffset function"
+            Just fn ->
+                let table = TList (TNamed "TypeDecl" [])
+                    copied = [dest | block <- Map.elems (fnBlocks fn), Assign dest (ReadField _ "Ctx" "types") <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == table]
+                 in if null copied then Nothing else Just ("fieldOffset clones the type table into " ++ show copied)
+
+threadedGen :: IO TestResult
+threadedGen = do
+    source <- readFile "examples/emit.tersus"
+    pure $ case lowerSource True source of
+        Error e -> Just e
+        Ok program ->
+            let owned = insertOwnership program
+                functions = [fn | (name, fn) <- Map.toList (progFunctions owned), fnReturns fn == Just (TNamed "Gen" []), name `notElem` ["<Gen as Clone>::clone", "Clone for Gen::clone"]]
+                snapshots = [fnName fn | fn <- functions, block <- Map.elems (fnBlocks fn), Call (Const (CFn "<Gen as Clone>::clone")) _ _ _ <- [blockTerminator block]]
+                copies = [fnName fn | fn <- functions, block <- Map.elems (fnBlocks fn), Assign dest CopyOf{} <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == TNamed "Gen" []]
+             in if null functions then Just "the emitter has no Gen operations" else
+                if null snapshots && null copies then Nothing else Just ("hot emitter operations clone Gen: " ++ show (snapshots ++ copies))
+
+orderedTypeClosure :: IO TestResult
+orderedTypeClosure = do
+    source <- readFile "examples/emit.tersus"
+    pure $ case lowerSource True source of
+        Error e -> Just e
+        Ok program -> firstFailure
+            [ testAssertEq (Eval.runNamedFunction program "closeTypes" [Eval.MList declarations, Eval.MList roots]) (Ok (Just (Eval.MList expected)))
+            | (declarations, roots, expected) <- cases
+            ]
+  where
+    text s = Eval.MData "String" [("bytes", Eval.MList [Eval.MInt (toInteger (fromEnum c)) | c <- s])]
+    named n = Eval.MData "Type::TNamed" [("name", text n), ("base", text n), ("argc", Eval.MInt 0), ("argTokens", Eval.MList [])]
+    int = Eval.MData "Type::TInt" []
+    byte = Eval.MData "Type::TByte" []
+    bool = Eval.MData "Type::TBool" []
+    field t = Eval.MData "Field" [("name", text "value"), ("ty", t)]
+    struct n t = Eval.MData "TypeDecl::DStruct" [("name", text n), ("fields", Eval.MList [field t])]
+    variant = Eval.MData "Type::TVariant" [("name", text "E::V")]
+    enum = Eval.MData "TypeDecl::DEnum" [("name", text "E"), ("variants", Eval.MList [Eval.MData "Variant" [("name", text "E::V"), ("fields", Eval.MList [field bool])]])]
+    node = named "Node"
+    addr = Eval.MData "Type::TAddr" [("inner", node)]
+    cases =
+        [ ([], [bool, int, bool, int], [bool, int])
+        , ([struct "A" int, struct "B" byte], [named "A", named "B", named "A"], [named "A", int, named "B", byte])
+        , ([struct "A" int, struct "B" byte], [named "A", int, named "B", int], [named "A", int, named "B", byte])
+        , ([enum], [variant, named "E", int, variant], [named "E", bool, int])
+        , ([struct "Node" addr], [node, addr, node], [node, addr])
+        ]
+    firstFailure results = case [message | Just message <- results] of
+        message : _ -> Just message
+        [] -> Nothing
 
 interpretedIr :: String -> IO TestResult
 interpretedIr source = do

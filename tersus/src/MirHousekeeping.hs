@@ -2,6 +2,7 @@ module MirHousekeeping
     ( verifyProgram
     , eraseGhosts
     , validatedListLibrary
+    , cachedEmitter
     , listLibrary
     ) where
 
@@ -186,6 +187,10 @@ cachedTool kind hash = do
 -- Stage 1 (the emitter as it is now) in the cache, made from stage 0 in the cache as Bootstrap makes it, and under the
 -- same name, so the two hosts keep one emitter between them: the program it is made from is this module's own way of
 -- making native code of a host program, which is the pipeline's with no erasure first (see ownedProgramOf)
+-- Making the emitter's list library needs the eraser; initialize the tools before taking the emitter lock.
+cachedEmitter :: IO (Result FilePath String)
+cachedEmitter = housekeepingTools >> cachedEmitterExe
+
 cachedEmitterExe :: IO (Result FilePath String)
 cachedEmitterExe = cachedProgram "emitter" emitterHash "the emitter written in Tersus" $ \output -> do
     zero <- cachedSeed

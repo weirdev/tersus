@@ -5,9 +5,11 @@ import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
+import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (verifyProgram)
+import MirOwnership (insertOwnership)
 import Types (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
@@ -23,7 +25,8 @@ testMirVerify :: Test
 testMirVerify =
     TestList
         "testMirVerify"
-        [ TestList
+        [ TestCase "constructor and block lookups borrow aggregates" borrowedLookups
+        , TestList
             "interpreted"
             [ TestCase "a well formed program is accepted" (interpreted goodSource id True)
             , TestCase "a program with a list is accepted" (interpreted "xs = [1, 2, 3]; return size(xs) + first(xs);" id True)
@@ -31,6 +34,8 @@ testMirVerify =
             , TestCase "a local of no known type" (interpreted goodSource varLocal False)
             , TestCase "a switch on an Int" (interpreted goodSource switchOnInt False)
             , TestCase "a call of a function that is not there" (interpreted goodSource unknownCall False)
+            , TestCase "an unknown constructor reports its name" (interpretedWithMessage (Just "there is no constructor MissingCtor") constructorSource unknownConstructor False)
+            , TestCase "a missing jump target reports its block" (interpretedWithMessage (Just "jumps to bb999999, which is not there") goodSource missingTarget False)
             , TestCase "an array with the same size parameter is accepted" (interpreted sizedSource id True)
             , TestCase "a named type that starts with a builtin's name is accepted" (interpreted integerSource id True)
             , TestCase "an instance with another array size is refused" (interpreted holderSource wrongHolderArg False)
@@ -49,6 +54,23 @@ testMirVerifyPrograms =
     TestParallel
         "testMirVerifyPrograms"
         [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
+
+borrowedLookups :: IO TestResult
+borrowedLookups = do
+    source <- readFile "examples/mir_verify.tersus"
+    pure $ case lowerSource True source of
+        Error e -> Just e
+        Ok program ->
+            let owned = insertOwnership program
+                check (name, owner, field, tableType, elementType) = case Map.lookup name (progFunctions owned) of
+                    Nothing -> Just ("the verifier has no " ++ name ++ " function")
+                    Just fn ->
+                        let copied = [dest | block <- Map.elems (fnBlocks fn), Assign dest (ReadField _ actualOwner actualField) <- blockStatements block, actualOwner == owner, actualField == field, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == tableType]
+                            elementCopies = [dest | Just raw <- [Map.lookup name (progFunctions program)], block <- Map.elems (fnBlocks raw), Assign dest (ListOp Get _) <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals raw)], localType decl == elementType]
+                         in if null (copied ++ elementCopies) then Nothing else Just (name ++ " clones its input aggregate into " ++ show (copied ++ elementCopies))
+                targets = [("ctorInfo", "Program", "types", TList (TNamed "TypeDecl" []), TNamed "TypeDecl" []), ("findBlock", "Function", "blocks", TList (TNamed "MirBlock" []), TNamed "MirBlock" []), ("findLocal", "Function", "locals", TList (TNamed "LocalDecl" []), TNamed "LocalDecl" [])]
+                errors = [message | Just message <- map check targets]
+             in if null errors then Nothing else Just (unlines errors)
 
 goodSource :: String
 goodSource = "fn double(n: Int) -> Int [{ }] [{ }] { return n + n; }; if double(2) = 4 { return 1; }; return 0;"
@@ -75,7 +97,10 @@ referenceAccepts program = case verifyProgram (forNative program) of
 
 -- Run the verifier in the interpreter over the data of the mutated program, and compare its verdict with the one it has to give
 interpreted :: String -> (Program -> Program) -> Bool -> IO TestResult
-interpreted source mutate expected = do
+interpreted = interpretedWithMessage Nothing
+
+interpretedWithMessage :: Maybe String -> String -> (Program -> Program) -> Bool -> IO TestResult
+interpretedWithMessage message source mutate expected = do
     verifier <- verifierProgram
     ownedResult <- ownedOnce source
     pure $ case verifier of
@@ -89,7 +114,7 @@ interpreted source mutate expected = do
                         Error e -> Just e
                         Ok ((output, errors), _)
                             | expected && sameText output "OK" && null errors -> Nothing
-                            | not expected && output == "1" && not (null errors) -> Nothing
+                            | not expected && output == "1" && not (null errors) && maybe True (`isInfixOf` errors) message -> Nothing
                             | otherwise -> Just ("expected " ++ verdict expected ++ ", got output " ++ show output ++ " and errors " ++ show errors ++ " for\n" ++ text)
   where
     verdict True = "acceptance"
@@ -130,6 +155,26 @@ unknownCall = onEveryFunction change
     change fn = fn{fnBlocks = Map.map block (fnBlocks fn)}
     block basic = basic{blockTerminator = case blockTerminator basic of
         Call _ args dest next -> Call (Const (CFn "noSuchFunction")) args dest next
+        other -> other}
+
+constructorSource :: String
+constructorSource = "struct ProbeCtor { value: Int }; x = ProbeCtor { value: 1 }; return x.value;"
+
+unknownConstructor :: Program -> Program
+unknownConstructor program = program{progMain = main{fnBlocks = Map.map block (fnBlocks main)}}
+  where
+    main = progMain program
+    block basic = basic{blockStatements = map statement (blockStatements basic)}
+    statement (Assign dest (MakeData "ProbeCtor" fields)) = Assign dest (MakeData "MissingCtor" fields)
+    statement (Peek dest (MakeData "ProbeCtor" fields)) = Peek dest (MakeData "MissingCtor" fields)
+    statement other = other
+
+missingTarget :: Program -> Program
+missingTarget program = program{progMain = main{fnBlocks = Map.map block (fnBlocks main)}}
+  where
+    main = progMain program
+    block basic = basic{blockTerminator = case blockTerminator basic of
+        SwitchBool condition _ no -> SwitchBool condition (BlockId 999999) no
         other -> other}
 
 localNamed :: Function -> String -> Maybe Local

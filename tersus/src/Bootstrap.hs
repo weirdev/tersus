@@ -14,7 +14,8 @@ module Bootstrap
 
 import qualified Mir as M
 import MirData (writeProgram)
-import Native (buildExecutable, cachedProgram, runWithInput)
+import qualified MirHousekeeping as Housekeeping
+import Native (buildExecutable, runWithInput)
 import Pipeline (ownedSource)
 import PreludeSource (emitterSource)
 import Seed (cachedSeed, emitterHash, seedHash, seedSha256, seedUrl, stageZero)
@@ -54,11 +55,7 @@ emitWith = runWithInput
 
 -- Stage 1 in the cache, built (from stage 0, which is built too if it is not there) if it is not there yet
 cachedEmitter :: IO (Result FilePath String)
-cachedEmitter = cachedProgram "emitter" emitterHash "the emitter written in Tersus" $ \output -> do
-    zero <- cachedSeed
-    case zero of
-        Error e -> pure (Error e)
-        Ok compiler -> stageOne compiler output
+cachedEmitter = Housekeeping.cachedEmitter
 
 -- The LLVM IR of a program, by the emitter in Tersus
 tersusLlvm :: String -> IO (Result String String)
