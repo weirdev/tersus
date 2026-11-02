@@ -18,7 +18,8 @@ jobs:
     name: Haskell build and tests
     runs-on: ubuntu-latest
     # (the tests that build the emitter written in Tersus, twice, and compile every program with it are the longest)
-    timeout-minutes: 45
+    # testMirVerify alone takes ~42m since the MIR checker moved into Tersus (#122); the whole suite needs ~50m
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: tersus
