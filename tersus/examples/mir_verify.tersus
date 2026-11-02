@@ -1,6 +1,6 @@
 // The MIR as data, checked for well-formedness by a program in Tersus: what MirVerify checks of a
-// program in the form `tersus mir --data` prints (the owned MIR that native code is made from: its
-// shape, and the types of its operations). It reads the MIR as examples/mir_reader.tersus does, from
+// program in the form `tersus mir --data` prints, or a pre-erasure program written by MirData: its
+// shape, and the types of its operations. It reads the MIR as examples/mir_reader.tersus does, from
 // the standard input, prints OK and gives 0 when the program is well formed, and prints the first
 // problem it finds (in the words of MirVerify, with the place of the function and the block) and
 // gives 1 when it is not. What is not the MIR as data is refused as the reader refuses it.
@@ -162,7 +162,7 @@ fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
     return w;
 };
 
-fn listWords() -> List<String> [{ }] [{ affirm size(return) = 46; }] {
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 54; }] {
     w = push([], "length");
     w = push(w, "first");
     w = push(w, "last");
@@ -209,6 +209,14 @@ fn listWords() -> List<String> [{ }] [{ affirm size(return) = 46; }] {
     w = push(w, "narrowU16");
     w = push(w, "narrowU32");
     w = push(w, "fromList");
+    w = push(w, "blockNew");
+    w = push(w, "blockTaken");
+    w = push(w, "blockResized");
+    w = push(w, "blockSplitLo");
+    w = push(w, "blockSplitHi");
+    w = push(w, "blockJoin");
+    w = push(w, "blockAssume");
+    w = push(w, "blockCast");
     return w;
 };
 
@@ -2350,6 +2358,38 @@ fn pointerWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int
     return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands"));
 };
 
+fn exactOperandWhy(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Operand) -> List<String> ~ {
+    actual = operandTy(p, funcs, f, o);
+    if actual.ok && typeEq(wanted, actual.ty) { return []; };
+    return expectedWhy(p, f, wanted, o);
+};
+
+fn blockOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int, args: &List<Operand>) -> List<String> ~ {
+    n = size(args);
+    wantN = 2;
+    if op = 48 { wantN = 3; };
+    if op = 53 { wantN = 1; };
+    if n != wantN { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
+    if !(d is Type::TBlock) { return one("the result is ".then(renderType(clone(d))).then(", not a Block")); };
+    elem = Box::unbox((d as Type::TBlock).inner);
+    if op = 53 {
+        actual = operandTy(p, funcs, f, argAt(args, 0));
+        if actual.ok && actual.ty is Type::TBlock { return []; };
+        return one(renderOperand(p, f, argAt(args, 0)).then(" is not a Block"));
+    };
+    firstType = clone(d);
+    if op = 46 || op = 52 { firstType = Type::TAddr { inner: Box::new(clone(elem)) }; };
+    out = exactOperandWhy(p, funcs, f, firstType, argAt(args, 0));
+    secondType = Type::TInt;
+    if op = 48 { secondType = Type::TAddr { inner: Box::new(clone(elem)) }; };
+    if op = 51 { secondType = clone(d); };
+    for w in exactOperandWhy(p, funcs, f, secondType, argAt(args, 1)) { out = push(out, clone(w)); };
+    if op = 48 {
+        for w in exactOperandWhy(p, funcs, f, Type::TInt, argAt(args, 2)) { out = push(out, clone(w)); };
+    };
+    return out;
+};
+
 fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int, args: &List<Operand>, inSet: Bool) -> List<String> ~ {
     out = [];
     dst = clone(d);
@@ -2517,6 +2557,7 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
         };
         return one("Array::fromList needs a result that is an array");
     };
+    if op >= 46 && op <= 53 { return blockOpWhy(p, funcs, f, dst, op, args); };
     return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands"));
 };
 

@@ -10,6 +10,7 @@ import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (verifyProgram)
 import MirOwnership (insertOwnership)
+import PreludeSource (boxSource, listsSource)
 import Types (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
@@ -42,6 +43,11 @@ testMirVerify =
             , TestCase "an array of lists that does not fit in a frame is refused" (interpreted "xs = array(3000, 0); return get(xs, 0);" arrayOfLists False)
             , TestCase "what is not the MIR is refused" refused
             ]
+        , TestList "pre-erasure, interpreted"
+            ( TestCase "raw lists and Boxes library" (rawInterpreted True rawLibrary)
+                : [TestCase name (rawInterpreted expected (Ok text)) | (name, text, expected) <- blockCases]
+            )
+        , TestCase "pre-erasure library and Block cases, natively" rawNative
         , TestParallel
             "every example, natively"
             [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
@@ -119,6 +125,87 @@ interpretedWithMessage message source mutate expected = do
   where
     verdict True = "acceptance"
     verdict False = "refusal"
+
+rawLibrary :: Result String String
+rawLibrary = mapResult writeProgram (lowerSource False (listsSource ++ "\n" ++ boxSource))
+
+rawInterpreted :: Bool -> Result String String -> IO TestResult
+rawInterpreted expected input = do
+    verifier <- verifierProgram
+    pure $ case input of
+        Error e -> Just e
+        Ok text -> case readProgram text of
+            Error e -> Just ("the raw fixture does not read: " ++ e)
+            Ok _ -> case verifier of
+                Error e -> Just ("the verifier does not compile: " ++ e)
+                Ok checker -> case runProgramIn noWorld{worldInput = text} checker of
+                    Error e -> Just e
+                    Ok ((output, errors), _)
+                        | expected && sameText output "OK" && null errors -> Nothing
+                        | not expected && output == "1" && not (null errors) && not ("not the MIR as data" `isInfixOf` errors) -> Nothing
+                        | otherwise -> Just ("expected " ++ show expected ++ ", got output " ++ show output ++ " and errors " ++ show errors ++ " for\n" ++ text)
+
+rawNative :: IO TestResult
+rawNative = withVerifier $ \exe -> case rawLibrary of
+    Error e -> pure (Just e)
+    Ok library -> do
+        failures <- mapM (check exe) (("raw lists and Boxes library", library, True) : blockCases)
+        pure $ case [failure | Just failure <- failures] of
+            [] -> Nothing
+            bad -> Just (unlines bad)
+  where
+    check exe (name, text, expected) = do
+        (code, output, errors) <- runExecutableBytes exe [] text
+        pure $
+            if expected && code == ExitSuccess && sameText output "OK" && null errors
+                || not expected && code == ExitSuccess && sameText output "1" && not (null errors) && not ("not the MIR as data" `isInfixOf` errors)
+                then Nothing
+                else Just (name ++ ": expected " ++ show expected ++ ", got " ++ show (code, output, errors))
+
+blockCases :: [(String, String, Bool)]
+blockCases = concatMap cases signatures
+  where
+    signatures =
+        [ ("blockNew", ["addr int", "int"])
+        , ("blockTaken", ["block int", "int"])
+        , ("blockResized", ["block int", "addr int", "int"])
+        , ("blockSplitLo", ["block int", "int"])
+        , ("blockSplitHi", ["block int", "int"])
+        , ("blockJoin", ["block int", "block int"])
+        , ("blockAssume", ["addr int", "int"])
+        , ("blockCast", ["block int"])
+        ]
+    cases (op, types) =
+        [ (op ++ " accepts its signature", fixture op "block int" types types, True)
+        , (op ++ " refuses a missing operand", fixture op "block int" types (init types), False)
+        , (op ++ " refuses an extra operand", fixture op "block int" (types ++ ["int"]) (types ++ ["int"]), False)
+        , (op ++ " refuses a non-Block result", fixture op "int" types types, False)
+        , (op ++ " refuses a reference result", fixture op "ref block int" types types, False)
+        , (op ++ " checks result element type", fixture op "block bool" types types, op == "blockCast")
+        ]
+            ++ [ (op ++ " refuses operand " ++ show i ++ " as " ++ wrong, fixture op "block int" (replace i wrong types) types, False)
+               | (i, ty) <- zip [0 ..] types
+               , wrong <- ["bool", "ref " ++ ty, "mutref " ++ ty] ++ [different | op /= "blockCast", different <- differentElement ty]
+               ]
+    differentElement "addr int" = ["addr bool"]
+    differentElement "block int" = ["block bool"]
+    differentElement _ = []
+    replace i ty types = take i types ++ [ty] ++ drop (i + 1) types
+    fixture op result locals operands = unlines $
+        [ "tersus-mir 1"
+        , "function \"probe\" params " ++ show (length locals) ++ concatMap ((" " ++) . show) [1 .. length locals] ++ " returns some " ++ result ++ " sizeparams 0 typeparams 0 borrowed 0"
+        , "local 0 none " ++ result
+        ]
+            ++ ["local " ++ show i ++ " none " ++ ty | (i, ty) <- zip [1 :: Int ..] locals]
+            ++ [ "block 0"
+               , "assign 0 listop " ++ op ++ " " ++ show (length operands) ++ concatMap ((" copy " ++) . show) [1 .. length operands]
+               , "return"
+               , "end"
+               , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+               , "block 0"
+               , "return"
+               , "end"
+               ]
 
 refused :: IO TestResult
 refused = do
