@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module PackageCompile
     ( CompiledModule (..)
     , CompiledPackage (..)
@@ -22,7 +24,7 @@ import MirValidate (validateProgram)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated (..), elaborateWith)
-import Types (Signature (..), Type (..), baseNameOf)
+import Types (Signature (..), Type (..), pattern TBox, pattern TList, baseNameOf)
 import Utils
 
 data CompiledModule = CompiledModule

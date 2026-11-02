@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Pipeline
     ( parseSource
     , parseWithEquality
@@ -39,7 +41,7 @@ import MirLists (lowerLists)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
 import TypeCheck (Elaborated (..), elaborateWith)
-import Types (Signature (..), Size (..), Type (..), baseNameOf)
+import Types (Signature (..), Size (..), Type (..), pattern TList, pattern TBox, baseNameOf)
 import Utils
 
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:

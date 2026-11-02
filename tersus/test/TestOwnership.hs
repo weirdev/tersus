@@ -1029,12 +1029,12 @@ borrowedRootTests =
          in testAssertTrue (any (\stmt -> case stmt of Assign (Local 5) (Use (Move (Local 2))) -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
     ]
   where
-    list = TNamed "StdList" [ArgType TInt]
+    list = TNamed "List" [ArgType TInt]
     own locals blocks =
         let stub = progMain (mainProgram [] [])
             fn = stub{fnName = "loan", fnParams = [Local 1] ++ [Local 2 | lookup (Local 2) locals == Just list], fnReturns = Just TInt, fnLocals = Map.fromList ((Local 0, LocalDecl TInt Nothing) : [(l, LocalDecl ty Nothing) | (l, ty) <- locals]), fnBlocks = Map.fromList blocks}
             dup = stub{fnName = "dup", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just list, fnLocals = Map.fromList [(Local 0, LocalDecl list Nothing), (Local 1, LocalDecl list Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (CopyOf (Copy (Local 1)))] Return)}
-            program = (mainProgram [] []){progTypes = Map.fromList [("Holder", StructDecl [("xs", list), ("n", TInt)]), ("StdList<Int>", StructDecl [("addr", TAddr TInt), ("len", TInt), ("cap", TInt)])], progFunctions = Map.fromList [("loan", fn), ("dup", dup)]}
+            program = (mainProgram [] []){progTypes = Map.fromList [("Holder", StructDecl [("xs", list), ("n", TInt)]), ("List<Int>", StructDecl [("addr", TAddr TInt), ("len", TInt), ("cap", TInt)])], progFunctions = Map.fromList [("loan", fn), ("dup", dup)]}
          in progFunctions (insertOwnership program) Map.! "loan"
 
 -- The programs that have arrays are not run on the model of the heap, which holds the values of the heap (a program with arrays and

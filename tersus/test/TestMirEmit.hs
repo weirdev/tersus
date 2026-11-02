@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module TestMirEmit (testMirEmit, testMirEmitPrograms) where
 
 import Data.List (isInfixOf, isPrefixOf)
@@ -8,7 +10,7 @@ import Cli (World (..), noWorld, runProgramIn)
 import Compile (lowerSource)
 import MirOwnership (insertOwnership)
 import qualified MirEval as Eval
-import Types (Type (..))
+import Types (Type (..), pattern TList, pattern TBox)
 import Mir
 import MirData (readProgram, writeProgram)
 import TestHarness

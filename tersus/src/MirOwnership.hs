@@ -242,8 +242,6 @@ referenceType program = go Set.empty
         TList t -> go seen t
         TBox t -> go seen t
         TArrayOf t _ -> go seen t
-        TNamed "StdList" args -> any (\a -> case a of ArgType t -> go seen t; _ -> False) args
-        TNamed "StdBox" args -> any (\a -> case a of ArgType t -> go seen t; _ -> False) args
         TNamed base args -> declared seen (instanceName base args)
         TVariant name -> maybe True (declared seen) (ownerOf program name)
         TParam _ -> True

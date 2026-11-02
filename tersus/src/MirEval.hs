@@ -27,7 +27,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Mir
-import Types (Name, Rel (..), Type (..), Variable, instanceName)
+import Types (Name, Rel (..), Type (..), pattern TList, pattern TBox, Variable, instanceName)
 import Syntax (Value (..))
 import Utils
 

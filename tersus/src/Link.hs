@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Link
     ( linkPrograms
     , pruneProgram
@@ -15,7 +17,7 @@ import Parse (emptyDecls, parseStatementBlockWith)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
 import qualified Syntax
 import Syntax (Proof (..), Statement (..), ValidationStatement (..), VariableProof, Value (..))
-import Types (Arg (..), Name, Type (..), baseNameOf)
+import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)
 import Utils (Result (..), bindResult)
 
 libraryStatements :: [Statement]

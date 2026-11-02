@@ -33,8 +33,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   - `prelude.tersus`: the traits `Sequence`, `Growable`, `Copy`, `Drop`
     and `Deref`, put in front of a program that mentions any of them and does
     not declare it (`Pipeline.libraries`). Embedded by `PreludeSource`.
-  - `lists.tersus`: the list that native code is made of (`StdList`), and
-    `box.tersus`: the Box that native code is made of (`StdBox`). Both embedded
+  - `lists.tersus`: the list that native code is made of (`List`), and
+    `box.tersus`: the Box that native code is made of (`Box`). Both embedded
     by `PreludeSource` and lowered with the lists library.
   - `string.tersus`: the struct `String` that a string literal is a value of,
     embedded by `PreludeSource` and put after the prelude for a program that
