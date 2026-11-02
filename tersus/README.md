@@ -105,6 +105,8 @@ differential tests before the new validator can replace `MirValidate`.
 
 The Haskell implementation parses to the AST, checks its types, lowers it to the MIR, validates the MIR, and runs it (the stages are chained by `Pipeline`, which type checks the program once; steps 1 to 6 below):
 
+`TypeCheck` lends a stable resolved place directly to its `Clone` impl instead of materializing a copy first. `MirLower` retains the variant proof when that place includes an enum cast; the existing loan and ownership checks still govern the call. Index expressions containing calls retain the original materialization path, so later calls cannot change an earlier container snapshot.
+
 Library parsing is shared per library selection in a process. `Compile` also
 reuses the type checker's prepared library prefix when the selection and the
 program's forward function signatures are unchanged. Each program continues

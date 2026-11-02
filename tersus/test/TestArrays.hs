@@ -229,7 +229,7 @@ testArrays =
                 , testCase "an enum has one" (runs "enum Shape { Pair { xs: Array<List<Int>, 2> }, None }; s = Shape::Pair { xs: array(2, push([], 4)) }; return match s { Shape::Pair { xs: xs } => size(get(xs, 1)), Shape::None => 0 };" (VInt 1))
                 , testCase "a list has one" (runs "l = push(push([], array(2, push([], 1))), array(2, [])); return clone(get(l, 0));" (VList [VList [VInt 1], VList [VInt 1]]))
                 , testCase "the size of an element array is known" (valid "a = array(2, push([], 1)); affirm size(a) = 2; return size(get(a, 0));")
-                , testCase "an index past the end" (rejected "a = array(2, push([], 1)); return clone(get(a, 2));" "Relation does not hold")
+                , testCase "an index past the end" (rejected "a = array(2, push([], 1)); return clone(get(a, 2));" "A reference is to an index that is not known to be in the value it borrows")
                 , testCase "a function with sizes takes one" (runs "fn count<n>(a: Array<List<Int>, n>) -> Int { return n; }; return count(array(3, []));" (VInt 3))
                 ]
             ]

@@ -9,6 +9,7 @@ import qualified Data.Set as Set
 import qualified Mir as M
 import MirMoves (checkMoves, stripPositions)
 import Pretty (renderType)
+import StdLib (builtinFunct)
 import StdLibDefs (stdLibCtx)
 import Types
 import Syntax
@@ -774,6 +775,15 @@ lowerPlace expr = case expr of
         (root, steps, subTy) <- lowerPlace sub
         ctor <- structCtor subTy
         return (root, steps ++ [M.RefField ctor field], fieldTy)
+    F (Val (VFunct _ _ _ (BuiltinFunct (Cast variant)) _)) [sub] -> do
+        variantTy <- claim
+        (root, steps, subTy) <- lowerPlace sub
+        -- Check the variant without materializing an owned copy of it.
+        borrowed <- newLocal Nothing (TRef subTy)
+        emit (M.Assign borrowed (M.Borrow root steps False))
+        emit (M.Ghost (Map.singleton "$cloneVariant" (M.Copy borrowed))
+            (M.GhostValidation (ProofAssert (FApp (CTerm (builtinFunct (Is variant))) [ATerm "$cloneVariant"]))))
+        return (root, steps, variantTy)
     F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, index] -> lowerIndexPlace sub index
     F (Var "get") [sub, index] -> lowerIndexPlace sub index
     F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
@@ -791,7 +801,15 @@ lowerPlace expr = case expr of
         elementTy <- claim
         (root, steps, _) <- lowerPlace sub
         (indexOperand, _) <- lowerOperand index
-        return (root, steps ++ [M.RefIndex indexOperand], elementTy)
+        captured <- captureIndex indexOperand
+        return (root, steps ++ [M.RefIndex captured], elementTy)
+
+captureIndex :: M.Operand -> L M.Operand
+captureIndex operand@M.Const{} = return operand
+captureIndex operand = do
+    at <- newLocal Nothing TInt
+    emit (M.Assign at (M.Use operand))
+    return (M.Copy at)
 
 -- The local a reference expression stands in, and the type it is a reference to
 lowerRefRoot :: Expression -> L (M.Local, Type)
@@ -816,18 +834,7 @@ lowerRefRoot expr = do
 lowerBorrow :: Bool -> Expression -> Type -> L (Pending, Type)
 lowerBorrow mutable place result = do
     (root, steps, _) <- lowerPlace place
-    -- (an index of the place is the value it has here, where the reference is made: the reference is to that
-    -- element, not to whichever element the index names when the reference is used)
-    steps' <- mapM captureStep steps
-    return (PRvalue (M.Borrow root steps' mutable), result)
-  where
-    captureStep (M.RefIndex (M.Copy l)) = captureIndex (M.Copy l)
-    captureStep (M.RefIndex (M.Move l)) = captureIndex (M.Move l)
-    captureStep step = return step
-    captureIndex operand = do
-        at <- newLocal Nothing TInt
-        emit (M.Assign at (M.Use operand))
-        return (M.RefIndex (M.Copy at))
+    return (PRvalue (M.Borrow root steps mutable), result)
 
 -- `root.steps = value` as assignments of the root: a field is rebuilt from its other fields, an element is `set`
 emitAssignPlace :: M.Local -> [M.RefStep] -> M.Operand -> L ()
