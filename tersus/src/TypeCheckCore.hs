@@ -534,8 +534,10 @@ fieldType :: Variable -> Type -> TC Type
 fieldType field structTy = do
     t <- zonk structTy
     case t of
-        -- (a Box has the fields of what it holds)
-        TBox inner -> fieldType field inner
+        -- (a Box has the fields of what it holds, and its own: the address of what it holds and the permission to it)
+        TBox inner
+            | field `elem` ["addr", "blk"] -> fieldType field (TNamed "Box" [ArgType inner])
+            | otherwise -> fieldType field inner
         TNamed "Self" _ -> failTc ("Type error: a trait does not know the fields of Self, so field " ++ field ++ " cannot be read from it")
         TNamed base args -> do
             let name = instanceName base args
