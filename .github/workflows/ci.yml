@@ -22,7 +22,8 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     # (the tests that build the emitter written in Tersus, twice, and compile every program with it are the longest)
-    timeout-minutes: 45
+    # headroom over the ~13m shards: the heavy groups are split into batches across the shards, but a slow runner should not kill a green suite
+    timeout-minutes: 60
     defaults:
       run:
         working-directory: tersus
