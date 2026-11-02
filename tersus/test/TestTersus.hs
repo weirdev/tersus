@@ -35,6 +35,7 @@ import TestStrings
 import TestBytes
 import TestConnectives
 import TestMirData
+import TestMirEval
 import TestMirReader
 import TestMirVerify
 import TestMirErase
@@ -143,6 +144,7 @@ allGroups =
     , testBytes
     , testConnectives
     , testMirData
+    , testMirEvalLists
     , testMirReader
     , testMirVerify
     , testMirErase
@@ -233,6 +235,7 @@ runInParallel jobs names = do
         forkIO $
             bracket_ (waitQSem sem) (signalQSem sem) $ do
                 started <- getMonotonicTime
+                putStrLn ("[START] " ++ name)
                 -- (the processors are shared between the groups that run at once: left to the package's -with-rtsopts=-N, every
                 -- child would take as many capabilities as the machine has processors, so N children would make N times N of them and their
                 -- threads and parallel garbage collectors would compete for the same cores. Each child is given its share of them,
@@ -241,6 +244,7 @@ runInParallel jobs names = do
                 let arguments = [name, "--child", "+RTS", "-N" ++ show (max 1 (processors `div` jobs)), "-RTS"]
                 outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
                 finished <- getMonotonicTime
+                putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
                 putMVar done (name, finished - started, outcome)
     -- (the results are taken in the order of the list, so the output has the order it has without the processes)
     outcomes <- forM slots $ \(_, done) -> takeMVar done >>= printOutcome
@@ -253,8 +257,7 @@ printOutcome (name, seconds, outcome) = do
             Left e -> (ExitFailure 1, "", displayException e)
     putStr out
     hPutStr stderr err
-    let tenths = round (seconds * 10) :: Int
-    putStrLn ("[TIME] " ++ name ++ " " ++ show (tenths `div` 10) ++ "." ++ show (tenths `mod` 10) ++ "s")
+    putStrLn ("[TIME] " ++ name ++ " " ++ elapsedText seconds)
     let summary = countResults out
         missing = exitCode /= ExitSuccess && summaryFailed summary == 0
     when missing $
@@ -265,6 +268,11 @@ printOutcome (name, seconds, outcome) = do
             else summary
         , exitCode == ExitSuccess
         )
+
+elapsedText :: Double -> String
+elapsedText seconds =
+    let tenths = round (seconds * 10) :: Int
+     in show (tenths `div` 10) ++ "." ++ show (tenths `mod` 10) ++ "s"
 
 -- The [PASS]/[FAIL]/[CRASH] lines of a group, which is what the summary of the whole run adds up
 countResults :: String -> TestSummary

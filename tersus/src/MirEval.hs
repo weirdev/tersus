@@ -1,5 +1,8 @@
+{-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE ViewPatterns #-}
+
 module MirEval
-    ( MirValue (..)
+    ( MirValue (MInt, MBool, MList, MData, MFn, MEmpty, MRef)
     , runProgram
     , runProgramOutput
     , runProgramWith
@@ -15,12 +18,16 @@ module MirEval
     ) where
 
 import Data.Char (chr)
+import Data.Foldable (toList)
 import Data.List (elemIndex, intercalate)
+import Data.Sequence (Seq, ViewL (..), ViewR (..), (|>))
+import qualified Data.Sequence as Seq
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 
 import Mir
-import Types (Name, Rel (..), Variable)
+import Types (Name, Rel (..), Type (..), Variable, instanceName)
 import Syntax (Value (..))
 import Utils
 
@@ -31,7 +38,7 @@ import Utils
 data MirValue
     = MInt Integer
     | MBool Bool
-    | MList [MirValue]
+    | MSequence (Seq MirValue)
     | MData Name [(Variable, MirValue)]
     | MFn Name
     | -- What an empty Uninit<T> holds: nothing, which no operation can read
@@ -40,7 +47,26 @@ data MirValue
       -- there (REFERENCES.md). Reading it gives the place's current value; a call through an update reference
       -- writes the callee's final value back into the place.
       MRef Local [EvalStep]
-    deriving (Eq, Show)
+    deriving (Eq)
+
+pattern MList :: [MirValue] -> MirValue
+pattern MList values <- MSequence (toList -> values)
+  where
+    MList values = MSequence (Seq.fromList values)
+
+{-# COMPLETE MInt, MBool, MList, MData, MFn, MEmpty, MRef #-}
+
+instance Show MirValue where
+    showsPrec p value = case value of
+        MInt n -> constructor "MInt" [showsPrec 11 n]
+        MBool b -> constructor "MBool" [showsPrec 11 b]
+        MSequence values -> constructor "MList" [showsPrec 11 (toList values)]
+        MData name fields -> constructor "MData" [showsPrec 11 name, showsPrec 11 fields]
+        MFn name -> constructor "MFn" [showsPrec 11 name]
+        MEmpty -> showString "MEmpty"
+        MRef local steps -> constructor "MRef" [showsPrec 11 local, showsPrec 11 steps]
+      where
+        constructor name args = showParen (p > 10) (showString name . foldr (.) id [showChar ' ' . arg | arg <- args])
 
 -- A step from the root of a borrowed place to the place itself, with its index a value
 data EvalStep = EvalField Variable | EvalIndex Integer
@@ -320,8 +346,11 @@ runBlock program fn block frame =
                     f <- liftE (operandValue frame' callee)
                     argValues <- liftE (mapResults (operandValue frame') args)
                     resolved <- liftE (mapResults (resolveRef frame') argValues)
-                    let normArgs = map (normaliseRefs frame') resolved
-                        synthRoots = refRootClosure frame' normArgs
+                    let carriesRefs = case f of
+                            MFn name -> maybe True (callHasReferences program) (Map.lookup name (progFunctions program))
+                            _ -> True
+                        normArgs = if carriesRefs then map (normaliseRefs frame') resolved else resolved
+                        synthRoots = if carriesRefs then refRootClosure frame' normArgs else []
                         synthMap = Map.fromList (zip synthRoots [Local (1000000 + i) | i <- [0 ..]])
                         calleeArgs = map (rewriteRefRoots synthMap) normArgs
                         synthFrame = Map.fromList [(synth, rewriteRefRoots synthMap (normaliseRefs frame' v)) | (root, synth) <- Map.toList synthMap, Just v <- [Map.lookup root frame']]
@@ -330,7 +359,7 @@ runBlock program fn block frame =
                     -- the same place in this frame. References to the callee's own places cannot be returned,
                     -- which the checker has already refused.)
                     result' <- liftE $ case f of
-                        MFn name | Just callee <- Map.lookup name (progFunctions program) -> rebaseRefs program callee calleeFrame args frame' result
+                        MFn name | carriesRefs, Just callee <- Map.lookup name (progFunctions program) -> rebaseRefs program callee calleeFrame args frame' result
                         _ -> Ok result
                     let finalParams = case f of
                             MFn name | Just callee <- Map.lookup name (progFunctions program) -> [Map.findWithDefault MEmpty p calleeFrame | p <- fnParams callee]
@@ -342,6 +371,34 @@ runBlock program fn block frame =
                     runBlock program fn next (Map.insert dest result2 frame3)
                 Return -> return (Map.lookup (Local 0) frame', frame')
                 Unreachable -> failE "Function did not return a value"
+
+callHasReferences :: Program -> Function -> Bool
+callHasReferences program fn = any parameter (fnParams fn) || maybe False (holds Set.empty) (fnReturns fn)
+  where
+    parameter local = case Map.lookup local (fnLocals fn) of
+        Nothing -> True
+        Just decl -> holds Set.empty (contents (localType decl))
+    contents (TRef ty) = ty
+    contents (TMutRef ty) = ty
+    contents ty = ty
+    holds seen ty = case ty of
+        TRef _ -> True
+        TMutRef _ -> True
+        TList inner -> holds seen inner
+        TArrayOf inner _ -> holds seen inner
+        TBox inner -> holds seen inner
+        TUninit inner -> holds seen inner
+        TParam _ -> True
+        TVar _ -> True
+        TNamed base args
+            | Set.member ty seen -> False
+            | otherwise -> case Map.lookup (instanceName base args) (progTypes program) of
+                Nothing -> True
+                Just decl -> any (holds (Set.insert ty seen) . snd) (fields decl)
+        TVariant name -> maybe True (\owner -> holds seen (TNamed owner [])) (ownerOf program name)
+        _ -> False
+    fields (StructDecl fs) = fs
+    fields (EnumDecl variants) = concatMap snd variants
 
 -- What a reference stands for here: the value at the place it is to
 resolveRef :: Frame -> MirValue -> Result MirValue String
@@ -356,8 +413,8 @@ readPlace frame l steps = case Map.lookup l frame of
     readSteps (MRef l' steps') rest = readPlace frame l' (steps' ++ rest)
     readSteps v [] = Ok v
     readSteps (MData _ fields) (EvalField field : rest) = maybe (Error ("A reference is to a field that is not there: " ++ field)) (\v -> readSteps v rest) (lookup field fields)
-    readSteps (MList xs) (EvalIndex i : rest)
-        | i >= 0 && i < toInteger (length xs) = readSteps (xs !! fromInteger i) rest
+    readSteps (MSequence xs) (EvalIndex i : rest)
+        | i >= 0 && i < toInteger (Seq.length xs) = readSteps (Seq.index xs (fromInteger i)) rest
         | otherwise = Error "A reference is to an index that is not there"
     readSteps _ _ = Error "A reference is to a place that is not there"
 
@@ -371,8 +428,8 @@ writePlace frame l steps value = case Map.lookup l frame of
     setSteps (MData name fields) (EvalField field : rest) new = case lookup field fields of
         Nothing -> Error ("A reference is to a field that is not there: " ++ field)
         Just old -> mapResult (\changed -> MData name [(f, if f == field then changed else v) | (f, v) <- fields]) (setSteps old rest new)
-    setSteps (MList xs) (EvalIndex i : rest) new
-        | i >= 0 && i < toInteger (length xs) = mapResult (\changed -> MList [if toInteger j == i then changed else x | (j, x) <- zip [0 ..] xs]) (setSteps (xs !! fromInteger i) rest new)
+    setSteps (MSequence xs) (EvalIndex i : rest) new
+        | i >= 0 && i < toInteger (Seq.length xs) = mapResult (\changed -> MSequence (Seq.update (fromInteger i) changed xs)) (setSteps (Seq.index xs (fromInteger i)) rest new)
         | otherwise = Error "A reference is to an index that is not there"
     setSteps _ _ _ = Error "A reference is to a place that is not there"
 
@@ -385,7 +442,7 @@ rebaseRefs program callee calleeFrame args callerFrame value = case value of
     MData name fields -> mapResult (MData name) (mapEach field fields)
       where
         field (f, v) = mapResult (\v' -> (f, v')) (rebaseRefs program callee calleeFrame args callerFrame v)
-    MList values -> mapResult MList (mapEach (rebaseRefs program callee calleeFrame args callerFrame) values)
+    MSequence values -> mapResult MSequence (mapSequence (rebaseRefs program callee calleeFrame args callerFrame) values)
     _ -> Ok value
   where
     mapEach _ [] = Ok []
@@ -437,14 +494,14 @@ normaliseRefs frame value = case value of
         Just (MRef l2 steps2) -> normaliseRefs frame (MRef l2 (steps2 ++ steps))
         _ -> MRef l steps
     MData name fields -> MData name [(f, normaliseRefs frame v) | (f, v) <- fields]
-    MList values -> MList (map (normaliseRefs frame) values)
+    MSequence values -> MSequence (fmap (normaliseRefs frame) values)
     _ -> value
 
 refRoots :: MirValue -> [Local]
 refRoots value = case value of
     MRef l _ -> [l]
     MData _ fields -> concatMap (refRoots . snd) fields
-    MList values -> concatMap refRoots values
+    MSequence values -> foldMap refRoots values
     _ -> []
 
 refRootClosure :: Frame -> [MirValue] -> [Local]
@@ -456,11 +513,15 @@ refRootClosure frame args = go [] (concatMap refRoots args)
         | otherwise = go (seen ++ [r]) (rest ++ maybe [] (refRoots . normaliseRefs frame) (Map.lookup r frame))
 
 rewriteRefRoots :: Map Local Local -> MirValue -> MirValue
+rewriteRefRoots m value | Map.null m = value
 rewriteRefRoots m value = case value of
     MRef l steps -> MRef (Map.findWithDefault l l m) steps
     MData name fields -> MData name [(f, rewriteRefRoots m v) | (f, v) <- fields]
-    MList values -> MList (map (rewriteRefRoots m) values)
+    MSequence values -> MSequence (fmap (rewriteRefRoots m) values)
     _ -> value
+
+mapSequence :: (a -> Result b e) -> Seq a -> Result (Seq b) e
+mapSequence f = foldr (\x rest -> f x `bindResult` \y -> mapResult (y Seq.<|) rest) (Ok Seq.empty)
 
 mapResults :: (a -> Result b String) -> [a] -> Result [b] String
 mapResults = flatResultMap
@@ -637,17 +698,20 @@ comparable (MBool _) (MBool _) = True
 comparable _ _ = False
 
 listOp :: ListOp -> [MirValue] -> Result MirValue String
-listOp Length [MList l] = Ok (MInt (fromIntegral (length l)))
-listOp First [MList []] = Error "First requires a non-empty list"
-listOp First [MList l] = Ok (head l)
-listOp Last [MList []] = Error "Last requires a non-empty list"
-listOp Last [MList l] = Ok (last l)
-listOp Get [MList l, MInt i]
-    | i < 0 || i >= fromIntegral (length l) = Error "Get index out of range"
-    | otherwise = Ok (l !! fromIntegral i)
-listOp Push [MList l, x] = Ok (MList (l ++ [x]))
-listOp Pop [MList []] = Error "Pop requires a non-empty list"
-listOp Pop [MList l] = Ok (MList (init l))
+listOp Length [MSequence l] = Ok (MInt (fromIntegral (Seq.length l)))
+listOp First [MSequence l] = case Seq.viewl l of
+    EmptyL -> Error "First requires a non-empty list"
+    x :< _ -> Ok x
+listOp Last [MSequence l] = case Seq.viewr l of
+    EmptyR -> Error "Last requires a non-empty list"
+    _ :> x -> Ok x
+listOp Get [MSequence l, MInt i]
+    | i < 0 || i >= fromIntegral (Seq.length l) = Error "Get index out of range"
+    | otherwise = Ok (Seq.index l (fromIntegral i))
+listOp Push [MSequence l, x] = Ok (MSequence (l |> x))
+listOp Pop [MSequence l] = case Seq.viewr l of
+    EmptyR -> Error "Pop requires a non-empty list"
+    rest :> _ -> Ok (MSequence rest)
 listOp NewBoxed args = listOp NewArray args
 listOp WriteByte _ = Error "writeByte is run by the statement that calls it"
 listOp WriteError _ = Error "writeError is run by the statement that calls it"
@@ -664,14 +728,14 @@ listOp ReadByte _ = Error "readByte is run by the statement that calls it"
 listOp ArgCount _ = Error "argCount is run by the statement that calls it"
 listOp ArgByte _ = Error "argByte is run by the statement that calls it"
 listOp op _ | op `elem` [PathByte, FileLoad, FileByte, StoreByte, FileStore] = Error "a file operation is run by the statement that calls it"
-listOp NewEmptyBoxed [] = Ok (MList [])
-listOp FromList [MList l] = Ok (MList l)
+listOp NewEmptyBoxed [] = Ok (MSequence Seq.empty)
+listOp FromList [MSequence l] = Ok (MSequence l)
 listOp NewArray [MInt n, x]
     | n < 0 = Error "array needs a size that is not negative"
-    | otherwise = Ok (MList (replicate (fromIntegral n) x))
-listOp Set [MList l, MInt i, x]
-    | i < 0 || i >= fromIntegral (length l) = Error "Set index out of range"
-    | otherwise = let (before, after) = splitAt (fromIntegral i) l in Ok (MList (before ++ x : drop 1 after))
+    | otherwise = Ok (MSequence (Seq.replicate (max 0 (fromIntegral n)) x))
+listOp Set [MSequence l, MInt i, x]
+    | i < 0 || i >= fromIntegral (Seq.length l) = Error "Set index out of range"
+    | otherwise = Ok (MSequence (Seq.update (fromIntegral i) x l))
 listOp UninitEmpty [] = Ok MEmpty
 listOp UninitNew [x] = Ok x
 listOp UninitGet [MEmpty] = Error "An Uninit that holds nothing was read"
