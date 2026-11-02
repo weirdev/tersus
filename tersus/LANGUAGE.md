@@ -2,7 +2,7 @@
 
 Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, booleans, lists, user-defined functions, nested blocks, and a proof validator built around an internal proof engine for equality, simple rewrites, and builtin function contracts.
 
-This guide describes the Haskell implementation in this package. Runnable programs that demonstrate the features below are in [`examples/`](examples/README.md).
+This guide describes the implementation in this package. (Programs are parsed by the parser written in Tersus, `examples/parser.tersus`; the Haskell parser stays as an oracle behind the environment variable `TERSUS_PARSER=haskell` for one release, and a program the tool cannot parse is parsed by it instead, with a note on the standard error. Which programs parse is unchanged; the wording of a parse error is the Tersus parser's own, a line and column and what was expected.) Runnable programs that demonstrate the features below are in [`examples/`](examples/README.md).
 
 ## Program Shape
 

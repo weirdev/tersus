@@ -24,6 +24,7 @@ extra-source-files:
     examples/ast_reader.tersus
     AST_DATA.md
     bootstrap/emitter.sha256
+    examples/parser.tersus
     examples/mir_verify.tersus
     examples/mir_erase.tersus
     lib/validation.tersus
@@ -77,6 +78,7 @@ library
       StdLib
       StdLibDefs
       Syntax
+      TersusParser
       TypeCheck
       TypeCheckCore
       Types
@@ -173,6 +175,7 @@ test-suite tersus-test
       TestParity
       TestNative
       TestOwnership
+      TestParser
       TestPipeline
       TestPointers
       TestProofs

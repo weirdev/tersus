@@ -146,6 +146,7 @@ exampleExpectations =
     , ("examples/text.tersus", ((ExpectReturn (VInt 504))))
     , ("examples/mir/mir_reader/mir_reader.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/ast_reader.tersus", ((ExpectReturn (VInt 1))))
+    , ("examples/parser.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/mir/mir_verify/mir_verify.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/mir/mir_erase/mir_erase.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/mir/emit/emit.tersus", ((ExpectReturn (VInt 1))))

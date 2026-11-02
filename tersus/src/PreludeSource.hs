@@ -11,6 +11,7 @@ module PreludeSource
     , mapSource
     , setSource
     , mirPackageFiles
+    , parserSource
     , stdlibSource
     , compilerSourceHash
     , seedSha256
@@ -151,3 +152,12 @@ seedSha256 =
         contents <- runIO (readFile "bootstrap/emitter.sha256")
         lift (head (words contents))
      )
+
+parserSource :: String
+parserSource =
+    $( do
+        addDependentFile "examples/parser.tersus"
+        contents <- runIO (readFile "examples/parser.tersus")
+        lift contents
+     )
+

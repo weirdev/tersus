@@ -6,6 +6,7 @@ module Compile
     , librariesFor
     , lowerSource
     , lowerStatements
+    , librarySourcesFor
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
@@ -130,6 +131,11 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         BoundedDef _ (Assign name _) -> [name]
         _ -> []
     reserved name = name `elem` ["List", "Box", "listNew", "listLen", "listGet", "listFirst", "listLast", "listPop", "listSet", "listPush", "listFilled", "boxNew", "boxUnbox"]
+
+-- The texts of the libraries a program has in front of it (see `libraries`), for a host that parses
+-- the program itself segment by segment
+librarySourcesFor :: String -> [String]
+librarySourcesFor source = map snd (libraries source)
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
 -- unchanged: lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares) unless it declares a trait `Eq`, lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`, with `hashCombine`) if it mentions any of them (or
