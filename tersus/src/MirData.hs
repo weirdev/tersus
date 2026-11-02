@@ -33,8 +33,8 @@ import Utils
 --     return
 --     end
 --
--- The words of a type are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`,
--- `forall N "n"... N "n"... T`, `param "n"` and `ref T`, and of a size `c N`, `any`, `p "n"` and `v N`. An operand is `copy L`, `move L` or
+-- The words of a type are `int byte bool`, `i8 i16 i32 u16 u32`, `list T`, `array T SIZE`, `box T`, `addr T`, `block T`, `uninit T`, `fn N T... T`, `named "n" N ARG...` (each ARG `size SIZE` or `type T`), `variant "n"`, `var N`,
+-- `forall N "n"... N "n"... T`, `param "n"`, `ref T` and `mutref T`, and of a size `c N`, `any`, `p "n"` and `v N`. An operand is `copy L`, `move L` or
 -- `const C`, a constant `int N`, `bool true`, `list N C...`, `array N C...`, `data "n" N ("f" C)...` or `fn "n"`. The statements are
 -- `assign L RVALUE`, `peek L RVALUE` and `drop L`; the terminators `goto B`, `switch O B B`, `call O N O... L B`, `return` and `unreachable`.
 --
