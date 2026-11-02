@@ -893,5 +893,28 @@ testModuleLibraries =
             "3"
         ]
 
+borrowGeo :: String
+borrowGeo = "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); };"
+
+testModuleLinkBorrow :: Test
+testModuleLinkBorrow =
+    testCaseSeq
+        "module-link-borrow"
+        [ expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; ys = [10, 20, 30]; r = geo::headOf(ys); return *r;")
+            , ("app/geo/geo.tersus", borrowGeo)
+            ]
+            "app/main.tersus"
+            "10"
+        , expectProgramError
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; ys = [10, 20, 30]; r = geo::headOf(ys); ys = [40, 50]; return *r;")
+            , ("app/geo/geo.tersus", borrowGeo)
+            ]
+            "app/main.tersus"
+            "cannot be assigned while it is borrowed"
+        ]
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]
+testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]

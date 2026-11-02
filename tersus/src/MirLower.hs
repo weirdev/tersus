@@ -8,7 +8,7 @@ import qualified Data.Set as Set
 
 import Interface (InterfaceFunction (..), ModuleInterface (..))
 import qualified Mir as M
-import MirMoves (checkMoves, stripPositions)
+import MirMoves (checkMovesExcluding, stripPositions)
 import Pretty (renderType)
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibCtx)
@@ -93,8 +93,8 @@ stubFunction mirName fn =
             , M.fnLocals = locals
             , M.fnSizeParams = sizes
             , M.fnTypeParams = types
-            , M.fnBorrowed = []
-            , M.fnMutBorrowed = []
+            , M.fnBorrowed = [l | (l, ty) <- zip params ptys, isRefType ty]
+            , M.fnMutBorrowed = [l | (l, ty) <- zip params ptys, isMutRefType ty]
             , M.fnFrom = [l | (l, v) <- zip params (fnParams fn), v `elem` froms]
             , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [] M.Return)
             , M.fnSpec = M.emptySpec{M.specRequires = fnRequires fn, M.specEnsures = fnEnsures fn, M.specTermination = fnTermination fn, M.specMutParams = [v | (v, ty) <- zip (fnParams fn) ptys, isMutRefType ty], M.specFrom = froms}
@@ -352,11 +352,12 @@ program stmts = do
             m : rest -> (m, rest)
             [] -> (main', [])
         result = M.completeInstances (M.Program (lsTypes s) (Map.fromList [(M.fnName f, f) | f <- others]) resolvedMain (lsGenerics s) (lsInvariants s))
-        moveProgram = if Set.null (lsStubs s) then result else result{M.progFunctions = Map.filterWithKey (\name _ -> name `Set.notMember` lsStubs s) (M.progFunctions result)}
     -- (that the program is well formed is checked by the pipeline on what is lowered, with the checker
     -- written in Tersus (MirHousekeeping): it is not checked here, so that the checker and the eraser can
-    -- themselves be lowered to be made from the seed)
-    case if lsChecking s then checkMoves (lsCopies s) (lsLinear s) (lsDrops s) moveProgram else [] of
+    -- themselves be lowered to be made from the seed. The stub functions of imported modules stay in the
+    -- program for this check, so a call of one is seen with its signature; they are not checked themselves,
+    -- and lowerModuleWith takes them out of the unit it returns.)
+    case if lsChecking s then checkMovesExcluding (lsCopies s) (lsLinear s) (lsDrops s) (lsStubs s) result else [] of
         [] -> return (stripPositions result)
         errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
