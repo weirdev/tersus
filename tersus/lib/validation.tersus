@@ -1367,8 +1367,11 @@ fn canonicalTerm(known: &List<EqualityFact>, term: Int) -> Int {
 // its equality class: the same value reached through equal terms (a
 // projection of a pair and the pair's part, say) must be one variable,
 // or counts and sizes of it never combine.
-fn canonicalContext(context: &ValidatorContext) -> ValidatorContext {
-    known = closeContext(context);
+fn canonicalFacts(context: &ValidatorContext) -> List<EqualityFact> {
+    return applicationFactsWithConstructors(semanticFacts(context.equalities, context.applications, context.constants), context.applications, context.constructorFunctions, context.constructorFields);
+};
+
+fn canonicalContext(context: &ValidatorContext, known: &List<EqualityFact>) -> ValidatorContext {
     equalities = [];
     for f in context.equalities { equalities = push(equalities, EqualityFact { left: canonicalTerm(known, f.left), right: canonicalTerm(known, f.right) }); };
     applications = [];
@@ -1803,8 +1806,8 @@ fn linContradiction(facts: &List<LinFact>, vars: &List<Int>) -> Bool {
 
 // Prove left - right <= bound by contradiction with the context's facts.
 fn linearEntails(context: &ValidatorContext, left: Int, right: Int, bound: Int) -> Bool {
-    canon = canonicalContext(context);
-    known = closeContext(context);
+    known = canonicalFacts(context);
+    canon = canonicalContext(context, known);
     goalLeft = canonicalTerm(known, left);
     goalRight = canonicalTerm(known, right);
     // Only the facts in the goal's own component of the term graph can
