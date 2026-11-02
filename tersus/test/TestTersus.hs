@@ -50,6 +50,7 @@ import TestScheduling
 import TestAstData
 import TestModules
 import TestParity
+import TestParser
 
 main :: IO ()
 main = do
@@ -177,6 +178,7 @@ originalGroups =
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
+    , testParser
     , testAstReader
     , testParity
     ]

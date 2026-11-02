@@ -23,7 +23,8 @@ import Data.List (sortBy)
 import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Mir as M
-import Compile (lowerSource, lowerStatements, parseSource, parseWithEquality)
+import Compile (librariesFor, lowerSource, lowerStatements, parseWithEquality)
+import TersusParser (parseSource)
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesValidated)
 import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv)
 import Link (linkPrograms, pruneProgram)
@@ -46,7 +47,8 @@ import Utils
 
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
 --
---   source -> AST (parseSource, in Compile) -> checked AST (elaborate: types checked, each `shrinks` resolved)
+--   source -> AST (parseSource: the parser written in Tersus, hosted by TersusParser; Compile.parseSource
+--   is the Haskell oracle behind TERSUS_PARSER=haskell and the fallback) -> checked AST (elaborate)
 --          -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateProgram) -> executed (runProgram)
 --                                                                    or -> owned MIR (ownedSource) -> LLVM IR (the emitter written in Tersus, see Bootstrap)
 --

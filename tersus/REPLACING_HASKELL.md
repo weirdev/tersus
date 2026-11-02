@@ -178,6 +178,20 @@ tests name the stage that refused a program and, for many programs, the
 message, so the Tersus checker must refuse the same programs with the
 same words, or the tests change deliberately with the messages.
 
+Status: the parser is done. `examples/parser.tersus` is the hand-written
+reader over bytes; it builds the AST arena directly and writes
+`tersus-ast 1 parsed` byte for byte as `AstData.writeParsed` of the Haskell
+parse, every desugaring included, and `src/TersusParser.hs` runs it (native
+and cached when clang can build it, interpreted otherwise; always compiled
+by the Haskell parser). `Pipeline.parseSource` is flipped to it; the
+Haskell parser stays as the oracle for one release behind
+`TERSUS_PARSER=haskell`, and a failure of the tool falls back to it with a
+note on the standard error. `testParser` checks byte parity over the
+corpus and generated snippets. The elaborator is not done: `Parse` and
+`TypeCheck` are still Haskell, and parse-error messages are the Tersus
+parser's own (verdicts match, and the one parser-rejected fixture names
+the same reason).
+
 ### 7. The host glue, and a bootstrap with no GHC (deletes `Cli`, `Pipeline`, `Bootstrap`, `PreludeSource`, `LlvmRuntime`, `Native`, `Hash`, `Utils`, `Pretty`, `app/Main.hs`; ~1,600 lines)
 
 The endgame: a Tersus `main` that reads files and arguments (the

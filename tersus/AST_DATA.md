@@ -133,6 +133,50 @@ record exceeding the limit; they never wrap, truncate or emit unreadable
 data. Those cases are not supported by the exact MIR representation;
 integer **value** literals have no such numeric limit.
 
+## The parser written in Tersus
+
+`examples/parser.tersus` is a hand-written parser over bytes (in the manner of
+`examples/mir_reader.tersus`) for the whole language. It builds the arena of
+this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
+as `AstData.writeParsed` writes the Haskell parse of the same program,
+including every desugaring (a `match` becomes an `if` chain of `Is` and
+`Project`, a `for` becomes a `while`, struct literals become `Ctor`
+applications, a standard `Eq` or `Clone` impl is written out, and so on). The
+arena is built in parse order and renumbered at the end into the emission
+order above; nodes a failed speculation built are unreachable and dropped.
+
+The host (`src/TersusParser.hs`) runs it as `MirHousekeeping` runs the checker
+and the eraser written in Tersus: a native executable built with clang from
+the seed and cached by the hash of the parser source, or the program
+interpreted by the MIR executor where it cannot be built. The tool is always
+compiled by the Haskell parser (the bootstrap path), never by itself. Its
+input is exactly:
+
+```
+tersus-parse 1
+<locating> <nsegments>
+<byte count>
+<that many raw bytes>
+... (per segment)
+```
+
+The segments are the library texts the pipeline puts in front of the program,
+then the program itself; `locating` is `1`, and only the last segment is read
+with statement places kept (a `Mark` before each statement, as
+`Parse.locating` does). On success the AST data is on the standard output and
+the return is `0`. On failure the return is `1` and the standard error has one
+line, `line L:C: <what was expected>`.
+
+`Pipeline.parseSource` feeds every program to this parser. The Haskell parser
+stays as the oracle for one release: `TERSUS_PARSER=haskell` selects it, and
+any failure of the tool falls back to it with a note on the standard error.
+`Compile.parseSource` is unchanged. Error parity is checked for verdicts, and
+for the one fixture the parser itself rejects the message names the same
+reason; other messages are the Tersus parser's own. `testParser` checks
+byte-for-byte parity over the corpus of `testAstData` plus generated snippets
+for every desugaring, and that the writer the parser shares with
+`examples/ast_reader.tersus` is identical text in both.
+
 ## Tests
 
 `testAstData` checks constructor fixtures, all registry builtins and metadata,
@@ -143,6 +187,10 @@ elaboration is round-tripped wherever it succeeds, without validation. The
 one fixture rejected by the parser itself, `rejected/for_assigns_counter.tersus`,
 is counted separately with its exact expected parser error; it has no AST.
 Unexpected parser failures fail the corpus test.
+
+`testParser` checks the parser written in Tersus against the Haskell parser
+over the same corpus plus generated snippets, as described under "The parser
+written in Tersus" above.
 
 `testAstReader` checks small interpreted round trips and the `Plus` to `Minus`
 mutation (`7 + 2` becomes `7 - 2`, evaluated as `5` by Haskell), then native
