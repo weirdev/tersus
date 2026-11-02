@@ -9,7 +9,7 @@ module LlvmRuntime
 -- fixed-width integer its bits over 8. A struct, an enum and an array are their bytes, held in the frame of a function, in a field or in
 -- memory at an address: a struct its fields at the offsets of C, an enum a U32 that says the variant and then the fields of that variant,
 -- an array its elements. What is on the heap is memory at an address, which only a struct of the library or of the program holds: a list
--- is the struct StdList of lib/lists.tersus, and a Box the struct StdBox of lib/box.tersus (or a StdList, for a Box of an array), and each
+-- is the struct List of lib/lists.tersus, and a Box the struct Box of lib/box.tersus (or a List, for a Box of an array), and each
 -- is freed by its drop.
 -- The runtime does none of that by the type of a value: the emitted code makes a function per type that frees,
 -- copies and prints a value of it, and the runtime is what talks to the system and the memory of the heap.

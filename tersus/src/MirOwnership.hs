@@ -82,7 +82,7 @@ needsDrop program = owning
         TVariant v -> maybe False declared (ownerOf v)
         _ -> False
     -- (the struct that a list is made of owns the memory at its address, which the runtime frees and copies with the elements in use)
-    declared n | takeWhile (/= '<') n == "StdList" = True
+    declared n | takeWhile (/= '<') n == "List" = True
     -- (a struct or an enum with a drop has something to do when it is freed, whatever its fields are)
     declared n | Just _ <- dropFunction program n = True
     declared n = case Map.lookup n (progTypes program) of

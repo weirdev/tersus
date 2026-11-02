@@ -1100,7 +1100,7 @@ fn sequenceFits(p: &Program, funcs: &List<String>, f: &Function, e: &Type, o: &O
         };
         if t is Type::TNamed {
             name = (t as Type::TNamed).name;
-            if beforeAngle(name) = "StdList" {
+            if beforeAngle(name) = "List" {
                 args = instanceArgs(name);
                 if size(args) = 1 {
                     et = textAt(args, 0);
@@ -1567,7 +1567,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             if d is Type::TBox {
                 held = Box::unbox((d as Type::TBox).inner);
                 if !fits(p, funcs, f, held, o) { out = expectedWhy(p, f, held, o); };
-            } else if d is Type::TNamed && beforeAngle((d as Type::TNamed).name) = "StdList" {
+            } else if d is Type::TNamed && beforeAngle((d as Type::TNamed).name) = "List" {
                 iargs = instanceArgs((d as Type::TNamed).name);
                 ot = operandTy(p, funcs, f, o);
                 okBox = false;

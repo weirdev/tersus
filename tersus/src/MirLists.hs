@@ -13,24 +13,24 @@ import Data.Maybe (fromMaybe, listToMaybe)
 import Mir
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, instanceName, mentionsParameter)
 
--- A list is checked, validated and run by the executor as a list. Native code has no list: a `List<T>` is the struct `StdList<T>` of
+-- A list is checked, validated and run by the executor as a list. Native code has no list: a `List<T>` is the struct `List<T>` of
 -- lib/lists.tersus (the elements in an array on the heap, and how many are in use), and this makes the program that is validated the
 -- program with those. It runs after the validator, so the proofs about lists are the proofs of lists, and before ownership, which then
 -- sees an ordinary struct that owns a Box of an array.
 --
 -- Each operation on a list becomes a call of the function of the library (a call ends a block, so a block with one is cut there), each
--- `List<T>` in a type becomes `StdList<T>`, and a list written as a constant (`[1, 2]`) is made by a call of `stdListNew` and one of
--- `stdListPush` for each element. A comparison of lists stays as it is: native code compares a `StdList` as a list (the elements in use,
+-- `List<T>` in a type becomes `List<T>`, and a list written as a constant (`[1, 2]`) is made by a call of `listNew` and one of
+-- `listPush` for each element. A comparison of lists stays as it is: native code compares a `List` as a list (the elements in use,
 -- not the room that is left), and prints it as one.
 
--- A Box is lowered the same way (step 29): a `Box<T>` whose T is not an array is the struct `StdBox<T>` of lib/box.tersus, one filled slot at
--- an address that its drop frees, and `Box::new(x)` and `Box::unbox(b)` are calls of `stdBoxNew` and `stdBoxUnbox`. A field read, a test of a
--- variant or a cast through a Box stays one through the `StdBox`, which native code reads at its address as it read a Box (the address is
+-- A Box is lowered the same way (step 29): a `Box<T>` whose T is not an array is the struct `Box<T>` of lib/box.tersus, one filled slot at
+-- an address that its drop frees, and `Box::new(x)` and `Box::unbox(b)` are calls of `boxNew` and `boxUnbox`. A field read, a test of a
+-- variant or a cast through a Box stays one through the `Box`, which native code reads at its address as it read a Box (the address is
 -- the struct's only word), so a `match` still takes the fields out of a Box that is not used again.
 --
--- A Box of an array, of a size or of any (`Box<Array<T, n>>`, `Box<Array<T>>`), is a `StdList<T>` with as many elements as it has room for:
--- `size`, `get`, `first`, `last` and `set` of one are those of a list, `Array::boxed(n, x)` is a call of `stdListFilled`, `Array::empty()` one
--- of `stdListNew`, and the unsizing of a Box of an array of a size is the list as it is. `Box::new` of an inline array and `Box::unbox` of a
+-- A Box of an array, of a size or of any (`Box<Array<T, n>>`, `Box<Array<T>>`), is a `List<T>` with as many elements as it has room for:
+-- `size`, `get`, `first`, `last` and `set` of one are those of a list, `Array::boxed(n, x)` is a call of `listFilled`, `Array::empty()` one
+-- of `listNew`, and the unsizing of a Box of an array of a size is the list as it is. `Box::new` of an inline array and `Box::unbox` of a
 -- Box of an array stay `MakeBox` and `Unbox`, which the emitters make of the list: the array's bytes are moved into memory of their own, or
 -- out of it.
 
@@ -126,9 +126,9 @@ lowerLists library program
 -- The type that a list or a Box is: the struct of the library, with the type of the elements
 listType :: Type -> Type
 listType ty = case ty of
-    TList t -> TNamed "StdList" [ArgType (listType t)]
+    TList t -> TNamed "List" [ArgType (listType t)]
     TArrayOf t size -> TArrayOf (listType t) size
-    TBox (TArrayOf t _) -> TNamed "StdList" [ArgType (listType t)]
+    TBox (TArrayOf t _) -> TNamed "List" [ArgType (listType t)]
     TBox t -> boxStruct t
     TAddr t -> TAddr (listType t)
     TUninit t -> TUninit (listType t)
@@ -140,7 +140,7 @@ listType ty = case ty of
 
 -- The struct that a Box of the type is
 boxStruct :: Type -> Type
-boxStruct t = TNamed "StdBox" [ArgType (listType t)]
+boxStruct t = TNamed "Box" [ArgType (listType t)]
 
 renameArg :: Arg -> Arg
 renameArg (ArgType t) = ArgType (listType t)
@@ -251,7 +251,7 @@ lowerFunction original fn =
         , fnSpec = emptySpec
         }
   where
-    -- (a Box of an array made from a list is the list itself, as a Box of an array is a StdList: the elements are
+    -- (a Box of an array made from a list is the list itself, as a Box of an array is a List: the elements are
     -- already in their own memory, and making an inline array of them first would need a size the type does not give)
     boxedFromLists =
         Map.fromList
@@ -310,12 +310,12 @@ lowerFunction original fn =
             Unbox o -> heldIn o
             _ -> return Nothing
         case (rv, boxed) of
-            (ListOp NewBoxed [n, x], _) | TBox (TArrayOf element _) <- destTy -> operandFor element x >>= \x' -> callTo "stdListFilled" [n, x'] dest
-            (ListOp NewEmptyBoxed [], _) | TBox TArrayOf{} <- destTy -> callTo "stdListNew" [] dest
+            (ListOp NewBoxed [n, x], _) | TBox (TArrayOf element _) <- destTy -> operandFor element x >>= \x' -> callTo "listFilled" [n, x'] dest
+            (ListOp NewEmptyBoxed [], _) | TBox TArrayOf{} <- destTy -> callTo "listNew" [] dest
             (Unsize o, _) -> emit (Assign dest (Use (renameOperand o)))
             (MakeBox o, _) | Just l <- operandLocal o, Just src <- Map.lookup l boxedFromLists -> emit (Assign dest (Use src))
-            (MakeBox o, _) | TBox held <- destTy, not (isArrayType held) -> operandFor held o >>= \o' -> callTo "stdBoxNew" [o'] dest
-            (Unbox o, Just _) -> callTo "stdBoxUnbox" [renameOperand o] dest
+            (MakeBox o, _) | TBox held <- destTy, not (isArrayType held) -> operandFor held o >>= \o' -> callTo "boxNew" [o'] dest
+            (Unbox o, Just _) -> callTo "boxUnbox" [renameOperand o] dest
             _ -> lowerOther dest destTy rv
 
     -- (the type a Box that is not of an array holds, if the operand is one)
@@ -334,8 +334,8 @@ lowerFunction original fn =
                 let element = case destTy of
                         TList t -> t
                         _ -> TInt
-                callTo "stdListNew" [] dest
-                mapM_ (\o -> operandFor element o >>= \o' -> callTo "stdListPush" [Copy dest, o'] dest) os
+                callTo "listNew" [] dest
+                mapM_ (\o -> operandFor element o >>= \o' -> callTo "listPush" [Copy dest, o'] dest) os
             _ -> rewritten dest destTy rv
 
     rewritten dest destTy rv = do
@@ -377,7 +377,7 @@ lowerFunction original fn =
         l <- operandFor listTy (head os)
         let struct = case listType listTy of
                 TNamed base args -> instanceName base args
-                _ -> "StdList"
+                _ -> "List"
         case (op, drop 1 os) of
             -- (an element is read from the list where it is: a part that is only read is not copied)
             (Length, []) -> emit (Assign dest (ReadField l struct "len"))
@@ -389,9 +389,9 @@ lowerFunction original fn =
                 emit (Assign index (BinaryOp Sub (Copy n) (Const (CInt 1))))
                 emit (Assign dest (ListOp Get [l, Copy index]))
             (Get, [i]) -> emit (Assign dest (ListOp Get [l, i]))
-            (Push, [x]) -> operandFor element x >>= \x' -> callTo "stdListPush" [l, x'] dest
-            (Pop, []) -> callTo "stdListPop" [l] dest
-            (Set, [i, x]) -> operandFor element x >>= \x' -> callTo "stdListSet" [l, i, x'] dest
+            (Push, [x]) -> operandFor element x >>= \x' -> callTo "listPush" [l, x'] dest
+            (Pop, []) -> callTo "listPop" [l] dest
+            (Set, [i, x]) -> operandFor element x >>= \x' -> callTo "listSet" [l, i, x'] dest
             (FromList, []) -> emit (Assign dest (ListOp FromList [l]))
             _ -> emit (Assign dest (ListOp op os))
 
@@ -497,8 +497,8 @@ lowerFunction original fn =
                     TList t -> t
                     _ -> TInt
             temp <- newTemp listTy
-            callTo "stdListNew" [] temp
-            mapM_ (\x -> operandFor element (Const x) >>= \x' -> callTo "stdListPush" [Copy temp, x'] temp) cs
+            callTo "listNew" [] temp
+            mapM_ (\x -> operandFor element (Const x) >>= \x' -> callTo "listPush" [Copy temp, x'] temp) cs
             return (Copy temp)
         CData name fs -> do
             let fieldTypes = fieldTypesOf name
