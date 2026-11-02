@@ -53,6 +53,8 @@ testMirVerify =
         , TestCase "Uninit function type round trips through MIR data" uninitRoundTrip
         , TestList "function-list identity, interpreted"
             [TestCase name (rawInterpreted expected input) | (name, input, expected) <- functionCases]
+        , TestList "call metadata, interpreted"
+            [TestCase name (rawInterpreted expected input) | (name, input, expected) <- callCases]
         , TestCase "pre-erasure and function-list cases, natively" rawNative
         , TestParallel
             "every example, natively"
@@ -158,7 +160,7 @@ rawNative = withVerifier $ \exe -> case rawLibrary of
         failures <- mapM (check exe) (("raw lists and Boxes library", library, True) : blockCases)
         functionFailures <- mapM (\(name, input, expected) -> case input of
             Error e -> pure (Just (name ++ ": " ++ e))
-            Ok text -> check exe (name, text, expected)) functionCases
+            Ok text -> check exe (name, text, expected)) (functionCases ++ callCases)
         pure $ case [failure | Just failure <- failures ++ functionFailures] of
             [] -> Nothing
             bad -> Just (unlines bad)
@@ -170,6 +172,103 @@ rawNative = withVerifier $ \exe -> case rawLibrary of
                 || not expected && code == ExitSuccess && sameText output "1" && not (null errors) && not ("not the MIR as data" `isInfixOf` errors)
                 then Nothing
                 else Just (name ++ ": expected " ++ show expected ++ ", got " ++ show (code, output, errors))
+
+callCases :: [(String, Result String String, Bool)]
+callCases =
+    [(name, mapResult writeProgram (lowerSource True source), True) | (name, source) <- sources]
+        ++ [(name, mapResult (writeProgram . mutate) (lowerSource True source), False) | (name, source, mutate) <- negatives]
+        ++ [(name, Ok (blockCall expected actual borrowed), accepted) | (name, expected, actual, borrowed, accepted) <- blocks]
+        ++ [(name, Ok (derefFixture parameter borrowed result operand), False) | (name, parameter, borrowed, result, operand) <- badDerefs]
+  where
+    mutableSource = "fn take(n: &mut Int) -> Int { return 0; }; x = 1; return take(&mut x);"
+    sources =
+        [ ("read callee accepts mutable borrow", "fn read(n: &Int) -> Int { return n; }; x = 1; return read(&mut x);")
+        , ("mutable parameter with contract", "fn increment(n: &mut Int) -> Int writes(n) [{ affirm *n < 100; }] [{ affirm *n = old(*n) + 1; affirm return = *n; }] { *n = *n + 1; return *n; }; x = 4; y = increment(&mut x); return x * 10 + y;")
+        , ("mutable field parameter", "struct Point { x: Int, y: Int }; fn bumpX(p: &mut Point) -> Int writes(p.x) [{ }] [{ affirm (*p).x = old((*p).x) + 1; affirm (*p).y = old((*p).y); }] { (*p).x = (*p).x + 1; return (*p).x; }; pt = Point { x: 1, y: 2 }; n = bumpX(&mut pt); return n * 100 + pt.x * 10 + pt.y;")
+        , ("mutable parameter in loop", "fn inc(n: &mut Int) -> Int [{ }] [{ affirm *n = old(*n) + 1; }] { *n = *n + 1; return *n; }; x = 0; while x < 3 [{ affirm x >= 0; affirm x <= 3; }] shrinks 3 - x { y = inc(&mut x); }; return x;")
+        , ("mutable call reaches old-fact proof check", "fn inc(n: &mut Int) -> Int [{ }] [{ }] { *n = *n + 1; return *n; }; x = 4; y = inc(&mut x); affirm x = 4; return y;")
+        , ("mutable call reaches new-fact proof check", "fn inc(n: &mut Int) -> Int [{ }] [{ affirm *n = old(*n) + 1; }] { *n = *n + 1; return *n; }; x = 4; y = inc(&mut x); affirm x = 5; return y;")
+        , ("mutable field reborrow", "struct Point { x: Int, y: Int }; fn good(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { q = &mut (*p).x; *q = 9; return (*p).x; }; pt = Point { x: 1, y: 2 }; return good(&mut pt);")
+        , ("mutable reference returned with contract", "fn upd(n: &mut Int) -> &mut Int from n [{ }] [{ }] { return n; }; x = 1; r = upd(&mut x); *r = 7; return x;")
+        , ("mutable reference returned", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return a;")
+        , ("mutable reference returned through parameter", "fn f(x: &mut Int) -> &mut Int from x { return &mut *x; }; a = 1; r = f(&mut a); *r = 9; return a;")
+        , ("mutable result read after write", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return *r;")
+        , ("native returned update reference", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return a;")
+        , ("native update parameter", "fn inc(x: &mut Int) -> Int { *x = *x + 1; return *x; }; a = 41; inc(&mut a); return a;")
+        , ("generic Block cast reaches erasure", "fn f<T>(p: Addr<T>, ghost b: Block<T>) -> Int [{ affirm base(b) = p; affirm whole(b); affirm cap(b) >= 1; affirm count(b) = 0; }] [{ }] { c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, 7, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c); }; (p, b) = Addr::alloc(1); return f(p, b);")
+        ]
+    negatives =
+        [ ("read borrow is not an update argument", mutableSource, readInsteadOfMutable)
+        , ("owned value is not an update argument", mutableSource, ownedInsteadOfMutable)
+        , ("wrong update pointee", mutableSource, wrongMutablePointee)
+        , ("mutable function value is not a read function", "fn take(n: &mut Int) -> Int { return 0; }; g = take; x = 1; return g(&mut x);", wrongFunctionKind False)
+        , ("read function value is not an update function", "fn take(n: &Int) -> Int { return 0; }; g = take; x = 1; return g(&mut x);", wrongFunctionKind True)
+        ]
+    blocks =
+        [ ("generic Block payload is resolved", "param \"T\"", "int", False, True)
+        , ("concrete Block payload matches", "int", "int", False, True)
+        , ("concrete Block payload mismatch", "int", "bool", False, False)
+        , ("generic Block argument is not a reference", "param \"T\"", "int", True, False)
+        , ("Block payload keeps nested reference kind", "list int", "list ref int", False, False)
+        , ("unknown Block payload is refused", "param \"T\"", "var 0", False, False)
+        ]
+    badDerefs =
+        [ ("ordinary local is not a reference slot", False, False, "int", "copy 1")
+        , ("stray borrowed flag is not a parameter slot", False, True, "int", "copy 1")
+        , ("constant is not a reference slot", True, True, "int", "const int 0")
+        , ("borrowed slot keeps its pointee type", True, True, "bool", "copy 1")
+        ]
+    derefFixture parameter borrowed result operand = unlines $
+        [ "tersus-mir 1"
+        , "function \"probe\" params " ++ (if parameter then "1 1" else "0") ++ " returns some " ++ result ++ " sizeparams 0 typeparams 0 borrowed " ++ (if borrowed then "1 1" else "0") ++ " mutborrowed " ++ (if borrowed then "1 1" else "0") ++ " from 0"
+        , "local 0 none " ++ result, "local 1 none int", "block 0"
+        ] ++ ["assign 1 use const int 4" | not parameter]
+          ++ ["assign 0 deref " ++ operand, "return", "end", "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0", "block 0", "return", "end"]
+    blockCall expected actual borrowed = unlines $
+        [ "tersus-mir 1"
+        , "function \"take\" params 1 1 returns some int sizeparams 0 typeparams " ++ (if expected == "param \"T\"" then "1 \"T\"" else "0") ++ " borrowed 0"
+        , "local 0 none int", "local 1 none block " ++ expected
+        , "block 0", "assign 0 use const int 0", "return", "end"
+        , "main \"main\" params 0 returns some int sizeparams 0 typeparams 0 borrowed 0"
+        , "local 0 none int", "local 1 none addr " ++ actual, "local 2 none block " ++ actual
+        ] ++ ["local 3 none ref block " ++ actual | borrowed]
+          ++ ["block 0", "assign 1 listop addrAlloc 1 const int 1", "assign 2 listop blockNew 2 copy 1 const int 1"]
+          ++ ["assign 3 borrow 2 0" | borrowed]
+          ++ ["call const fn \"take\" 1 copy " ++ (if borrowed then "3" else "2") ++ " 0 1", "block 1", "return", "end"]
+
+readInsteadOfMutable :: Program -> Program
+readInsteadOfMutable program = program{progMain = main{fnLocals = Map.map decl (fnLocals main), fnBlocks = Map.map block (fnBlocks main)}}
+  where
+    main = progMain program
+    decl d = d{localType = case localType d of TMutRef t -> TRef t; other -> other}
+    block b = b{blockStatements = map statement (blockStatements b)}
+    statement (Assign dest (Borrow root steps True)) = Assign dest (Borrow root steps False)
+    statement other = other
+
+ownedInsteadOfMutable :: Program -> Program
+ownedInsteadOfMutable program = case localNamed (progMain program) "x" of
+    Nothing -> program
+    Just x -> program{progMain = main{fnBlocks = Map.map block (fnBlocks main)}}
+      where
+        main = progMain program
+        block b = b{blockTerminator = case blockTerminator b of Call callee [_] dest next -> Call callee [Copy x] dest next; other -> other}
+
+wrongMutablePointee :: Program -> Program
+wrongMutablePointee program = case localNamed (progMain program) "x" of
+    Nothing -> program
+    Just x -> program{progMain = main{fnLocals = Map.mapWithKey decl (fnLocals main), fnBlocks = Map.map block (fnBlocks main)}}
+      where
+        main = progMain program
+        decl l d = d{localType = if l == x then TBool else case localType d of TMutRef TInt -> TMutRef TBool; other -> other}
+        block b = b{blockStatements = map statement (blockStatements b)}
+        statement (Assign dest (Use _)) | dest == x = Assign dest (Use (Const (CBool True)))
+        statement other = other
+
+wrongFunctionKind :: Bool -> Program -> Program
+wrongFunctionKind mutable program = case localNamed (progMain program) "g" of
+    Nothing -> program
+    Just g -> program{progMain = main{fnLocals = Map.adjust (\d -> d{localType = TFn [if mutable then TMutRef TInt else TRef TInt] TInt}) g (fnLocals main)}}
+      where main = progMain program
 
 uninitRoundTrip :: IO TestResult
 uninitRoundTrip = pure $ case [input | (name, input, _) <- functionCases, name == "function list Uninit argument"] of

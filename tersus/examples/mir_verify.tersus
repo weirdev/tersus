@@ -1961,6 +1961,9 @@ fn subType(p: &Program, wanted: &Type, actual: &Type, strict: Bool) -> Bool ~ {
     if wanted is Type::TAddr && actual is Type::TAddr {
         return subType(p, Box::unbox((wanted as Type::TAddr).inner), Box::unbox((actual as Type::TAddr).inner), strict);
     };
+    if wanted is Type::TBlock && actual is Type::TBlock {
+        return subType(p, Box::unbox((wanted as Type::TBlock).inner), Box::unbox((actual as Type::TBlock).inner), true);
+    };
     if wanted is Type::TNamed && actual is Type::TVariant {
         info = ctorInfo(p, (actual as Type::TVariant).name);
         return info.ok && info.typeName = (wanted as Type::TNamed).name;
@@ -2032,7 +2035,12 @@ fn functionTypeOf(p: &Program, f: &Function) -> Type [{ }] [{ }] {
         if lt.ok { ty = lt.ty; };
         borrowed = false;
         for b in f.borrowed { if b = pid { borrowed = true; }; };
-        if borrowed { ty = Type::TRef { inner: Box::new(ty) }; };
+        if borrowed {
+            mutable = false;
+            for b in f.mutBorrowed { if b = pid { mutable = true; }; };
+            if mutable { ty = Type::TMutRef { inner: Box::new(ty) }; }
+            else { ty = Type::TRef { inner: Box::new(ty) }; };
+        };
         args = push(args, ty);
     };
     ret = Type::TVar { n: 0 };
@@ -2681,6 +2689,18 @@ fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRe
     return TyRes { ok: true, ty: ty };
 };
 
+fn borrowedParameter(f: &Function, o: &Operand) -> Bool ~ {
+    locals = operandLocals(o);
+    if size(locals) != 1 { return false; };
+    id = get(locals, 0);
+    if !localTy(f, id).ok { return false; };
+    parameter = false;
+    for p in f.params { if p = id { parameter = true; }; };
+    if !parameter { return false; };
+    for b in f.borrowed { if b = id { return true; }; };
+    return false;
+};
+
 fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rvalue) -> List<String> ~ {
     out = [];
     dst = clone(d);
@@ -2840,7 +2860,9 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
         Rvalue::Deref { o: o } => {
             ot = operandTy(p, funcs, f, o);
             if !ot.ok { out = one("a reference is read through a value that is not there"); }
-            else if ot.ty is Type::TRef {
+            else if borrowedParameter(f, o) {
+                if !subType(p, dst, ot.ty, true) { out = one("what a reference is to is ".then(renderType(ot.ty)).then(", not ").then(renderType(dst))); };
+            } else if ot.ty is Type::TRef {
                 inner = Box::unbox((ot.ty as Type::TRef).inner);
                 if !sub(p, dst, inner) { out = one("what a reference is to is ".then(renderType(inner)).then(", not ").then(renderType(dst))); };
             } else if ot.ty is Type::TMutRef {
@@ -2931,6 +2953,16 @@ fn fnTypeAfterSizes(f: &Function, t: &Type, args: &List<Operand>) -> TyRes ~ {
     return TyRes { ok: true, ty: clone(t) };
 };
 
+fn callArgFits(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Operand) -> Bool ~ {
+    actual = operandTy(p, funcs, f, o);
+    if wanted is Type::TMutRef { return actual.ok && actual.ty is Type::TMutRef && subType(p, wanted, actual.ty, true); };
+    if wanted is Type::TBlock { return actual.ok && actual.ty is Type::TBlock && subType(p, wanted, actual.ty, true); };
+    if wanted is Type::TRef && actual.ok && actual.ty is Type::TMutRef {
+        return subType(p, Box::unbox((wanted as Type::TRef).inner), Box::unbox((actual.ty as Type::TMutRef).inner), true);
+    };
+    return fits(p, funcs, f, wanted, o);
+};
+
 fn callWhy(p: &Program, funcs: &List<String>, f: &Function, callee: &Operand, args: &List<Operand>, dest: Int) -> List<String> ~ {
     ct = operandTy(p, funcs, f, callee);
     if !ct.ok { return one("the callee is not a function"); };
@@ -2945,7 +2977,7 @@ fn callWhy(p: &Program, funcs: &List<String>, f: &Function, callee: &Operand, ar
     i = 0;
     while i < size(args) && i < size(params) [{ affirm i >= 0; affirm i <= size(args); affirm i <= size(params); }] ~ {
         if i < size(params) {
-            if !fits(p, funcs, f, get(params, i), get(args, i)) {
+            if !callArgFits(p, funcs, f, get(params, i), get(args, i)) {
                 out = push(out, "argument ".then(String::fromInt(i + 1)).then(" is not ").then(renderType(get(params, i))));
             };
         };
