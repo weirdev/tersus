@@ -12,7 +12,7 @@ import Cli (Command (..), makesIr)
 import MirData (writeProgram)
 import Pipeline (ownedSource)
 import Hash (fingerprint)
-import PreludeSource (boxSource, cloneSource, emitterSource, eqSource, listsSource, preludeSource, stringSource)
+import PreludeSource (boxSource, cloneSource, compilerSourceHash, emitterSource, eqSource, listsSource, preludeSource, stdlibSource, stringSource)
 import TestHarness
 import TestNative (clangAvailable)
 import Utils
@@ -39,7 +39,7 @@ hashShape :: IO TestResult
 hashShape =
     pure $
         if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
-            && emitterHash == fingerprint [seedHash, emitterSource, preludeSource, listsSource, stringSource, cloneSource, eqSource, boxSource]
+            && emitterHash == fingerprint [seedHash, emitterSource, preludeSource, listsSource, stringSource, cloneSource, eqSource, boxSource, stdlibSource, compilerSourceHash]
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, emitterHash))
 

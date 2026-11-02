@@ -13,10 +13,27 @@ module PreludeSource
     , mirVerifySource
     , mirEraseSource
     , stdlibSource
+    , compilerSourceHash
     , seedSha256
     ) where
 
+import Data.List (isSuffixOf, sort)
+import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
+import System.Directory (listDirectory)
+
+compilerSourceHash :: String
+compilerSourceHash =
+    $( do
+        addDependentFile "tersus.cabal"
+        files <- runIO (sort . filter (isSuffixOf ".hs") <$> listDirectory "src")
+        inputs <- mapM (\file -> do
+            let path = "src/" ++ file
+            addDependentFile path
+            contents <- runIO (readFile path)
+            pure [file, contents]) files
+        lift (fingerprint (concat inputs))
+     )
 
 -- The text of lib/prelude.tersus, read when this module is compiled
 preludeSource :: String

@@ -558,9 +558,9 @@ inferExprR ctx env expr =
                 then do
                     owner <- ownerOfValue "clone" (tType receiver')
                     name <- resolveAssociated owner "clone"
-                    let input = case Map.lookup "Clone" (tcTraits s) of
-                            Just functions | name == implFunctionName owner (Just "Clone") "clone" -> cloneTraitInput functions receiver'
-                            _ -> receiver'
+                    input <- case Map.lookup "Clone" (tcTraits s) of
+                        Just functions | name == implFunctionName owner (Just "Clone") "clone" -> cloneTraitInput functions receiver'
+                        _ -> return receiver'
                     callResolved name [input]
                 else cloneCall args
         F (Var ('.' : method)) (receiver : args) -> methodCall method (receiver : args)
@@ -761,7 +761,7 @@ inferExprR ctx env expr =
                                         Just (TFn ptys _) -> ptys
                                         Just (TForall _ _ (TFn ptys _)) -> ptys
                                         _ -> []
-                                input = case params of TRef _ : _ -> cloneInput x'; _ -> x'
+                            input <- case params of TRef _ : _ -> cloneInput x'; _ -> return x'
                             callResolved "cloneBoxedArray" [input]
                         else traitCall "Clone" "clone" [x]
                 -- (a tuple is cloned part by part, as a struct is by its impl)
@@ -772,23 +772,25 @@ inferExprR ctx env expr =
                     return (TExpr xt (F (Val (builtinFunct (Ctor name args (map fst fields)))) (map tExpr parts)) parts)
                 _ -> cloneTrait x'
         _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
-    cloneInput x =
-        let place = case x of
-                TExpr ty (F funct [_]) [inner] | builtinHead ctx env funct == Just UnBox ->
-                    TExpr ty (F (Val (builtinFunct DerefOf)) [tExpr inner]) [inner]
-                _ -> x
-            projection = case tExpr place of Var _ -> False; expr -> clonePlace expr
-         in if projection
-                then TExpr (TRef (tType place)) (F (Val (builtinFunct BorrowOf)) [tExpr place]) [place]
-                else x
+    cloneInput x = do
+        boxed <- throughBox x
+        let projection = case tExpr x of Var _ -> False; expr -> clonePlace expr
+        return (if projection && not boxed
+            then TExpr (TRef (tType x)) (F (Val (builtinFunct BorrowOf)) [tExpr x]) [x]
+            else x)
+    throughBox (TExpr ty _ children) = do
+        resolved <- unref <$> zonk ty
+        case resolved of
+            TBox _ -> return True
+            _ -> or <$> mapM throughBox children
     cloneTraitInput functions x = case [traitFnSignature f | f <- functions, traitFnName f == "clone"] of
         Signature [TRef (TNamed "Self" [])] _ _ _ _ _ : _ -> cloneInput x
-        _ -> x
+        _ -> return x
     cloneTrait x = do
         s <- getState
         case Map.lookup "Clone" (tcTraits s) of
             Just functions -> do
-                let input = cloneTraitInput functions x
+                input <- cloneTraitInput functions x
                 owner <- ownerThroughTrait "Clone" functions "clone" [tType x]
                 callResolved (implFunctionName owner (Just "Clone") "clone") [input]
             Nothing -> traitCall "Clone" "clone" [tExpr x]

@@ -53,12 +53,19 @@ testCopies =
                 ]
             , TestList
                 "single Clone dispatch"
-                [ cloneDispatch "list" "<List as Clone>::clone[Token]" ("xs = push([], Token { n: 7, xs: [1] }); ys = clone(xs); return get(ys, 0).n;") 7
-                , cloneDispatch "array" "<Array as Clone>::clone[Token]" "fn singleton() -> Array<Token, 1> { return Array::fromList(push([], Token { n: 7, xs: [1] })); }; xs = singleton(); ys = clone(xs); return get(ys, 0).n;" 7
-                , cloneDispatch "boxed array" "cloneBoxedArray[Token]" "fn singleton() -> Array<Token, 1> { return Array::fromList(push([], Token { n: 7, xs: [1] })); }; fn duplicate(xs: &Box<Array<Token>>) -> Box<Array<Token>> [{ }] [{ affirm size(return) = size(xs); }] { return clone(xs); }; xs = Box::new(singleton()); ys = duplicate(xs); return get(ys, 0).n;" 7
-                , cloneDispatch "Box" "<Box as Clone>::clone[Token]" ("xs = Box::new(Token { n: 7, xs: [1] }); ys = clone(xs); return Box::unbox(ys).n;") 7
-                , cloneDispatch "derived struct" "<Wrapped as Clone>::clone" ("struct Wrapped { token: Token }; impl Clone for Wrapped { }; xs = Wrapped { token: Token { n: 7, xs: [1] } }; ys = clone(xs); return ys.token.n;") 7
-                , cloneDispatch "derived enum" "<Wrapped as Clone>::clone" ("enum Wrapped { Present { token: Token }, Empty }; impl Clone for Wrapped { }; xs = Wrapped::Present { token: Token { n: 7, xs: [1] } }; ys = clone(xs); return (ys as Wrapped::Present).token.n;") 7
+                [ cloneDispatch "list" "<List as Clone>::clone[Token]" ("xs = push([], Token { n: 7, xs: [1] }); ys = clone(xs); return get(ys, 0).n;") 7 0
+                , cloneDispatch "array" "<Array as Clone>::clone[Token]" "fn singleton() -> Array<Token, 1> { return Array::fromList(push([], Token { n: 7, xs: [1] })); }; xs = singleton(); ys = clone(xs); return get(ys, 0).n;" 7 0
+                , cloneDispatch "boxed array" "cloneBoxedArray[Token]" "fn singleton() -> Array<Token, 1> { return Array::fromList(push([], Token { n: 7, xs: [1] })); }; fn duplicate(xs: &Box<Array<Token>>) -> Box<Array<Token>> [{ }] [{ affirm size(return) = size(xs); }] { return clone(xs); }; xs = Box::new(singleton()); ys = duplicate(xs); return get(ys, 0).n;" 7 1
+                , cloneDispatch "Box" "<Box as Clone>::clone[Token]" ("xs = Box::new(Token { n: 7, xs: [1] }); ys = clone(xs); return Box::unbox(ys).n;") 7 2
+                , cloneDispatch "derived struct" "<Wrapped as Clone>::clone" ("struct Wrapped { token: Token }; impl Clone for Wrapped { }; xs = Wrapped { token: Token { n: 7, xs: [1] } }; ys = clone(xs); return ys.token.n;") 7 0
+                , cloneDispatch "derived enum" "<Wrapped as Clone>::clone" ("enum Wrapped { Present { token: Token }, Empty }; impl Clone for Wrapped { }; xs = Wrapped::Present { token: Token { n: 7, xs: [1] } }; ys = clone(xs); return (ys as Wrapped::Present).token.n;") 7 0
+                , testCase "cloning boxed contents preserves both words and the source" (runs boxedContents (VInt 7096))
+                , TestCase "cloning boxed contents does not synthesize a wrapper loan" (noCloneBorrow boxedContents)
+                , testCase "cloning a field through a Box keeps its snapshot" (runs boxedField (VInt 7013))
+                , TestCase "cloning a field through a Box keeps its materialization" (noCloneBorrow boxedField)
+                , testCase "cloning a field of a boxed list element keeps its snapshot" (runs boxedListField (VInt 7013))
+                , TestCase "a resolved Box in a list element is not borrowed through" (noCloneBorrow boxedListField)
+                , testCase "a terminal Box field is cloned as a Box, not its referent" (runs "enum CloneBoxNode { Word, Ref { inner: Box<CloneBoxNode> } }; impl Clone for CloneBoxNode { }; struct CloneBoxHolder { ty: CloneBoxNode }; h = CloneBoxHolder { ty: CloneBoxNode::Ref { inner: Box::new(CloneBoxNode::Word) } }; b = clone((h.ty as CloneBoxNode::Ref).inner); return Box::unbox(b) is CloneBoxNode::Word;" (VBool True))
                 , testCase "a method clones an element once" (cloneOutput "xs = push([], Token { n: 7, xs: [1] }); ys = get(xs, 0).clone(); return ys.n;" "C" 7)
                 , testCase "nested Clone keeps exactly one custom call" (cloneOutput ("rows = push([], push([], Token { n: 7, xs: [1] })); copy = clone(rows); return get(get(copy, 0), 0).n;") "C" 7)
                 , testCase "a shadowed get is evaluated once and remains a call" (loweredOutput "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct Token { n: Int }; impl Clone for Token { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { writeByte(toByte(67)); return Self { n: self.n }; }; }; fn get(xs: &List<Token>, i: Int) -> Token { writeByte(toByte(71)); return Token { n: 7 }; }; xs = push([], Token { n: 1 }); ys = clone(get(xs, 0)); return ys.n;" "GC" 7)
@@ -193,6 +200,22 @@ testCopies =
                 ]
             ]
 
+boxedContents :: String
+boxedContents = "struct CloneBoxPair { first: Int, second: Int }; impl Clone for CloneBoxPair { }; b = Box::new(CloneBoxPair { first: 7, second: 13 }); copy = clone(Box::unbox(b)); return copy.first * 1000 + copy.second + Box::unbox(b).first * 10 + Box::unbox(b).second;"
+
+boxedField :: String
+boxedField = "struct CloneBoxFields { xs: List<Int>, n: Int }; impl Clone for CloneBoxFields { }; b = Box::new(CloneBoxFields { xs: [7], n: 13 }); xs = clone(b.xs); return get(xs, 0) * 1000 + Box::unbox(b).n;"
+
+boxedListField :: String
+boxedListField = "struct CloneBoxFields { xs: List<Int>, n: Int }; impl Clone for CloneBoxFields { }; boxes = push([], Box::new(CloneBoxFields { xs: [7], n: 13 })); xs = clone(get(boxes, 0).xs); return get(xs, 0) * 1000 + Box::unbox(get(boxes, 0)).n;"
+
+noCloneBorrow :: String -> IO TestResult
+noCloneBorrow source = do
+    result <- compileOnce source
+    pure $ case result of
+        Error e -> Just e
+        Ok program -> testAssertEq (length [() | M.BasicBlock stmts _ <- Map.elems (M.fnBlocks (M.progMain program)), M.Assign _ M.Borrow{} <- stmts]) 0
+
 tokenClone :: String
 tokenClone = "struct Token { n: Int, xs: List<Int> }; impl Clone for Token { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { writeByte(toByte(67)); return Self { n: self.n, xs: clone(self.xs) }; }; }; "
 
@@ -207,10 +230,10 @@ loweredOutput :: String -> String -> Integer -> TestResult
 loweredOutput source output value =
     testAssertEq (Compile.lowerSource True source `bindResult` runProgramOutput) (Ok (output, Just (MInt value)))
 
-cloneDispatch :: String -> String -> String -> Integer -> Test
-cloneDispatch label function body value = TestList label
-    [ testCase "custom Clone runs once" (cloneOutput body "C" value)
-    , TestCase "no materialized copy before Clone" (ownedCloneCopies function (tokenClone ++ body) 0)
+cloneDispatch :: String -> String -> String -> Integer -> Int -> Test
+cloneDispatch label function body value materializations = TestList label
+    [ testCase "reference Clone runs once" (cloneOutput body "C" value)
+    , TestCase "expected projection materialization" (ownedCloneCopies function (tokenClone ++ body) materializations)
     ]
 
 ownedCloneCopies :: String -> String -> Int -> IO TestResult
