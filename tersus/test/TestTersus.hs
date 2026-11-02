@@ -50,12 +50,12 @@ main = do
     case parseArguments args of
         Left message -> do
             hPutStr stderr (message ++ "\n")
-            hPutStr stderr "Usage: tersus-test [-j <n>] [group...]\n"
+            hPutStr stderr "Usage: tersus-test [-j <n>] [--skip <group>]... [group...]\n"
             exitFailure
         Right arguments -> do
             -- (the names of groups on the command line run only those: `tests testBorrow testCopies`)
             let chosen = argumentGroups arguments
-                selected = if null chosen then allGroups else [g | g <- allGroups, groupName g `elem` chosen]
+                selected = [g | g <- (if null chosen then allGroups else [h | h <- allGroups, groupName h `elem` chosen]), groupName g `notElem` argumentSkip arguments]
                 names = map groupName selected
             jobs <- case argumentJobs arguments of
                 Just n -> pure n
@@ -158,19 +158,23 @@ groupName (TestCase name _) = name
 data Arguments = Arguments
     { argumentJobs :: Maybe Int
     , argumentGroups :: [String]
+    , argumentSkip :: [String]
     , argumentChild :: Bool
     }
 
 parseArguments :: [String] -> Either String Arguments
-parseArguments = go (Arguments Nothing [] False)
+parseArguments = go (Arguments Nothing [] [] False)
   where
     go arguments [] = Right arguments
     go arguments ("--child" : rest) = go arguments{argumentChild = True} rest
+    go arguments ("--skip" : name : rest) = go arguments{argumentSkip = argumentSkip arguments ++ [name]} rest
+    go _ ["--skip"] = Left "--skip needs a group name"
     go arguments ("-j" : number : rest) = withJobs arguments number rest
     go arguments ("--jobs" : number : rest) = withJobs arguments number rest
     go _ ["-j"] = Left "-j needs a number of jobs"
     go _ ["--jobs"] = Left "--jobs needs a number of jobs"
     go arguments (argument : rest)
+        | "--skip=" `isPrefixOf` argument = go arguments{argumentSkip = argumentSkip arguments ++ [drop (length "--skip=") argument]} rest
         | "--jobs=" `isPrefixOf` argument = withJobs arguments (drop (length "--jobs=") argument) rest
         | "-j" `isPrefixOf` argument && length argument > 2 = withJobs arguments (drop 2 argument) rest
         | "-" `isPrefixOf` argument = Left ("unknown option: " ++ argument)
