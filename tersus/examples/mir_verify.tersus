@@ -1492,7 +1492,7 @@ fn simpleLayout(t: &Type) -> Simple [{ }] [{ }] {
 
 fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
     simple = simpleLayout(t);
-    if simple.ok { return clone(simple.layout); };
+    if simple.ok { return simple.layout; };
     if t is Type::TList { return Layout { size: 24, align: 8 }; };
     if t is Type::TBox && Box::unbox((t as Type::TBox).inner) is Type::TArray { return Layout { size: 24, align: 8 }; };
     arr = sizedArray(t);
@@ -1648,12 +1648,12 @@ fn findBlock(f: &Function, id: Int) -> Int [{ }] [{ affirm return >= 0 - 1; affi
 };
 
 fn typeEq(a: &Type, b: &Type) -> Bool ~ {
-    return renderType(clone(a)) = renderType(clone(b));
+    return renderType(a) = renderType(b);
 };
 
 fn isUnknown(t: &Type) -> Bool ~ {
     r = false;
-    match clone(t) {
+    match t {
         Type::TVar { n: n } => { r = true; },
         Type::TList { elem: e } => { r = isUnknown(Box::unbox(e)); },
         Type::TArray { elem: e, size: s } => { r = isUnknown(Box::unbox(e)); },
@@ -1696,7 +1696,7 @@ fn instanceArgs(name: &String) -> List<String> [{ }] [{ }] {
     start = 0;
     open = 0 - 1;
     i = 0;
-    bytes = clone(name.bytes);
+    bytes = name.bytes;
     n = size(bytes);
     while i < n [{ affirm i >= 0; affirm i <= n; }] shrinks n - i {
         c = toInt(get(bytes, i));
@@ -1877,8 +1877,8 @@ fn sub(p: &Program, wanted: &Type, actual: &Type) -> Bool ~ {
         return info.ok && info.typeName = (wanted as Type::TNamed).name;
     };
     if wanted is Type::TNamed && actual is Type::TNamed {
-        wn = clone((wanted as Type::TNamed).name);
-        an = clone((actual as Type::TNamed).name);
+        wn = (wanted as Type::TNamed).name;
+        an = (actual as Type::TNamed).name;
         if wn = an { return true; };
         if beforeAngle(wn) != beforeAngle(an) { return false; };
         wa = instanceArgs(wn);
@@ -1961,7 +1961,7 @@ fn constantFits(p: &Program, funcs: &List<String>, wanted: &Type, c: &Constant) 
     if wanted is Type::TRef { return constantFits(p, funcs, Box::unbox((wanted as Type::TRef).inner), c); };
     if wanted is Type::TParam { return true; };
     r = false;
-    match clone(c) {
+    match c {
         Constant::CInt { n: n } => {
             r = wanted is Type::TInt;
             if wanted is Type::TByte { r = n >= 0 && n < 256; };
@@ -2006,7 +2006,7 @@ fn constantFits(p: &Program, funcs: &List<String>, wanted: &Type, c: &Constant) 
 
 fn operandTy(p: &Program, funcs: &List<String>, f: &Function, o: &Operand) -> TyRes [{ }] [{ }] {
     r = noTy();
-    match clone(o) {
+    match o {
         Operand::Copy { local: l } => { r = localTy(f, l); },
         Operand::Move { local: l } => { r = localTy(f, l); },
         Operand::Const { value: c } => {
@@ -2028,7 +2028,7 @@ fn operandTy(p: &Program, funcs: &List<String>, f: &Function, o: &Operand) -> Ty
 
 fn fits(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Operand) -> Bool ~ {
     r = false;
-    match clone(o) {
+    match o {
         Operand::Copy { local: l } => {
             lt = localTy(f, l);
             r = lt.ok && sub(p, wanted, lt.ty);
@@ -2044,7 +2044,7 @@ fn fits(p: &Program, funcs: &List<String>, f: &Function, wanted: &Type, o: &Oper
 
 fn renderOperand(p: &Program, f: &Function, o: &Operand) -> String ~ {
     r = "the constant";
-    match clone(o) {
+    match o {
         Operand::Copy { local: l } => {
             lt = localTy(f, l);
             r = "_".then(String::fromInt(l));
@@ -2060,8 +2060,8 @@ fn renderOperand(p: &Program, f: &Function, o: &Operand) -> String ~ {
     return r;
 };
 
-fn one(s: &String) -> List<String> [{ }] [{ affirm size(return) = 1; }] {
-    return push([], clone(s));
+fn one(s: String) -> List<String> [{ }] [{ affirm size(return) = 1; }] {
+    return push([], s);
 };
 
 fn single<T>(x: &T) -> List<T> [{ }] [{ affirm size(return) = 1; }] {
@@ -2073,12 +2073,12 @@ fn pairOf<T>(x: &T, y: &T) -> List<T> [{ }] [{ affirm size(return) = 2; }] {
 };
 
 fn expectedWhy(p: &Program, f: &Function, t: &Type, o: &Operand) -> List<String> ~ {
-    return one(renderOperand(p, f, o).then(" is not ").then(renderType(clone(t))));
+    return one(renderOperand(p, f, o).then(" is not ").then(renderType(t)));
 };
 
 fn resultWhy(d: &Type, t: &Type) -> List<String> ~ {
     if typeEq(d, t) { return []; };
-    return one("the result is ".then(renderType(clone(t))).then(", not ").then(renderType(clone(d))));
+    return one("the result is ".then(renderType(t)).then(", not ").then(renderType(d)));
 };
 
 fn intWhys(p: &Program, funcs: &List<String>, f: &Function, os: &List<Operand>) -> List<String> ~ {
@@ -2091,7 +2091,7 @@ fn intWhys(p: &Program, funcs: &List<String>, f: &Function, os: &List<Operand>) 
 
 fn operandLocals(o: &Operand) -> List<Int> [{ }] [{ }] {
     r = [];
-    match clone(o) {
+    match o {
         Operand::Copy { local: l } => { r = single(l); },
         Operand::Move { local: l } => { r = single(l); },
         Operand::Const { value: c } => { },
@@ -2101,8 +2101,8 @@ fn operandLocals(o: &Operand) -> List<Int> [{ }] [{ }] {
 
 fn constantFunctions(c: &Constant) -> List<String> ~ {
     out = [];
-    match clone(c) {
-        Constant::CFn { name: name } => { out = single(clone(name)); },
+    match c {
+        Constant::CFn { name: name } => { out = single(name); },
         Constant::CList { items: items } => { for v in items { for n in constantFunctions(v) { out = push(out, clone(n)); }; }; },
         Constant::CArray { items: items } => { for v in items { for n in constantFunctions(v) { out = push(out, clone(n)); }; }; },
         Constant::CData { name: name, fields: fields, values: values } => { for v in values { for n in constantFunctions(v) { out = push(out, clone(n)); }; }; },
@@ -2114,7 +2114,7 @@ fn constantFunctions(c: &Constant) -> List<String> ~ {
 
 fn operandFunctions(o: &Operand) -> List<String> ~ {
     r = [];
-    match clone(o) {
+    match o {
         Operand::Const { value: c } => { r = constantFunctions(c); },
         Operand::Copy { local: l } => { },
         Operand::Move { local: l } => { },
@@ -2132,7 +2132,7 @@ fn refStepOperands(steps: &List<RefStep>) -> List<Operand> [{ }] [{ }] {
 
 fn rvalueOperands(rv: &Rvalue) -> List<Operand> [{ }] [{ }] {
     out = [];
-    match clone(rv) {
+    match rv {
         Rvalue::Use { o: o } => { out = single(o); },
         Rvalue::BinaryOp { op: op, a: a, b: b } => { out = pairOf(a, b); },
         Rvalue::ListOp { op: op, args: args } => { out = clone(args); },
@@ -2170,7 +2170,7 @@ fn sequenceFits(p: &Program, funcs: &List<String>, f: &Function, e: &Type, o: &O
             if inner is Type::TArray && sub(p, e, Box::unbox((inner as Type::TArray).elem)) { return true; };
         };
         if t is Type::TNamed {
-            name = clone((t as Type::TNamed).name);
+            name = (t as Type::TNamed).name;
             if beforeAngle(name) = "StdList" {
                 args = instanceArgs(name);
                 if size(args) = 1 {
@@ -2181,7 +2181,7 @@ fn sequenceFits(p: &Program, funcs: &List<String>, f: &Function, e: &Type, o: &O
         };
     };
     r = false;
-    match clone(o) {
+    match o {
         Operand::Const { value: c } => {
             if c is Constant::CArray {
                 r = true;
@@ -2204,7 +2204,7 @@ fn listLike(p: &Program, funcs: &List<String>, f: &Function, o: &Operand) -> Boo
         return inner is Type::TList || inner is Type::TArray || (inner is Type::TBox && Box::unbox((inner as Type::TBox).inner) is Type::TArray);
     };
     r = false;
-    match clone(o) {
+    match o {
         Operand::Const { value: c } => { r = c is Constant::CList || c is Constant::CArray; },
         Operand::Copy { local: l } => { },
         Operand::Move { local: l } => { },
@@ -2227,15 +2227,15 @@ fn addressWhy(p: &Program, funcs: &List<String>, f: &Function, o: &Operand, d: &
     elem = Box::unbox((ot.ty as Type::TAddr).inner);
     out = [];
     if resultCheck = 1 { out = resultWhy(d, Type::TInt); };
-    if resultCheck = 2 && !sub(p, d, elem) { out = one("the result is ".then(renderType(elem)).then(", not ").then(renderType(clone(d)))); };
-    if resultCheck = 3 && !fits(p, funcs, f, d, o) { out = one(renderOperand(p, f, o).then(" is not ").then(renderType(clone(d)))); };
+    if resultCheck = 2 && !sub(p, d, elem) { out = one("the result is ".then(renderType(elem)).then(", not ").then(renderType(d))); };
+    if resultCheck = 3 && !fits(p, funcs, f, d, o) { out = one(renderOperand(p, f, o).then(" is not ").then(renderType(d))); };
     return out;
 };
 
 fn permissionOrZero(d: &Type, rest: Int) -> List<String> ~ {
     if rest = 1 { return []; };
     if rest = 0 && d is Type::TInt { return []; };
-    return one("the result is ".then(renderType(clone(d))).then(", not Int"));
+    return one("the result is ".then(renderType(d)).then(", not Int"));
 };
 
 fn argAt(args: &List<Operand>, i: Int) -> Operand [{ }] [{ }] {
@@ -2255,7 +2255,7 @@ fn pointerWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int
     if op = 24 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         out = addressWhy(p, funcs, f, argAt(args, 0), d, 0, 0);
-        if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(clone(d))).then(", not an address")); };
+        if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(d)).then(", not an address")); };
         return out;
     };
     if op = 25 {
@@ -2265,14 +2265,14 @@ fn pointerWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int
     };
     if op = 26 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, clone(args));
-        if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(clone(d))).then(", not an address")); };
+        out = intWhys(p, funcs, f, args);
+        if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(d)).then(", not an address")); };
         return out;
     };
     if op = 27 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, clone(args));
-        if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(clone(d))).then(", not an address")); };
+        out = intWhys(p, funcs, f, args);
+        if !(d is Type::TAddr) { out = push(out, "the result is ".then(renderType(d)).then(", not an address")); };
         return out;
     };
     if op = 28 || op = 30 {
@@ -2321,22 +2321,21 @@ fn pointerWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int
 
 fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int, args: &List<Operand>, inSet: Bool) -> List<String> ~ {
     out = [];
-    dst = clone(d);
     n = size(args);
     if op = 0 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         if !listLike(p, funcs, f, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not a list")); };
-        for w in resultWhy(dst, Type::TInt) { out = push(out, clone(w)); };
+        for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 1 || op = 2 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !sequenceFits(p, funcs, f, dst, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(dst) }))); };
+        if !sequenceFits(p, funcs, f, d, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(clone(d)) }))); };
         return out;
     };
     if op = 3 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !sequenceFits(p, funcs, f, dst, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(dst) }))); };
+        if !sequenceFits(p, funcs, f, d, argAt(args, 0)) { out = one(renderOperand(p, f, argAt(args, 0)).then(" is not ").then(renderType(Type::TList { elem: Box::new(clone(d)) }))); };
         for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
         return out;
     };
@@ -2346,14 +2345,14 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
         if isSetOp { wantN = 3; };
         if n != wantN { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         elem = noTy();
-        if dst is Type::TList { elem = TyRes { ok: true, ty: clone(Box::unbox((dst as Type::TList).elem)) }; };
-        if !elem.ok && dst is Type::TArray && isSetOp { elem = TyRes { ok: true, ty: clone(Box::unbox((dst as Type::TArray).elem)) }; };
-        if !elem.ok && dst is Type::TBox && isSetOp {
-            inner = Box::unbox((dst as Type::TBox).inner);
+        if d is Type::TList { elem = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TList).elem)) }; };
+        if !elem.ok && d is Type::TArray && isSetOp { elem = TyRes { ok: true, ty: clone(Box::unbox((d as Type::TArray).elem)) }; };
+        if !elem.ok && d is Type::TBox && isSetOp {
+            inner = Box::unbox((d as Type::TBox).inner);
             if inner is Type::TArray { elem = TyRes { ok: true, ty: clone(Box::unbox((inner as Type::TArray).elem)) }; };
         };
-        if !elem.ok { return one("the result is ".then(renderType(dst)).then(", not a list")); };
-        if !fits(p, funcs, f, dst, argAt(args, 0)) { out = expectedWhy(p, f, dst, argAt(args, 0)); };
+        if !elem.ok { return one("the result is ".then(renderType(d)).then(", not a list")); };
+        if !fits(p, funcs, f, d, argAt(args, 0)) { out = expectedWhy(p, f, d, argAt(args, 0)); };
         xi = 1;
         if isSetOp {
             for w in intWhys(p, funcs, f, single(argAt(args, 1))) { out = push(out, clone(w)); };
@@ -2364,17 +2363,17 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
     };
     if op = 5 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if !fits(p, funcs, f, dst, argAt(args, 0)) { out = expectedWhy(p, f, dst, argAt(args, 0)); };
+        if !fits(p, funcs, f, d, argAt(args, 0)) { out = expectedWhy(p, f, d, argAt(args, 0)); };
         return out;
     };
     if op = 7 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if dst is Type::TArray {
-            e = Box::unbox((dst as Type::TArray).elem);
-            sz = (dst as Type::TArray).size;
+        if d is Type::TArray {
+            e = Box::unbox((d as Type::TArray).elem);
+            sz = (d as Type::TArray).size;
             given = argAt(args, 0);
             sizeOk = false;
-            match clone(given) {
+            match given {
                 Operand::Const { value: c } => {
                     if c is Constant::CInt && sz is Size::SConst && (c as Constant::CInt).n = (sz as Size::SConst).n { sizeOk = true; };
                 },
@@ -2389,8 +2388,8 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
     };
     if op = 8 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if dst is Type::TBox {
-            inner = Box::unbox((dst as Type::TBox).inner);
+        if d is Type::TBox {
+            inner = Box::unbox((d as Type::TBox).inner);
             if inner is Type::TArray && (inner as Type::TArray).size is Size::SAny {
                 e = Box::unbox((inner as Type::TArray).elem);
                 out = intWhys(p, funcs, f, single(argAt(args, 0)));
@@ -2402,8 +2401,8 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
     };
     if op = 9 {
         if n != 0 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if dst is Type::TBox {
-            inner = Box::unbox((dst as Type::TBox).inner);
+        if d is Type::TBox {
+            inner = Box::unbox((d as Type::TBox).inner);
             if inner is Type::TArray && (inner as Type::TArray).size is Size::SAny { return []; };
         };
         return one("Array::empty needs a result that is a Box of an array of any size");
@@ -2411,35 +2410,35 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
     if op = 10 || op = 11 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         if !fits(p, funcs, f, Type::TByte, argAt(args, 0)) { out = expectedWhy(p, f, Type::TByte, argAt(args, 0)); };
-        for w in resultWhy(dst, Type::TByte) { out = push(out, clone(w)); };
+        for w in resultWhy(d, Type::TByte) { out = push(out, clone(w)); };
         return out;
     };
     if op = 12 || op = 13 || op = 16 || op = 19 {
         if n != 0 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        return resultWhy(dst, Type::TInt);
+        return resultWhy(d, Type::TInt);
     };
     if op = 14 {
         if n != 2 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, clone(args));
-        for w in resultWhy(dst, Type::TInt) { out = push(out, clone(w)); };
+        out = intWhys(p, funcs, f, args);
+        for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 15 || op = 18 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
         if !fits(p, funcs, f, Type::TByte, argAt(args, 0)) { out = expectedWhy(p, f, Type::TByte, argAt(args, 0)); };
-        for w in resultWhy(dst, Type::TInt) { out = push(out, clone(w)); };
+        for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 17 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, clone(args));
-        for w in resultWhy(dst, Type::TInt) { out = push(out, clone(w)); };
+        out = intWhys(p, funcs, f, args);
+        for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op = 20 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, clone(args));
-        for w in resultWhy(dst, Type::TByte) { out = push(out, clone(w)); };
+        out = intWhys(p, funcs, f, args);
+        for w in resultWhy(d, Type::TByte) { out = push(out, clone(w)); };
         return out;
     };
     if op = 21 {
@@ -2451,22 +2450,22 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
             || fits(p, funcs, f, Type::TWord { signed: false, bits: 16 }, argAt(args, 0))
             || fits(p, funcs, f, Type::TWord { signed: false, bits: 32 }, argAt(args, 0));
         if !okFrom { out = expectedWhy(p, f, Type::TByte, argAt(args, 0)); };
-        for w in resultWhy(dst, Type::TInt) { out = push(out, clone(w)); };
+        for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
         return out;
     };
     if op >= 40 && op <= 44 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        out = intWhys(p, funcs, f, clone(args));
-        for w in resultWhy(dst, narrowType(op)) { out = push(out, clone(w)); };
+        out = intWhys(p, funcs, f, args);
+        for w in resultWhy(d, narrowType(op)) { out = push(out, clone(w)); };
         return out;
     };
     if op = 22 {
         if n != 0 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if dst is Type::TAddr { return []; };
-        return one("the result is ".then(renderType(dst)).then(", not an address"));
+        if d is Type::TAddr { return []; };
+        return one("the result is ".then(renderType(d)).then(", not an address"));
     };
     if op = 23 || op = 24 || op = 25 || op = 26 || op = 27 || op = 28 || op = 29 || op = 30 || op = 31 || op = 32 || op = 33 || op = 34 {
-        return pointerWhy(p, funcs, f, dst, op, args);
+        return pointerWhy(p, funcs, f, d, op, args);
     };
     if op >= 35 && op <= 38 {
         if n != 1 && op != 35 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
@@ -2475,12 +2474,12 @@ fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int,
     };
     if op = 39 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        return resultWhy(dst, Type::TInt);
+        return resultWhy(d, Type::TInt);
     };
     if op = 45 {
         if n != 1 { return one(wordOf(listWords(), op).then(" is applied to ").then(String::fromInt(n)).then(" operands")); };
-        if dst is Type::TArray {
-            e = Box::unbox((dst as Type::TArray).elem);
+        if d is Type::TArray {
+            e = clone(Box::unbox((d as Type::TArray).elem));
             if !sequenceFits(p, funcs, f, e, argAt(args, 0)) { return expectedWhy(p, f, Type::TList { elem: Box::new(e) }, argAt(args, 0)); };
             return out;
         };
@@ -2521,10 +2520,10 @@ fn ctorFields(p: &Program, ctor: &String) -> List<Field> ~ {
 fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRes ~ {
     lt = localTy(f, root);
     if !lt.ok { return noTy(); };
-    ty = clone(lt.ty);
-    if ty is Type::TRef { ty = Box::unbox(clone((ty as Type::TRef).inner)); };
-    if ty is Type::TMutRef { ty = Box::unbox(clone((ty as Type::TMutRef).inner)); };
-    if ty is Type::TBox { ty = Box::unbox(clone((ty as Type::TBox).inner)); };
+    ty = lt.ty;
+    if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
+    if ty is Type::TMutRef { ty = Box::unbox((ty as Type::TMutRef).inner); };
+    if ty is Type::TBox { ty = Box::unbox((ty as Type::TBox).inner); };
     i = 0;
     while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
         step = get(steps, i);
@@ -2537,19 +2536,19 @@ fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRe
             if !found { return noTy(); };
         };
         if step is RefStep::Index {
-            if ty is Type::TList { ty = Box::unbox(clone((ty as Type::TList).elem)); }
-            else if ty is Type::TArray { ty = Box::unbox(clone((ty as Type::TArray).elem)); }
+            if ty is Type::TList { ty = Box::unbox((ty as Type::TList).elem); }
+            else if ty is Type::TArray { ty = Box::unbox((ty as Type::TArray).elem); }
             else if ty is Type::TNamed {
                 iargs = instanceArgs((ty as Type::TNamed).name);
                 if size(iargs) = 1 {
                     et = textAt(iargs, 0);
-                    if et.ok { ty = clone(et.ty); } else { return noTy(); };
+                    if et.ok { ty = et.ty; } else { return noTy(); };
                 } else { return noTy(); };
             } else { return noTy(); };
         };
-        if ty is Type::TRef { ty = Box::unbox(clone((ty as Type::TRef).inner)); };
-        if ty is Type::TMutRef { ty = Box::unbox(clone((ty as Type::TMutRef).inner)); };
-        if ty is Type::TBox { ty = Box::unbox(clone((ty as Type::TBox).inner)); };
+        if ty is Type::TRef { ty = Box::unbox((ty as Type::TRef).inner); };
+        if ty is Type::TMutRef { ty = Box::unbox((ty as Type::TMutRef).inner); };
+        if ty is Type::TBox { ty = Box::unbox((ty as Type::TBox).inner); };
         i = i + 1;
     };
     return TyRes { ok: true, ty: ty };
@@ -2557,14 +2556,13 @@ fn placeWhy(p: &Program, f: &Function, root: Int, steps: &List<RefStep>) -> TyRe
 
 fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rvalue) -> List<String> ~ {
     out = [];
-    dst = clone(d);
-    match clone(rv) {
+    match rv {
         Rvalue::Use { o: o } => {
-            if !fits(p, funcs, f, dst, o) { out = expectedWhy(p, f, dst, o); };
+            if !fits(p, funcs, f, d, o) { out = expectedWhy(p, f, d, o); };
         },
         Rvalue::BinaryOp { op: op, a: a, b: b } => {
             if op = 5 || op = 6 {
-                out = resultWhy(dst, Type::TBool);
+                out = resultWhy(d, Type::TBool);
                 ta = operandTy(p, funcs, f, a);
                 tb = operandTy(p, funcs, f, b);
                 if ta.ok && tb.ok {
@@ -2576,27 +2574,27 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                 };
             } else if op >= 7 {
                 out = intWhys(p, funcs, f, pairOf(a, b));
-                for w in resultWhy(dst, Type::TBool) { out = push(out, clone(w)); };
+                for w in resultWhy(d, Type::TBool) { out = push(out, clone(w)); };
             } else {
                 out = intWhys(p, funcs, f, pairOf(a, b));
-                for w in resultWhy(dst, Type::TInt) { out = push(out, clone(w)); };
+                for w in resultWhy(d, Type::TInt) { out = push(out, clone(w)); };
             };
         },
         Rvalue::ListOp { op: op, args: args } => {
-            out = listOpWhy(p, funcs, f, dst, op, args, false);
+            out = listOpWhy(p, funcs, f, d, op, args, false);
         },
         Rvalue::MakeList { items: items } => {
-            if dst is Type::TList {
-                e = Box::unbox((dst as Type::TList).elem);
-                for o in items { if !fits(p, funcs, f, e, o) { out = push(out, renderOperand(p, f, o).then(" is not ").then(renderType(clone(e)))); }; };
-            } else { out = one("the result is ".then(renderType(dst)).then(", not a list")); };
+            if d is Type::TList {
+                e = Box::unbox((d as Type::TList).elem);
+                for o in items { if !fits(p, funcs, f, e, o) { out = push(out, renderOperand(p, f, o).then(" is not ").then(renderType(e))); }; };
+            } else { out = one("the result is ".then(renderType(d)).then(", not a list")); };
         },
         Rvalue::MakeBox { o: o } => {
-            if dst is Type::TBox {
-                held = Box::unbox((dst as Type::TBox).inner);
+            if d is Type::TBox {
+                held = Box::unbox((d as Type::TBox).inner);
                 if !fits(p, funcs, f, held, o) { out = expectedWhy(p, f, held, o); };
-            } else if dst is Type::TNamed && beforeAngle((dst as Type::TNamed).name) = "StdList" {
-                iargs = instanceArgs((dst as Type::TNamed).name);
+            } else if d is Type::TNamed && beforeAngle((d as Type::TNamed).name) = "StdList" {
+                iargs = instanceArgs((d as Type::TNamed).name);
                 ot = operandTy(p, funcs, f, o);
                 okBox = false;
                 if size(iargs) = 1 {
@@ -2607,23 +2605,23 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                     };
                 };
                 if !okBox { out = one(renderOperand(p, f, o).then(" is not an array")); };
-            } else { out = one("the result is ".then(renderType(dst)).then(", not a Box")); };
+            } else { out = one("the result is ".then(renderType(d)).then(", not a Box")); };
         },
         Rvalue::Unbox { o: o } => {
             ot = operandTy(p, funcs, f, o);
             matched = false;
             if ot.ok && ot.ty is Type::TBox {
                 held = Box::unbox((ot.ty as Type::TBox).inner);
-                if !sub(p, dst, held) { out = one("the result is ".then(renderType(dst)).then(", not ").then(renderType(held))); };
+                if !sub(p, d, held) { out = one("the result is ".then(renderType(d)).then(", not ").then(renderType(held))); };
                 matched = true;
             };
             if !matched && ot.ok && ot.ty is Type::TNamed && beforeAngle((ot.ty as Type::TNamed).name) = "StdList" {
                 iargs = instanceArgs((ot.ty as Type::TNamed).name);
                 if size(iargs) = 1 {
                     et = textAt(iargs, 0);
-                    if et.ok && dst is Type::TArray && sub(p, Box::unbox((dst as Type::TArray).elem), et.ty) { matched = true; };
+                    if et.ok && d is Type::TArray && sub(p, Box::unbox((d as Type::TArray).elem), et.ty) { matched = true; };
                 };
-                if !matched { out = one("the result is ".then(renderType(dst)).then(", not an array")); };
+                if !matched { out = one("the result is ".then(renderType(d)).then(", not an array")); };
                 matched = true;
             };
             if !matched { out = one(renderOperand(p, f, o).then(" is not a Box")); };
@@ -2631,8 +2629,8 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
         Rvalue::Unsize { o: o } => {
             ot = operandTy(p, funcs, f, o);
             okUn = false;
-            if dst is Type::TBox && ot.ok && ot.ty is Type::TBox {
-                de = Box::unbox((dst as Type::TBox).inner);
+            if d is Type::TBox && ot.ok && ot.ty is Type::TBox {
+                de = Box::unbox((d as Type::TBox).inner);
                 oe = Box::unbox((ot.ty as Type::TBox).inner);
                 if de is Type::TArray && oe is Type::TArray {
                     dsz = (de as Type::TArray).size;
@@ -2656,9 +2654,9 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                         i = i + 1;
                     };
                 };
-                if !namesOk { out = one(name.then(" is built with the wrong fields")); }
+                if !namesOk { out = one(clone(name).then(" is built with the wrong fields")); }
                 else {
-                    if !typeEq(dst, Type::TNamed { name: clone(info.typeName), base: clone(info.typeName), argc: 0, argTokens: [] }) { out = one("the result is ".then(renderType(dst)).then(", not ").then(info.typeName)); };
+                    if !typeEq(d, Type::TNamed { name: clone(info.typeName), base: clone(info.typeName), argc: 0, argTokens: [] }) { out = one("the result is ".then(renderType(d)).then(", not ").then(info.typeName)); };
                     i = 0;
                     while i < size(values) && i < size(info.fields) [{ affirm i >= 0; affirm i <= size(values); affirm i <= size(info.fields); }] ~ {
                         if i < size(info.fields) {
@@ -2676,8 +2674,8 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             else {
                 if !valueOf(p, funcs, f, info.typeName, o) { out = one(renderOperand(p, f, o).then(" is not a ").then(name)); };
                 ft = fieldType(info.fields, field);
-                if !ft.ok { out = push(out, name.then(" has no field ").then(field)); }
-                else if !sub(p, dst, ft.ty) { out = push(out, "the field is ".then(renderType(ft.ty)).then(", not ").then(renderType(dst))); };
+                if !ft.ok { out = push(out, clone(name).then(" has no field ").then(field)); }
+                else if !sub(p, d, ft.ty) { out = push(out, "the field is ".then(renderType(ft.ty)).then(", not ").then(renderType(d))); };
             };
         },
         Rvalue::IsVariant { o: o, name: name } => {
@@ -2685,7 +2683,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             if !info.ok { out = one("there is no constructor ".then(name)); }
             else {
                 if !valueOf(p, funcs, f, info.typeName, o) { out = one(renderOperand(p, f, o).then(" is not a ").then(info.typeName)); };
-                for w in resultWhy(dst, Type::TBool) { out = push(out, clone(w)); };
+                for w in resultWhy(d, Type::TBool) { out = push(out, clone(w)); };
             };
         },
         Rvalue::AsVariant { o: o, name: name } => {
@@ -2693,37 +2691,37 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             if !info.ok { out = one("there is no constructor ".then(name)); }
             else {
                 if !valueOf(p, funcs, f, info.typeName, o) { out = one(renderOperand(p, f, o).then(" is not a ").then(info.typeName)); };
-                if !sub(p, dst, Type::TVariant { name: clone(name) }) { out = push(out, "the result is ".then(renderType(dst)).then(", not ").then(name)); };
+                if !sub(p, d, Type::TVariant { name: clone(name) }) { out = push(out, "the result is ".then(renderType(d)).then(", not ").then(name)); };
             };
         },
         Rvalue::Copy { o: o } => {
-            if !fits(p, funcs, f, dst, o) { out = expectedWhy(p, f, dst, o); };
+            if !fits(p, funcs, f, d, o) { out = expectedWhy(p, f, d, o); };
         },
         Rvalue::Borrow { root: root, steps: steps, mutable: m } => {
             pt = placeWhy(p, f, root, steps);
             if !pt.ok { out = one("a reference is to a place that is not there"); }
-            else if dst is Type::TRef {
-                inner = Box::unbox((dst as Type::TRef).inner);
-                if !sub(p, inner, pt.ty) && !sub(p, pt.ty, inner) { out = one("a reference to ".then(renderType(pt.ty)).then(" is not ").then(renderType(dst))); };
-            } else if dst is Type::TMutRef {
-                inner = Box::unbox((dst as Type::TMutRef).inner);
+            else if d is Type::TRef {
+                inner = Box::unbox((d as Type::TRef).inner);
+                if !sub(p, inner, pt.ty) && !sub(p, pt.ty, inner) { out = one("a reference to ".then(renderType(pt.ty)).then(" is not ").then(renderType(d))); };
+            } else if d is Type::TMutRef {
+                inner = Box::unbox((d as Type::TMutRef).inner);
                 if !m { out = one("a read reference is not an update reference"); };
-                if !sub(p, inner, pt.ty) && !sub(p, pt.ty, inner) { out = one("a reference to ".then(renderType(pt.ty)).then(" is not ").then(renderType(dst))); };
-            } else { out = one("a reference is not ".then(renderType(dst))); };
+                if !sub(p, inner, pt.ty) && !sub(p, pt.ty, inner) { out = one("a reference to ".then(renderType(pt.ty)).then(" is not ").then(renderType(d))); };
+            } else { out = one("a reference is not ".then(renderType(d))); };
         },
         Rvalue::Deref { o: o } => {
             ot = operandTy(p, funcs, f, o);
             if !ot.ok { out = one("a reference is read through a value that is not there"); }
             else if ot.ty is Type::TRef {
                 inner = Box::unbox((ot.ty as Type::TRef).inner);
-                if !sub(p, dst, inner) { out = one("what a reference is to is ".then(renderType(inner)).then(", not ").then(renderType(dst))); };
+                if !sub(p, d, inner) { out = one("what a reference is to is ".then(renderType(inner)).then(", not ").then(renderType(d))); };
             } else if ot.ty is Type::TMutRef {
                 inner = Box::unbox((ot.ty as Type::TMutRef).inner);
-                if !sub(p, dst, inner) { out = one("what a reference is to is ".then(renderType(inner)).then(", not ").then(renderType(dst))); };
+                if !sub(p, d, inner) { out = one("what a reference is to is ".then(renderType(inner)).then(", not ").then(renderType(d))); };
             } else { out = one("a value that is not a reference is read through"); };
         },
         Rvalue::TakeField { local: l, name: name, field: field } => {
-            out = rvalueWhy(p, funcs, f, dst, Rvalue::ReadField { o: Operand::Copy { local: l }, name: clone(name), field: clone(field) });
+            out = rvalueWhy(p, funcs, f, d, Rvalue::ReadField { o: Operand::Copy { local: l }, name: clone(name), field: clone(field) });
         },
     };
     return out;
@@ -2731,7 +2729,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
 
 fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
     r = clone(t);
-    match clone(t) {
+    match t {
         Type::TArray { elem: e, size: s } => {
             ns = clone(s);
             if s is Size::SParam {
@@ -2775,7 +2773,7 @@ fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
 
 fn sizeOfOperand(f: &Function, o: &Operand) -> Size [{ }] [{ }] {
     r = Size::SAny;
-    match clone(o) {
+    match o {
         Operand::Const { value: c } => { if c is Constant::CInt { r = Size::SConst { n: (c as Constant::CInt).n }; }; },
         Operand::Copy { local: l } => {
             i = findLocal(f, l);
@@ -2834,7 +2832,7 @@ fn callWhy(p: &Program, funcs: &List<String>, f: &Function, callee: &Operand, ar
 
 fn statementLocals(st: &Statement) -> List<Int> [{ }] [{ }] {
     out = [];
-    match clone(st) {
+    match st {
         Statement::Assign { local: l, rv: rv } => {
             out = single(l);
             for o in rvalueOperands(rv) { for x in operandLocals(o) { out = push(out, x); }; };
@@ -2855,7 +2853,7 @@ fn statementLocals(st: &Statement) -> List<Int> [{ }] [{ }] {
 
 fn terminatorLocals(t: &Terminator) -> List<Int> [{ }] [{ }] {
     out = [];
-    match clone(t) {
+    match t {
         Terminator::Switch { cond: c, yes: yes, no: no } => { out = operandLocals(c); },
         Terminator::Call { callee: callee, args: args, dest: dest, next: next } => {
             out = single(dest);
@@ -2871,7 +2869,7 @@ fn terminatorLocals(t: &Terminator) -> List<Int> [{ }] [{ }] {
 
 fn terminatorFunctions(t: &Terminator) -> List<String> ~ {
     out = [];
-    match clone(t) {
+    match t {
         Terminator::Switch { cond: c, yes: yes, no: no } => { out = operandFunctions(c); },
         Terminator::Call { callee: callee, args: args, dest: dest, next: next } => {
             out = operandFunctions(callee);
@@ -2901,7 +2899,7 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f
         if !declared(f, 0) { out = push(out, clone(prefix).then("_0 is not declared")); };
         z = localTy(f, 0);
         if z.ok && !typeEq(z.ty, f.returns) {
-            out = push(out, clone(prefix).then("_0 is ").then(renderType(z.ty)).then(" but the function returns ").then(renderType(clone(f.returns))));
+            out = push(out, clone(prefix).then("_0 is ").then(renderType(z.ty)).then(" but the function returns ").then(renderType(f.returns)));
         };
     };
     for b in f.blocks {
@@ -2939,17 +2937,11 @@ fn functionProblems(types: &List<TypeDecl>, p: &Program, funcs: &List<String>, f
             if findBlock(f, t) < 0 { out = push(out, clone(bp).then("jumps to bb").then(String::fromInt(t)).then(", which is not there")); };
         };
         for st in b.stmts {
-            dst = noTy();
-            rvx = Rvalue::Use { o: Operand::Const { value: Constant::CInt { n: 0 } } };
-            hasRv = false;
             match st {
-                Statement::Assign { local: dl, rv: rv } => { dst = localTy(f, dl); rvx = clone(rv); hasRv = true; },
-                Statement::Peek { local: dl, rv: rv } => { dst = localTy(f, dl); rvx = clone(rv); hasRv = true; },
-                Statement::AssignRef { local: dl, steps: steps, rv: rv } => { dst = placeWhy(p, f, dl, steps); rvx = clone(rv); hasRv = true; },
+                Statement::Assign { local: dl, rv: rv } => { dst = localTy(f, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
+                Statement::Peek { local: dl, rv: rv } => { dst = localTy(f, dl); if dst.ok { for w in rvalueWhy(p, funcs, f, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
+                Statement::AssignRef { local: dl, steps: steps, rv: rv } => { dst = placeWhy(p, f, dl, steps); if dst.ok { for w in rvalueWhy(p, funcs, f, dst.ty, rv) { out = push(out, clone(bp).then("is ill typed: ").then(w)); }; }; },
                 Statement::Drop { local: dl } => { },
-            };
-            if hasRv && dst.ok {
-                for w in rvalueWhy(p, funcs, f, dst.ty, rvx) { out = push(out, clone(bp).then("is ill typed: ").then(w)); };
             };
         };
         match b.term {
