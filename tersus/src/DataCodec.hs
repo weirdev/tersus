@@ -14,14 +14,14 @@ typeTokens ty = case ty of
     TByte -> ["byte"]
     TWord signed bits -> [(if signed then "i" else "u") ++ show bits]
     TBool -> ["bool"]
-    TList t -> "list" : typeTokens t
+    -- (a list and a Box are named types, in the data as in the checker, so the programs that read the data see
+    -- the struct a native list or Box is; the `list` and `box` tokens are only read, for data written before)
+    TNamed base args -> ["named", quote base, show (length args)] ++ concatMap argTokens args
     TArrayOf t s -> "array" : typeTokens t ++ sizeTokens s
-    TBox t -> "box" : typeTokens t
     TAddr t -> "addr" : typeTokens t
     TUninit t -> "uninit" : typeTokens t
     TBlock t -> "block" : typeTokens t
     TFn args ret -> ["fn", show (length args)] ++ concatMap typeTokens (args ++ [ret])
-    TNamed base args -> ["named", quote base, show (length args)] ++ concatMap argTokens args
     TVariant n -> ["variant", quote n]
     TVar i -> ["var", show i]
     TForall sizes types t -> ["forall", show (length sizes)] ++ map quote sizes ++ [show (length types)] ++ map quote types ++ typeTokens t
