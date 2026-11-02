@@ -5,13 +5,19 @@ import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
+import Compile (lowerSource)
 import Mir
 import MirData (forNative, readProgram, writeProgram)
 import MirHousekeeping (verifyProgram)
+import MirOwnership (insertOwnership)
+import MirLower (lowerProgram)
+import Parse (parseStatementBlock)
+import Pipeline (nativeProgram)
+import PreludeSource (boxSource, listsSource)
 import Types (Type (..))
 import TestHarness
 import TestMirReader (sameText, withProgram)
-import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
+import TestNative (nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
 import Utils
 
 -- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir_verify.tersus): the check that a program
@@ -23,7 +29,8 @@ testMirVerify :: Test
 testMirVerify =
     TestList
         "testMirVerify"
-        [ TestList
+        [ TestCase "constructor and block lookups borrow aggregates" borrowedLookups
+        , TestList
             "interpreted"
             [ TestCase "a well formed program is accepted" (interpreted goodSource id True)
             , TestCase "a program with a list is accepted" (interpreted "xs = [1, 2, 3]; return size(xs) + first(xs);" id True)
@@ -31,12 +38,24 @@ testMirVerify =
             , TestCase "a local of no known type" (interpreted goodSource varLocal False)
             , TestCase "a switch on an Int" (interpreted goodSource switchOnInt False)
             , TestCase "a call of a function that is not there" (interpreted goodSource unknownCall False)
+            , TestCase "an unknown constructor reports its name" (interpretedWithMessage (Just "there is no constructor MissingCtor") constructorSource unknownConstructor False)
+            , TestCase "a missing jump target reports its block" (interpretedWithMessage (Just "jumps to bb999999, which is not there") goodSource missingTarget False)
             , TestCase "an array with the same size parameter is accepted" (interpreted sizedSource id True)
             , TestCase "a named type that starts with a builtin's name is accepted" (interpreted integerSource id True)
             , TestCase "an instance with another array size is refused" (interpreted holderSource wrongHolderArg False)
             , TestCase "an array of lists that does not fit in a frame is refused" (interpreted "xs = array(3000, 0); return get(xs, 0);" arrayOfLists False)
             , TestCase "what is not the MIR is refused" refused
             ]
+        , TestList "pre-erasure, interpreted"
+            ( TestCase "raw lists and Boxes library" (rawInterpreted True rawLibrary)
+                : [TestCase name (rawInterpreted expected (Ok text)) | (name, text, expected) <- blockCases]
+            )
+        , TestCase "Uninit function type round trips through MIR data" uninitRoundTrip
+        , TestList "function-list identity, interpreted"
+            [TestCase name (rawInterpreted expected input) | (name, input, expected) <- functionCases]
+        , TestList "call metadata, interpreted"
+            [TestCase name (rawInterpreted expected input) | (name, input, expected) <- callCases]
+        , TestCase "pre-erasure and function-list cases, natively" rawNative
         , TestParallel
             "every example, natively"
             [TestCase path (readFile path >>= nativeCheck path) | path <- nativeExamples]
@@ -49,6 +68,23 @@ testMirVerifyPrograms =
     TestParallel
         "testMirVerifyPrograms"
         [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
+
+borrowedLookups :: IO TestResult
+borrowedLookups = do
+    source <- readFile "examples/mir_verify.tersus"
+    pure $ case lowerSource True source of
+        Error e -> Just e
+        Ok program ->
+            let owned = insertOwnership program
+                check (name, owner, field, tableType, elementType) = case Map.lookup name (progFunctions owned) of
+                    Nothing -> Just ("the verifier has no " ++ name ++ " function")
+                    Just fn ->
+                        let copied = [dest | block <- Map.elems (fnBlocks fn), Assign dest (ReadField _ actualOwner actualField) <- blockStatements block, actualOwner == owner, actualField == field, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == tableType]
+                            elementCopies = [dest | Just raw <- [Map.lookup name (progFunctions program)], block <- Map.elems (fnBlocks raw), Assign dest (ListOp Get _) <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals raw)], localType decl == elementType]
+                         in if null (copied ++ elementCopies) then Nothing else Just (name ++ " clones its input aggregate into " ++ show (copied ++ elementCopies))
+                targets = [("ctorInfo", "Program", "types", TList (TNamed "TypeDecl" []), TNamed "TypeDecl" []), ("findBlock", "Function", "blocks", TList (TNamed "MirBlock" []), TNamed "MirBlock" []), ("findLocal", "Function", "locals", TList (TNamed "LocalDecl" []), TNamed "LocalDecl" [])]
+                errors = [message | Just message <- map check targets]
+             in if null errors then Nothing else Just (unlines errors)
 
 goodSource :: String
 goodSource = "fn double(n: Int) -> Int [{ }] [{ }] { return n + n; }; if double(2) = 4 { return 1; }; return 0;"
@@ -75,7 +111,10 @@ referenceAccepts program = case verifyProgram (forNative program) of
 
 -- Run the verifier in the interpreter over the data of the mutated program, and compare its verdict with the one it has to give
 interpreted :: String -> (Program -> Program) -> Bool -> IO TestResult
-interpreted source mutate expected = do
+interpreted = interpretedWithMessage Nothing
+
+interpretedWithMessage :: Maybe String -> String -> (Program -> Program) -> Bool -> IO TestResult
+interpretedWithMessage message source mutate expected = do
     verifier <- verifierProgram
     ownedResult <- ownedOnce source
     pure $ case verifier of
@@ -89,11 +128,277 @@ interpreted source mutate expected = do
                         Error e -> Just e
                         Ok ((output, errors), _)
                             | expected && sameText output "OK" && null errors -> Nothing
-                            | not expected && output == "1" && not (null errors) -> Nothing
+                            | not expected && output == "1" && not (null errors) && maybe True (`isInfixOf` errors) message -> Nothing
                             | otherwise -> Just ("expected " ++ verdict expected ++ ", got output " ++ show output ++ " and errors " ++ show errors ++ " for\n" ++ text)
   where
     verdict True = "acceptance"
     verdict False = "refusal"
+
+rawLibrary :: Result String String
+rawLibrary = mapResult writeProgram (lowerSource False (listsSource ++ "\n" ++ boxSource))
+
+rawInterpreted :: Bool -> Result String String -> IO TestResult
+rawInterpreted expected input = do
+    verifier <- verifierProgram
+    pure $ case input of
+        Error e -> Just e
+        Ok text -> case readProgram text of
+            Error e -> Just ("the raw fixture does not read: " ++ e)
+            Ok _ -> case verifier of
+                Error e -> Just ("the verifier does not compile: " ++ e)
+                Ok checker -> case runProgramIn noWorld{worldInput = text} checker of
+                    Error e -> Just e
+                    Ok ((output, errors), _)
+                        | expected && sameText output "OK" && null errors -> Nothing
+                        | not expected && output == "1" && not (null errors) && not ("not the MIR as data" `isInfixOf` errors) -> Nothing
+                        | otherwise -> Just ("expected " ++ show expected ++ ", got output " ++ show output ++ " and errors " ++ show errors ++ " for\n" ++ text)
+
+rawNative :: IO TestResult
+rawNative = withVerifier $ \exe -> case rawLibrary of
+    Error e -> pure (Just e)
+    Ok library -> do
+        failures <- mapM (check exe) (("raw lists and Boxes library", library, True) : blockCases)
+        functionFailures <- mapM (\(name, input, expected) -> case input of
+            Error e -> pure (Just (name ++ ": " ++ e))
+            Ok text -> check exe (name, text, expected)) (functionCases ++ callCases)
+        pure $ case [failure | Just failure <- failures ++ functionFailures] of
+            [] -> Nothing
+            bad -> Just (unlines bad)
+  where
+    check exe (name, text, expected) = do
+        (code, output, errors) <- runExecutableBytes exe [] text
+        pure $
+            if expected && code == ExitSuccess && sameText output "OK" && null errors
+                || not expected && code == ExitSuccess && sameText output "1" && not (null errors) && not ("not the MIR as data" `isInfixOf` errors)
+                then Nothing
+                else Just (name ++ ": expected " ++ show expected ++ ", got " ++ show (code, output, errors))
+
+callCases :: [(String, Result String String, Bool)]
+callCases =
+    [(name, mapResult writeProgram (lowerSource True source), True) | (name, source) <- sources]
+        ++ [(name, mapResult (writeProgram . mutate) (lowerSource True source), False) | (name, source, mutate) <- negatives]
+        ++ [(name, Ok (blockCall expected actual borrowed), accepted) | (name, expected, actual, borrowed, accepted) <- blocks]
+        ++ [(name, Ok (derefFixture parameter borrowed result operand), False) | (name, parameter, borrowed, result, operand) <- badDerefs]
+  where
+    mutableSource = "fn take(n: &mut Int) -> Int { return 0; }; x = 1; return take(&mut x);"
+    sources =
+        [ ("read callee accepts mutable borrow", "fn read(n: &Int) -> Int { return n; }; x = 1; return read(&mut x);")
+        , ("mutable parameter with contract", "fn increment(n: &mut Int) -> Int writes(n) [{ affirm *n < 100; }] [{ affirm *n = old(*n) + 1; affirm return = *n; }] { *n = *n + 1; return *n; }; x = 4; y = increment(&mut x); return x * 10 + y;")
+        , ("mutable field parameter", "struct Point { x: Int, y: Int }; fn bumpX(p: &mut Point) -> Int writes(p.x) [{ }] [{ affirm (*p).x = old((*p).x) + 1; affirm (*p).y = old((*p).y); }] { (*p).x = (*p).x + 1; return (*p).x; }; pt = Point { x: 1, y: 2 }; n = bumpX(&mut pt); return n * 100 + pt.x * 10 + pt.y;")
+        , ("mutable parameter in loop", "fn inc(n: &mut Int) -> Int [{ }] [{ affirm *n = old(*n) + 1; }] { *n = *n + 1; return *n; }; x = 0; while x < 3 [{ affirm x >= 0; affirm x <= 3; }] shrinks 3 - x { y = inc(&mut x); }; return x;")
+        , ("mutable call reaches old-fact proof check", "fn inc(n: &mut Int) -> Int [{ }] [{ }] { *n = *n + 1; return *n; }; x = 4; y = inc(&mut x); affirm x = 4; return y;")
+        , ("mutable call reaches new-fact proof check", "fn inc(n: &mut Int) -> Int [{ }] [{ affirm *n = old(*n) + 1; }] { *n = *n + 1; return *n; }; x = 4; y = inc(&mut x); affirm x = 5; return y;")
+        , ("mutable field reborrow", "struct Point { x: Int, y: Int }; fn good(p: &mut Point) -> Int writes(p.x) [{ }] [{ }] { q = &mut (*p).x; *q = 9; return (*p).x; }; pt = Point { x: 1, y: 2 }; return good(&mut pt);")
+        , ("mutable reference returned with contract", "fn upd(n: &mut Int) -> &mut Int from n [{ }] [{ }] { return n; }; x = 1; r = upd(&mut x); *r = 7; return x;")
+        , ("mutable reference returned", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return a;")
+        , ("mutable reference returned through parameter", "fn f(x: &mut Int) -> &mut Int from x { return &mut *x; }; a = 1; r = f(&mut a); *r = 9; return a;")
+        , ("mutable result read after write", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return *r;")
+        , ("native returned update reference", "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return a;")
+        , ("native update parameter", "fn inc(x: &mut Int) -> Int { *x = *x + 1; return *x; }; a = 41; inc(&mut a); return a;")
+        , ("generic Block cast reaches erasure", "fn f<T>(p: Addr<T>, ghost b: Block<T>) -> Int [{ affirm base(b) = p; affirm whole(b); affirm cap(b) >= 1; affirm count(b) = 0; }] [{ }] { c = Block::cast(b); q = Addr::cast(p); c = Addr::write(q, 0, 7, c); c = Addr::dropValue(q, 0, c); return Addr::free(q, c); }; (p, b) = Addr::alloc(1); return f(p, b);")
+        ]
+    negatives =
+        [ ("read borrow is not an update argument", mutableSource, readInsteadOfMutable)
+        , ("owned value is not an update argument", mutableSource, ownedInsteadOfMutable)
+        , ("wrong update pointee", mutableSource, wrongMutablePointee)
+        , ("mutable function value is not a read function", "fn take(n: &mut Int) -> Int { return 0; }; g = take; x = 1; return g(&mut x);", wrongFunctionKind False)
+        , ("read function value is not an update function", "fn take(n: &Int) -> Int { return 0; }; g = take; x = 1; return g(&mut x);", wrongFunctionKind True)
+        ]
+    blocks =
+        [ ("generic Block payload is resolved", "param \"T\"", "int", False, True)
+        , ("concrete Block payload matches", "int", "int", False, True)
+        , ("concrete Block payload mismatch", "int", "bool", False, False)
+        , ("generic Block argument is not a reference", "param \"T\"", "int", True, False)
+        , ("Block payload keeps nested reference kind", "list int", "list ref int", False, False)
+        , ("unknown Block payload is refused", "param \"T\"", "var 0", False, False)
+        ]
+    badDerefs =
+        [ ("ordinary local is not a reference slot", False, False, "int", "copy 1")
+        , ("stray borrowed flag is not a parameter slot", False, True, "int", "copy 1")
+        , ("constant is not a reference slot", True, True, "int", "const int 0")
+        , ("borrowed slot keeps its pointee type", True, True, "bool", "copy 1")
+        ]
+    derefFixture parameter borrowed result operand = unlines $
+        [ "tersus-mir 1"
+        , "function \"probe\" params " ++ (if parameter then "1 1" else "0") ++ " returns some " ++ result ++ " sizeparams 0 typeparams 0 borrowed " ++ (if borrowed then "1 1" else "0") ++ " mutborrowed " ++ (if borrowed then "1 1" else "0") ++ " from 0"
+        , "local 0 none " ++ result, "local 1 none int", "block 0"
+        ] ++ ["assign 1 use const int 4" | not parameter]
+          ++ ["assign 0 deref " ++ operand, "return", "end", "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0", "block 0", "return", "end"]
+    blockCall expected actual borrowed = unlines $
+        [ "tersus-mir 1"
+        , "function \"take\" params 1 1 returns some int sizeparams 0 typeparams " ++ (if expected == "param \"T\"" then "1 \"T\"" else "0") ++ " borrowed 0"
+        , "local 0 none int", "local 1 none block " ++ expected
+        , "block 0", "assign 0 use const int 0", "return", "end"
+        , "main \"main\" params 0 returns some int sizeparams 0 typeparams 0 borrowed 0"
+        , "local 0 none int", "local 1 none addr " ++ actual, "local 2 none block " ++ actual
+        ] ++ ["local 3 none ref block " ++ actual | borrowed]
+          ++ ["block 0", "assign 1 listop addrAlloc 1 const int 1", "assign 2 listop blockNew 2 copy 1 const int 1"]
+          ++ ["assign 3 borrow 2 0" | borrowed]
+          ++ ["call const fn \"take\" 1 copy " ++ (if borrowed then "3" else "2") ++ " 0 1", "block 1", "return", "end"]
+
+readInsteadOfMutable :: Program -> Program
+readInsteadOfMutable program = program{progMain = main{fnLocals = Map.map decl (fnLocals main), fnBlocks = Map.map block (fnBlocks main)}}
+  where
+    main = progMain program
+    decl d = d{localType = case localType d of TMutRef t -> TRef t; other -> other}
+    block b = b{blockStatements = map statement (blockStatements b)}
+    statement (Assign dest (Borrow root steps True)) = Assign dest (Borrow root steps False)
+    statement other = other
+
+ownedInsteadOfMutable :: Program -> Program
+ownedInsteadOfMutable program = case localNamed (progMain program) "x" of
+    Nothing -> program
+    Just x -> program{progMain = main{fnBlocks = Map.map block (fnBlocks main)}}
+      where
+        main = progMain program
+        block b = b{blockTerminator = case blockTerminator b of Call callee [_] dest next -> Call callee [Copy x] dest next; other -> other}
+
+wrongMutablePointee :: Program -> Program
+wrongMutablePointee program = case localNamed (progMain program) "x" of
+    Nothing -> program
+    Just x -> program{progMain = main{fnLocals = Map.mapWithKey decl (fnLocals main), fnBlocks = Map.map block (fnBlocks main)}}
+      where
+        main = progMain program
+        decl l d = d{localType = if l == x then TBool else case localType d of TMutRef TInt -> TMutRef TBool; other -> other}
+        block b = b{blockStatements = map statement (blockStatements b)}
+        statement (Assign dest (Use _)) | dest == x = Assign dest (Use (Const (CBool True)))
+        statement other = other
+
+wrongFunctionKind :: Bool -> Program -> Program
+wrongFunctionKind mutable program = case localNamed (progMain program) "g" of
+    Nothing -> program
+    Just g -> program{progMain = main{fnLocals = Map.adjust (\d -> d{localType = TFn [if mutable then TMutRef TInt else TRef TInt] TInt}) g (fnLocals main)}}
+      where main = progMain program
+
+uninitRoundTrip :: IO TestResult
+uninitRoundTrip = pure $ case [input | (name, input, _) <- functionCases, name == "function list Uninit argument"] of
+    [Ok text] -> case readProgram text of
+        Error e -> Just e
+        Ok program -> case Map.lookup "probe" (progFunctions program) >>= Map.lookup (Local 0) . fnLocals of
+            Nothing -> Just "the Uninit fixture has no return local"
+            Just decl -> case testAssertEq (localType decl) (TFn [TUninit TInt] TInt) of
+                Just e -> Just e
+                Nothing -> case readProgram (writeProgram program) of
+                    Error e -> Just e
+                    Ok restored -> testAssertEq restored (forNative program)
+    _ -> Just "there is no Uninit function fixture"
+
+functionCases :: [(String, Result String String, Bool)]
+functionCases =
+    [ ("existing function program: " ++ name, sourceData name, True)
+    | name <- ["in a list", "a function that lends is a value"]
+    ]
+        ++ [(name, Ok (fixture element result borrowed), expected) | (name, element, result, borrowed, expected) <- signatures]
+        ++ [("function list malformed " ++ label ++ " closer", Ok (fixtureWithLocal (badName, goodType) goodType False ("named \"StdList<" ++ badName ++ ">\" 0")), False) | (label, badName, goodType) <- malformed]
+  where
+    sourceData name = case lookup name unvalidatedPrograms of
+        Nothing -> Error ("no function program named " ++ name)
+        Just source -> case parseStatementBlock source of
+            Left e -> Error (show e)
+            Right stmts -> mapResult (writeProgram . insertOwnership . nativeProgram) (lowerProgram stmts)
+    ordinary = ("fn(Int) -> Int", "fn 1 int int")
+    borrowedArg = ("fn(&List<Int>) -> Int", "fn 1 ref list int int")
+    namedArg = ("fn(Integer) -> Int", "fn 1 named \"Integer\" 0 int")
+    signatures =
+        [ ("function list exact signature", ordinary, ordinary, False, True)
+        , ("function list through a borrowed list", ordinary, ordinary, True, True)
+        , ("function list zero arguments", ("fn() -> Int", "fn 0 int"), ("fn() -> Int", "fn 0 int"), False, True)
+        , ("function list two arguments", ("fn(Int, Bool) -> Int", "fn 2 int bool int"), ("fn(Int, Bool) -> Int", "fn 2 int bool int"), False, True)
+        , ("function list borrowed argument", borrowedArg, borrowedArg, False, True)
+        , ("function list nested argument", ("fn(fn(Int) -> Int) -> Int", "fn 1 fn 1 int int int"), ("fn(fn(Int) -> Int) -> Int", "fn 1 fn 1 int int int"), False, True)
+        , ("function list nested result", ("fn() -> fn(Int) -> Int", "fn 0 fn 1 int int"), ("fn() -> fn(Int) -> Int", "fn 0 fn 1 int int"), False, True)
+        , ("function list named argument with builtin prefix", namedArg, namedArg, False, True)
+        , ("function list wrong argument", ordinary, ("fn(Bool) -> Int", "fn 1 bool int"), False, False)
+        , ("function list wrong result", ordinary, ("fn(Int) -> Bool", "fn 1 int bool"), False, False)
+        , ("function list missing argument", ordinary, ("fn() -> Int", "fn 0 int"), False, False)
+        , ("function list extra argument", ordinary, ("fn(Int, Int) -> Int", "fn 2 int int int"), False, False)
+        , ("function list borrowed argument is not owned", borrowedArg, ("fn(List<Int>) -> Int", "fn 1 list int int"), False, False)
+        , ("function list read reference is not mutable", borrowedArg, ("fn(&mut List<Int>) -> Int", "fn 1 mutref list int int"), False, False)
+        , ("function list mutable argument", ("fn(&mut List<Int>) -> Int", "fn 1 mutref list int int"), ("fn(&mut List<Int>) -> Int", "fn 1 mutref list int int"), False, True)
+        , ("function list borrowed result is not owned", ("fn() -> &Integer", "fn 0 ref named \"Integer\" 0"), ("fn() -> Integer", "fn 0 named \"Integer\" 0"), False, False)
+        , ("function list read result is not mutable", ("fn() -> &Integer", "fn 0 ref named \"Integer\" 0"), ("fn() -> &mut Integer", "fn 0 mutref named \"Integer\" 0"), False, False)
+        , ("function list nested List reference", ("fn(List<&Int>) -> Int", "fn 1 list ref int int"), ("fn(List<Int>) -> Int", "fn 1 list int int"), False, False)
+        , ("function list nested Box reference", ("fn(Box<&Int>) -> Int", "fn 1 box ref int int"), ("fn(Box<Int>) -> Int", "fn 1 box int int"), False, False)
+        , ("function list nested Addr reference", ("fn(Addr<&Int>) -> Int", "fn 1 addr ref int int"), ("fn(Addr<Int>) -> Int", "fn 1 addr int int"), False, False)
+        , ("function list nested Array reference", ("fn(Array<&Int, 2>) -> Int", "fn 1 array ref int c 2 int"), ("fn(Array<Int, 2>) -> Int", "fn 1 array int c 2 int"), False, False)
+        , ("function list nested named reference", ("fn(Holder<&Int>) -> Int", "fn 1 named \"Holder\" 1 type ref int int"), ("fn(Holder<Int>) -> Int", "fn 1 named \"Holder\" 1 type int int"), False, False)
+        , ("function list nested function reference", ("fn(fn(List<&Int>) -> Int) -> Int", "fn 1 fn 1 list ref int int int"), ("fn(fn(List<Int>) -> Int) -> Int", "fn 1 fn 1 list int int int"), False, False)
+        , ("function list nested result reference", ("fn() -> List<&Int>", "fn 0 list ref int"), ("fn() -> List<Int>", "fn 0 list int"), False, False)
+        , ("function list array argument", ("fn(Array<Int, 2>) -> Int", "fn 1 array int c 2 int"), ("fn(Array<Int, 2>) -> Int", "fn 1 array int c 2 int"), False, True)
+        , ("function list Uninit argument", ("fn(Uninit<Int>) -> Int", "fn 1 uninit int int"), ("fn(Uninit<Int>) -> Int", "fn 1 uninit int int"), False, True)
+        , ("function list explicit generic argument", ("fn(List<'T>) -> Int", "fn 1 list param \"T\" int"), ("fn(List<Int>) -> Int", "fn 1 list int int"), False, True)
+        , ("function list named argument is not builtin", namedArg, ordinary, False, False)
+        ]
+    malformed =
+        [ ("List", "fn(List<Int)) -> Int", "fn 1 list int int")
+        , ("Box", "fn(Box<Int)) -> Int", "fn 1 box int int")
+        , ("Addr", "fn(Addr<Int)) -> Int", "fn 1 addr int int")
+        , ("Array", "fn(Array<Int, 2)) -> Int", "fn 1 array int c 2 int")
+        , ("Uninit", "fn(Uninit<Int)) -> Int", "fn 1 uninit int int")
+        ]
+    fixture element@(_, elementType) (_, resultType) borrowed =
+        fixtureWithLocal element resultType borrowed ("named \"StdList\" 1 type " ++ elementType)
+    fixtureWithLocal (elementName, elementType) resultType borrowed listType = unlines
+        [ "tersus-mir 1"
+        , "struct \"Integer\" 1 \"n\" int"
+        , "struct \"StdList<" ++ elementName ++ ">\" 3 \"addr\" addr " ++ elementType ++ " \"len\" int \"cap\" int"
+        , "function \"probe\" params 1 1 returns some " ++ resultType ++ " sizeparams 0 typeparams " ++ (if "param \"T\"" `isInfixOf` elementType then "1 \"T\"" else "0") ++ " borrowed " ++ if borrowed then "1 1" else "0"
+        , "local 0 none " ++ resultType
+        , "local 1 none " ++ listType
+        , "block 0"
+        , "assign 0 listop get 2 copy 1 const int 0"
+        , "return"
+        , "end"
+        , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+        , "block 0"
+        , "return"
+        , "end"
+        ]
+
+blockCases :: [(String, String, Bool)]
+blockCases = concatMap cases signatures
+  where
+    signatures =
+        [ ("blockNew", ["addr int", "int"])
+        , ("blockTaken", ["block int", "int"])
+        , ("blockResized", ["block int", "addr int", "int"])
+        , ("blockSplitLo", ["block int", "int"])
+        , ("blockSplitHi", ["block int", "int"])
+        , ("blockJoin", ["block int", "block int"])
+        , ("blockAssume", ["addr int", "int"])
+        , ("blockCast", ["block int"])
+        ]
+    cases (op, types) =
+        [ (op ++ " accepts its signature", fixture op "block int" types types, True)
+        , (op ++ " refuses a missing operand", fixture op "block int" types (init types), False)
+        , (op ++ " refuses an extra operand", fixture op "block int" (types ++ ["int"]) (types ++ ["int"]), False)
+        , (op ++ " refuses a non-Block result", fixture op "int" types types, False)
+        , (op ++ " refuses a reference result", fixture op "ref block int" types types, False)
+        , (op ++ " checks result element type", fixture op "block bool" types types, op == "blockCast")
+        ]
+            ++ [ (op ++ " refuses operand " ++ show i ++ " as " ++ wrong, fixture op "block int" (replace i wrong types) types, False)
+               | (i, ty) <- zip [0 ..] types
+               , wrong <- ["bool", "ref " ++ ty, "mutref " ++ ty] ++ [different | op /= "blockCast", different <- differentElement ty]
+               ]
+    differentElement "addr int" = ["addr bool"]
+    differentElement "block int" = ["block bool"]
+    differentElement _ = []
+    replace i ty types = take i types ++ [ty] ++ drop (i + 1) types
+    fixture op result locals operands = unlines $
+        [ "tersus-mir 1"
+        , "function \"probe\" params " ++ show (length locals) ++ concatMap ((" " ++) . show) [1 .. length locals] ++ " returns some " ++ result ++ " sizeparams 0 typeparams 0 borrowed 0"
+        , "local 0 none " ++ result
+        ]
+            ++ ["local " ++ show i ++ " none " ++ ty | (i, ty) <- zip [1 :: Int ..] locals]
+            ++ [ "block 0"
+               , "assign 0 listop " ++ op ++ " " ++ show (length operands) ++ concatMap ((" copy " ++) . show) [1 .. length operands]
+               , "return"
+               , "end"
+               , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0"
+               , "block 0"
+               , "return"
+               , "end"
+               ]
 
 refused :: IO TestResult
 refused = do
@@ -130,6 +435,26 @@ unknownCall = onEveryFunction change
     change fn = fn{fnBlocks = Map.map block (fnBlocks fn)}
     block basic = basic{blockTerminator = case blockTerminator basic of
         Call _ args dest next -> Call (Const (CFn "noSuchFunction")) args dest next
+        other -> other}
+
+constructorSource :: String
+constructorSource = "struct ProbeCtor { value: Int }; x = ProbeCtor { value: 1 }; return x.value;"
+
+unknownConstructor :: Program -> Program
+unknownConstructor program = program{progMain = main{fnBlocks = Map.map block (fnBlocks main)}}
+  where
+    main = progMain program
+    block basic = basic{blockStatements = map statement (blockStatements basic)}
+    statement (Assign dest (MakeData "ProbeCtor" fields)) = Assign dest (MakeData "MissingCtor" fields)
+    statement (Peek dest (MakeData "ProbeCtor" fields)) = Peek dest (MakeData "MissingCtor" fields)
+    statement other = other
+
+missingTarget :: Program -> Program
+missingTarget program = program{progMain = main{fnBlocks = Map.map block (fnBlocks main)}}
+  where
+    main = progMain program
+    block basic = basic{blockTerminator = case blockTerminator basic of
+        SwitchBool condition _ no -> SwitchBool condition (BlockId 999999) no
         other -> other}
 
 localNamed :: Function -> String -> Maybe Local

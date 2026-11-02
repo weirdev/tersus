@@ -16,7 +16,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirMono (monomorphize)
-import Types (Name, Type (..), Variable, instanceName)
+import Types (Arg (..), Name, Type (..), Variable, instanceName)
 
 -- Native code frees what a program makes, and updates a list in place, so it needs to know who owns each list and each
 -- struct or enum value. This pass makes that explicit in the MIR, after the program is validated, and without changing what
@@ -125,7 +125,7 @@ roles rv =
         CopyOf o -> [(o, Read)]
         TakeField l _ _ -> [(Copy l, Read)]
         -- (a reference owns nothing: its root is not moved or copied into it, and reading through it owns nothing either)
-        Borrow _ steps _ -> [(o, Read) | RefIndex o <- steps]
+        Borrow root steps _ -> (Copy root, Read) : [(o, Read) | RefIndex o <- steps]
         Deref o -> [(o, Read)]
 
 -- The rvalues that read a part of a value
@@ -162,6 +162,7 @@ rvalueUses :: Rvalue -> Live
 rvalueUses rv =
     case rv of
         ReadField (Copy l) name field -> Set.singleton (l, Field name field)
+        Borrow root steps _ -> Set.fromList ((root, borrowKey steps) : [(l, Whole) | RefIndex o <- steps, Just l <- [operandLocal o]])
         IsVariant (Copy l) _ -> Set.singleton (l, Tag)
         _ -> Set.fromList [(l, Whole) | (o, _) <- roles rv, Just l <- [operandLocal o]]
 
@@ -193,12 +194,145 @@ stepStmt st after = Set.union (stmtUses st) (maybe id forgetLocal (stmtDef st) a
 stepTerm :: Terminator -> Live -> Live
 stepTerm term after = Set.union (termUses term) (maybe id forgetLocal (termDef term) after)
 
+borrowKey :: [RefStep] -> Key
+borrowKey (RefField ctor field : _) = Field ctor field
+borrowKey _ = Whole
+
+data LoanOrigin = LoanOrigin
+    { originReferences :: Live
+    , originView :: Live
+    , originIsView :: Bool
+    }
+    deriving (Eq)
+
+type LoanRoots = Map Local LoanOrigin
+
+emptyOrigin :: LoanOrigin
+emptyOrigin = LoanOrigin Set.empty Set.empty False
+
+referencesOf :: LoanRoots -> Local -> Live
+referencesOf loans root = maybe Set.empty originReferences (Map.lookup root loans)
+
+storeOrigin :: Local -> LoanOrigin -> LoanRoots -> LoanRoots
+storeOrigin dest origin loans
+    | Set.null (originReferences origin) && Set.null (originView origin) = Map.delete dest loans
+    | otherwise = Map.insert dest origin loans
+
+borrowRoots :: Function -> LoanRoots -> Local -> [RefStep] -> Live
+borrowRoots fn loans root steps =
+    let origin = Map.findWithDefault emptyOrigin root loans
+        prior = originReferences origin
+        rootType = localType <$> Map.lookup root (fnLocals fn)
+        refTarget (TRef t) = Just t
+        refTarget (TMutRef t) = Just t
+        refTarget _ = Nothing
+        refine target = Set.map (\key@(owner, part) -> if part == Whole && (localType <$> Map.lookup owner (fnLocals fn)) == Just target then (owner, borrowKey steps) else key)
+     in case rootType >>= refTarget of
+            Nothing -> Set.unions [prior, originView origin, if originIsView origin then Set.empty else Set.singleton (root, borrowKey steps)]
+            Just target -> refine target prior
+
+referenceType :: Program -> Type -> Bool
+referenceType program = go Set.empty
+  where
+    go seen ty = case ty of
+        TRef _ -> True
+        TMutRef _ -> True
+        TList t -> go seen t
+        TBox t -> go seen t
+        TArrayOf t _ -> go seen t
+        TNamed "StdList" args -> any (\a -> case a of ArgType t -> go seen t; _ -> False) args
+        TNamed "StdBox" args -> any (\a -> case a of ArgType t -> go seen t; _ -> False) args
+        TNamed base args -> declared seen (instanceName base args)
+        TVariant name -> maybe True (declared seen) (ownerOf program name)
+        TParam _ -> True
+        TVar _ -> True
+        _ -> False
+    declared seen name
+        | name `Set.member` seen = False
+        | otherwise = case Map.lookup name (progTypes program) of
+            Just (StructDecl fields) -> any (go (Set.insert name seen) . snd) fields
+            Just (EnumDecl variants) -> any (go (Set.insert name seen) . snd) (concatMap snd variants)
+            Nothing -> True
+
+loanStatement :: Function -> Program -> LoanRoots -> Statement -> LoanRoots
+loanStatement fn program loans stmt = case stmt of
+    Assign dest rv -> assign False dest rv
+    Peek dest rv -> assign True dest rv
+    _ -> loans
+  where
+    assign peek dest rv =
+        let ty = maybe TInt localType (Map.lookup dest (fnLocals fn))
+            directRef = case ty of TRef _ -> True; TMutRef _ -> True; _ -> False
+            roots = if referenceType program ty
+                then case rv of
+                    Borrow root steps _ -> borrowRoots fn loans root steps
+                    _ -> Set.unions [referencesOf loans l | (o, _) <- roles rv, Just l <- [operandLocal o]]
+                else Set.empty
+            view = if directRef || not (needsDrop program ty) then Set.empty else case rv of
+                ReadField o ctor field -> placeOf o [RefField ctor field]
+                ListOp op (o : _) | op `elem` [Get, First, Last] -> placeOf o []
+                Deref o -> placeOf o []
+                Unbox o -> placeOf o []
+                AsVariant o _ -> placeOf o []
+                Use o | peek -> placeOf o []
+                _ -> Set.empty
+         in storeOrigin dest (LoanOrigin roots view (not (Set.null view))) loans
+    placeOf o steps = maybe Set.empty (\root -> borrowRoots fn loans root steps) (operandLocal o)
+
+loanTerminator :: Function -> Program -> LoanRoots -> Terminator -> LoanRoots
+loanTerminator fn program loans (Call callee args dest _) =
+    let roots = if maybe True (referenceType program . localType) (Map.lookup dest (fnLocals fn))
+            then Set.union carried (Set.unions [borrowRoots fn loans l [] | (o, from) <- zip args fromArgs, from, Just l <- [operandLocal o]])
+            else Set.empty
+     in storeOrigin dest (LoanOrigin roots Set.empty False) loans
+  where
+    (fromArgs, specific) = case callee of
+        Const (CFn name) | Just f <- Map.lookup name (progFunctions program) ->
+            let froms = if null (fnFrom f) then fnBorrowed f ++ fnMutBorrowed f else fnFrom f
+             in ([p `elem` froms | p <- fnParams f], not (null (fnFrom f)))
+        _ -> case operandLocal callee >>= (`Map.lookup` fnLocals fn) of
+            Just (LocalDecl (TFn params _) _) -> (map ref params, False)
+            _ -> (replicate (length args) False, False)
+    ref (TRef _) = True
+    ref (TMutRef _) = True
+    ref _ = False
+    carried = if specific then Set.empty else Set.unions [referencesOf loans l | o <- args, Just l <- [operandLocal o]]
+loanTerminator _ _ loans _ = loans
+
+loanEntries :: Program -> Function -> Map BlockId LoanRoots
+loanEntries program fn = fixpoint (Map.singleton (BlockId 0) initial)
+  where
+    initial = Map.fromList [(p, LoanOrigin (Set.singleton (p, Whole)) Set.empty False) | p <- fnBorrowed fn ++ fnMutBorrowed fn]
+    join a b = Map.fromList
+        [ (local, LoanOrigin (Set.union (originReferences x) (originReferences y)) (Set.union (originView x) (originView y)) (originIsView x && originIsView y))
+        | local <- Set.toList (Map.keysSet a `Set.union` Map.keysSet b)
+        , let x = Map.findWithDefault emptyOrigin local a
+        , let y = Map.findWithDefault emptyOrigin local b
+        ]
+    fixpoint known =
+        let outs = [(b, loanTerminator fn program (foldl (loanStatement fn program) loans stmts) term) | (b, loans) <- Map.toList known, Just (BasicBlock stmts term) <- [Map.lookup b (fnBlocks fn)]]
+            reached = Map.fromListWith join [(next, loans) | (b, loans) <- outs, Just block <- [Map.lookup b (fnBlocks fn)], next <- successors (blockTerminator block)]
+            next = Map.insertWith join (BlockId 0) initial reached
+         in if next == known then known else fixpoint next
+
+withLoanRoots :: LoanRoots -> Live -> Live
+withLoanRoots loans live = Set.union live (Set.unions [referencesOf loans l | (l, _) <- Set.toList live])
+
+blockLiveness :: Program -> Function -> Map BlockId LoanRoots -> BlockId -> Live -> (Live, [Live])
+blockLiveness program fn entries block out =
+    let BasicBlock stmts term = fnBlocks fn Map.! block
+        states = scanl (loanStatement fn program) (Map.findWithDefault Map.empty block entries) stmts
+        termLoans = last states
+        termLive = withLoanRoots termLoans (stepTerm term (withLoanRoots (loanTerminator fn program termLoans term) out))
+        lives = scanr (\(loans, stmt) after -> withLoanRoots loans (stepStmt stmt after)) termLive (zip states stmts)
+     in (head lives, tail lives)
+
 -- What is live when each block ends
-liveOuts :: Function -> Map BlockId Live
-liveOuts fn = go (Map.map (const Set.empty) (fnBlocks fn))
+liveOuts :: Program -> Function -> Map BlockId LoanRoots -> Map BlockId Live
+liveOuts program fn entries = go (Map.map (const Set.empty) (fnBlocks fn))
   where
     go outs =
-        let ins = Map.mapWithKey (\b (BasicBlock stmts term) -> foldr stepStmt (stepTerm term (outs Map.! b)) stmts) (fnBlocks fn)
+        let ins = Map.mapWithKey (\b _ -> fst (blockLiveness program fn entries b (outs Map.! b))) (fnBlocks fn)
             outs' = Map.map (\(BasicBlock _ term) -> Set.unions [Map.findWithDefault Set.empty s ins | s <- successors term]) (fnBlocks fn)
          in if outs' == outs then outs else go outs'
 
@@ -214,6 +348,7 @@ data Ctx = Ctx
     , cxStatements :: Map BlockId [Statement]
     , cxUses :: Map Local [(BlockId, Int, Role)] -- the uses of a local by statements
     , cxUsedByTerminator :: Set Local
+    , cxAfters :: Map BlockId [Live]
     , cxTakes :: Set (BlockId, Int) -- the statements that take a field out of a value
     , cxBorrowed :: Set Local -- the parameters that are lent: the function does not own them, so it never frees or moves them
     }
@@ -224,7 +359,9 @@ typeOf cx l = Map.findWithDefault TInt l (cxTypes cx)
 ownFunction :: Program -> Function -> Function
 ownFunction program fn0 =
     let fn = fuseCasts fn0
-        outs = liveOuts fn
+        entries = loanEntries program fn
+        outs = liveOuts program fn entries
+        afters = Map.mapWithKey (\b _ -> snd (blockLiveness program fn entries b (outs Map.! b))) (fnBlocks fn)
         statements = Map.map blockStatements (fnBlocks fn)
         -- (a parameter has a value from the start, so what is assigned to it is a second one)
         defsOf = Map.fromListWith (+) ([(d, 1 :: Int) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Just d <- map stmtDef stmts] ++ [(d, 1) | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn)] ++ [(p, 1) | p <- fnParams fn])
@@ -257,6 +394,7 @@ ownFunction program fn0 =
                 , cxStatements = statements
                 , cxUses = usesOf
                 , cxUsedByTerminator = byTerminator
+                , cxAfters = afters
                 , cxTakes = Set.empty
                 , cxBorrowed = Set.fromList (fnBorrowed fn)
                 }
@@ -264,9 +402,9 @@ ownFunction program fn0 =
             Set.fromList
                 [ (b, k)
                 | (b, BasicBlock stmts term) <- Map.toList (fnBlocks fn)
-                , let afters = tail (scanr stepStmt (stepTerm term (outs Map.! b)) stmts)
-                , (k, st, after) <- zip3 [0 ..] stmts afters
-                , takesField cx0 st after
+                , let after = afters Map.! b
+                , (k, st, live) <- zip3 [0 ..] stmts after
+                , takesField cx0 st live
                 ]
         cx = cx0{cxTakes = takes}
         start = 1 + maximum (0 : [n | Local n <- Map.keys (fnLocals fn)])
@@ -515,8 +653,9 @@ elaborateDrops program fn tracked locals blocks nextLocal nextBlock = (locals', 
     locals' = Map.union (Map.union locals (Map.fromList [(f, LocalDecl TBool Nothing) | f <- Map.elems flagOf])) (Map.fromList newDecls)
     -- The state of a local whose drop has just been inserted: it holds nothing
     afterDrop l state = setState tracked (l, Nothing) Empty (clearFields l state)
+    entries = loanEntries program (fn{fnLocals = locals, fnBlocks = blocks})
     processBlock acc (b, block@(BasicBlock stmts term)) =
-        segment b initialRev (entryStateOf b) Map.empty stmts term acc
+        segment b initialRev (entryStateOf b) (Map.findWithDefault Map.empty b entries) stmts term acc
       where
         initialRev = [Assign f (Use (Const (CBool (fst key `elem` fnParams fn)))) | b == BlockId 0, (key, f) <- Map.toList flagOf]
     -- One block, statement by statement: a statement that gives a local a new value while it holds one closes the
@@ -546,12 +685,10 @@ elaborateDrops program fn tracked locals blocks nextLocal nextBlock = (locals', 
         routed (Assign _ rv) dest = any (\o -> maybe False (Set.member dest . rootsOf aliases) (operandLocal o)) [o | (o, _) <- roles rv]
         routed _ _ = False
     -- What a local looks into, for a peek that only reads a part of it (the roots of what it was read from)
-    rootsOf aliases l = Set.insert l (Map.findWithDefault Set.empty l aliases)
-    afterStatement aliases st =
-        case st of
-            Peek d rv -> Map.insert d (Set.unions [rootsOf aliases l | (o, _) <- roles rv, Just l <- [operandLocal o]]) (Map.delete d aliases)
-            Assign d _ -> Map.delete d aliases
-            _ -> aliases
+    rootsOf aliases l =
+        let origin = Map.findWithDefault emptyOrigin l aliases
+         in Set.insert l (localsOf (originReferences origin `Set.union` originView origin))
+    afterStatement aliases st = loanStatement (fn{fnLocals = locals}) program aliases st
     finishTerm curBid rev state aliases term acc =
         case term of
             Return ->
@@ -743,7 +880,7 @@ markAlias l = R (\s -> ((), s{rsAlias = Set.insert l (rsAlias s)}))
 rewriteBlock :: Ctx -> Map BlockId Live -> (BlockId, BasicBlock) -> R (BlockId, BasicBlock)
 rewriteBlock cx outs (b, BasicBlock stmts term) = do
     let out = outs Map.! b
-        afters = tail (scanr stepStmt (stepTerm term out) stmts)
+        afters = cxAfters cx Map.! b
     rewritten <- mapM (\(k, st, after) -> rewriteStatement cx b k after st) (zip3 [0 ..] stmts afters)
     (pre, term') <- rewriteTerminator cx out term
     return (b, BasicBlock (concat rewritten ++ pre) term')
@@ -868,7 +1005,7 @@ withOperands rv operands =
         (IsVariant _ name, [o]) -> IsVariant o name
         (AsVariant _ name, [o]) -> AsVariant o name
         (CopyOf _, [o]) -> CopyOf o
-        (Borrow root steps mutable, os) -> Borrow root (rewriteRefSteps steps os) mutable
+        (Borrow _ steps mutable, Copy root : os) -> Borrow root (rewriteRefSteps steps os) mutable
         (Deref _, [o]) -> Deref o
         _ -> rv
 

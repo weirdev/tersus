@@ -4,7 +4,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket_, displayException, try)
 import Control.Monad (forM, forM_, unless, when)
-import Data.List (elemIndex, foldl', isPrefixOf, sortBy)
+import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumProcessors)
@@ -35,6 +35,7 @@ import TestStrings
 import TestBytes
 import TestConnectives
 import TestMirData
+import TestMirEval
 import TestMirReader
 import TestMirVerify
 import TestMirErase
@@ -45,21 +46,22 @@ import TestHashMap
 import TestHashSet
 import TestBuiltinRegistry
 import TestSharedCache
+import TestScheduling
 
 main :: IO ()
 main = do
     hSetBuffering stdout LineBuffering
     args <- getArgs
-    case parseArguments args of
+    case parseArguments args >>= select of
         Left message -> do
             hPutStr stderr (message ++ "\n")
-            hPutStr stderr "Usage: tersus-test [-j <n>] [group...]\n"
+            hPutStr stderr "Usage: tersus-test [-j <n>] [--shard k/n] [group...]\n"
             exitFailure
-        Right arguments -> do
-            -- (the names of groups on the command line run only those: `tests testBorrow testCopies`)
-            let chosen = argumentGroups arguments
-                selected = if null chosen then allGroups else [g | g <- allGroups, groupName g `elem` chosen]
-                names = map groupName selected
+        Right (arguments, names) -> do
+            let selected = [g | g <- allGroups, groupName g `elem` names]
+            forM_ (argumentShard arguments) $ \(index, count) -> do
+                putStrLn ("[SHARD] " ++ show index ++ "/" ++ show count ++ " " ++ show (length names) ++ "/" ++ show (length allGroups) ++ " groups")
+                putStrLn ("[GROUPS] " ++ unwords names)
             jobs <- case argumentJobs arguments of
                 Just n -> pure n
                 Nothing -> min (length names) <$> getNumProcessors
@@ -75,6 +77,8 @@ main = do
                         ++ show (summaryFailed summary)
                         ++ " failed"
             when (summaryFailed summary > 0 || not reported) exitFailure
+  where
+    select arguments = (,) arguments <$> selectGroupNames arguments (map groupName allGroups)
 
 allGroups :: [Test]
 allGroups =
@@ -143,6 +147,7 @@ allGroups =
     , testBytes
     , testConnectives
     , testMirData
+    , testMirEvalLists
     , testMirReader
     , testMirVerify
     , testMirErase
@@ -156,36 +161,13 @@ allGroups =
     , testBuiltinRegistry
     , testSharedCache
     , testSharedCacheProbe
+    , testScheduling (map groupName allGroups)
     ]
 
 groupName :: Test -> String
 groupName (TestList name _) = name
 groupName (TestParallel name _) = name
 groupName (TestCase name _) = name
-
-data Arguments = Arguments
-    { argumentJobs :: Maybe Int
-    , argumentGroups :: [String]
-    , argumentChild :: Bool
-    }
-
-parseArguments :: [String] -> Either String Arguments
-parseArguments = go (Arguments Nothing [] False)
-  where
-    go arguments [] = Right arguments
-    go arguments ("--child" : rest) = go arguments{argumentChild = True} rest
-    go arguments ("-j" : number : rest) = withJobs arguments number rest
-    go arguments ("--jobs" : number : rest) = withJobs arguments number rest
-    go _ ["-j"] = Left "-j needs a number of jobs"
-    go _ ["--jobs"] = Left "--jobs needs a number of jobs"
-    go arguments (argument : rest)
-        | "--jobs=" `isPrefixOf` argument = withJobs arguments (drop (length "--jobs=") argument) rest
-        | "-j" `isPrefixOf` argument && length argument > 2 = withJobs arguments (drop 2 argument) rest
-        | "-" `isPrefixOf` argument = Left ("unknown option: " ++ argument)
-        | otherwise = go arguments{argumentGroups = argumentGroups arguments ++ [argument]} rest
-    withJobs arguments number rest = case reads number of
-        [(jobs, "")] | jobs >= (1 :: Int) -> go arguments{argumentJobs = Just jobs} rest
-        _ -> Left ("-j needs a number of jobs (at least 1), not " ++ show number)
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)
 runInProcess selected = do
@@ -199,28 +181,6 @@ runInProcess selected = do
 -- ends, so the ones that take minutes are started first and the seconds-long ones fill in around them, instead of
 -- the longest only starting once everything before it in the list has had a process. The results are still taken
 -- in the order of the list of groups, so the output is unchanged.
-launchFirst :: [String]
-launchFirst =
-    [ "testMirVerify"
-    , "testNative"
-    , "testMir"
-    , "testMirSelfHosted"
-    , "testMirEmit"
-    , "testMirErase"
-    , "testBootstrap"
-    , "testMirReader"
-    , "testMirEmitPrograms"
-    , "testExamples"
-    , "testMirData"
-    , "testStrings"
-    , "testMirVerifyPrograms"
-    ]
-
-launchRank :: String -> Int
-launchRank name = case elemIndex name launchFirst of
-    Just rank -> rank
-    Nothing -> length launchFirst
-
 runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
 runInParallel jobs names = do
     self <- getExecutablePath
@@ -229,10 +189,11 @@ runInParallel jobs names = do
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
         pure (name, done)
-    forM_ (sortBy (comparing (launchRank . fst)) slots) $ \(name, done) ->
+    forM_ (sortBy (comparing (negate . groupWeight . fst)) slots) $ \(name, done) ->
         forkIO $
             bracket_ (waitQSem sem) (signalQSem sem) $ do
                 started <- getMonotonicTime
+                putStrLn ("[START] " ++ name)
                 -- (the processors are shared between the groups that run at once: left to the package's -with-rtsopts=-N, every
                 -- child would take as many capabilities as the machine has processors, so N children would make N times N of them and their
                 -- threads and parallel garbage collectors would compete for the same cores. Each child is given its share of them,
@@ -241,6 +202,7 @@ runInParallel jobs names = do
                 let arguments = [name, "--child", "+RTS", "-N" ++ show (max 1 (processors `div` jobs)), "-RTS"]
                 outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
                 finished <- getMonotonicTime
+                putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
                 putMVar done (name, finished - started, outcome)
     -- (the results are taken in the order of the list, so the output has the order it has without the processes)
     outcomes <- forM slots $ \(_, done) -> takeMVar done >>= printOutcome
@@ -253,8 +215,7 @@ printOutcome (name, seconds, outcome) = do
             Left e -> (ExitFailure 1, "", displayException e)
     putStr out
     hPutStr stderr err
-    let tenths = round (seconds * 10) :: Int
-    putStrLn ("[TIME] " ++ name ++ " " ++ show (tenths `div` 10) ++ "." ++ show (tenths `mod` 10) ++ "s")
+    putStrLn ("[TIME] " ++ name ++ " " ++ elapsedText seconds)
     let summary = countResults out
         missing = exitCode /= ExitSuccess && summaryFailed summary == 0
     when missing $
@@ -265,6 +226,11 @@ printOutcome (name, seconds, outcome) = do
             else summary
         , exitCode == ExitSuccess
         )
+
+elapsedText :: Double -> String
+elapsedText seconds =
+    let tenths = round (seconds * 10) :: Int
+     in show (tenths `div` 10) ++ "." ++ show (tenths `mod` 10) ++ "s"
 
 -- The [PASS]/[FAIL]/[CRASH] lines of a group, which is what the summary of the whole run adds up
 countResults :: String -> TestSummary

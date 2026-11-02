@@ -1335,17 +1335,15 @@ fn renderType(t: &Type) -> String ~ {
 };
 
 fn declName(d: &TypeDecl) -> String [{ }] [{ }] {
-    return match d {
-        TypeDecl::DStruct { name: name, fields: fields } => clone(name),
-        TypeDecl::DEnum { name: name, variants: variants } => clone(name),
-    };
+    if d is TypeDecl::DStruct { return clone((d as TypeDecl::DStruct).name); };
+    return clone((d as TypeDecl::DEnum).name);
 };
 
 // The index of the declaration of a struct or an enum in the types of the program, or -1
 fn lookupDecl(types: &List<TypeDecl>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(types); }] {
     i = 0;
     while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
-        d = get(types, i);
+        d = &get(types, i);
         if declName(d) = name { return i; };
         i = i + 1;
     };
@@ -1506,12 +1504,13 @@ fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
     i = lookupDecl(types, n.text);
     if i < 0 { return wordLayout(); };
     r = wordLayout();
-    match get(types, i) {
+    d = &get(types, i);
+    match *d {
         TypeDecl::DStruct { name: name, fields: fields } => {
             align = 1;
             end = 0;
             for f in fields {
-                l = layoutOf(types, f.ty);
+                l = layoutOf(types, &f.ty);
                 if l.align > align { align = l.align; };
                 end = roundUp(end, l.align) + l.size;
             };
@@ -1524,7 +1523,7 @@ fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
                 align = 1;
                 end = 0;
                 for f in v.fields {
-                    l = layoutOf(types, f.ty);
+                    l = layoutOf(types, &f.ty);
                     if l.align > align { align = l.align; };
                     end = roundUp(end, l.align) + l.size;
                 };
@@ -1545,7 +1544,7 @@ fn fieldsLayout(types: &List<TypeDecl>, fields: &List<Field>) -> Layout ~ {
     align = 1;
     end = 0;
     for f in fields {
-        l = layoutOf(types, f.ty);
+        l = layoutOf(types, &f.ty);
         if l.align > align { align = l.align; };
         end = roundUp(end, l.align) + l.size;
     };
@@ -1821,19 +1820,29 @@ fn parts(types: &List<TypeDecl>, t: &Type) -> List<Type> ~ {
 };
 
 fn contains(seen: &List<Type>, t: &Type) -> Bool [{ }] [{ }] {
-    for s in seen {
+    i = 0;
+    while i < size(seen) [{ affirm i >= 0; affirm i <= size(seen); }] shrinks size(seen) - i {
+        s = &get(seen, i);
         if s = t { return true; };
+        i = i + 1;
     };
     return false;
 };
 
 fn closeTypes(types: &List<TypeDecl>, roots: &List<Type>) -> List<Type> ~ {
-    // the types still to see, the next one last
+    // Retain the first root occurrence so the depth-first output order stays unchanged.
+    unique = noTypes();
+    i = 0;
+    while i < size(roots) [{ affirm i >= 0; affirm i <= size(roots); }] shrinks size(roots) - i {
+        t = canonical(types, &get(roots, i));
+        if !contains(unique, t) { unique = push(unique, t); };
+        i = i + 1;
+    };
     work = noTypes();
-    i = size(roots);
-    while i > 0 [{ affirm i >= 0; affirm i <= size(roots); }] shrinks i {
+    i = size(unique);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(unique); }] shrinks i {
         i = i - 1;
-        work = push(work, canonical(types, get(roots, i)));
+        work = push(work, clone(get(unique, i)));
     };
     seen = noTypes();
     while size(work) > 0 [{ }] ~ {
@@ -2200,7 +2209,7 @@ fn hasText(hay: &String, needle: &String) -> Bool ~ {
 // name says it is the `clone` of the trait `Clone` and whose result is the type (the impl of a list is named
 // for `List`, and its result is the `StdList` the list is made of, so the name is not made from the type)
 fn cloneImplName(cx: &Ctx, t: &Type) -> Res ~ {
-    want = renderType(canonical(cx.types, t));
+    want = renderType(canonical(&cx.types, t));
     i = 0;
     while i < size(cx.clones) && i < size(cx.cloneTys) [{ affirm i >= 0; affirm i <= size(cx.clones); affirm i <= size(cx.cloneTys); }] shrinks size(cx.clones) - i {
         if get(cx.cloneTys, i) = want { return Res { ok: true, text: clone(get(cx.clones, i)) }; };
@@ -2213,13 +2222,14 @@ fn cloneImplName(cx: &Ctx, t: &Type) -> Res ~ {
 // already copied by the copy of the whole value): a copy the field's type makes itself, which is its `Clone`
 // impl when it has one and the made function of its type when it does not
 fn cloneFieldLines(cx: &Ctx, variantIndex: Int, fields: &List<Field>, start: Int) -> List<String> ~ {
+    types = &cx.types;
     out = noStrings();
     offset = 0;
     i = 0;
     for f in fields {
-        l = layoutOf(cx.types, f.ty);
+        l = layoutOf(types, &f.ty);
         offset = roundUp(offset, l.align);
-        ct = canonical(cx.types, f.ty);
+        ct = canonical(types, f.ty);
         if isAggregate(ct) {
             reg = "%cf".then(showInt(variantIndex)).then(".").then(showInt(i));
             out = push(out, "    ".then(reg).then("f = getelementptr i8, ptr %from, i64 ").then(showInt(start + offset)));
@@ -2228,7 +2238,7 @@ fn cloneFieldLines(cx: &Ctx, variantIndex: Int, fields: &List<Field>, start: Int
             if implName.ok {
                 out = push(out, "    call void ".then(functionSymbol(implName.text)).then("(ptr ").then(reg).then("t, ptr ").then(reg).then("f)"));
             } else {
-                out = push(out, "    call void ".then(cloneSymbol(cx.types, ct)).then("(ptr ").then(reg).then("t, ptr ").then(reg).then("f)"));
+                out = push(out, "    call void ".then(cloneSymbol(types, ct)).then("(ptr ").then(reg).then("t, ptr ").then(reg).then("f)"));
             };
         };
         offset = offset + l.size;
@@ -2242,7 +2252,7 @@ fn cloneFieldLines(cx: &Ctx, variantIndex: Int, fields: &List<Field>, start: Int
 // its fields or its elements hold, as a deep copy is made. A value that is not there (0)
 // is copied as it is.
 fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
-    types = cx.types;
+    types = &cx.types;
     out = noStrings();
     out = push(out, "define internal void ".then(cloneSymbol(types, t)).then("(ptr %to, ptr %from) {"));
     out = push(out, "entry:");
@@ -2504,8 +2514,8 @@ fn typeText(g: Gen, t: &Type) -> Gen ~ {
 // A struct is its own constructor, and a variant has its enum's representation
 fn constructedType(cx: &Ctx, name: &String) -> Type [{ }] [{ }] {
     i = declIndex(cx, name);
-    if i >= 0 && i < size(cx.types) {
-        d = get(cx.types, i);
+    if i >= 0 && i < size(&cx.types) {
+        d = get(&cx.types, i);
         if d is TypeDecl::DStruct { return Type::TNamed { name: clone(name), base: clone(name), argc: 0, argTokens: [] }; };
     };
     return Type::TVariant { name: clone(name) };
@@ -2526,9 +2536,9 @@ fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
 // The type of the elements of a list of native code: what the address that is its first field is of
 fn listElement(cx: &Ctx, t: &Type) -> Held ~ {
     if !(t is Type::TNamed) { return Held { ok: false, ty: Type::TInt }; };
-    i = lookupDecl(cx.types, (t as Type::TNamed).name);
-    if i < 0 || i >= size(cx.types) { return Held { ok: false, ty: Type::TInt }; };
-    d = get(cx.types, i);
+    i = lookupDecl(&cx.types, (t as Type::TNamed).name);
+    if i < 0 || i >= size(&cx.types) { return Held { ok: false, ty: Type::TInt }; };
+    d = get(&cx.types, i);
     if d is TypeDecl::DStruct {
         fields = (d as TypeDecl::DStruct).fields;
         if size(fields) > 0 {
@@ -2639,13 +2649,13 @@ fn cloneValue(g: Gen, cx: &Ctx, current: &String, t: &Type, to: &String, from: &
     if implName.ok {
         return emit(g1, "call void ".then(functionSymbol(implName.text)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
     };
-    return emit(g1, "call void ".then(cloneSymbol(cx.types, t)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
+    return emit(g1, "call void ".then(cloneSymbol(&cx.types, t)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
 };
 
 // Frees what the value a local holds owns (nothing, if it holds none), and leaves a Box it held holding nothing
 fn dropSlot(g: Gen, cx: &Ctx, t: &Type, l: Int) -> Gen ~ {
     g1 = descriptor(g, cx, t);
-    return emit(g1, "call void ".then(dropSymbol(cx.types, t)).then("(ptr ").then(slot(l)).then(")"));
+    return emit(g1, "call void ".then(dropSymbol(&cx.types, t)).then("(ptr ").then(slot(l)).then(")"));
 };
 
 fn memcpyText(to: &String, from: &String, bytes: Int) -> String [{ }] [{ }] {
@@ -2701,15 +2711,17 @@ fn fieldIndex(fields: &List<Field>, name: &String) -> Int [{ }] [{ affirm return
 // the words of a value held inline.
 fn fieldOffset(cx: &Ctx, c: &Ctor, i: Int) -> Int ~ {
     // (the fields of a variant of an enum start after the tag, where every variant's fields can start: Mir.fieldOffsets)
+    types = &cx.types;
     start = 0;
     if c.tagged {
         payload = 1;
-        k = lookupDecl(cx.types, c.owner);
+        k = lookupDecl(types, c.owner);
         if k >= 0 {
-            match get(cx.types, k) {
+            d = &get(types, k);
+            match *d {
                 TypeDecl::DEnum { name: name, variants: variants } => {
                     for v in variants {
-                        l = fieldsLayout(cx.types, v.fields);
+                        l = fieldsLayout(types, &v.fields);
                         if l.align > payload { payload = l.align; };
                     };
                 },
@@ -2721,11 +2733,11 @@ fn fieldOffset(cx: &Ctx, c: &Ctor, i: Int) -> Int ~ {
     offset = 0;
     j = 0;
     while j < i && j < size(c.fields) [{ affirm j >= 0; affirm j <= size(c.fields); }] shrinks size(c.fields) - j {
-        l = layoutIn(cx, get(c.fields, j).ty);
+        l = layoutIn(cx, &get(c.fields, j).ty);
         offset = roundUp(offset, l.align) + l.size;
         j = j + 1;
     };
-    if i >= 0 && i < size(c.fields) { offset = roundUp(offset, layoutIn(cx, get(c.fields, i).ty).align); };
+    if i >= 0 && i < size(c.fields) { offset = roundUp(offset, layoutIn(cx, &get(c.fields, i).ty).align); };
     return start + offset;
 };
 
@@ -2742,13 +2754,13 @@ fn storeAt(g: Gen, t: &Type, p: &String, value: &String) -> Gen [{ }] [{ }] {
     if t is Type::TByte || t is Type::TWord {
         width = memoryType(t);
         g1 = ins(g, "w", "trunc i64 ".then(value).then(" to ").then(width));
-        w = g1.last;
-        return emit(clone(g1), "store ".then(width).then(" ").then(w).then(", ptr ").then(p));
+        w = clone(g1.last);
+        return emit(g1, "store ".then(width).then(" ").then(w).then(", ptr ").then(p));
     };
     if isNumberWord(t) { return emit(g, "store i64 ".then(value).then(", ptr ").then(p)); };
     if t is Type::TBool {
         g1 = ins(g, "w", "zext i1 ".then(value).then(" to i8"));
-        w = g1.last;
+        w = clone(g1.last);
         return emit(g1, "store i8 ".then(w).then(", ptr ").then(p));
     };
     return emit(g, "store ptr ".then(value).then(", ptr ").then(p));
@@ -2760,13 +2772,13 @@ fn loadAt(g: Gen, t: &Type, p: &String) -> Gen [{ }] [{ }] {
         how = "zext";
         if t is Type::TWord && (t as Type::TWord).signed { how = "sext"; };
         g1 = ins(g, "w", "load ".then(width).then(", ptr ").then(p));
-        w = g1.last;
-        return ins(clone(g1), "v", clone(how).then(" ").then(width).then(" ").then(w).then(" to i64"));
+        w = clone(g1.last);
+        return ins(g1, "v", clone(how).then(" ").then(width).then(" ").then(w).then(" to i64"));
     };
     if isNumberWord(t) { return ins(g, "v", "load i64, ptr ".then(p)); };
     if t is Type::TBool {
         g1 = ins(g, "w", "load i8, ptr ".then(p));
-        w = g1.last;
+        w = clone(g1.last);
         return ins(g1, "b", "icmp ne i8 ".then(w).then(", 0"));
     };
     return ins(g, "v", "load ptr, ptr ".then(p));
@@ -2775,21 +2787,21 @@ fn loadAt(g: Gen, t: &Type, p: &String) -> Gen [{ }] [{ }] {
 // A slot of a struct or an enum value, at a byte offset
 fn storeSlot(g: Gen, cx: &Ctx, t: &Type, object: &String, offset: Int, value: &String) -> Gen ~ {
     g1 = ins(g, "p", "getelementptr i8, ptr ".then(object).then(", i64 ").then(showInt(offset)));
-    p = g1.last;
-    if isAggregate(t) { return copyWords(clone(g1), p, value, bytesIn(cx, t)); };
-    return storeAt(clone(g1), t, p, value);
+    p = clone(g1.last);
+    if isAggregate(t) { return copyWords(g1, p, value, bytesIn(cx, t)); };
+    return storeAt(g1, t, p, value);
 };
 
 fn loadSlot(g: Gen, t: &Type, object: &String, offset: Int) -> Gen [{ }] [{ }] {
     g1 = ins(g, "p", "getelementptr i8, ptr ".then(object).then(", i64 ").then(showInt(offset)));
-    p = g1.last;
-    return loadAt(clone(g1), t, p);
+    p = clone(g1.last);
+    return loadAt(g1, t, p);
 };
 
 // The address of an element at an index, an element being so many bytes
 fn elementAddress(g: Gen, base: &String, index: &String, bytes: Int) -> Gen [{ }] [{ }] {
     g1 = ins(g, "o", "mul i64 ".then(index).then(", ").then(showInt(bytes)));
-    offset = g1.last;
+    offset = clone(g1.last);
     return ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(offset));
 };
 
@@ -2858,8 +2870,8 @@ fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen 
     if c is Constant::CList { return failG(g, "Native code has no list constant: ".then(renderType(ty))); };
     if c is Constant::CArray {
         g1 = constantWords(g, (c as Constant::CArray).items);
-        from = g1.last;
-        return copyWords(clone(g1), at, from, bytesIn(cx, ty));
+        from = clone(g1.last);
+        return copyWords(g1, at, from, bytesIn(cx, ty));
     };
     if !(c is Constant::CData) { return failG(g, "A constant of the wrong type"); };
     name = (c as Constant::CData).name;
@@ -2877,8 +2889,8 @@ fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen 
         if j < 0 || j >= size(values) { return failG(g1, "A field is missing: ".then(name).then(".").then(field.name)); };
         offset = fieldOffset(cx, ctor, i);
         g2 = ins(g1, "p", "getelementptr i8, ptr ".then(at).then(", i64 ").then(showInt(offset)));
-        p = g2.last;
-        g1 = writeConstant(clone(g2), cx, field.ty, p, get(values, j));
+        p = clone(g2.last);
+        g1 = writeConstant(g2, cx, field.ty, p, get(values, j));
         i = i + 1;
     };
     return g1;
@@ -2889,8 +2901,8 @@ fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen 
 fn constantAggregate(g: Gen, cx: &Ctx, ty: &Type, c: &Constant) -> Gen ~ {
     if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
     g1 = entryTemp(g, slotsIn(cx, ty));
-    room = g1.last;
-    g2 = writeConstant(clone(g1), cx, ty, room, c);
+    room = clone(g1.last);
+    g2 = writeConstant(g1, cx, ty, room, c);
     return giving(g2, room);
 };
 
@@ -2919,8 +2931,8 @@ fn operandAddress(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen
         if ownsIn(cx, lt.ty) {
             bytes = bytesIn(cx, lt.ty);
             g1 = entryTemp(g, (bytes + 7) / 8);
-            room = g1.last;
-            g2 = copyWords(clone(g1), room, slot(l), bytes);
+            room = clone(g1.last);
+            g2 = copyWords(g1, room, slot(l), bytes);
             g3 = zeroWords(g2, slot(l), bytes);
             return giving(g3, room);
         };
@@ -2943,16 +2955,16 @@ fn operandValue(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~
     lt = localTypeOf(f, l);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
     g1 = typeText(g, lt.ty);
-    t = g1.last;
+    t = clone(g1.last);
     // (a value held inline is the address of the words it is made of)
     if isAggregate(lt.ty) {
         if moved { return operandAddress(g1, cx, f, lt.ty, o); };
         return giving(g1, slot(l));
     };
-    g2 = ins(clone(g1), "v", "load ".then(t).then(", ptr ").then(slot(l)));
+    g2 = ins(g1, "v", "load ".then(t).then(", ptr ").then(slot(l)));
     if moved {
-        v = g2.last;
-        g3 = emit(clone(g2), "store ".then(t).then(" ").then(zeroOf(t)).then(", ptr ").then(slot(l)));
+        v = clone(g2.last);
+        g3 = emit(g2, "store ".then(t).then(" ").then(zeroOf(t)).then(", ptr ").then(slot(l)));
         return giving(g3, v);
     };
     return g2;
@@ -3006,11 +3018,11 @@ fn arrayPtr(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
     if isListStruct(lt.ty) { return ins(g, "a", "load ptr, ptr ".then(slot(l))); };
     if lt.ty is Type::TRef || lt.ty is Type::TMutRef {
         g1 = ins(g, "a", "load ptr, ptr ".then(slot(l)));
-        at = g1.last;
+        at = clone(g1.last);
         inner = Type::TInt;
         if lt.ty is Type::TRef { inner = clone(Box::unbox(clone((lt.ty as Type::TRef).inner))); };
         if lt.ty is Type::TMutRef { inner = clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner))); };
-        if isListStruct(inner) { return ins(clone(g1), "a", "load ptr, ptr ".then(at)); };
+        if isListStruct(inner) { return ins(g1, "a", "load ptr, ptr ".then(at)); };
         return g1;
     };
     return giving(g, slot(l));
@@ -3028,17 +3040,17 @@ fn dropElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String
     if !(elementTy is Type::TNamed || elementTy is Type::TVariant || sizedArray(elementTy).ok) { return g; };
     bytes = bytesIn(cx, elementTy);
     g1 = elementAddress(g, base, index, bytes);
-    p = g1.last;
-    g2 = descriptor(clone(g1), cx, elementTy);
-    return emit(g2, "call void ".then(dropSymbol(cx.types, elementTy)).then("(ptr ").then(p).then(")"));
+    p = clone(g1.last);
+    g2 = descriptor(g1, cx, elementTy);
+    return emit(g2, "call void ".then(dropSymbol(&cx.types, elementTy)).then("(ptr ").then(p).then(")"));
 };
 
 fn writeElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String, value: &String) -> Gen ~ {
     bytes = bytesIn(cx, elementTy);
     g1 = elementAddress(g, base, index, bytes);
-    p = g1.last;
-    if isAggregate(elementTy) { return copyWords(clone(g1), p, value, bytes); };
-    return storeAt(clone(g1), elementTy, p, value);
+    p = clone(g1.last);
+    if isAggregate(elementTy) { return copyWords(g1, p, value, bytes); };
+    return storeAt(g1, elementTy, p, value);
 };
 
 // The number of elements of an array operand, as text in `last`: a constant when the size is in the type, and what a Box of an array of no size carries otherwise
@@ -3068,30 +3080,30 @@ fn lastIndex(g: Gen, count: &String) -> Gen [{ }] [{ }] {
 // Goes to the overflow block when the flag is set, and carries on in a new block otherwise
 fn stopOn(g: Gen, flag: &String) -> Gen [{ }] [{ }] {
     g1 = freshLabel(g, "ok");
-    next = g1.last;
-    g2 = emit(clone(g1), "br i1 ".then(flag).then(", label %overflow, label %").then(next));
+    next = clone(g1.last);
+    g2 = emit(g1, "br i1 ".then(flag).then(", label %overflow, label %").then(next));
     return label(g2, next);
 };
 
 // Arithmetic that stops the program when the result does not fit in an Int; the value is in `last`
 fn checked(g: Gen, name: &String, x: &String, y: &String) -> Gen [{ }] [{ }] {
     g1 = ins(g, "o", "call {i64, i1} @llvm.".then(name).then(".with.overflow.i64(i64 ").then(x).then(", i64 ").then(y).then(")"));
-    result = g1.last;
-    g2 = ins(clone(g1), "r", "extractvalue {i64, i1} ".then(result).then(", 0"));
-    value = g2.last;
-    g3 = ins(clone(g2), "f", "extractvalue {i64, i1} ".then(result).then(", 1"));
-    overflowed = g3.last;
-    return giving(stopOn(clone(g3), overflowed), value);
+    result = clone(g1.last);
+    g2 = ins(g1, "r", "extractvalue {i64, i1} ".then(result).then(", 0"));
+    value = clone(g2.last);
+    g3 = ins(g2, "f", "extractvalue {i64, i1} ".then(result).then(", 1"));
+    overflowed = clone(g3.last);
+    return giving(stopOn(g3, overflowed), value);
 };
 
 // Whether a remainder and the divisor have opposite signs and the remainder is not 0, which is when truncating and rounding down differ
 fn roundsTheOtherWay(g: Gen, r: &String, divisor: &String) -> Gen [{ }] [{ }] {
     g1 = ins(g, "c", "icmp ne i64 ".then(r).then(", 0"));
-    nonZero = g1.last;
-    g2 = ins(clone(g1), "x", "xor i64 ".then(r).then(", ").then(divisor));
-    signs = g2.last;
+    nonZero = clone(g1.last);
+    g2 = ins(g1, "x", "xor i64 ".then(r).then(", ").then(divisor));
+    signs = clone(g2.last);
     g3 = ins(g2, "c", "icmp slt i64 ".then(signs).then(", 0"));
-    differ = g3.last;
+    differ = clone(g3.last);
     return ins(g3, "c", "and i1 ".then(nonZero).then(", ").then(differ));
 };
 
@@ -3124,40 +3136,40 @@ fn binary(g: Gen, cx: &Ctx, op: Int, ty: &Type, x: &String, y: &String) -> Gen ~
     if op = 3 {
         // the one quotient that does not fit, which sdiv does not define
         g1 = ins(g, "c", "icmp eq i64 ".then(x).then(", ").then(intMin()));
-        isMin = g1.last;
-        g2 = ins(clone(g1), "c", "icmp eq i64 ".then(y).then(", -1"));
-        isMinusOne = g2.last;
+        isMin = clone(g1.last);
+        g2 = ins(g1, "c", "icmp eq i64 ".then(y).then(", -1"));
+        isMinusOne = clone(g2.last);
         g3 = ins(g2, "c", "and i1 ".then(isMin).then(", ").then(isMinusOne));
-        overflows = g3.last;
-        g4 = stopOn(clone(g3), overflows);
+        overflows = clone(g3.last);
+        g4 = stopOn(g3, overflows);
         // sdiv rounds toward 0 and `/` rounds down
         g5 = ins(g4, "q", "sdiv i64 ".then(x).then(", ").then(y));
-        q = g5.last;
-        g6 = ins(clone(g5), "r", "srem i64 ".then(x).then(", ").then(y));
-        r = g6.last;
-        g7 = roundsTheOtherWay(clone(g6), r, y);
-        adjust = g7.last;
-        g8 = ins(clone(g7), "q", "sub i64 ".then(q).then(", 1"));
-        lower = g8.last;
+        q = clone(g5.last);
+        g6 = ins(g5, "r", "srem i64 ".then(x).then(", ").then(y));
+        r = clone(g6.last);
+        g7 = roundsTheOtherWay(g6, r, y);
+        adjust = clone(g7.last);
+        g8 = ins(g7, "q", "sub i64 ".then(q).then(", 1"));
+        lower = clone(g8.last);
         return ins(g8, "q", "select i1 ".then(adjust).then(", i64 ").then(lower).then(", i64 ").then(q));
     };
     if op = 4 {
         // x % -1 is 0, and srem does not define it for the smallest Int
         g1 = ins(g, "c", "icmp eq i64 ".then(y).then(", -1"));
-        isMinusOne = g1.last;
+        isMinusOne = clone(g1.last);
         g2 = ins(g1, "d", "select i1 ".then(isMinusOne).then(", i64 1, i64 ").then(y));
-        divisor = g2.last;
+        divisor = clone(g2.last);
         g3 = ins(g2, "r", "srem i64 ".then(x).then(", ").then(divisor));
-        r = g3.last;
+        r = clone(g3.last);
         // srem takes the sign of the dividend and `%` the sign of the divisor
-        g4 = roundsTheOtherWay(clone(g3), r, y);
-        adjust = g4.last;
-        g5 = ins(clone(g4), "r", "add i64 ".then(r).then(", ").then(y));
-        shifted = g5.last;
+        g4 = roundsTheOtherWay(g3, r, y);
+        adjust = clone(g4.last);
+        g5 = ins(g4, "r", "add i64 ".then(r).then(", ").then(y));
+        shifted = clone(g5.last);
         return ins(g5, "r", "select i1 ".then(adjust).then(", i64 ").then(shifted).then(", i64 ").then(r));
     };
     g1 = typeText(g, ty);
-    t = g1.last;
+    t = clone(g1.last);
     return ins(g1, "c", "icmp ".then(predicate(op)).then(" ").then(t).then(" ").then(x).then(", ").then(y));
 };
 
@@ -3168,27 +3180,28 @@ fn arrayRead(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, os: &List
     if op = 0 && n = 1 { return arrayLength(g, f, get(os, 0)); };
     if op = 1 && n = 1 {
         g1 = arrayPtr(g, f, get(os, 0));
-        base = g1.last;
-        return loadAt(clone(g1), destType, base);
+        base = clone(g1.last);
+        return loadAt(g1, destType, base);
     };
     if op = 2 && n = 1 {
         g1 = arrayLength(g, f, get(os, 0));
-        g2 = lastIndex(clone(g1), g1.last);
-        index = g2.last;
-        g3 = arrayPtr(clone(g2), f, get(os, 0));
-        base = g3.last;
-        g4 = elementAddress(clone(g3), base, index, bytesIn(cx, destType));
-        p = g4.last;
-        return loadAt(clone(g4), destType, p);
+        length = clone(g1.last);
+        g2 = lastIndex(g1, length);
+        index = clone(g2.last);
+        g3 = arrayPtr(g2, f, get(os, 0));
+        base = clone(g3.last);
+        g4 = elementAddress(g3, base, index, bytesIn(cx, destType));
+        p = clone(g4.last);
+        return loadAt(g4, destType, p);
     };
     if op = 3 && n = 2 {
         g1 = arrayPtr(g, f, get(os, 0));
-        base = g1.last;
-        g2 = operandValue(clone(g1), cx, f, Type::TInt, get(os, 1));
-        index = g2.last;
-        g3 = elementAddress(clone(g2), base, index, bytesIn(cx, destType));
-        p = g3.last;
-        return loadAt(clone(g3), destType, p);
+        base = clone(g1.last);
+        g2 = operandValue(g1, cx, f, Type::TInt, get(os, 1));
+        index = clone(g2.last);
+        g3 = elementAddress(g2, base, index, bytesIn(cx, destType));
+        p = clone(g3.last);
+        return loadAt(g3, destType, p);
     };
     return failG(g, "Native code does not support this operation for an array yet");
 };
@@ -3206,19 +3219,19 @@ fn slotNumber(g: Gen, cx: &Ctx, f: &Function, p: &Operand, i: &Operand) -> Gen ~
     if !e.ok { return failG(g, "Not an address"); };
     bytes = bytesIn(cx, e.ty);
     g1 = operandValue(g, cx, f, Type::TInt, p);
-    a = g1.last;
-    g2 = operandValue(clone(g1), cx, f, Type::TInt, i);
-    x = g2.last;
-    g3 = ins(clone(g2), "o", "mul i64 ".then(x).then(", ").then(showInt(bytes)));
-    o = g3.last;
-    return ins(clone(g3), "a", "add i64 ".then(a).then(", ").then(o));
+    a = clone(g1.last);
+    g2 = operandValue(g1, cx, f, Type::TInt, i);
+    x = clone(g2.last);
+    g3 = ins(g2, "o", "mul i64 ".then(x).then(", ").then(showInt(bytes)));
+    o = clone(g3.last);
+    return ins(g3, "a", "add i64 ".then(a).then(", ").then(o));
 };
 
 // The same as a pointer
 fn slotAddress(g: Gen, cx: &Ctx, f: &Function, p: &Operand, i: &Operand) -> Gen ~ {
     g1 = slotNumber(g, cx, f, p, i);
-    n = g1.last;
-    return ins(clone(g1), "p", "inttoptr i64 ".then(n).then(" to ptr"));
+    n = clone(g1.last);
+    return ins(g1, "p", "inttoptr i64 ".then(n).then(" to ptr"));
 };
 
 // The operations on addresses (POINTERS.md), whose permissions are erased: an address is an i64, the memory of an allocation is slots of the bytes of a
@@ -3234,39 +3247,39 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
         if !(destType is Type::TAddr) { return failG(g, "Addr::alloc gives an address"); };
         bytes = bytesIn(cx, Box::unbox((destType as Type::TAddr).inner));
         g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
-        x = g1.last;
-        return ins(clone(g1), "m", "call i64 @tersus_addr_alloc(i64 ".then(x).then(", i64 ").then(showInt(bytes)).then(")"));
+        x = clone(g1.last);
+        return ins(g1, "m", "call i64 @tersus_addr_alloc(i64 ".then(x).then(", i64 ").then(showInt(bytes)).then(")"));
     };
     if op = 33 && n = 2 {
         e = addressElement(f, get(args, 0));
         if !e.ok { return failG(g, "Not an address"); };
         bytes = bytesIn(cx, e.ty);
         g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
-        a = g1.last;
-        g2 = operandValue(clone(g1), cx, f, Type::TInt, get(args, 1));
-        x = g2.last;
-        return ins(clone(g2), "m", "call i64 @tersus_addr_resize(i64 ".then(a).then(", i64 ").then(x).then(", i64 ").then(showInt(bytes)).then(")"));
+        a = clone(g1.last);
+        g2 = operandValue(g1, cx, f, Type::TInt, get(args, 1));
+        x = clone(g2.last);
+        return ins(g2, "m", "call i64 @tersus_addr_resize(i64 ".then(a).then(", i64 ").then(x).then(", i64 ").then(showInt(bytes)).then(")"));
     };
     if op = 34 && n = 1 {
         g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
-        a = g1.last;
-        return giving(emit(clone(g1), "call void @tersus_addr_free(i64 ".then(a).then(")")), "0");
+        a = clone(g1.last);
+        return giving(emit(g1, "call void @tersus_addr_free(i64 ".then(a).then(")")), "0");
     };
     if (op = 28 || op = 30) && n = 2 {
         g1 = slotAddress(g, cx, f, get(args, 0), get(args, 1));
-        p = g1.last;
-        return loadAt(clone(g1), destType, p);
+        p = clone(g1.last);
+        return loadAt(g1, destType, p);
     };
     if op = 29 && n = 3 {
         e = addressElement(f, get(args, 0));
         if !e.ok { return failG(g, "Not an address"); };
         g1 = slotAddress(g, cx, f, get(args, 0), get(args, 1));
-        at = g1.last;
-        g2 = elementValue(clone(g1), cx, f, e.ty, get(args, 2));
-        value = g2.last;
+        at = clone(g1.last);
+        g2 = elementValue(g1, cx, f, e.ty, get(args, 2));
+        value = clone(g2.last);
         bytes = bytesIn(cx, e.ty);
-        if isAggregate(e.ty) { return giving(copyWords(clone(g2), at, value, bytes), "0"); };
-        return giving(storeAt(clone(g2), e.ty, at, value), "0");
+        if isAggregate(e.ty) { return giving(copyWords(g2, at, value, bytes), "0"); };
+        return giving(storeAt(g2, e.ty, at, value), "0");
     };
     if op = 31 && n = 2 {
         e = addressElement(f, get(args, 0));
@@ -3274,9 +3287,9 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
         if !needsDropIn(cx, e.ty) { return giving(g, "0"); };
         if !(e.ty is Type::TNamed || e.ty is Type::TVariant || sizedArray(e.ty).ok) { return giving(g, "0"); };
         g1 = slotAddress(g, cx, f, get(args, 0), get(args, 1));
-        at = g1.last;
-        g2 = descriptor(clone(g1), cx, e.ty);
-        return giving(emit(clone(g2), "call void ".then(dropSymbol(cx.types, e.ty)).then("(ptr ").then(at).then(")")), "0");
+        at = clone(g1.last);
+        g2 = descriptor(g1, cx, e.ty);
+        return giving(emit(g2, "call void ".then(dropSymbol(&cx.types, e.ty)).then("(ptr ").then(at).then(")")), "0");
     };
     if op = 32 && n = 3 {
         e = addressElement(f, get(args, 0));
@@ -3284,11 +3297,11 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
         if !needsDropIn(cx, e.ty) { return giving(g, "0"); };
         if !(e.ty is Type::TNamed || e.ty is Type::TVariant || sizedArray(e.ty).ok) { return giving(g, "0"); };
         g1 = slotNumber(g, cx, f, get(args, 0), get(args, 1));
-        at = g1.last;
-        g2 = operandValue(clone(g1), cx, f, Type::TInt, get(args, 2));
-        count = g2.last;
-        g3 = descriptor(clone(g2), cx, e.ty);
-        return giving(emit(clone(g3), "call void ".then(dropRangeSymbol(cx.types, e.ty)).then("(i64 ").then(at).then(", i64 ").then(count).then(")")), "0");
+        at = clone(g1.last);
+        g2 = operandValue(g1, cx, f, Type::TInt, get(args, 2));
+        count = clone(g2.last);
+        g3 = descriptor(g2, cx, e.ty);
+        return giving(emit(g3, "call void ".then(dropRangeSymbol(&cx.types, e.ty)).then("(i64 ").then(at).then(", i64 ").then(count).then(")")), "0");
     };
     return failG(g, "Native code does not support this operation on an address");
 };
@@ -3346,7 +3359,7 @@ fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>
     // (the root may itself be a reference: a reborrow is to what the reference is to)
     if ty is Type::TRef || ty is Type::TMutRef {
         g1 = ins(g1, "p", "load ptr, ptr ".then(at));
-        at = g1.last;
+        at = clone(g1.last);
         ty = refTargetOf(lt.ty);
     };
     i = 0;
@@ -3354,7 +3367,7 @@ fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>
         // (a step may start from a reference met on the way, which is followed the same way)
         if ty is Type::TRef || ty is Type::TMutRef {
             g1 = ins(g1, "p", "load ptr, ptr ".then(at));
-            at = g1.last;
+            at = clone(g1.last);
             ty = refTargetOf(ty);
         };
         step = get(steps, i);
@@ -3367,7 +3380,7 @@ fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>
             j = fieldIndex(ctor.fields, fieldName);
             if j < 0 { return failG(k.g, "Variant ".then(ctorName).then(" has no field ").then(fieldName)); };
             g1 = ins(k.g, "p", "getelementptr i8, ptr ".then(at).then(", i64 ").then(showInt(fieldOffset(cx, ctor, j))));
-            at = g1.last;
+            at = clone(g1.last);
             ty = clone(get(ctor.fields, j).ty);
         };
         if step is RefStep::Index {
@@ -3379,14 +3392,14 @@ fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>
             if arr.ok { elem = Held { ok: true, ty: clone(arr.elem) }; };
             if !elem.ok { return failG(g1, "A reference to an element of this is not made by native code"); };
             g1 = operandValue(g1, cx, f, Type::TInt, o);
-            index = g1.last;
+            index = clone(g1.last);
             base = clone(at);
             if isListStruct(ty) || isBoxStruct(ty) {
-                g1 = ins(clone(g1), "a", "load ptr, ptr ".then(at));
-                base = g1.last;
+                g1 = ins(g1, "a", "load ptr, ptr ".then(at));
+                base = clone(g1.last);
             };
-            g1 = elementAddress(clone(g1), base, index, bytesIn(cx, elem.ty));
-            at = g1.last;
+            g1 = elementAddress(g1, base, index, bytesIn(cx, elem.ty));
+            at = clone(g1.last);
             ty = clone(elem.ty);
         };
         i = i + 1;
@@ -3412,8 +3425,8 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
     if rv is Rvalue::Deref {
         o = (rv as Rvalue::Deref).o;
         g1 = operandPointer(g, cx, f, o);
-        at = g1.last;
-        return loadAt(clone(g1), destType, at);
+        at = clone(g1.last);
+        return loadAt(g1, destType, at);
     };
     // (native code has no Box: a Box is made into a struct of lib/box.tersus or lib/lists.tersus first, see MirLists)
     if rv is Rvalue::MakeBox || rv is Rvalue::Unbox { return failG(g, "Native code has no Box: a Box is made into the struct of lib/box.tersus first (see MirLists)"); };
@@ -3424,10 +3437,10 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         operands = push(push([], clone(a)), clone(b));
         ty = sharedType(cx, f, operands);
         g1 = operandValue(g, cx, f, ty, a);
-        x = g1.last;
-        g2 = operandValue(clone(g1), cx, f, ty, b);
-        y = g2.last;
-        return binary(clone(g2), cx, op, ty, x, y);
+        x = clone(g1.last);
+        g2 = operandValue(g1, cx, f, ty, b);
+        y = clone(g2.last);
+        return binary(g2, cx, op, ty, x, y);
     };
     if rv is Rvalue::MakeList { return failG(g, "Native code has no list: a list is made into the struct of lib/lists.tersus first (see MirLists)"); };
     if rv is Rvalue::ListOp {
@@ -3440,8 +3453,8 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         // 35 uninitEmpty, 36 uninitNew, 37 uninitGet, 38 uninitTake, 39 uninitDiscard: an Uninit<T> is a T (an empty one is a T that is 0)
         if op = 35 && n = 0 {
             g1 = typeText(g, destType);
-            t = g1.last;
-            return giving(clone(g1), zeroOf(t));
+            t = clone(g1.last);
+            return giving(g1, zeroOf(t));
         };
         if (op = 36 || op = 37 || op = 38) && n = 1 { return operandValue(g, cx, f, destType, get(args, 0)); };
         if op = 39 && n = 1 { return giving(g, "0"); };
@@ -3456,7 +3469,7 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
             if op = 15 || op = 18 || op = 11 || op = 10 || op = 21 {
                 g1 = operandValue(g, cx, f, Type::TByte, a);
                 if op = 21 { return g1; };
-                x = g1.last;
+                x = clone(g1.last);
                 callText = "call i64 @tersus_pathByte(i64 ";
                 base = "p";
                 if op = 18 { callText = "call i64 @tersus_storeByte(i64 "; base = "s"; };
@@ -3466,16 +3479,16 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
             };
             if op = 17 {
                 g1 = operandValue(g, cx, f, Type::TInt, a);
-                x = g1.last;
+                x = clone(g1.last);
                 return ins(g1, "f", "call i64 @tersus_fileByte(i64 ".then(x).then(")"));
             };
             if op = 20 { return operandValue(g, cx, f, Type::TInt, a); };
         };
         if op = 14 && n = 2 {
             g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
-            x = g1.last;
-            g2 = operandValue(clone(g1), cx, f, Type::TInt, get(args, 1));
-            y = g2.last;
+            x = clone(g1.last);
+            g2 = operandValue(g1, cx, f, Type::TInt, get(args, 1));
+            y = clone(g2.last);
             return ins(g2, "a", "call i64 @tersus_argByte(i64 ".then(x).then(", i64 ").then(y).then(")"));
         };
         if n > 0 && isArrayOperand(f, get(args, 0)) { return arrayRead(g, cx, f, destType, op, args); };
@@ -3490,8 +3503,8 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         i = fieldIndex(ctor.fields, field);
         if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
         g1 = dataBase(k.g, cx, f, constructedType(cx, name), (rv as Rvalue::ReadField).o);
-        base = g1.last;
-        return loadSlot(clone(g1), get(ctor.fields, i).ty, base, fieldOffset(cx, ctor, i));
+        base = clone(g1.last);
+        return loadSlot(g1, get(ctor.fields, i).ty, base, fieldOffset(cx, ctor, i));
     };
     if rv is Rvalue::IsVariant {
         name = (rv as Rvalue::IsVariant).name;
@@ -3501,9 +3514,9 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         // (a struct has no tag, and a value of its type is that struct)
         if !ctor.tagged { return giving(k.g, "true"); };
         g1 = dataBase(k.g, cx, f, constructedType(cx, name), (rv as Rvalue::IsVariant).o);
-        base = g1.last;
+        base = clone(g1.last);
         g2 = ins(g1, "t", "load i32, ptr ".then(base));
-        found = g2.last;
+        found = clone(g2.last);
         return ins(g2, "c", "icmp eq i32 ".then(found).then(", ").then(showInt(ctor.tag)));
     };
     // the field is moved out of the value: what it held is left holding nothing
@@ -3516,12 +3529,12 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         i = fieldIndex(ctor.fields, field);
         if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
         g1 = dataBase(k.g, cx, f, constructedType(cx, name), Operand::Copy { local: (rv as Rvalue::TakeField).local });
-        base = g1.last;
+        base = clone(g1.last);
         offset = fieldOffset(cx, ctor, i);
-        g2 = loadSlot(clone(g1), get(ctor.fields, i).ty, base, offset);
-        taken = g2.last;
-        g3 = ins(clone(g2), "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(offset)));
-        p = g3.last;
+        g2 = loadSlot(g1, get(ctor.fields, i).ty, base, offset);
+        taken = clone(g2.last);
+        g3 = ins(g2, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(offset)));
+        p = clone(g3.last);
         return giving(emit(g3, "store i64 0, ptr ".then(p)), taken);
     };
     return failG(g, "Native code makes this where it is held inline, not as a word");
@@ -3537,24 +3550,24 @@ fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Typ
         if c is Constant::CBool { isZero = !(c as Constant::CBool).b; };
     };
     if isZero && !isAggregate(elementTy) {
-        g1 = clone(g);
+        g1 = g;
         bytes = "";
         size1 = bytesIn(cx, elementTy);
         if isKnown {
             bytes = showInt(size1 * n);
         } else {
-            g1 = ins(g, "z", "mul i64 ".then(count).then(", ").then(showInt(size1)));
-            bytes = g1.last;
+            g1 = ins(g1, "z", "mul i64 ".then(count).then(", ").then(showInt(size1)));
+            bytes = clone(g1.last);
         };
         return emit(g1, "call void @llvm.memset.p0.i64(ptr ".then(target).then(", i8 0, i64 ").then(bytes).then(", i1 false)"));
     };
     // an element that owns something is not the same words n times: each is a copy of the one that is given, which stays its own
     owning = needsDropIn(cx, elementTy);
-    g1 = clone(g);
+    g1 = g;
     value = "";
     if !owning {
-        g1 = elementValue(g, cx, f, elementTy, x);
-        value = g1.last;
+        g1 = elementValue(g1, cx, f, elementTy, x);
+        value = clone(g1.last);
     };
     source = "";
     if owning {
@@ -3564,7 +3577,7 @@ fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Typ
     };
     bytes = bytesIn(cx, elementTy);
     g2 = freshLabel(g1, "fill");
-    k = g2.last;
+    k = clone(g2.last);
     before = clone(k).then(".before");
     header = clone(k).then(".header");
     body = clone(k).then(".body");
@@ -3577,16 +3590,16 @@ fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Typ
     g6 = label(g5, header);
     g7 = emit(g6, clone(i).then(" = phi i64 [ 0, %").then(before).then(" ], [ ").then(next).then(", %").then(body).then(" ]"));
     g8 = ins(g7, "c", "icmp slt i64 ".then(i).then(", ").then(count));
-    c = g8.last;
+    c = clone(g8.last);
     g9 = emit(g8, "br i1 ".then(c).then(", label %").then(body).then(", label %").then(finish));
     g10 = label(g9, body);
-    g11 = clone(g10);
+    g11 = g10;
     if owning {
-        g11 = elementAddress(g10, target, i, bytes);
+        g11 = elementAddress(g11, target, i, bytes);
         p = clone(g11.last);
         g11 = cloneValue(g11, cx, f.name, elementTy, p, source);
     } else {
-        g11 = writeElement(g10, cx, elementTy, target, i, value);
+        g11 = writeElement(g11, cx, elementTy, target, i, value);
     };
     g12 = emit(g11, next.then(" = add i64 ").then(i).then(", 1"));
     g13 = emit(g12, "br label %".then(header));
@@ -3601,10 +3614,10 @@ fn fromPart(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int, address: &St
     target = slot(dest);
     if dropsOld && owns {
         g1 = entryTemp(g, (bytes + 7) / 8);
-        room = g1.last;
-        g2 = copyWords(clone(g1), room, address, bytes);
-        g3 = clone(g2);
-        if clear { g3 = zeroWords(g2, address, bytes); };
+        room = clone(g1.last);
+        g2 = copyWords(g1, room, address, bytes);
+        g3 = g2;
+        if clear { g3 = zeroWords(g3, address, bytes); };
         g4 = dropSlot(g3, cx, ty, dest);
         return copyWords(g4, target, room, bytes);
     };
@@ -3622,8 +3635,8 @@ fn freeOld(g: Gen, cx: &Ctx, dropsOld: Bool, ty: &Type, dest: Int) -> Gen ~ {
 // The address of the element at an index of an array (or of a list of native code, whose address is that of its array), the element being the value that is made
 fn elementOf(g: Gen, cx: &Ctx, f: &Function, ty: &Type, container: &Operand, index: &String) -> Gen ~ {
     g1 = arrayPtr(g, f, container);
-    base = g1.last;
-    return elementAddress(clone(g1), base, index, bytesIn(cx, ty));
+    base = clone(g1.last);
+    return elementAddress(g1, base, index, bytesIn(cx, ty));
 };
 
 // The statement that gives a value held inline to a local, made where the local is, with no pointer to it. What the local
@@ -3634,13 +3647,13 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
     target = slot(dest);
     if rv is Rvalue::Use {
         g1 = operandAddress(g, cx, f, ty, (rv as Rvalue::Use).o);
-        src = g1.last;
-        return fromPart(clone(g1), cx, dropsOld, ty, dest, src, false);
+        src = clone(g1.last);
+        return fromPart(g1, cx, dropsOld, ty, dest, src, false);
     };
     if rv is Rvalue::Deref {
         g1 = operandPointer(g, cx, f, (rv as Rvalue::Deref).o);
-        src = g1.last;
-        return fromPart(clone(g1), cx, dropsOld, ty, dest, src, false);
+        src = clone(g1.last);
+        return fromPart(g1, cx, dropsOld, ty, dest, src, false);
     };
     if rv is Rvalue::ListOp {
         op = (rv as Rvalue::ListOp).op;
@@ -3655,14 +3668,14 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         };
         if (op = 36 || op = 37 || op = 38) && n = 1 {
             g1 = operandAddress(g, cx, f, ty, get(args, 0));
-            src = g1.last;
-            return fromPart(clone(g1), cx, dropsOld, ty, dest, src, false);
+            src = clone(g1.last);
+            return fromPart(g1, cx, dropsOld, ty, dest, src, false);
         };
         // (the value held inline in a slot of memory, which is read or taken: the slot is empty after, which only the permission says)
         if (op = 28 || op = 30) && n = 2 {
             g1 = slotAddress(g, cx, f, get(args, 0), get(args, 1));
-            at = g1.last;
-            return fromPart(clone(g1), cx, dropsOld, ty, dest, at, false);
+            at = clone(g1.last);
+            return fromPart(g1, cx, dropsOld, ty, dest, at, false);
         };
         // Array::fromList: the elements of the list move into the array, and only the buffer of the list is freed
         if op = 45 && n = 1 && ty is Type::TArray && get(args, 0) is Operand::Move {
@@ -3673,7 +3686,8 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             g1 = ins(g, "m", "load i64, ptr ".then(slot(l)));
             m = clone(g1.last);
             g2 = ins(g1, "q", "getelementptr i8, ptr ".then(slot(l)).then(", i64 8"));
-            g3 = ins(clone(g2), "c", "load i64, ptr ".then(g2.last));
+            countAddress = clone(g2.last);
+            g3 = ins(g2, "c", "load i64, ptr ".then(countAddress));
             count = clone(g3.last);
             g4 = ins(g3, "p", "inttoptr i64 ".then(m).then(" to ptr"));
             p = clone(g4.last);
@@ -3688,8 +3702,8 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             // (an array that owns something is made in room of its own, then what the destination held is freed and the elements move in)
             if dropsOld && owns {
                 g1 = entryTemp(g, (bytes + 7) / 8);
-                room = g1.last;
-                g2 = fillElements(clone(g1), cx, f, room, arr.elem, showInt(arr.length), true, arr.length, get(args, 1));
+                room = clone(g1.last);
+                g2 = fillElements(g1, cx, f, room, arr.elem, showInt(arr.length), true, arr.length, get(args, 1));
                 g3 = freeOld(g2, cx, dropsOld, ty, dest);
                 return copyWords(g3, target, room, bytes);
             };
@@ -3698,12 +3712,12 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         if op = 6 && n = 3 && arr.ok {
             // (an array that owns something is moved to room of its own first, and what the destination held is freed)
             g1 = operandAddress(g, cx, f, ty, get(args, 0));
-            src = g1.last;
-            g2 = operandValue(clone(g1), cx, f, Type::TInt, get(args, 1));
-            index = g2.last;
-            g3 = elementValue(clone(g2), cx, f, arr.elem, get(args, 2));
-            value = g3.last;
-            g4 = freeOld(clone(g3), cx, dropsOld, ty, dest);
+            src = clone(g1.last);
+            g2 = operandValue(g1, cx, f, Type::TInt, get(args, 1));
+            index = clone(g2.last);
+            g3 = elementValue(g2, cx, f, arr.elem, get(args, 2));
+            value = clone(g3.last);
+            g4 = freeOld(g3, cx, dropsOld, ty, dest);
             g5 = copyWords(g4, target, src, bytes);
             g6 = dropElement(g5, cx, arr.elem, target, index);
             return writeElement(g6, cx, arr.elem, target, index, value);
@@ -3711,23 +3725,24 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         // an element that is a value held inline, of an array or of a list
         if op = 3 && n = 2 {
             g1 = operandValue(g, cx, f, Type::TInt, get(args, 1));
-            index = g1.last;
-            g2 = elementOf(clone(g1), cx, f, ty, get(args, 0), index);
-            p = g2.last;
-            return fromPart(clone(g2), cx, dropsOld, ty, dest, p, false);
+            index = clone(g1.last);
+            g2 = elementOf(g1, cx, f, ty, get(args, 0), index);
+            p = clone(g2.last);
+            return fromPart(g2, cx, dropsOld, ty, dest, p, false);
         };
         if op = 1 && n = 1 {
             g1 = elementOf(g, cx, f, ty, get(args, 0), "0");
-            p = g1.last;
-            return fromPart(clone(g1), cx, dropsOld, ty, dest, p, false);
+            p = clone(g1.last);
+            return fromPart(g1, cx, dropsOld, ty, dest, p, false);
         };
         if op = 2 && n = 1 {
             g1 = arrayLength(g, f, get(args, 0));
-            g2 = lastIndex(clone(g1), g1.last);
-            index = g2.last;
-            g3 = elementOf(clone(g2), cx, f, ty, get(args, 0), index);
-            p = g3.last;
-            return fromPart(clone(g3), cx, dropsOld, ty, dest, p, false);
+            length = clone(g1.last);
+            g2 = lastIndex(g1, length);
+            index = clone(g2.last);
+            g3 = elementOf(g2, cx, f, ty, get(args, 0), index);
+            p = clone(g3.last);
+            return fromPart(g3, cx, dropsOld, ty, dest, p, false);
         };
     };
     // a field that is held inline
@@ -3740,10 +3755,10 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         i = fieldIndex(ctor.fields, field);
         if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
         g1 = dataBase(k.g, cx, f, constructedType(cx, name), (rv as Rvalue::ReadField).o);
-        base = g1.last;
+        base = clone(g1.last);
         g2 = ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(fieldOffset(cx, ctor, i))));
-        p = g2.last;
-        return fromPart(clone(g2), cx, dropsOld, ty, dest, p, false);
+        p = clone(g2.last);
+        return fromPart(g2, cx, dropsOld, ty, dest, p, false);
     };
     // the field is moved out of the value: what it held is left holding nothing
     if rv is Rvalue::TakeField {
@@ -3755,10 +3770,10 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         i = fieldIndex(ctor.fields, field);
         if i < 0 { return failG(k.g, "Variant ".then(name).then(" has no field ").then(field)); };
         g1 = dataBase(k.g, cx, f, constructedType(cx, name), Operand::Copy { local: (rv as Rvalue::TakeField).local });
-        base = g1.last;
+        base = clone(g1.last);
         g2 = ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(showInt(fieldOffset(cx, ctor, i))));
-        p = g2.last;
-        return fromPart(clone(g2), cx, dropsOld, ty, dest, p, true);
+        p = clone(g2.last);
+        return fromPart(g2, cx, dropsOld, ty, dest, p, true);
     };
     if rv is Rvalue::MakeData {
         name = (rv as Rvalue::MakeData).name;
@@ -3800,16 +3815,16 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             block = clone(g1.last);
             if o is Operand::Move {
                 g2 = emit(g1, "store i64 0, ptr ".then(slot(l)));
-                g3 = freeOld(clone(g2), cx, dropsOld, ty, dest);
+                g3 = freeOld(g2, cx, dropsOld, ty, dest);
                 g4 = copyWords(g3, target, block, bytes);
                 return emit(g4, "call void @tersus_box_free(ptr ".then(block).then(")"));
             };
-            g2 = freeOld(clone(g1), cx, dropsOld, ty, dest);
+            g2 = freeOld(g1, cx, dropsOld, ty, dest);
             return copyWords(g2, target, block, bytes);
         };
         g1 = operandAddress(g, cx, f, ty, o);
-        src = g1.last;
-        g2 = freeOld(clone(g1), cx, dropsOld, ty, dest);
+        src = clone(g1.last);
+        g2 = freeOld(g1, cx, dropsOld, ty, dest);
         return copyWords(g2, target, src, bytes);
     };
     // Box::new of an inline array: a Box of an array is a list of native code (MirLists), so the elements move into memory of their own, with
@@ -3837,9 +3852,11 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
         g5 = freeOld(g4, cx, dropsOld, ty, dest);
         g6 = emit(g5, "store i64 ".then(m).then(", ptr ").then(target));
         g7 = ins(g6, "q", "getelementptr i8, ptr ".then(target).then(", i64 8"));
-        g8 = emit(clone(g7), "store i64 ".then(showInt(count)).then(", ptr ").then(g7.last));
+        lengthAddress = clone(g7.last);
+        g8 = emit(g7, "store i64 ".then(showInt(count)).then(", ptr ").then(lengthAddress));
         g9 = ins(g8, "q", "getelementptr i8, ptr ".then(target).then(", i64 16"));
-        return emit(clone(g9), "store i64 ".then(showInt(count)).then(", ptr ").then(g9.last));
+        capacityAddress = clone(g9.last);
+        return emit(g9, "store i64 ".then(showInt(count)).then(", ptr ").then(capacityAddress));
     };
     // Box::unbox of a Box of an array: the elements move out of the memory of the list, which is freed
     if rv is Rvalue::Unbox && isListStruct(operandLocalType(f, (rv as Rvalue::Unbox).o).ty) {
@@ -3870,7 +3887,7 @@ fn store(g: Gen, cx: &Ctx, f: &Function, dest: Int, value: &String) -> Gen ~ {
     lt = localTypeOf(f, dest);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
     g1 = typeText(g, lt.ty);
-    t = g1.last;
+    t = clone(g1.last);
     return emit(g1, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
 };
 
@@ -3892,9 +3909,9 @@ fn cloneInto(g: Gen, cx: &Ctx, f: &Function, dest: Int, destType: &Type, o: &Ope
     if owns {
         // the copy is made before what the local held is freed, since it can be a part of it (`t = clone of t.next`)
         bytes = bytesIn(cx, destType);
-        g2 = entryTemp(clone(g), (bytes + 7) / 8);
-        room = g2.last;
-        g3 = cloneValue(clone(g2), cx, f.name, destType, room, source);
+        g2 = entryTemp(g, (bytes + 7) / 8);
+        room = clone(g2.last);
+        g3 = cloneValue(g2, cx, f.name, destType, room, source);
         return copyWords(g3, slot(dest), room, bytes);
     };
     return cloneValue(g, cx, f.name, destType, slot(dest), source);
@@ -3929,15 +3946,24 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
         addr = clone(g1.last);
         ty = assignRefType(cx, f, root, steps);
         if isAggregate(ty) {
-            if rv2 is Rvalue::Use { g2 = operandAddress(clone(g1), cx, f, ty, (rv2 as Rvalue::Use).o); return copyWords(g2, addr, clone(g2.last), bytesIn(cx, ty)); };
-            if rv2 is Rvalue::Deref { g2 = operandValue(clone(g1), cx, f, ty, (rv2 as Rvalue::Deref).o); return copyWords(g2, addr, clone(g2.last), bytesIn(cx, ty)); };
+            if rv2 is Rvalue::Use {
+                g2 = operandAddress(g1, cx, f, ty, (rv2 as Rvalue::Use).o);
+                source = clone(g2.last);
+                return copyWords(g2, addr, source, bytesIn(cx, ty));
+            };
+            if rv2 is Rvalue::Deref {
+                g2 = operandValue(g1, cx, f, ty, (rv2 as Rvalue::Deref).o);
+                source = clone(g2.last);
+                return copyWords(g2, addr, source, bytesIn(cx, ty));
+            };
             return failG(g1, "an assignment through a reference of this shape is not made by native code yet");
         };
-        g2 = rvalue(clone(g1), cx, f, ty, rv2);
+        g2 = rvalue(g1, cx, f, ty, rv2);
         if size(g2.error.bytes) > 0 { return g2; };
         value = clone(g2.last);
-        g3 = typeText(clone(g2), ty);
-        return emit(g3, "store ".then(g3.last).then(" ").then(value).then(", ptr ").then(addr));
+        g3 = typeText(g2, ty);
+        storeType = clone(g3.last);
+        return emit(g3, "store ".then(storeType).then(" ").then(value).then(", ptr ").then(addr));
     };
     lt = localTypeOf(f, dest);
     if !lt.ok { return failG(g, "Undeclared local ".then(showInt(dest))); };
@@ -3945,9 +3971,9 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
     if peek {
         if isAggregate(lt.ty) { return assignAggregate(g, cx, f, false, dest, lt.ty, rv); };
         g1 = rvalue(g, cx, f, lt.ty, rv);
-        value = g1.last;
-        g2 = typeText(clone(g1), lt.ty);
-        t = g2.last;
+        value = clone(g1.last);
+        g2 = typeText(g1, lt.ty);
+        t = clone(g2.last);
         return emit(g2, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
     };
     if rv is Rvalue::Copy {
@@ -3961,8 +3987,8 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
         return g1;
     };
     g1 = rvalue(g, cx, f, lt.ty, rv);
-    value = g1.last;
-    return storeResult(clone(g1), cx, entry, f, dest, value);
+    value = clone(g1.last);
+    return storeResult(g1, cx, entry, f, dest, value);
 };
 
 // A call of a function, given its symbol or the address of it, the types of its parameters and of its result
@@ -3984,20 +4010,25 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
                 if !(argument is Operand::Copy) && !(argument is Operand::Move) {
                     g1 = operandValue(g1, cx, f, wanted, argument);
                     if isAggregate(wanted) {
-                        g1 = giving(g1, clone(g1.last));
+                        address = clone(g1.last);
+                        g1 = giving(g1, address);
                     } else {
                         value = clone(g1.last);
-                        g1 = entryTemp(clone(g1), 1);
+                        g1 = entryTemp(g1, 1);
                         room = clone(g1.last);
-                        g1 = typeText(clone(g1), wanted);
-                        g1 = emit(g1, "store ".then(g1.last).then(" ").then(value).then(", ptr ").then(room));
+                        g1 = typeText(g1, wanted);
+                        text = clone(g1.last);
+                        g1 = emit(g1, "store ".then(text).then(" ").then(value).then(", ptr ").then(room));
                         g1 = giving(g1, room);
                     };
                 };
             };
         } else if given.ok && (given.ty is Type::TRef || given.ty is Type::TMutRef) && refTargetOf(given.ty) = wanted {
             g1 = operandValue(g1, cx, f, given.ty, argument);
-            if !isAggregate(wanted) { g1 = loadAt(clone(g1), wanted, g1.last); };
+            if !isAggregate(wanted) {
+                address = clone(g1.last);
+                g1 = loadAt(g1, wanted, address);
+            };
         } else {
             g1 = operandValue(g1, cx, f, wanted, argument);
         };
@@ -4016,7 +4047,7 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
         j = j + 1;
     };
     g2 = typeText(g1, returnType);
-    result = g2.last;
+    result = clone(g2.last);
     if isAggregate(returnType) {
         // the callee makes a value held inline in the room it is given. If the local that gets it owns something, the room is one of the function's own and the local is given
         // the value after what it held is freed; otherwise it is the slot of the local (the callee has copied its arguments by the time it writes, so the local may be one of them).
@@ -4028,27 +4059,27 @@ fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: 
                 if (a as Operand::Copy).local = dest { lends = true; };
             };
         };
-        g3 = clone(g2);
+        g3 = g2;
         if owns || lends {
-            g3 = entryTemp(g2, slotsIn(cx, returnType));
-            room = g3.last;
+            g3 = entryTemp(g3, slotsIn(cx, returnType));
+            room = clone(g3.last);
             all = noStrings();
             all = push(all, "ptr ".then(room));
             for a in arguments { all = push(all, clone(a)); };
             g3 = emit(g3, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
-            g3 = copyWords(clone(g3), slot(dest), room, bytesIn(cx, returnType));
+            g3 = copyWords(g3, slot(dest), room, bytesIn(cx, returnType));
         } else {
             all = noStrings();
             all = push(all, "ptr ".then(slot(dest)));
             for a in arguments { all = push(all, clone(a)); };
-            g3 = emit(g2, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
+            g3 = emit(g3, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
         };
         if entry && dest = 0 { g3 = emit(g3, "store i1 true, ptr %returned"); };
         return emit(g3, "br label %".then(blockLabel(next)));
     };
     g3 = ins(g2, "c", "call ".then(result).then(" ").then(target).then("(").then(joinWith(", ", arguments)).then(")"));
-    value = g3.last;
-    g4 = storeResult(clone(g3), cx, entry, f, dest, value);
+    value = clone(g3.last);
+    g4 = storeResult(g3, cx, entry, f, dest, value);
     return emit(g4, "br label %".then(blockLabel(next)));
 };
 
@@ -4056,7 +4087,7 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
     if t is Terminator::Goto { return emit(g, "br label %".then(blockLabel((t as Terminator::Goto).block))); };
     if t is Terminator::Switch {
         g1 = operandValue(g, cx, f, Type::TBool, (t as Terminator::Switch).cond);
-        v = g1.last;
+        v = clone(g1.last);
         return emit(g1, "br i1 ".then(v).then(", label %").then(blockLabel((t as Terminator::Switch).yes)).then(", label %").then(blockLabel((t as Terminator::Switch).no)));
     };
     if t is Terminator::Unreachable { return emit(g, "unreachable"); };
@@ -4082,8 +4113,8 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
         ty = sharedType(cx, f, callees);
         if ty is Type::TFn {
             g1 = operandValue(g, cx, f, ty, callee);
-            address = g1.last;
-            return call(clone(g1), cx, entry, f, address, (ty as Type::TFn).args, noBools(), Box::unbox((ty as Type::TFn).ret), args, dest, next);
+            address = clone(g1.last);
+            return call(g1, cx, entry, f, address, (ty as Type::TFn).args, noBools(), Box::unbox((ty as Type::TFn).ret), args, dest, next);
         };
         return failG(g, "Call of something that is not a function");
     };
@@ -4094,23 +4125,23 @@ fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -
         g1 = copyWords(g, "%ret", slot(0), bytesIn(cx, ty));
         if entry {
             g2 = ins(g1, "f", "load i1, ptr %returned");
-            returned = g2.last;
+            returned = clone(g2.last);
             return emit(g2, "ret i1 ".then(returned));
         };
         return emit(g1, "ret void");
     };
     g1 = typeText(g, ty);
-    tt = g1.last;
-    g2 = ins(clone(g1), "v", "load ".then(tt).then(", ptr ").then(slot(0)));
-    v = g2.last;
+    tt = clone(g1.last);
+    g2 = ins(g1, "v", "load ".then(tt).then(", ptr ").then(slot(0)));
+    v = clone(g2.last);
     if entry {
-        g3 = ins(clone(g2), "f", "load i1, ptr %returned");
-        returned = g3.last;
+        g3 = ins(g2, "f", "load i1, ptr %returned");
+        returned = clone(g3.last);
         result = resultStruct(tt);
-        g4 = ins(clone(g3), "w", "insertvalue ".then(result).then(" undef, ").then(tt).then(" ").then(v).then(", 0"));
-        withValue = g4.last;
+        g4 = ins(g3, "w", "insertvalue ".then(result).then(" undef, ").then(tt).then(" ").then(v).then(", 0"));
+        withValue = clone(g4.last);
         g5 = ins(g4, "w", "insertvalue ".then(result).then(" ").then(withValue).then(", i1 ").then(returned).then(", 1"));
-        both = g5.last;
+        both = clone(g5.last);
         return emit(g5, "ret ".then(result).then(" ").then(both));
     };
     return emit(g2, "ret ".then(tt).then(" ").then(v));

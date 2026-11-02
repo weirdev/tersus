@@ -1,10 +1,16 @@
 module TestCopies (testCopies) where
 
 import Data.List (isInfixOf)
+import qualified Data.Map.Strict as Map
 
+import qualified Compile
+import qualified Mir as M
+import MirEval (MirValue (MInt), runProgramOutput)
+import MirOwnership (insertOwnership, operandLocal)
 import Pipeline (compileSource)
 import Syntax
 import TestHarness
+import Types (Type (..))
 import Utils
 
 -- A copy is made where the program writes `clone`, and a value that is not Copy is moved: Clone and Copy are traits that a type says it has,
@@ -44,6 +50,49 @@ testCopies =
                 , testCase "an enum is Clone" (runs (markers ++ "enum E { A { xs: List<Int> }, B }; impl Clone for E { }; e = E::A { xs: push([], 1) }; f = clone(e); return f is E::A;") (VBool True))
                 , testCase "clone takes one argument" (rejected "return clone(1, 2);" "clone takes 1 argument")
                 , testCase "a function of the program can have the name" (runs "fn clone(x: Int) -> Int { return x + 1; }; return clone(1);" (VInt 2))
+                ]
+            , TestList
+                "single Clone dispatch"
+                [ cloneDispatch "list" "<List as Clone>::clone[Token]" ("xs = push([], Token { n: 7, xs: [1] }); ys = clone(xs); return get(ys, 0).n;") 7 0
+                , cloneDispatch "array" "<Array as Clone>::clone[Token]" "fn singleton() -> Array<Token, 1> { return Array::fromList(push([], Token { n: 7, xs: [1] })); }; xs = singleton(); ys = clone(xs); return get(ys, 0).n;" 7 0
+                , cloneDispatch "boxed array" "cloneBoxedArray[Token]" "fn singleton() -> Array<Token, 1> { return Array::fromList(push([], Token { n: 7, xs: [1] })); }; fn duplicate(xs: &Box<Array<Token>>) -> Box<Array<Token>> [{ }] [{ affirm size(return) = size(xs); }] { return clone(xs); }; xs = Box::new(singleton()); ys = duplicate(xs); return get(ys, 0).n;" 7 1
+                , cloneDispatch "Box" "<Box as Clone>::clone[Token]" ("xs = Box::new(Token { n: 7, xs: [1] }); ys = clone(xs); return Box::unbox(ys).n;") 7 2
+                , cloneDispatch "derived struct" "<Wrapped as Clone>::clone" ("struct Wrapped { token: Token }; impl Clone for Wrapped { }; xs = Wrapped { token: Token { n: 7, xs: [1] } }; ys = clone(xs); return ys.token.n;") 7 0
+                , cloneDispatch "derived enum" "<Wrapped as Clone>::clone" ("enum Wrapped { Present { token: Token }, Empty }; impl Clone for Wrapped { }; xs = Wrapped::Present { token: Token { n: 7, xs: [1] } }; ys = clone(xs); return (ys as Wrapped::Present).token.n;") 7 0
+                , testCase "cloning boxed contents preserves both words and the source" (runs boxedContents (VInt 7096))
+                , TestCase "cloning boxed contents does not synthesize a wrapper loan" (noCloneBorrow boxedContents)
+                , testCase "cloning a field through a Box keeps its snapshot" (runs boxedField (VInt 7013))
+                , TestCase "cloning a field through a Box keeps its materialization" (noCloneBorrow boxedField)
+                , testCase "cloning a field of a boxed list element keeps its snapshot" (runs boxedListField (VInt 7013))
+                , TestCase "a resolved Box in a list element is not borrowed through" (noCloneBorrow boxedListField)
+                , testCase "a terminal Box field is cloned as a Box, not its referent" (runs "enum CloneBoxNode { Word, Ref { inner: Box<CloneBoxNode> } }; impl Clone for CloneBoxNode { }; struct CloneBoxHolder { ty: CloneBoxNode }; h = CloneBoxHolder { ty: CloneBoxNode::Ref { inner: Box::new(CloneBoxNode::Word) } }; b = clone((h.ty as CloneBoxNode::Ref).inner); return Box::unbox(b) is CloneBoxNode::Word;" (VBool True))
+                , testCase "a method clones an element once" (cloneOutput "xs = push([], Token { n: 7, xs: [1] }); ys = get(xs, 0).clone(); return ys.n;" "C" 7)
+                , testCase "nested Clone keeps exactly one custom call" (cloneOutput ("rows = push([], push([], Token { n: 7, xs: [1] })); copy = clone(rows); return get(get(copy, 0), 0).n;") "C" 7)
+                , testCase "a shadowed get is evaluated once and remains a call" (loweredOutput "trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; struct Token { n: Int }; impl Clone for Token { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { writeByte(toByte(67)); return Self { n: self.n }; }; }; fn get(xs: &List<Token>, i: Int) -> Token { writeByte(toByte(71)); return Token { n: 7 }; }; xs = push([], Token { n: 1 }); ys = clone(get(xs, 0)); return ys.n;" "GC" 7)
+                , testCase "an index expression is evaluated once" (cloneOutput ("fn index() -> Int [{ }] [{ affirm return = 0; }] { writeByte(toByte(73)); return 0; }; xs = push([], Token { n: 7, xs: [1] }); ys = clone(get(xs, index())); return ys.n;") "IC" 7)
+                , testCase "an inactive enum variant does not clone fields" (cloneOutput "enum E { A { token: Token }, B }; impl Clone for E { }; e = E::B; copy = clone(e); if copy is E::B { return 7; }; return 0;" "" 7)
+                , testCase "a recursive Box field clones once" (cloneOutput "enum Node { End, Link { token: Token, next: Box<Node> } }; impl Clone for Node { }; e = Node::Link { token: Token { n: 7, xs: [1] }, next: Box::new(Node::End) }; copy = clone(e); return (copy as Node::Link).token.n;" "C" 7)
+                , testCase "recursive list fields clone each node once" (cloneOutput "struct Node { token: Token, kids: List<Node> }; impl Clone for Node { }; leaf = Node { token: Token { n: 7, xs: [1] }, kids: [] }; tree = Node { token: Token { n: 7, xs: [1] }, kids: push([], leaf) }; copy = clone(tree); return size(copy.kids);" "CC" 1)
+                , testCase "a wrong variant is not borrowed by clone" (rejected (tokenClone ++ "enum E { A { token: Token }, B }; e = E::B; t = clone((e as E::A).token); return t.n;") "Could not prove")
+                , testCase "a nested clone captures an earlier index before a later call" (loweredOutput "fn bump(i: &mut Int) -> Int [{ affirm *i = 0; }] [{ affirm *i = 1; affirm return = 0; }] { *i = 1; return 0; }; rows = [[[7]], [[9]]]; i = 0; copy = clone(get(get(rows, i), bump(&mut i))); return first(copy);" "" 7)
+                , testCase "a nested clone keeps the earlier container snapshot" (loweredOutput "fn replaceRows(rows: &mut List<List<List<Int>>>) -> Int [{ }] [{ affirm return = 0; }] { *rows = [[[9]]]; return 0; }; rows = [[[7]]]; copy = clone(get(get(rows, 0), replaceRows(&mut rows))); return first(copy);" "" 7)
+                , testCase "a borrow captures an earlier index before a later call" (loweredOutput "fn bump(i: &mut Int) -> Int [{ affirm *i = 0; }] [{ affirm *i = 1; affirm return = 0; }] { *i = 1; return 0; }; rows = [[[7]], [[9]]]; i = 0; r = &get(get(rows, i), bump(&mut i)); return first(*r);" "" 7)
+                , testCase "an owned boxed-array helper is not lent a field" (runs "trait Clone { fn clone(self: &Self) -> Self; }; fn cloneBoxedArray(b: Box<Array<Int>>) -> Box<Array<Int>> { return b; }; struct H { b: Box<Array<Int>> }; h = H { b: Array::boxed(1, 7) }; copy = clone(h.b); return size(copy);" (VInt 1))
+                , TestCase "a named intermediate keeps its materialization" $ do
+                    result <- mapResult insertOwnership <$> compileOnce (tokenClone ++ "xs = push([], Token { n: 7, xs: [1] }); tmp = get(xs, 0); copy = clone(tmp); return copy.n;")
+                    pure $ case result of
+                        Error e -> Just e
+                        Ok program ->
+                            let main = M.progMain program
+                                args = [M.localType decl | M.BasicBlock _ (M.Call (M.Const (M.CFn "<Token as Clone>::clone")) [arg] _ _) <- Map.elems (M.fnBlocks main), Just local <- [operandLocal arg], Just decl <- [Map.lookup local (M.fnLocals main)]]
+                             in testAssertEq args [TNamed "Token" []]
+                , testCase "two explicit clones call custom Clone twice" (cloneOutput "xs = push([], Token { n: 7, xs: [1] }); copy = clone(clone(get(xs, 0))); return copy.n;" "CC" 7)
+                , testCase "an owned custom Clone signature is not changed" (runs "trait Clone { fn clone(self: Self) -> Self; }; struct S { n: Int }; impl Clone for S { fn clone(self: Self) -> Self { return S { n: self.n }; }; }; s = S { n: 7 }; t = s.clone(); return t.n;" (VInt 7))
+                , testCase "primitive clone copies the word" (runs "x = 7; y = clone(x); x = 9; return y;" (VInt 7))
+                , testCase "clone of a reference keeps the reference" (runs "x = 7; r = &x; s = clone(r); return *s;" (VInt 7))
+                , testCase "clone through a reference owns its snapshot" (runs "xs = [1]; r = &xs; ys = clone(*r); xs = push(xs, 2); return size(xs) * 10 + size(ys);" (VInt 21))
+                , testCase "cloned nested values do not retain the source loan" (runs "rows = push([], [1]); copy = clone(rows); rows = set(rows, 0, [2, 3]); return size(get(rows, 0)) * 10 + size(get(copy, 0));" (VInt 21))
+                , TestCase "String clones its byte list once" (ownedCloneCopies "<String as Clone>::clone" "s = \"abc\"; t = clone(s); return size(t);" 0)
                 ]
             , TestList
                 "copy"
@@ -150,3 +199,54 @@ testCopies =
                 , testCase "several errors are reported" (placed "xs = [1];\nys = xs;\nzs = xs;\nn = size(xs);\nreturn n;" "line 4:1")
                 ]
             ]
+
+boxedContents :: String
+boxedContents = "struct CloneBoxPair { first: Int, second: Int }; impl Clone for CloneBoxPair { }; b = Box::new(CloneBoxPair { first: 7, second: 13 }); copy = clone(Box::unbox(b)); return copy.first * 1000 + copy.second + Box::unbox(b).first * 10 + Box::unbox(b).second;"
+
+boxedField :: String
+boxedField = "struct CloneBoxFields { xs: List<Int>, n: Int }; impl Clone for CloneBoxFields { }; b = Box::new(CloneBoxFields { xs: [7], n: 13 }); xs = clone(b.xs); return get(xs, 0) * 1000 + Box::unbox(b).n;"
+
+boxedListField :: String
+boxedListField = "struct CloneBoxFields { xs: List<Int>, n: Int }; impl Clone for CloneBoxFields { }; boxes = push([], Box::new(CloneBoxFields { xs: [7], n: 13 })); xs = clone(get(boxes, 0).xs); return get(xs, 0) * 1000 + Box::unbox(get(boxes, 0)).n;"
+
+noCloneBorrow :: String -> IO TestResult
+noCloneBorrow source = do
+    result <- compileOnce source
+    pure $ case result of
+        Error e -> Just e
+        Ok program -> testAssertEq (length [() | M.BasicBlock stmts _ <- Map.elems (M.fnBlocks (M.progMain program)), M.Assign _ M.Borrow{} <- stmts]) 0
+
+tokenClone :: String
+tokenClone = "struct Token { n: Int, xs: List<Int> }; impl Clone for Token { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }] { writeByte(toByte(67)); return Self { n: self.n, xs: clone(self.xs) }; }; }; "
+
+cloneOutput :: String -> String -> Integer -> TestResult
+cloneOutput body = programOutput (tokenClone ++ body)
+
+programOutput :: String -> String -> Integer -> TestResult
+programOutput source output value =
+    testAssertEq (compileSource source `bindResult` runProgramOutput) (Ok (output, Just (MInt value)))
+
+loweredOutput :: String -> String -> Integer -> TestResult
+loweredOutput source output value =
+    testAssertEq (Compile.lowerSource True source `bindResult` runProgramOutput) (Ok (output, Just (MInt value)))
+
+cloneDispatch :: String -> String -> String -> Integer -> Int -> Test
+cloneDispatch label function body value materializations = TestList label
+    [ testCase "reference Clone runs once" (cloneOutput body "C" value)
+    , TestCase "expected projection materialization" (ownedCloneCopies function (tokenClone ++ body) materializations)
+    ]
+
+ownedCloneCopies :: String -> String -> Int -> IO TestResult
+ownedCloneCopies name source expected = do
+    result <- mapResult insertOwnership <$> compileOnce source
+    pure $ case result of
+        Error e -> Just e
+        Ok program -> case [fn | fn <- Map.elems (M.progFunctions program), name `isInfixOf` M.fnName fn] of
+            [fn] -> testAssertEq (length [() | M.BasicBlock stmts _ <- Map.elems (M.fnBlocks fn), M.Assign _ rv <- stmts, materializes rv]) expected
+            fns -> Just ("Expected one Clone function matching " ++ name ++ ", got " ++ show (map M.fnName fns))
+  where
+    materializes M.CopyOf{} = True
+    materializes M.ReadField{} = True
+    materializes (M.ListOp M.Get _) = True
+    materializes M.Unbox{} = True
+    materializes _ = False

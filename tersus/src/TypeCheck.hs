@@ -554,7 +554,15 @@ inferExprR ctx env expr =
             let owned = case t of
                     TNamed base _ -> Map.member (base, "clone") (tcAssoc s)
                     _ -> False
-            if owned then methodCall "clone" args else cloneCall args
+            if owned
+                then do
+                    owner <- ownerOfValue "clone" (tType receiver')
+                    name <- resolveAssociated owner "clone"
+                    input <- case Map.lookup "Clone" (tcTraits s) of
+                        Just functions | name == implFunctionName owner (Just "Clone") "clone" -> cloneTraitInput functions receiver'
+                        _ -> return receiver'
+                    callResolved name [input]
+                else cloneCall args
         F (Var ('.' : method)) (receiver : args) -> methodCall method (receiver : args)
         -- what is known of a permission, in an expression of the validator (a define); in code it is not a value there is
         F (Var name) args
@@ -746,7 +754,15 @@ inferExprR ctx env expr =
                 TBox (TArrayOf _ SizeAny) -> do
                     s <- getState
                     if Map.member "cloneBoxedArray" (tcTemplates s) || Map.member "cloneBoxedArray" (ctxFns ctx)
-                        then general (Var "cloneBoxedArray") [x]
+                        then do
+                            let params = case Map.lookup "cloneBoxedArray" (tcTemplates s) of
+                                    Just template -> let Signature ptys _ _ _ _ _ = tmplSignature template in ptys
+                                    Nothing -> case Map.lookup "cloneBoxedArray" (ctxFns ctx) of
+                                        Just (TFn ptys _) -> ptys
+                                        Just (TForall _ _ (TFn ptys _)) -> ptys
+                                        _ -> []
+                            input <- case params of TRef _ : _ -> cloneInput x'; _ -> return x'
+                            callResolved "cloneBoxedArray" [input]
                         else traitCall "Clone" "clone" [x]
                 -- (a tuple is cloned part by part, as a struct is by its impl)
                 TNamed base args | Just _ <- tupleGeneric base -> do
@@ -754,8 +770,43 @@ inferExprR ctx env expr =
                     (_, fields) <- ctorInfo name
                     parts <- mapM (\(field, _) -> cloneCall [F (Val (builtinFunct (Field (Just name) field))) [tExpr x']]) fields
                     return (TExpr xt (F (Val (builtinFunct (Ctor name args (map fst fields)))) (map tExpr parts)) parts)
-                _ -> traitCall "Clone" "clone" [x]
+                _ -> cloneTrait x'
         _ -> failTc ("Type error: clone takes 1 argument, got " ++ show (length args))
+    cloneInput x = do
+        boxed <- throughBox x
+        let projection = case tExpr x of Var _ -> False; expr -> clonePlace expr
+        return (if projection && not boxed
+            then TExpr (TRef (tType x)) (F (Val (builtinFunct BorrowOf)) [tExpr x]) [x]
+            else x)
+    throughBox (TExpr ty _ children) = do
+        resolved <- unref <$> zonk ty
+        case resolved of
+            TBox _ -> return True
+            _ -> or <$> mapM throughBox children
+    cloneTraitInput functions x = case [traitFnSignature f | f <- functions, traitFnName f == "clone"] of
+        Signature [TRef (TNamed "Self" [])] _ _ _ _ _ : _ -> cloneInput x
+        _ -> return x
+    cloneTrait x = do
+        s <- getState
+        case Map.lookup "Clone" (tcTraits s) of
+            Just functions -> do
+                input <- cloneTraitInput functions x
+                owner <- ownerThroughTrait "Clone" functions "clone" [tType x]
+                callResolved (implFunctionName owner (Just "Clone") "clone") [input]
+            Nothing -> traitCall "Clone" "clone" [tExpr x]
+    clonePlace expr = case expr of
+        Var _ -> True
+        F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> clonePlace sub
+        F (Val (VFunct _ _ _ (BuiltinFunct (Cast _)) _)) [sub] -> clonePlace sub
+        F funct [sub, index] | builtinHead ctx env funct == Just Get -> clonePlace sub && stableCloneIndex index
+        F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [_] -> True
+        _ -> False
+    -- A later index call can replace a container whose earlier snapshot must be kept.
+    stableCloneIndex expr = case expr of
+        Var _ -> True
+        Val (VInt _) -> True
+        F funct args | Just b <- builtinHead ctx env funct, b `elem` [Plus, Minus, Times, Div, Mod, FromByte] -> all stableCloneIndex args
+        _ -> False
     methodCall method (receiver : args) = do
             inferred <- mapM (inferExprR ctx env) (receiver : args)
             receiverTy <- unref <$> zonk (tType (head inferred))

@@ -9,13 +9,13 @@ import qualified Data.Map.Strict as Map
 
 import Mir
 import MirEval (MirValue (..), runProgram)
-import MirOwnership (insertOwnership, needsDrop)
+import MirOwnership (Role (..), insertOwnership, needsDrop, operandLocal, roles)
 import MirHousekeeping (verifyProgram)
 import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import Types (Name, Rel (..), Size (..), Type (..), Variable)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), Variable)
 import TestHarness
 import Utils
 
@@ -27,7 +27,10 @@ import Utils
 -- The model of the heap
 
 -- (a struct or an enum value, held inline, is its fields; VP is the address of a value of the heap: a list, or a Box)
-data Val = VI Integer | VB Bool | VP Int | VNull | VF Name | VS Name [(Variable, Val)]
+data RefPath = RefFieldPath Name Variable | RefIndexPath Integer
+    deriving (Eq, Show)
+
+data Val = VI Integer | VB Bool | VP Int | VNull | VF Name | VS Name [(Variable, Val)] | VA [Val] | VR Int Local [RefPath] Bool Val [(Int, Int)]
     deriving (Eq, Show)
 
 -- (OMem is the memory of Addr::alloc: the slots that hold a value, of so many; an address is the number of the cell times 2^32 and the slot)
@@ -38,11 +41,12 @@ data Cell = Cell {cellGeneration :: Int, cellObject :: Obj}
 -- What a local holds, and for a local that only looks at a value, which one and how it was when it looked
 data Slot = Slot {slotValue :: Val, slotLook :: Maybe [(Int, Int)]}
 
-data Frame = Frame {frameFunction :: Function, frameSlots :: Map Local Slot}
+data Frame = Frame {frameIdentity :: Int, frameFunction :: Function, frameSlots :: Map Local Slot}
 
 data St = St
     { stHeap :: Map Int Cell
     , stNext :: Int
+    , stNextFrame :: Int
     , stFrames :: [Frame]
     , stFuel :: Int
     , stProgram :: Program
@@ -107,6 +111,7 @@ freeTree v@(VS name fs) = do
         Just fn -> callFunction program fn [v] >> return ()
         Nothing -> return ()
     mapM_ (freeTree . snd) fs
+freeTree (VA values) = mapM_ freeTree values
 freeTree _ = return ()
 
 -- The struct or the enum that a value of a struct or of a variant is of
@@ -133,6 +138,7 @@ pointersOf :: Val -> [Int]
 pointersOf (VP a) = [a]
 pointersOf (VS name fs) | isListStruct name || isBoxStruct name, Just a <- listCell fs = [a]
 pointersOf (VS _ fs) = concatMap (pointersOf . snd) fs
+pointersOf (VA values) = concatMap pointersOf values
 pointersOf _ = []
 
 cloneVal :: Val -> M Val
@@ -168,6 +174,7 @@ cloneVal (VS name fs) | isBoxStruct name, Just a <- listCell fs = do
                 _ -> failM "an allocation is not on the heap"
         _ -> failM "a Box that is not in memory"
 cloneVal (VS name fs) = VS name <$> mapM (\(f, v) -> (,) f <$> cloneVal v) fs
+cloneVal (VA values) = VA <$> mapM cloneVal values
 cloneVal v = return v
 
 -- How many places own the value: locals (not those that only look) and slots of values
@@ -200,18 +207,72 @@ localHeap program f l = maybe False (needsDrop program . localType) (Map.lookup 
 readLocal :: Local -> M Val
 readLocal l = do
     f <- currentFrame
+    v <- readLocalAt (frameIdentity f) l
+    case (v, Map.lookup l (fnLocals (frameFunction f))) of
+        (VR{}, Just (LocalDecl ty _)) | l `elem` fnBorrowed (frameFunction f), not (refType ty) -> dereference v
+        _ -> return v
+  where
+    refType TRef{} = True
+    refType TMutRef{} = True
+    refType _ = False
+
+readLocalAt :: Int -> Local -> M Val
+readLocalAt depth l = do
+    s <- getSt
+    f <- case [frame | frame <- stFrames s, frameIdentity frame == depth] of
+        frame : _ -> return frame
+        _ -> failM "a reference is to a frame that has returned"
     case Map.lookup l (frameSlots f) of
         Nothing -> failM ("read of " ++ show l ++ " before it is given a value")
         Just (Slot VNull _) -> failM ("use of " ++ show l ++ " after it was moved from")
         Just (Slot v look) -> do
-            -- (a local that only looks at a value sees it as it was when it looked)
-            mapM_
-                ( \(a, g) -> do
-                    c <- cell a
-                    if g /= cellGeneration c then failM (show l ++ " looks at a value that changed") else return ()
-                )
-                (maybe [] id look)
+            mapM_ (\(a, g) -> cell a >>= \c -> if g /= cellGeneration c then failM (show l ++ " looks at a value that changed") else return ()) (maybe [] id look)
             return v
+
+refPath :: RefStep -> M RefPath
+refPath (RefField ctor field) = return (RefFieldPath ctor field)
+refPath (RefIndex o) = RefIndexPath <$> intOperand o
+
+readPlace :: Int -> Local -> [RefPath] -> M Val
+readPlace depth root steps = readLocalAt depth root >>= dereference >>= walk steps
+  where
+    walk [] VNull = failM "a reference reads a place that was moved from"
+    walk [] v = return v
+    walk (RefFieldPath ctor field : rest) value = do
+        v <- dereference value
+        (actual, fields) <- throughBox ctor v >>= dataValue
+        if actual == ctor then return () else failM ("a reference expects " ++ ctor ++ ", got " ++ actual)
+        sub <- maybe (failM ("a reference is to a missing field " ++ field)) return (lookup field fields)
+        walk rest sub
+    walk (RefIndexPath i : rest) value = do
+        v <- dereference value
+        values <- sequenceValues v
+        if i < 0 || i >= toInteger (length values) then failM "a reference is to an index outside its owner" else walk rest (values !! fromIntegral i)
+
+dereference :: Val -> M Val
+dereference (VR depth root steps mutable old generations) = do
+    v <- readPlace depth root steps
+    if mutable then return v else do
+        if v == old then return () else failM "a borrowed place changed before its last use"
+        mapM_ (\(a, g) -> cell a >>= \c -> if g == cellGeneration c then return () else failM "a borrowed value changed before its last use") generations
+        return v
+dereference v = return v
+
+borrowValue :: Local -> [RefPath] -> Bool -> M Val
+borrowValue root steps mutable = do
+    f <- currentFrame
+    v <- readLocalAt (frameIdentity f) root
+    case v of
+        VR _ _ _ wasMutable _ _ -> do
+            _ <- dereference v
+            if mutable && not wasMutable then failM "an update reference is made through a read reference" else return ()
+        _ -> return ()
+    let (depth, owner, path) = case v of
+            VR d r prior _ _ _ -> (d, r, prior ++ steps)
+            _ -> (frameIdentity f, root, steps)
+    current <- readPlace depth owner path
+    generations <- mapM (\a -> cell a >>= \c -> return (a, cellGeneration c)) (pointersOf current)
+    return (VR depth owner path mutable current generations)
 
 readOperand :: Operand -> M Val
 readOperand (Copy l) = readLocal l
@@ -229,6 +290,7 @@ constant :: Constant -> M Val
 constant (CInt i) = return (VI i)
 constant (CBool b) = return (VB b)
 constant (CList cs) = mapM constant cs >>= alloc . OList
+constant (CArray cs) = VA <$> mapM constant cs
 constant (CData name fs) = VS name <$> mapM (\(f, c) -> (,) f <$> constant c) fs
 constant (CFn name) = return (VF name)
 
@@ -239,8 +301,10 @@ data Pure = PI Integer | PB Bool | PL [Pure] | PD Name [(Variable, Pure)] | PF N
 toPure :: Val -> M Pure
 toPure (VI i) = return (PI i)
 toPure (VB b) = return (PB b)
+toPure (VA values) = PL <$> mapM toPure values
 toPure (VF n) = return (PF n)
 toPure VNull = failM "a value that was moved from is compared"
+toPure v@VR{} = dereference v >>= toPure
 toPure (VP a) = do
     c <- cell a
     case cellObject c of
@@ -266,6 +330,10 @@ fromPure (PB b) = MBool b
 fromPure (PL ps) = MList (map fromPure ps)
 fromPure (PD name fs) = MData name [(f, fromPure p) | (f, p) <- fs]
 fromPure (PF n) = MFn n
+
+sequenceValues :: Val -> M [Val]
+sequenceValues (VA values) = return values
+sequenceValues value = children . snd <$> object value
 
 object :: Val -> M (Int, Obj)
 object (VP a) = do
@@ -322,6 +390,8 @@ evalRvalue :: Rvalue -> M Val
 evalRvalue rv =
     case rv of
         Use o -> readOperand o
+        Borrow root steps mutable -> mapM refPath steps >>= \path -> borrowValue root path mutable
+        Deref o -> readOperand o >>= dereference
         MakeBox o -> readOperand o >>= alloc . OBox
         Unbox o -> readOperand o >>= unbox
         BinaryOp op a b -> do
@@ -402,9 +472,13 @@ intOperand o = do
 listOp :: ListOp -> [Operand] -> M Val
 listOp op os =
     case (op, os) of
-        (Length, [l]) -> do
-            (_, obj) <- readOperand l >>= object
-            return (VI (fromIntegral (length (children obj))))
+        (Length, [l]) -> VI . toInteger . length <$> (readOperand l >>= sequenceValues)
+        (NewArray, [n, x]) -> do
+            count <- intOperand n
+            v <- readOperand x
+            copies <- mapM (const (cloneVal v)) [1 .. count]
+            case x of Copy _ -> return (); _ -> freeTree v
+            return (VA copies)
         -- (n copies of the element, in room of their own on the heap, as an array in a Box)
         (NewBoxed, [n, x]) -> do
             count <- intOperand n
@@ -521,9 +595,8 @@ listOp op os =
             freeTree v) [index .. index + count - 1]
         pure (VI 0)
     item l pick = do
-        (_, obj) <- readOperand l >>= object
-        let vs = children obj
-            i = pick (length vs)
+        vs <- readOperand l >>= sequenceValues
+        let i = pick (length vs)
         if i < 0 || i >= length vs then failM "index out of range" else return (vs !! i)
 
 -- A list is changed in place only when nothing else holds it: the operand has been moved out of its local, so nothing
@@ -598,7 +671,7 @@ callFunction program fn args = do
     -- (and remembers how it was, so that a change to it while it is lent is found)
     looks <- mapM (\(p, v) -> if p `elem` fnBorrowed fn then mapM (\a -> (\c -> (a, cellGeneration c)) <$> cell a) (pointersOf v) else return []) (zip (fnParams fn) args)
     s' <- getSt
-    putSt s'{stFrames = Frame fn (Map.fromList [(p, Slot v (if p `elem` fnBorrowed fn then Just lk else Nothing)) | ((p, v), lk) <- zip (zip (fnParams fn) args) looks]) : stFrames s'}
+    putSt s'{stNextFrame = stNextFrame s' + 1, stFrames = Frame (stNextFrame s') fn (Map.fromList [(p, Slot v (if p `elem` fnBorrowed fn then Just lk else Nothing)) | ((p, v), lk) <- zip (zip (fnParams fn) args) looks]) : stFrames s'}
     result <- runBlock program fn (BlockId 0)
     s' <- getSt
     case stFrames s' of
@@ -632,11 +705,13 @@ runBlock program fn b = do
                 _ -> return Nothing
         Call callee args dest next -> do
             target <- readOperand callee
-            values <- mapM readOperand args
             name <- case target of
                 VF n -> return n
                 _ -> failM "a call of something that is not a function"
             callee' <- maybe (failM ("no function " ++ name)) return (Map.lookup name (progFunctions program))
+            values <- mapM (\(param, operand) -> case operandLocal operand of
+                Just local | param `elem` fnBorrowed callee' -> borrowValue local [] (param `elem` fnMutBorrowed callee')
+                _ -> readOperand operand) (zip (fnParams callee') args)
             result <- callFunction program callee' values
             v <- maybe (failM "a function did not return a value") return result
             f <- currentFrame
@@ -649,7 +724,7 @@ runBlock program fn b = do
 -- Runs the whole program on the model, and checks that nothing is left on the heap
 runOwned :: Program -> Either String (Maybe MirValue)
 runOwned program =
-    case runM go (St Map.empty 1 [] 1000000 program) of
+    case runM go (St Map.empty 1 0 [] 1000000 program) of
         Left e -> Left e
         Right (r, _) -> Right r
   where
@@ -801,6 +876,7 @@ mainProgram locals stmts =
                 , fnLocals = Map.fromList [(l, LocalDecl t Nothing) | (l, t) <- locals]
                 , fnBlocks = Map.singleton (BlockId 0) (BasicBlock stmts Return)
                 , fnSizeParams = []
+                , fnTypeParams = []
                 , fnBorrowed = []
             , fnMutBorrowed = []
             , fnFrom = []
@@ -825,6 +901,121 @@ windowTests =
     orElseT Nothing b = b
     orElseT a _ = a
 
+referenceModelTests :: [Test]
+referenceModelTests =
+    [ testCase "an indexed reference captures its index" (onSource "indexed reference" "xs = [7, 9]; i = 0; r = &get(xs, i); i = 1; return *r;")
+    , testCase "an intermediate reference field is followed" (onSource "reference field" "struct W { r: &List<Int> }; xs = [7]; w = W { r: &xs }; z = &get(*w.r, 0); return *z;")
+    , testCase "a reference copy keeps the same place" (onSource "reference copy" "xs = [7]; r = &xs; q = r; return get(*q, 0);")
+    , testCase "a returned reference keeps its caller's frame" (onSource "returned reference" "fn head(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; xs = [7]; r = head(xs); return *r;")
+    , rejects "a changed scalar loan cannot be refreshed by forwarding" TInt
+        [ Assign (Local 1) (Use (Const (CInt 1)))
+        , Assign (Local 2) (Borrow (Local 1) [] False)
+        , Assign (Local 1) (Use (Const (CInt 2)))
+        ] "a borrowed place changed"
+    , rejects "a changed heap loan cannot be refreshed by forwarding" heap
+        [ Assign (Local 1) (Use (Const (CList [CInt 1])))
+        , Assign (Local 2) (Borrow (Local 1) [] False)
+        , Assign (Local 1) (ListOp Set [Move (Local 1), Const (CInt 0), Const (CInt 2)])
+        ] "a borrowed value changed"
+    , rejects "a freed owner cannot be read through its reference" heap
+        [ Assign (Local 1) (Use (Const (CList [CInt 1])))
+        , Assign (Local 2) (Borrow (Local 1) [] False)
+        , Drop (Local 1)
+        ] "after it was moved from"
+    , testCase "a returned frame identity cannot be reused by a later call" $
+        let base = mainProgram [(Local 1, TRef TInt), (Local 2, TInt), (Local 3, TInt)] []
+            bad = (progMain base){fnName = "bad", fnReturns = Just (TRef TInt), fnLocals = Map.fromList [(Local 0, LocalDecl (TRef TInt) Nothing), (Local 1, LocalDecl TInt Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 1) (Use (Const (CInt 7))), Assign (Local 0) (Borrow (Local 1) [] False)] Return)}
+            later = (progMain base){fnName = "later", fnReturns = Just TInt, fnLocals = Map.singleton (Local 0) (LocalDecl TInt Nothing), fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Const (CInt 9)))] Return)}
+            main = (progMain base){fnBlocks = Map.fromList [(BlockId 0, BasicBlock [] (Call (Const (CFn "bad")) [] (Local 1) (BlockId 1))), (BlockId 1, BasicBlock [] (Call (Const (CFn "later")) [] (Local 2) (BlockId 2))), (BlockId 2, BasicBlock [Assign (Local 3) (Deref (Copy (Local 1)))] Return)]}
+         in case runOwned base{progMain = main, progFunctions = Map.fromList [("bad", bad), ("later", later)]} of
+                Left error -> testAssertTrue ("a frame that has returned" `isInfixOf` error)
+                Right _ -> Just "the heap model accepted a reference to a returned frame"
+    ]
+  where
+    heap = TBox (TArrayOf TInt SizeAny)
+    rejects name ty stmts expected =
+        let base = mainProgram [(Local 1, ty), (Local 2, TRef ty), (Local 3, TInt)] []
+            reader = (progMain base){fnName = "read", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just TInt, fnLocals = Map.fromList [(Local 0, LocalDecl TInt Nothing), (Local 1, LocalDecl ty Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (Use (Const (CInt 0)))] Return)}
+            main = (progMain base){fnBlocks = Map.fromList [(BlockId 0, BasicBlock stmts (Call (Const (CFn "read")) [Copy (Local 2)] (Local 3) (BlockId 1))), (BlockId 1, BasicBlock [] Return)]}
+            program = base{progMain = main, progFunctions = Map.singleton "read" reader}
+         in testCase name (case runOwned program of Left error -> testAssertTrue (expected `isInfixOf` error); Right _ -> Just "the heap model accepted an invalid reference")
+
+borrowedRootTests :: [Test]
+borrowedRootTests =
+    [ testCase "a borrow reads its owner and indexes" (testAssertTrue (roles (Borrow (Local 1) [RefIndex (Copy (Local 2))] False) == [(Copy (Local 1), Read), (Copy (Local 2), Read)]))
+    , testCase "a field stays in its owner through the reference's last use" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, TRef list), (Local 3, list), (Local 4, TInt), (Local 5, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 2) (Borrow (Local 1) [RefField "Holder" "xs"] False)
+                    , Assign (Local 3) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 4) (ListOp Length [Copy (Local 3)])
+                    , Assign (Local 5) (Deref (Copy (Local 2)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 5)])
+                    ] Return)
+                ]
+         in testAssertEq [() | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign _ (TakeField (Local 1) "Holder" "xs") <- stmts] []
+    , testCase "an owner is replaced after a reference call across blocks" $
+        let fn = own [(Local 1, list), (Local 2, TRef list), (Local 3, TInt)]
+                [ (BlockId 0, BasicBlock [Assign (Local 2) (Borrow (Local 1) [] False)] (Call (Const (CFn "noop")) [] (Local 3) (BlockId 1)))
+                , (BlockId 1, BasicBlock [] (Call (Const (CFn "dup")) [Copy (Local 2)] (Local 1) (BlockId 2)))
+                , (BlockId 2, BasicBlock [Assign (Local 0) (ListOp Length [Copy (Local 1)])] Return)
+                ]
+         in testAssertTrue (any (\block -> case blockTerminator block of Call (Const (CFn "dup")) _ dest _ -> dest /= Local 1; _ -> False) (Map.elems (fnBlocks fn)))
+    , testCase "reference reassignment releases the previous owner" $
+        let fn = own [(Local 1, list), (Local 2, list), (Local 3, TRef list), (Local 4, list), (Local 5, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 3) (Borrow (Local 1) [] False)
+                    , Assign (Local 3) (Borrow (Local 2) [] False)
+                    , Assign (Local 4) (Use (Copy (Local 1)))
+                    , Assign (Local 5) (Deref (Copy (Local 3)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 5)])
+                    ] Return)
+                ]
+         in testAssertTrue (any (\stmt -> case stmt of Assign (Local 4) (Use (Move (Local 1))) -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    , testCase "a reference through a non-reference view keeps the original field live" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, list), (Local 3, TRef list), (Local 4, list), (Local 5, TInt), (Local 6, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 2) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 3) (Borrow (Local 2) [] False)
+                    , Assign (Local 4) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 5) (ListOp Length [Copy (Local 4)])
+                    , Assign (Local 6) (Deref (Copy (Local 3)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 6)])
+                    ] Return)
+                ]
+         in testAssertEq [() | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign _ (TakeField (Local 1) "Holder" "xs") <- stmts] []
+    , testCase "a disjoint field may still be taken while a scalar field is borrowed" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, TRef TInt), (Local 3, list), (Local 4, TInt)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 2) (Borrow (Local 1) [RefField "Holder" "n"] False)
+                    , Assign (Local 3) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 4) (Deref (Copy (Local 2)))
+                    , Assign (Local 0) (Use (Copy (Local 4)))
+                    ] Return)
+                ]
+         in testAssertTrue (any (\stmt -> case stmt of Assign (Local 3) (TakeField (Local 1) "Holder" "xs") -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    , testCase "a reborrow keeps the old owner after its parent reference is reassigned" $
+        let fn = own [(Local 1, list), (Local 2, list), (Local 3, TRef list), (Local 4, TRef list), (Local 5, list), (Local 6, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 3) (Borrow (Local 1) [] False)
+                    , Assign (Local 4) (Borrow (Local 3) [] False)
+                    , Assign (Local 3) (Borrow (Local 2) [] False)
+                    , Assign (Local 5) (Use (Copy (Local 2)))
+                    , Assign (Local 6) (Deref (Copy (Local 4)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 6)])
+                    ] Return)
+                ]
+         in testAssertTrue (any (\stmt -> case stmt of Assign (Local 5) (Use (Move (Local 2))) -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    ]
+  where
+    list = TNamed "StdList" [ArgType TInt]
+    own locals blocks =
+        let stub = progMain (mainProgram [] [])
+            fn = stub{fnName = "loan", fnParams = [Local 1] ++ [Local 2 | lookup (Local 2) locals == Just list], fnReturns = Just TInt, fnLocals = Map.fromList ((Local 0, LocalDecl TInt Nothing) : [(l, LocalDecl ty Nothing) | (l, ty) <- locals]), fnBlocks = Map.fromList blocks}
+            dup = stub{fnName = "dup", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just list, fnLocals = Map.fromList [(Local 0, LocalDecl list Nothing), (Local 1, LocalDecl list Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (CopyOf (Copy (Local 1)))] Return)}
+            program = (mainProgram [] []){progTypes = Map.fromList [("Holder", StructDecl [("xs", list), ("n", TInt)]), ("StdList<Int>", StructDecl [("addr", TAddr TInt), ("len", TInt), ("cap", TInt)])], progFunctions = Map.fromList [("loan", fn), ("dup", dup)]}
+         in progFunctions (insertOwnership program) Map.! "loan"
+
 -- The programs that have arrays are not run on the model of the heap, which holds the values of the heap (a program with arrays and
 -- nothing else is checked structurally by the plan tests)
 usesArrays :: String -> Bool
@@ -839,5 +1030,7 @@ testOwnership =
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
         , TestList "what a part may be read after" windowTests
+        , TestList "reference heap model" referenceModelTests
+        , TestList "borrowed roots" borrowedRootTests
         , TestList "mistakes the model finds" mistakeTests
         ]

@@ -15,8 +15,12 @@ concurrency:
 
 jobs:
   haskell:
-    name: Haskell build and tests
+    name: Haskell build and tests (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     # (the tests that build the emitter written in Tersus, twice, and compile every program with it are the longest)
     timeout-minutes: 45
     defaults:
@@ -30,8 +34,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.stack
-          key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}
-          restore-keys: stack-${{ runner.os }}-
+          key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}-shard-${{ matrix.shard }}
+          restore-keys: |
+            stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}-
+            stack-${{ runner.os }}-
 
       # (the package's own build output: keyed on everything it is made of, and restored from the previous run when
       # only a little of that changed, so stack rebuilds the changed modules instead of all of them)
@@ -39,8 +45,10 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tersus/.stack-work
-          key: stack-work-${{ runner.os }}-${{ hashFiles('tersus/package.yaml', 'tersus/stack.yaml', 'tersus/src/**', 'tersus/app/**', 'tersus/test/**', 'tersus/lib/**', 'tersus/examples/**', 'tersus/bootstrap/**') }}
-          restore-keys: stack-work-${{ runner.os }}-
+          key: stack-work-${{ runner.os }}-${{ hashFiles('tersus/package.yaml', 'tersus/stack.yaml', 'tersus/src/**', 'tersus/app/**', 'tersus/test/**', 'tersus/lib/**', 'tersus/examples/**', 'tersus/bootstrap/**') }}-shard-${{ matrix.shard }}
+          restore-keys: |
+            stack-work-${{ runner.os }}-${{ hashFiles('tersus/package.yaml', 'tersus/stack.yaml', 'tersus/src/**', 'tersus/app/**', 'tersus/test/**', 'tersus/lib/**', 'tersus/examples/**', 'tersus/bootstrap/**') }}-
+            stack-work-${{ runner.os }}-
 
       # `build`, `llvm` and `run` write the IR with the emitter written in Tersus (examples/emit.tersus), which is built with clang the first time from the seed
       # (a release asset pinned by bootstrap/emitter.sha256, fetched and verified on first use) and kept in ~/.cache/tersus under a name made from what it is made of, so a cache entry that is out of date is only not used.
@@ -57,8 +65,10 @@ jobs:
         with:
           path: ~/.cache/tersus
           # Immutable snapshots must change when any build/test input or the runner toolchain changes.
-          key: emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}
-          restore-keys: emitter-${{ runner.os }}-
+          key: emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}-shard-${{ matrix.shard }}
+          restore-keys: |
+            emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}-
+            emitter-${{ runner.os }}-
 
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
       # reports "cannot find 'ld'". ld.bfd takes the same options, so let it answer to that name.
@@ -73,15 +83,17 @@ jobs:
       # `stack test --test-arguments='-j 1'` runs the groups one at a time when a failure needs a quiet log.
       # It loads examples/ relative to the package directory, so run from tersus/.
       - name: Test
-        run: stack test
+        run: stack test --test-arguments='--shard ${{ matrix.shard }}/4'
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)
       - name: Check an example through the CLI
+        if: ${{ matrix.shard == 1 }}
         run: stack run tersus-exe -- run examples/frame_facts.tersus
 
       # The command line itself (the tests call its parts): the emitter in Tersus writes the IR
       - name: Check the emitter in Tersus through the CLI
+        if: ${{ matrix.shard == 1 }}
         run: stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
 
       # Keep successfully compiled entries even when later tests or CLI checks fail.
@@ -91,3 +103,12 @@ jobs:
         with:
           path: ~/.cache/tersus
           key: ${{ steps.tersus-cache.outputs.cache-primary-key }}
+
+  complete:
+    name: Haskell build and tests
+    needs: haskell
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all shards to pass
+        run: test '${{ needs.haskell.result }}' = 'success'
