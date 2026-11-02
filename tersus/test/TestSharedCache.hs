@@ -1,22 +1,26 @@
 module TestSharedCache (testSharedCache, testSharedCacheProbe) where
 
-import Control.Concurrent (threadDelay)
-import Control.Exception (finally, try)
+import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad (when)
-import Data.List (isInfixOf)
+import Data.IORef (atomicModifyIORef', newIORef, readIORef)
+import Data.List (isInfixOf, sort)
 import qualified Data.Map.Strict as Map
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, setModificationTime)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.IO (SeekMode (AbsoluteSeek))
+import System.IO (SeekMode (AbsoluteSeek), hClose, openTempFile)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
+import System.Posix.Process (exitImmediately, getProcessID)
+import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process (CreateProcess (..), ProcessHandle, createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
+import Native (cachedProgram)
 import MirData (forNative)
 import TestHarness
 import Types (Type (..))
@@ -52,6 +56,13 @@ testSharedCache =
         , TestCase "a restored entry survives touching the actual executable" touchedExecutable
         , TestCase "a stale build entry is rejected in a fresh process" staleBuildEntry
         , TestCase "missing hash tools compile without reading or writing disk entries" missingHashTools
+        , TestCase "native concurrent processes build once and warm hits preserve the entry" (nativeProcesses False)
+        , TestCase "native nested checker emitter seed locks do not deadlock" (nativeProcesses True)
+        , TestCase "native failed builders release the lock for retry" (nativeRecovery "error")
+        , TestCase "native exceptions release the lock for retry" (nativeRecovery "exception")
+        , TestCase "native crashed builders release the lock for retry" (nativeRecovery "crash")
+        , TestCase "native killed builders release the lock for retry" (nativeRecovery "hold")
+        , TestCase "native threads still build once" nativeThreads
         ]
 
 testSharedCacheProbe :: Test
@@ -59,6 +70,11 @@ testSharedCacheProbe = TestList "testSharedCacheProbe" [TestCase "probe" probe]
 
 probe :: IO TestResult
 probe = do
+    native <- lookupEnv "TERSUS_NATIVE_CACHE_PROBE"
+    maybe sharedProbe nativeProbe native
+
+sharedProbe :: IO TestResult
+sharedProbe = do
     hold <- lookupEnv "TERSUS_SHARED_CACHE_PROBE_HOLD"
     case hold of
         Just lockPath -> do
@@ -90,6 +106,152 @@ probe = do
                         Ok program -> do
                             writeFile path (encodeProgram program)
                             pure Nothing
+
+withNativeHome :: (FilePath -> IO a) -> IO a
+withNativeHome use = do
+    tmp <- getTemporaryDirectory
+    (home, handle) <- openTempFile tmp "tersus-native-cache-test"
+    hClose handle
+    removeFile home
+    createDirectoryIfMissing True home
+    use home `finally` removeDirectoryRecursive home
+
+awaitNativeFile :: FilePath -> IO ()
+awaitNativeFile path = do
+    ready <- timeout 10000000 loop
+    case ready of
+        Just () -> pure ()
+        Nothing -> ioError (userError ("native probe did not create " ++ path))
+  where
+    loop = do
+        present <- doesFileExist path
+        if present then pure () else threadDelay 10000 >> loop
+
+nativeProbe :: String -> IO TestResult
+nativeProbe mode = do
+    Just home <- lookupEnv "XDG_CACHE_HOME"
+    Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
+    writeFile (marker ++ ".started") ""
+    when (mode `elem` ["shared", "nested"]) (awaitNativeFile (home </> "go"))
+    result <- make (if mode == "nested" then "checker" else "single")
+    case result of
+        Error e -> pure (if mode == "error" then Nothing else Just e)
+        Ok path -> writeFile marker path >> pure Nothing
+  where
+    make kind = cachedProgram ("native-probe-" ++ kind) "key" "native cache probe" $ \output -> do
+        Just home <- lookupEnv "XDG_CACHE_HOME"
+        Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
+        writeFile (marker ++ "." ++ kind ++ ".built") ""
+        case mode of
+            "error" -> pure (Error "intentional builder failure")
+            "exception" -> throwIO (userError "intentional builder exception")
+            "crash" -> exitImmediately (ExitFailure 23) >> pure (Error "crash returned")
+            "hold" -> do
+                pid <- getProcessID
+                writeFile (marker ++ ".pid") (show pid)
+                threadDelay 600000000
+                pure (Error "holder was not killed")
+            _ -> do
+                when (mode == "shared" || (mode == "nested" && kind == "seed")) (awaitNativeFile (home </> "release"))
+                dependency <- case kind of
+                    "checker" -> make "emitter"
+                    "emitter" -> make "seed"
+                    _ -> pure (Ok "")
+                case dependency of
+                    Error e -> pure (Error e)
+                    Ok _ -> writeFile output kind >> pure (Ok ())
+
+withNativeChildren :: FilePath -> [(String, String)] -> ([ProcessHandle] -> IO a) -> IO a
+withNativeChildren home children = bracket
+    (mapM (\(marker, mode) -> spawnProbe home [("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_NATIVE_CACHE_PROBE", mode)]) children)
+    (mapM_ (\child -> terminateProcess child >> waitForProcess child >> pure ()))
+
+nativeProcesses :: Bool -> IO TestResult
+nativeProcesses nested = withNativeHome $ \home -> do
+    let markers = ["child" ++ show i | i <- [1 .. 4 :: Int]]
+        kinds = if nested then ["checker", "emitter", "seed"] else ["single"]
+        mode = if nested then "nested" else "shared"
+        entry kind = home </> "tersus" </> ("native-probe-" ++ kind ++ "-key")
+        built marker kind = home </> (marker ++ "." ++ kind ++ ".built")
+    withNativeChildren home [(marker, mode) | marker <- markers] $ \children -> do
+        mapM_ (awaitNativeFile . (home </>) . (++ ".started")) markers
+        writeFile (home </> "go") ""
+        -- Leave the first builder blocked while the other processes reach the cold entry.
+        threadDelay 500000
+        writeFile (home </> "release") ""
+        codes <- mapM (waitChild 15) children
+        counts <- mapM (\kind -> length . filter id <$> mapM (\marker -> doesFileExist (built marker kind)) markers) kinds
+        results <- mapM (readMarker . (home </>)) markers
+        before <- mapM (getModificationTime . entry) kinds
+        withNativeChildren home [("warm", mode)] $ \warm -> do
+            warmCodes <- mapM (waitChild 15) warm
+            warmBuilt <- mapM (doesFileExist . built "warm") kinds
+            after <- mapM (getModificationTime . entry) kinds
+            names <- listDirectory (home </> "tersus")
+            let expected = concat [["native-probe-" ++ kind ++ "-key", "native-probe-" ++ kind ++ "-key.lock"] | kind <- kinds]
+            pure $ firstFailure
+                [ testAssertEq codes (replicate 4 (Just ExitSuccess))
+                , testAssertEq counts (replicate (length kinds) 1)
+                , testAssertEq results (replicate 4 (Right (entry (head kinds))))
+                , testAssertEq warmCodes [Just ExitSuccess]
+                , testAssertEq warmBuilt (replicate (length kinds) False)
+                , testAssertEq after before
+                , testAssertEq (sort names) (sort expected)
+                ]
+
+nativeRecovery :: String -> IO TestResult
+nativeRecovery mode = withNativeHome $ \home ->
+    withNativeChildren home [("owner", mode)] $ \owners -> do
+        let entry = home </> "tersus" </> "native-probe-single-key"
+        awaitNativeFile (home </> "owner.single.built")
+        when (mode == "hold") $ do
+            awaitNativeFile (home </> "owner.pid")
+            pid <- read <$> readFile (home </> "owner.pid")
+            signalProcess sigKILL pid
+        ownerCodes <- mapM (waitChild 15) owners
+        absent <- not <$> doesFileExist entry
+        withNativeChildren home [("retry", "retry")] $ \children -> do
+            codes <- mapM (waitChild 15) children
+            rebuilt <- doesFileExist (home </> "retry.single.built")
+            contents <- readMarker entry
+            pure $ firstFailure
+                [ testAssertTrue (all (/= Nothing) ownerCodes)
+                , testAssertTrue absent
+                , testAssertEq codes [Just ExitSuccess]
+                , testAssertTrue rebuilt
+                , testAssertEq contents (Right "single")
+                ]
+
+nativeThreads :: IO TestResult
+nativeThreads = withNativeHome $ \home -> do
+    saved <- lookupEnv "XDG_CACHE_HOME"
+    let restore = maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME") saved
+    (do
+        setEnv "XDG_CACHE_HOME" home
+        count <- newIORef (0 :: Int)
+        let build output = do
+                atomicModifyIORef' count (\n -> (n + 1, ()))
+                threadDelay 100000
+                writeFile output "threads"
+                pure (Ok ())
+            start = do
+                result <- newEmptyMVar
+                tid <- forkIO $ do
+                    outcome <- try (cachedProgram "native-probe-threads" "key" "thread probe" build) :: IO (Either SomeException (Result FilePath String))
+                    putMVar result outcome
+                pure (tid, result)
+        bracket (mapM (const start) [1 .. 8 :: Int]) (mapM_ (killThread . fst)) $ \threads -> do
+            outcomes <- timeout 15000000 (mapM (takeMVar . snd) threads)
+            builders <- readIORef count
+            pure $ firstFailure
+                [ testAssertEq builders 1
+                , case outcomes of
+                    Just results -> testAssertTrue (all success results)
+                    Nothing -> Just "native thread waiters hung"
+                ]) `finally` restore
+  where
+    success (Right (Ok _)) = True
+    success _ = False
 
 digestIdentity :: IO TestResult
 digestIdentity = do

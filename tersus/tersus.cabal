@@ -88,6 +88,7 @@ library
     , parsec
     , process
     , template-haskell
+    , unix
   default-language: Haskell2010
 
 executable parity
@@ -108,6 +109,7 @@ executable parity
     , process
     , template-haskell
     , tersus
+    , unix
   default-language: Haskell2010
 
 executable tersus-exe
@@ -128,6 +130,7 @@ executable tersus-exe
     , process
     , template-haskell
     , tersus
+    , unix
   default-language: Haskell2010
 
 test-suite tersus-test
