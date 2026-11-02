@@ -753,33 +753,34 @@ forallInstances eligible table classes facts known done =
         (\(guards, instantiated, indexTerm, _) -> (guards, instantiated, indexTerm))
         [ (map (substituteIndex index indexTerm) guards, instantiated, indexTerm, key)
         | (place, Forall index guards body) <- zip [0 ..] facts
-        , listTerm <- indexedLists index body
-        , indexTerm <- getIndexesOf listTerm
+        , (accessor, listTerm) <- indexedLists index body
+        , indexTerm <- getIndexesOf accessor listTerm
         , let key = (place, indexTerm)
         , key `Set.notMember` done
         , let instantiated = substituteIndex index indexTerm body
         , instantiated `Set.notMember` known
         ]
   where
-    getClasses = Map.keys (builtinsByClass table classes (== Get))
     termFor = termOf table
-    -- The index terms t of the get(L', t) in the closure, by the class of L'
+    -- The index terms t of the access(L', t) in the closure, by the class of L' and of the access itself: an
+    -- access is the builtin get, or the get of a trait (the function of an impl, as a contract of Sequence
+    -- writes it), and a forall is used at the indexes where its own access is read
     getIndexes =
         Map.fromListWith
             (flip (++))
-            [ (rep classes listId, [indexTerm])
+            [ ((rep classes listId, rep classes functId), [indexTerm])
             | (_, (functId, [listId, indexId])) <- tableApps table
-            , rep classes functId `elem` getClasses
             , let indexTerm = termFor indexId
             , eligible indexTerm
             ]
-    getIndexesOf listTerm = Map.findWithDefault [] (rep classes (idOf table listTerm)) getIndexes
+    getIndexesOf accessor listTerm = Map.findWithDefault [] (rep classes (idOf table listTerm), rep classes (idOf table accessor)) getIndexes
 
--- The lists L of the get(L, index) in a proof, where L does not mention the index
-indexedLists :: Variable -> IotaProof -> [IotaProof]
+-- The (access, list) of the access(L, index) in a proof, where L does not mention the index: the access is a
+-- function of two arguments whose second is the index, the builtin get or a function a trait's contract names
+indexedLists :: Variable -> IotaProof -> [(IotaProof, IotaProof)]
 indexedLists index (FApp funct args) =
-    [ listTerm
-    | FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [listTerm, BVar bound] <- [FApp funct args]
+    [ (funct, listTerm)
+    | FApp f [listTerm, BVar bound] <- [FApp funct args]
     , bound == index
     , not (mentionsIndex index listTerm)
     ]

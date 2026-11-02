@@ -95,12 +95,14 @@ testSequence =
                 , testCase "a function with bounds calls another" (runsAs "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ }] { return get(s, 0); }; fn twice<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ affirm return = head(s) * 2; }] { return head(s) * 2; }; return twice(push([], 4));" "8")
                 , testCase "in a contract" (compiles "fn head<S: Sequence<E>, E>(s: &S) -> E [{ affirm size(s) > 0; }] [{ affirm return = get(s, 0); }] { return get(s, 0); }; fn f(l: &List<Int>) -> Int [{ affirm size(l) > 0; }] [{ affirm return = head(l); }] { return get(l, 0); }; return f(push([], 1));")
                 , testCase "Growable is for what grows" (runsAs "fn add<S: Growable<Int>>(s: S, x: Int) -> S [{ }] [{ affirm size(return) = size(s) + 1; affirm get(return, size(s)) = x; }] { return push(s, x); }; l = add(add([], 7), 8); return size(l) * 10 + get(l, 1);" "28")
+                , testCase "the frame of a push is a fact of the trait" (compiles "fn add<S: Growable<Int>>(s: S, x: Int) -> S [{ affirm size(s) > 0; }] [{ affirm size(return) = size(s) + 1; affirm get(return, 0) = get(s, 0); }] { return push(s, x); }; l = add(push([], 7), 8); return get(l, 0);")
+                , testCase "the frame of a set is a fact of the trait" (compiles "fn put<S: Sequence<Int>>(s: S, x: Int) -> S [{ affirm size(s) > 1; }] [{ affirm size(return) = size(s); affirm get(return, 0) = get(s, 0); }] { return set(s, 1, x); }; l = put(push(push([], 7), 8), 9); return get(l, 0);")
                 , testCase "an array does not grow" (errorHas "fn add<S: Growable<Int>>(s: S, x: Int) -> S [{ }] [{ }] { return push(s, x); }; return size(add(array(2, 1), 3));" "needs S to implement Growable, and Array<Int, 2> does not")
                 , testCase "a Box of an array is a sequence" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(Array::boxed(3, 1));" "3")
                 , testCase "the types of the bound have to be the ones" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(push([], true));" "total needs S to implement Sequence<Int>, and List<Bool> implements Sequence<Bool>")
                 , testCase "a type that does not implement the trait" (errorHas "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(3);" "needs S to implement Sequence, and Int does not")
-                , testCase "a struct that implements it" (runsAs (counter ++ "fn total<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ }] { return size(s) * 10 + get(s, 0); }; return total(Three { a: 4, n: 2 });") "24")
-                , testCase "one that implements it for a type of its own" (runsAs (counter ++ "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(Three { a: 4, n: 2 }) + total([1]);") "3")
+                , testCase "a struct that implements it" (runsAs (counter ++ "fn total<S: Sequence<Int>>(s: &S) -> Int [{ affirm size(s) > 0; }] [{ }] { return size(s) * 10 + get(s, 0); }; return total(Three { items: [4, 4] });") "24")
+                , testCase "one that implements it for a type of its own" (runsAs (counter ++ "fn total<S: Sequence<Int>>(s: &S) -> Int [{ }] [{ }] { return size(s); }; return total(Three { items: [4, 4] }) + total([1]);") "3")
                 , testCase "a bound of several traits" (runsAs "fn both<S: Sequence<Int> + Growable<Int>>(s: S) -> Int [{ }] [{ }] { return size(push(s, 1)); }; return both(push([], 5));" "2")
                 , testCase "a trait that is not there" (errorHas "fn f<S: Missing>(s: &S) -> Int [{ }] [{ }] { return 0; }; return 0;" "unknown trait Missing")
                 , testCase "the types of the trait are as many as it has" (errorHas "fn f<S: Sequence>(s: &S) -> Int [{ }] [{ }] { return 0; }; return 0;" "has parameters <E>")
@@ -141,7 +143,7 @@ testSequence =
                     let code = [l | l <- lines exampleText, not (null (words l)), take 2 (dropWhile (== ' ') l) /= "//"]
                         library = lines vecLibrary
                     pure $ if any (\rest -> take (length library) rest == library) (tails code) then Nothing else Just "examples/vec.tersus does not hold vecLibrary"
-                , testCase "a program that mentions Sequence has the trait" (runsAs (counter ++ "return Three { a: 4, n: 2 }.size() + get(Three { a: 4, n: 2 }, 0);") "6")
+                , testCase "a program that mentions Sequence has the trait" (runsAs (counter ++ "return Three { items: [4, 4] }.size() + get(Three { items: [4, 4] }, 0);") "6")
                 , testCase "a list is a Sequence by the impl in lib/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(push([], 3));" "1")
                 , testCase "and a Growable by it" (runsAs "fn add<S: Growable<Int>>(s: S, x: Int) -> S { return push(s, x); }; return size(add(push([], 3), 4));" "2")
                 , testCase "called through the trait by its path" (runsAs "return Sequence::size(push([], 3)) + Sequence::get(push([], 3), 0);" "4")
@@ -156,7 +158,7 @@ testSequence =
                 , testCase "a trait written for an array of one type is not for another" (rejected "trait OfInts { }; impl OfInts for Array<Int, 3> { }; fn f<S: OfInts>(s: &S) -> Int { return 0; }; return f(#[true, false, true]);" "needs S to implement OfInts, and Array<Bool, 3> does not")
                 , testCase "a Box of an array is a Sequence by the impl in lib/prelude.tersus" (runsAs "fn total<S: Sequence<Int>>(s: &S) -> Int { return size(s); }; return total(Array::boxed(3, 5)) * 10 + total(#[1, 2]);" "32")
                 , testCase "an impl for an array is written for it" (runs "trait Holds<E> { }; impl<T, n> Holds<Array<T, n>> for Array<T, n> { }; fn g<S: Holds<Array<Int, 3>>>(s: &S) -> Int [{ }] [{ }] { return 2; }; return g(#[1, 2, 3]);" (VInt 2))
-                , testCase "the trait is the one in lib/prelude.tersus" (errorHas (counter ++ "return get(Three { a: 4, n: 2 }, 3);") "Could not prove: i < <Three as Sequence>::size(self)")
+                , testCase "the trait is the one in lib/prelude.tersus" (errorHas (counter ++ "return get(Three { items: [4, 4] }, 3);") "Could not prove: i < <Three as Sequence>::size(self)")
                 , testCase "a program with a Sequence of its own does not" (runsAs "trait Sequence { fn size(self: Self) -> Int; }; struct Box1 { n: Int }; impl Sequence for Box1 { fn size(self: Self) -> Int { return self.n; }; }; return Box1 { n: 3 }.size();" "3")
                 , testCase "the names that native code makes a list of are not a program's" (errorHas "fn stdListNew() -> Int { return 7; }; return [1];" "stdListNew is reserved")
                 , testCase "nor is the struct" (errorHas "struct StdList { x: Int }; return 1;" "StdList is reserved")
@@ -165,13 +167,13 @@ testSequence =
                 , testCase "a program that mentions Deref has the trait" (runsAs "struct P { x: Int, y: Int }; impl Clone for P { }; struct W { v: P }; impl Deref<P> for W { fn deref(self: &Self) -> P [{ }] [{ affirm return = self.v; }] { return clone(self.v); }; }; w = W { v: P { x: 4, y: 5 } }; return w.x + w.y;" "9")
                 , testCase "a program that mentions neither is as it was" (runsAs "return 4;" "4")
                 , testCase "the lines of an error are those of the program" (errorHas "\n\nreturn ( ;" "line 3")
-                , testCase "an error in the use of the library is the program's" (errorHas (counter ++ "x = Three { a: 1, n: 1 };\nreturn get(x, 5);") "Could not prove: i < <Three as Sequence>::size(self)")
+                , testCase "an error in the use of the library is the program's" (errorHas (counter ++ "x = Three { items: [1] };\nreturn get(x, 5);") "Could not prove: i < <Three as Sequence>::size(self)")
                 ]
             ]
   where
     -- A struct that implements the trait of the prelude: a number n of the same element a
     counter =
-        "struct Three { a: Int, n: Int } invariant [{ affirm n >= 0; }]; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = self.n; }] { return self.n; }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = self.a; }] { return self.a; }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { a: x, n: self.n }; }; }; impl Growable<Int> for Three { fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { a: x, n: self.n + 1 }; }; }; "
+        "struct Three { items: List<Int> }; impl Sequence<Int> for Three { fn size(self: &Self) -> Int [{ }] [{ affirm return = size(self.items); }] { return size(self.items); }; fn get(self: &Self, i: Int) -> Int [{ affirm i >= 0; affirm i < size(self); }] [{ affirm return = get(self.items, i); }] { return clone(get(self.items, i)); }; fn set(self: Self, i: Int, x: Int) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }] { return Self { items: set(self.items, i, x) }; }; }; impl Growable<Int> for Three { fn push(self: Self, x: Int) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }] { return Self { items: push(self.items, x) }; } }; "
     compiles source = case compileSource source of
         Ok _ -> Nothing
         Error e -> Just ("Failed: " ++ e)
