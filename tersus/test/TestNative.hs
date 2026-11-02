@@ -158,11 +158,11 @@ testNativeIr =
         , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" $
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
         , TestCase "a Box takes room on the heap for what it holds" $
-            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.stdBoxNew<P>\"" `isInfixOf` ir))
+            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.boxNew<P>\"" `isInfixOf` ir))
         , TestCase "a Box of an array is a list of the library" $
-            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.stdListFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
+            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir))
         , TestCase "a Box is the struct of the library, freed by its drop" $
-            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<StdBox<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.stdBoxUnbox<Int>\"" `isInfixOf` ir))
+            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<Box<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.boxUnbox<Int>\"" `isInfixOf` ir))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" $
             withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "@tersus_writeByte(i64 195)" `isInfixOf` ir && "@tersus_writeByte(i64 169)" `isInfixOf` ir))
         , TestCase "a letter of four bytes" $

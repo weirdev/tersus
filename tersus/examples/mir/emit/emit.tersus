@@ -408,7 +408,7 @@ fn needsDrop(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Bool ~ {
     n = declaredName(types, t);
     if !n.ok { return false; };
     // (the struct that a list is made of owns the memory at its address)
-    if beforeAngle(n.text) = "StdList" { return true; };
+    if beforeAngle(n.text) = "List" { return true; };
     // (a struct or an enum with a drop has something to do when it is freed, whatever its fields are)
     if containsName(fns, dropName(n.text)) { return true; };
     i = lookupDecl(types, n.text);
@@ -1023,7 +1023,7 @@ fn hasText(hay: &String, needle: &String) -> Bool ~ {
 
 // The `Clone` impl of a type, when the program has one: the function a copy of the type is. It is the one whose
 // name says it is the `clone` of the trait `Clone` and whose result is the type (the impl of a list is named
-// for `List`, and its result is the `StdList` the list is made of, so the name is not made from the type)
+// for `List`, and its result is the `List` the list is made of, so the name is not made from the type)
 fn cloneImplName(cx: &Ctx, t: &Type) -> Res ~ {
     want = renderType(canonical(&cx.types, t));
     i = 0;
@@ -1118,7 +1118,7 @@ fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
     };
     start = 0;
     if isEnumKind { start = roundUp(4, payload); };
-    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "StdList" || beforeAngle(n.text) = "StdBox") {
+    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "List" || beforeAngle(n.text) = "Box") {
         fields = get(variants, 0).fields;
         offset0 = 0;
         lenOffset = 0;
@@ -1140,7 +1140,7 @@ fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
             out = push(out, "    %addrp = getelementptr i8, ptr %from, i64 ".then(showInt(offset0)));
             out = push(out, "    %addr = load i64, ptr %addrp");
             out = push(out, "    %has = icmp ne i64 %addr, 0");
-            if beforeAngle(n.text) = "StdList" {
+            if beforeAngle(n.text) = "List" {
                 step = layoutOf(types, elem).size;
                 out = push(out, "    br i1 %has, label %lalloc, label %done");
                 out = push(out, "lalloc:");
@@ -1342,10 +1342,10 @@ fn isArray(t: &Type) -> Bool [{ }] [{ }] {
     return isSizedArray(t);
 };
 
-// A list of native code: the struct StdList of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
+// A list of native code: the struct List of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
 // starts with
 fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
-    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdList"; };
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "List"; };
     return false;
 };
 
@@ -1365,9 +1365,9 @@ fn listElement(cx: &Ctx, t: &Type) -> Held ~ {
     return Held { ok: false, ty: Type::TInt };
 };
 
-// A Box of native code: the struct StdBox of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
+// A Box of native code: the struct Box of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
 fn isBoxStruct(t: &Type) -> Bool [{ }] [{ }] {
-    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdBox"; };
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "Box"; };
     return false;
 };
 
@@ -3372,7 +3372,7 @@ fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
     enumKind = isEnum(types, n.text);
     start = printFieldStart(types, variants, enumKind);
     out = push(out, "    %slot = inttoptr i64 %w to ptr");
-    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "StdList" || beforeAngle(n.text) = "StdBox") {
+    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "List" || beforeAngle(n.text) = "Box") {
         fields = get(variants, 0).fields;
         offset0 = 0;
         lenOffset = 0;
@@ -3391,7 +3391,7 @@ fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
             elem = Box::unbox((held as Type::TAddr).inner);
             out = push(out, "    %addrp = getelementptr i8, ptr %slot, i64 ".then(showInt(offset0)));
             out = push(out, "    %addr = load i64, ptr %addrp");
-            if beforeAngle(n.text) = "StdList" {
+            if beforeAngle(n.text) = "List" {
                 out = push(out, "    %lenp = getelementptr i8, ptr %slot, i64 ".then(showInt(lenOffset)));
                 out = push(out, "    %count = load i64, ptr %lenp");
                 out = push(out, "    %base = inttoptr i64 %addr to ptr");
