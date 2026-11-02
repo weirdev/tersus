@@ -1,5 +1,6 @@
 module MirMoves
     ( checkMoves
+    , checkMovesExcluding
     , isCopyType
     , stripPositions
     ) where
@@ -227,7 +228,12 @@ isCopy cx = isCopyType (cxCopies cx) (cxProgram cx) . typeOf cx
 
 -- The errors of a program: none if it never uses a value that was moved
 checkMoves :: Set Name -> Set Name -> Set Name -> Program -> [String]
-checkMoves copies linear drops program = concatMap (checkFunction copies linear drops program) (Map.elems (progFunctions program) ++ [progMain program])
+checkMoves copies linear drops program = checkMovesExcluding copies linear drops Set.empty program
+
+-- As checkMoves, but the named functions are not checked themselves: they stay in the program so that
+-- calls of them are still seen with their signatures (what they lend, and what a result is from).
+checkMovesExcluding :: Set Name -> Set Name -> Set Name -> Set Name -> Program -> [String]
+checkMovesExcluding copies linear drops excluded program = concatMap (checkFunction copies linear drops program) ([fn | fn <- Map.elems (progFunctions program), fnName fn `Set.notMember` excluded] ++ [progMain program])
 
 checkFunction :: Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
 checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
