@@ -2248,25 +2248,7 @@ fn popSequence(initial: ExecutionState, local: Int, list: Int) -> ExecutionResul
                     sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
                     context = state.context;
                     apps = push(context.applications, sizeApp);
-                    equalities = semanticFacts(initial.context.equalities, initial.context.applications, initial.context.constants);
-                    for previous in initial.context.applications {
-                        if previous.function = -14 {
-                            if size(previous.arguments) = 2 {
-                                if hasEquality(equalities, get(previous.arguments, 0), list) {
-                                    index = integerValue(initial.context, get(previous.arguments, 1));
-                                    if index is IntegerLookup::Found {
-                                        i = (index as IntegerLookup::Found).value;
-                                        if i >= 0 {
-                                            if i < newLengthValue {
-                                                kept = ApplicationTerm { id: previous.id, function: -14, arguments: push(push([], result), get(previous.arguments, 1)) };
-                                                apps = push(apps, kept);
-                                            };
-                                        };
-                                    };
-                                };
-                            };
-                        };
-                    };
+                    for kept in keptApps { apps = push(apps, clone(kept)); };
                     context = ValidatorContext { applications: apps, ..context };
                     return ExecutionResult { status: 0, failedAt: -1, state: ExecutionState { context: context, ..state } };
                 };
