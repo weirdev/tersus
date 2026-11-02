@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 module Native
     ( cacheDirectory
     , cachedProgram
@@ -10,12 +12,19 @@ module Native
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
-import Control.Exception (IOException, evaluate, finally, try)
+import Control.Exception (IOException, bracket, evaluate, finally, try)
 import GHC.IO.Encoding (char8)
 import System.Directory (XdgDirectory (..), createDirectoryIfMissing, doesFileExist, getTemporaryDirectory, getXdgDirectory, removeFile, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>))
-import System.IO (IOMode (..), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
+import System.IO (IOMode (..), SeekMode (AbsoluteSeek), hClose, hGetContents, hPutStr, hPutStrLn, hSetEncoding, openFile, openTempFile, stderr)
+import System.Posix.IO (LockRequest (WriteLock), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
+#ifdef MIN_VERSION_unix
+# if MIN_VERSION_unix(2,8,0)
+import System.Posix.IO (OpenFileFlags (creat))
+# endif
+#endif
+import System.Posix.Types (Fd)
 import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Data.Map.Strict as Map
@@ -191,6 +200,17 @@ cacheLock key = modifyMVar cacheLocks $ \locks -> case Map.lookup key locks of
         lock <- newMVar ()
         pure (Map.insert key lock locks, lock)
 
+openCacheLock :: FilePath -> IO Fd
+#ifdef MIN_VERSION_unix
+# if MIN_VERSION_unix(2,8,0)
+openCacheLock path = openFd path WriteOnly defaultFileFlags{creat = Just 0o600}
+# else
+openCacheLock path = openFd path WriteOnly (Just 0o600) defaultFileFlags
+# endif
+#else
+openCacheLock path = openFd path WriteOnly (Just 0o600) defaultFileFlags
+#endif
+
 cachedProgram :: String -> String -> String -> (FilePath -> IO (Result () String)) -> IO (Result FilePath String)
 cachedProgram kind hash what build = do
     lock <- cacheLock (kind ++ hash)
@@ -200,15 +220,19 @@ cachedProgram kind hash what build = do
             Error e -> pure (Error e)
             Ok dir -> do
                 let exe = dir </> (kind ++ "-" ++ hash)
-                present <- doesFileExist exe
-                if present
-                    then pure (Ok exe)
-                    else do
-                        hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
-                        (partial, handle) <- openTempFile dir (kind ++ ".tmp")
-                        hClose handle
-                        removeFile partial
-                        built <- build partial
-                        case built of
-                            Error e -> pure (Error e)
-                            Ok () -> renameFile partial exe >> pure (Ok exe)
+                -- Keep the lock file: unlinking it could give waiters different inodes.
+                -- The MVar must enclose the fd's lifetime: fcntl locks belong to processes, not threads.
+                bracket (openCacheLock (exe ++ ".lock")) closeFd $ \fd -> do
+                    waitToSetLock fd (WriteLock, AbsoluteSeek, 0, 0)
+                    present <- doesFileExist exe
+                    if present
+                        then pure (Ok exe)
+                        else do
+                            hPutStrLn stderr ("Building " ++ what ++ " (once, it is kept in the cache)...")
+                            (partial, handle) <- openTempFile dir (kind ++ ".tmp")
+                            hClose handle
+                            removeFile partial
+                            built <- build partial
+                            case built of
+                                Error e -> pure (Error e)
+                                Ok () -> renameFile partial exe >> pure (Ok exe)

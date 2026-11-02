@@ -39,6 +39,7 @@ dependencies:
 - parsec
 - process
 - template-haskell
+- unix
 
 ghc-options:
 - -Wall

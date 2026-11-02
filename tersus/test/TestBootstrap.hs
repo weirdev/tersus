@@ -127,6 +127,7 @@ cache zero one = withDirectory "tersus-cache-test" $ \home -> do
     saved <- lookupEnv "XDG_CACHE_HOME"
     let restore = maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME") saved
         names = ["seed-" ++ seedHash, "emitter-" ++ emitterHash]
+        expectedNames = names ++ ["emitter-" ++ emitterHash ++ ".lock"]
         kept = [home </> "tersus" </> name | name <- names]
     (do
         createDirectoryIfMissing True (home </> "tersus")
@@ -143,7 +144,7 @@ cache zero one = withDirectory "tersus-cache-test" $ \home -> do
         pure $ case (ir, expected) of
             (Ok text, Ok fromStage1)
                 | text /= fromStage1 -> Just "the IR is not what stage 1 writes"
-                | before /= after || sort entries /= sort names -> Just ("the cache was written to: " ++ show entries)
+                | before /= after || sort entries /= sort expectedNames -> Just ("the cache was written to: " ++ show entries)
                 | otherwise -> Nothing
             (Error e, _) -> Just e
             (_, Error e) -> Just e)
