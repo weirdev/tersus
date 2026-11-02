@@ -50,6 +50,8 @@ testPaths =
         , showsPath "a::b::Seq" "fn f<S: a::b::Seq<Int>>(x: Int) -> Int [{ }] [{ }] { return x; };"
         , showsPath "a::b::Trait" "struct Point { x: Int }; impl a::b::Trait for geo::Point { fn get(self: &Self) -> Int [{ }] [{ }] { return 1; }; };"
         , showsPath "a::b::check" "fn f(x: Int) -> Int [{ affirm a::b::check(x); }] [{ }] { return x; };"
+        , showsPath "geo::Vec" "struct Vec<T> { x: T }; fn f(v: geo::Vec<Int>) -> Int [{ }] [{ }] { return v.x; };"
+        , showsPath "geo::types::Vec" "struct Vec<T> { x: T }; fn f(v: geo::types::Vec<Int>) -> Int [{ }] [{ }] { return v.x; };"
         ]
 
 testMatchOverReference :: Test
@@ -916,5 +918,25 @@ testModuleLinkBorrow =
             "cannot be assigned while it is borrowed"
         ]
 
+testModuleQualifiedGenerics :: Test
+testModuleQualifiedGenerics =
+    testCaseSeq
+        "module-qualified-generics"
+        [ expectRuns collapsedFiles "app/main.tersus" "9"
+        , expectRuns filedFiles "app/main.tersus" "9"
+        ]
+  where
+    collapsedFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; fn getX(v: geo::Vec<Int>) -> Int [{ }] [{ }] { return v.x; }; w = geo::makeVec(9); return getX(w);")
+        , ("app/geo/geo.tersus", "struct Vec<T> { x: T }; fn makeVec(v: Int) -> Vec<Int> [{ }] [{ }] { return Vec<Int> { x: v }; };")
+        ]
+    filedFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; fn getY(v: geo::types::Boxed<Int>) -> Int [{ }] [{ }] { return v.y; }; b = geo::types::makeBoxed(9); return getY(b);")
+        , ("app/geo/geo.tersus", "fn placeholder(x: Int) -> Int [{ }] [{ }] { return x; };")
+        , ("app/geo/types.tersus", "struct Boxed<T> { y: T }; fn makeBoxed(v: Int) -> Boxed<Int> [{ }] [{ }] { return Boxed<Int> { y: v }; };")
+        ]
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]
+testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]
