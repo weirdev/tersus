@@ -45,7 +45,7 @@ import System.Environment (getExecutablePath)
 import System.FilePath ((</>))
 import System.IO (SeekMode (AbsoluteSeek), hClose, hPutStr, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
-import System.Posix.IO (FileLock, LockRequest (WriteLock), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
+import System.Posix.IO (FileLock, LockRequest (WriteLock), OpenFileFlags (..), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
 import System.Posix.Types (Fd)
 
 import Hash (fingerprint)
