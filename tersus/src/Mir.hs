@@ -48,6 +48,9 @@ import Data.Map.Strict (Map)
 import Data.Maybe (listToMaybe)
 
 import Pretty (renderType, renderVarProof)
+import Text.ParserCombinators.ReadP (readS_to_P)
+import Text.ParserCombinators.ReadPrec (lift)
+import Text.Read (readPrec)
 import qualified Data.Set as Set
 import Types (Arg (..), Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray)
 import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, exprToProof)
@@ -69,6 +72,14 @@ instance Show Local where
 instance Show BlockId where
     show (BlockId n) = "bb" ++ show n
 
+instance Read Local where
+    readsPrec _ s = [(Local n, more) | ('_' : rest) <- [dropWhile (== ' ') s], (n, more) <- reads rest]
+    readPrec = lift (readS_to_P (\s -> [(Local n, more) | ('_' : rest) <- [dropWhile (== ' ') s], (n, more) <- reads rest]))
+
+instance Read BlockId where
+    readsPrec _ s = [(BlockId n, more) | ('b' : 'b' : rest) <- [dropWhile (== ' ') s], (n, more) <- reads rest]
+    readPrec = lift (readS_to_P (\s -> [(BlockId n, more) | ('b' : 'b' : rest) <- [dropWhile (== ' ') s], (n, more) <- reads rest]))
+
 data Program = Program
     { progTypes :: Map Name TypeDecl
     , progFunctions :: Map Name Function -- every function but main, a nested one lifted to the top (outer::inner)
@@ -76,11 +87,11 @@ data Program = Program
     , progGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields (see completeInstances)
     , progInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets, by the name of the struct (not of an instance of it)
     }
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- A struct is its fields; an enum its variants (named Enum::Variant) with theirs
 data TypeDecl = StructDecl [(Variable, Type)] | EnumDecl [(Name, [(Variable, Type)])]
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data Function = Function
     { fnName :: Name
@@ -95,19 +106,19 @@ data Function = Function
     , fnFrom :: [Local] -- the parameters a reference result is from
     , fnSpec :: FunctionSpec
     }
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data LocalDecl = LocalDecl
     { localType :: Type
     , localName :: Maybe Variable -- the source name; Nothing for a temporary
     }
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data BasicBlock = BasicBlock
     { blockStatements :: [Statement]
     , blockTerminator :: Terminator
     }
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data Statement
     = Assign Local Rvalue
@@ -122,7 +133,7 @@ data Statement
       -- and the value. It is not an assignment of the root: it goes through a live update loan to the place, and the
       -- root gets a new version whose place at those steps is the value. Native code expands it (MirOwnership).
       AssignRef Local [RefStep] Rvalue
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- What the names of the source mean at a point: the local of a variable, or the function (a constant) of a name that
 -- stands for one. Ghost statements, contracts and invariants are written with these names.
@@ -141,7 +152,7 @@ data GhostStatement
     | -- The value of the local has been taken apart into its fields (`S { a: x, ... } = v;`): it is used up, and a drop of its type is not run
       -- on it. The ghost erasure makes it the clearing of the local's bytes, which native code takes for a value that was moved out.
       GhostDissolve Local
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data Rvalue
     = Use Operand
@@ -171,16 +182,16 @@ data Rvalue
       Borrow Local [RefStep] Bool
     | -- The value at the place a reference local is to: the local's current version, in the validator and the executor
       Deref Operand
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- A step from the root of a borrowed place to the place itself: a field of a struct or variant, or an element at an index
 data RefStep = RefField Name Variable | RefIndex Operand
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- Div and Mod need a divisor that is not 0. Compare Eq and NotEq are of two words of one type (an Int, a Byte, a Bool, a fixed-width
 -- integer or an address: anything else is compared by its Eq, which the checker calls), and the other comparisons are of Ints.
 data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- First and Last need a list that is not empty, Get and Set an index in range. These work on an array as on a list; NewArray n x
 -- makes an array of n copies of x, with n not negative; NewBoxed n x does so for an n that is not a constant, in a Box. NewEmptyBoxed makes the Box of an array of no elements.
@@ -200,7 +211,7 @@ data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBox
       UninitEmpty | UninitNew | UninitGet | UninitTake | UninitDiscard
     | -- An Int as a fixed-width integer (signed, bits), with its range proved: the same number
       Narrow Bool Integer
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- The operations that make a permission, which are erased with it
 ghostOp :: ListOp -> Bool
@@ -208,7 +219,7 @@ ghostOp op = op `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockS
 
 -- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns
 data Operand = Copy Local | Move Local | Const Constant
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data Constant
     = CInt Integer
@@ -217,7 +228,7 @@ data Constant
     | CArray [Constant] -- an array literal (#[1, 2]): held inline, where a list is on the heap
     | CData Name [(Variable, Constant)]
     | CFn Name -- a function of the program, as a value
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data Terminator
     = Goto BlockId
@@ -230,7 +241,7 @@ data Terminator
       Return
     | -- The end of a function whose every path returned
       Unreachable
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- What the program says about a function that the validator uses and the executor does not
 data FunctionSpec = FunctionSpec
@@ -243,7 +254,7 @@ data FunctionSpec = FunctionSpec
     , specMutParams :: [Variable] -- the parameters lent for updating (&mut T): a call gives the caller a new version of what they are to
     , specFrom :: [Variable] -- the parameters a reference result is from (`-> &T from xs`): a call's result is a reference to a place of one of them (REFERENCES.md)
     }
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 data LoopSpec = LoopSpec
     { loopInvariant :: [ValidationStatement]
@@ -251,7 +262,7 @@ data LoopSpec = LoopSpec
     , loopEnv :: Env
     , loopBody :: BlockId -- the first block of the body: an iteration starts on each edge into it (a condition made of && and || has several tests)
     }
-    deriving (Show, Eq)
+    deriving (Show, Eq, Read)
 
 -- A struct with sizes is a struct of its own for each list of sizes (`Packet<4>`, and `Packet<n>` in a function that has the size n),
 -- named by them. This declares every one the program mentions, from the declaration of the struct with the sizes put in.

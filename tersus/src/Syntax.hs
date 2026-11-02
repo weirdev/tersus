@@ -20,10 +20,10 @@ data Termination
       MayDiverge
     | -- Never parsed: the copy of a function that its own body calls, with what the function said
       Recursing (Maybe Termination)
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 -- NativeFunct signature termination body
-data FunctBody = NativeFunct Signature (Maybe Termination) [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord)
+data FunctBody = NativeFunct Signature (Maybe Termination) [Statement] | BuiltinFunct BuiltinFunct deriving (Show, Eq, Ord, Read)
 
 data Value
     = VInt Integer
@@ -37,7 +37,7 @@ data Value
       -- Result assertions may contain variables from inputArgs and "return" variable
       -- TODO: Real return slot rather than var
       VFunct [Variable] [ValidationStatement] [ValidationStatement] FunctBody [VariableProof]
-    deriving (Show)
+    deriving (Show, Read)
 
 -- A builtin is fully described by which builtin it is: its contracts come from the standard library
 -- and are large, and values are compared constantly by the proof engine.
@@ -64,7 +64,7 @@ instance Ord Value where
 
 -- TODO: Call
 data Expression = Val Value | Var Variable | F Expression [Expression]
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 data ValidationStatement
     = Rewrite RwRule
     | ProofAssert VariableProof
@@ -72,7 +72,7 @@ data ValidationStatement
     | -- assume e;: a fact that the rest of the path knows without a proof, as after an affirm. It is an assumption, which
       -- `tersus assumptions` lists: what a program takes on trust, such as what a C function did to memory (POINTERS.md).
       Assume VariableProof
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 data Statement
     = Assign Variable Expression
     | -- `*place = expression;`: the place a reference is to is given a new value (REFERENCES.md, stage 3). The first
@@ -127,7 +127,7 @@ data Statement
     | -- The value of the variable has been taken apart into its fields (`Vec { addr: a, len: n, blk: b } = v;`, which the parser makes into
       -- the reads of the fields and this): it is used up, so a drop it has is not run. Only native code needs it (MirGhost).
       Dissolve Variable
-    deriving (Show, Eq, Ord) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
+    deriving (Show, Eq, Ord, Read) -- Assign ProofVar used only in validations, TODO: maintain separate var map for proof vars
 
 -- A bound on a type parameter of a function: the parameter, the trait its type has to implement and the types it is given
 -- (`S: Sequence<Int>`)
@@ -142,7 +142,7 @@ data TraitFn = TraitFn
     , traitFnRequires :: [ValidationStatement]
     , traitFnEnsures :: [ValidationStatement]
     }
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 -- What a function of an impl is called in the program: <Type>::f for an impl of Type, and <Type as Trait>::f for an impl of a
 -- trait. The programs write Type::f, x.f(...) and Trait::f(x), which the type checker resolves to one of these (Type::f is
@@ -174,7 +174,7 @@ parseImplCheckName name =
             | otherwise = go (c : acc) cs
         go _ [] = Nothing
 
-newtype Iota = Iota String deriving (Eq, Ord, Show)
+newtype Iota = Iota String deriving (Eq, Ord, Show, Read)
 
 -- Function being applied, arguments
 -- Proof terms reuse the same tree shape for both concrete values and symbolic placeholders.
@@ -186,7 +186,7 @@ data Proof i
     | CTerm Value
     | Forall Variable [Proof i] (Proof i)
     | BVar Variable
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 proofHasForall :: Proof i -> Bool
 proofHasForall Forall{} = True
@@ -209,12 +209,12 @@ data RwRule
     | CheckGtZero VariableProof
     | CheckRel VariableProof
     | UserRewrite Variable [VariableProof]
-    deriving (Show, Eq, Ord) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
+    deriving (Show, Eq, Ord, Read) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 
 data UserRule
     = AxiomRule [Variable] [ValidationStatement] [ValidationStatement]
     | ProofRule [Variable] [ValidationStatement] [VariableProof]
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 type RuleContext = Map Variable UserRule
 

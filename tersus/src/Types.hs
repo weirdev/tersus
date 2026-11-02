@@ -9,7 +9,7 @@ type Variable = String
 type Name = String
 
 -- This will need to be made more robust, for now A=abstract, C=concrete, FApp = Iota1 = Funct(Iota2)
-data Rel = Eq | NotEq | Lt | Gt | LtEq | GtEq deriving (Eq, Ord, Show)
+data Rel = Eq | NotEq | Lt | Gt | LtEq | GtEq deriving (Eq, Ord, Show, Read)
 
 -- Ctor builds a struct from its fields, given in declaration order, and Field reads one by name. The Field of a `..base` update names the struct the base must be.
 -- A struct literal is the application of its Ctor, so the proof engine sees structs as ordinary terms.
@@ -142,7 +142,7 @@ data BuiltinFunct
     | -- Cast Ctor reinterprets an enum value as that variant so its fields can be read. The validator demands the proof
       -- that the value is that variant; evaluation does nothing, and a wrong cast is undefined behaviour.
       Cast Name
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 -- The builtins whose value is something outside the program (the input, the arguments): a call of one is not a function of its arguments,
 -- so a validator does not say that two calls are the same value, and a proof may not call one
@@ -184,7 +184,7 @@ data Type = TInt | TByte | TBool
     | -- A reference that may update its referent (REFERENCES.md): as a parameter it is lent exclusively, as a local it is
       -- made by `&mut place`. It is never a result, a field or an element in stages 1 to 3 (escaping references are stage 4).
       TMutRef Type
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 -- The size argument of a type: a constant, or `?`, a size that the type does not say. A type with a `?` is unsized: its size is
 -- known only to something that holds a pointer to it and carries the size along (a Box, later), so it cannot be held by value.
@@ -192,11 +192,11 @@ data Type = TInt | TByte | TBool
 -- A name is a size parameter of the function (`n` in `fn dot<n>`), which stands for a constant that its callers give; SizeVar is the
 -- checker's own unknown, for the size a call gives a parameter, and is never written by a program.
 data Size = SizeConst Integer | SizeAny | SizeParam Name | SizeVar Int
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 -- What a struct with parameters is given: a size, or a type
 data Arg = ArgSize Size | ArgType Type
-    deriving (Show, Eq, Ord)
+    deriving (Show, Eq, Ord, Read)
 
 -- A parameter that starts with a capital letter is a type, and any other is a size
 isTypeName :: Variable -> Bool
@@ -372,5 +372,5 @@ pattern TArray t n = TArrayOf t (SizeConst n)
 
 -- The declared parameter types and return type of a user function, its size parameters, which are the last parameters (of type Int),
 -- given by the call and not written in it, and its type parameters, which a call gives too
-data Signature = Signature [Type] Type [Variable] [Variable] [Variable] [Variable] deriving (Show, Eq, Ord) -- parameter types, return type, size parameters, type parameters, writes footprint, and the parameters a reference result is from (REFERENCES.md)
+data Signature = Signature [Type] Type [Variable] [Variable] [Variable] [Variable] deriving (Show, Eq, Ord, Read) -- parameter types, return type, size parameters, type parameters, writes footprint, and the parameters a reference result is from (REFERENCES.md)
 

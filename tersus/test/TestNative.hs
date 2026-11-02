@@ -843,13 +843,15 @@ sameAsMirWorld name world source = do
     available <- clangAvailable
     if not available
         then pure Nothing
-        else case compileSource source of
-            Error e -> pure (Just ("Does not compile: " ++ e))
-            Ok program -> do
-                ir <- emitUnvalidated (nativeProgram program)
-                case ir of
-                    Error e -> pure (Just e)
-                    Ok text -> buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name text (expected (runProgramIn world program))
+        else do
+            compiled <- compileOnce source
+            case compiled of
+                Error e -> pure (Just ("Does not compile: " ++ e))
+                Ok program -> do
+                    ir <- emitUnvalidated (nativeProgram program)
+                    case ir of
+                        Error e -> pure (Just e)
+                        Ok text -> buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name text (expected (runProgramIn world program))
   where
     expected (Ok ((output, errors), _)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
     expected (Error e) = (ExitFailure 1, "", e ++ "\n")
@@ -986,35 +988,37 @@ sameAsMirFiles name initial source = do
     available <- clangAvailable
     if not available
         then pure Nothing
-        else case compileSource source of
-            Error e -> pure (Just ("Does not compile: " ++ e))
-            Ok program -> do
-                ir <- emitUnvalidated (nativeProgram program)
-                case ir of
-                    Error e -> pure (Just e)
-                    Ok text -> case runProgramIn noWorld{worldFile = \path -> lookup path initial} program of
-                        Error e -> pure (Just ("The MIR run failed: " ++ e))
-                        Ok ((out, err), files) -> do
-                            tmp <- getTemporaryDirectory
-                            let dir = tmp </> "tersus-native-files" </> map safeChar name
-                                exe = tmp </> "tersus-native-files" </> (map safeChar name ++ "_exe")
-                            withByteNames $ do
-                                exists <- doesDirectoryExist dir
-                                if exists then removeDirectoryRecursive dir else pure ()
-                                createDirectoryIfMissing True dir
-                                mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
-                            built <- buildExecutableFast [] exe text
-                            case built of
-                                Error e -> pure (Just e)
-                                Ok () -> do
-                                    (code, nativeOut, nativeErr) <- runProcessBytes (Just dir) exe [] ""
-                                    let expectedOut = if null out then "" else out ++ "\n"
-                                        sameStreams = testAssertEq (code, nativeOut, nativeErr) (ExitSuccess, expectedOut, err)
-                                    written <- withByteNames (mapM (\(path, contents) -> readBytes (dir </> path) >>= \actual -> pure (path, actual, contents)) files)
-                                    let sameFiles = case [path ++ ": expected " ++ show contents ++ ", got " ++ show actual | (path, actual, contents) <- written, actual /= contents] of
-                                            [] -> Nothing
-                                            problems -> Just (unlines problems)
-                                    pure (maybe sameFiles Just sameStreams)
+        else do
+            compiled <- compileOnce source
+            case compiled of
+                Error e -> pure (Just ("Does not compile: " ++ e))
+                Ok program -> do
+                    ir <- emitUnvalidated (nativeProgram program)
+                    case ir of
+                        Error e -> pure (Just e)
+                        Ok text -> case runProgramIn noWorld{worldFile = \path -> lookup path initial} program of
+                            Error e -> pure (Just ("The MIR run failed: " ++ e))
+                            Ok ((out, err), files) -> do
+                                tmp <- getTemporaryDirectory
+                                let dir = tmp </> "tersus-native-files" </> map safeChar name
+                                    exe = tmp </> "tersus-native-files" </> (map safeChar name ++ "_exe")
+                                withByteNames $ do
+                                    exists <- doesDirectoryExist dir
+                                    if exists then removeDirectoryRecursive dir else pure ()
+                                    createDirectoryIfMissing True dir
+                                    mapM_ (\(path, contents) -> withBinaryFile (dir </> path) WriteMode (\h -> hPutStr h contents)) initial
+                                built <- buildExecutableFast [] exe text
+                                case built of
+                                    Error e -> pure (Just e)
+                                    Ok () -> do
+                                        (code, nativeOut, nativeErr) <- runProcessBytes (Just dir) exe [] ""
+                                        let expectedOut = if null out then "" else out ++ "\n"
+                                            sameStreams = testAssertEq (code, nativeOut, nativeErr) (ExitSuccess, expectedOut, err)
+                                        written <- withByteNames (mapM (\(path, contents) -> readBytes (dir </> path) >>= \actual -> pure (path, actual, contents)) files)
+                                        let sameFiles = case [path ++ ": expected " ++ show contents ++ ", got " ++ show actual | (path, actual, contents) <- written, actual /= contents] of
+                                                [] -> Nothing
+                                                problems -> Just (unlines problems)
+                                        pure (maybe sameFiles Just sameStreams)
   where
     -- (the names of files are bytes here too: the file-system encoding is global, so the cases that run at the same
     -- time take this lock for the file operations of a case)
