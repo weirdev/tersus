@@ -762,17 +762,28 @@ fn entailsSemanticEquality(equalities: &List<EqualityFact>, terms: &List<Applica
 
 // Concrete integer values also provide their exact order. Booleans do not
 // provide integer-order edges, even though their encoding uses an integer.
+// The integer constants in order of value, each below the next larger one:
+// a chain, which orders every pair as the transitive closure does, with one
+// fact per constant rather than one per pair.
 fn constantOrders(orders: &List<OrderFact>, constants: &List<ConstantTerm>) -> List<OrderFact> {
     known = clone(orders);
     for a in constants {
-        for b in constants {
-            if a.kind = 0 {
+        if a.kind = 0 {
+            next = 0;
+            nextValue = 0;
+            found = false;
+            for b in constants {
                 if b.kind = 0 {
-                    if a.value < b.value {
-                        known = push(known, OrderFact { smaller: a.id, greater: b.id, strict: true });
+                    if b.value > a.value {
+                        if found = false || b.value < nextValue {
+                            next = b.id;
+                            nextValue = b.value;
+                            found = true;
+                        };
                     };
                 };
             };
+            if found { known = push(known, OrderFact { smaller: a.id, greater: next, strict: true }); };
         };
     };
     return known;
