@@ -4,7 +4,7 @@
 //     tersus mir --data examples/hello.tersus | tersus run examples/emit.tersus
 //
 // With no argument it writes all of the IR of the program (TestMirEmit runs every mode of it on every example and every
-// program of the native tests, and TestNative builds and runs the IR). The argument `outline` writes the declarations, the descriptors of the types of the locals and the entry point,
+// program of the native tests, and TestNative builds and runs the IR). The argument `outline` writes the declarations, the made functions of the types of the locals and the entry point,
 // and `bodies` the code of each function: the parts it was written in.
 //
 // A program is one file, so the reader of examples/mir_reader.tersus (its types, tokenizer and parsers) is repeated here, between the same two lines in both
@@ -1377,7 +1377,7 @@ fn ownerOf(types: &List<TypeDecl>, v: &String) -> Res [{ }] [{ }] {
     return Res { ok: false, text: "" };
 };
 
-// A value of a variant has the representation of its enum, so one descriptor serves both
+// A value of a variant has the representation of its enum, so the made functions of one serve both
 fn canonical(types: &List<TypeDecl>, t: &Type) -> Type [{ }] [{ }] {
     if t is Type::TVariant {
         o = ownerOf(types, (t as Type::TVariant).name);
@@ -1627,6 +1627,12 @@ fn printSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
     return global("print.", renderType(canonical(types, t)));
 };
 
+// The symbol of the function that copies a value of the type into room of its own, made for the type below: the copy
+// that is made when the type has no `Clone` impl to call (a copy of a type that has one is that impl, called)
+fn cloneSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("clone.", renderType(canonical(types, t)));
+};
+
 
 // The symbol of the function that frees what each of a run of values of the type owns
 fn dropRangeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
@@ -1793,12 +1799,8 @@ fn llvmType(t: &Type) -> Res ~ {
     return unsupported;
 };
 
-// The symbol of the descriptor of a type
-fn typeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
-    return global("type.", renderType(canonical(types, t)));
-};
 
-// The types the runtime needs a descriptor of, and the types inside them (a type that contains itself is there once)
+// The types inside a type (a type that contains itself is there once)
 fn parts(types: &List<TypeDecl>, t: &Type) -> List<Type> ~ {
     out = noTypes();
     if t is Type::TAddr {
@@ -1850,118 +1852,11 @@ fn closeTypes(types: &List<TypeDecl>, roots: &List<Type>) -> List<Type> ~ {
     return seen;
 };
 
-// Descriptors
-
-// The kind of a type for the runtime (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array of no size, 8 an unsigned integer of fewer
-// bytes, 9 a signed one, -1 other) and what it points to
-fn descriptorShape(types: &List<TypeDecl>, t: &Type) -> Res ~ {
-    if t is Type::TByte { return Res { ok: true, text: "8, ptr null" }; };
-    if t is Type::TWord {
-        if (t as Type::TWord).signed { return Res { ok: true, text: "9, ptr null" }; };
-        return Res { ok: true, text: "8, ptr null" };
-    };
-    // (an address names the descriptor of what it is the address of, which is how the runtime walks the elements of a list)
-    if t is Type::TAddr { return Res { ok: true, text: "0, ptr ".then(typeSymbol(types, Box::unbox((t as Type::TAddr).inner))) }; };
-    if isNumberWord(t) { return Res { ok: true, text: "0, ptr null" }; };
-    if t is Type::TBool { return Res { ok: true, text: "1, ptr null" }; };
-    if isSizedArray(t) { return Res { ok: true, text: "5, ptr ".then(global("array.", renderType(t))) }; };
-    if t is Type::TNamed { return Res { ok: true, text: "3, ptr ".then(global("data.", (t as Type::TNamed).name)) }; };
-    if t is Type::TFn { return Res { ok: true, text: "4, ptr null" }; };
-    return Res { ok: true, text: "-1, ptr null" };
-};
-
-// The body of the descriptor of a type: its kind and what it points to, the words of a value held inline and whether it owns something (worked out here, once, and not by
-// the runtime at every drop and copy)
-fn descriptorBody(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> String ~ {
-    drops = "0";
-    if needsDrop(types, fns, t) { drops = "1"; };
-    return "{ i64 ".then(descriptorShape(types, t).text).then(", i64 ").then(showInt(layoutOf(types, t).size)).then(", i64 ").then(drops).then(" }");
-};
-
-// The constants of a struct or an enum: how many variants, the variants with the names and descriptors of their fields, and whether the value starts with a word that
-// says the variant (1 for an enum, 2 for the list of native code), and the drop of the type, if it has one
-fn dataDescriptor(types: &List<TypeDecl>, fns: &List<String>, n: &String) -> List<String> ~ {
-    variants = variantsOf(types, n);
-    kind = "0";
-    if isEnum(types, n) { kind = "1"; } else { if beforeAngle(n) = "StdList" { kind = "2"; } else { if beforeAngle(n) = "StdBox" { kind = "3"; }; }; };
-    out = noStrings();
-    out = push(out, global("data.", n).then(" = private constant { i64, ptr, i64 } { i64 ").then(showInt(size(variants))).then(", ptr ").then(global("variants.", n)).then(", i64 ").then(kind).then(" }"));
-    entries = noStrings();
-    for v in variants {
-        fieldsRef = "null";
-        if size(v.fields) > 0 { fieldsRef = global("fields.", v.name); };
-        entries = push(entries, "{ ptr, i64, ptr } { ptr ".then(global("str.", v.name)).then(", i64 ").then(showInt(size(v.fields))).then(", ptr ").then(fieldsRef).then(" }"));
-    };
-    out = push(out, global("variants.", n).then(" = private constant [").then(showInt(size(variants))).then(" x { ptr, i64, ptr }] [").then(joinWith(", ", entries)).then("]"));
-    // (the offset of each field: after the tag of an enum, from where every variant's fields can start)
-    payload = 1;
-    for v in variants {
-        l = fieldsLayout(types, v.fields);
-        if l.align > payload { payload = l.align; };
-    };
-    start = 0;
-    if kind = "1" { start = roundUp(4, payload); };
-    for v in variants {
-        if size(v.fields) > 0 {
-            fs = noStrings();
-            offset = 0;
-            for f in v.fields {
-                l = layoutOf(types, f.ty);
-                offset = roundUp(offset, l.align);
-                fs = push(fs, "{ ptr, ptr, i64 } { ptr ".then(global("str.", f.name)).then(", ptr ").then(typeSymbol(types, f.ty)).then(", i64 ").then(showInt(start + offset)).then(" }"));
-                offset = offset + l.size;
-            };
-            out = push(out, global("fields.", v.name).then(" = private constant [").then(showInt(size(v.fields))).then(" x { ptr, ptr, i64 }] [").then(joinWith(", ", fs)).then("]"));
-        };
-    };
-    return out;
-};
-
 // The names of the functions of the program
 fn functionNames(program: &Program) -> List<String> ~ {
     names = noStrings();
     for f in program.functions { names = push(names, clone(f.name)); };
     return names;
-};
-
-// A constant global for each type: its kind (0 Int, 1 Bool, 3 struct or enum, 4 function, 5 array, 6 Box, 7 Box of an array of no size) and what the runtime needs to walk a
-// value (typeDescriptors)
-fn typeDescriptors(types: &List<TypeDecl>, fns: &List<String>, closed: &List<Type>) -> List<String> ~ {
-    out = noStrings();
-    out = push(out, "%tersus.type = type { i64, ptr, i64, i64 }");
-    for t in closed {
-        out = push(out, typeSymbol(types, t).then(" = private constant %tersus.type ").then(descriptorBody(types, fns, t)));
-    };
-    for t in closed {
-        if t is Type::TNamed {
-            for line in dataDescriptor(types, fns, (t as Type::TNamed).name) { out = push(out, clone(line)); };
-        };
-    };
-    for t in closed {
-        arr = sizedArray(t);
-        if arr.ok {
-            out = push(out, global("array.", renderType(t)).then(" = private constant { i64, ptr } { i64 ").then(showInt(arr.length)).then(", ptr ").then(typeSymbol(types, arr.elem)).then(" }"));
-        };
-    };
-    seen = noStrings();
-    for t in closed {
-        if t is Type::TNamed {
-            for v in variantsOf(types, (t as Type::TNamed).name) {
-                names = noStrings();
-                names = push(names, clone(v.name));
-                for f in v.fields { names = push(names, clone(f.name)); };
-                for name in names {
-                    if !containsName(seen, name) {
-                        seen = push(seen, clone(name));
-                        shown = beforeAngle(name);
-                        out = push(out, global("str.", name).then(" = private constant [").then(showInt(size(shown.bytes) + 1)).then(" x i8] c\"").then(escaped(shown)).then("\\00\""));
-                    };
-                };
-            };
-        };
-    };
-    out = push(out, "");
-    return out;
 };
 
 // The declarations of the runtime and of the intrinsics
@@ -1984,7 +1879,7 @@ fn declarations() -> List<String> [{ }] [{ }] {
     out = push(out, "declare i64 @tersus_fileStore()");
     out = push(out, "declare void @llvm.memcpy.p0.p0.i64(ptr, ptr, i64, i1)");
     out = push(out, "declare void @llvm.memset.p0.i64(ptr, i8, i64, i1)");
-    out = push(out, "declare void @tersus_clone(ptr, ptr, ptr)");
+    out = push(out, "declare ptr @tersus_box_new(i64)");
     out = push(out, "declare void @tersus_box_free(ptr)");
     out = push(out, "declare i64 @tersus_addr_alloc(i64, i64)");
     out = push(out, "declare i64 @tersus_addr_resize(i64, i64, i64)");
@@ -2030,7 +1925,6 @@ fn entryPoint(types: &List<TypeDecl>, fns: &List<String>, main: &Function) -> En
         return Entry { ok: true, error: "", lines: wrapMain(body), types: noTypes() };
     };
     ty = main.returns;
-    sym = typeSymbol(types, ty);
     roots = noTypes();
     roots = push(roots, clone(ty));
     body = noStrings();
@@ -2090,7 +1984,7 @@ fn printLines(lines: &List<String>) -> Int [{ }] [{ }] {
 
 // The code of a function
 //
-// The Haskell emits a block in a state monad `G`: a counter for the names of temporaries and labels, the lines so far, the types whose descriptors the code asks for, the
+// The Haskell emits a block in a state monad `G`: a counter for the names of temporaries and labels, the lines so far, the types the code makes a function for, the
 // globals it needs and the rooms in the frame for values it builds. Here the state is a `Gen` that each function takes and gives back. A function that also gives a value
 // leaves its text in `last` (the name of the value that an instruction made, a number, the type of a local): the caller reads it at once, with `g.last`. The state is never
 // in a struct with the value, since a field read from a struct that is used again afterwards is a copy, and a copy of the lines so far for each instruction would make the
@@ -2116,7 +2010,7 @@ impl Clone for Ctor { };
 
 // The types of the program and the signatures of its functions, and for each type what is asked of it again and again, worked out once: the names, to look one up without
 // copying the declarations, whether a value of it owns something and the words it takes, and the constructors
-struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, sizes: List<Int>, aligns: List<Int>, ctors: List<Ctor>, ctorNames: List<String> };
+struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, sizes: List<Int>, aligns: List<Int>, ctors: List<Ctor>, ctorNames: List<String>, clones: List<String>, cloneTys: List<String> };
 
 impl Clone for Ctx { };
 
@@ -2262,7 +2156,15 @@ fn contextOf(program: &Program) -> Ctx ~ {
     ctors = ctorsOf(program.types);
     ctorNames = noStrings();
     for c in ctors { ctorNames = push(ctorNames, clone(c.name)); };
-    return Ctx { types: clone(program.types), sigs: sigs, names: names, drops: drops, sizes: sizes, aligns: aligns, ctors: ctors, ctorNames: ctorNames };
+    clones = noStrings();
+    cloneTys = noStrings();
+    for s in sigs {
+        if s.hasReturn && size(s.params) > 0 && hasText(s.name, " as Clone>::clone") {
+            clones = push(clones, clone(s.name));
+            cloneTys = push(cloneTys, renderType(canonical(program.types, s.returns)));
+        };
+    };
+    return Ctx { types: clone(program.types), sigs: sigs, names: names, drops: drops, sizes: sizes, aligns: aligns, ctors: ctors, ctorNames: ctorNames, clones: clones, cloneTys: cloneTys };
 };
 
 // The index of the declaration of a struct or an enum, or -1 (the same as lookupDecl, without copying the declarations)
@@ -2283,6 +2185,247 @@ fn sigIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; aff
     };
     return 0 - 1;
 };
+
+// Whether `hay` holds `needle`
+fn hasText(hay: &String, needle: &String) -> Bool ~ {
+    i = 0;
+    while i < size(hay.bytes) [{ affirm i >= 0; affirm i <= size(hay.bytes); }] shrinks size(hay.bytes) - i {
+        if hay.slice(i, size(hay.bytes)).startsWith(needle) { return true; };
+        i = i + 1;
+    };
+    return size(needle.bytes) = 0;
+};
+
+// The `Clone` impl of a type, when the program has one: the function a copy of the type is. It is the one whose
+// name says it is the `clone` of the trait `Clone` and whose result is the type (the impl of a list is named
+// for `List`, and its result is the `StdList` the list is made of, so the name is not made from the type)
+fn cloneImplName(cx: &Ctx, t: &Type) -> Res ~ {
+    want = renderType(canonical(cx.types, t));
+    i = 0;
+    while i < size(cx.clones) && i < size(cx.cloneTys) [{ affirm i >= 0; affirm i <= size(cx.clones); affirm i <= size(cx.cloneTys); }] shrinks size(cx.clones) - i {
+        if get(cx.cloneTys, i) = want { return Res { ok: true, text: clone(get(cx.clones, i)) }; };
+        i = i + 1;
+    };
+    return Res { ok: false, text: "" };
+};
+
+// The lines that copy one field of a value at %from into %to, where the field is a value held inline (a word is
+// already copied by the copy of the whole value): a copy the field's type makes itself, which is its `Clone`
+// impl when it has one and the made function of its type when it does not
+fn cloneFieldLines(cx: &Ctx, variantIndex: Int, fields: &List<Field>, start: Int) -> List<String> ~ {
+    out = noStrings();
+    offset = 0;
+    i = 0;
+    for f in fields {
+        l = layoutOf(cx.types, f.ty);
+        offset = roundUp(offset, l.align);
+        ct = canonical(cx.types, f.ty);
+        if isAggregate(ct) {
+            reg = "%cf".then(showInt(variantIndex)).then(".").then(showInt(i));
+            out = push(out, "    ".then(reg).then("f = getelementptr i8, ptr %from, i64 ").then(showInt(start + offset)));
+            out = push(out, "    ".then(reg).then("t = getelementptr i8, ptr %to, i64 ").then(showInt(start + offset)));
+            implName = cloneImplName(cx, ct);
+            if implName.ok {
+                out = push(out, "    call void ".then(functionSymbol(implName.text)).then("(ptr ").then(reg).then("t, ptr ").then(reg).then("f)"));
+            } else {
+                out = push(out, "    call void ".then(cloneSymbol(cx.types, ct)).then("(ptr ").then(reg).then("t, ptr ").then(reg).then("f)"));
+            };
+        };
+        offset = offset + l.size;
+        i = i + 1;
+    };
+    return out;
+};
+
+// The function that copies a value of the type into another that shares nothing with it, for a type with no
+// `Clone` impl to call (a copy of a type that has one is that impl): the words of the value, and then what
+// its fields or its elements hold, as a deep copy is made. A value that is not there (0)
+// is copied as it is.
+fn cloneFunctionLines(cx: &Ctx, t: &Type) -> List<String> ~ {
+    types = cx.types;
+    out = noStrings();
+    out = push(out, "define internal void ".then(cloneSymbol(types, t)).then("(ptr %to, ptr %from) {"));
+    out = push(out, "entry:");
+    bytes = layoutOf(types, t).size;
+    if bytes > 0 {
+        out = push(out, "    call void @llvm.memcpy.p0.p0.i64(ptr %to, ptr %from, i64 ".then(showInt(bytes)).then(", i1 false)"));
+    };
+    arr = sizedArray(t);
+    if arr.ok {
+        if needsDropIn(cx, arr.elem) {
+            step = layoutOf(types, arr.elem).size;
+            out = push(out, "    br label %chead");
+            out = push(out, "chead:");
+            out = push(out, "    %ci = phi i64 [0, %entry], [%cnext, %cbody]");
+            out = push(out, "    %ccond = icmp eq i64 %ci, ".then(showInt(arr.length)));
+            out = push(out, "    br i1 %ccond, label %done, label %cbody");
+            out = push(out, "cbody:");
+            out = push(out, "    %coff = mul i64 %ci, ".then(showInt(step)));
+            out = push(out, "    %cfp = getelementptr i8, ptr %from, i64 %coff");
+            out = push(out, "    %ctp = getelementptr i8, ptr %to, i64 %coff");
+            implName = cloneImplName(cx, arr.elem);
+            if implName.ok {
+                out = push(out, "    call void ".then(functionSymbol(implName.text)).then("(ptr %ctp, ptr %cfp)"));
+            } else {
+                out = push(out, "    call void ".then(cloneSymbol(types, arr.elem)).then("(ptr %ctp, ptr %cfp)"));
+            };
+            out = push(out, "    %cnext = add i64 %ci, 1");
+            out = push(out, "    br label %chead");
+            out = push(out, "done:");
+        };
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    n = declaredName(types, t);
+    if !n.ok {
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    variants = variantsOf(types, n.text);
+    isEnumKind = isEnum(types, n.text);
+    payload = 1;
+    for v in variants {
+        l = fieldsLayout(types, v.fields);
+        if l.align > payload { payload = l.align; };
+    };
+    start = 0;
+    if isEnumKind { start = roundUp(4, payload); };
+    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "StdList" || beforeAngle(n.text) = "StdBox") {
+        fields = get(variants, 0).fields;
+        offset0 = 0;
+        lenOffset = 0;
+        capOffset = 0;
+        offset = 0;
+        i = 0;
+        for f in fields {
+            l = layoutOf(types, f.ty);
+            offset = roundUp(offset, l.align);
+            if i = 0 { offset0 = start + offset; };
+            if i = 1 { lenOffset = start + offset; };
+            if i = 2 { capOffset = start + offset; };
+            offset = offset + l.size;
+            i = i + 1;
+        };
+        held = get(fields, 0).ty;
+        if held is Type::TAddr {
+            elem = Box::unbox((held as Type::TAddr).inner);
+            out = push(out, "    %addrp = getelementptr i8, ptr %from, i64 ".then(showInt(offset0)));
+            out = push(out, "    %addr = load i64, ptr %addrp");
+            out = push(out, "    %has = icmp ne i64 %addr, 0");
+            if beforeAngle(n.text) = "StdList" {
+                step = layoutOf(types, elem).size;
+                out = push(out, "    br i1 %has, label %lalloc, label %done");
+                out = push(out, "lalloc:");
+                out = push(out, "    %lenp = getelementptr i8, ptr %from, i64 ".then(showInt(lenOffset)));
+                out = push(out, "    %count = load i64, ptr %lenp");
+                out = push(out, "    %bytes = mul i64 %count, ".then(showInt(step)));
+                out = push(out, "    %copy = call ptr @tersus_box_new(i64 %bytes)");
+                out = push(out, "    %base = inttoptr i64 %addr to ptr");
+                if step > 0 {
+                    out = push(out, "    call void @llvm.memcpy.p0.p0.i64(ptr %copy, ptr %base, i64 %bytes, i1 false)");
+                };
+                if needsDropIn(cx, elem) {
+                    out = push(out, "    br label %lhead");
+                    out = push(out, "lhead:");
+                    out = push(out, "    %li = phi i64 [0, %lalloc], [%lnext, %lbody]");
+                    out = push(out, "    %lcond = icmp eq i64 %li, %count");
+                    out = push(out, "    br i1 %lcond, label %lstore, label %lbody");
+                    out = push(out, "lbody:");
+                    out = push(out, "    %loff = mul i64 %li, ".then(showInt(step)));
+                    out = push(out, "    %lfp = getelementptr i8, ptr %base, i64 %loff");
+                    out = push(out, "    %ltp = getelementptr i8, ptr %copy, i64 %loff");
+                    implName = cloneImplName(cx, elem);
+                    if implName.ok {
+                        out = push(out, "    call void ".then(functionSymbol(implName.text)).then("(ptr %ltp, ptr %lfp)"));
+                    } else {
+                        out = push(out, "    call void ".then(cloneSymbol(types, elem)).then("(ptr %ltp, ptr %lfp)"));
+                    };
+                    out = push(out, "    %lnext = add i64 %li, 1");
+                    out = push(out, "    br label %lhead");
+                    out = push(out, "lstore:");
+                } else {
+                    out = push(out, "    br label %lstore");
+                    out = push(out, "lstore:");
+                };
+                out = push(out, "    %top = getelementptr i8, ptr %to, i64 ".then(showInt(offset0)));
+                out = push(out, "    %copyi = ptrtoint ptr %copy to i64");
+                out = push(out, "    store i64 %copyi, ptr %top");
+                out = push(out, "    %capp = getelementptr i8, ptr %to, i64 ".then(showInt(capOffset)));
+                out = push(out, "    store i64 %count, ptr %capp");
+                out = push(out, "    br label %done");
+                out = push(out, "done:");
+            } else {
+                esize = layoutOf(types, elem).size;
+                out = push(out, "    br i1 %has, label %balloc, label %done");
+                out = push(out, "balloc:");
+                out = push(out, "    %heldp = inttoptr i64 %addr to ptr");
+                out = push(out, "    %copy = call ptr @tersus_box_new(i64 ".then(showInt(esize)).then(")"));
+                if isAggregate(elem) {
+                    implName = cloneImplName(cx, elem);
+                    if implName.ok {
+                        out = push(out, "    call void ".then(functionSymbol(implName.text)).then("(ptr %copy, ptr %heldp)"));
+                    } else {
+                        out = push(out, "    call void ".then(cloneSymbol(types, elem)).then("(ptr %copy, ptr %heldp)"));
+                    };
+                } else {
+                    if esize > 0 {
+                        out = push(out, "    call void @llvm.memcpy.p0.p0.i64(ptr %copy, ptr %heldp, i64 ".then(showInt(esize)).then(", i1 false)"));
+                    };
+                };
+                out = push(out, "    %top = getelementptr i8, ptr %to, i64 ".then(showInt(offset0)));
+                out = push(out, "    %copyi = ptrtoint ptr %copy to i64");
+                out = push(out, "    store i64 %copyi, ptr %top");
+                out = push(out, "    br label %done");
+                out = push(out, "done:");
+            };
+            out = push(out, "    ret void");
+            out = push(out, "}");
+            return out;
+        };
+    };
+    if isEnumKind {
+        out = push(out, "    %tag = load i32, ptr %from");
+        cases = "";
+        j = 0;
+        for v in variants {
+            cases = cases.then(" i32 ").then(showInt(j)).then(", label %v").then(showInt(j));
+            j = j + 1;
+        };
+        out = push(out, "    switch i32 %tag, label %done [".then(cases).then(" ]"));
+        j = 0;
+        for v in variants {
+            out = push(out, "v".then(showInt(j)).then(":"));
+            for l in cloneFieldLines(cx, j, v.fields, start) { out = push(out, clone(l)); };
+            out = push(out, "    br label %done");
+            j = j + 1;
+        };
+        out = push(out, "done:");
+        out = push(out, "    ret void");
+        out = push(out, "}");
+        return out;
+    };
+    if size(variants) > 0 {
+        for l in cloneFieldLines(cx, 0, get(variants, 0).fields, start) { out = push(out, clone(l)); };
+    };
+    out = push(out, "    ret void");
+    out = push(out, "}");
+    return out;
+};
+
+// A copy function for every type that is a value held inline, for a copy of one that has no `Clone` impl to call
+fn cloneFunctions(cx: &Ctx, closed: &List<Type>) -> List<String> ~ {
+    out = noStrings();
+    for t in closed {
+        if t is Type::TNamed || sizedArray(t).ok {
+            for l in cloneFunctionLines(cx, t) { out = push(out, clone(l)); };
+            out = push(out, "");
+        };
+    };
+    return out;
+};
+
 
 // The index of the constructor with a name, or -1 (Mir.constructor)
 fn ctorIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.ctorNames); }] {
@@ -2478,9 +2621,25 @@ fn sharedType(cx: &Ctx, f: &Function, os: &List<Operand>) -> Type ~ {
     return Type::TInt;
 };
 
-// The descriptor of a type, which the program will have: its symbol in `last`
+// A type the code makes a function for (a drop, a copy or a print of it), put with the types of the program
 fn descriptor(g: Gen, cx: &Ctx, t: &Type) -> Gen ~ {
-    return Gen { types: push(g.types, clone(t)), last: typeSymbol(cx.types, t), ..g };
+    return Gen { types: push(g.types, clone(t)), ..g };
+};
+
+// Copies the value of the type at `from` into `to`, which then shares nothing with it: the copy the type
+// makes itself, which is its `Clone` impl when it has one (which is assumed to be a value that is made of
+// copies of its parts, as the impl the language makes for `impl Clone for T { };` is) and the made function
+// of the type when it does not
+fn cloneValue(g: Gen, cx: &Ctx, current: &String, t: &Type, to: &String, from: &String) -> Gen ~ {
+    g1 = descriptor(g, cx, t);
+    implName = cloneImplName(cx, t);
+    // (a copy inside the `Clone` impl of the type itself is the copy the impl is made of, not the impl called
+    // again: the impl of a Box copies the Box it makes, and the impl of a list the list it holds)
+    if implName.ok && implName.text = current { implName = Res { ok: false, text: "" }; };
+    if implName.ok {
+        return emit(g1, "call void ".then(functionSymbol(implName.text)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
+    };
+    return emit(g1, "call void ".then(cloneSymbol(cx.types, t)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
 };
 
 // Frees what the value a local holds owns (nothing, if it holds none), and leaves a Box it held holding nothing
@@ -3403,11 +3562,6 @@ fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Typ
         if x is Operand::Move { source = slot((x as Operand::Move).local); };
         if x is Operand::Const { return failG(g1, "An element that owns something is made from a constant"); };
     };
-    d = "";
-    if owning {
-        g1 = descriptor(g1, cx, elementTy);
-        d = g1.last;
-    };
     bytes = bytesIn(cx, elementTy);
     g2 = freshLabel(g1, "fill");
     k = g2.last;
@@ -3429,8 +3583,8 @@ fn fillElements(g: Gen, cx: &Ctx, f: &Function, target: &String, elementTy: &Typ
     g11 = clone(g10);
     if owning {
         g11 = elementAddress(g10, target, i, bytes);
-        p = g11.last;
-        g11 = emit(g11, "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(p).then(", ptr ").then(source).then(")"));
+        p = clone(g11.last);
+        g11 = cloneValue(g11, cx, f.name, elementTy, p, source);
     } else {
         g11 = writeElement(g10, cx, elementTy, target, i, value);
     };
@@ -3728,23 +3882,22 @@ fn storeResult(g: Gen, cx: &Ctx, entry: Bool, f: &Function, dest: Int, value: &S
 };
 
 // A copy of the value that a local owns, which shares nothing with it, given to another local (which frees the value it held)
-fn cloneInto(g: Gen, cx: &Ctx, dest: Int, destType: &Type, o: &Operand) -> Gen ~ {
+fn cloneInto(g: Gen, cx: &Ctx, f: &Function, dest: Int, destType: &Type, o: &Operand) -> Gen ~ {
     source = "";
     if o is Operand::Copy { source = slot((o as Operand::Copy).local); };
     if o is Operand::Move { source = slot((o as Operand::Move).local); };
     if o is Operand::Const { return failG(g, "Native code does not copy a constant"); };
+    if !isAggregate(destType) { return copyWords(g, slot(dest), source, bytesIn(cx, destType)); };
     owns = ownsIn(cx, destType);
-    g1 = descriptor(g, cx, destType);
-    d = g1.last;
     if owns {
         // the copy is made before what the local held is freed, since it can be a part of it (`t = clone of t.next`)
         bytes = bytesIn(cx, destType);
-        g2 = entryTemp(clone(g1), (bytes + 7) / 8);
+        g2 = entryTemp(clone(g), (bytes + 7) / 8);
         room = g2.last;
-        g3 = emit(clone(g2), "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(room).then(", ptr ").then(source).then(")"));
+        g3 = cloneValue(clone(g2), cx, f.name, destType, room, source);
         return copyWords(g3, slot(dest), room, bytes);
     };
-    return emit(g1, "call void @tersus_clone(ptr ".then(d).then(", ptr ").then(slot(dest)).then(", ptr ").then(source).then(")"));
+    return cloneValue(g, cx, f.name, destType, slot(dest), source);
 };
 
 fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) -> Gen ~ {
@@ -3798,7 +3951,7 @@ fn emitStatement(g: Gen, cx: &Ctx, entry: Bool, f: &Function, st: &Statement) ->
         return emit(g2, "store ".then(t).then(" ").then(value).then(", ptr ").then(slot(dest)));
     };
     if rv is Rvalue::Copy {
-        g1 = cloneInto(g, cx, dest, lt.ty, (rv as Rvalue::Copy).o);
+        g1 = cloneInto(g, cx, f, dest, lt.ty, (rv as Rvalue::Copy).o);
         if returned { return emit(g1, "store i1 true, ptr %returned"); };
         return g1;
     };
@@ -3978,7 +4131,7 @@ fn emitBody(cx: &Ctx, entry: Bool, f: &Function) -> Gen ~ {
 
 // The function around its blocks
 
-// What a function is as text: its lines, and the types whose descriptors its code asks for (the newest first), or why there is none
+// What a function is as text: its lines, and the types its code makes a function for (the newest first), or why there is none
 struct FnOut { ok: Bool, error: String, lines: List<String>, types: List<Type> };
 
 impl Clone for FnOut { };
@@ -4117,7 +4270,7 @@ fn emitFunction(cx: &Ctx, entry: Bool, symbol: &String, f: &Function) -> FnOut ~
     return FnOut { ok: true, error: "", lines: lines, types: newest };
 };
 
-// What the code of a function gives, as lines: the globals the code needs, the rooms for the values it builds, the code, and the types whose descriptors it asks for (the
+// What the code of a function gives, as lines: the globals the code needs, the rooms for the values it builds, the code, and the types it makes a function for (the
 // newest first)
 fn bodyLines(index: Int, g: &Gen) -> List<String> ~ {
     out = noStrings();
@@ -4302,7 +4455,7 @@ fn printDecimalLines(signed: Bool) -> List<String> ~ {
     return out;
 };
 
-// The offset of each field of a variant, as the descriptor makes them (after the tag of an enum)
+// The offset of each field of a variant (after the tag of an enum)
 fn printFieldStart(types: &List<TypeDecl>, variants: &List<Variant>, isEnumKind: Bool) -> Int ~ {
     payload = 1;
     for v in variants {
@@ -4313,7 +4466,7 @@ fn printFieldStart(types: &List<TypeDecl>, variants: &List<Variant>, isEnumKind:
     return 0;
 };
 
-// The function that prints a value of the type, as the runtime's print_word did by walking its descriptor
+// The function that prints a value of the type
 fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
     out = noStrings();
     out = push(out, "define internal void ".then(printSymbol(types, t)).then("(i64 %w) {"));
@@ -4457,7 +4610,7 @@ fn printFunctions(types: &List<TypeDecl>, closed: &List<Type>) -> List<String> ~
     return out;
 };
 
-// The whole IR of the program: the declarations, the descriptors of the types that the code asks for and the types inside them, the functions in order,
+// The whole IR of the program: the declarations, the functions in order,
 // main, and the entry point
 fn ir(program: &Program) -> Entry ~ {
     cx = contextOf(program);
@@ -4478,7 +4631,6 @@ fn ir(program: &Program) -> Entry ~ {
     for t in e.types { roots = push(roots, clone(t)); };
     closed = closeTypes(program.types, roots);
     lines = declarations();
-    for l in typeDescriptors(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
     for b in pieces {
         for l in b { lines = push(lines, clone(l)); };
         lines = push(lines, "");
@@ -4486,13 +4638,14 @@ fn ir(program: &Program) -> Entry ~ {
     for l in m.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
+    for l in cloneFunctions(cx, closed) { lines = push(lines, clone(l)); };
     for l in printFunctions(program.types, closed) { lines = push(lines, clone(l)); };
     for l in e.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
     return Entry { ok: true, error: "", lines: lines, types: closed };
 };
 
-// The IR so far: the declarations, the descriptors of the types of the locals and what they contain, and the entry point
+// The IR so far: the declarations, the made functions of the types of the locals and what they contain, and the entry point
 fn outline(program: &Program) -> Entry ~ {
     entry = entryPoint(program.types, functionNames(program), program.entry);
     if !entry.ok { return entry; };
@@ -4503,9 +4656,10 @@ fn outline(program: &Program) -> Entry ~ {
     for d in program.entry.locals { roots = push(roots, clone(d.ty)); };
     for t in entry.types { roots = push(roots, clone(t)); };
     closed = closeTypes(program.types, roots);
+    cx = contextOf(program);
     lines = declarations();
-    for l in typeDescriptors(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
     for l in dropFunctions(program.types, functionNames(program), closed) { lines = push(lines, clone(l)); };
+    for l in cloneFunctions(cx, closed) { lines = push(lines, clone(l)); };
     for l in printFunctions(program.types, closed) { lines = push(lines, clone(l)); };
     for l in entry.lines { lines = push(lines, clone(l)); };
     lines = push(lines, "");
@@ -4513,7 +4667,7 @@ fn outline(program: &Program) -> Entry ~ {
 };
 
 // The program is read from the standard input and its IR is written. The first argument says what: `ir` (or none) is all of it, `outline` the
-// declarations, the descriptors and the entry point, and `bodies` the code of each function. What cannot be read or made is
+// declarations, the made functions and the entry point, and `bodies` the code of each function. What cannot be read or made is
 // reported on the standard error.
 mode = String::arg(0, 100);
 read = readLines();
