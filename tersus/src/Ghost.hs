@@ -290,7 +290,9 @@ callTerms st proof = case proof of
         | Just _ <- calledFunction st iota -> concatMap (callTerms st) args ++ [proof]
         | otherwise -> concatMap (callTerms st) args
     FApp funct args -> concatMap (callTerms st) (funct : args)
-    Forall _ guards body -> concatMap (callTerms st) (guards ++ [body])
+    -- (a call under a forall is under its binder: what it needs is what the guards say, which the proof of the
+    -- forall itself answers for, so it is not called here, where the bound index is not a value)
+    Forall{} -> []
     _ -> []
 
 evaluated :: PState -> IotaProof -> Bool
