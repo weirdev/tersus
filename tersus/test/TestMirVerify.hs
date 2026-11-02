@@ -1,6 +1,6 @@
 module TestMirVerify (testMirVerify, testMirVerifyPrograms) where
 
-import Data.List (isInfixOf)
+import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import System.Exit (ExitCode (..))
 
@@ -20,7 +20,7 @@ import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, unvalidatedPrograms, validatedPrograms)
 import Utils
 
--- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir_verify.tersus): the check that a program
+-- The MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir/mir_verify/mir_verify.tersus): the check that a program
 -- as MirData writes it is well formed (the shape, and the types of statements, switches and calls), run over the data of
 -- a program. The verdict of each case below is the one the check has to give; the native sweep compares the verdict with
 -- the one the host gives (MirHousekeeping, which runs this program), program by program. Ghost erasure is not here:
@@ -71,8 +71,8 @@ testMirVerifyPrograms =
 
 borrowedLookups :: IO TestResult
 borrowedLookups = do
-    source <- readFile "examples/mir_verify.tersus"
-    pure $ case lowerSource True source of
+    loaded <- validatedFromFile "examples/mir/mir_verify/mir_verify.tersus"
+    pure $ case loaded of
         Error e -> Just e
         Ok program ->
             let owned = insertOwnership program
@@ -82,7 +82,7 @@ borrowedLookups = do
                         let copied = [dest | block <- Map.elems (fnBlocks fn), Assign dest (ReadField _ actualOwner actualField) <- blockStatements block, actualOwner == owner, actualField == field, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == tableType]
                             elementCopies = [dest | Just raw <- [Map.lookup name (progFunctions program)], block <- Map.elems (fnBlocks raw), Assign dest (ListOp Get _) <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals raw)], localType decl == elementType]
                          in if null (copied ++ elementCopies) then Nothing else Just (name ++ " clones its input aggregate into " ++ show (copied ++ elementCopies))
-                targets = [("ctorInfo", "Program", "types", TList (TNamed "TypeDecl" []), TNamed "TypeDecl" []), ("findBlock", "Function", "blocks", TList (TNamed "MirBlock" []), TNamed "MirBlock" []), ("findLocal", "Function", "locals", TList (TNamed "LocalDecl" []), TNamed "LocalDecl" [])]
+                targets = [("ctorInfo", "mir$reader$reader$Program", "types", TList (TNamed "mir$reader$reader$TypeDecl" []), TNamed "mir$reader$reader$TypeDecl" []), ("findBlock", "mir$reader$reader$Function", "blocks", TList (TNamed "mir$reader$reader$MirBlock" []), TNamed "mir$reader$reader$MirBlock" []), ("findLocal", "mir$reader$reader$Function", "locals", TList (TNamed "mir$reader$reader$LocalDecl" []), TNamed "mir$reader$reader$LocalDecl" [])]
                 errors = [message | Just message <- map check targets]
              in if null errors then Nothing else Just (unlines errors)
 
@@ -101,7 +101,7 @@ holderSource = "struct Holder<T> { x: T }; fn take2(h: Holder<Array<Int, 2>>) ->
 -- The verifier compiled once for every interpreted case: compiling it is the expensive part, and every case
 -- runs the same program over a different input (the pattern of TestMirEmit's emitterProgram).
 verifierProgram :: IO (Result Program String)
-verifierProgram = readFile "examples/mir_verify.tersus" >>= compileOnce
+verifierProgram = programFromFile "examples/mir/mir_verify/mir_verify.tersus"
 
 -- Whether the host's check accepts the program, as MirData writes it
 referenceAccepts :: Program -> Bool
@@ -489,7 +489,7 @@ onEveryFunction change program =
         }
 
 withVerifier :: (FilePath -> IO TestResult) -> IO TestResult
-withVerifier = withProgram "examples/mir_verify.tersus" "mir-verify"
+withVerifier = withProgram "examples/mir/mir_verify/mir_verify.tersus" "mir-verify"
 
 -- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
 -- inside a single case (withVerifier builds the verifier executable once for the process). The data comes from
@@ -502,7 +502,7 @@ nativeCheck name source = withVerifier $ \exe -> do
         bad -> Just (unlines bad)
   where
     check exe (name, source) = do
-        dataOf <- mirDataOf source
+        dataOf <- if "examples/mir/" `isPrefixOf` name then mirDataFromFile name else mirDataOf source
         case dataOf of
             Error e -> pure [name ++ ": " ++ e]
             Ok text -> case readProgram text of

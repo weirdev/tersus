@@ -47,9 +47,9 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     remains the production path. It is not embedded by `PreludeSource`; tests
     and hosts read it from `lib/` directly.
 - `tersus/examples/`: example programs, all loaded and checked by
-  `testExamples` (see Testing Guidelines). `examples/emit.tersus` is the LLVM
-  emitter written in Tersus, and `examples/mir_reader.tersus` /
-  `examples/mir_verify.tersus` / `examples/mir_erase.tersus` are the MIR
+  `testExamples` (see Testing Guidelines). `examples/mir/emit/emit.tersus` is the LLVM
+  emitter written in Tersus, and `examples/mir/mir_reader/mir_reader.tersus` /
+  `examples/mir/mir_verify/mir_verify.tersus` / `examples/mir/mir_erase/mir_erase.tersus` are the MIR
   reader, the MIR checker and the ghost erasure written in Tersus. The host
   runs the checker and the erasure on the MIR as data (`MirHousekeeping`);
   they are the production path, and the examples' expectations in
@@ -87,7 +87,7 @@ Work from `tersus/`.
   - `owned <file>`: print the MIR that native code is made from, with moves,
     copies and frees.
   - `llvm <file>`: print the LLVM IR of a validated program (written by the
-    emitter in Tersus, `examples/emit.tersus`, which is built with clang on
+    emitter in Tersus, `examples/mir/emit/emit.tersus`, which is built with clang on
     first use from the seed (a release asset pinned by
     `bootstrap/emitter.sha256`, fetched and verified on first use; a seed at
     `$TERSUS_SEED_FILE` or `bootstrap/emitter.ll` is used instead when
@@ -102,9 +102,9 @@ Work from `tersus/`.
   `testNative` also runs some programs under `valgrind` when it is installed;
   the heap model of `testOwnership` needs neither.
 - If a change alters what the emitter in Tersus produces (a change to
-  `examples/emit.tersus` or to what it is built from), regenerate the seed
+  `examples/mir/emit/emit.tersus` or to what it is built from), regenerate the seed
   into a temporary file only when that succeeds:
-  `stack run tersus-exe -- llvm examples/emit.tersus > emitter.ll.new`,
+  `stack run tersus-exe -- llvm examples/mir/emit/emit.tersus > emitter.ll.new`,
   then `sha256sum emitter.ll.new`, upload it as the `emitter.ll` asset of a
   new GitHub release tagged `bootstrap-<first 12 digits of that digest>`,
   put the digest in `bootstrap/emitter.sha256`, and let `TestBootstrap`

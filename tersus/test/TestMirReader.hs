@@ -1,5 +1,6 @@
 module TestMirReader (testMirReader, withProgram, sameText) where
 
+import Data.List (isPrefixOf)
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
@@ -8,8 +9,8 @@ import System.FilePath ((</>))
 import System.IO (hClose, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 
-import Bootstrap (emitterHash, tersusLlvm)
-import Cli (Command (..), World (..), noWorld, runSourceIn)
+import Bootstrap (emitterHash, llvmOfOwned, tersusLlvm)
+import Cli (Command (..), World (..), noWorld, runProgramIn, runSourceIn)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Native (buildExecutable, cacheDirectory)
@@ -17,7 +18,7 @@ import TestHarness
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The MIR as data, read and written by a program in Tersus (examples/mir_reader.tersus, step 31 of the roadmap): what `tersus mir --data` prints for a program
+-- The MIR as data, read and written by a program in Tersus (examples/mir/mir_reader/mir_reader.tersus, step 31 of the roadmap): what `tersus mir --data` prints for a program
 -- is read into the types of the MIR and written again, and the output is the input. The reader is built once (it needs clang, and the tests pass without it),
 -- and run on the data of every example and every program that native code is tested with; it also reads the data of itself. A smaller input is run by the
 -- interpreter, which needs no clang.
@@ -39,7 +40,7 @@ testMirReader =
         ]
 
 readerSource :: IO String
-readerSource = readFile "examples/mir_reader.tersus"
+readerSource = readFile "examples/mir/mir_reader/mir_reader.tersus"
 
 -- The data of a program, or the reason it has none (the harness's shared cache: these programs are compiled once
 -- between the groups that check them)
@@ -54,13 +55,14 @@ sameText a b = trim a == trim b
 
 interpreted :: String -> IO TestResult
 interpreted source = do
-    reader <- readerSource
+    reader <- programFromFile "examples/mir/mir_reader/mir_reader.tersus"
     dataText <- dataOf source
-    pure $ case dataText of
-        Error e -> Just e
-        Ok text -> case runSourceIn noWorld{worldInput = text} Interpret reader of
+    pure $ case (reader, dataText) of
+        (Error e, _) -> Just e
+        (_, Error e) -> Just e
+        (Ok prog, Ok text) -> case runProgramIn noWorld{worldInput = text} prog of
             Error e -> Just e
-            Ok (output, errors)
+            Ok ((output, errors), _)
                 | not (null errors) -> Just ("reported: " ++ errors)
                 | sameText output text -> Nothing
                 | otherwise -> Just ("wrote\n" ++ output ++ "\nfor\n" ++ text)
@@ -80,12 +82,13 @@ withProgram path name use = do
                     Just exe -> pure (built, Right exe)
                     Nothing -> do
                         source <- readFile path
+                        readerText <- if "examples/mir/" `isPrefixOf` path then readFile "examples/mir/reader/reader.tersus" else pure ""
                         cache <- cacheDirectory
                         case cache of
                             Error e -> pure (built, Left e)
                             Ok cacheDir -> do
                                 let dir = cacheDir </> "test-programs"
-                                    exe = dir </> (name ++ "-" ++ fingerprint [source, emitterHash, runtimeSource])
+                                    exe = dir </> (name ++ "-" ++ fingerprint [source, readerText, emitterHash, runtimeSource])
                                 createDirectoryIfMissing True dir
                                 present <- doesFileExist exe
                                 if present
@@ -95,7 +98,7 @@ withProgram path name use = do
                                         (partial, handle) <- openTempFile dir (name ++ ".building")
                                         hClose handle
                                         removeFile partial
-                                        ir <- tersusLlvm source
+                                        ir <- if "examples/mir/" `isPrefixOf` path then (ownedFromFile path >>= \owned -> case owned of Error e -> pure (Error e); Ok prog -> llvmOfOwned prog) else tersusLlvm source
                                         result <- case ir of
                                             Error e -> pure (Error e)
                                             Ok text -> buildExecutable partial text
@@ -111,7 +114,7 @@ builtPrograms :: MVar (Map.Map String FilePath)
 builtPrograms = unsafePerformIO (newMVar Map.empty)
 
 withReader :: (FilePath -> IO TestResult) -> IO TestResult
-withReader = withProgram "examples/mir_reader.tersus" "mir-reader"
+withReader = withProgram "examples/mir/mir_reader/mir_reader.tersus" "mir-reader"
 
 -- One case per program, so the sweep runs at the harness's parallelism instead of one program after another
 -- inside a single case (withReader builds the reader executable once for the process).
@@ -123,7 +126,7 @@ nativeCheck name source = withReader $ \exe -> do
         bad -> Just (unlines bad)
   where
     check exe (name, source) = do
-        dataText <- dataOf source
+        dataText <- if "examples/mir/" `isPrefixOf` name then mirDataFromFile name else dataOf source
         case dataText of
             Error e -> pure [name ++ ": " ++ e]
             Ok text -> do

@@ -2,7 +2,7 @@
 
 The aim: the compiler is a Tersus program compiled to native code, and no
 Haskell remains in the repository. Step 31 (`STEP31.md`) did the first part:
-the lowering from the MIR to LLVM IR is `examples/emit.tersus`, built from
+the lowering from the MIR to LLVM IR is `examples/mir/emit/emit.tersus`, built from
 the seed `bootstrap/emitter.ll` in two stages, and `LlvmEmit` is deleted.
 This is the plan for the rest, in the order to do it. Each target names the
 Haskell it deletes, why it comes where it does, and what blocks it.
@@ -22,9 +22,9 @@ The Haskell package `tersus/` is 61 `.hs` files, about 24,900 lines:
 | Pipeline and CLI | 371 | `Pipeline` (181), `Cli` (192), plus `app/Main.hs` (56) |
 | Tests | 8,399 | 25 files under `test/`, plus `dev/parity/Parity.hs` (101) |
 
-Already in Tersus: the emitter (`examples/emit.tersus`, 3,698 lines), a
-reader and writer of the MIR as data (`examples/mir_reader.tersus`) and a
-checker of it (`examples/mir_verify.tersus`), the
+Already in Tersus: the emitter (`examples/mir/emit/emit.tersus`, 3,698 lines), a
+reader and writer of the MIR as data (`examples/mir/mir_reader/mir_reader.tersus`) and a
+checker of it (`examples/mir/mir_verify/mir_verify.tersus`), the
 libraries every program gets (`lib/prelude.tersus`, `lib/lists.tersus`,
 `lib/box.tersus`, `lib/string.tersus`), and a validator that is not yet the
 production one (`lib/validation.tersus`, 2,884 lines). The superseded
@@ -88,7 +88,7 @@ as today.
 ### 3. MIR housekeeping in Tersus (deleted `MirVerify` 438, `MirGhost` 245; `MirData` stays until target 6)
 
 The MIR-as-data format is already defined twice in Tersus (the reader in
-`examples/emit.tersus` and `examples/mir_reader.tersus`), and
+`examples/mir/emit/emit.tersus` and `examples/mir/mir_reader/mir_reader.tersus`), and
 `TestMirData`, `TestMirReader` and `TestMirEmit` are ready-made oracles:
 a Tersus writer of the format must round-trip every example, and a
 Tersus well-formedness check must accept and refuse the same programs
@@ -97,8 +97,8 @@ same types. Mostly transcription; do it while the format is fresh from
 target 1's bridge work.
 
 Status (2026-10-31): done. The writer and the reader were already
-Tersus; the check is `examples/mir_verify.tersus` and the erasure is
-`examples/mir_erase.tersus`. For the erasure the data gained a
+Tersus; the check is `examples/mir/mir_verify/mir_verify.tersus` and the erasure is
+`examples/mir/mir_erase/mir_erase.tersus`. For the erasure the data gained a
 version 2 (`MirData.writeProgramWithGhosts`, printed by `tersus mir
 --ghost-data` from a validated program before its ghosts are
 erased): the only records it adds are `ghost` and `dissolve L`, with
@@ -166,7 +166,7 @@ Nothing can be deleted end to end until source text can enter a Tersus
 program, so this gates the finish even though it is the hardest part.
 Parser first: `Parse` is Parsec combinators, which have no Tersus
 analogue, so the Tersus parser is a hand-written reader over bytes in
-the manner of `examples/mir_reader.tersus`, producing the AST of
+the manner of `examples/mir/mir_reader/mir_reader.tersus`, producing the AST of
 `TersusTypes` re-declared as Tersus structs and enums. Then the
 elaborator on that AST. Error-message parity is part of the target:
 tests name the stage that refused a program and, for many programs, the

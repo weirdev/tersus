@@ -1,6 +1,6 @@
 module TestMirErase (testMirErase) where
 
-import Data.List (isInfixOf, isSuffixOf)
+import Data.List (isInfixOf, isPrefixOf, isSuffixOf)
 import System.Exit (ExitCode (..))
 
 import Cli (World (..), noWorld, runProgramIn)
@@ -14,7 +14,7 @@ import TestMirReader (sameText, withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The rest of the MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir_erase.tersus): the erasure of the
+-- The rest of the MIR housekeeping of REPLACING_HASKELL.md target 3, in Tersus (examples/mir/mir_erase/mir_erase.tersus): the erasure of the
 -- ghosts of a program over the data of the program as it is before the erasure (version 2 of the data, writeProgramWithGhosts),
 -- compared word for word with the erasure the host runs (MirHousekeeping, which runs this program), and for the programs
 -- below with the output recorded of the Haskell erasure it replaced. The erasure also makes each Uninit<T> a T.
@@ -51,7 +51,7 @@ mutSource = "x = 4; r = &mut x; *r = 9; return *r;"
 -- The eraser compiled once for every interpreted case: compiling it is the expensive part, and every case
 -- runs the same program over a different input (the pattern of TestMirVerify's verifierProgram).
 eraserProgram :: IO (Result Program String)
-eraserProgram = readFile "examples/mir_erase.tersus" >>= compileOnce
+eraserProgram = programFromFile "examples/mir/mir_erase/mir_erase.tersus"
 
 -- What the host makes of the program before its ghosts are erased, as version 1 of the data
 expectedOf :: String -> Result String String
@@ -195,24 +195,26 @@ castAccepted from to = do
                             | otherwise -> Just ("got output " ++ show (take 80 output) ++ " and errors " ++ show errors ++ " for\n" ++ unlines text)
 
 everyProgram :: IO TestResult
-everyProgram = withProgram "examples/mir_erase.tersus" "mir-erase" $ \exe -> do
+everyProgram = withProgram "examples/mir/mir_erase/mir_erase.tersus" "mir-erase" $ \exe -> do
     files <- mapM (\path -> (,) path <$> readFile path) nativeExamples
     failures <- mapM (check exe) (files ++ validatedPrograms)
     pure $ case concat failures of
         [] -> Nothing
         bad -> Just (unlines (take 5 bad))
   where
-    check exe (name, source) = case validatedSource source of
-        Error e -> pure [name ++ ": " ++ e]
-        Ok program -> case eraseGhosts program of
-            Error e -> pure [name ++ ": the host refuses: " ++ e]
-            Ok erased -> do
-                (code, output, errors) <- runExecutableBytes exe [] (writeProgramWithGhosts program)
-                let expected = writeProgram erased
-                pure
-                    [ name ++ ": wrote\n" ++ output ++ "\nwith errors " ++ take 200 errors ++ "\nfor (expected)\n" ++ expected
-                    | code /= ExitSuccess || not (null errors) || not (sameText output expected)
-                    ]
+    check exe (name, source) = do
+        validated <- if "examples/mir/" `isPrefixOf` name then validatedFromFile name else pure (validatedSource source)
+        case validated of
+            Error e -> pure [name ++ ": " ++ e]
+            Ok program -> case eraseGhosts program of
+                Error e -> pure [name ++ ": the host refuses: " ++ e]
+                Ok erased -> do
+                    (code, output, errors) <- runExecutableBytes exe [] (writeProgramWithGhosts program)
+                    let expected = writeProgram erased
+                    pure
+                        [ name ++ ": wrote\n" ++ output ++ "\nwith errors " ++ take 200 errors ++ "\nfor (expected)\n" ++ expected
+                        | code /= ExitSuccess || not (null errors) || not (sameText output expected)
+                        ]
 
 -- The host puts back what the data does not carry on the entry function as on any other: a program whose
 -- top level holds a ghost statement keeps it through the erasure

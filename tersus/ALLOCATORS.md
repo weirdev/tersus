@@ -212,7 +212,7 @@ The stages, each with the tests that show it done:
 3. **`TERSUS_CHECK` in Tersus.** The native tests run under `with checked { ... }` in place of `-DTERSUS_CHECK`, and the checking code in `LlvmRuntime` is deleted (step 30 (c)). Valgrind stays the second opinion.
 4. **`BulkFree`.** A test that a dropped tree in an arena calls nothing, and that a file in an arena is still closed.
 
-Stage 1 is where the cost to users shows: every message about a type is now able to name a region. Before stage 2, the messages of the examples and of `examples/emit.tersus` (with only `System`, none should mention one) and the output of `tersus sig` are reviewed. That review is the checkpoint for whether the elision rules are right.
+Stage 1 is where the cost to users shows: every message about a type is now able to name a region. Before stage 2, the messages of the examples and of `examples/mir/emit/emit.tersus` (with only `System`, none should mention one) and the output of `tersus sig` are reviewed. That review is the checkpoint for whether the elision rules are right.
 
 ## Limitations, and what is left for later
 

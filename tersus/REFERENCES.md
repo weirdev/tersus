@@ -509,9 +509,9 @@ mid-implementation:
    the Tersus reader/validator of step 33 does not model references yet.
    The MIR-as-data format (`MirData`) carries `mutref`, `borrow`,
    `borrowmut`, `deref` and `assignref` rows, and
-   `examples/mir_reader.tersus` reads and prints them (it shares the
+   `examples/mir/mir_reader/mir_reader.tersus` reads and prints them (it shares the
    reader with the emitter, which `TestMirEmit` keeps identical);
-   `examples/mir_verify.tersus` does not model references yet.
+   `examples/mir/mir_verify/mir_verify.tersus` does not model references yet.
 
    **Checkpoint after stage 3.** Stages 1 to 3 are self-contained and are
    where most of the value is (no copies for reads, checked in-place update,
@@ -580,7 +580,7 @@ mid-implementation:
 Every stage updates `Types`/`Syntax`, elaboration, MIR serialization/verification,
 the interpreter, ownership lowering and both LLVM emitters as needed, and also
 the self-hosted path: `SelfHostedMir` (which today reports `TRef` as
-unsupported), `examples/mir_reader.tersus`, `examples/emit.tersus` and the
+unsupported), `examples/mir/mir_reader/mir_reader.tersus`, `examples/mir/emit/emit.tersus` and the
 validator being written in Tersus for step 33 of the roadmap. A stage that
 adds a MIR operation or a type constructor is not done until the Tersus
 programs that read and emit MIR handle it, or explicitly refuse it with the
