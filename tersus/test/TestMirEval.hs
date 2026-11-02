@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module TestMirEval (testMirEvalLists) where
 
 import Control.Exception (evaluate)
@@ -8,7 +10,7 @@ import Compile (lowerSource)
 import qualified Mir as M
 import qualified MirEval as Eval
 import Syntax (Value (..))
-import Types (Type (..))
+import Types (Type (..), pattern TList, pattern TBox)
 import TestHarness
 import Utils
 

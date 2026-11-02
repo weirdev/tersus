@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module Compile
     ( parseSource
     , parseWithEquality
@@ -19,7 +21,7 @@ import Parse (Decls, ParsedFile (..), emptyDecls, importPath, locating, parseFil
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource, typesSource)
 import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Statement (..), Termination (..), TraitFn (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated, PreparedPrefix, elaborate, elaborateAfter, gatheredSignatures, preparePrefix)
-import Types (Arg (..), BuiltinFunct (..), Signature (..), Size (..), Type (..), Variable)
+import Types (Arg (..), BuiltinFunct (..), Signature (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
 import Utils
 
 -- The front of the pipeline of Pipeline, split out so that MirHousekeeping can compile the checker and the

@@ -1168,8 +1168,8 @@ testPipeline =
           testAssertEq (mapResult (const ()) (compileSource "trait Sequence { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
         , testAssertEq (mapResult (const ()) (compileSource "trait String { }; String = true; if String { return 1; } else { return 2; };")) (Ok ())
         , -- The names native code makes a list and a Box of are reserved from what a program declares, not from its text
-          testAssertErrorContains "StdList is reserved" (parseSource "struct StdList { x: Int }; return 1;")
-        , case parseSource "// struct StdList\nreturn 1;" of
+          testAssertErrorContains "listPush is reserved" (parseSource "fn listPush(x: Int) -> Int { return x; }; return 1;")
+        , case parseSource "// fn listPush\nreturn 1;" of
             Ok _ -> Nothing
             Error e -> Just e
         ]
