@@ -1593,7 +1593,7 @@ fn needsDrop(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Bool ~ {
     n = declaredName(types, t);
     if !n.ok { return false; };
     // (the struct that a list is made of owns the memory at its address)
-    if beforeAngle(n.text) = "StdList" { return true; };
+    if beforeAngle(n.text) = "List" { return true; };
     // (a struct or an enum with a drop has something to do when it is freed, whatever its fields are)
     if containsName(fns, dropName(n.text)) { return true; };
     i = lookupDecl(types, n.text);
@@ -1883,7 +1883,7 @@ fn descriptorBody(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Strin
 fn dataDescriptor(types: &List<TypeDecl>, fns: &List<String>, n: &String) -> List<String> ~ {
     variants = variantsOf(types, n);
     kind = "0";
-    if isEnum(types, n) { kind = "1"; } else { if beforeAngle(n) = "StdList" { kind = "2"; } else { if beforeAngle(n) = "StdBox" { kind = "3"; }; }; };
+    if isEnum(types, n) { kind = "1"; } else { if beforeAngle(n) = "List" { kind = "2"; } else { if beforeAngle(n) = "Box" { kind = "3"; }; }; };
     out = noStrings();
     out = push(out, global("data.", n).then(" = private constant { i64, ptr, i64 } { i64 ").then(showInt(size(variants))).then(", ptr ").then(global("variants.", n)).then(", i64 ").then(kind).then(" }"));
     entries = noStrings();
@@ -2373,10 +2373,10 @@ fn isArray(t: &Type) -> Bool [{ }] [{ }] {
     return isSizedArray(t);
 };
 
-// A list of native code: the struct StdList of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
+// A list of native code: the struct List of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
 // starts with
 fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
-    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdList"; };
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "List"; };
     return false;
 };
 
@@ -2396,9 +2396,9 @@ fn listElement(cx: &Ctx, t: &Type) -> Held ~ {
     return Held { ok: false, ty: Type::TInt };
 };
 
-// A Box of native code: the struct StdBox of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
+// A Box of native code: the struct Box of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
 fn isBoxStruct(t: &Type) -> Bool [{ }] [{ }] {
-    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "StdBox"; };
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "Box"; };
     return false;
 };
 
@@ -4372,7 +4372,7 @@ fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
     enumKind = isEnum(types, n.text);
     start = printFieldStart(types, variants, enumKind);
     out = push(out, "    %slot = inttoptr i64 %w to ptr");
-    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "StdList" || beforeAngle(n.text) = "StdBox") {
+    if size(variants) > 0 && size(get(variants, 0).fields) > 0 && (beforeAngle(n.text) = "List" || beforeAngle(n.text) = "Box") {
         fields = get(variants, 0).fields;
         offset0 = 0;
         lenOffset = 0;
@@ -4391,7 +4391,7 @@ fn printFunctionLines(types: &List<TypeDecl>, t: &Type) -> List<String> ~ {
             elem = Box::unbox((held as Type::TAddr).inner);
             out = push(out, "    %addrp = getelementptr i8, ptr %slot, i64 ".then(showInt(offset0)));
             out = push(out, "    %addr = load i64, ptr %addrp");
-            if beforeAngle(n.text) = "StdList" {
+            if beforeAngle(n.text) = "List" {
                 out = push(out, "    %lenp = getelementptr i8, ptr %slot, i64 ".then(showInt(lenOffset)));
                 out = push(out, "    %count = load i64, ptr %lenp");
                 out = push(out, "    %base = inttoptr i64 %addr to ptr");

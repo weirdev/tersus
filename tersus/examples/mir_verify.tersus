@@ -2185,7 +2185,7 @@ fn sequenceFits(p: &Program, funcs: &List<String>, f: &Function, e: &Type, o: &O
         };
         if t is Type::TNamed {
             name = clone((t as Type::TNamed).name);
-            if beforeAngle(name) = "StdList" {
+            if beforeAngle(name) = "List" {
                 args = instanceArgs(name);
                 if size(args) = 1 {
                     et = textAt(args, 0);
@@ -2508,7 +2508,7 @@ fn valueOf(p: &Program, funcs: &List<String>, f: &Function, typeName: &String, o
     if !ot.ok { return false; };
     t = ot.ty;
     if t is Type::TBox { return sub(p, Type::TNamed { name: clone(typeName), base: clone(typeName), argc: 0, argTokens: [] }, Box::unbox((t as Type::TBox).inner)); };
-    if t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "StdBox" {
+    if t is Type::TNamed && beforeAngle((t as Type::TNamed).name) = "Box" {
         iargs = instanceArgs((t as Type::TNamed).name);
         if size(iargs) = 1 {
             et = textAt(iargs, 0);
@@ -2609,7 +2609,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
             if dst is Type::TBox {
                 held = Box::unbox((dst as Type::TBox).inner);
                 if !fits(p, funcs, f, held, o) { out = expectedWhy(p, f, held, o); };
-            } else if dst is Type::TNamed && beforeAngle((dst as Type::TNamed).name) = "StdList" {
+            } else if dst is Type::TNamed && beforeAngle((dst as Type::TNamed).name) = "List" {
                 iargs = instanceArgs((dst as Type::TNamed).name);
                 ot = operandTy(p, funcs, f, o);
                 okBox = false;
@@ -2631,7 +2631,7 @@ fn rvalueWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, rv: &Rva
                 if !sub(p, dst, held) { out = one("the result is ".then(renderType(dst)).then(", not ").then(renderType(held))); };
                 matched = true;
             };
-            if !matched && ot.ok && ot.ty is Type::TNamed && beforeAngle((ot.ty as Type::TNamed).name) = "StdList" {
+            if !matched && ot.ok && ot.ty is Type::TNamed && beforeAngle((ot.ty as Type::TNamed).name) = "List" {
                 iargs = instanceArgs((ot.ty as Type::TNamed).name);
                 if size(iargs) = 1 {
                     et = textAt(iargs, 0);

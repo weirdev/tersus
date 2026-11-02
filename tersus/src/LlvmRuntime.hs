@@ -9,7 +9,7 @@ module LlvmRuntime
 -- fixed-width integer its bits over 8. A struct, an enum and an array are their bytes, held in the frame of a function, in a field or in
 -- memory at an address: a struct its fields at the offsets of C, an enum a U32 that says the variant and then the fields of that variant,
 -- an array its elements. What is on the heap is memory at an address, which only a struct of the library or of the program holds: a list
--- is the struct StdList of lib/lists.tersus, and a Box the struct StdBox of lib/box.tersus (or a StdList, for a Box of an array), and each
+-- is the struct List of lib/lists.tersus, and a Box the struct Box of lib/box.tersus (or a List, for a Box of an array), and each
 -- is freed by its drop.
 -- The runtime prints, copies and frees values by the descriptor of their type, which the emitted code defines as a
 -- constant: its kind and what it is made of (the elements of an array, the variants of a struct or enum with their field names and the
@@ -52,8 +52,8 @@ runtimeSource =
         , ""
         , "// The variants of a struct (one) or an enum. A value held inline is its fields' words, and an enum value starts with a word that"
         , "// says which variant it is (the position in the enum): tagged is 1 for an enum and 0 for a struct, which has no tag. It is 2 for the struct that"
-        , "// a list is made of (StdList in lib/lists.tersus: the elements at an address, and how many are in use), which is printed"
-        , "// as a list; it is a struct otherwise. It is 3 for the struct that a Box is made of (StdBox in lib/box.tersus: the address of one value),"
+        , "// a list is made of (List in lib/lists.tersus: the elements at an address, and how many are in use), which is printed"
+        , "// as a list; it is a struct otherwise. It is 3 for the struct that a Box is made of (Box in lib/box.tersus: the address of one value),"
         , "// which is printed and copied as the value at its address, and freed by its drop."
         , "typedef struct Variants {"
         , "    int64_t count;"

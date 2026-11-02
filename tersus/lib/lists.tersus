@@ -9,9 +9,9 @@
 // and room in proportion to its length.
 //
 // The runtime and the emitter know this struct by its name and its fields, which have to stay as they are: `addr` first (an element is read
-// from a list at the address that is its first field), then `len`, then `cap`; the runtime prints, compares and copies a StdList as a list of
+// from a list at the address that is its first field), then `len`, then `cap`; the runtime prints, compares and copies a List as a list of
 // its first `len` elements. It is freed by its drop, at the end.
-struct StdList<T> {
+struct List<T> {
     addr: Addr<T>,
     len: Int,
     cap: Int,
@@ -23,60 +23,60 @@ struct StdList<T> {
     affirm forall j in len..cap: filled(blk, j) = false;
 }];
 
-fn stdListNew<T>() -> StdList<T> [{ }] [{ affirm return.len = 0; }] {
+fn listNew<T>() -> List<T> [{ }] [{ affirm return.len = 0; }] {
     (a, b) = Addr::alloc(0);
-    return StdList<T> { addr: a, len: 0, cap: 0, blk: b };
+    return List<T> { addr: a, len: 0, cap: 0, blk: b };
 };
 
-fn stdListLen<T>(l: &StdList<T>) -> Int [{ }] [{ affirm return = l.len; }] {
+fn listLen<T>(l: &List<T>) -> Int [{ }] [{ affirm return = l.len; }] {
     return l.len;
 };
 
-fn stdListGet<T>(l: &StdList<T>, i: Int) -> T [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return = at(l.blk, i); }] {
+fn listGet<T>(l: &List<T>, i: Int) -> T [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return = at(l.blk, i); }] {
     return clone(Addr::get(l.addr, i, l.blk));
 };
 
-fn stdListFirst<T>(l: &StdList<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = at(l.blk, 0); }] {
+fn listFirst<T>(l: &List<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = at(l.blk, 0); }] {
     return clone(Addr::get(l.addr, 0, l.blk));
 };
 
-fn stdListLast<T>(l: &StdList<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = at(l.blk, l.len - 1); }] {
+fn listLast<T>(l: &List<T>) -> T [{ affirm l.len > 0; }] [{ affirm return = at(l.blk, l.len - 1); }] {
     return clone(Addr::get(l.addr, l.len - 1, l.blk));
 };
 
 // The last element is dropped, and its slot is room for the next push. (A function that makes a list of the memory of the one it is
 // given takes that one apart, so that its drop does not free the memory.)
-fn stdListPop<T>(l: StdList<T>) -> StdList<T> [{ affirm l.len > 0; }] [{ affirm return.len = l.len - 1; affirm forall j in 0..return.len: at(return.blk, j) = at(l.blk, j); }] {
-    StdList { addr: a, len: n, cap: c, blk: b } = l;
-    return StdList<T> { addr: a, len: n - 1, cap: c, blk: Addr::dropValue(a, n - 1, b) };
+fn listPop<T>(l: List<T>) -> List<T> [{ affirm l.len > 0; }] [{ affirm return.len = l.len - 1; affirm forall j in 0..return.len: at(return.blk, j) = at(l.blk, j); }] {
+    List { addr: a, len: n, cap: c, blk: b } = l;
+    return List<T> { addr: a, len: n - 1, cap: c, blk: Addr::dropValue(a, n - 1, b) };
 };
 
 // The element is dropped where it is, and x is written in its place
-fn stdListSet<T>(l: StdList<T>, i: Int, x: T) -> StdList<T> [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return.len = l.len; affirm at(return.blk, i) = x; affirm forall j where j >= 0, j < l.len, j != i: at(return.blk, j) = at(l.blk, j); }] {
-    StdList { addr: a, len: n, cap: c, blk: k } = l;
+fn listSet<T>(l: List<T>, i: Int, x: T) -> List<T> [{ affirm i >= 0; affirm i < l.len; }] [{ affirm return.len = l.len; affirm at(return.blk, i) = x; affirm forall j where j >= 0, j < l.len, j != i: at(return.blk, j) = at(l.blk, j); }] {
+    List { addr: a, len: n, cap: c, blk: k } = l;
     b = Addr::dropValue(a, i, k);
-    return StdList<T> { addr: a, len: n, cap: c, blk: Addr::write(a, i, x, b) };
+    return List<T> { addr: a, len: n, cap: c, blk: Addr::write(a, i, x, b) };
 };
 
-fn stdListPush<T>(l: StdList<T>, x: T) -> StdList<T> [{ }] [{ affirm return.len = l.len + 1; affirm at(return.blk, l.len) = x; affirm forall j in 0..l.len: at(return.blk, j) = at(l.blk, j); }] {
-    StdList { addr: p, len: n, cap: c, blk: k } = l;
+fn listPush<T>(l: List<T>, x: T) -> List<T> [{ }] [{ affirm return.len = l.len + 1; affirm at(return.blk, l.len) = x; affirm forall j in 0..l.len: at(return.blk, j) = at(l.blk, j); }] {
+    List { addr: p, len: n, cap: c, blk: k } = l;
     if n = c {
         cap = c * 2 + 4;
         (a, b) = Addr::resize(p, cap, k);
-        return StdList<T> { addr: a, len: n + 1, cap: cap, blk: Addr::write(a, n, x, b) };
+        return List<T> { addr: a, len: n + 1, cap: cap, blk: Addr::write(a, n, x, b) };
     };
-    return StdList<T> { addr: p, len: n + 1, cap: c, blk: Addr::write(p, n, x, k) };
+    return List<T> { addr: p, len: n + 1, cap: c, blk: Addr::write(p, n, x, k) };
 };
 
 // A list that goes out of scope drops the elements in use, and frees its memory
-impl<T> Drop for StdList<T> {
+impl<T> Drop for List<T> {
     fn drop(self: Self) -> Int {
         return Addr::free(self.addr, Addr::dropRange(self.addr, 0, self.len, self.blk));
     };
 };
 
 // Array::boxed(n, x): n copies of x, in memory of its own (a Box of an array is a list of native code, with as many elements as room)
-fn stdListFilled<T>(n: Int, x: &T) -> StdList<T> [{ affirm n >= 0; }] [{ affirm return.len = n; }] {
+fn listFilled<T>(n: Int, x: &T) -> List<T> [{ affirm n >= 0; }] [{ affirm return.len = n; }] {
     (a, b) = Addr::alloc(n);
     i = 0;
     while i < n [{
@@ -88,5 +88,5 @@ fn stdListFilled<T>(n: Int, x: &T) -> StdList<T> [{ affirm n >= 0; }] [{ affirm 
         b = Addr::write(a, i, clone(x), b);
         i = i + 1;
     };
-    return StdList<T> { addr: a, len: n, cap: n, blk: b };
+    return List<T> { addr: a, len: n, cap: n, blk: b };
 };

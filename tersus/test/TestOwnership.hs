@@ -119,7 +119,7 @@ typeOfValue program name = case Map.lookup name (progTypes program) of
         n : _ -> Just n
         [] -> Nothing
 
--- The memory that a list of native code (a StdList, on an address) has its elements in
+-- The memory that a list of native code (a List, on an address) has its elements in
 listCell :: [(Variable, Val)] -> Maybe Int
 listCell fs = case lookup "addr" fs of
     Just (VI address) | address > 0 -> Just (fromInteger (address `div` (2 ^ (32 :: Integer))))
@@ -273,15 +273,15 @@ object :: Val -> M (Int, Obj)
 object (VP a) = do
     c <- cell a
     return (a, cellObject c)
--- (a list of native code is read where its elements are: the first field of the struct StdList is the Box of the array that holds them)
+-- (a list of native code is read where its elements are: the first field of the struct List is the Box of the array that holds them)
 object (VS name fs) | isListStruct name, Just a <- listCell fs = object (VP a)
 object v = failM ("not a value of the heap: " ++ show v)
 
 isListStruct :: Name -> Bool
-isListStruct name = takeWhile (/= '<') name == "StdList"
+isListStruct name = takeWhile (/= '<') name == "List"
 
 isBoxStruct :: Name -> Bool
-isBoxStruct name = takeWhile (/= '<') name == "StdBox"
+isBoxStruct name = takeWhile (/= '<') name == "Box"
 
 -- The fields of a struct or an enum value that a value is: held inline, or in a Box
 dataValue :: Val -> M (Name, [(Variable, Val)])
@@ -715,7 +715,7 @@ functionText name text = unlines (takeWhile (/= "}") (dropWhile (not . isInfixOf
 planTests :: [Test]
 planTests =
     [ TestCase "a list pushed to in a loop is changed in place" . pure $
-        withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue ("stdListPush<Int>(move _1" `isInfixOf` m))
+        withOwned "l = []; i = 0; while i < 4 [{ affirm i >= 0; }] shrinks 4 - i { l = push(l, i); i = i + 1; }; return size(l);" (\t -> let m = functionText "main" t in testAssertEq (count "clone" m) 0 `orElseT` testAssertTrue ("listPush<Int>(move _1" `isInfixOf` m))
     , -- an array is held inline and has nothing in it to free, so the pass leaves it alone (the model of the heap holds values of the
       -- heap, and the programs with arrays are not run on it)
       TestCase "an array is not owned: no copy, no move, nothing to free" . pure $

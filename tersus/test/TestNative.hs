@@ -131,17 +131,17 @@ testNativeIr =
         , TestCase "ghost statements are dropped" $
             withIr "x = 1; affirm x = 1; return x;" (\ir -> testAssertTrue (not ("affirm" `isInfixOf` ir)))
         , TestCase "a list is the struct of the library, which holds its elements in memory at an address" $
-            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.StdList<Int>\" = private constant" `isInfixOf` ir && "call i64 @tersus_addr_alloc" `isInfixOf` ir && "call i64 @tersus_addr_resize" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
+            withIr "x = push([1], 2); return x;" (\ir -> testAssertTrue ("@\"data.List<Int>\" = private constant" `isInfixOf` ir && "call i64 @tersus_addr_alloc" `isInfixOf` ir && "call i64 @tersus_addr_resize" `isInfixOf` ir && not ("tersus_list_" `isInfixOf` ir && "call ptr @tersus_list_" `isInfixOf` ir)))
         , TestCase "a struct is held in the frame, as its fields, with a descriptor" $
             withIr "struct P { x: Int, y: Int }; p = P { x: 1, y: 2 }; return p;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "@\"data.P\" = private constant" `isInfixOf` ir && not ("tersus_data_new" `isInfixOf` ir)))
         , TestCase "an enum value is a tag (a U32) and the widest of its variants, in the frame" $
             withIr "enum S { A, B { w: Int } }; x = S::B { w: 2 }; return x is S::B;" (\ir -> testAssertTrue ("= alloca [2 x i64]" `isInfixOf` ir && "store i32 1, ptr" `isInfixOf` ir && "icmp eq i32" `isInfixOf` ir))
         , TestCase "a Box takes room on the heap for what it holds" $
-            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.stdBoxNew<P>\"" `isInfixOf` ir))
+            withIr "struct P { x: Int, y: Int }; b = Box::new(P { x: 1, y: 2 }); return b.y;" (\ir -> testAssertTrue ("call i64 @tersus_addr_alloc(i64 1, i64 16)" `isInfixOf` ir && "call void @\"fn.boxNew<P>\"" `isInfixOf` ir))
         , TestCase "a Box of an array is a list of the library" $
-            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.stdListFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
+            withIr "a = Array::boxed(3, 1); b = Box::new(#[1, 2]); return size(a) + get(b, 1);" (\ir -> testAssertTrue ("@\"fn.listFilled<Int>\"" `isInfixOf` ir && "call i64 @tersus_addr_alloc(i64 2, i64 8)" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
         , TestCase "a Box is the struct of the library, freed by its drop" $
-            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<StdBox<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.stdBoxUnbox<Int>\"" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
+            withIr "b = Box::new(5); return Box::unbox(b);" (\ir -> testAssertTrue ("@\"fn.<Box<Int> as Drop>::drop\"" `isInfixOf` ir && "@\"fn.boxUnbox<Int>\"" `isInfixOf` ir && not ("call ptr @tersus_box_new" `isInfixOf` ir)))
         , TestCase "names with non-ASCII letters are written as their UTF-8 bytes" $
             withIr "struct P { \x00e9: Int }; return P { \x00e9: 1 };" (\ir -> testAssertTrue (all isAscii ir && "[3 x i8] c\"\\C3\\A9\\00\"" `isInfixOf` ir))
         , TestCase "a letter of four bytes" $

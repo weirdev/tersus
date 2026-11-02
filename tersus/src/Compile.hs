@@ -56,7 +56,7 @@ parseSourceWith reserving source = case libraries source of
     readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
         Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
         Right (stmts, declared') -> fmap (\(rest, final) -> (stmts ++ rest, final)) (readLibraries more declared')
-    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, and a Box of the struct StdBox and the functions stdBox... of lib/box.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
+    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
 
 -- A name the program declares that native code uses for lists (see MirLists)
 reservedName :: [Statement] -> Maybe String
@@ -71,7 +71,7 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         TraitDef name _ _ -> [name]
         BoundedDef _ (Assign name _) -> [name]
         _ -> []
-    reserved name = name `elem` ["StdList", "StdBox"] || take 7 name == "stdList" || take 6 name == "stdBox"
+    reserved name = name `elem` ["List", "Box", "listNew", "listLen", "listGet", "listFirst", "listLast", "listPop", "listSet", "listPush", "listFilled", "boxNew", "boxUnbox"]
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
 -- unchanged: lib/types.tersus (the structs `List` and `Box`, which a program has whether it names them or not), lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares), lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`) if it mentions any of them (or
