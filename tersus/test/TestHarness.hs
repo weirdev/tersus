@@ -28,6 +28,7 @@ module TestHarness
     , decodeProgram
     , sharedProgramCacheFile
     , openEntryLockFile
+    , executableDigest
     ) where
 
 import qualified Control.Exception as Exception
@@ -37,18 +38,19 @@ import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (IOException, SomeException, bracket, bracket_, displayException, finally, mask, onException, throwIO, try)
 import Control.Monad (forM, when)
 import GHC.Conc (getNumCapabilities)
-import Data.Char (isSpace)
+import Data.Char (isHexDigit, isSpace, toLower)
 import Data.List (isInfixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getFileSize, getModificationTime, removeDirectory, removeDirectoryRecursive, removeFile, renameFile)
+import System.Directory (createDirectoryIfMissing, renameFile)
 import System.Environment (getExecutablePath)
-import System.FilePath ((</>))
+import System.Exit (ExitCode (..))
+import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (SeekMode (AbsoluteSeek), hClose, hPutStr, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.IO (FileLock, LockRequest (WriteLock), OpenFileFlags (..), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
 import System.Posix.Types (Fd)
+import System.Process (readProcessWithExitCode)
 
-import Hash (fingerprint)
 import Mir (Program)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
@@ -263,54 +265,46 @@ withEntryThreadLock key action = do
 
 sharedOnDisk :: String -> String -> Result Program String -> IO (Result Program String)
 sharedOnDisk stage source compute = do
-    cache <- cacheDirectory
-    case cache of
-        Error _ -> pure compute
-        Ok dir -> do
-            built <- binaryIdentity
-            let entryKey = fingerprint [stage, source, built, programCodecHeader]
-                dataDir = dir </> "test-programs"
-                file = dataDir </> entryKey
+    file <- sharedProgramCacheFile stage source
+    case file of
+        Nothing -> pure compute
+        Just path -> do
+            let dataDir = takeDirectory path
+                entryKey = takeFileName path
             made <- try (createDirectoryIfMissing True dataDir) :: IO (Either IOException ())
             case made of
                 Left _ -> pure compute
                 Right () -> do
-                    existing <- readEntry file
+                    existing <- readEntry entryKey path
                     case existing of
                         Just program -> pure (Ok program)
                         Nothing -> do
                             let produce = do
                                     -- another process may have written it while this one waited for the lock
-                                    waited <- readEntry file
+                                    waited <- readEntry entryKey path
                                     case waited of
                                         Just program -> pure (Ok program)
                                         Nothing -> case compute of
                                             Error e -> pure (Error e)
                                             Ok program -> do
-                                                written <- try (writeEntryAtomically dataDir file (encodeEntry entryKey program)) :: IO (Either IOException ())
+                                                written <- try (writeEntryAtomically dataDir path (encodeEntry entryKey program)) :: IO (Either IOException ())
                                                 case written of
                                                     Right () -> pure (Ok program)
                                                     Left _ -> pure (Ok program)
-                            locked <- withKernelLock file produce
+                            locked <- withKernelLock path produce
                             case locked of
                                 Just result -> pure result
                                 -- the entry cannot be locked (an unwritable directory, a full
                                 -- disk): computing without the cache is always safe
                                 Nothing -> pure compute
   where
-    readEntry file = do
-        present <- doesFileExist file
-        if not present
-            then pure Nothing
-            else do
-                built <- binaryIdentity
-                let entryKey = fingerprint [stage, source, built, programCodecHeader]
-                cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
-                pure $ case cached of
-                    Right text -> case decodeEntry entryKey text of
-                        Ok program -> Just program
-                        Error _ -> Nothing
-                    Left _ -> Nothing
+    readEntry entryKey file = do
+        cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)
+        pure $ case cached of
+            Right text -> case decodeEntry entryKey text of
+                Ok program -> Just program
+                Error _ -> Nothing
+            Left _ -> Nothing
 
 -- An entry carries the key it was filed under, so a well-formed program filed for another
 -- source, stage or build is a miss, not an answer.
@@ -371,11 +365,12 @@ withKernelLock file produce = do
 sharedProgramCacheFile :: String -> String -> IO (Maybe FilePath)
 sharedProgramCacheFile stage source = do
     cache <- cacheDirectory
-    case cache of
-        Error _ -> pure Nothing
-        Ok dir -> do
-            built <- binaryIdentity
-            pure (Just (dir </> "test-programs" </> fingerprint [stage, source, built, programCodecHeader]))
+    built <- binaryIdentity
+    case (cache, built) of
+        (Ok dir, Just identity) -> do
+            key <- sha256 [] (show [stage, source, identity, programCodecHeader])
+            pure ((\digest -> dir </> "test-programs" </> digest) <$> key)
+        _ -> pure Nothing
 
 -- The MIR of a program as data (what MirData writes of Pipeline.ownedSource), shared between
 -- the groups that check the same programs: the owned program itself comes from the shared
@@ -387,27 +382,36 @@ mirDataOf source = do
         Error e -> Error e
         Ok program -> Ok (writeProgram program)
 
--- What identifies the test binary that is running: a compiler or harness change rebuilds it, which changes at
--- least one of these, so cached MIR data made by another build is not used.
+-- The compiler, embedded libraries and housekeeping sources, harness and codec are
+-- part of the executable. Cache its bytes, not filesystem metadata that a restore changes.
 {-# NOINLINE binaryIdentity #-}
-binaryIdentity :: IO String
+binaryIdentity :: IO (Maybe String)
 binaryIdentity = unsafePerformIO $ do
     cache <- newMVar Nothing
     pure $ modifyMVar cache $ \known -> case known of
         Just identity -> pure (known, identity)
         Nothing -> do
-            identity <- try identify :: IO (Either IOException String)
-            let text = case identity of
-                    Right value -> value
-                    Left _ -> ""
-            pure (Just text, text)
+            outcome <- try (getExecutablePath >>= executableDigest) :: IO (Either IOException (Maybe String))
+            let identity = either (const Nothing) id outcome
+            pure (Just identity, identity)
+
+executableDigest :: FilePath -> IO (Maybe String)
+executableDigest path = sha256 [path] ""
+
+sha256 :: [String] -> String -> IO (Maybe String)
+sha256 arguments input = do
+    digest <- run "sha256sum" arguments
+    case digest of
+        Just _ -> pure digest
+        Nothing -> run "shasum" (["-a", "256"] ++ arguments)
   where
-    identify :: IO String
-    identify = do
-        exe <- getExecutablePath
-        size <- getFileSize exe
-        modified <- getModificationTime exe
-        pure (show size ++ " " ++ show modified)
+    run command args = do
+        outcome <- try (readProcessWithExitCode command args input) :: IO (Either IOException (ExitCode, String, String))
+        pure $ case outcome of
+            Right (ExitSuccess, out, _) -> case words out of
+                digest : _ | length digest == 64 && all isHexDigit digest -> Just (map toLower digest)
+                _ -> Nothing
+            _ -> Nothing
 
 -- Run tests
 -- A function over integers only

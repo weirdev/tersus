@@ -47,11 +47,17 @@ jobs:
       # This has to be restored before the tests run: the test groups build the emitter (and the programs they build with it) into the same directory, and a restore
       # after them only ever helped the two CLI checks at the end. A restore key of an older entry is still useful, for the same reason: what it holds is named
       # for what it is made of, so what is out of date is only not used.
-      - name: Cache the emitter written in Tersus
-        uses: actions/cache@v4
+      - name: Identify runner image
+        id: runner-image
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: Restore the emitter and test compilation
+        id: tersus-cache
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/tersus
-          key: emitter-${{ runner.os }}-${{ hashFiles('tersus/bootstrap/emitter.sha256', 'tersus/examples/emit.tersus', 'tersus/lib/*.tersus', 'tersus/src/LlvmRuntime.hs') }}
+          # Immutable snapshots must change when any build/test input or the runner toolchain changes.
+          key: emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}
           restore-keys: emitter-${{ runner.os }}-
 
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
@@ -77,3 +83,11 @@ jobs:
       # The command line itself (the tests call its parts): the emitter in Tersus writes the IR
       - name: Check the emitter in Tersus through the CLI
         run: stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
+
+      # Keep successfully compiled entries even when later tests or CLI checks fail.
+      - name: Save the emitter and test compilation
+        if: ${{ !cancelled() && steps.tersus-cache.outputs.cache-hit != 'true' && steps.tersus-cache.outputs.cache-primary-key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/tersus
+          key: ${{ steps.tersus-cache.outputs.cache-primary-key }}

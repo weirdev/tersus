@@ -5,7 +5,7 @@ import Control.Exception (finally, try)
 import Control.Monad (when)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
-import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, setModificationTime)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
@@ -43,6 +43,12 @@ testSharedCache =
         , TestCase "a killed lock owner releases the entry" killedOwnerReleases
         , TestCase "an unusable lock falls back without hanging" unusableLockFallsBack
         , TestCase "a mutated program is still verified" mutatedStillVerified
+        , TestCase "executable digest ignores mtime and detects equal-size byte changes" digestIdentity
+        , TestCase "an unreadable executable has no identity" unreadableIdentity
+        , TestCase "full SHA256 keys isolate exact source and stage" exactKeys
+        , TestCase "a restored entry survives touching the actual executable" touchedExecutable
+        , TestCase "a stale build entry is rejected in a fresh process" staleBuildEntry
+        , TestCase "missing hash tools compile without reading or writing disk entries" missingHashTools
         ]
 
 testSharedCacheProbe :: Test
@@ -73,6 +79,129 @@ probe = do
                 Ok program -> do
                     writeFile path (encodeProgram program)
                     pure Nothing
+
+digestIdentity :: IO TestResult
+digestIdentity = do
+    home <- freshHome "tersus-shared-cache-digest"
+    ( do
+        let path = home </> "binary"
+            oldTime = read "2000-01-01 00:00:00 UTC"
+        writeFile path "abc"
+        before <- executableDigest path
+        setModificationTime path oldTime
+        touched <- executableDigest path
+        writeFile path "abd"
+        setModificationTime path oldTime
+        changed <- executableDigest path
+        pure $ firstFailure
+            [ testAssertEq before (Just "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad")
+            , testAssertEq touched before
+            , testAssertTrue (changed /= Nothing && changed /= before)
+            ]) `finally` removeDirectoryRecursive home
+
+unreadableIdentity :: IO TestResult
+unreadableIdentity = do
+    home <- freshHome "tersus-shared-cache-unreadable"
+    (testAssertEq <$> executableDigest (home </> "missing") <*> pure Nothing)
+        `finally` removeDirectoryRecursive home
+
+exactKeys :: IO TestResult
+exactKeys = do
+    files <- mapM (uncurry sharedProgramCacheFile)
+        [("compile", "return 1;"), ("compile", "return 2;"), ("validated", "return 1;"), ("compile", "a\0b"), ("compile\0a", "b")]
+    pure $ firstFailure
+        [ testAssertTrue (all (maybe False ((== 64) . length . takeFileName)) files)
+        , testAssertTrue (length (Map.fromList [(file, ()) | file <- files]) == length files)
+        ]
+
+touchedExecutable :: IO TestResult
+touchedExecutable = do
+    home <- freshHome "tersus-shared-cache-touched"
+    ( do
+        self <- getExecutablePath
+        let copied = home </> "tersus-test"
+            marker = home </> "marker"
+        copyFile self copied
+        env <- probeEnv home marker []
+        let runChild = readCreateProcessWithExitCode
+                (proc copied ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env} ""
+        (code1, _, err1) <- runChild
+        first <- readMarker marker
+        entries <- entryFiles home
+        case (code1, first, entries) of
+            (ExitSuccess, Right original, [entry]) -> do
+                before <- getModificationTime entry
+                digest <- executableDigest copied
+                setModificationTime copied (read "2000-01-01 00:00:00 UTC")
+                afterDigest <- executableDigest copied
+                (code2, _, err2) <- runChild
+                second <- readMarker marker
+                after <- getModificationTime entry
+                afterEntries <- entryFiles home
+                pure $ firstFailure
+                    [ testAssertEq code2 ExitSuccess <? err2
+                    , testAssertEq second (Right original)
+                    , testAssertEq digest afterDigest
+                    , testAssertEq after before
+                    , testAssertEq afterEntries entries
+                    ]
+            _ -> pure (Just ("first copied executable failed: " ++ err1 ++ show entries))
+        ) `finally` removeDirectoryRecursive home
+
+staleBuildEntry :: IO TestResult
+staleBuildEntry = do
+    home <- freshHome "tersus-shared-cache-stale"
+    ( do
+        let marker = home </> "marker"
+        firstChild <- spawnProbe home []
+        firstCode <- waitChild 300 firstChild
+        original <- readMarker marker
+        entries <- entryFiles home
+        case (firstCode, original, entries) of
+            (Just ExitSuccess, Right expected, [entry]) -> do
+                Right text <- readMarker entry
+                let stale = unlines (head (lines text) : replicate 64 '0' : drop 2 (lines text))
+                writeFile entry stale
+                child <- spawnProbe home []
+                code <- waitChild 300 child
+                got <- readMarker marker
+                repaired <- readMarker entry
+                pure $ firstFailure
+                    [ testAssertEq code (Just ExitSuccess)
+                    , testAssertEq got (Right expected)
+                    , testAssertEq repaired (Right text)
+                    ]
+            _ -> pure (Just ("could not seed stale entry: " ++ show firstCode ++ show entries))
+        ) `finally` removeDirectoryRecursive home
+
+missingHashTools :: IO TestResult
+missingHashTools = do
+    home <- freshHome "tersus-shared-cache-no-hash"
+    ( do
+        let marker = home </> "marker"
+        firstChild <- spawnProbe home []
+        firstCode <- waitChild 300 firstChild
+        original <- readMarker marker
+        entries <- entryFiles home
+        other <- compileOnce "return 987099;"
+        case (firstCode, original, entries, other) of
+            (Just ExitSuccess, Right expected, [entry], Ok wrong) -> do
+                Right text <- readMarker entry
+                let poisoned = unlines (take 2 (lines text)) ++ show wrong ++ "\n"
+                writeFile entry poisoned
+                child <- spawnProbe home [("PATH", home)]
+                code <- waitChild 300 child
+                got <- readMarker marker
+                after <- readMarker entry
+                afterEntries <- entryFiles home
+                pure $ firstFailure
+                    [ testAssertEq code (Just ExitSuccess)
+                    , testAssertEq got (Right expected)
+                    , testAssertEq after (Right poisoned)
+                    , testAssertEq afterEntries entries
+                    ]
+            _ -> pure (Just ("could not seed missing-hash test: " ++ show firstCode ++ show entries))
+        ) `finally` removeDirectoryRecursive home
 
 roundtrip :: IO TestResult
 roundtrip = do
