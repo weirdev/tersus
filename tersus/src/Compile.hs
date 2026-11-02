@@ -16,7 +16,7 @@ import qualified Mir as M
 import MirLower (lowerElaborated, lowerLibrary)
 import Data.List (intercalate)
 import Parse (Decls, ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, parseStatementBlockWith, renderPath)
-import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
+import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource, typesSource)
 import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Statement (..), Termination (..), TraitFn (..), ValidationStatement (..), Value (..))
 import TypeCheck (Elaborated, PreparedPrefix, elaborate, elaborateAfter, gatheredSignatures, preparePrefix)
 import Types (Arg (..), BuiltinFunct (..), Signature (..), Size (..), Type (..), Variable)
@@ -31,17 +31,17 @@ import Utils
 parseSource :: String -> Result [Statement] String
 parseSource source = parseSourceWith True source
 
--- A program with the equality library in front of it (unless it declares a trait Eq), as `=` on any type but a word needs, and with no
--- other library: how the tests of the language read a program
+-- A program with the list and Box types and the equality library in front of it (unless it declares those names
+-- itself), as `=` on any type but a word needs, and with no other library: how the tests of the language read a program
 parseWithEquality :: String -> Either String [Statement]
 parseWithEquality source = case probeParse probeDecls emptyDecls source of
     Left err -> Left (show err)
-    Right (probed, _) -> case parsedLibraries [name | (name, _) <- librariesFor probed, name `elem` ["the clone library", "the equality library"]] of
+    Right (probed, _) -> case parsedLibraries [name | (name, _) <- librariesFor probed, name `elem` ["the list and Box types", "the clone library", "the equality library"]] of
         Left err -> Left err
         Right (library, declared) -> either (Left . show) (Right . (library ++) . fst) (parseStatementBlockWith declared source)
 
 librarySources :: [(String, String)]
-librarySources = [("the clone library", cloneSource), ("the equality library", eqSource), ("the prelude", preludeSource), ("the string library", stringSource), ("the map library", mapSource), ("the set library", setSource)]
+librarySources = [("the list and Box types", typesSource), ("the clone library", cloneSource), ("the equality library", eqSource), ("the prelude", preludeSource), ("the string library", stringSource), ("the map library", mapSource), ("the set library", setSource)]
 
 {-# NOINLINE libraryParses #-}
 libraryParses :: Map.Map [String] (Either String ([Statement], Decls))
@@ -100,7 +100,7 @@ parseSourceParts reserving source = case probeParseFile (locating probeDecls) (l
     notLinked imports stmts
         | null imports = Ok stmts
         | otherwise = Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
-    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, and a Box of the struct StdBox and the functions stdBox... of lib/box.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
+    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
 
 readLibraries :: [(String, String)] -> Decls -> Either String ([Statement], Decls)
 readLibraries [] declared = Right ([], declared)
@@ -127,7 +127,7 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
         TraitDef name _ _ -> [name]
         BoundedDef _ (Assign name _) -> [name]
         _ -> []
-    reserved name = name `elem` ["StdList", "StdBox"] || take 7 name == "stdList" || take 6 name == "stdBox"
+    reserved name = name `elem` ["List", "Box", "listNew", "listLen", "listGet", "listFirst", "listLast", "listPop", "listSet", "listPush", "listFilled", "boxNew", "boxUnbox"]
 
 -- The libraries that a program has in front of it, in order, unless it declares their names itself, so a program that has a `Vec` of its own is
 -- unchanged: lib/eq.tersus (the trait `Eq` that `=` calls, whose impls are made only for the types a program compares) unless it declares a trait `Eq`, lib/prelude.tersus (the traits `Sequence`, `Growable`, `Clone`, `Copy`, `Drop`, `Deref` and `Hash`, with `hashCombine`) if it mentions any of them (or
@@ -137,7 +137,7 @@ reservedName stmts = case [name | stmt <- stmts, name <- declared stmt, reserved
 -- The decision is made from the program as it was read (see parseSourceWith): the names it declares and the names it mentions are the
 -- ones in its statements, so a name written in a comment or in the text of a literal, which is not in the program that was read, decides nothing.
 librariesFor :: [Statement] -> [(String, String)]
-librariesFor stmts = [("the clone library", cloneSource) | not (declares ["Clone"])] ++ [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps] ++ [("the set library", setSource) | sets]
+librariesFor stmts = [("the list and Box types", typesSource) | not (declares ["List"]) && not (declares ["Box"])] ++ [("the clone library", cloneSource) | not (declares ["Clone"])] ++ [("the equality library", eqSource) | not (declares ["Eq"])] ++ [("the prelude", preludeSource) | prelude] ++ [("the string library", stringSource) | strings] ++ [("the map library", mapSource) | maps] ++ [("the set library", setSource) | sets]
   where
     declared = concatMap declaredNames stmts
     mentioned = concatMap statementNames stmts

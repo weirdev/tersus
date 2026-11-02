@@ -1,3 +1,5 @@
+{-# LANGUAGE PatternSynonyms #-}
+
 module MirMono
     ( monomorphize
     ) where
@@ -9,7 +11,7 @@ import Data.Map.Strict (Map)
 
 import Mir
 import Pretty (renderType)
-import Types (Arg (..), Name, Size (..), Type (..), Variable, instanceName, mentionsParameter, substitute)
+import Types (Arg (..), Name, Size (..), Type (..), pattern TList, pattern TBox, Variable, instanceName, mentionsParameter, substitute)
 
 -- A function with type parameters (`fn first<T>(a: &List<T>) -> T`) is made the same way, a copy for each list of types. A call does not
 -- say them: they are what the types of the arguments and of the local that gets the result make the types of the parameters and of the
@@ -209,7 +211,7 @@ typeArguments caller target args dest = [fromMaybe TInt (lookup t found) | t <- 
 
 -- What the type parameters of a type are, given the type it stands for
 match :: Type -> Type -> [(Variable, Type)]
-match pattern actual = case (pattern, actual) of
+match pat actual = case (pat, actual) of
     (TParam name, a) -> [(name, a)]
     (TBox p, TBox a) -> match p a
     (TAddr p, TAddr a) -> match p a
