@@ -1964,6 +1964,12 @@ fn subType(p: &Program, wanted: &Type, actual: &Type, strict: Bool) -> Bool ~ {
     if wanted is Type::TBlock && actual is Type::TBlock {
         return subType(p, Box::unbox((wanted as Type::TBlock).inner), Box::unbox((actual as Type::TBlock).inner), true);
     };
+    if wanted is Type::TBlock && actual is Type::TBlock {
+        return sub(p, Box::unbox((wanted as Type::TBlock).inner), Box::unbox((actual as Type::TBlock).inner));
+    };
+    if wanted is Type::TUninit && actual is Type::TUninit {
+        return sub(p, Box::unbox((wanted as Type::TUninit).inner), Box::unbox((actual as Type::TUninit).inner));
+    };
     if wanted is Type::TNamed && actual is Type::TVariant {
         info = ctorInfo(p, (actual as Type::TVariant).name);
         return info.ok && info.typeName = (wanted as Type::TNamed).name;
