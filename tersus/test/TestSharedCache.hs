@@ -10,11 +10,11 @@ import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist,
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
-import System.IO (SeekMode (AbsoluteSeek), hClose, openTempFile)
+import System.IO (IOMode (WriteMode), SeekMode (AbsoluteSeek), hClose, openTempFile, withFile)
 import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Posix.Process (exitImmediately, getProcessID)
 import System.Posix.Signals (sigKILL, signalProcess)
-import System.Process (CreateProcess (..), ProcessHandle, createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
+import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
@@ -622,8 +622,9 @@ spawnProbe home extra = do
             Just m -> m
             Nothing -> home </> "marker"
     env <- probeEnv home marker extra
-    (_, _, _, handle) <- createProcess (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env}
-    pure handle
+    withFile "/dev/null" WriteMode $ \sink -> do
+        (_, _, _, handle) <- createProcess (proc self ["testSharedCacheProbe", "--child", "+RTS", "-N1", "-RTS"]){env = Just env, std_out = UseHandle sink, std_err = UseHandle sink}
+        pure handle
 
 waitChild :: Int -> ProcessHandle -> IO (Maybe ExitCode)
 waitChild seconds handle = timeout (seconds * 1000000) (waitForProcess handle)
