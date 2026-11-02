@@ -162,6 +162,7 @@ test-suite tersus-test
       TestPipeline
       TestPointers
       TestProofs
+      TestScheduling
       TestSequence
       TestSharedCache
       TestStrings

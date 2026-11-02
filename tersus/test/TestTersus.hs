@@ -4,7 +4,7 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
 import Control.Exception (SomeException, bracket_, displayException, try)
 import Control.Monad (forM, forM_, unless, when)
-import Data.List (elemIndex, foldl', isPrefixOf, sortBy)
+import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumProcessors)
@@ -46,21 +46,22 @@ import TestHashMap
 import TestHashSet
 import TestBuiltinRegistry
 import TestSharedCache
+import TestScheduling
 
 main :: IO ()
 main = do
     hSetBuffering stdout LineBuffering
     args <- getArgs
-    case parseArguments args of
+    case parseArguments args >>= select of
         Left message -> do
             hPutStr stderr (message ++ "\n")
-            hPutStr stderr "Usage: tersus-test [-j <n>] [group...]\n"
+            hPutStr stderr "Usage: tersus-test [-j <n>] [--shard k/n] [group...]\n"
             exitFailure
-        Right arguments -> do
-            -- (the names of groups on the command line run only those: `tests testBorrow testCopies`)
-            let chosen = argumentGroups arguments
-                selected = if null chosen then allGroups else [g | g <- allGroups, groupName g `elem` chosen]
-                names = map groupName selected
+        Right (arguments, names) -> do
+            let selected = [g | g <- allGroups, groupName g `elem` names]
+            forM_ (argumentShard arguments) $ \(index, count) -> do
+                putStrLn ("[SHARD] " ++ show index ++ "/" ++ show count ++ " " ++ show (length names) ++ "/" ++ show (length allGroups) ++ " groups")
+                putStrLn ("[GROUPS] " ++ unwords names)
             jobs <- case argumentJobs arguments of
                 Just n -> pure n
                 Nothing -> min (length names) <$> getNumProcessors
@@ -76,6 +77,8 @@ main = do
                         ++ show (summaryFailed summary)
                         ++ " failed"
             when (summaryFailed summary > 0 || not reported) exitFailure
+  where
+    select arguments = (,) arguments <$> selectGroupNames arguments (map groupName allGroups)
 
 allGroups :: [Test]
 allGroups =
@@ -158,36 +161,13 @@ allGroups =
     , testBuiltinRegistry
     , testSharedCache
     , testSharedCacheProbe
+    , testScheduling (map groupName allGroups)
     ]
 
 groupName :: Test -> String
 groupName (TestList name _) = name
 groupName (TestParallel name _) = name
 groupName (TestCase name _) = name
-
-data Arguments = Arguments
-    { argumentJobs :: Maybe Int
-    , argumentGroups :: [String]
-    , argumentChild :: Bool
-    }
-
-parseArguments :: [String] -> Either String Arguments
-parseArguments = go (Arguments Nothing [] False)
-  where
-    go arguments [] = Right arguments
-    go arguments ("--child" : rest) = go arguments{argumentChild = True} rest
-    go arguments ("-j" : number : rest) = withJobs arguments number rest
-    go arguments ("--jobs" : number : rest) = withJobs arguments number rest
-    go _ ["-j"] = Left "-j needs a number of jobs"
-    go _ ["--jobs"] = Left "--jobs needs a number of jobs"
-    go arguments (argument : rest)
-        | "--jobs=" `isPrefixOf` argument = withJobs arguments (drop (length "--jobs=") argument) rest
-        | "-j" `isPrefixOf` argument && length argument > 2 = withJobs arguments (drop 2 argument) rest
-        | "-" `isPrefixOf` argument = Left ("unknown option: " ++ argument)
-        | otherwise = go arguments{argumentGroups = argumentGroups arguments ++ [argument]} rest
-    withJobs arguments number rest = case reads number of
-        [(jobs, "")] | jobs >= (1 :: Int) -> go arguments{argumentJobs = Just jobs} rest
-        _ -> Left ("-j needs a number of jobs (at least 1), not " ++ show number)
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)
 runInProcess selected = do
@@ -201,28 +181,6 @@ runInProcess selected = do
 -- ends, so the ones that take minutes are started first and the seconds-long ones fill in around them, instead of
 -- the longest only starting once everything before it in the list has had a process. The results are still taken
 -- in the order of the list of groups, so the output is unchanged.
-launchFirst :: [String]
-launchFirst =
-    [ "testMirVerify"
-    , "testNative"
-    , "testMir"
-    , "testMirSelfHosted"
-    , "testMirEmit"
-    , "testMirErase"
-    , "testBootstrap"
-    , "testMirReader"
-    , "testMirEmitPrograms"
-    , "testExamples"
-    , "testMirData"
-    , "testStrings"
-    , "testMirVerifyPrograms"
-    ]
-
-launchRank :: String -> Int
-launchRank name = case elemIndex name launchFirst of
-    Just rank -> rank
-    Nothing -> length launchFirst
-
 runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
 runInParallel jobs names = do
     self <- getExecutablePath
@@ -231,7 +189,7 @@ runInParallel jobs names = do
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
         pure (name, done)
-    forM_ (sortBy (comparing (launchRank . fst)) slots) $ \(name, done) ->
+    forM_ (sortBy (comparing (negate . groupWeight . fst)) slots) $ \(name, done) ->
         forkIO $
             bracket_ (waitQSem sem) (signalQSem sem) $ do
                 started <- getMonotonicTime
