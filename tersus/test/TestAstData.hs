@@ -273,8 +273,8 @@ haskellRefused s = case A.readParsed s of
 sameCodec :: IO TestResult
 sameCodec = do
     ast <- readFile readerPath
-    mir <- readFile "examples/mir_reader.tersus"
-    emitter <- readFile "examples/emit.tersus"
+    mir <- readFile "examples/mir/reader/reader.tersus"
+    emitter <- readFile "examples/mir/reader/reader.tersus"
     let block s = takeWhile (not . isPrefixOf "struct Field") (dropWhile (not . isPrefixOf "struct Token") (lines s))
         function n s = unlines (takeThrough (== "};") (dropWhile (not . isPrefixOf ("fn " ++ n)) (lines s)))
         names = ["failed", "done", "noNames", "noInts", "hexValue", "quoted", "tokenize", "parseInt", "wordAt", "nameAt", "intAt", "countAt", "namesAt", "intsAt", "sizeAt", "catStrings", "renderSizeForName", "isBareLowerName", "renderTypeForName", "typeAt", "hexDigit", "printInt", "printWord", "printName", "printNames", "printInts", "newLine", "printSize", "printType", "isWord", "indexOf", "wordOf"]

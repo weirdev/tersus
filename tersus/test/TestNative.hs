@@ -29,6 +29,7 @@ import MirOwnership (insertOwnership)
 import MirHousekeeping (verifyProgram)
 import Native (buildExecutableFast, runExecutable)
 import Parse (parseStatementBlock)
+import Modules (LoadResult (..), loadFromFilesystem)
 import Pipeline
 import TestHarness
 import Utils
@@ -110,12 +111,31 @@ nativeExamples =
         [ "arithmetic", "array_data", "array_owners", "array_sizes", "arrays", "args", "basics", "booleans", "borrowing", "box_array", "branching", "build_list", "bytes", "contracts", "early_return", "element_facts"
         , "enums", "files", "for_loops", "forall_facts", "frame_facts", "functions", "generic_lists", "generic_structs", "hello", "helper_functions", "linear"
         , "linked_list", "loop_return", "loops", "packet_parser", "parallel_sum", "proofs", "recursion", "rewrites", "rules"
-        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text", "mir_reader", "emit"
+        , "list_methods", "safe_access", "sized_structs", "spec_functions", "structs", "termination", "traits", "type_parameters", "types", "update_list", "upper", "vec", "addresses", "drops", "strings", "text"
         ]
-    ]
+    ] ++ ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus"]
 
 testNativeProgram :: FilePath -> Test
-testNativeProgram path = TestCase path (readFile path >>= sameAsMir path)
+testNativeProgram path = TestCase path $ do
+    loaded <- loadFromFilesystem path
+    case loaded of
+        Right (PackageResult _) -> do
+            available <- clangAvailable
+            if not available
+                then pure Nothing
+                else do
+                    compiled <- programFromFile path
+                    case compiled of
+                        Error e -> pure (Just ("Does not compile: " ++ e))
+                        Ok program -> do
+                            ir <- emitUnvalidated (nativeProgram program)
+                            case ir of
+                                Error e -> pure (Just e)
+                                Ok text -> buildAndRun "" [] (map safeChar path) path text (expected (runProgramIn noWorld program))
+          where
+            expected (Ok ((output, errors), _)) = (ExitSuccess, if null output then "" else output ++ "\n", errors)
+            expected (Error e) = (ExitFailure 1, "", e ++ "\n")
+        _ -> readFile path >>= sameAsMir path
 
 testNativeIr :: Test
 testNativeIr =

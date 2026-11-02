@@ -23,7 +23,11 @@ module TestHarness
     , compileOnce
     , ownedOnce
     , validatedOnce
+    , programFromFile
+    , validatedFromFile
+    , ownedFromFile
     , mirDataOf
+    , mirDataFromFile
     , encodeProgram
     , decodeProgram
     , sharedProgramCacheFile
@@ -56,7 +60,9 @@ import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
 import Parse
-import Pipeline (compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Modules (LoadResult (..), loadFromFilesystem)
+import qualified Modules
+import Pipeline (compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
@@ -228,6 +234,46 @@ ownedOnce source = sharedProgram "owned" source (ownedSource source)
 
 validatedOnce :: String -> IO (Result Program String)
 validatedOnce source = sharedProgram "validated" source (validatedSource source)
+
+-- A program in a package, compiled from its entry file through the module
+-- pipeline (the same stages as compileOnce, ownedOnce and validatedOnce do
+-- for a single-file program given as text)
+programFromFile :: FilePath -> IO (Result Program String)
+programFromFile path = cachedFromPackage "program" path compileModulesToProgram
+
+validatedFromFile :: FilePath -> IO (Result Program String)
+validatedFromFile path = cachedFromPackage "validated" path compileModulesValidated
+
+ownedFromFile :: FilePath -> IO (Result Program String)
+ownedFromFile path = cachedFromPackage "owned" path compileModulesToOwned
+
+{-# NOINLINE packagePrograms #-}
+packagePrograms :: MVar (Map.Map (String, FilePath) (Result Program String))
+packagePrograms = unsafePerformIO (newMVar Map.empty)
+
+cachedFromPackage :: String -> FilePath -> (Modules.LoadedPackage -> Result Program String) -> IO (Result Program String)
+cachedFromPackage stage path compile = do
+    known <- modifyMVar packagePrograms $ \cache -> pure (cache, Map.lookup (stage, path) cache)
+    case known of
+        Just result -> pure result
+        Nothing -> do
+            result <- fromPackage path compile
+            modifyMVar packagePrograms $ \cache -> pure (Map.insert (stage, path) result cache, result)
+
+fromPackage :: FilePath -> (Modules.LoadedPackage -> Result Program String) -> IO (Result Program String)
+fromPackage path compile = do
+    loaded <- loadFromFilesystem path
+    pure $ case loaded of
+        Left e -> Error e
+        Right (PackageResult pkg) -> compile pkg
+        Right _ -> Error (path ++ " is not in a package")
+
+mirDataFromFile :: FilePath -> IO (Result String String)
+mirDataFromFile path = do
+    owned <- ownedFromFile path
+    pure $ case owned of
+        Error e -> Error e
+        Ok program -> Ok (writeProgram program)
 
 sharedProgram :: String -> String -> Result Program String -> IO (Result Program String)
 sharedProgram stage source compute = do

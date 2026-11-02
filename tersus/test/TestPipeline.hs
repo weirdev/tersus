@@ -49,13 +49,27 @@ data ExampleExpectation
 
 testExampleFile :: FilePath -> ExampleExpectation -> Test
 testExampleFile path expectation = TestCase path $ do
-    source <- readFile path
-    -- (as the command line reads a program, so an example that uses the prelude has it)
-    pure $ case parseSource source of
-        Error err -> case expectation of
-            ExpectRejected expectedError -> testAssertErrorContains expectedError (Error err :: Result () String)
-            _ -> Just $ "Parse failed: " ++ err
-        Ok stmts -> checkExample stmts expectation
+    loaded <- loadFromFilesystem path
+    case loaded of
+        Right (PackageResult pkg) -> pure $ case compileModulesToProgram pkg of
+            Error e -> case expectation of
+                ExpectRejected expectedError -> testAssertErrorContains expectedError (Error e :: Result () String)
+                _ -> Just ("Package example failed to compile: " ++ e)
+            Ok program -> case expectation of
+                ExpectRejected _ -> Just "expected rejection, but the package example compiled"
+                _ -> case runProgram program of
+                    Error e -> Just ("Evaluation failed with error: " ++ e)
+                    Ok result -> case expectation of
+                        ExpectReturn expected -> testAssertEq (fmap fromMirValue result) (Just expected)
+                        _ -> testAssertEq (fmap fromMirValue result) Nothing
+        _ -> do
+            source <- readFile path
+            -- (as the command line reads a program, so an example that uses the prelude has it)
+            pure $ case parseSource source of
+                Error err -> case expectation of
+                    ExpectRejected expectedError -> testAssertErrorContains expectedError (Error err :: Result () String)
+                    _ -> Just $ "Parse failed: " ++ err
+                Ok stmts -> checkExample stmts expectation
 
 checkExample :: [Statement] -> ExampleExpectation -> TestResult
 checkExample stmts (ExpectRejected expectedError) =
@@ -130,11 +144,11 @@ exampleExpectations =
     , ("examples/strings.tersus", ((ExpectReturn (VInt 980))))
     , ("examples/upper.tersus", ((ExpectReturn (VInt 0))))
     , ("examples/text.tersus", ((ExpectReturn (VInt 504))))
-    , ("examples/mir_reader.tersus", ((ExpectReturn (VInt 1))))
+    , ("examples/mir/mir_reader/mir_reader.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/ast_reader.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/mir_verify.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/mir_erase.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/emit.tersus", ((ExpectReturn (VInt 1))))
+    , ("examples/mir/mir_verify/mir_verify.tersus", ((ExpectReturn (VInt 1))))
+    , ("examples/mir/mir_erase/mir_erase.tersus", ((ExpectReturn (VInt 1))))
+    , ("examples/mir/emit/emit.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/vec.tersus", ((ExpectReturn (VInt 2491212381))))
     , ("examples/hashmap.tersus", ((ExpectReturn (VInt 218420))))
     , ("examples/spec_functions.tersus", ((ExpectReturn (VInt 25070))))

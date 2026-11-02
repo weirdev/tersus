@@ -16,7 +16,7 @@ import TestMirReader (withProgram)
 import TestNative (nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
 
--- The lowering to LLVM IR written in Tersus (examples/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
+-- The lowering to LLVM IR written in Tersus (examples/mir/emit/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
 -- and writes all of the IR with no argument, the declarations, the descriptors of the types and the entry point for `outline`, and the code of each function for
 -- `bodies`. What it writes has to build and run as the program does, which TestNative checks for every example and program by building the IR; here every mode
 -- is run on every one of them, and the data of a program and the data of the program read back from it have to make the same IR. A smaller input is run by the
@@ -26,7 +26,7 @@ testMirEmit :: Test
 testMirEmit =
     TestList
         "testMirEmit"
-        [ TestCase "the reader is the same in the reader and in the emitter" sameReader
+        [ TestCase "the four programs share the reader module of the mir package" sharedReader
         , TestCase "field offsets borrow the type table instead of cloning it" borrowedTypeTable
         , TestCase "hot emitter operations move Gen instead of cloning its history" threadedGen
         , TestCase "type closure preserves ordered duplicate and dependency traversal" orderedTypeClosure
@@ -45,45 +45,47 @@ testMirEmitPrograms =
         "testMirEmitPrograms"
         [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
 
--- The text of the reader between its two marker lines
-readerOf :: String -> String
-readerOf source = unlines (takeWhile (not . isPrefixOf "// ---- end of the reader ----") (dropWhile (not . isPrefixOf "// ---- the reader:") (lines source)))
+-- The four programs of the mir package import the shared reader, and none
+-- of them carries a copy of it: the reader's types live only in
+-- examples/mir/reader/reader.tersus, and the sweeps below run all four
+-- programs through the package.
+sharedReader :: IO TestResult
+sharedReader = do
+    reader <- readFile "examples/mir/reader/reader.tersus"
+    programs <- mapM readFile ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus", "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus"]
+    pure $
+        if "struct Token" `isInfixOf` reader
+            && all ("import mir::reader::reader" `isInfixOf`) programs
+            && not (any ("struct Token" `isInfixOf`) programs)
+            then Nothing
+            else Just "a program of the mir package does not import the shared reader, or still carries its own copy of it"
 
--- The emitter of examples/emit.tersus, compiled once: the three interpreted cases each run it for a part of the IR, and its
+-- The emitter of examples/mir/emit/emit.tersus, compiled once: the three interpreted cases each run it for a part of the IR, and its
 -- validation is the most expensive thing in this group.
 emitterProgram :: IO (Result Program String)
-emitterProgram = readFile "examples/emit.tersus" >>= compileOnce
+emitterProgram = programFromFile "examples/mir/emit/emit.tersus"
 
 runEmitter :: World -> Result Program String -> Result ((String, String), [(FilePath, String)]) String
 runEmitter world compiled = case compiled of
     Error e -> Error e
     Ok program -> runProgramIn world program
 
-sameReader :: IO TestResult
-sameReader = do
-    reader <- readFile "examples/mir_reader.tersus"
-    emitter <- readFile "examples/emit.tersus"
-    pure $
-        if null (readerOf reader) || readerOf reader /= readerOf emitter
-            then Just "the text between '// ---- the reader:' and '// ---- end of the reader ----' differs between examples/mir_reader.tersus and examples/emit.tersus"
-            else Nothing
-
 borrowedTypeTable :: IO TestResult
 borrowedTypeTable = do
-    source <- readFile "examples/emit.tersus"
-    pure $ case lowerSource True source of
+    loaded <- validatedFromFile "examples/mir/emit/emit.tersus"
+    pure $ case loaded of
         Error e -> Just e
         Ok program -> case Map.lookup "fieldOffset" (progFunctions (insertOwnership program)) of
             Nothing -> Just "the emitter has no fieldOffset function"
             Just fn ->
-                let table = TList (TNamed "TypeDecl" [])
+                let table = TList (TNamed "mir$reader$reader$TypeDecl" [])
                     copied = [dest | block <- Map.elems (fnBlocks fn), Assign dest (ReadField _ "Ctx" "types") <- blockStatements block, Just decl <- [Map.lookup dest (fnLocals fn)], localType decl == table]
                  in if null copied then Nothing else Just ("fieldOffset clones the type table into " ++ show copied)
 
 threadedGen :: IO TestResult
 threadedGen = do
-    source <- readFile "examples/emit.tersus"
-    pure $ case lowerSource True source of
+    loaded <- validatedFromFile "examples/mir/emit/emit.tersus"
+    pure $ case loaded of
         Error e -> Just e
         Ok program ->
             let owned = insertOwnership program
@@ -95,8 +97,8 @@ threadedGen = do
 
 orderedTypeClosure :: IO TestResult
 orderedTypeClosure = do
-    source <- readFile "examples/emit.tersus"
-    pure $ case lowerSource True source of
+    loaded <- validatedFromFile "examples/mir/emit/emit.tersus"
+    pure $ case loaded of
         Error e -> Just e
         Ok program -> firstFailure
             [ testAssertEq (Eval.runNamedFunction program "closeTypes" [Eval.MList declarations, Eval.MList roots]) (Ok (Just (Eval.MList expected)))
@@ -104,16 +106,16 @@ orderedTypeClosure = do
             ]
   where
     text s = Eval.MData "String" [("bytes", Eval.MList [Eval.MInt (toInteger (fromEnum c)) | c <- s])]
-    named n = Eval.MData "Type::TNamed" [("name", text n), ("base", text n), ("argc", Eval.MInt 0), ("argTokens", Eval.MList [])]
-    int = Eval.MData "Type::TInt" []
-    byte = Eval.MData "Type::TByte" []
-    bool = Eval.MData "Type::TBool" []
-    field t = Eval.MData "Field" [("name", text "value"), ("ty", t)]
-    struct n t = Eval.MData "TypeDecl::DStruct" [("name", text n), ("fields", Eval.MList [field t])]
-    variant = Eval.MData "Type::TVariant" [("name", text "E::V")]
-    enum = Eval.MData "TypeDecl::DEnum" [("name", text "E"), ("variants", Eval.MList [Eval.MData "Variant" [("name", text "E::V"), ("fields", Eval.MList [field bool])]])]
+    named n = Eval.MData "mir$reader$reader$Type::TNamed" [("name", text n), ("base", text n), ("argc", Eval.MInt 0), ("argTokens", Eval.MList [])]
+    int = Eval.MData "mir$reader$reader$Type::TInt" []
+    byte = Eval.MData "mir$reader$reader$Type::TByte" []
+    bool = Eval.MData "mir$reader$reader$Type::TBool" []
+    field t = Eval.MData "mir$reader$reader$Field" [("name", text "value"), ("ty", t)]
+    struct n t = Eval.MData "mir$reader$reader$TypeDecl::DStruct" [("name", text n), ("fields", Eval.MList [field t])]
+    variant = Eval.MData "mir$reader$reader$Type::TVariant" [("name", text "E::V")]
+    enum = Eval.MData "mir$reader$reader$TypeDecl::DEnum" [("name", text "E"), ("variants", Eval.MList [Eval.MData "mir$reader$reader$Variant" [("name", text "E::V"), ("fields", Eval.MList [field bool])]])]
     node = named "Node"
-    addr = Eval.MData "Type::TAddr" [("inner", node)]
+    addr = Eval.MData "mir$reader$reader$Type::TAddr" [("inner", node)]
     cases =
         [ ([], [bool, int, bool, int], [bool, int])
         , ([struct "A" int, struct "B" byte], [named "A", named "B", named "A"], [named "A", int, named "B", byte])
@@ -145,14 +147,14 @@ interpretedIr source = do
 -- after another inside a single case (withProgram builds the emitter executable once for the process). The data
 -- comes from the harness's shared cache (mirDataOf): the groups between them compile these programs once.
 nativeCheck :: String -> String -> IO TestResult
-nativeCheck name source = withProgram "examples/emit.tersus" "emit" $ \exe -> do
+nativeCheck name source = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
     bad <- check exe (name, source)
     pure $ case bad of
         [] -> Nothing
         problems -> Just (unlines problems)
   where
     check exe (name, source) = do
-        dataOf <- mirDataOf source
+        dataOf <- if "examples/mir/" `isPrefixOf` name then mirDataFromFile name else mirDataOf source
         case dataOf of
             Error e -> pure [name ++ ": " ++ e]
             Ok dataText -> do
@@ -176,7 +178,7 @@ nativeCheck name source = withProgram "examples/emit.tersus" "emit" $ \exe -> do
                 pure (modeProblems ++ roundTrip)
 
 refusal :: IO TestResult
-refusal = withProgram "examples/emit.tersus" "emit" $ \exe -> do
+refusal = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
     (_, output, errors) <- runExecutableBytes exe ["outline"] "return 1;\n"
     (_, output', errors') <- runExecutableBytes exe ["nonsense"] "tersus-mir 1\n"
     pure $

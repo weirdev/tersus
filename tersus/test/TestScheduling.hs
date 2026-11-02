@@ -185,7 +185,7 @@ splitTestGroups count original
             | batch@(weight, index, leaves) <- batches]
     unitWeight :: Test -> Int
     unitWeight test = case concat (leafPaths test) of
-        path | "examples/emit.tersus" `elem` path || "examples/mir_reader.tersus" `elem` path -> 30
+        path | "examples/mir/emit/emit.tersus" `elem` path || "examples/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
         path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
         path | "MIR loops" `elem` path -> 32
         path | "MIR branches" `elem` path -> 16

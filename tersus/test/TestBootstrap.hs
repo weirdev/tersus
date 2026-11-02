@@ -12,12 +12,13 @@ import Cli (Command (..), makesIr)
 import MirData (writeProgram)
 import Pipeline (ownedSource)
 import Hash (fingerprint)
-import PreludeSource (boxSource, cloneSource, compilerSourceHash, emitterSource, eqSource, listsSource, preludeSource, stdlibSource, stringSource)
+import MirHousekeeping (emitterOwnedProgram)
+import PreludeSource (boxSource, cloneSource, compilerSourceHash, eqSource, listsSource, mirPackageFiles, preludeSource, stdlibSource, stringSource)
 import TestHarness
 import TestNative (clangAvailable)
 import Utils
 
--- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (examples/emit.tersus) is built from a seed, the IR of an emitter that is
+-- The compiler that compiles itself (step 31 of the roadmap and STEP31.md). The emitter in Tersus (examples/mir/emit/emit.tersus) is built from a seed, the IR of an emitter that is
 -- a GitHub release asset pinned by bootstrap/emitter.sha256 (see Bootstrap):
 -- - stage 0 is the seed built;
 -- - stage 1 is the emitter as it is now, made from the IR that stage 0 writes for it.
@@ -39,7 +40,7 @@ hashShape :: IO TestResult
 hashShape =
     pure $
         if all (\h -> length h == 16 && all isHexDigit h) [seedHash, emitterHash] && seedHash /= emitterHash
-            && emitterHash == fingerprint [seedHash, emitterSource, preludeSource, listsSource, stringSource, cloneSource, eqSource, boxSource, stdlibSource, compilerSourceHash]
+            && emitterHash == fingerprint ([seedHash] ++ concatMap (\(path, contents) -> [path, contents]) mirPackageFiles ++ [preludeSource, listsSource, stringSource, cloneSource, eqSource, boxSource, stdlibSource, compilerSourceHash])
             then Nothing
             else Just ("the hashes are " ++ show (seedHash, emitterHash))
 
@@ -102,7 +103,7 @@ bootstrap = do
                                 found -> Just (unlines (take 5 found))
   where
     -- Stage 0 and stage 1 write the same IR for the emitter, so the emitter built by stage 1 would be stage 1 again
-    sameEmitter zero one = case ownedSource emitterSource of
+    sameEmitter zero one = case emitterOwnedProgram of
         Error e -> pure ["the emitter: " ++ e]
         Ok owned -> do
             fromZero <- emitWith zero (writeProgram owned)
