@@ -2,6 +2,11 @@ Well typed implementation of ideas I wrote in black FB notebook.
 
 See [LANGUAGE.md](LANGUAGE.md) for the current syntax and language constructs.
 
+[AST_DATA.md](AST_DATA.md) describes the development-stage AST data bridge:
+checked Haskell readers/writers and a single-file Tersus typed AST reader/writer,
+including contracts, proofs, builtin metadata and elaborated occurrence types.
+It does not change the production frontend.
+
 ## Tests
 
 `stack test --test-arguments='-j 4'` runs up to four group processes, each
