@@ -9,13 +9,13 @@ import qualified Data.Map.Strict as Map
 
 import Mir
 import MirEval (MirValue (..), runProgram)
-import MirOwnership (insertOwnership, needsDrop)
+import MirOwnership (Role (..), insertOwnership, needsDrop, roles)
 import MirHousekeeping (verifyProgram)
 import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
-import Types (Name, Rel (..), Size (..), Type (..), Variable)
+import Types (Arg (..), Name, Rel (..), Size (..), Type (..), Variable)
 import TestHarness
 import Utils
 
@@ -801,6 +801,7 @@ mainProgram locals stmts =
                 , fnLocals = Map.fromList [(l, LocalDecl t Nothing) | (l, t) <- locals]
                 , fnBlocks = Map.singleton (BlockId 0) (BasicBlock stmts Return)
                 , fnSizeParams = []
+                , fnTypeParams = []
                 , fnBorrowed = []
             , fnMutBorrowed = []
             , fnFrom = []
@@ -825,6 +826,82 @@ windowTests =
     orElseT Nothing b = b
     orElseT a _ = a
 
+borrowedRootTests :: [Test]
+borrowedRootTests =
+    [ testCase "a borrow reads its owner and indexes" (testAssertTrue (roles (Borrow (Local 1) [RefIndex (Copy (Local 2))] False) == [(Copy (Local 1), Read), (Copy (Local 2), Read)]))
+    , testCase "a field stays in its owner through the reference's last use" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, TRef list), (Local 3, list), (Local 4, TInt), (Local 5, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 2) (Borrow (Local 1) [RefField "Holder" "xs"] False)
+                    , Assign (Local 3) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 4) (ListOp Length [Copy (Local 3)])
+                    , Assign (Local 5) (Deref (Copy (Local 2)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 5)])
+                    ] Return)
+                ]
+         in testAssertEq [() | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign _ (TakeField (Local 1) "Holder" "xs") <- stmts] []
+    , testCase "an owner is replaced after a reference call across blocks" $
+        let fn = own [(Local 1, list), (Local 2, TRef list), (Local 3, TInt)]
+                [ (BlockId 0, BasicBlock [Assign (Local 2) (Borrow (Local 1) [] False)] (Call (Const (CFn "noop")) [] (Local 3) (BlockId 1)))
+                , (BlockId 1, BasicBlock [] (Call (Const (CFn "dup")) [Copy (Local 2)] (Local 1) (BlockId 2)))
+                , (BlockId 2, BasicBlock [Assign (Local 0) (ListOp Length [Copy (Local 1)])] Return)
+                ]
+         in testAssertTrue (any (\block -> case blockTerminator block of Call (Const (CFn "dup")) _ dest _ -> dest /= Local 1; _ -> False) (Map.elems (fnBlocks fn)))
+    , testCase "reference reassignment releases the previous owner" $
+        let fn = own [(Local 1, list), (Local 2, list), (Local 3, TRef list), (Local 4, list), (Local 5, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 3) (Borrow (Local 1) [] False)
+                    , Assign (Local 3) (Borrow (Local 2) [] False)
+                    , Assign (Local 4) (Use (Copy (Local 1)))
+                    , Assign (Local 5) (Deref (Copy (Local 3)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 5)])
+                    ] Return)
+                ]
+         in testAssertTrue (any (\stmt -> case stmt of Assign (Local 4) (Use (Move (Local 1))) -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    , testCase "a reference through a non-reference view keeps the original field live" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, list), (Local 3, TRef list), (Local 4, list), (Local 5, TInt), (Local 6, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 2) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 3) (Borrow (Local 2) [] False)
+                    , Assign (Local 4) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 5) (ListOp Length [Copy (Local 4)])
+                    , Assign (Local 6) (Deref (Copy (Local 3)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 6)])
+                    ] Return)
+                ]
+         in testAssertEq [() | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign _ (TakeField (Local 1) "Holder" "xs") <- stmts] []
+    , testCase "a disjoint field may still be taken while a scalar field is borrowed" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, TRef TInt), (Local 3, list), (Local 4, TInt)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 2) (Borrow (Local 1) [RefField "Holder" "n"] False)
+                    , Assign (Local 3) (ReadField (Copy (Local 1)) "Holder" "xs")
+                    , Assign (Local 4) (Deref (Copy (Local 2)))
+                    , Assign (Local 0) (Use (Copy (Local 4)))
+                    ] Return)
+                ]
+         in testAssertTrue (any (\stmt -> case stmt of Assign (Local 3) (TakeField (Local 1) "Holder" "xs") -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    , testCase "a reborrow keeps the old owner after its parent reference is reassigned" $
+        let fn = own [(Local 1, list), (Local 2, list), (Local 3, TRef list), (Local 4, TRef list), (Local 5, list), (Local 6, list)]
+                [ (BlockId 0, BasicBlock
+                    [ Assign (Local 3) (Borrow (Local 1) [] False)
+                    , Assign (Local 4) (Borrow (Local 3) [] False)
+                    , Assign (Local 3) (Borrow (Local 2) [] False)
+                    , Assign (Local 5) (Use (Copy (Local 2)))
+                    , Assign (Local 6) (Deref (Copy (Local 4)))
+                    , Assign (Local 0) (ListOp Length [Copy (Local 6)])
+                    ] Return)
+                ]
+         in testAssertTrue (any (\stmt -> case stmt of Assign (Local 5) (Use (Move (Local 2))) -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    ]
+  where
+    list = TNamed "StdList" [ArgType TInt]
+    own locals blocks =
+        let stub = progMain (mainProgram [] [])
+            fn = stub{fnName = "loan", fnParams = [Local 1] ++ [Local 2 | lookup (Local 2) locals == Just list], fnReturns = Just TInt, fnLocals = Map.fromList ((Local 0, LocalDecl TInt Nothing) : [(l, LocalDecl ty Nothing) | (l, ty) <- locals]), fnBlocks = Map.fromList blocks}
+            dup = stub{fnName = "dup", fnParams = [Local 1], fnBorrowed = [Local 1], fnReturns = Just list, fnLocals = Map.fromList [(Local 0, LocalDecl list Nothing), (Local 1, LocalDecl list Nothing)], fnBlocks = Map.singleton (BlockId 0) (BasicBlock [Assign (Local 0) (CopyOf (Copy (Local 1)))] Return)}
+            program = (mainProgram [] []){progTypes = Map.fromList [("Holder", StructDecl [("xs", list), ("n", TInt)]), ("StdList<Int>", StructDecl [("addr", TAddr TInt), ("len", TInt), ("cap", TInt)])], progFunctions = Map.fromList [("loan", fn), ("dup", dup)]}
+         in progFunctions (insertOwnership program) Map.! "loan"
+
 -- The programs that have arrays are not run on the model of the heap, which holds the values of the heap (a program with arrays and
 -- nothing else is checked structurally by the plan tests)
 usesArrays :: String -> Bool
@@ -839,5 +916,6 @@ testOwnership =
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests
         , TestList "what a part may be read after" windowTests
+        , TestList "borrowed roots" borrowedRootTests
         , TestList "mistakes the model finds" mistakeTests
         ]
