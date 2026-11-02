@@ -4,6 +4,12 @@ module MirHousekeeping
     , validatedListLibrary
     , cachedEmitter
     , listLibrary
+    , emitterEntry
+    , mirVerifyEntry
+    , mirEraseEntry
+    , toolValidatedProgram
+    , toolOwnedProgram
+    , emitterOwnedProgram
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
@@ -27,12 +33,14 @@ import MirOwnership (expandRefWrites, insertOwnership)
 import MirValidate (validateProgram)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import Seed (cachedSeed, emitterHash)
-import PreludeSource (boxSource, emitterSource, listsSource, mirEraseSource, mirVerifySource)
+import Modules (LoadResult (..), loadFromEntry, resolverFromFiles)
+import PackageCompile (compileModulesValidated)
+import PreludeSource (boxSource, listsSource, mirPackageFiles)
 import Types (Type (..))
 import Utils
 
 -- The housekeeping of the MIR (REPLACING_HASKELL.md target 3) is done by the programs written in Tersus for
--- it: examples/mir_verify.tersus checks that a program is well formed, and examples/mir_erase.tersus takes
+-- it: examples/mir/mir_verify/mir_verify.tersus checks that a program is well formed, and examples/mir/mir_erase/mir_erase.tersus takes
 -- its ghosts out. This module is the host that runs them, as Bootstrap runs the emitter written in Tersus:
 -- each is built with clang from the seed when it is first needed and kept in the cache of the user, and a
 -- program is given to it as data (MirData) and read back from what it writes. Where an executable cannot be
@@ -49,14 +57,14 @@ import Utils
 
 -- Whether the program is a well formed MIR: the shape (every block a jump names is there, every local and
 -- function used is declared), and the types (every operation is applied to operands of the types it takes,
--- and gives the type of the local that receives it), as examples/mir_verify.tersus checks it over the data
+-- and gives the type of the local that receives it), as examples/mir/mir_verify/mir_verify.tersus checks it over the data
 -- of the program. The check of a specification that only the program itself holds (that a loop is at a
 -- block that is there, that a name of a specification stands for a declared local) is not in the data, and
 -- is the validator's (MirValidate), which runs after this in the pipeline.
 verifyProgram :: Program -> Result () String
 verifyProgram program = unsafePerformIO (verifyIO program)
 
--- The program with its permissions taken out (POINTERS.md): what examples/mir_erase.tersus writes for the
+-- The program with its permissions taken out (POINTERS.md): what examples/mir/mir_erase/mir_erase.tersus writes for the
 -- program as data before the erasure (MirData.writeProgramWithGhosts), read back, with the parts the data
 -- does not carry put back as the head of this module says. A Block::cast whose slots are not the same size
 -- is refused, with the eraser's reason.
@@ -165,28 +173,25 @@ nativeTools = do
         _ -> interpretedToolsOnce
 
 interpretedTools :: IO Tools
-interpretedTools = pure $ case (interpretedTool mirVerifySource, interpretedTool mirEraseSource) of
+interpretedTools = pure $ case (interpretedTool mirVerifyEntry, interpretedTool mirEraseEntry) of
     (Error e, _) -> Tools (ToolFailed e) (ToolFailed e)
     (_, Error e) -> Tools (ToolFailed e) (ToolFailed e)
     (Ok checker, Ok eraser) -> Tools (ToolInterpreted checker) (ToolInterpreted eraser)
 
-interpretedTool :: String -> Result Program String
-interpretedTool source =
-    lowerSource True source `bindResult` \program ->
-        stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
-            Ok program
+interpretedTool :: FilePath -> Result Program String
+interpretedTool = toolValidatedProgram
 
 -- An executable of a program written in Tersus, in the cache: made by the stage 1 emitter if it is not there
 cachedTool :: String -> String -> IO (Either String FilePath)
 cachedTool kind hash = do
-    made <- cachedProgram kind hash "the housekeeping written in Tersus" (\output -> buildTool output (if kind == "mir-verify" then mirVerifySource else mirEraseSource))
+    made <- cachedProgram kind hash "the housekeeping written in Tersus" (\output -> buildTool output (if kind == "mir-verify" then mirVerifyEntry else mirEraseEntry))
     pure $ case made of
         Error e -> Left e
         Ok exe -> Right exe
 
 -- Stage 1 (the emitter as it is now) in the cache, made from stage 0 in the cache as Bootstrap makes it, and under the
 -- same name, so the two hosts keep one emitter between them: the program it is made from is this module's own way of
--- making native code of a host program, which is the pipeline's with no erasure first (see ownedProgramOf)
+-- making native code of a host program, which is the pipeline's with no erasure first (see toolOwnedProgram)
 -- Making the emitter's list library needs the eraser; initialize the tools before taking the emitter lock.
 cachedEmitter :: IO (Result FilePath String)
 cachedEmitter = housekeepingTools >> cachedEmitterExe
@@ -197,7 +202,7 @@ cachedEmitterExe = cachedProgram "emitter" emitterHash "the emitter written in T
     case zero of
         Error e -> pure (Error e)
         Ok compiler -> do
-            owned <- pure (ownedProgramOf emitterSource)
+            owned <- pure emitterOwnedProgram
             case owned of
                 Error e -> pure (Error e)
                 Ok program -> do
@@ -206,13 +211,13 @@ cachedEmitterExe = cachedProgram "emitter" emitterHash "the emitter written in T
                         Error e -> pure (Error e)
                         Ok text -> buildExecutable output text
 
-buildTool :: FilePath -> String -> IO (Result () String)
-buildTool output source = do
+buildTool :: FilePath -> FilePath -> IO (Result () String)
+buildTool output entry = do
     emitter <- cachedEmitterExe
     case emitter of
         Error e -> pure (Error e)
         Ok exe -> do
-            owned <- pure (ownedProgramOf source)
+            owned <- pure (toolOwnedProgram entry)
             case owned of
                 Error e -> pure (Error e)
                 Ok program -> do
@@ -222,22 +227,44 @@ buildTool output source = do
                         Ok text -> buildExecutable output text
 
 mirVerifyHash :: String
-mirVerifyHash = fingerprint [emitterHash, mirVerifySource, runtimeSource]
+mirVerifyHash = fingerprint ([emitterHash] ++ concatMap (\(path, contents) -> [path, contents]) mirPackageFiles ++ [runtimeSource])
 
 mirEraseHash :: String
-mirEraseHash = fingerprint [emitterHash, mirEraseSource, runtimeSource]
+mirEraseHash = fingerprint ([emitterHash] ++ concatMap (\(path, contents) -> [path, contents]) mirPackageFiles ++ [runtimeSource])
 
--- The program that native code is made of, for a source the host compiles itself (the emitter, the checker,
--- the eraser): lowered and validated, with the lists of the library, ready for insertOwnership. It is not
--- erased first: the host's own programs hold no permission at runtime (their ghosts are the statements of
--- their proofs, which the executor and the data writer alike pass over), and erasing one to make the eraser
--- would need the eraser made already. The pipeline's ownedSource is this with the erasure of a user's
--- program and the refusals of one that runs natively, which do not apply here.
-ownedProgramOf :: String -> Result Program String
-ownedProgramOf source =
-    lowerSource True source `bindResult` \program ->
-        stage "Validation failed: " (validateProgram program) `bindResult` \_ ->
-            Ok (insertOwnership (lowerLists listLibrary (expandRefWrites program)))
+-- The entry files of the programs the host compiles itself, inside the mir package
+emitterEntry :: FilePath
+emitterEntry = "examples/mir/emit/emit.tersus"
+
+mirVerifyEntry :: FilePath
+mirVerifyEntry = "examples/mir/mir_verify/mir_verify.tersus"
+
+mirEraseEntry :: FilePath
+mirEraseEntry = "examples/mir/mir_erase/mir_erase.tersus"
+
+-- A program of the mir package compiled through the module pipeline from
+-- the embedded package files: linked and validated, as the single-file
+-- programs the host compiled itself were. It is not erased first: the
+-- host's own programs hold no permission at runtime (their ghosts are the
+-- statements of their proofs, which the executor and the data writer alike
+-- pass over), and erasing one to make the eraser would need the eraser made
+-- already.
+toolValidatedProgram :: FilePath -> Result Program String
+toolValidatedProgram entry = case loadFromEntry (resolverFromFiles mirPackageFiles) entry of
+    Left e -> Error e
+    Right (PackageResult pkg) -> compileModulesValidated pkg
+    Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in the mir package")
+
+-- The program that native code is made of, for a program of the mir package
+-- the host compiles itself (the emitter, the checker, the eraser): validated,
+-- with the lists of the library, ready for insertOwnership.
+toolOwnedProgram :: FilePath -> Result Program String
+toolOwnedProgram entry =
+    toolValidatedProgram entry `bindResult` \program ->
+        Ok (insertOwnership (lowerLists listLibrary (expandRefWrites program)))
+
+emitterOwnedProgram :: Result Program String
+emitterOwnedProgram = toolOwnedProgram emitterEntry
 
 -- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once, its
 -- ghosts erased with the eraser itself (it holds a permission, in a contract's ghost local)

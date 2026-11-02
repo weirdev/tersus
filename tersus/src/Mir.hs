@@ -201,7 +201,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 -- into an empty slot), AddrTake p i b (the value moved out of a slot), AddrDropValue p i b and AddrDropRange p i n b (the values of slots
 -- dropped where they are), AddrResize p n b (the slots moved to an allocation of n) and AddrFree p b (the allocation given back) are given
 -- the permission b too, which only the validator reads. The Block operations make a permission and are ghost: the validator has them, and
--- they are erased (by the ghost erasure, `examples/mir_erase.tersus`) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
+-- they are erased (by the ghost erasure, `examples/mir/mir_erase/mir_erase.tersus`) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
 -- and AddrDropRange, which give the permission after, give 0.
 data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | FromList | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
     | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree

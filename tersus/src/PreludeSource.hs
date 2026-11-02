@@ -9,9 +9,7 @@ module PreludeSource
     , stringSource
     , mapSource
     , setSource
-    , emitterSource
-    , mirVerifySource
-    , mirEraseSource
+    , mirPackageFiles
     , stdlibSource
     , compilerSourceHash
     , seedSha256
@@ -116,13 +114,23 @@ setSource =
         lift contents
      )
 
--- The text of examples/emit.tersus: the lowering to LLVM IR written in Tersus (see Bootstrap)
-emitterSource :: String
-emitterSource =
+-- The files of the mir package (examples/mir): the shared reader and the
+-- four programs that import it (the emitter, the MIR reader, the checker and
+-- the eraser), embedded so the host can compile any of them through the
+-- module pipeline (see MirHousekeeping) without reading the file system.
+mirPackageFiles :: [(FilePath, String)]
+mirPackageFiles =
     $( do
-        addDependentFile "examples/emit.tersus"
-        contents <- runIO (readFile "examples/emit.tersus")
-        lift contents
+        let paths =
+                [ "examples/mir/package.tersus"
+                , "examples/mir/reader/reader.tersus"
+                , "examples/mir/emit/emit.tersus"
+                , "examples/mir/mir_reader/mir_reader.tersus"
+                , "examples/mir/mir_verify/mir_verify.tersus"
+                , "examples/mir/mir_erase/mir_erase.tersus"
+                ]
+        files <- mapM (\path -> do addDependentFile path; contents <- runIO (readFile path); pure (path, contents)) paths
+        lift files
      )
 
 -- The SHA-256 pinned in bootstrap/emitter.sha256: the seed IR itself is a GitHub release asset (see Bootstrap), so only this digest is kept in the repository
@@ -132,22 +140,4 @@ seedSha256 =
         addDependentFile "bootstrap/emitter.sha256"
         contents <- runIO (readFile "bootstrap/emitter.sha256")
         lift (head (words contents))
-     )
-
--- The text of examples/mir_verify.tersus: the check of the MIR written in Tersus (see MirHousekeeping)
-mirVerifySource :: String
-mirVerifySource =
-    $( do
-        addDependentFile "examples/mir_verify.tersus"
-        contents <- runIO (readFile "examples/mir_verify.tersus")
-        lift contents
-     )
-
--- The text of examples/mir_erase.tersus: the erasure of the ghosts of a program, written in Tersus (see MirHousekeeping)
-mirEraseSource :: String
-mirEraseSource =
-    $( do
-        addDependentFile "examples/mir_erase.tersus"
-        contents <- runIO (readFile "examples/mir_erase.tersus")
-        lift contents
      )

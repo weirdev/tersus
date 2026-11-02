@@ -60,7 +60,7 @@ usage =
         , "  mir --data <file>"
         , "                Validate a program, then print the MIR that native code is made from as data (see MirData)"
         , "  mir --ghost-data <file>"
-        , "                Validate a program, then print its MIR before its ghosts are erased, as data for the eraser written in Tersus (examples/mir_erase.tersus)"
+        , "                Validate a program, then print its MIR before its ghosts are erased, as data for the eraser written in Tersus (examples/mir/mir_erase/mir_erase.tersus)"
         , "  owned <file>  Validate a program, then print its MIR with moves, copies and frees for native code"
         , "  llvm <file>   Validate a program, then print its LLVM IR"
         , "  assumptions <file>"
@@ -70,7 +70,7 @@ usage =
         , ""
         , "Use - as the file to read the program from standard input."
         , ""
-        , "llvm, build and run write the LLVM IR with the emitter that is written in Tersus (examples/emit.tersus; see Bootstrap), which is built with clang the"
+        , "llvm, build and run write the LLVM IR with the emitter that is written in Tersus (examples/mir/emit/emit.tersus; see Bootstrap), which is built with clang the"
         , "first time (from the bootstrap seed, a release asset pinned by bootstrap/emitter.sha256; $TERSUS_SEED_FILE overrides it) and kept in the cache."
         ]
 

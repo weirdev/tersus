@@ -1,23 +1,21 @@
-// The MIR as data, read and written by a program (step 31 of the roadmap, see STEP31.md). It reads what `tersus mir --data` prints (see MirData in MIR.md)
-// from the standard input into the types below, which are those of Mir.hs, and writes it again: the output is the input. It is the start of the lowering to LLVM IR
-// that is written in Tersus (the emitter reads the program in this form), and the first program of its size, so it is also a test of the validator.
+// The MIR as data: its types, tokenizer and parsers, shared by the programs
+// that read it. This is a declarations-only module of the mir package; the
+// programs that use it are in their own modules and import the names they
+// write from here.
 //
-//     tersus mir --data examples/hello.tersus | tersus run examples/mir_reader.tersus
+// A line is split into tokens (a word, or a name in quotes), and a parser
+// takes the tokens and the index of the one it starts at. It gives a
+// `Parsed<T>`: the value, the index after what it read, and whether it could
+// be read. There are no options or results in the language, so a parser that
+// fails gives a value of no meaning, the index at the end of the line and
+// `ok: false`, and the one that called it gives up in its turn.
 //
-// How it is written, which is how the rest of the emitter will be:
-// - A line is split into tokens (a word, or a name in quotes), and a parser takes the tokens and the index of the one it starts at. It gives a `Parsed<T>`:
-//   the value, the index after what it read, and whether it could be read. There are no options or results in the language, so a parser that fails gives a value
-//   of no meaning, the index at the end of the line and `ok: false`, and the one that called it gives up in its turn.
-// - A parser that reads at least one token needs an index that is in the line and gives one that is after it, which is also what makes the ones that call
-//   themselves end (`shrinks size(ts) - pos`). Those that read a number of things (a list of types) may read none.
-// - The MIR is a tree of enums, so a function that walks it calls itself on a part that is a Box, or on the elements of a list; those that go through lists are `~`
-//   (no guarantee that they end), since only a part of a struct or an enum is known to be smaller. Every index is proved to be in range all the same.
-// - The binary operations and the list operations are numbers, in the order of the tables `binaryWords` and `listWords`; they are words in the data.
-//
-// What it is made to read is the output of the writer: `tersus-mir 1`, the types, the functions and `main` (in that order), a record to a line, and a line
-// not longer than `lineLimit` bytes. An end of the input, or an empty line, is the end of the file.
+// `programAt` reads version 1 of the data, as `tersus mir --data` writes
+// it. `ghostProgramAt` reads version 2, as `tersus mir --ghost-data` writes
+// it: the same records with `ghost` and `dissolve` statements. The binary
+// and list operations are numbers in the order of `binaryWords` and
+// `listWords`; they are words in the data.
 
-// ---- the reader: the text up to the line 'end of the reader' is the same in examples/emit.tersus (a program is one file; TestMirEmit checks that it is) ----
 
 struct Token { quoted: Bool, text: String };
 
@@ -109,7 +107,7 @@ enum Rvalue {
 
 impl Clone for Rvalue { };
 
-enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, AssignRef { local: Int, steps: List<RefStep>, rv: Rvalue } };
+enum Statement { Assign { local: Int, rv: Rvalue }, Peek { local: Int, rv: Rvalue }, Drop { local: Int }, Ghost, Dissolve { local: Int }, AssignRef { local: Int, steps: List<RefStep>, rv: Rvalue } };
 
 impl Clone for Statement { };
 
@@ -879,7 +877,7 @@ fn noLine() -> Line [{ }] [{ }] {
     return Line::LTerminator { t: Terminator::Unreachable };
 };
 
-fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
+fn lineAt(ts: &List<Token>, pos: Int, ghosts: Bool) -> Parsed<Line> [{ affirm pos >= 0; affirm pos < size(ts); }] [{ affirm return.pos > pos; affirm return.pos <= size(ts); }] {
     bad = failed(noLine(), ts);
     w = wordAt(ts, pos);
     if !w.ok { return bad; };
@@ -887,6 +885,7 @@ fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm
     kw = w.value;
     if kw = "return" { return done(Line::LTerminator { t: Terminator::Return }, next); };
     if kw = "unreachable" { return done(Line::LTerminator { t: Terminator::Unreachable }, next); };
+    if ghosts && kw = "ghost" { return done(Line::LStatement { s: Statement::Ghost }, next); };
     if next >= size(ts) { return bad; };
     if kw = "assign" || kw = "peek" {
         l = intAt(ts, next);
@@ -911,6 +910,11 @@ fn lineAt(ts: &List<Token>, pos: Int) -> Parsed<Line> [{ affirm pos >= 0; affirm
         l = intAt(ts, next);
         if !l.ok { return bad; };
         return done(Line::LStatement { s: Statement::Drop { local: l.value } }, l.pos);
+    };
+    if ghosts && kw = "dissolve" {
+        l = intAt(ts, next);
+        if !l.ok { return bad; };
+        return done(Line::LStatement { s: Statement::Dissolve { local: l.value } }, l.pos);
     };
     if kw = "goto" {
         b = intAt(ts, next);
@@ -1105,7 +1109,7 @@ fn noBlock() -> MirBlock [{ }] [{ }] {
 };
 
 // The block that starts at the line li (`block B`): its statements and the terminator that ends it. The index in the result is the line after the terminator.
-fn blockAt(lines: &List<List<Token>>, li: Int) -> Parsed<MirBlock> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
+fn blockAt(lines: &List<List<Token>>, li: Int, ghosts: Bool) -> Parsed<MirBlock> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
     bad = Parsed<MirBlock> { value: noBlock(), pos: size(lines), ok: false };
     head = get(lines, li);
     if size(head) != 2 { return bad; };
@@ -1116,7 +1120,7 @@ fn blockAt(lines: &List<List<Token>>, li: Int) -> Parsed<MirBlock> [{ affirm li 
     while j < size(lines) [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
         ts = get(lines, j);
         if size(ts) = 0 { return bad; };
-        l = lineAt(ts, 0);
+        l = lineAt(ts, 0, ghosts);
         if !l.ok || l.pos != size(ts) { return bad; };
         match l.value {
             Line::LStatement { s: st } => {
@@ -1137,7 +1141,7 @@ fn functionKeyword(lines: &List<List<Token>>, li: Int) -> String [{ }] [{ }] {
 };
 
 // The function that starts at the line li, up to its `end` line. The index in the result is the line after that.
-fn functionAt(lines: &List<List<Token>>, li: Int) -> Parsed<Function> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
+fn functionAt(lines: &List<List<Token>>, li: Int, ghosts: Bool) -> Parsed<Function> [{ affirm li >= 0; affirm li < size(lines); }] [{ affirm return.pos > li; affirm return.pos <= size(lines); }] {
     bad = Parsed<Function> { value: noFunction(), pos: size(lines), ok: false };
     h = headerAt(get(lines, li));
     if !h.ok { return bad; };
@@ -1151,7 +1155,7 @@ fn functionAt(lines: &List<List<Token>>, li: Int) -> Parsed<Function> [{ affirm 
     };
     blocks = [];
     while j < size(lines) && functionKeyword(lines, j) = "block" [{ affirm j >= li + 1; affirm j <= size(lines); }] shrinks size(lines) - j {
-        b = blockAt(lines, j);
+        b = blockAt(lines, j, ghosts);
         if !b.ok { return bad; };
         blocks = push(blocks, b.value);
         j = b.pos;
@@ -1166,10 +1170,19 @@ fn noProgram() -> Program [{ }] [{ }] {
 
 // The program in the lines of a file: `tersus-mir 1`, the types, the functions and `main`
 fn programAt(lines: &List<List<Token>>) -> Parsed<Program> [{ }] [{ }] {
+    return programFor(lines, false, "1");
+};
+
+// The program before its ghosts are erased: `tersus-mir 2`, with the `ghost` and `dissolve` statements
+fn ghostProgramAt(lines: &List<List<Token>>) -> Parsed<Program> [{ }] [{ }] {
+    return programFor(lines, true, "2");
+};
+
+fn programFor(lines: &List<List<Token>>, ghosts: Bool, version: &String) -> Parsed<Program> [{ }] [{ }] {
     bad = Parsed<Program> { value: noProgram(), pos: size(lines), ok: false };
     if size(lines) < 1 { return bad; };
     first = get(lines, 0);
-    if size(first) != 2 || !isWord(first, 0, "tersus-mir") || !isWord(first, 1, "1") { return bad; };
+    if size(first) != 2 || !isWord(first, 0, "tersus-mir") || !isWord(first, 1, version) { return bad; };
     j = 1;
     types = [];
     while j < size(lines) && (functionKeyword(lines, j) = "struct" || functionKeyword(lines, j) = "enum") [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
@@ -1180,13 +1193,13 @@ fn programAt(lines: &List<List<Token>>) -> Parsed<Program> [{ }] [{ }] {
     };
     functions = [];
     while j < size(lines) && functionKeyword(lines, j) = "function" [{ affirm j >= 1; affirm j <= size(lines); }] shrinks size(lines) - j {
-        f = functionAt(lines, j);
+        f = functionAt(lines, j, ghosts);
         if !f.ok { return bad; };
         functions = push(functions, f.value);
         j = f.pos;
     };
     if j >= size(lines) || functionKeyword(lines, j) != "main" { return bad; };
-    m = functionAt(lines, j);
+    m = functionAt(lines, j, ghosts);
     if !m.ok || m.pos != size(lines) { return bad; };
     return done(Program { types: types, functions: functions, entry: m.value }, m.pos);
 };
@@ -1210,343 +1223,3 @@ fn readLines() -> Parsed<List<List<Token>>> [{ }] [{ }] {
     return done(lines, n);
 };
 
-// ---- end of the reader ----
-
-// Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
-
-fn hexDigit(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
-    if d < 10 { return toByte(48 + d); };
-    return toByte(55 + d);
-};
-
-fn printInt(n: Int) -> Int [{ }] [{ }] {
-    return " ".print() + String::fromInt(n).print();
-};
-
-fn printWord(w: &String) -> Int [{ }] [{ }] {
-    return " ".print() + w.print();
-};
-
-// A name in quotes: the bytes that are printable ASCII as they are, and the others, `"` and `\` as `\xHH`
-fn printName(name: &String) -> Int [{ }] [{ }] {
-    n = " \"".print();
-    for i in 0..size(name.bytes) {
-        c = toInt(get(name.bytes, i));
-        if c >= 32 && c < 127 && c != 34 && c != 92 {
-            writeByte(toByte(c));
-            n = n + 1;
-        } else {
-            writeByte(toByte(92));
-            writeByte(toByte(120));
-            writeByte(hexDigit(c / 16));
-            writeByte(hexDigit(c % 16));
-            n = n + 4;
-        };
-    };
-    writeByte(toByte(34));
-    return n + 1;
-};
-
-fn printNames(names: &List<String>) -> Int [{ }] [{ }] {
-    n = printInt(size(names));
-    for name in names {
-        n = n + printName(name);
-    };
-    return n;
-};
-
-fn printInts(ints: &List<Int>) -> Int [{ }] [{ }] {
-    n = printInt(size(ints));
-    for v in ints {
-        n = n + printInt(v);
-    };
-    return n;
-};
-
-fn newLine() -> Int [{ }] [{ }] {
-    writeByte(toByte(10));
-    return 1;
-};
-
-fn printSize(s: &Size) -> Int [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => " c".print() + printInt(n),
-        Size::SAny => " any".print(),
-        Size::SParam { name: name } => " p".print() + printName(name),
-        Size::SVar { n: n } => " v".print() + printInt(n),
-    };
-};
-
-fn printType(t: &Type) -> Int ~ {
-    n = 0;
-    match t {
-        Type::TInt => { n = " int".print(); },
-        Type::TByte => { n = " byte".print(); },
-        Type::TBool => { n = " bool".print(); },
-        Type::TList { elem: e } => { n = " list".print() + printType(Box::unbox(e)); },
-        Type::TArray { elem: e, size: s } => { n = " array".print() + printType(Box::unbox(e)) + printSize(s); },
-        Type::TBox { inner: e } => { n = " box".print() + printType(Box::unbox(e)); },
-        Type::TFn { args: args, ret: r } => {
-            n = " fn".print() + printInt(size(args));
-            i = 0;
-            while i < size(args) [{ affirm i >= 0; affirm i <= size(args); }] ~ {
-                n = n + printType(get(args, i));
-                i = i + 1;
-            };
-            n = n + printType(Box::unbox(r));
-        },
-        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
-            n = " named".print() + printName(base) + printInt(argc);
-            for tok in argTokens {
-                if tok.quoted {
-                    n = n + printName(tok.text);
-                } else {
-                    n = n + printWord(tok.text);
-                };
-            };
-        },
-        Type::TVariant { name: name } => { n = " variant".print() + printName(name); },
-        Type::TVar { n: v } => { n = " var".print() + printInt(v); },
-        Type::TForall { sizes: sizes, types: types, body: body } => {
-            n = " forall".print() + printNames(sizes) + printNames(types) + printType(Box::unbox(body));
-        },
-        Type::TParam { name: name } => { n = " param".print() + printName(name); },
-        Type::TRef { inner: e } => { n = " ref".print() + printType(Box::unbox(e)); },
-        Type::TMutRef { inner: e } => { n = " mutref".print() + printType(Box::unbox(e)); },
-        Type::TAddr { inner: e } => { n = " addr".print() + printType(Box::unbox(e)); },
-        Type::TBlock { inner: e } => { n = " block".print() + printType(Box::unbox(e)); },
-        Type::TUninit { inner: e } => { n = " uninit".print() + printType(Box::unbox(e)); },
-        Type::TWord { signed: signed, bits: bits } => {
-            w = " u32";
-            if signed && bits = 8 { w = " i8"; };
-            if signed && bits = 16 { w = " i16"; };
-            if signed && bits = 32 { w = " i32"; };
-            if !signed && bits = 16 { w = " u16"; };
-            n = w.print();
-        },
-    };
-    return n;
-};
-
-fn printConstant(c: &Constant) -> Int ~ {
-    n = 0;
-    match c {
-        Constant::CInt { n: v } => { n = " int".print() + printInt(v); },
-        Constant::CBool { b: b } => {
-            if b { n = " bool true".print(); } else { n = " bool false".print(); };
-        },
-        Constant::CList { items: items } => {
-            n = " list".print() + printInt(size(items));
-            i = 0;
-            while i < size(items) [{ affirm i >= 0; affirm i <= size(items); }] ~ {
-                n = n + printConstant(get(items, i));
-                i = i + 1;
-            };
-        },
-        Constant::CArray { items: items } => {
-            n = " array".print() + printInt(size(items));
-            i = 0;
-            while i < size(items) [{ affirm i >= 0; affirm i <= size(items); }] ~ {
-                n = n + printConstant(get(items, i));
-                i = i + 1;
-            };
-        },
-        Constant::CData { name: name, fields: fields, values: values } => {
-            n = " data".print() + printName(name) + printInt(size(fields));
-            i = 0;
-            while i < size(fields) && i < size(values) [{ affirm i >= 0; affirm i <= size(fields); affirm i <= size(values); }] ~ {
-                n = n + printName(get(fields, i)) + printConstant(get(values, i));
-                i = i + 1;
-            };
-        },
-        Constant::CFn { name: name } => { n = " fn".print() + printName(name); },
-    };
-    return n;
-};
-
-fn printOperand(o: &Operand) -> Int ~ {
-    return match o {
-        Operand::Copy { local: l } => " copy".print() + printInt(l),
-        Operand::Move { local: l } => " move".print() + printInt(l),
-        Operand::Const { value: c } => " const".print() + printConstant(c),
-    };
-};
-
-fn printOperands(os: &List<Operand>) -> Int ~ {
-    n = printInt(size(os));
-    i = 0;
-    while i < size(os) [{ affirm i >= 0; affirm i <= size(os); }] ~ {
-        n = n + printOperand(get(os, i));
-        i = i + 1;
-    };
-    return n;
-};
-
-fn printRefStep(step: &RefStep) -> Int ~ {
-    n = 0;
-    match step {
-        RefStep::Field { ctor: ctor, field: field } => { n = " field".print() + printName(ctor) + printName(field); },
-        RefStep::Index { o: o } => { n = " index".print() + printOperand(o); },
-    };
-    return n;
-};
-
-fn printRvalue(rv: &Rvalue) -> Int ~ {
-    n = 0;
-    match rv {
-        Rvalue::Use { o: o } => { n = " use".print() + printOperand(o); },
-        Rvalue::BinaryOp { op: op, a: a, b: b } => {
-            n = " binary".print() + printWord(wordOf(binaryWords(), op)) + printOperand(a) + printOperand(b);
-        },
-        Rvalue::ListOp { op: op, args: args } => {
-            n = " listop".print() + printWord(wordOf(listWords(), op)) + printOperands(args);
-        },
-        Rvalue::MakeList { items: items } => { n = " makelist".print() + printOperands(items); },
-        Rvalue::MakeBox { o: o } => { n = " makebox".print() + printOperand(o); },
-        Rvalue::Unbox { o: o } => { n = " unbox".print() + printOperand(o); },
-        Rvalue::Unsize { o: o } => { n = " unsize".print() + printOperand(o); },
-        Rvalue::MakeData { name: name, fields: fields, values: values } => {
-            n = " makedata".print() + printName(name) + printInt(size(fields));
-            i = 0;
-            while i < size(fields) && i < size(values) [{ affirm i >= 0; affirm i <= size(fields); affirm i <= size(values); }] ~ {
-                n = n + printName(get(fields, i)) + printOperand(get(values, i));
-                i = i + 1;
-            };
-        },
-        Rvalue::ReadField { o: o, name: name, field: field } => {
-            n = " readfield".print() + printOperand(o) + printName(name) + printName(field);
-        },
-        Rvalue::IsVariant { o: o, name: name } => { n = " isvariant".print() + printOperand(o) + printName(name); },
-        Rvalue::AsVariant { o: o, name: name } => { n = " asvariant".print() + printOperand(o) + printName(name); },
-        Rvalue::Copy { o: o } => { n = " clone".print() + printOperand(o); },
-        Rvalue::TakeField { local: l, name: name, field: field } => {
-            n = " takefield".print() + printInt(l) + printName(name) + printName(field);
-        },
-        Rvalue::Borrow { root: root, steps: steps, mutable: mutable } => {
-            kw = " borrow";
-            if mutable { kw = " borrowmut"; };
-            n = kw.print() + printInt(root) + printInt(size(steps));
-            i = 0;
-            while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
-                n = n + printRefStep(get(steps, i));
-                i = i + 1;
-            };
-        },
-        Rvalue::Deref { o: o } => { n = " deref".print() + printOperand(o); },
-    };
-    return n;
-};
-
-fn printStatement(st: &Statement) -> Int ~ {
-    n = 0;
-    match st {
-        Statement::Assign { local: l, rv: rv } => { n = "assign".print() + printInt(l) + printRvalue(rv); },
-        Statement::Peek { local: l, rv: rv } => { n = "peek".print() + printInt(l) + printRvalue(rv); },
-        Statement::Drop { local: l } => { n = "drop".print() + printInt(l); },
-        Statement::AssignRef { local: l, steps: steps, rv: rv } => {
-            n = "assignref".print() + printInt(l) + printInt(size(steps));
-            i = 0;
-            while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
-                n = n + printRefStep(get(steps, i));
-                i = i + 1;
-            };
-            n = n + printRvalue(rv);
-        },
-    };
-    return n + newLine();
-};
-
-fn printTerminator(t: &Terminator) -> Int ~ {
-    n = 0;
-    match t {
-        Terminator::Goto { block: b } => { n = "goto".print() + printInt(b); },
-        Terminator::Switch { cond: c, yes: yes, no: no } => { n = "switch".print() + printOperand(c) + printInt(yes) + printInt(no); },
-        Terminator::Call { callee: callee, args: args, dest: dest, next: after } => {
-            n = "call".print() + printOperand(callee) + printOperands(args) + printInt(dest) + printInt(after);
-        },
-        Terminator::Return => { n = "return".print(); },
-        Terminator::Unreachable => { n = "unreachable".print(); },
-    };
-    return n + newLine();
-};
-
-fn printBlock(b: &MirBlock) -> Int ~ {
-    n = "block".print() + printInt(b.id) + newLine();
-    i = 0;
-    while i < size(b.stmts) [{ affirm i >= 0; affirm i <= size(b.stmts); }] ~ {
-        n = n + printStatement(get(b.stmts, i));
-        i = i + 1;
-    };
-    return n + printTerminator(b.term);
-};
-
-fn printLocal(d: &LocalDecl) -> Int ~ {
-    n = "local".print() + printInt(d.id);
-    if d.named { n = n + " some".print() + printName(d.name); } else { n = n + " none".print(); };
-    return n + printType(d.ty) + newLine();
-};
-
-fn printFunction(kind: &String, f: &Function) -> Int ~ {
-    n = kind.print() + printName(f.name) + " params".print() + printInts(f.params) + " returns".print();
-    if f.hasReturn { n = n + " some".print() + printType(f.returns); } else { n = n + " none".print(); };
-    n = n + " sizeparams".print() + printNames(f.sizeParams) + " typeparams".print() + printNames(f.typeParams) + " borrowed".print() + printInts(f.borrowed);
-    if size(f.mutBorrowed) + size(f.from) > 0 { n = n + " mutborrowed".print() + printInts(f.mutBorrowed) + " from".print() + printInts(f.from); };
-    n = n + newLine();
-    i = 0;
-    while i < size(f.locals) [{ affirm i >= 0; affirm i <= size(f.locals); }] ~ {
-        n = n + printLocal(get(f.locals, i));
-        i = i + 1;
-    };
-    j = 0;
-    while j < size(f.blocks) [{ affirm j >= 0; affirm j <= size(f.blocks); }] ~ {
-        n = n + printBlock(get(f.blocks, j));
-        j = j + 1;
-    };
-    return n + "end".print() + newLine();
-};
-
-fn printFields(fields: &List<Field>) -> Int ~ {
-    n = printInt(size(fields));
-    for f in fields {
-        n = n + printName(f.name) + printType(f.ty);
-    };
-    return n;
-};
-
-fn printDecl(d: &TypeDecl) -> Int ~ {
-    n = 0;
-    match d {
-        TypeDecl::DStruct { name: name, fields: fields } => { n = "struct".print() + printName(name) + printFields(fields); },
-        TypeDecl::DEnum { name: name, variants: variants } => {
-            n = "enum".print() + printName(name) + printInt(size(variants));
-            for v in variants {
-                n = n + printName(v.name) + printFields(v.fields);
-            };
-        },
-    };
-    return n + newLine();
-};
-
-fn printProgram(p: &Program) -> Int ~ {
-    n = "tersus-mir 1".print() + newLine();
-    for d in p.types {
-        n = n + printDecl(d);
-    };
-    for f in p.functions {
-        n = n + printFunction("function", f);
-    };
-    return n + printFunction("main", p.entry);
-};
-
-// The program is read from the standard input and written again. What cannot be read is reported on the standard error.
-read = readLines();
-if !read.ok {
-    "the input is not the MIR as data: a bad name\n".printError();
-    return 1;
-};
-program = programAt(read.value);
-if !program.ok {
-    "the input is not the MIR as data\n".printError();
-    return 1;
-};
-printProgram(program.value);
