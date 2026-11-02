@@ -142,6 +142,41 @@ known is recorded as the constant it evaluates to (arithmetic,
 engine's constant values did, and loop invariants are inferred from
 what the entry state proves, in the families the reference infers.
 
+Addresses, permissions and uninitialised slots are modeled in the
+bridge: each `Addr`, `Block` and `Uninit` operation is an application
+with the contract `StdLib` gives it (what it needs is checked, what it
+promises is assumed), a write or an emptied slot is a `set` on the
+block's ghost arrays, whose size is the block's capacity, and an
+operation that makes a new address or permission is tagged so two are
+never one term. A `forall` that cannot be stated as one of the
+checker's range facts is checked but not assumed, and what a checked
+`forall` assumed of its index is forgotten after it: assuming the
+guards of an instance that cannot exist made every later goal pass.
+An `extern fn` is assumed at its calls to keep its contract, the
+narrowing conversions give a value in their type's range, and a loop
+test of several parts joined by `&&` (a call among them) or `||` is
+checked as written; after `||` the body knows only what every test
+gives, as LANGUAGE.md says. The solver canonicalises terms before
+linear arithmetic and splits a get of a written list on the written
+index. With that the pointer and connective tests pass.
+
+`String::fromInt` is still too slow to check: the literal it returns
+for the least integer puts twenty element facts in the entry context of
+the whole function, and every goal at its loops works over them. Every
+program that mentions `String` checks the whole library, so this blocks
+the string tests and the string cases of `TestEq`. Ordering the
+integer constants as a chain instead of pair by pair removes most of
+the cost of a long literal, but it changes one verdict of
+`testInferredInvariants` and is not in yet.
+
+Open soundness bug, older than the pointer work: a `for` loop whose
+body sets an element of a literal list, in a function that requires
+its bound to be positive, leaves a contradictory context after the
+loop (`affirm 1 = 2` validates after `for i in 0..n { out = set(out,
+0, 7); }` with `affirm n > 0` required); the same loop written with
+`while` is refused as it should be. `testInferredInvariants` 18 fails
+from it, and 16 fails to prove a get through a pushing loop.
+
 ### 2. Write the standard library as Tersus text (deletes `StdLib`, 839 lines)
 
 `StdLib.hs` defines the builtins in Haskell; its own TODO says to write
