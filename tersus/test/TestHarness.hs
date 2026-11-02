@@ -1,3 +1,5 @@
+{-# LANGUAGE CPP #-}
+
 module TestHarness
     ( TestResult
     , Test (..)
@@ -25,6 +27,7 @@ module TestHarness
     , encodeProgram
     , decodeProgram
     , sharedProgramCacheFile
+    , openEntryLockFile
     ) where
 
 import qualified Control.Exception as Exception
@@ -43,6 +46,7 @@ import System.FilePath ((</>))
 import System.IO (SeekMode (AbsoluteSeek), hClose, hPutStr, openTempFile)
 import System.IO.Unsafe (unsafePerformIO)
 import System.Posix.IO (FileLock, LockRequest (WriteLock), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
+import System.Posix.Types (Fd)
 
 import Hash (fingerprint)
 import Mir (Program)
@@ -327,6 +331,21 @@ writeEntryAtomically dir file text = do
     hClose handle
     renameFile staging file
 
+-- The one place the unix openFd version difference lives: unix before 2.8 takes the creation
+-- mode as its own argument, and from 2.8 on it is the creat field of the flags. Without the
+-- Cabal version macros (a direct ghc build of the tests on the older toolchain) the older
+-- call is used.
+openEntryLockFile :: FilePath -> IO Fd
+#ifdef MIN_VERSION_unix
+# if MIN_VERSION_unix(2,8,0)
+openEntryLockFile path = openFd path WriteOnly defaultFileFlags{creat = Just 0o644}
+# else
+openEntryLockFile path = openFd path WriteOnly (Just 0o644) defaultFileFlags
+# endif
+#else
+openEntryLockFile path = openFd path WriteOnly (Just 0o644) defaultFileFlags
+#endif
+
 -- One process compiles an entry while the others wait in the kernel for its lock: a file
 -- lock on the entry's lock file, held from before the entry is re-read until after it is
 -- written, and released by closing the descriptor -- by the bracket below, or by the kernel
@@ -342,7 +361,7 @@ withKernelLock file produce = do
   where
     acquireUse = bracket acquire closeFd (\_ -> produce)
     acquire = do
-        fd <- openFd (file ++ ".lock") WriteOnly (Just 0o644) defaultFileFlags
+        fd <- openEntryLockFile (file ++ ".lock")
         waitToSetLock fd lockRequest `onException` closeFd fd
         pure fd
     lockRequest :: FileLock

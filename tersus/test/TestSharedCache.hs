@@ -10,7 +10,7 @@ import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv,
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (SeekMode (AbsoluteSeek))
-import System.Posix.IO (LockRequest (WriteLock), OpenMode (WriteOnly), closeFd, defaultFileFlags, openFd, waitToSetLock)
+import System.Posix.IO (LockRequest (WriteLock), closeFd, waitToSetLock)
 import System.Process (CreateProcess (..), ProcessHandle, createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
@@ -53,7 +53,7 @@ probe = do
     hold <- lookupEnv "TERSUS_SHARED_CACHE_PROBE_HOLD"
     case hold of
         Just lockPath -> do
-            fd <- openFd lockPath WriteOnly (Just 0o644) defaultFileFlags
+            fd <- openEntryLockFile lockPath
             waitToSetLock fd (WriteLock, AbsoluteSeek, 0, 0)
             marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
             case marker of
