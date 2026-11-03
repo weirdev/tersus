@@ -81,12 +81,13 @@ data ImportEnv = ImportEnv
     , ieDrops :: Set.Set Name
     , ieRefResults :: Map Name ([Variable], [Variable])
     , ieTemplates :: Map Name Template
+    , ieCompanions :: Map Name [Name]
     , iePredeclareOwn :: Bool
     }
     deriving (Show, Eq)
 
 emptyImportEnv :: ImportEnv
-emptyImportEnv = ImportEnv Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty Map.empty Map.empty False
+emptyImportEnv = ImportEnv Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty Map.empty Map.empty Map.empty Set.empty Set.empty Map.empty Map.empty Map.empty False
 
 elaborateWith :: ImportEnv -> [Statement] -> Result (Elaborated, TcState) String
 elaborateWith env stmts =
@@ -115,6 +116,7 @@ seededTcState env =
         , tcDrops = Set.union (ieDrops env) (tcDrops initialTcState)
         , tcRefResults = Map.union (ieRefResults env) (tcRefResults initialTcState)
         , tcTemplates = Map.union (ieTemplates env) (tcTemplates initialTcState)
+        , tcCompanions = Map.unionWith (++) (ieCompanions env) (tcCompanions initialTcState)
         }
 
 checkProgram :: [Statement] -> TC ([Statement], [Type])

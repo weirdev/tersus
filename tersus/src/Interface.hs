@@ -18,7 +18,7 @@ import Modules (ModuleId (..), renderModuleId)
 import Syntax
 import Types
 import TypeCheck (ImportEnv (..), emptyImportEnv)
-import TypeCheckCore (TcState (..), Template, functionType)
+import TypeCheckCore (TcState (..), Template, functionType, isRefType)
 import Utils (Result (..))
 
 data InterfaceFunction = InterfaceFunction
@@ -51,6 +51,7 @@ data ModuleInterface = ModuleInterface
     , ifProofs :: [Statement]
     , ifExterns :: Set.Set Name
     , ifTemplates :: Map.Map Name Template
+    , ifCompanions :: Map.Map Name [Name]
     }
     deriving (Show, Eq)
 
@@ -86,14 +87,19 @@ extractInterfaceWith inModule isLib modu original elaborated state
                 { ifModule = modu
                 , ifTypes = Map.union (Map.fromList [(name, [name]) | StructDef name _ _ _ <- elaborated]) (Map.fromList [(name, map fst variants) | EnumDef name variants <- elaborated])
                 , ifCtors =
-                    Map.fromList ([(name, (name, fields)) | StructDef name params fields _ <- elaborated, null params] ++ [(variant, (name, fields)) | EnumDef name variants <- elaborated, (variant, fields) <- variants])
-                , ifGenerics = Map.fromList [(name, (params, fields)) | StructDef name params fields _ <- elaborated, not (null params)]
-                , ifInvariants = Map.fromList [(name, invariant) | StructDef name _ _ invariant <- elaborated]
+                    Map.union
+                        (Map.fromList ([(name, (name, fields)) | StructDef name params fields _ <- elaborated, null params] ++ [(variant, (name, fields)) | EnumDef name variants <- elaborated, (variant, fields) <- variants]))
+                        ( if isLib
+                            then Map.fromList [(inst, (inst, fields)) | (name, (params, fields)) <- Map.toList genericStructs, let inst = instanceName name [if isTypeName param then ArgType (TParam param) else ArgSize (SizeParam param) | param <- params]]
+                            else Map.empty
+                        )
+                , ifGenerics = genericStructs
+                , ifInvariants = Map.fromList [(name, invariant) | StructDef name _ _ invariant <- elaborated, not (null invariant)]
                 , ifTraits = Map.fromList [(name, functions) | TraitDef name _ functions <- original]
                 , ifTraitParams = Map.fromList [(name, params) | TraitDef name params _ <- original]
                 , ifFunctions = Map.fromList [(name, interfaceFunction params ins outs signature termination exported) | Assign name (Val (VFunct params ins outs (NativeFunct signature termination _) exported)) <- elaborated, name `Set.member` declaredFunctions]
                 , ifImpls = Set.filter implVisible (tcImpls state)
-                , ifAssoc = Map.filterWithKey (\(owner, _) _ -> inModule owner) (tcAssoc state)
+                , ifAssoc = Map.filterWithKey (\(owner, _) origins -> if isLib then baseNameOf owner `Set.member` ownNames || any (`Set.member` ownNames) [trait | Just trait <- origins] else inModule owner) (tcAssoc state)
                 , ifImplArgs = Map.filterWithKey (\(trait, ty) _ -> implVisible (trait, ty)) (tcImplArgs state)
                 , ifImplBounds = Map.filterWithKey (\(trait, ty) _ -> implVisible (trait, ty)) (tcImplBounds state)
                 , ifCopies = Set.union (Set.fromList [name | CopyDef name <- elaborated]) (Set.fromList [ty | ("Copy", ty) <- Set.toList (tcImpls state), if isLib then implHere ("Copy", ty) else inModule ty])
@@ -106,9 +112,14 @@ extractInterfaceWith inModule isLib modu original elaborated state
                     if isLib
                         then Map.filterWithKey (\name _ -> templateHere name) (tcTemplates state)
                         else Map.filterWithKey (\name _ -> name `elem` boundedNames) (tcTemplates state)
+                , ifCompanions =
+                    if isLib
+                        then Map.filterWithKey (\name _ -> templateHere name) (tcCompanions state)
+                        else Map.filterWithKey (\name _ -> name `elem` boundedNames) (tcCompanions state)
                 }
   where
     boundedNames = [name | BoundedDef _ (Assign name _) <- original]
+    genericStructs = Map.fromList [(name, (params, fields)) | StructDef name params fields _ <- elaborated, not (null params)]
     ownNames = Set.fromList (concatMap declaredTypeOrTrait original)
     declaredTypeOrTrait stmt = case stmt of
         StructDef name _ _ _ -> [name]
@@ -167,13 +178,26 @@ interfaceImportEnv iface =
         , ieLinear = ifLinear iface
         , ieDrops = ifDrops iface
         , ieTemplates = ifTemplates iface
+        , ieCompanions = ifCompanions iface
         , ieRefResults =
-            Map.fromList
-                [ (name, (fnParams fn, froms))
-                | (name, fn) <- Map.toList (ifFunctions iface)
-                , let Signature _ _ _ _ _ froms = fnSignature fn
-                , not (null froms)
-                ]
+            Map.union
+                ( Map.fromList
+                    [ (trait ++ "::" ++ traitFnName fn, (traitFnParams fn, froms))
+                    | (trait, functions) <- Map.toList (ifTraits iface)
+                    , fn <- functions
+                    , let Signature params result _ _ _ fromNames = traitFnSignature fn
+                    , let froms = if not (null fromNames) then fromNames else case [param | (param, ty) <- zip (traitFnParams fn) params, isRefType ty] of [only] -> [only]; _ -> []
+                    , not (null froms)
+                    , isRefType result
+                    ]
+                )
+                ( Map.fromList
+                    [ (name, (fnParams fn, froms))
+                    | (name, fn) <- Map.toList (ifFunctions iface)
+                    , let Signature _ _ _ _ _ froms = fnSignature fn
+                    , not (null froms)
+                    ]
+                )
         }
   where
     functionOf fn = let Signature ptys rty sizes types _ _ = fnSignature fn in functionType sizes types ptys rty
@@ -201,5 +225,6 @@ mergeInterfacesImportEnv ifaces = foldr merge emptyImportEnv ifaces
                 , ieDrops = Set.union (ieDrops addition) (ieDrops env)
                 , ieRefResults = Map.union (ieRefResults addition) (ieRefResults env)
                 , ieTemplates = Map.union (ieTemplates addition) (ieTemplates env)
+                , ieCompanions = Map.unionWith (++) (ieCompanions addition) (ieCompanions env)
                 , iePredeclareOwn = iePredeclareOwn env
                 }
