@@ -8055,8 +8055,10 @@ fn fileTypeAt(ts: &List<Token>, pos: Int) -> Parsed<Type> [{ affirm pos >= 0; af
         c = fileCountAt(ts, s.pos);
         if !c.ok { return bad; };
         if c.value = 1 && (s.value = "List" || s.value = "Box") {
+            if c.pos >= size(ts) { return bad; };
             kind = fileWordAt(ts, c.pos);
             if kind.ok && kind.value = "type" {
+                if kind.pos >= size(ts) { return bad; };
                 element = fileTypeAt(ts, kind.pos);
                 if !element.ok { return bad; };
                 if s.value = "List" { return fileDone(Type::TList { elem: Box::new(element.value) }, element.pos); };
