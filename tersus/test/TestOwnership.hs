@@ -12,6 +12,7 @@ import MirEval (MirValue (..), runProgram)
 import MirOwnership (Role (..), insertOwnership, needsDrop, operandLocal, roles)
 import MirHousekeeping (verifyProgram)
 import MirLower (lowerProgram)
+import Modules (LoadResult (..), loadFromFilesystem)
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)
@@ -755,10 +756,28 @@ sameOnModel what program =
 
 -- A program lowered and run on the model, with the answer of the executor, as source
 onSource :: String -> String -> TestResult
-onSource name source =
-    case compileSource source of
+onSource name source = onProgram name (compileSource source)
+
+onProgram :: String -> Result Program String -> TestResult
+onProgram name compiled =
+    case compiled of
         Error e -> Just (name ++ " does not compile: " ++ e)
         Ok program -> sameOnModel name program
+
+onFile :: FilePath -> IO TestResult
+onFile path = do
+    loaded <- loadFromFilesystem path
+    case loaded of
+        Right (PackageResult _) -> do
+            source <- readFile path
+            if usesArrays source
+                then pure Nothing
+                else do
+                    compiled <- programFromFile path
+                    pure (onProgram path compiled)
+        _ -> do
+            source <- readFile path
+            pure (if usesArrays source then Nothing else onSource path source)
 
 -- The same for a program that is lowered without being validated
 onLowered :: String -> String -> TestResult
@@ -1025,7 +1044,7 @@ testOwnership :: Test
 testOwnership =
     TestList
         "testOwnership"
-        [ TestList "examples" [TestCase path (readFile path >>= \source -> pure (if usesArrays source then Nothing else onSource path source)) | path <- nativeExamples]
+        [ TestList "examples" [TestCase path (onFile path) | path <- nativeExamples]
         , TestList "programs" [TestCase name (pure (onSource name source)) | (name, source) <- validatedPrograms]
         , TestList "without validation" [TestCase name (pure (onLowered name source)) | (name, source) <- unvalidatedPrograms]
         , TestList "the plan" planTests

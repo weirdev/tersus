@@ -6,6 +6,7 @@ import qualified Data.Map.Strict as Map
 
 import Cli (Command (..), runSource)
 import Mir
+import Modules (LoadResult (..), loadFromFilesystem)
 import MirData
 import Pipeline (ownedSource)
 import Types (Arg (..), Type (..))
@@ -19,7 +20,7 @@ testMirData :: Test
 testMirData =
     TestList
         "testMirData"
-        [ TestParallel "examples" [TestCase path (readFile path >>= roundTripsAndIr) | path <- nativeExamples]
+        [ TestParallel "examples" [TestCase path (roundTripsAndIrForPath path) | path <- nativeExamples]
         , TestParallel "programs" [TestCase name (roundTripsAndIr source) | (name, source) <- validatedPrograms]
         , TestList
             "format"
@@ -70,10 +71,23 @@ testMirData =
 -- The data of a program reads back as the same program, and is written the same way again. That the data the emitter is
 -- given and the data of the program read back from it make the same IR is checked with the emitter itself in TestMirEmit.
 -- The data comes from the harness's shared cache (mirDataOf): the groups between them compile these programs once.
+roundTripsAndIrForPath :: FilePath -> IO TestResult
+roundTripsAndIrForPath path = do
+    loaded <- loadFromFilesystem path
+    case loaded of
+        Right (PackageResult _) -> do
+            dataOf <- mirDataFromFile path
+            pure (roundTripResult dataOf)
+        _ -> readFile path >>= roundTripsAndIr
+
 roundTripsAndIr :: String -> IO TestResult
 roundTripsAndIr source = do
     dataOf <- mirDataOf source
-    pure $ case dataOf of
+    pure (roundTripResult dataOf)
+
+roundTripResult :: Result String String -> TestResult
+roundTripResult dataOf =
+    case dataOf of
         Error e -> Just ("does not compile: " ++ e)
         Ok text -> case readProgram text of
             Error e -> Just ("cannot be read back: " ++ e)
