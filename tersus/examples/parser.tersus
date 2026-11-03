@@ -1432,6 +1432,38 @@ fn containsText(s: &String, needle: &String) -> Bool ~ {
     return false;
 };
 
+fn splitPath(name: &String) -> List<String> ~ {
+    out = [];
+    start = 0;
+    i = 0;
+    while i + 1 < size(name.bytes) [{ affirm i >= 0; affirm start >= 0; }] ~ {
+        if get(name.bytes, i) = toByte(58) && get(name.bytes, i + 1) = toByte(58) { out = push(out, strSlice(name, start, i)); i = i + 2; start = i; } else { i = i + 1; };
+    };
+    out = push(out, strSlice(name, start, size(name.bytes)));
+    return out;
+};
+
+fn joinFrom(segs: &List<String>, i: Int) -> String [{ affirm i >= 0; }] [{ }] ~ {
+    out = "";
+    j = i;
+    while j < size(segs) [{ affirm j >= i; }] ~ { if j > i { out = catStrings(out, "::"); }; out = catStrings(out, clone(get(segs, j))); j = j + 1; };
+    return out;
+};
+
+fn isSuffixPath(short: &String, long: &String) -> Bool ~ {
+    ss = splitPath(short);
+    ls = splitPath(long);
+    if size(ss) > size(ls) { return false; };
+    off = size(ls) - size(ss);
+    i = 0;
+    while i < size(ss) ~ { if get(ss, i) != get(ls, off + i) { return false; }; i = i + 1; };
+    return true;
+};
+
+fn samePath(a: &String, b: &String) -> Bool ~ {
+    return a = b || isSuffixPath(a, b) || isSuffixPath(b, a);
+};
+
 // ---- declaration lookups ----
 
 fn findCtor(st: &St, name: &String) -> List<String> ~ {
@@ -1442,6 +1474,35 @@ fn findCtor(st: &St, name: &String) -> List<String> ~ {
 fn hasCtor(st: &St, name: &String) -> Bool ~ {
     for c in st.ctors { if c.name = name { return true; }; };
     return false;
+};
+
+fn matchedCtorName(st: &St, name: &String) -> String ~ {
+    segs = splitPath(name);
+    i = 0;
+    while i < size(segs) ~ {
+        cand = joinFrom(segs, i);
+        if hasCtor(st, cand) { return cand; };
+        i = i + 1;
+    };
+    return "";
+};
+
+fn findCtorPath(st: &St, name: &String) -> List<String> ~ {
+    m = matchedCtorName(st, name);
+    if size(m.bytes) = 0 { return []; };
+    return findCtor(st, m);
+};
+
+fn genericsForPath(st: &St, name: &String) -> List<String> ~ {
+    segs = splitPath(name);
+    i = 0;
+    while i < size(segs) ~ {
+        cand = joinFrom(segs, i);
+        ps = findGenerics(st, cand);
+        if size(ps) > 0 { return ps; };
+        i = i + 1;
+    };
+    return [];
 };
 
 fn findFields(st: &St, name: &String) -> List<FieldInfo> ~ {
@@ -1517,24 +1578,70 @@ fn deleteCtor(st: St, name: &String) -> St ~ {
     return s;
 };
 
+fn removeGenerics(st: St, name: &String) -> St ~ {
+    s = st;
+    out = [];
+    for c in s.generics { if c.name != name { out = push(out, clone(c)); }; };
+    s = St { generics: out, ..s };
+    return s;
+};
+
+fn removeTypeInfo(st: St, name: &String) -> St ~ {
+    s = st;
+    out = [];
+    for c in s.types { if c.name != name { out = push(out, clone(c)); }; };
+    s = St { types: out, ..s };
+    return s;
+};
+
+fn typeVariantsNamed(st: &St, name: &String) -> List<String> ~ {
+    for c in st.types { if c.name = name { return clone(c.variants); }; };
+    return [];
+};
+
+fn shadowCtors(st: St, name: &String) -> St ~ {
+    s = deleteCtor(st, name);
+    for v in typeVariantsNamed(s, name) { s = deleteCtor(s, v); };
+    return s;
+};
+
 fn resolveSelfName(st: &St, name: &String) -> String ~ {
     if name = "Self" && st.hasSelf { return clone(st.selfName); };
     return clone(name);
 };
 
-fn qualifiedName(st: St) -> Res<String> ~ {
+fn namePathOf(st: St) -> Res<List<String>> ~ {
     v = parseVariable(st);
-    if !v.ok { return v; };
+    if !v.ok { return Res<List<String>> { st: v.st, v: [], ok: false }; };
+    first = v.v;
     s = v.st;
-    if peekIs(s, "::") {
-        s = St { pos: s.pos + 2, ..s };
-        w = parseVariable(s);
-        if !w.ok { return w; };
-        owner = resolveSelfName(w.st, v.v);
-        base = baseNameOf(owner);
-        return ok(w.st, cat3(base, "::", w.v));
+    return namePathRest(s, push([], first));
+};
+
+fn namePathRest(st: St, segs: List<String>) -> Res<List<String>> ~ {
+    s = st;
+    if !peekIs(s, "::") { return ok(s, segs); };
+    s = St { pos: s.pos + 2, ..s };
+    w = parseVariable(s);
+    if !w.ok { return Res<List<String>> { st: w.st, v: [], ok: false }; };
+    next = w.v;
+    s2 = w.st;
+    return namePathRest(s2, push(segs, next));
+};
+
+fn qualifiedName(st: St) -> Res<String> ~ {
+    p = namePathOf(st);
+    if !p.ok { return Res<String> { st: p.st, v: "", ok: false }; };
+    s = p.st;
+    first = "";
+    out = "";
+    i = 0;
+    for seg in p.v {
+        if i = 0 { first = clone(seg); out = baseNameOf(resolveSelfName(s, seg)); } else { out = cat3(out, "::", seg); };
+        i = i + 1;
     };
-    return ok(s, resolveSelfName(s, v.v));
+    if size(p.v) = 1 { return ok(s, resolveSelfName(s, first)); };
+    return ok(s, out);
 };
 
 // ---- values ----
@@ -1951,6 +2058,29 @@ fn namedType(st: St) -> Res<Type> ~ {
     };
     name = resolveSelfName(s, raw);
     s2 = s;
+    // a path of several segments is a variant when it has two and a generic named type otherwise
+    extraSegs = [];
+    s3 = clone(s2);
+    segLoop = true;
+    while segLoop ~ {
+        if peekIs(s3, "::") {
+            saveSeg = clone(s3);
+            s3 = St { pos: s3.pos + 2, ..s3 };
+            w = parseVariable(s3);
+            if w.ok { extraSegs = push(extraSegs, w.v); s3 = w.st; } else { s3 = saveSeg; segLoop = false; };
+        } else { segLoop = false; };
+    };
+    if size(extraSegs) > 0 {
+        full = clone(name);
+        for seg in extraSegs { full = cat3(full, "::", seg); };
+        pparams = genericsForPath(s3, full);
+        if size(pparams) > 0 && hasGenericArguments(s3, pparams) {
+            g = genericArguments(skipWs(clone(s3)), pparams);
+            if g.ok { return ok(g.st, namedTypeOf(full, g.v)); };
+        };
+        if size(extraSegs) = 1 { return ok(s3, Type::TVariant { name: full }); };
+        return ok(s3, namedTypeOf(full, []));
+    };
     if containsName(s2.typeParams, name) { return ok(s2, Type::TParam { name: clone(name) }); };
     if name = "Int" { return ok(s2, Type::TInt); };
     if name = "Byte" { return ok(s2, Type::TByte); };
@@ -2222,7 +2352,7 @@ fn exprMultiplicative(st: St) -> Res<Int> ~ {
 fn declaredCtorNode(st: St) -> Res<String> ~ {
     q = qualifiedName(st);
     if !q.ok { return q; };
-    if !hasCtor(q.st, q.v) { return fail(q.st, "", cat3("Unknown struct or variant ", q.v, "")); };
+    if size(matchedCtorName(q.st, q.v).bytes) = 0 { return fail(q.st, "", cat3("Unknown struct or variant ", q.v, "")); };
     return q;
 };
 
@@ -2373,16 +2503,16 @@ fn qualifiedCallExpr(st: St) -> Res<Int> ~ {
     s = st;
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(s);
-    v = parseVariable(s);
+    v = qualifiedName(s);
     if !v.ok { return Res<Int> { st: v.st, v: 0, ok: false }; };
-    owner = baseNameOf(resolveSelfName(v.st, v.v));
+    owner = baseNameOf(v.v);
     s = skipWs(v.st);
     trt = "";
     hasTrait = false;
     k = eatKeyword(s, "as");
     if k.v {
         s = skipWs(k.st);
-        w = parseVariable(s);
+        w = qualifiedName(s);
         if !w.ok { return Res<Int> { st: w.st, v: 0, ok: false }; };
         trt = w.v;
         hasTrait = true;
@@ -2625,12 +2755,13 @@ fn litHead(st: St) -> Res<LitOut> ~ {
     if !q.ok { return Res<LitOut> { st: q.st, v: LitOut { name: "", ctorArgs: [], declared: [], isVariant: false }, ok: false }; };
     s = q.st;
     base = q.v;
-    declared = findCtor(s, base);
-    if !hasCtor(s, base) { return fail(s, LitOut { name: "", ctorArgs: [], declared: [], isVariant: false }, "not a struct or variant"); };
-    isVar = containsText(base, "::");
+    matched = matchedCtorName(s, base);
+    declared = findCtor(s, matched);
+    if size(matched.bytes) = 0 { return fail(s, LitOut { name: "", ctorArgs: [], declared: [], isVariant: false }, "not a struct or variant"); };
+    isVar = containsText(matched, "::");
     ctorArgs = [];
     candidate = clone(base);
-    params = findGenerics(s, base);
+    params = findGenerics(s, matched);
     if size(params) > 0 && !isVar {
         if hasGenericArguments(s, params) {
             g = genericArguments(skipWs(clone(s)), params);
@@ -2638,9 +2769,7 @@ fn litHead(st: St) -> Res<LitOut> ~ {
             s = g.st;
             ctorArgs = g.v;
             candidate = instanceNameOf(base, ctorArgs);
-            declared = findCtor(s, candidate);
-            // a candidate instance is not itself declared; Haskell keeps the base's fields
-            declared = findCtor(s, base);
+            // a candidate instance is not itself declared; Haskell keeps the matched name's fields
         };
     };
     if size(declared) = 0 && containsText(candidate, "::") {
@@ -4326,8 +4455,15 @@ fn curlyBlock(st: St) -> Res<List<Int>> ~ {
     return ok(s, inner.v);
 };
 
+fn atImportKeyword(st: &St) -> Bool ~ {
+    if !peekIs(st, "import") { return false; };
+    after = byteAt(st, st.pos + 6);
+    return after = 32 || after = 9 || after = 10 || after = 13;
+};
+
 fn statements(st: St) -> Res<List<Int>> ~ {
     s = skipWs(st);
+    if atImportKeyword(s) { return fail(s, [], "import statements must come before any declaration in a file"); };
     ma = tryMatchAssign(s);
     if ma.ok { return ma; };
     return statementsAfterMatch(ma.st);
@@ -5056,7 +5192,7 @@ fn matchArmBlock(st: St) -> Res<Arm> ~ {
         s = St { pos: s.pos + 1, ..s };
         s = skipWs(s);
     };
-    declared = findCtor(s, dc.v);
+    declared = findCtorPath(s, dc.v);
     for f in fields { if !containsName(declared, f) { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, cat3(cat3("Variant ", dc.v, " has no field "), f, "")); }; };
     if hasDupStrings(fields) { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, cat3("Pattern ", dc.v, " repeats a field")); };
     if !peekIs(s, "=>") { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, "expected =>"); };
@@ -5090,18 +5226,32 @@ fn matchStatement(st: St) -> Res<List<Int>> ~ {
 fn desugarMatch(st: St, scrutinee: Int, arms: &List<Arm>) -> Res<List<Int>> ~ {
     if size(arms) = 0 { return fail(st, [], "A match needs at least one arm"); };
     first = clone(get(arms, 0).name);
-    found = findTypeVariants(st, first);
-    if size(found) = 0 { return fail(st, [], cat3("Unknown variant ", first, "")); };
-    typeName = clone(get(found, 0));
+    typeName = "";
     variants = [];
-    i = 1;
-    while i < size(found) ~ { variants = push(variants, clone(get(found, i))); i = i + 1; };
+    bestLen = 0 - 1;
+    for c in st.types {
+        for v in c.variants {
+            if samePath(first, v) {
+                vl = size(splitPath(v));
+                if vl >= bestLen { bestLen = vl; typeName = clone(c.name); variants = clone(c.variants); };
+            };
+        };
+    };
+    if size(typeName.bytes) = 0 { return fail(st, [], cat3("Unknown variant ", first, "")); };
     names = [];
     for a in arms { names = push(names, clone(a.name)); };
-    for n in names { if !containsName(variants, n) { return fail(st, [], cat3(cat3("A match over ", typeName, " has an arm of another type"), "", "")); }; };
+    for n in names {
+        covered = false;
+        for v in variants { if samePath(n, v) { covered = true; }; };
+        if !covered { return fail(st, [], cat3(cat3("A match over ", typeName, " has an arm of another type"), "", "")); };
+    };
     if hasDupStrings(names) { return fail(st, [], cat3("A match over ", typeName, " repeats a variant")); };
     missing = [];
-    for v in variants { if !containsName(names, v) { missing = push(missing, clone(v)); }; };
+    for v in variants {
+        covered = false;
+        for n in names { if samePath(v, n) { covered = true; }; };
+        if !covered { missing = push(missing, clone(v)); };
+    };
     if size(missing) > 0 {
         joined = "";
         j = 0;
@@ -5284,7 +5434,7 @@ fn matchArmExpr(st: St) -> Res<Arm> ~ {
         s = St { pos: s.pos + 1, ..s };
         s = skipWs(s);
     };
-    declared = findCtor(s, dc.v);
+    declared = findCtorPath(s, dc.v);
     for f in fields { if !containsName(declared, f) { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, cat3(cat3("Variant ", dc.v, " has no field "), f, "")); }; };
     if hasDupStrings(fields) { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, cat3("Pattern ", dc.v, " repeats a field")); };
     if !peekIs(s, "=>") { return fail(s, Arm { name: "", fields: [], vars: [], body: [] }, "expected =>"); };
@@ -5681,7 +5831,7 @@ fn tryStructAssign(st: St) -> Res<List<Int>> ~ {
     q = qualifiedName(s);
     if !q.ok { return Res<List<Int>> { st: save, v: [], ok: false }; };
     if !hasCtor(q.st, q.v) { return Res<List<Int>> { st: save, v: [], ok: false }; };
-    declared = findCtor(q.st, q.v);
+    declared = findCtorPath(q.st, q.v);
     name = q.v;
     s = skipWs(q.st);
     if byteAt(s, s.pos) != 123 { return Res<List<Int>> { st: save, v: [], ok: false }; };
@@ -5796,7 +5946,7 @@ fn structStatement(st: St) -> Res<Int> ~ {
     tps = [];
     for p in params { if isTypeParamName(p) { tps = push(tps, clone(p)); }; };
     s = St { typeParams: tps, ..s };
-    if size(params) > 0 { s = setGenerics(s, name, params); };
+    if size(params) > 0 { s = setGenerics(s, name, params); } else { s = removeGenerics(s, name); };
     if byteAt(s, s.pos) != 123 { return fail(s, 0, "expected {"); };
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(s);
@@ -5831,6 +5981,7 @@ fn structStatement(st: St) -> Res<Int> ~ {
     s = St { typeParams: outerParams, ..s };
     if hasDupStrings(fieldNames) { return fail(s, 0, cat3("Struct ", name, " repeats a field")); };
     if isBuiltinTypeName(name) { return fail(s, 0, cat3(name, " is a builtin type and cannot be a struct name", "")); };
+    s = shadowCtors(s, name);
     s = setCtor(s, clone(name), clone(fieldNames));
     s = setTypeInfo(s, clone(name), push([], clone(name)));
     finfos = [];
@@ -5970,6 +6121,8 @@ fn enumStatement(st: St) -> Res<Int> ~ {
     if name = "Int" || name = "Bool" || name = "List" || name = "Array" || name = "Box" || name = "Self" { return fail(s, 0, cat3(name, " is a builtin type and cannot be an enum name", "")); };
     if size(variantNames) = 0 { return fail(s, 0, cat3("Enum ", name, " has no variants")); };
     if hasDupStrings(variantNames) { return fail(s, 0, cat3("Enum ", name, " repeats a variant")); };
+    s = shadowCtors(s, name);
+    s = removeGenerics(s, name);
     s = setTypeInfo(s, name, variantNames);
     nn = putName(s, name);
     if !nn.ok { return nn; };
@@ -6028,7 +6181,9 @@ fn traitStatement(st: St) -> Res<Int> ~ {
     for p in params { if !isTypeParamName(p) { return fail(s, 0, cat3(cat3("trait ", name, " has a size parameter: a trait has types only"), "", "")); }; };
     outerParams = s.typeParams;
     s = St { typeParams: clone(params), ..s };
-    if size(params) > 0 { s = setGenerics(s, name, params); };
+    s = shadowCtors(s, name);
+    s = removeTypeInfo(s, name);
+    if size(params) > 0 { s = setGenerics(s, name, params); } else { s = removeGenerics(s, name); };
     if byteAt(s, s.pos) != 123 { return fail(s, 0, "expected {"); };
     s = St { pos: s.pos + 1, ..s };
     s = skipWs(s);
@@ -6139,7 +6294,7 @@ fn oneGenericParam(st: St) -> Res<GenParam> ~ {
         s = skipWs(s);
         loop = true;
         while loop ~ {
-            t = parseVariable(s);
+            t = qualifiedName(s);
             if !t.ok { return Res<GenParam> { st: t.st, v: empty, ok: false }; };
             s = skipWs(t.st);
             args = [];
@@ -6351,7 +6506,7 @@ fn implStatement(st: St) -> Res<Int> ~ {
     tpsOnly = [];
     for n in implParams { if isTypeParamName(n) { tpsOnly = push(tpsOnly, clone(n)); }; };
     s = St { typeParams: tpsOnly, ..s };
-    first = parseVariable(s);
+    first = qualifiedName(s);
     if !first.ok { return Res<Int> { st: first.st, v: 0, ok: false }; };
     s = skipWs(first.st);
     firstArgs = [];
@@ -6371,7 +6526,7 @@ fn implStatement(st: St) -> Res<Int> ~ {
     fk = eatKeyword(s, "for");
     if fk.v {
         s = skipWs(fk.st);
-        t = parseVariable(s);
+        t = qualifiedName(s);
         if !t.ok { return Res<Int> { st: t.st, v: 0, ok: false }; };
         trt = first.v;
         hasTrait = true;
@@ -6431,7 +6586,7 @@ fn implStatement(st: St) -> Res<Int> ~ {
     } else { s = fk.st; };
     s = St { typeParams: outerParams, ..s };
     isBuiltinType = typeName = "List" || typeName = "Box" || typeName = "Array" || typeName = "Int" || typeName = "Byte" || typeName = "Bool";
-    if !isBuiltinType && !hasTypeNamed(s, typeName) { return fail(s, 0, cat3(cat3("impl for ", typeName, ", which is not a struct or enum declared before"), "", "")); };
+    if !isBuiltinType && !containsText(typeName, "::") && !hasTypeNamed(s, typeName) { return fail(s, 0, cat3(cat3("impl for ", typeName, ", which is not a struct or enum declared before"), "", "")); };
     // trait parameter checks
     if hasTrait {
         tp3 = findGenerics(s, trt);
@@ -7323,6 +7478,82 @@ fn remapNode(node: AstNode, map: &List<Int>) -> AstNode ~ {
     return result;
 };
 
+fn hasTextPrefix(text: &String, prefix: &String) -> Bool ~ {
+    if size(prefix.bytes) > size(text.bytes) { return false; };
+    i = 0;
+    while i < size(prefix.bytes) ~ { if get(text.bytes, i) != get(prefix.bytes, i) { return false; }; i = i + 1; };
+    return true;
+};
+
+fn joinComma(xs: &List<String>) -> String ~ {
+    out = "";
+    i = 0;
+    for x in xs { if i > 0 { out = catStrings(out, ", "); }; out = catStrings(out, x); i = i + 1; };
+    return out;
+};
+
+// The import declarations at the head of the file segment (Parse.fileParser): their paths,
+// rendered. A file with imports is parsed whole, and only then refused as not linked.
+fn fileHead(st: St) -> Res<List<String>> ~ {
+    s = skipWs(st);
+    out = [];
+    loop = true;
+    while loop ~ {
+        if atImportKeyword(s) {
+            s = St { pos: s.pos + 6, ..s };
+            s = skipWs(s);
+            p = namePathOf(s);
+            if !p.ok { return Res<List<String>> { st: p.st, v: [], ok: false }; };
+            rendered = joinFrom(p.v, 0);
+            s = skipWs(p.st);
+            k = eatKeyword(s, "as");
+            if k.v {
+                s = skipWs(k.st);
+                a = parseVariable(s);
+                if !a.ok { return Res<List<String>> { st: a.st, v: [], ok: false }; };
+                s = skipWs(a.st);
+            } else { s = k.st; };
+            if byteAt(s, s.pos) = 123 {
+                s = St { pos: s.pos + 1, ..s };
+                s = skipWs(s);
+                if byteAt(s, s.pos) = 125 { return fail(s, out, "an import name list must not be empty"); };
+                namesLoop = true;
+                while namesLoop ~ {
+                    w = parseVariable(s);
+                    if !w.ok { return Res<List<String>> { st: w.st, v: [], ok: false }; };
+                    s = skipWs(w.st);
+                    if byteAt(s, s.pos) = 44 { s = St { pos: s.pos + 1, ..s }; s = skipWs(s); } else { namesLoop = false; };
+                };
+                if byteAt(s, s.pos) != 125 { return fail(s, out, "expected }"); };
+                s = St { pos: s.pos + 1, ..s };
+                s = skipWs(s);
+            };
+            if byteAt(s, s.pos) != 59 { return fail(s, out, "expected ;"); };
+            s = St { pos: s.pos + 1, ..s };
+            s = skipWs(s);
+            out = push(out, rendered);
+        } else { loop = false; };
+    };
+    return ok(s, out);
+};
+
+// One segment of the file the pipeline reads: the last segment is a file, with its import
+// declarations; the libraries in front of it are statement blocks
+fn parseSegment(state: St, isFile: Bool) -> Res<List<Int>> ~ {
+    if !isFile { return statementBlock(state); };
+    head = fileHead(state);
+    if !head.ok { return Res<List<Int>> { st: head.st, v: [], ok: false }; };
+    body = statementBlock(head.st);
+    if !body.ok { return body; };
+    bv = body.v;
+    bs = body.st;
+    if size(head.v) > 0 {
+        s2 = skipWs(clone(bs));
+        if atEnd(s2) { return fail(bs, [], catStrings("imports are not linked yet: ", joinComma(head.v))); };
+    };
+    return Res<List<Int>> { st: bs, v: bv, ok: true };
+};
+
 // ---- driver ----
 
 fn parseNonNegative(text: &String) -> Int ~ {
@@ -7396,7 +7627,7 @@ while si < segmentCount && !parseFailed ~ {
             state = St { pos: 0, ..state };
             state = St { locate: locatingFlag = 1 && si = segmentCount - 1, ..state };
             state = St { err: "", ..state };
-            parsed = statementBlock(state);
+            parsed = parseSegment(state, si = segmentCount - 1);
             if !parsed.ok {
                 parseFailed = true;
                 failMessage = parsed.st.err;
@@ -7422,6 +7653,11 @@ while si < segmentCount && !parseFailed ~ {
     si = si + 1;
 };
 if parseFailed {
+    if hasTextPrefix(failMessage, "imports are not linked yet: ") {
+        msg = catStrings(clone(failMessage), "\n");
+        msg.printError();
+        return 1;
+    };
     lc = lineCol(failSource, failPos);
     msg = cat3(cat3("line ", String::fromInt(get(lc, 0)), ":"), String::fromInt(get(lc, 1)), ": ");
     msg = catStrings(catStrings(msg, failMessage), "\n");

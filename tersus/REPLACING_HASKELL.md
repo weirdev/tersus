@@ -192,6 +192,16 @@ corpus and generated snippets. The elaborator is not done: `Parse` and
 parser's own (verdicts match, and the one parser-rejected fixture names
 the same reason).
 
+Under the module system the pipeline reads a program twice, and the tool
+does both readings: a probe with the prelude, string, map and set library
+declarations (from which `Compile.librariesFor` chooses the program's
+libraries), then the chosen libraries and the program, located. The Tersus
+parser also reads the module syntax the single-file path reads: a name path
+of any length, constructors matched by suffix, generic arguments on a type
+path, and `import` declarations at a file's head, which it parses whole and
+refuses with `imports are not linked yet: ...` in the pipeline's own words;
+linking imports is the module pipeline's work, not this parser's.
+
 ### 7. The host glue, and a bootstrap with no GHC (deletes `Cli`, `Pipeline`, `Bootstrap`, `PreludeSource`, `LlvmRuntime`, `Native`, `Hash`, `Utils`, `Pretty`, `app/Main.hs`; ~1,600 lines)
 
 The endgame: a Tersus `main` that reads files and arguments (the

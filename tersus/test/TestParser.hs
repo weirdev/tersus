@@ -40,9 +40,10 @@ haskellData = writeData . haskellParsed
 haskellPlainData :: String -> Either String String
 haskellPlainData = writeData . haskellPlainParsed
 
--- The same program as the pipeline parses it: the libraries in front, then the source, located
+-- The same program as the pipeline parses it: the probe, the libraries it chooses, then the
+-- source located, all through the tool
 tersusData :: String -> IO (Either String String)
-tersusData source = TersusParser.runParserTool True (Compile.librarySourcesFor source ++ [source])
+tersusData = TersusParser.toolParseSource
 
 -- The source alone, unlocated, through the interpreted tool: the shape of the generated snippets
 tersusPlain :: String -> IO (Either String String)
@@ -55,12 +56,11 @@ compareWith haskell tool source = do
     pure $ case (haskell source, tersus) of
         (Right expected, Right actual) -> testAssertEq actual expected
         (Left message, Left tersusMessage) ->
-            if knownRejection source message
-                then
-                    if knownSubstring `isInfixOf` tersusMessage
-                        then Nothing
-                        else Just ("the Tersus parser's message does not name the reason: " ++ take 200 tersusMessage)
-                else Nothing
+            case [s | s <- knownSubstrings, s `isInfixOf` message] of
+                [] -> Nothing
+                s : _
+                    | s `isInfixOf` tersusMessage -> Nothing
+                    | otherwise -> Just ("the Tersus parser's message does not name the reason: " ++ take 200 tersusMessage)
         (Right _, Left e) -> Just ("the Tersus parser refused what Haskell accepts: " ++ take 200 e)
         (Left e, Right _) -> Just ("the Tersus parser accepted what Haskell refuses: " ++ take 200 e)
 
@@ -70,8 +70,11 @@ compareSource = compareWith haskellData
 knownSubstring :: String
 knownSubstring = "The body of a for loop cannot assign its loop variable"
 
-knownRejection :: String -> String -> Bool
-knownRejection _ message = knownSubstring `isInfixOf` message
+knownSubstrings :: [String]
+knownSubstrings =
+    [ knownSubstring
+    , "import statements must come before any declaration in a file"
+    ]
 
 corpusPaths :: IO [FilePath]
 corpusPaths = do
@@ -155,6 +158,16 @@ snippets =
     , ("cast and is", "enum E { A { x: Int }, B }; e = E::A { x: 1 }; if e is E::A { return (e as E::A).x; }; return 0;")
     , ("function value type", "fn apply(f: fn(Int) -> Int, x: Int) -> Int { return f(x); }; return 0;")
     , ("qualified impl call", "struct S { x: Int }; impl S { fn get(self: &Self) -> Int [{ }] [{ }] { return self.x; }; }; s = S { x: 1 }; return <S>::get(s);")
+    , ("misplaced import", "x = 1; import geo; return x;")
+    , ("path literal by suffix", "struct Point { x: Int }; p = geo::Point { x: 1 }; return p.x;")
+    , ("two segment type is a variant", "fn f(x: geo::Point) -> Int [{ }] [{ }] { return 1; }; return 0;")
+    , ("three segment type is named", "fn f(x: a::b::Point) -> Int [{ }] [{ }] { return 1; }; return 0;")
+    , ("generic arguments on a path", "struct Vec<T> { x: T }; fn f(v: geo::Vec<Int>) -> Int [{ }] [{ }] { return 1; }; return 0;")
+    , ("match arms written with a path", "enum Shape { Circle { r: Int }, Dot }; s = Shape::Circle { r: 3 }; x = 0; match s { geo::Shape::Circle { r: r } => { x = r; }, geo::Shape::Dot => { x = 1; }, }; return x;")
+    , ("bound written with a path", "trait Seq { fn size(self: &Self) -> Int [{ }] [{ }]; }; fn g<S: geo::Seq>(x: S) -> Int [{ }] [{ }] { return 0; }; return 0;")
+    , ("qualified call with a path", "struct S { x: Int }; impl S { fn get(self: &Self) -> Int [{ }] [{ }] { return self.x; }; }; s = S { x: 1 }; return <geo::S>::get(s);")
+    , ("enum shadowed by an enum", "enum E { A, B }; enum E { C }; e = E::C; return 0;")
+    , ("struct shadowed by a struct", "struct S { x: Int }; struct S { y: Int }; s = S { y: 2 }; return s.y;")
     ]
 
 snippetParity :: IO TestResult
@@ -181,7 +194,20 @@ locatedSnippets =
     , ("trait and impl", "trait T { fn get(self: &Self) -> Int [{ }] [{ }]; }; struct S { x: Int }; impl T for S { fn get(self: &Self) -> Int [{ }] [{ }] { return self.x; }; }; return 0;")
     , ("standard Eq impl", "struct S { x: Int }; impl Eq for S { }; return 0;")
     , ("proof statements", "affirm 1 < 2 && 2 < 3; define p = 1; rewrite evalAll; return 0;")
+    , ("import is not linked", "import geo; return 0;")
+    , ("imports with alias and names are not linked", "import geo::shapes as G { Circle }; import units; return 0;")
+    , ("empty import name list", "import geo { }; return 0;")
     ]
+
+-- A file with imports is parsed whole and then refused as the Haskell reading refuses it, in
+-- the same words (Compile.parseSourceParts), not by falling back to the Haskell parser
+importsVerdict :: IO TestResult
+importsVerdict = do
+    tersus <- TersusParser.toolParseSource "import geo; import geo::Point as P { x }; return 0;"
+    pure $ firstFailure
+        [ testAssertEq tersus (Left "imports are not linked yet: geo, geo::Point")
+        , testAssertEq (haskellData "import geo; import geo::Point as P { x }; return 0;") (Left "imports are not linked yet: geo, geo::Point")
+        ]
 
 writerIdentity :: IO TestResult
 writerIdentity = do
@@ -212,6 +238,7 @@ firstFailure (e : _) = e
 testParser :: Test
 testParser = TestList "testParser"
     [ TestCase "writer identity with ast_reader" writerIdentity
+    , TestCase "imports are not linked yet" importsVerdict
     , TestCase "generated snippet parity" snippetParity
     , TestCase "small corpus parity (interpreted or native tool)" smallParity
     , TestCase "whole corpus parity" corpusParity
