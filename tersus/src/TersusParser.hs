@@ -33,7 +33,7 @@ import MirValidate (validateProgram)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import PreludeSource (parserSource)
 import Seed (emitterHash)
-import Syntax (Expression (..), Statement (..), Value (..))
+import Syntax (Statement)
 import Utils
 
 -- Compile and the default Modules loader remain the one-way bootstrap/oracle path.
@@ -86,7 +86,7 @@ sourcePartsWith readSourceFile reserving source = do
                         Left e -> Error (stageParseError e)
                         Right (Oracle.ParsedFile imports body, _)
                             | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (Oracle.renderPath . Oracle.importPath) imports))
-                            | reserving, Just name <- reservedName body -> Error (reservedError name)
+                            | reserving, Just name <- Compile.reservedName body -> Error (Compile.reservedError name)
                             | otherwise -> Ok (names, library, body)
   where
     stageParseError e | toolFailure e = e
@@ -128,23 +128,6 @@ toolParseSource source = do
         Ok (_, library, body) -> case A.writeParsed (library ++ body) of
             Error e -> Left (failure e)
             Ok text -> Right text
-
-reservedName :: [Statement] -> Maybe String
-reservedName statements = case [name | statement <- statements, name <- declared statement, reserved name] of
-    name : _ -> Just name
-    [] -> Nothing
-  where
-    declared statement = case statement of
-        Assign name (Val VFunct{}) -> [name]
-        StructDef name _ _ _ -> [name]
-        EnumDef name _ -> [name]
-        TraitDef name _ _ -> [name]
-        BoundedDef _ (Assign name _) -> [name]
-        _ -> []
-    reserved name = name `elem` ["StdList", "StdBox"] || "stdList" `isPrefixOf` name || "stdBox" `isPrefixOf` name
-
-reservedError :: String -> String
-reservedError name = "Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, and a Box of the struct StdBox and the functions stdBox... of lib/box.tersus, so a program does not declare names like them"
 
 -- The parsed-AST stream protocol remains useful for exact stdout tests and the tiny
 -- interpreted smoke set; the file protocol transports imports and declaration seeds.
