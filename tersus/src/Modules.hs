@@ -20,8 +20,11 @@ module Modules
     , LoadedModule (..)
     , LoadedPackage (..)
     , LoadResult (..)
+    , FileParser
     , loadFromEntry
+    , loadFromEntryWith
     , loadFromFilesystem
+    , loadFromFilesystemWith
     , findPackageRootIO
     ) where
 
@@ -33,7 +36,8 @@ import qualified Data.Set as Set
 import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 
-import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, parseFileWith, parseStatementBlockWith, renderPath)
+import qualified Parse
+import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, parseStatementBlockWith, renderPath)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
 import Syntax
 import Types hiding (baseNameOf)
@@ -459,8 +463,16 @@ data PModule = PModule
     , pmFiles :: [PFile]
     }
 
+type FileParser = Decls -> String -> Either String (ParsedFile, Decls)
+
+haskellFileParser :: FileParser
+haskellFileParser decls source = case Parse.parseFileWith decls source of
+    Left err -> Left (show err)
+    Right parsed -> Right parsed
+
 data LState = LState
-    { lsLayouts :: Map.Map String Layout
+    { lsFileParser :: FileParser
+    , lsLayouts :: Map.Map String Layout
     , lsParsed :: Map.Map ModuleId PModule
     , lsResolved :: Map.Map (ModuleId, String) [ResolvedImport]
     , lsOrder :: [ModuleId]
@@ -565,16 +577,16 @@ parseModule resolver entryPath layout moduleName = do
     case Map.lookup moduleId (lsParsed state) of
         Just parsed -> pureM parsed
         Nothing -> do
-            files <- parseFiles
+            files <- parseFiles (lsFileParser state)
             let parsed = PModule layout moduleId moduleName files
             modifyM (\s -> s{lsParsed = Map.insert moduleId parsed (lsParsed s)})
             pureM parsed
   where
     moduleId = layoutModuleId layout moduleName
     entries = layoutModuleFiles layout moduleName
-    parseFiles = do
+    parseFiles fileParser = do
         texts <- mapM_M readEntry entries
-        case parseModuleFiles resolver layout moduleId entries texts of
+        case parseModuleFiles fileParser resolver layout moduleId entries texts of
             Left err -> failM err
             Right parsedFiles -> mapM_M checkOne (zip texts parsedFiles)
       where
@@ -595,14 +607,14 @@ parseModule resolver entryPath layout moduleName = do
 -- round makes no progress. A file that still does not parse is
 -- reported with the error it gives on its own, exactly as a
 -- single-file parse reports it.
-parseModuleFiles :: Resolver -> Layout -> ModuleId -> [FileEntry] -> [(FileEntry, String)] -> Either String [ParsedFile]
-parseModuleFiles resolver layout moduleId ownEntries ownTexts =
-    let seed = seedDecls resolver layout ownEntries
+parseModuleFiles :: FileParser -> Resolver -> Layout -> ModuleId -> [FileEntry] -> [(FileEntry, String)] -> Either String [ParsedFile]
+parseModuleFiles fileParser resolver layout moduleId ownEntries ownTexts =
+    let seed = seedDecls fileParser resolver layout ownEntries
         ordered = [entry | (entry, _) <- ownTexts]
      in case iterateParses seed ownTexts [] of
             Right done -> Right [parsedFile | entry <- ordered, Just parsedFile <- [lookup (fePath entry) done]]
-            Left (entry, text) -> case parseFileWith (locating emptyDecls) text of
-                Left err -> Left ("parse error in module " ++ renderModuleId moduleId ++ " file " ++ fePath entry ++ ": " ++ show err)
+            Left (entry, text) -> case fileParser (locating emptyDecls) text of
+                Left err -> Left ("parse error in module " ++ renderModuleId moduleId ++ " file " ++ fePath entry ++ ": " ++ err)
                 Right _ -> Left ("parse error in module " ++ renderModuleId moduleId ++ " file " ++ fePath entry ++ ": could not be parsed with the declarations of its package")
   where
     iterateParses _ [] done = Right done
@@ -614,7 +626,7 @@ parseModuleFiles resolver layout moduleId ownEntries ownTexts =
     pass decls pending = go decls pending [] []
       where
         go d [] remaining done = (d, reverse remaining, reverse done)
-        go d ((entry, text) : rest) remaining done = case parseFileWith (locating d) text of
+        go d ((entry, text) : rest) remaining done = case fileParser (locating d) text of
             Right (parsedFile, d') -> go d' rest remaining ((fePath entry, parsedFile) : done)
             Left _ -> go d rest ((entry, text) : remaining) done
 
@@ -625,8 +637,8 @@ libraryDecls = foldl step emptyDecls [cloneSource, eqSource, preludeSource, stri
         Right (_, decls') -> decls'
         Left _ -> decls
 
-seedDecls :: Resolver -> Layout -> [FileEntry] -> Decls
-seedDecls resolver layout ownEntries = loop libraryDecls texts
+seedDecls :: FileParser -> Resolver -> Layout -> [FileEntry] -> Decls
+seedDecls fileParser resolver layout ownEntries = loop libraryDecls texts
   where
     layoutEntries = layRootFiles layout ++ concat (Map.elems (layModules layout))
     ordered = ownEntries ++ [entry | entry <- layoutEntries, fePath entry `notElem` map fePath ownEntries]
@@ -640,7 +652,7 @@ seedDecls resolver layout ownEntries = loop libraryDecls texts
     pass decls pending = go decls pending []
       where
         go d [] remaining = (d, reverse remaining)
-        go d ((entry, text) : rest) remaining = case parseFileWith (locating d) text of
+        go d ((entry, text) : rest) remaining = case fileParser (locating d) text of
             Right (_, d') -> go d' rest remaining
             Left _ -> go d rest ((entry, text) : remaining)
 
@@ -1088,11 +1100,14 @@ visitModule resolver entryPath stack moduleId layout moduleName = do
                 | otherwise -> failM ("internal: package " ++ pkg ++ " was resolved but its layout is missing")
 
 loadFromEntry :: Resolver -> FilePath -> Either String LoadResult
-loadFromEntry resolver rawEntry = case discoverEntry resolver entryPath of
+loadFromEntry = loadFromEntryWith haskellFileParser
+
+loadFromEntryWith :: FileParser -> Resolver -> FilePath -> Either String LoadResult
+loadFromEntryWith fileParser resolver rawEntry = case discoverEntry resolver entryPath of
     Standalone _ -> do
         text <- maybe (Left ("file not found: " ++ entryPath)) Right (resolverReadFile resolver entryPath)
-        parsedFile <- case parseFileWith (locating emptyDecls) text of
-            Left err -> Left ("parse error in file " ++ entryPath ++ ": " ++ show err)
+        parsedFile <- case fileParser (locating emptyDecls) text of
+            Left err -> Left ("parse error in file " ++ entryPath ++ ": " ++ err)
             Right (parsed, _) -> Right parsed
         if null (fileImports parsedFile)
             then Right (StandaloneResult entryPath parsedFile)
@@ -1115,6 +1130,7 @@ loadFromEntry resolver rawEntry = case discoverEntry resolver entryPath of
                 let entryModuleId = layoutModuleId layout entryModuleName
                     initial =
                         LState
+                            fileParser
                             (Map.singleton pkgName layout)
                             Map.empty
                             Map.empty
@@ -1170,7 +1186,10 @@ findPackageRootIO entry = go (takeDirectory entry)
                 if parent == dir then return Nothing else go parent
 
 loadFromFilesystem :: FilePath -> IO (Either String LoadResult)
-loadFromFilesystem entry = do
+loadFromFilesystem = loadFromFilesystemWith haskellFileParser
+
+loadFromFilesystemWith :: FileParser -> FilePath -> IO (Either String LoadResult)
+loadFromFilesystemWith fileParser entry = do
     root <- findPackageRootIO entry
     case root of
         Nothing -> do
@@ -1179,13 +1198,13 @@ loadFromFilesystem entry = do
                 then return (Left ("file not found: " ++ entry))
                 else do
                     text <- readFile entry
-                    return (loadFromEntry (resolverFromFiles [(normalizePath entry, text)]) entry)
+                    return (loadFromEntryWith fileParser (resolverFromFiles [(normalizePath entry, text)]) entry)
         Just packageRoot -> do
             packageFiles <- snapshotPackage packageRoot
             let parent = takeDirectory packageRoot
             siblings <- listDirectory parent >>= filterM (isSiblingPackage parent)
             siblingFiles <- fmap concat (mapM (\sib -> snapshotPackage (parent </> sib)) siblings)
-            return (loadFromEntry (resolverFromFiles (packageFiles ++ siblingFiles)) entry)
+            return (loadFromEntryWith fileParser (resolverFromFiles (packageFiles ++ siblingFiles)) entry)
   where
     isSiblingPackage parent name = do
         let dir = parent </> name

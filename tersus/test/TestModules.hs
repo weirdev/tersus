@@ -9,6 +9,8 @@ import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removeDirectoryRecursive)
 import System.FilePath ((</>))
 
+import qualified AstData
+import FileParserProtocol
 import Cli (Command (..), World (..), noWorld, runPackageFiles)
 import Interface
 import qualified Mir as M
@@ -455,10 +457,14 @@ testLoaderFilesystem = TestCase "loader-filesystem" $ do
         writeFile (pkgDir </> "main.tersus") "import app::geo; x = 1;"
         writeFile (pkgDir </> "geo" </> "geo.tersus") "struct Point { x: Int };"
         loaded <- loadFromFilesystem (pkgDir </> "main.tersus")
-        return (case loaded of
+        injected <- loadFromFilesystemWith injectedFileParser (pkgDir </> "main.tersus")
+        return ((case loaded of
             Left err -> Just ("filesystem load failed: " ++ err)
             Right (PackageResult pkg) -> testAssertEq (moduleOrder pkg) ["app::geo", "app"]
             Right other -> Just ("expected a package result, got: " ++ show other))
+            <> case injected of
+                Left err -> testAssertTrue ("injected refusal sentinel" `isInfixOf` err)
+                Right _ -> Just "filesystem loader did not use injected parser")
         `finallyRemove` root
     finallyRemove action dir = do
         value <- action
@@ -938,5 +944,221 @@ testModuleQualifiedGenerics =
         , ("app/geo/types.tersus", "struct Boxed<T> { y: T }; fn makeBoxed(v: Int) -> Boxed<Int> [{ }] [{ }] { return Boxed<Int> { y: v }; };")
         ]
 
+sameDecls :: Decls -> Decls -> TestResult
+sameDecls actual expected =
+    testAssertEq (declCtors actual) (declCtors expected)
+        <> testAssertEq (declTypes actual) (declTypes expected)
+        <> testAssertEq (declSelf actual) (declSelf expected)
+        <> testAssertEq (declSelfType actual) (declSelfType expected)
+        <> testAssertEq (declTypeParams actual) (declTypeParams expected)
+        <> testAssertEq (declGenerics actual) (declGenerics expected)
+        <> testAssertEq (declImplParams actual) (declImplParams expected)
+        <> testAssertEq (declOwnClone actual) (declOwnClone expected)
+        <> testAssertEq (declLocate actual) (declLocate expected)
+        <> testAssertEq (declFieldTypes actual) (declFieldTypes expected)
+
+protocolDecls :: Decls
+protocolDecls = Decls
+    (Map.fromList [("pkg$geo$Shape::Circle", ["z", "a"]), ("Empty", [])])
+    (Map.fromList [("pkg$geo$Shape", ["pkg$geo$Shape::Circle", "pkg$geo$Shape::Square"]), ("Empty", [])])
+    (Just "pkg$geo$Self\"\\\nλ")
+    (Just (TNamed "pkg$geo$Vec" [ArgSize (SizeParam "N"), ArgType (TParam "T")]))
+    ["T", "U"]
+    (Map.fromList [("pkg$geo$Vec", ["N", "T"]), ("Empty", [])])
+    ["U", "M"]
+    True
+    True
+    (Map.fromList [("pkg$geo$Vec", zip (map (\n -> "f" ++ show n) [0 :: Int ..]) fieldTypes), ("Empty", [])])
+  where
+    fieldTypes =
+        [ TInt, TByte, TWord True 8, TWord True 16, TWord True 32, TWord False 16, TWord False 32, TBool
+        , TList TInt, TArrayOf TByte (SizeConst 5), TArrayOf TInt SizeAny
+        , TArrayOf TInt (SizeParam "N"), TArrayOf TInt (SizeVar 7)
+        , TBox TInt, TAddr TInt, TUninit TInt, TBlock TInt
+        , TFn [TRef (TParam "T"), TMutRef TByte] TBool
+        , TNamed "pkg$geo$Vec" [ArgSize (SizeConst 2), ArgType (TList (TParam "T"))]
+        , TVariant "pkg$geo$Shape::Circle", TVar 9
+        , TForall ["N"] ["T"] (TArrayOf (TParam "T") (SizeParam "N")), TParam "T", TRef TInt, TMutRef TInt
+        ]
+
+emptyDeclRecords :: String
+emptyDeclRecords = unlines
+    [ "decls", "ctors 0", "types 0", "self none", "selfType none", "typeParams 0"
+    , "generics 0", "implParams 0", "ownClone false", "locate false", "fieldTypes 0", "endDecls"
+    ]
+
+replaceRecord :: String -> String -> String -> String
+replaceRecord old new = concatMap (\line -> if line == old then new ++ "\n" else line ++ "\n") . lines
+
+protocolRefuses :: Result a String -> TestResult
+protocolRefuses (Error _) = Nothing
+protocolRefuses (Ok _) = Just "expected protocol refusal"
+
+testFileProtocol :: Test
+testFileProtocol = TestList "file-protocol"
+    [ testCaseSeq "request-roundtrip"
+        [ case writeFileRequest decls source of
+            Error err -> Just ("request writer failed: " ++ err)
+            Ok wire -> case readFileRequest wire of
+                Error err -> Just ("request reader failed: " ++ err)
+                Ok (actual, text) -> sameDecls actual decls <> testAssertEq text source
+        | decls <- [emptyDecls, protocolDecls, protocolDecls{declSelf = Nothing}, protocolDecls{declSelfType = Nothing, declOwnClone = False, declLocate = False}]
+        , source <- ["", "raw λ 🙂\nsource 0\n\"\\\NULtail", replicate 33000 'x', "no final newline"]
+        ]
+    , testCaseSeq "reply-roundtrip"
+        [ case writeParsedFile parsedFile decls of
+            Error err -> Just ("reply writer failed: " ++ err)
+            Ok wire -> case readParsedFile wire of
+                Error err -> Just ("reply reader failed: " ++ err)
+                Ok (actual, ds) -> testAssertEq actual parsedFile <> sameDecls ds decls
+        | decls <- [emptyDecls, protocolDecls]
+        , parsedFile <- [ParsedFile [] [], ParsedFile imports [Mark 7 9, StructDef "pkg$geo$Vec" ["T"] [("x", TRef (TParam "T"))] [], Return (Val (VInt 77))]]
+        ]
+    , testCase "exact-request-wire" $ case writeFileRequest emptyDecls "λ" of
+        Error err -> Just err
+        Ok wire -> testAssertEq wire ("tersus-file-parse 1\n" ++ emptyDeclRecords ++ "source 2\n\xCE\xBB")
+    , testCase "exact-reply-wire" $ case (writeParsedFile (ParsedFile [Import ["app", "geo"] (Just "g") (Just ["Point"]) 2 3] []) emptyDecls, AstData.writeParsed []) of
+        (Ok wire, Ok ast) -> testAssertEq wire ("tersus-file 1\nimports 1\nimport 2 3 2 \"app\" \"geo\" some \"g\" some 1 \"Point\"\n" ++ emptyDeclRecords ++ "ast\n" ++ ast)
+        _ -> Just "reply or AST writer failed"
+    , testCaseSeq "strict-declarations"
+        [ protocolRefuses (readFileRequest ("tersus-file-parse 1\n" ++ replaceRecord old new emptyDeclRecords ++ "source 0\n"))
+        | (old, new) <-
+            [ ("ctors 0", "ctors -1"), ("ctors 0", "ctors 9223372036854775808"), ("ctors 0", "ctors 9223372036854775807")
+            , ("ctors 0", "ctors 2\nctor \"T\" 0\nctor \"T\" 0")
+            , ("types 0", "types 2\ntype \"T\" 0\ntype \"T\" 0")
+            , ("generics 0", "generics 2\ngeneric \"T\" 0\ngeneric \"T\" 0")
+            , ("fieldTypes 0", "fieldTypes 2\nfields \"T\" 0\nfields \"T\" 0")
+            , ("ctors 0", "ctors 1\nctor \"T\" 2 \"a\"")
+            , ("ctors 0", "ctors 1\nctor \"\\xFF\" 0")
+            , ("ctors 0", "ctors 1\nctor \"λ\" 0")
+            , ("typeParams 0", "typeParams -1"), ("typeParams 0", "typeParams 999999999 \"T\"")
+            , ("self none", "self other"), ("self none", "self some"), ("self none", "self some \"bad\\q\"")
+            , ("selfType none", "selfType some fn -1 int")
+            , ("selfType none", "selfType some named \"T\" -1")
+            , ("selfType none", "selfType some forall -1 0 int")
+            , ("selfType none", "selfType some var -1")
+            , ("selfType none", "selfType some array int v -1")
+            , ("selfType none", "selfType some u64")
+            , ("fieldTypes 0", "fieldTypes 1\nfields \"T\" 1 \"x\" named \"Vec\" 1 type")
+            , ("ownClone false", "ownClone 1"), ("locate false", "locate maybe")
+            , ("endDecls", "unknown"), ("endDecls", "endDecls extra"), ("self none", "self none\r")
+            , ("self none", ""), ("self none", "self none\ntypes 0")
+            , ("self none", "self some \"" ++ replicate 1000001 'x' ++ "\"")
+            ]
+        ]
+    , testCaseSeq "strict-source-frame"
+        [ protocolRefuses (readFileRequest wire)
+        | wire <-
+            [ "tersus-file-parse 2\n" ++ emptyDeclRecords ++ "source 0\n"
+            , "tersus-file-parse 1\r\n" ++ emptyDeclRecords ++ "source 0\n"
+            , "tersus-file-parse 1\n" ++ emptyDeclRecords ++ "source -1\n"
+            , "tersus-file-parse 1\n" ++ emptyDeclRecords ++ "source 2\nx"
+            , "tersus-file-parse 1\n" ++ emptyDeclRecords ++ "source 0\nx"
+            , "tersus-file-parse 1\n" ++ emptyDeclRecords ++ "source 1\n\xFF"
+            , "tersus-file-parse 1\n" ++ emptyDeclRecords ++ "source 1\nλ"
+            , "tersus-file-parse 1\n" ++ emptyDeclRecords ++ "source 0"
+            ]
+        ]
+    , testCase "strict-import-control" $ case readParsedFile (replyWithImport "import 1 1 1 \"app\" none none") of
+        Ok (pf, decls) -> testAssertEq (fileImports pf) [Import ["app"] Nothing Nothing 1 1] <> sameDecls decls emptyDecls
+        Error err -> Just ("valid import control failed: " ++ err)
+    , testCaseSeq "strict-imports"
+        [ protocolRefuses (readParsedFile (replyWithImport imp))
+        | imp <-
+            [ "import 0 1 1 \"app\" none none", "import 1 -1 1 \"app\" none none"
+            , "import 1 1 0 none none", "import 1 1 1 \"app\" none some 0"
+            , "import 1 1 1 \"app\" some none", "import 1 1 1 \"app\" none some 2 \"A\""
+            , "import 1 1 1 \"app\" none none extra", "import 1 1 1 \"app\" none none\r"
+            ]
+        ]
+    , testCase "strict-ast-control" $ case readParsedFile (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nMark 1 1\nStatementsCons 1 0\nroot 2\n") of
+        Ok (pf, _) -> testAssertEq (fileBody pf) [Mark 1 1]
+        Error err -> Just ("valid AST control failed: " ++ err)
+    , testCaseSeq "strict-ast"
+        [ protocolRefuses (readParsedFile (replyWithAst ast))
+        | ast <-
+            [ "tersus-ast 1 elaborated\nStatementsEnd\nroot 0\n"
+            , "tersus-ast 2 parsed\nStatementsEnd\nroot 0\n"
+            , "tersus-ast 1 parsed\nStatementsEnd\nroot 0\ntrailing\n"
+            , "tersus-ast 1 parsed\nStatementsEnd\nStatementsEnd\nroot 1\n"
+            , "tersus-ast 1 parsed\nBlock 0\nStatementsCons 0 0\nroot 1\n"
+            , "tersus-ast 1 parsed\nStatementsEnd\nMark 1 1\nStatementsCons 1 0\nBlock 2\nStatementsCons 3 2\nroot 4\n"
+            , "tersus-ast 1 parsed\nStatementsEnd\nStatementsCons -1 0\nroot 1\n"
+            ]
+        ]
+    , testCase "reply-wrong-header" (protocolRefuses (readParsedFile (replaceRecord "tersus-file 1" "tersus-file 2" (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"))))
+    , testCase "reply-negative-import-count" (protocolRefuses (readParsedFile (replaceRecord "imports 0" "imports -1" (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"))))
+    , testCase "reply-extra-ast-marker-token" (protocolRefuses (readParsedFile (replaceRecord "ast" "ast -1" (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"))))
+    , testCase "reply-trailing-byte" (protocolRefuses (readParsedFile (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n" ++ "x")))
+    , testCase "reply-truncated-ast" (protocolRefuses (readParsedFile (replyWithAst "tersus-ast 1 parsed\nStatementsEnd\nroot\n")))
+    , testCase "writer-rejects-negative-type-count" (protocolRefuses (writeFileRequest emptyDecls{declSelfType = Just (TVar (-1))} ""))
+    , testCase "writer-rejects-empty-import-path" (protocolRefuses (writeParsedFile (ParsedFile [Import [] Nothing Nothing 1 1] []) emptyDecls))
+    ]
+  where
+    imports =
+        [ Import ["app", "geo", "shapes"] Nothing Nothing 2 3
+        , Import ["pkg$geo", "λ\"\\\n"] (Just "g") Nothing 4 5
+        , Import ["app", "geo"] Nothing (Just ["z", "a"]) 6 7
+        , Import ["app", "geo"] (Just "alias") (Just ["Point"]) 8 9
+        ]
+    replyWithImport imp =
+        let ast = "tersus-ast 1 parsed\nStatementsEnd\nroot 0\n"
+         in "tersus-file 1\nimports 1\n" ++ imp ++ "\n" ++ emptyDeclRecords ++ "ast\n" ++ ast
+    replyWithAst ast = "tersus-file 1\nimports 0\n" ++ emptyDeclRecords ++ "ast\n" ++ ast
+
+injectedFileParser :: FileParser
+injectedFileParser decls source
+    | not (declLocate decls) = Left "injected parser requires source positions"
+    | source == "@native-entry@" =
+        if Map.member "NativePoint" (declCtors decls)
+            then Right (ParsedFile [Import ["app", "geo", "NativePoint"] (Just "p") Nothing 2 3] [Mark 7 9, Return (Val (VInt 77))], decls)
+            else Left "native seed missing"
+    | source == "@native-type@" = Right (ParsedFile [] [Mark 11 13, StructDef "NativePoint" [] [] []], decls{declCtors = Map.insert "NativePoint" [] (declCtors decls)})
+    | source == "@need-final@" =
+        if Map.member "finalGate" (declCtors decls)
+            then Right (ParsedFile [] [Return (Val (VInt 88))], decls)
+            else Left "iterative callback state missing"
+    | source == "@promote@" =
+        let key = if Map.member "seedGate" (declCtors decls) then "finalGate" else "seedGate"
+         in Right (ParsedFile [] [StructDef "Gate" [] [] []], decls{declCtors = Map.insert key [] (declCtors decls)})
+    | otherwise = Left "injected refusal sentinel"
+
+testLoaderInjection :: Test
+testLoaderInjection = testCaseSeq "loader-injection"
+    [ case loadFromEntryWith injectedFileParser (resolverFromFiles [("solo.tersus", "@need-final@")]) "solo.tersus" of
+        Left err -> testAssertTrue ("iterative callback state missing" `isInfixOf` err)
+        Right _ -> Just "standalone loader did not use injected parser"
+    , case loadFromEntryWith (\d _ -> Right (ParsedFile [] [Return (Val (VInt 99))], d)) (resolverFromFiles [("solo.tersus", "not Haskell syntax")]) "solo.tersus" of
+        Right (StandaloneResult path pf) -> testAssertEq path "solo.tersus" <> testAssertEq (fileBody pf) [Return (Val (VInt 99))]
+        other -> Just ("standalone AST substitution failed: " ++ show other)
+    , case loadFromEntryWith injectedFileParser (resolverFromFiles nativeFiles) "app/main.tersus" of
+        Left err -> Just ("native-only files should load through callback: " ++ err)
+        Right (PackageResult pkg) ->
+            let files = concatMap loadedModuleFiles (packageModules pkg)
+                mainFiles = [file | file <- files, loadedFileName file == "main.tersus"]
+             in testAssertEq (moduleOrder pkg) ["app::geo", "app"]
+                <> case mainFiles of
+                    [file] -> testAssertEq (loadedFileSource file) "@native-entry@"
+                        <> testAssertEq (loadedFilePath file) "app/main.tersus"
+                        <> testAssertEq (fileBody (loadedParsed file)) [Mark 7 9, Return (Val (VInt 77))]
+                        <> testAssertEq (map resolvedImport (loadedImports file)) [Import ["app", "geo", "NativePoint"] (Just "p") Nothing 2 3]
+                        <> testAssertEq (map resolvedCanonical (loadedImports file)) ["app$geo$geo$NativePoint"]
+                        <> case compileModulesToProgram pkg of
+                            Error err -> Just ("substituted AST should compile without reparsing source: " ++ err)
+                            Ok program -> case runProgram program of
+                                Error err -> Just err
+                                Ok returned -> testAssertEq (fmap renderMirValue returned) (Just "77")
+                    _ -> Just "expected one substituted main file"
+        Right _ -> Just "expected injected package result"
+    , case loadFromEntryWith injectedFileParser (resolverFromFiles [("app/package.tersus", ""), ("app/a.tersus", "@need-final@"), ("app/z.tersus", "@promote@")]) "app/a.tersus" of
+        Right (PackageResult pkg) -> testAssertEq [fileBody (loadedParsed file) | modu <- packageModules pkg, file <- loadedModuleFiles modu, loadedFileName file == "a.tersus"] [[Return (Val (VInt 88))]]
+        other -> Just ("iterative passes must use callback and its final Decls: " ++ show other)
+    , case loadFromEntryWith injectedFileParser (resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@never@")]) "app/main.tersus" of
+        Left err -> testAssertTrue ("injected refusal sentinel" `isInfixOf` err)
+        Right _ -> Just "diagnostic parse bypassed callback"
+    ]
+  where
+    nativeFiles = [("app/package.tersus", ""), ("app/main.tersus", "@native-entry@"), ("app/geo/geo.tersus", "@native-type@")]
+
 testModules :: Test
-testModules = TestList "testModules" [testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]
+testModules = TestList "testModules" [testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]
