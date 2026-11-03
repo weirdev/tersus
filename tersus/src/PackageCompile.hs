@@ -14,8 +14,8 @@ import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import Compile (librariesFor)
-import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv)
-import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelection)
+import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv, withoutDeclaredNames)
+import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
@@ -88,13 +88,17 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
 moduleLibSelection :: LibPackage -> [ModuleInterface] -> Mod.LoadedModule -> [Statement] -> Either String ([ModuleInterface], [(Mod.ModuleId, M.Program)], [ModuleInterface])
 moduleLibSelection libPkg depInterfaces modu prepared =
     let selected = [name | display <- map fst (librariesFor probed), Just name <- [libModuleOfDisplay display]]
-        (libIfaces, libUnits) = libSelection libPkg selected
+        selection = libSelectionFor libPkg selected prepared
         checkOnlyIfaces
             | needsDropTrait prepared && "prelude" `notElem` selected = case Map.lookup "prelude" (libInterfaces libPkg) of
                 Just preludeIface -> [dropOnlyInterface preludeIface]
                 Nothing -> []
             | otherwise = []
-     in Right (libIfaces, libUnits, checkOnlyIfaces)
+     in do
+        (selectedIfaces, libUnits) <- selection
+        let libIfaces = map (withoutDeclaredNames (moduleDeclaredNames prepared)) selectedIfaces
+            libUnits' = stripDeclaredFromUnits (moduleDeclaredNames prepared) libUnits
+        Right (libIfaces, libUnits', checkOnlyIfaces)
   where
     probed = concatMap (fileBody . Mod.loadedParsed) (Mod.loadedModuleFiles modu) ++ [Return (Var name) | name <- ["String", "HashMap", "HashSet"], name `elem` dependencyTypeNames]
     dependencyTypeNames = concatMap interfaceTypeNames depInterfaces
@@ -119,6 +123,23 @@ moduleLibSelection libPkg depInterfaces modu prepared =
         TFn args ret -> concatMap typeNames (ret : args)
         TForall _ _ inner -> typeNames inner
         _ -> []
+-- The names a prepared module itself declares, under the names it declares
+-- them (the entry module's are the bare names the libraries use; another
+-- module's are canonical and so do not meet the libraries' bare names).
+moduleDeclaredNames :: [Statement] -> [String]
+moduleDeclaredNames prepared = concatMap declared prepared ++ concatMap defined prepared
+  where
+    declared stmt = case stmt of
+        StructDef name _ _ _ -> [name]
+        EnumDef name _ -> [name]
+        TraitDef name _ _ -> [name]
+        _ -> []
+    defined stmt = case stmt of
+        Assign name (Val VFunct{}) -> [name]
+        ImplDef _ _ _ _ _ body -> concatMap defined body
+        BoundedDef _ inner -> defined inner
+        _ -> []
+
 needsDropTrait :: [Statement] -> Bool
 needsDropTrait prepared = any implsDrop prepared && not (any declaresDrop prepared)
   where

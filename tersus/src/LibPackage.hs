@@ -5,13 +5,17 @@ module LibPackage
     , libModuleId
     , libModuleOfDisplay
     , libSelection
+    , libSelectionFor
+    , stripDeclaredFromUnits
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import System.IO.Unsafe (unsafePerformIO)
 
-import Interface (ModuleInterface, extractLibInterface, mergeInterfacesImportEnv, predeclareOwnEnv)
+import Interface (ModuleInterface (..), extractLibInterface, mergeInterfacesImportEnv, predeclareOwnEnv)
+import Syntax (Statement (..))
 import LibParsed (LibParsed (..), libModules, libParsed)
 import qualified LibParsed
 import qualified Mir as M
@@ -40,6 +44,25 @@ libDependencies :: String -> [String]
 libDependencies name = case [deps | (candidate, _, _, deps) <- libModules, candidate == name] of
     deps : _ -> deps
     [] -> []
+
+-- A library unit lowered against the types its fellow libraries declare
+-- carries those types' declarations and invariants seeded from their
+-- interfaces; where the program being linked declares such a name itself
+-- (which kept the declaring library out of its selection), the program's
+-- own declaration is the one the link must see, as with the interfaces
+-- (see Interface.withoutDeclaredNames).
+stripDeclaredFromUnits :: [String] -> [(ModuleId, M.Program)] -> [(ModuleId, M.Program)]
+stripDeclaredFromUnits declared units = map strip units
+  where
+    declaredSet = Set.fromList declared
+    strip (moduId, program) =
+        ( moduId
+        , program
+            { M.progTypes = Map.withoutKeys (M.progTypes program) declaredSet
+            , M.progGenerics = Map.withoutKeys (M.progGenerics program) declaredSet
+            , M.progInvariants = Map.withoutKeys (M.progInvariants program) declaredSet
+            }
+        )
 
 libModuleId :: String -> ModuleId
 libModuleId name = ModuleId "tersuslib" (Just name)
@@ -97,6 +120,30 @@ libPackage = unsafePerformIO $ modifyMVar libPackageCache $ \cached -> case cach
 -- over their dependencies. The units are in the order librariesFor puts
 -- the libraries in front of a program, as the linked program's ghost
 -- statements follow that order.
+-- Suppression governs the user-facing imports, not the units needed by
+-- library-internal calls. A replacement Eq does not receive the eq module's
+-- helpers or implementation registry through String's dependency closure.
+-- A retained cached implementation (String's Eq today) was checked against
+-- the library trait: require exact trait AST identity before exposing it.
+-- This intentionally rejects even logically equivalent differently written
+-- contracts; programs with no retained cached Eq impl remain unrestricted.
+libSelectionFor :: LibPackage -> [String] -> [Statement] -> Either String ([ModuleInterface], [(ModuleId, M.Program)])
+libSelectionFor pkg names statements =
+    let (ifaces, units) = libSelection pkg names
+     in case [(params, functions) | TraitDef "Eq" params functions <- statements] of
+            [] -> Right (ifaces, units)
+            replacement : _ ->
+                let visible = filter ((/= libModuleId "eq") . ifModule) ifaces
+                    retainsEq = any (any ((== "Eq") . fst) . Set.toList . ifImpls) visible
+                    original = do
+                        iface <- Map.lookup "eq" (libInterfaces pkg)
+                        params <- Map.lookup "Eq" (ifTraitParams iface)
+                        functions <- Map.lookup "Eq" (ifTraits iface)
+                        pure (params, functions)
+                 in if retainsEq && Just replacement /= original
+                        then Left "Type error: a replacement Eq used with cached library implementations must have exactly the library Eq's parameters, method signatures and contracts"
+                        else Right (visible, units)
+
 libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
 libSelection pkg names =
     let wanted = closure names

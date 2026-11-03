@@ -1,15 +1,24 @@
 module TestLibModules (testLibModules) where
 
+import Control.Exception (bracket, evaluate)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
+import qualified Compile
+import qualified Modules
+import qualified Parse
+import PreludeSource (eqSource)
+import qualified Mir as M
+import MirValidate (validateProgram)
+import PackageCompile (compileModulesValidated)
 import Interface (ModuleInterface (..))
 import LibPackage (libInterfaces, libOrder, libPackage)
 import MirEval (fromMirValue, runProgram)
 import Pipeline (compileSource)
 import Syntax (Value (..))
-import TestHarness (Test (..), testAssertEq, testAssertTrue, testCase)
+import TestHarness (Test (..), forceTestResult, testAssertEq, testAssertTrue, testCase)
 import Utils (Result (..), bindResult)
 
 -- The compiler libraries (lib/eq.tersus and the rest) compiled as modules
@@ -22,7 +31,14 @@ testLibModules =
         "testLibModules"
         [ TestList
             "the lib package standalone"
-            [ testCase "it compiles" compiles
+            [ TestCase "bootstrap is independent of the production parser" $
+                bracket (lookupEnv "TERSUS_PARSER") restoreParser $ \_ -> do
+                    -- Run first in this cold group: an invalid backend must not
+                    -- affect the libraries needed to build the native parser.
+                    setEnv "TERSUS_PARSER" "unavailable-bootstrap-guard"
+                    _ <- evaluate (forceTestResult compiles)
+                    pure compiles
+            , testCase "it compiles" compiles
             , testCase "modules compile dependencies first" orderIsDependencyFirst
             , testCase "eq declares Eq and its impls" (interface "eq" (\iface -> Map.member "Eq" (ifTraits iface) && implsIn iface [("Eq", "List"), ("Eq", "Array"), ("Eq", "Box")]))
             , testCase "clone declares Clone and its impls" (interface "clone" (\iface -> Map.member "Clone" (ifTraits iface) && implsIn iface [("Clone", "List"), ("Clone", "Array"), ("Clone", "Box")]))
@@ -47,9 +63,61 @@ testLibModules =
             , testCase "Drop is synthesized through the prelude interface" (compiledRuns (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") (VInt 7))
             , testCase "an Eq of the program's own suppresses the eq module" (compiledRejected "trait Eq { }; if [1] = [1] { return 1; }; return 0;" "List<Int> is compared with =")
             , testCase "a String of the program's own takes its literals" (compiledRuns "struct String { bytes: List<Byte> }; s = \"hi\"; return size(s.bytes);" (VInt 2))
+            , testCase "an Eq of the program's own with a string literal" (compiledRuns (ownEq ++ "s = \"hi\"; return size(s.bytes);") (VInt 2))
+            , testCase "an Eq of the program's own compares strings" (compiledRuns (ownEq ++ "if \"a\" = \"a\" { if \"a\" != \"b\" { return 1; }; }; return 0;") (VInt 1))
+            , testCase "an Eq of the program's own with a HashMap" (compiledRuns (ownEq ++ "m = HashMap::new().insert(\"a\", 3).insert(\"b\", 4); return m.lookup(\"a\", 0) * 10 + m.lookup(\"b\", 0);") (VInt 34))
             ]
+        , TestList "Eq shadowing source fixtures"
+            ([ testCase (path ++ " rejects " ++ label) (rejected (compile source) "replacement Eq")
+             | (path, compile) <- [("single", checkedSource), ("package", checkedPackage)]
+             , (label, trait) <-
+                [ ("return type", "trait Eq { fn eq(self: &Self, other: &Self) -> Int; }; ")
+                , ("contract", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm false; }]; }; ")
+                , ("empty method set", "trait Eq { }; ")
+                , ("extra method", "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; fn extra(self: &Self) -> Int; }; ")
+                , ("generic arity", "trait Eq<T> { fn eq(self: &Self, other: &Self) -> Bool; }; ")
+                ]
+             , let source = trait ++ "s = \"a\"; return size(s.bytes);"
+             ] ++
+             [ testCase (path ++ " accepts source " ++ owner ++ " impl") (runs (compile source) (VInt 2))
+             | (path, compile) <- [("single", checkedSource), ("package", checkedPackage)]
+             , owner <- ["List", "Array", "Box"]
+             , let source = ownEq ++ eqImpl owner ++ "s = \"hi\"; return size(s.bytes);"
+             ] ++
+             [ testCase "compatible Eq keeps String equality" (runs (checkedSource (ownEq ++ "if \"a\" = \"a\" { return 1; }; return 0;")) (VInt 1))
+             , testCase "suppressed eq helper is not exposed" (rejected (checkedSource (ownEq ++ "s = \"hi\"; a = Array::boxed(1, 1); return eqBoxedArrays(a, a);")) "eqBoxedArrays")
+             , testCase "a replacement without cached Eq impls is unrestricted" (runs (checkedSource "trait Eq { }; return 7;") (VInt 7))
+             , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.parseSourceParts True "return 9;" `bindResult` Compile.lowerSourceParts True) (VInt 9))
+             , testCase "Copy source regression" (runs (checkedSource "struct P { x: Int, y: Int }; impl Clone for P { }; impl Copy for P { }; fn getX(p: P) -> Int { return p.x; }; p = P { x: 3, y: 4 }; a = getX(p); b = getX(p); return a * 10 + b + p.y;") (VInt 37))
+             , testCase "Drop source validates and retains its implementation" $ case checkedSource (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") of
+                Error err -> Just err
+                Ok program -> testAssertTrue (Map.member "<V as Drop>::drop" (M.progFunctions program))
+             , testCase "injected package AST is compiled without reparsing" injectedPackage
+             ])
         ]
   where
+    checkedSource source = Compile.lowerSource True source `bindResult` \program ->
+        validateProgram program `bindResult` \_ -> Ok program
+    checkedPackage source = case Modules.loadFromEntry (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", source)]) "app/main.tersus" of
+        Left err -> Error err
+        Right (Modules.PackageResult pkg) -> compileModulesValidated pkg
+        Right _ -> Error "fixture did not load as a package"
+    runs result expected = case result `bindResult` runProgram of
+        Error err -> Just err
+        Ok value -> testAssertEq (fmap fromMirValue value) (Just expected)
+    rejected result expected = case result of
+        Error err -> testAssertTrue (expected `isInfixOf` err)
+        Ok _ -> Just ("expected rejection containing " ++ expected)
+    eqImpl owner = unlines (takeThrough (== "};") (dropWhile (not . isInfixOf ("Eq for " ++ owner ++ "<")) (lines eqSource)))
+    takeThrough _ [] = []
+    takeThrough p (x : xs) = x : if p x then [] else takeThrough p xs
+    injectedPackage =
+        let parser decls source = either (Left . show) Right (Parse.parseFileWith decls (if source == "@supplied-ast@" then "return 11;" else source))
+         in case Modules.loadFromEntryWith parser (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@supplied-ast@")]) "app/main.tersus" of
+                Right (Modules.PackageResult pkg) -> runs (compileModulesValidated pkg) (VInt 11)
+                other -> Just ("injected fixture failed: " ++ show other)
+    restoreParser Nothing = unsetEnv "TERSUS_PARSER"
+    restoreParser (Just backend) = setEnv "TERSUS_PARSER" backend
     compiledRuns source expected = case compileSource source `bindResult` runProgram of
         Error err -> Just ("compiling and running failed: " ++ err)
         Ok result -> testAssertEq (fmap fromMirValue result) (Just expected)
@@ -57,6 +125,7 @@ testLibModules =
         Error err -> if expected `isInfixOf` err then Nothing else Just ("expected failure containing " ++ show expected ++ ", got: " ++ err)
         Ok _ -> Just "the program compiled, where a failure was expected"
     dropper = "struct V { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl V { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for V { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
+    ownEq = "trait Eq { fn eq(self: &Self, other: &Self) -> Bool [{ }] [{ affirm return = (self = other); }]; }; "
     compiles = case libPackage of
         Error err -> Just err
         Ok _ -> Nothing

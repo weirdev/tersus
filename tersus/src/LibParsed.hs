@@ -59,6 +59,9 @@ data LibParsed = LibParsed
 -- where the libraries stand in front of one (Compile's textual prepend)
 -- the last library place must not become the place of the program's own
 -- statements that follow it.
+-- This parse is the bootstrap boundary: use Parse, never TersusParser or
+-- Pipeline. Building the native parser itself needs these libraries, so
+-- selecting the production parser here would create a builtin dependency cycle.
 libParsed :: Either String LibParsed
 libParsed = go libParseOrder emptyDecls Map.empty
   where
