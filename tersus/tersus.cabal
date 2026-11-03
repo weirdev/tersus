@@ -45,6 +45,7 @@ library
       Cli
       Compile
       DataCodec
+      FileParserProtocol
       Ghost
       Hash
       Interface

@@ -10,7 +10,7 @@ module Parse
     , parseFileWith
     , Import (..)
     , ParsedFile (..)
-    , Decls
+    , Decls (..)
     , emptyDecls
     , locating
     , namePath
