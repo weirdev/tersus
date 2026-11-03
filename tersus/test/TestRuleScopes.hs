@@ -13,6 +13,9 @@ testRuleScopes :: Test
 testRuleScopes = TestList "testRuleScopes" $
     [testCase name (checked source expected) | (name, source, expected) <- cases]
         ++ [testCase "input-capture counterexample really divides by zero without validation" runtimeOracle]
+        ++ [TestCase "unchanged contracts example exports its boundary definition" $ do
+                source <- readFile "examples/contracts.tersus"
+                pure (checked source Nothing)]
   where
     checked source expected = case lowerSource True source of
         Error e -> Just ("Lowering failed: " ++ e)
@@ -46,8 +49,15 @@ cases =
     , ("axiom truth about the captured actual remains trusted", "axiom ax(x) [{ define i = 1; }] [{ affirm x > 100; }]; i = 0; rewrite ax i; affirm i > 100; return 0;", Nothing)
     , ("nested rule scope restores its immediate caller", "proof inner(x) [{ define n = 0; }] [{ affirm x = x; }] { }; proof outer(x) [{ define n = 1; }] [{ affirm n = 1; }] { rewrite inner x; affirm n = 1; }; define n = 6; rewrite outer 5; affirm n = 6; return 0;", Nothing)
     , ("nested function contract cannot overwrite caller proof names", namedContract ++ "fn outer(x: Int) -> Int [{ define n = 1; }] [{ affirm return = x; }] { y = identity(x); affirm n = 1; return y; }; return outer(5);", Nothing)
-    , ("function contract locals are not published as caller bindings", namedContract ++ "define n = 6; value = identity(5); affirm n = 6; return value;", Nothing)
+    , ("function contract locals do not replace existing caller bindings", namedContract ++ "define n = 6; value = identity(5); affirm n = 6; return value;", Nothing)
     , ("rule uses its lexical function binding, not a caller shadow", "fn observe(i: Int) -> Int [{ }] [{ affirm return = 0; }] { return 0; }; fn reader(i: Int) -> Int { return readByte(); }; proof fixed(x) [{ affirm observe(x) = 0; }] [{ affirm observe(x) = 0; }] { }; define observe = reader; rewrite fixed 0; return 0;", Nothing)
+    , ("absent function boundary definition is published", namedContract ++ "value = identity(5); affirm n = 0; return value;", Nothing)
+    , ("existing code local retains precedence over a function boundary definition", namedContract ++ "n = 6; value = identity(5); affirm n = 6; return value;", Nothing)
+    , ("a function boundary name cannot shadow a global function", "fn n() -> Int [{ }] [{ affirm return = 6; }] { return 6; }; " ++ namedContract ++ "value = identity(5); affirm n() = 6; return value;", Nothing)
+    , ("function boundary collision cannot manufacture false caller facts", namedContract ++ "define n = 6; value = identity(5); affirm 6 = 0; return 0;", Just "Could not prove: 6 = 0")
+    , ("existing function parameter retains precedence over a nested boundary definition", namedContract ++ "fn outer(n: Int) -> Int [{ }] [{ affirm return = n; }] { value = identity(5); affirm value = 5; return n; }; return outer(6);", Nothing)
+    , ("a new function definition name stays private inside a rule application", namedContract ++ "proof call(x) [{ affirm identity(x) = x; }] [{ affirm x = x; }] { }; rewrite call 5; affirm n = 0; return 0;", Just "Variable not found in proof map: n")
+    , ("an existing rule-local proof definition survives a nested function contract", namedContract ++ "proof call(x) [{ define n = 6; affirm identity(x) = x; affirm n = 6; }] [{ affirm n = 6; }] { }; define n = 7; rewrite call 5; affirm n = 7; return 0;", Nothing)
     , ("body-only rebinding cannot redefine a public output", "proof bad(x) [{ }] [{ affirm x = 0; }] { define x = 0; }; rewrite bad 6; affirm 6 = 0; return 0;", Just "private body binding")
     ]
 

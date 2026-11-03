@@ -538,7 +538,8 @@ instantiateOutputsMut st params args result mutPosts exported = do
         argOf name = fromMaybe (CTerm (VInt 0)) (lookup name (zip params args))
         view = (calleeView st ([(name, maybe (argOf name) (ATerm . id) (lookup name mutPosts)) | name <- params] ++ [("$old " ++ name, argOf name) | (name, _) <- mutPosts] ++ [("return", result)])){psVars = Map.fromList bound}
     proofs <- liftR (flatResultMap (toIotaProof view) exported)
-    return (st{psRuntimeProofValues = Set.union (Set.fromList iotas) (psRuntimeProofValues st)}, proofs)
+    let introduced = Map.fromList [(name, iota) | (name, iota) <- bound, Map.notMember name (psVars st), Map.notMember name (psView st), Map.notMember name (psGlobals st), name `notElem` Map.elems (psLocalNames st)]
+    return (st{psVars = Map.union (psVars st) introduced, psRuntimeProofValues = Set.union (Set.fromList iotas) (psRuntimeProofValues st)}, proofs)
 
 -- The value of a term when the facts say what it is
 termValue :: PState -> IotaProof -> Maybe Value
