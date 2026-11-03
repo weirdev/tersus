@@ -9,7 +9,7 @@ module LibParsed
 
 import qualified Data.Map.Strict as Map
 
-import Parse (Decls, ParsedFile (..), declsFromStatements, emptyDecls, locating, parseFileWith)
+import Parse (Decls, ParsedFile (..), declsFromStatements, emptyDecls, parseFileWith)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource, typesSource)
 import Syntax (Statement)
 
@@ -43,8 +43,8 @@ libParseOrder :: [String]
 libParseOrder = ["types", "clone", "eq", "prelude", "string", "map", "set"]
 
 -- The imports share the first line of the text (a comment in every lib
--- file), so the positions of the library's own statements, which the
--- lowering names temporaries by, are the ones of the text itself.
+-- file), so the reading of the library's own text is the one it has
+-- without them.
 libSourceWithImports :: (String, String, String, [String]) -> String
 libSourceWithImports (_, _, text, deps) = concat ["import tersuslib::" ++ dep ++ "; " | dep <- deps] ++ text
 
@@ -53,12 +53,18 @@ data LibParsed = LibParsed
     , lpDecls :: Decls
     }
 
+-- The libraries are read without the places of their statements, as
+-- they were when a program was read with the library texts in front of
+-- it: a library statement's place is not a place of the program, and
+-- where the libraries stand in front of one (Compile's textual prepend)
+-- the last library place must not become the place of the program's own
+-- statements that follow it.
 libParsed :: Either String LibParsed
 libParsed = go libParseOrder emptyDecls Map.empty
   where
     go [] decls statements = Right (LibParsed statements decls)
     go (name : rest) decls statements = case [modu | modu@(candidate, _, _, _) <- libModules, candidate == name] of
-        modu : _ -> case parseFileWith (locating decls) (libSourceWithImports modu) of
+        modu : _ -> case parseFileWith decls (libSourceWithImports modu) of
             Left err -> Left ("Parse error in the " ++ name ++ " library: " ++ show err)
             Right (ParsedFile _ stmts, decls') -> go rest decls' (Map.insert name stmts statements)
         [] -> Left ("internal: no lib module named " ++ name)
