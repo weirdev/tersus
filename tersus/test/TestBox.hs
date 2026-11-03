@@ -1,7 +1,14 @@
 module TestBox (testBox) where
 
+import Compile (lowerSource)
+import Control.Exception (evaluate)
+import qualified Data.Map.Strict as Map
+import qualified Mir as M
+import MirValidate (validateContainerLibrary, validateProgram)
+import System.Timeout (timeout)
 import Syntax
 import TestHarness
+import Utils (Result (..))
 
 -- Box<T>: a struct or an enum held in a Box. A Box has the value of what it holds, so it is looked into wherever the struct or the
 -- enum is (a field read, `is`, `as`, `match`, a method call), and a type that holds itself holds the recursion in one.
@@ -25,7 +32,11 @@ testBox =
             "testBox"
             [ TestList
                 "holding a value"
-                [ testCase "a struct in a Box" (runs (point ++ "b = Box::new(P { x: 4, y: 5 }); return b.x + b.y;") (VInt 9))
+                [ TestCase "a Box's address is read from the Box itself" (ownField "addr" "Addr<Int>")
+                , TestCase "a Box's permission is read from the Box itself" (ownField "blk" "Block<Int>")
+                , TestCase "a borrow names the Box's own address field" (ownPlace False)
+                , TestCase "an update names the Box's own address field" (ownPlace True)
+                , testCase "a struct in a Box" (runs (point ++ "b = Box::new(P { x: 4, y: 5 }); return b.x + b.y;") (VInt 9))
                 , testCase "an enum in a Box" (runs "enum E { A { v: Int }, B }; b = Box::new(E::A { v: 3 }); return b is E::A;" (VBool True))
                 , testCase "a Box is cast to a variant" (runs "enum E { A { v: Int }, B }; b = Box::new(E::A { v: 3 }); return (b as E::A).v;" (VInt 3))
                 , testCase "a Box is matched" (runs "enum E { A { v: Int }, B }; fn f(b: Box<E>) -> Int { return match b { E::A { v: v } => v, E::B => 0 }; }; return f(Box::new(E::A { v: 6 }));" (VInt 6))
@@ -40,6 +51,36 @@ testBox =
                 , testCase "unbox gives back what was held" (runs (point ++ "b = Box::new(P { x: 2, y: 3 }); p = Box::unbox(b); return p.x * 10 + p.y;") (VInt 23))
                 , testCase "unbox of a Box is the value" (runs (point ++ "impl Eq for P { }; return Box::unbox(Box::new(P { x: 2, y: 3 })) = P { x: 2, y: 3 };") (VBool True))
                 , testCase "the contents of a Box can be passed where the struct is wanted by a builtin test" (runs "enum E { A, B }; b = Box::new(E::B); if b is E::B { return 1; }; return 0;" (VInt 1))
+                ]
+            , TestList
+                "container proof models"
+                [ TestCase "a boxed list does not make an invalid postcondition vacuous" $
+                    sourceBoxProof "fn bad(b: Box<List<Int>>) -> Int [{ affirm b.len = 2; }] [{ affirm return = 1; }] { a = b.addr; return 0; };"
+                , TestCase "Box and payload permission fields do not share layout facts" $
+                    sourceBoxProof (unlines
+                        [ "trait Drop { fn drop(self: Self) -> Int; };"
+                        , "struct P { addr: Addr<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 2; affirm count(blk) = 0; affirm whole(blk); }];"
+                        , "impl Drop for P { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
+                        , "fn bad(b: Box<P>) -> Int [{ }] [{ affirm return = 1; }] { a = b.addr; return 0; };"
+                        ])
+                , TestCase "payload block facts cannot prove a Box storage property" $
+                    rejectedBoxProperty (unlines
+                        [ "trait Drop { fn drop(self: Self) -> Int; };"
+                        , "struct P { addr: Addr<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 2; affirm count(blk) = 0; affirm whole(blk); }];"
+                        , "impl Drop for P { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
+                        , "fn bad(b: Box<P>) -> Int [{ }] [{ affirm cap(b.blk) = 2; }] { return 0; };"
+                        ])
+                , TestCase "generic native Box storage contracts validate" genericBoxStorage
+                , TestCase "monomorphic native Box storage contracts can be called" monomorphicBoxStorage
+                , TestCase "native layout validation rejects a source-level Box operation" $
+                    rejectedLayout "return Box::new(1);" "requires explicit library structs"
+                , TestCase "native layout validation rejects implicit Box payload views" $
+                    rejectedLayout "struct P { x: Int }; fn field(b: Box<P>) -> Int { return b.x; };" "requires explicit library structs"
+                , TestCase "native layout validation still checks constructor invariants" $
+                    rejectedLayout (unlines
+                        [ "struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }];"
+                        , "fn bad() -> Box<Int> { (a, b) = Addr::alloc(0); return Box<Int> { addr: a, blk: b }; };"
+                        ]) "does not meet its invariant"
                 ]
             , TestList
                 "a type that holds itself"
@@ -112,3 +153,55 @@ testBox =
                 , testCase "the size is an Int" (rejected "return Array::boxed(true, 1);" "argument 1 of Array::boxed: expected Int, got Bool")
                 ]
             ]
+
+ownField :: String -> String -> IO TestResult
+ownField field ty = lowerBox ("fn field(b: Box<Int>) -> " ++ ty ++ " { return b." ++ field ++ "; };") (const Nothing)
+
+ownPlace :: Bool -> IO TestResult
+ownPlace updating = lowerBox source $ \program ->
+    let statements = concatMap (concatMap M.blockStatements . Map.elems . M.fnBlocks) (Map.elems (M.progFunctions program))
+        ownsField stmt = case stmt of
+            M.AssignRef _ steps _ | updating -> steps == [M.RefField "Box<Int>" "addr"]
+            M.Assign _ (M.Borrow _ steps _) | not updating -> steps == [M.RefField "Box<Int>" "addr"]
+            _ -> False
+     in testAssertTrue (any ownsField statements)
+  where
+    source
+        | updating = "fn field(b: &mut Box<Int>, a: Addr<Int>) -> Int writes(b.addr) { (*b).addr = a; return 0; };"
+        | otherwise = "fn field(b: &Box<Int>) -> &Addr<Int> from b { return &b.addr; };"
+
+sourceBoxProof :: String -> IO TestResult
+sourceBoxProof source = checkLowered True source (testAssertErrorContains "Could not prove: return = 1" . validateProgram)
+
+rejectedBoxProperty :: String -> IO TestResult
+rejectedBoxProperty source = checkLowered True source (testAssertErrorContains "Could not prove:" . validateProgram)
+
+genericBoxStorage :: IO TestResult
+genericBoxStorage = nativeStorage "fn address<T>(b: &Box<T>) -> Addr<T> [{ }] [{ affirm return = b.addr; }] { return b.addr; };"
+
+monomorphicBoxStorage :: IO TestResult
+monomorphicBoxStorage = nativeStorage (unlines
+    [ "fn address(b: &Box<Int>) -> Addr<Int> [{ }] [{ affirm return = b.addr; }] { return (*b).addr; };"
+    , "fn test(b: &Box<Int>) -> Addr<Int> [{ }] [{ affirm return = b.addr; }] { return address(b); };"
+    ])
+
+nativeStorage :: String -> IO TestResult
+nativeStorage source = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }]; " ++ source) $ \program -> case validateContainerLibrary program of
+        Error e -> Just e
+        Ok _ -> Nothing
+
+rejectedLayout :: String -> String -> IO TestResult
+rejectedLayout source expected = checkLowered False source (testAssertErrorContains expected . validateContainerLibrary)
+
+lowerBox :: String -> (M.Program -> TestResult) -> IO TestResult
+lowerBox body = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> }; " ++ body)
+
+checkLowered :: Bool -> String -> (M.Program -> TestResult) -> IO TestResult
+checkLowered reserving source check = do
+    let result = case lowerSource reserving source of
+            Error e -> Just e
+            Ok program -> check program
+    finished <- timeout 5000000 (evaluate (forceTestResult result) >> pure result)
+    pure $ case finished of
+        Nothing -> Just "Box validation did not finish"
+        Just checked -> checked

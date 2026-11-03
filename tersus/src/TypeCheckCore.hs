@@ -495,11 +495,14 @@ checkConstruct ty0 fields argTys0 = do
 readField :: Maybe Name -> Variable -> Type -> TC Type
 readField owner field structTy = do
     -- (a Box is looked into for the base of an update as for a field)
-    held <- zonk structTy >>= \t -> return (case t of TBox inner -> inner; _ -> t)
+    typed <- zonk structTy
+    let held = case typed of
+            TBox inner | maybe True (not . namedMatches typed) owner -> inner
+            _ -> typed
     case owner of
         Just name -> do h <- zonk held; unless (namedMatches h name) $ expect ("base of an update of " ++ name) (TNamed name []) held
         Nothing -> return ()
-    fieldType field structTy
+    fieldType field (maybe typed (const held) owner)
 
 -- The type a value is looked through to where a struct or an enum is looked at (a field, `is`, `as`, a `match`, the base of an
 -- update, `shrinks`): a Box to what it holds, which the language gives itself since what a Box holds is not a field of it, and a type
@@ -536,8 +539,7 @@ fieldType field structTy = do
     case t of
         -- (a Box has the fields of what it holds, and its own: the address of what it holds and the permission to it)
         TBox inner
-            | field `elem` ["addr", "blk"] -> fieldType field (TNamed "Box" [ArgType inner])
-            | otherwise -> fieldType field inner
+            | field `notElem` ["addr", "blk"] -> fieldType field inner
         TNamed "Self" _ -> failTc ("Type error: a trait does not know the fields of Self, so field " ++ field ++ " cannot be read from it")
         TNamed base args -> do
             let name = instanceName base args

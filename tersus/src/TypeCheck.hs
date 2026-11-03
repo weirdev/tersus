@@ -555,7 +555,13 @@ inferExprR ctx env expr =
                                     t <- readField owner field (tType texpr)
                                     return (t, texpr)
             (t, struct'') <- go struct0
-            return (TExpr t (F funct [tExpr struct'']) [struct''])
+            ty <- zonk (tType struct'')
+            let funct' = case (owner, ty) of
+                    (Nothing, TNamed "Box" args) ->
+                        let access = namedField (instanceName "Box" args) field
+                         in if access == Field Nothing field then funct else Val (builtinFunct access)
+                    _ -> funct
+            return (TExpr t (F funct' [tExpr struct'']) [struct''])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
             inferred0 <- mapM (inferExprR ctx env) args
             -- (a tuple's parts are what they are: it is made of their types)
@@ -1405,16 +1411,22 @@ inferProofR ctx env proof =
             let go (ty, proof) = do
                     direct <- tryTc (readField owner field ty)
                     case direct of
-                        Just t -> return (t, proof)
+                        Just t -> return (t, proof, ty)
                         Nothing -> do
                             next <- derefStepProof (ty, proof)
                             case next of
                                 Just stepped -> go stepped
                                 Nothing -> do
                                     t <- readField owner field ty
-                                    return (t, proof)
-            (t, struct'') <- go (structTy, struct')
-            return (t, FApp funct [struct''])
+                                    return (t, proof, ty)
+            (t, struct'', receiverTy) <- go (structTy, struct')
+            ty <- zonk receiverTy
+            let funct' = case (owner, ty) of
+                    (Nothing, TNamed "Box" args) ->
+                        let access = namedField (instanceName "Box" args) field
+                         in if access == Field Nothing field then funct else CTerm (builtinFunct access)
+                    _ -> funct
+            return (t, FApp funct' [struct''])
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
             inferred <- mapM (inferProofR ctx env) args
             t <- checkConstruct (TNamed (baseNameOf name) ctorArgs) fields (map fst inferred)

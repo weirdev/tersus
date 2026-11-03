@@ -30,7 +30,7 @@ import MirData (readProgram, writeProgram, writeProgramWithGhosts)
 import MirEval (MirValue (..), Outcome (..), RunEnv (..), runProgramEnv)
 import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
-import MirValidate (validateProgram)
+import MirValidate (validateContainerLibrary)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import Seed (cachedSeed, emitterHash)
 import Modules (LoadResult (..), loadFromEntry, resolverFromFiles)
@@ -271,7 +271,7 @@ emitterOwnedProgram = toolOwnedProgram emitterEntry
 validatedListLibrary :: Program
 validatedListLibrary = case lowerSource False (listsSource ++ "\n" ++ boxSource) of
     Error e -> error ("lib/lists.tersus and lib/box.tersus do not lower: " ++ e)
-    Ok program -> case validateProgram program of
+    Ok program -> case validateContainerLibrary program of
         Error e -> error ("lib/lists.tersus and lib/box.tersus do not validate: " ++ e)
         Ok _ -> program
 

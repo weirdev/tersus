@@ -141,6 +141,7 @@ data PState = PState
     , psRules :: RuleContext
     , psFns :: Map Name FnInfo
     , psInBody :: Bool -- in the body of a function, where a function defined is local
+    , psPhysicalContainers :: Bool
     , psTerminates :: Bool -- in a function that is guaranteed to terminate
     , psCache :: Maybe FactCache
     , psProgram :: M.Program
@@ -171,6 +172,7 @@ initialPState program =
             , psRules = stdLibRuleCtx
             , psFns = Map.empty
             , psInBody = False
+            , psPhysicalContainers = False
             , psTerminates = False
             , psCache = Just (Engine.factCacheAdd Engine.emptyFactCache globalFacts)
             , psProgram = program

@@ -1,6 +1,7 @@
 module MirValidate
     ( Validated (..)
     , validateProgram
+    , validateContainerLibrary
     , validateProgramWithCache
     , validateProgramUncached
     , ValidationCache
@@ -120,15 +121,43 @@ validateProgram program = unsafePerformIO $ modifyMVar processValidationCache $ 
         Ok (validated, cache') -> pure (cache', Ok validated)
 
 validateProgramWithCache :: ValidationCache -> M.Program -> Result (Validated, ValidationCache) String
-validateProgramWithCache cache = runVWithCache cache . validateProgramV
+validateProgramWithCache cache = runVWithCache cache . validateProgramV False
 
 validateProgramUncached :: M.Program -> Result Validated String
-validateProgramUncached = runV . validateProgramV
+validateProgramUncached = runV . validateProgramV False
 
-validateProgramV :: M.Program -> V Validated
-validateProgramV program = do
+-- Source-level Boxes alias their contents in proofs; the native library's structs must not.
+validateContainerLibrary :: M.Program -> Result Validated String
+validateContainerLibrary program
+    | any (uncurry logicalContainer) [(fn, rv) | fn <- M.progMain program : Map.elems (M.progFunctions program), block <- Map.elems (M.fnBlocks fn), stmt <- M.blockStatements block, rv <- rvalues stmt] = Error "Container layout validation requires explicit library structs, not source-level container operations"
+    | otherwise = runV (validateProgramV True program)
+  where
+    rvalues (M.Assign _ rv) = [rv]
+    rvalues (M.Peek _ rv) = [rv]
+    rvalues (M.AssignRef _ _ rv) = [rv]
+    rvalues _ = []
+    logicalContainer _ M.MakeBox{} = True
+    logicalContainer _ M.Unbox{} = True
+    logicalContainer _ M.Unsize{} = True
+    logicalContainer _ M.MakeList{} = True
+    logicalContainer _ (M.ListOp M.NewBoxed _) = True
+    logicalContainer _ (M.ListOp M.NewEmptyBoxed _) = True
+    logicalContainer fn (M.ReadField o owner _) = boxed fn o && baseNameOf owner /= "Box"
+    logicalContainer fn (M.IsVariant o _) = boxed fn o
+    logicalContainer fn (M.AsVariant o _) = boxed fn o
+    logicalContainer fn (M.Deref o) = boxed fn o && maybe False (`notElem` M.fnBorrowed fn) (localOf o)
+    logicalContainer _ _ = False
+    localOf (M.Copy l) = Just l
+    localOf (M.Move l) = Just l
+    localOf _ = Nothing
+    boxed fn o = case localOf o >>= (`Map.lookup` M.fnLocals fn) of
+        Just (M.LocalDecl TBox{} _) -> True
+        _ -> False
+
+validateProgramV :: Bool -> M.Program -> V Validated
+validateProgramV physicalContainers program = do
     let main' = M.progMain program
-        seeded = (initialPState program){psFns = Map.fromList [(name, assumedInfo program name) | name <- Map.keys (topLevelSources program)]}
+        seeded = (initialPState program){psPhysicalContainers = physicalContainers, psFns = Map.fromList [(name, assumedInfo program name) | name <- Map.keys (topLevelSources program)]}
         st0 = withFunctions main' seeded
     returned <- walkFunction st0 main'
     -- (a function whose definition main never reaches, past a return, has still to be checked)
@@ -403,11 +432,12 @@ assign st dest rv =
 -- The invariant of the struct that a type is, or that a Box of the type holds, as facts about a value of the type
 typeInvariants :: PState -> Type -> IotaProof -> [IotaProof]
 typeInvariants st ty value = case ty of
-    -- (a Box is its contents in a proof, so the invariant of what it holds is the one that is said of it)
-    TBox inner -> typeInvariants st inner value
-    -- (a list is not said of by the invariant of the struct it is made of: what a proof knows of a list is what
-    -- the contracts of its operations say, as it was before a list was a struct)
-    TList _ -> []
+    TBox inner
+        | psPhysicalContainers st -> invariantFacts st (instanceName "Box" [ArgType inner]) value
+        | otherwise -> typeInvariants st inner value
+    TList inner
+        | psPhysicalContainers st -> invariantFacts st (instanceName "List" [ArgType inner]) value
+        | otherwise -> []
     TNamed base args -> invariantFacts st (instanceName base args) value
     _ -> []
 
@@ -475,7 +505,7 @@ checkFromListSize cx st dest src = do
 -- values whose fields are equal equal)
 constructedFacts :: PState -> Name -> [Arg] -> IotaProof -> [IotaProof]
 constructedFacts st ctor ctorArgs value = case fieldsOf of
-    Just fields -> [FApp eqProof [value, FApp (CTerm (builtinFunct (Ctor ctor ctorArgs fields))) [FApp (CTerm (builtinFunct (Field Nothing f))) [value] | f <- fields]]]
+    Just fields -> [FApp eqProof [value, FApp (CTerm (builtinFunct (Ctor ctor ctorArgs fields))) [FApp (CTerm (builtinFunct (namedField ctor f))) [value] | f <- fields]]]
     Nothing -> []
   where
     types = M.progTypes (psProgram st)
@@ -496,7 +526,7 @@ placeTermSteps :: PState -> IotaProof -> [M.RefStep] -> V IotaProof
 placeTermSteps _ term [] = return term
 placeTermSteps st term (step : rest) = do
     next <- case step of
-        M.RefField _ field -> return (FApp (CTerm (builtinFunct (Field Nothing field))) [term])
+        M.RefField ctor field -> return (FApp (CTerm (builtinFunct (namedField ctor field))) [term])
         M.RefIndex index -> do
             indexTerm <- operandTerm st index
             return (FApp (CTerm (builtinFunct Get)) [term, indexTerm])
@@ -531,7 +561,7 @@ checkPlaceBounds st root steps = do
   where
     go _ [] = return ()
     go term (step : rest) = case step of
-        M.RefField _ field -> go (FApp (CTerm (builtinFunct (Field Nothing field))) [term]) rest
+        M.RefField ctor field -> go (FApp (CTerm (builtinFunct (namedField ctor field))) [term]) rest
         M.RefIndex index -> do
             indexTerm <- operandTerm st index
             let sizeTerm = FApp (CTerm (builtinFunct Size)) [term]
@@ -553,8 +583,8 @@ checkWriteInvariants st root steps = do
             let fields = case Map.lookup ctor (M.progTypes (psProgram st)) of
                     Just (M.StructDecl fs) -> map fst fs
                     _ -> []
-            checkInvariant st ctor [(f, FApp (CTerm (builtinFunct (Field Nothing f))) [term]) | f <- fields]
-            go (FApp (CTerm (builtinFunct (Field Nothing field))) [term]) rest
+            checkInvariant st ctor [(f, FApp (CTerm (builtinFunct (namedField ctor f))) [term]) | f <- fields]
+            go (FApp (CTerm (builtinFunct (namedField ctor field))) [term]) rest
         M.RefIndex index -> do
             indexTerm <- operandTerm st index
             go (FApp (CTerm (builtinFunct Get)) [term, indexTerm]) rest
@@ -566,7 +596,7 @@ setPlaceVersion s root steps post = case steps of
     [] -> return s{psLocals = Map.insert root post (psLocals s)}
     [M.RefField ctor field] -> do
         newRoot <- fresh
-        let fieldOf t f = FApp (CTerm (builtinFunct (Field Nothing f))) [t]
+        let fieldOf t f = FApp (CTerm (builtinFunct (namedField ctor f))) [t]
             fields = case Map.lookup ctor (M.progTypes (psProgram s)) of
                 Just (M.StructDecl fs) -> map fst fs
                 _ -> [field]
@@ -680,7 +710,7 @@ functionValidationKey st name top = show
     ( name, top
     , (M.progTypes program, M.progFunctions program, M.progGenerics program, M.progInvariants program, topLevelSources program)
     , (psLocals st, psLocalNames st, psVars st, psView st, psFacts st, psGlobalFacts st, psGlobals st)
-    , (psRules st, psFns st, psInBody st, psTerminates st, psReaders st, psBorrows st, psValidated st)
+    , (psRules st, psFns st, psInBody st, psPhysicalContainers st, psTerminates st, psReaders st, psBorrows st, psValidated st)
     )
   where
     program = psProgram st

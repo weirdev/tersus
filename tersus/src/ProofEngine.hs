@@ -588,7 +588,10 @@ selections table classes = reads ++ injectivity ++ casts
         | (termId, (functId, [structId])) <- tableApps table
         , Just funct <- [Map.lookup (rep classes functId) builtinOfClass]
         , Just field <- [fieldRead funct]
-        , (_, fields, args) <- Map.findWithDefault [] (rep classes structId) constructions
+        , (ctor, fields, args) <- Map.findWithDefault [] (rep classes structId) constructions
+        , case funct of
+            Field (Just owner) _ -> owner == ctor
+            _ -> True
         , (name, arg) <- zip fields args
         , name == field
         ]
@@ -893,9 +896,10 @@ lightProof (FApp funct args) = FApp (lightProof funct) (map lightProof args)
 lightProof (Forall index guards body) = Forall index (map lightProof guards) (lightProof body)
 lightProof other = other
 
--- Which struct the base of an update must be is for the type checker: for the proof engine a field is
--- the same function however it was written
+-- Ordinary field owners only constrain typing. Box storage owners also distinguish payload projections.
 unowned :: BuiltinFunct -> BuiltinFunct
+unowned funct@(Field (Just owner) field)
+    | namedField owner field == funct = funct
 unowned (Field _ field) = Field Nothing field
 unowned (Project _ field) = Field Nothing field
 unowned funct = funct

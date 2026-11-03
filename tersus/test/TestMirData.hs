@@ -52,6 +52,7 @@ testMirData =
         , TestList
             "instances"
             [ testCase "an instance introduced by another instance is declared" nestedInstanceIsDeclared
+            , testCase "erasure scrubs existing declarations as well as new instances" existingPermissionsAreErased
             ]
         , TestList
             "reading"
@@ -138,6 +139,29 @@ nestedInstanceIsDeclared =
             && Map.lookup "Inner<Int>" (progTypes completed) == Just (StructDecl [("value", TInt)])
             then Nothing
             else Just ("the nested instance was not declared: " ++ show (Map.toList (progTypes completed)))
+
+existingPermissionsAreErased :: TestResult
+existingPermissionsAreErased =
+    let fields = [("addr", TAddr TInt), ("blk", TBlock TInt)]
+        declarations = Map.fromList [("Box<Int>", StructDecl fields), ("E", EnumDecl [("E::Held", fields)])]
+        program = roundTripsNames
+            { progTypes = declarations
+            , progFunctions = Map.empty
+            , progMain = (progMain roundTripsNames)
+                { fnLocals = Map.singleton (Local 0) (LocalDecl (TNamed "Wrapped" [ArgType TInt]) Nothing)
+                , fnBlocks = Map.singleton (BlockId 0) (BasicBlock [] Return)
+                }
+            , progGenerics = Map.singleton "Wrapped" (["T"], [("value", TParam "T"), ("blk", TBlock (TParam "T"))])
+            }
+        completed = completeErasedInstances program
+        expected = Map.fromList
+            [ ("Box<Int>", StructDecl [("addr", TAddr TInt)])
+            , ("E", EnumDecl [("E::Held", [("addr", TAddr TInt)])])
+            , ("Wrapped<Int>", StructDecl [("value", TInt)])
+            ]
+     in if progTypes completed == expected && all (\(name, declaration) -> Map.lookup name (progTypes (completeInstances program)) == Just declaration) (Map.toList declarations)
+            then Nothing
+            else Just ("erased declarations: " ++ show (progTypes completed))
 
 roundTripsNames :: Program
 roundTripsNames =
