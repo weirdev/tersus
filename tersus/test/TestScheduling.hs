@@ -269,11 +269,11 @@ testScheduling names batches = TestList "testScheduling"
         pure (testAssertTrue (sort executed == [1,2,3,4]
             && results == replicate 4 Nothing
             && sort (leafPaths fixture) == sort (concatMap (map (drop 1) . leafPaths) split)))
-    , testCase "all 1562 original self-hosted query assertions remain in their families" $
+    , testCase "all 1564 self-hosted query assertions remain in their families" $
         testAssertEq selfHostedFamilyManifest
             [("equality graphs", 1056), ("products", 225), ("relations", 68), ("execution", 23),
              ("MIR contracts", 41), ("MIR arithmetic", 22), ("MIR sequences", 32), ("MIR data", 21),
-             ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 21), ("bridges", 20)]
+             ("MIR list updates", 19), ("MIR branches", 14), ("MIR loops", 21), ("bridges", 22)]
     , testCase "self-hosted cache-sharing batches belong to one shard for every count" $
         testAssertTrue (all (\count ->
             length (unique [index | (name, index) <- assignShards count names, isSelfHosted name]) == 1)
