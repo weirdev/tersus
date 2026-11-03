@@ -1444,7 +1444,7 @@ Rule and axiom arguments are resolved to caller values before local definitions 
 
 Input contracts are checked at call sites before the function body's exported proofs are instantiated. They are also assumed while validating the function body.
 
-Output contracts are validated after the body has been validated. Proofs involving argument names, `return`, and proof values defined in the input or output contract can be exported to callers. Contract-local names remain private and do not replace caller proof-variable bindings.
+Output contracts are validated after the body has been validated. Proofs involving argument names, `return`, and proof values defined in the input or output contract can be exported to callers. A function boundary definition introduces its name only when that name is absent from the caller's proof, code, formal and global bindings; it never replaces an existing binding. Rule and axiom boundary names remain private.
 
 Example:
 
