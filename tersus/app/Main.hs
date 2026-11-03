@@ -10,7 +10,7 @@ import Bootstrap (llvmOfOwned, tersusLlvm)
 import Cli
 import qualified Modules
 import Native (buildExecutable, runExecutable)
-import Pipeline (compileModulesToOwned)
+import Pipeline (compileModulesToOwned, loadFromFilesystem)
 import Utils
 
 main :: IO ()
@@ -74,7 +74,7 @@ loadPackage file = do
     case root of
         Nothing -> return Nothing
         Just _ -> do
-            loaded <- Modules.loadFromFilesystem file
+            loaded <- loadFromFilesystem file
             return $ case loaded of
                 Left err -> Just (Left err)
                 Right (Modules.PackageResult pkg) -> Just (Right pkg)

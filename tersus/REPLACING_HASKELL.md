@@ -178,29 +178,32 @@ tests name the stage that refused a program and, for many programs, the
 message, so the Tersus checker must refuse the same programs with the
 same words, or the tests change deliberately with the messages.
 
-Status: the parser is done. `examples/parser.tersus` is the hand-written
-reader over bytes; it builds the AST arena directly and writes
-`tersus-ast 1 parsed` byte for byte as `AstData.writeParsed` of the Haskell
-parse, every desugaring included, and `src/TersusParser.hs` runs it (native
-and cached when clang can build it, interpreted otherwise; always compiled
-by the Haskell parser). `Pipeline.parseSource` is flipped to it; the
-Haskell parser stays as the oracle for one release behind
-`TERSUS_PARSER=haskell`, and a failure of the tool falls back to it with a
-note on the standard error. `testParser` checks byte parity over the
-corpus and generated snippets. The elaborator is not done: `Parse` and
-`TypeCheck` are still Haskell, and parse-error messages are the Tersus
-parser's own (verdicts match, and the one parser-rejected fixture names
-the same reason).
+Status: production source and package entry points use the parser written in
+Tersus. `TersusParser.parseSourceParts` supplies the source AST to
+`Pipeline.validatedSource` and `compileSource`; `Pipeline.loadFromFilesystem`
+injects the same file parser into module loading. The file reply carries
+imports, all declaration state and the exact parsed AST (`AST_DATA.md`).
+Native is the default, with the existing fingerprinted disk cache and locks.
+`TERSUS_PARSER=interpreted` is explicit; `haskell` keeps the oracle for one
+release. Native build, process and protocol failures are errors, not fallback
+signals.
 
-Under the module system the pipeline reads a program twice, and the tool
-does both readings: a probe with the prelude, string, map and set library
-declarations (from which `Compile.librariesFor` chooses the program's
-libraries), then the chosen libraries and the program, located. The Tersus
-parser also reads the module syntax the single-file path reads: a name path
-of any length, constructors matched by suffix, generic arguments on a type
-path, and `import` declarations at a file's head, which it parses whole and
-refuses with `imports are not linked yet: ...` in the pipeline's own words;
-linking imports is the module pipeline's work, not this parser's.
+The source probe runs natively against frozen declarations. Its AST chooses
+libraries through `Compile.librariesFor`; cached library ASTs and declarations
+seed the final native file parse. `Compile.lowerSourceParts` preserves the
+library/source split and prepared-prefix cache. Module imports are resolved
+by the module pipeline rather than rejected by the source-only entry point.
+`Compile` and the default `Modules` loaders retain the isolated Haskell
+bootstrap, so building the parser and MIR tools does not recurse into the
+production frontend. The elaborator remains Haskell.
+
+`testParser` checks the full native source/rejection corpus and generated
+cases, with three explicit interpreted parser smokes. File state, imports,
+generated Eq/Clone positions, Unicode identifiers and constructor names are
+compared against the oracle. Character predicates are generated from that
+oracle's serving `Data.Char` version and linked only into the parser bootstrap
+and parser example build; they are not implicit libraries of ordinary code.
+Parser error wording remains the Tersus parser's own.
 
 ### 7. The host glue, and a bootstrap with no GHC (deletes `Cli`, `Pipeline`, `Bootstrap`, `PreludeSource`, `LlvmRuntime`, `Native`, `Hash`, `Utils`, `Pretty`, `app/Main.hs`; ~1,600 lines)
 

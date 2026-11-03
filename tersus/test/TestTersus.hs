@@ -51,6 +51,8 @@ import TestAstData
 import TestModules
 import TestParity
 import TestParser
+import TestParserBootstrap
+import TestParserUnicode
 
 main :: IO ()
 main = do
@@ -179,6 +181,8 @@ originalGroups =
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
     , testParser
+    , testParserBootstrap
+    , testParserUnicode
     , testAstReader
     , testParity
     ]

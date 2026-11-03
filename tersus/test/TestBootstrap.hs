@@ -7,6 +7,7 @@ import System.Directory (copyFile, createDirectoryIfMissing, getModificationTime
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 
+import qualified TersusParser
 import Bootstrap
 import Cli (Command (..), makesIr)
 import MirData (writeProgram)
@@ -96,11 +97,14 @@ bootstrap = do
                     case built1 of
                         Error e -> pure (Just ("stage 1: " ++ e))
                         Ok one -> do
+                            nativeParser <- TersusParser.runParserTool False ["return 0;"]
                             fixpoint <- sameEmitter zero one
                             kept <- cache zero one
-                            pure $ case fixpoint of
-                                [] -> kept
-                                found -> Just (unlines (take 5 found))
+                            pure $ case nativeParser of
+                                Left err -> Just ("native parser bootstrap smoke: " ++ err)
+                                Right _ -> case fixpoint of
+                                    [] -> kept
+                                    found -> Just (unlines (take 5 found))
   where
     -- Stage 0 and stage 1 write the same IR for the emitter, so the emitter built by stage 1 would be stage 1 again
     sameEmitter zero one = case emitterOwnedProgram of

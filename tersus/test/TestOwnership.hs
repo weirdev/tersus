@@ -14,7 +14,7 @@ import MirEval (MirValue (..), runProgram)
 import MirOwnership (Role (..), insertOwnership, needsDrop, operandLocal, roles)
 import MirHousekeeping (verifyProgram)
 import MirLower (lowerProgram)
-import Modules (LoadResult (..), loadFromFilesystem)
+import Modules (LoadResult (..))
 import Parse (parseStatementBlock)
 import Pipeline
 import TestNative (nativeExamples, unvalidatedPrograms, validatedPrograms)

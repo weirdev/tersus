@@ -17,7 +17,9 @@ import System.Directory (getTemporaryDirectory, removeFile)
 import System.IO
 import qualified Data.Map as Map
 import Cli
-import Modules (LoadResult (..), loadFromFilesystem)
+import Modules (LoadResult (..))
+import qualified Modules
+import PreludeSource (parserSource)
 import qualified Mir as M
 import MirEval
 import MirLower
@@ -49,39 +51,26 @@ data ExampleExpectation
 
 testExampleFile :: FilePath -> ExampleExpectation -> Test
 testExampleFile path expectation = TestCase path $ do
-    loaded <- loadFromFilesystem path
-    case loaded of
-        Right (PackageResult pkg) -> pure $ case compileModulesToProgram pkg of
-            Error e -> case expectation of
-                ExpectRejected expectedError -> testAssertErrorContains expectedError (Error e :: Result () String)
-                _ -> Just ("Package example failed to compile: " ++ e)
-            Ok program -> case expectation of
-                ExpectRejected _ -> Just "expected rejection, but the package example compiled"
-                _ -> case runProgram program of
-                    Error e -> Just ("Evaluation failed with error: " ++ e)
-                    Ok result -> case expectation of
-                        ExpectReturn expected -> testAssertEq (fmap fromMirValue result) (Just expected)
-                        _ -> testAssertEq (fmap fromMirValue result) Nothing
-        _ -> do
-            source <- readFile path
-            -- (as the command line reads a program, so an example that uses the prelude has it)
-            pure $ case parseSource source of
-                Error err -> case expectation of
-                    ExpectRejected expectedError -> testAssertErrorContains expectedError (Error err :: Result () String)
-                    _ -> Just $ "Parse failed: " ++ err
-                Ok stmts -> checkExample stmts expectation
-
-checkExample :: [Statement] -> ExampleExpectation -> TestResult
-checkExample stmts (ExpectRejected expectedError) =
-    testAssertErrorContains expectedError (validateStatements stmts)
-checkExample stmts expectation =
-    case validateStatements stmts of
-        Error e -> Just $ "Validation failed with error: " ++ e
-        Ok _ -> case runStatements stmts of
-            Error e -> Just $ "Evaluation failed with error: " ++ e
-            Ok result -> case expectation of
-                ExpectReturn expected -> testAssertEq (fmap fromMirValue result) (Just expected)
-                _ -> testAssertEq (fmap fromMirValue result) Nothing
+    root <- Modules.findPackageRootIO path
+    lowered <- case root of
+        Nothing -> if path == "examples/parser.tersus" then pure (compileSource parserSource) else compileSource <$> readFile path
+        Just _ -> do
+            loaded <- loadFromFilesystem path
+            case loaded of
+                Left err -> pure (Error err)
+                Right (PackageResult pkg) -> pure (compileModulesToProgram pkg)
+                Right (StandaloneResult _ _) -> compileSource <$> readFile path
+    pure $ case lowered of
+        Error err -> case expectation of
+            ExpectRejected expectedError -> testAssertErrorContains expectedError (Error err :: Result () String)
+            _ -> Just ("Example failed to compile: " ++ err)
+        Ok program -> case expectation of
+            ExpectRejected _ -> Just "expected rejection, but the example compiled"
+            _ -> case runProgram program of
+                Error err -> Just ("Evaluation failed with error: " ++ err)
+                Ok result -> case expectation of
+                    ExpectReturn expected -> testAssertEq (fmap fromMirValue result) (Just expected)
+                    _ -> testAssertEq (fmap fromMirValue result) Nothing
 
 -- The first failure of two checks
 orElse :: TestResult -> TestResult -> TestResult
@@ -1133,7 +1122,19 @@ testPipeline :: Test
 testPipeline =
     testCaseSeq
         "testPipeline"
-        [ -- Each stage names itself in its error
+        [ case compileSource "return parserUnicodeLetter(233);" of
+            Ok _ -> Just "ordinary source received private parser helpers"
+            Error err | "Parser tool failure:" `isInfixOf` err -> Just err
+            Error err -> testAssertTrue ("parserUnicodeLetter" `isInfixOf` err)
+        , testAssertErrorContains "frontend sentinel" (validatedSourceWith (\_ _ -> Error "frontend sentinel") "return 1;")
+        , testAssertErrorContains "frontend sentinel" (compileSourceWith (\_ _ -> Error "frontend sentinel") "return 1;")
+        , case compileSourceWith (\_ _ -> Ok ([], [], [Return (Val (VInt 7))])) "return 1;" of
+            Error err -> Just err
+            Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
+        , case validatedSourceWith (\_ _ -> Ok ([], [], [Return (Val (VInt 7))])) "return 1;" of
+            Error err -> Just err
+            Ok program -> testAssertEq (mapResult (fmap renderMirValue) (runProgram program)) (Ok (Just "7"))
+        , -- Each stage names itself in its error
           testAssertErrorContains "Parse error" (parseSource "x = ;")
         , testAssertErrorContains "Validation failed: Could not prove" (compileSource "x = 1; affirm x = 2;")
         , testAssertErrorContains "Validation failed: Type error" (compileSource "x = 1; y = x(2);")

@@ -2,21 +2,34 @@ module TestModules
     ( testModules
     ) where
 
-import Control.Exception (try, SomeException)
+import Control.Exception (bracket, evaluate, try, SomeException)
 import Control.Monad (when)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, removeDirectoryRecursive)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
+import System.IO.Unsafe (unsafePerformIO)
 
 import qualified AstData
+import qualified Compile
 import FileParserProtocol
+import qualified FileParserProtocol as File
 import Cli (Command (..), World (..), noWorld, runPackageFiles)
 import Interface
 import qualified Mir as M
 import MirEval (renderMirValue, runProgram)
 import Modules
 import Parse
+import qualified Parse as Oracle
+import qualified TersusParser as NativeParser
+import qualified Native
+import Seed (emitterHash)
+import PreludeSource (parserSource)
+import LlvmRuntime (runtimeSource)
+import Hash (fingerprint)
+import System.Exit (ExitCode (..))
 import Pipeline (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesToOwned, compileModulesToProgram, compileSource)
 import Syntax
 import Types
@@ -1160,5 +1173,258 @@ testLoaderInjection = testCaseSeq "loader-injection"
   where
     nativeFiles = [("app/package.tersus", ""), ("app/main.tersus", "@native-entry@"), ("app/geo/geo.tersus", "@native-type@")]
 
+canonicalDeclsEqual :: Decls -> Decls -> TestResult
+canonicalDeclsEqual actual expected = case (File.writeFileRequest actual "", File.writeFileRequest expected "") of
+    (Ok actualWire, Ok expectedWire) -> testAssertEq actualWire expectedWire
+    (Error err, _) -> Just ("native final declarations could not be encoded: " ++ err)
+    (_, Error err) -> Just ("oracle final declarations could not be encoded: " ++ err)
+
+nativeFileVerdict :: Bool -> Decls -> String -> Either String (ParsedFile, Decls) -> TestResult
+nativeFileVerdict accepted decls source actual = case actual of
+    Left err | "Parser tool failure:" `isInfixOf` err -> Just err
+    _ -> case Oracle.parseFileWith decls source of
+        Left err
+            | accepted -> Just ("oracle rejected accepted file control: " ++ show err)
+            | otherwise -> case actual of
+                Left _ -> Nothing
+                Right _ -> Just "native parser accepted rejected file control"
+        Right (expectedFile, expectedDecls)
+            | not accepted -> Just "oracle accepted rejected file control"
+            | otherwise -> case actual of
+                Left err -> Just ("native parser rejected accepted file control: " ++ err)
+                Right (actualFile, actualDecls) -> testAssertEq actualFile expectedFile <> canonicalDeclsEqual actualDecls expectedDecls
+
+nativeFileCase :: String -> Bool -> Decls -> String -> Test
+nativeFileCase label accepted decls source = TestCase label $ do
+    actual <- NativeParser.parseFileNative decls source
+    pure (nativeFileVerdict accepted decls source actual)
+
+nativeFileSequence :: String -> [(Bool, String)] -> Test
+nativeFileSequence label = TestCase label . go (locating emptyDecls) (locating emptyDecls)
+  where
+    go _ _ [] = pure Nothing
+    go nativeDecls oracleDecls ((accepted, source) : rest) = do
+        actual <- NativeParser.parseFileNative nativeDecls source
+        case nativeFileVerdict accepted oracleDecls source actual of
+            Just err -> pure (Just err)
+            Nothing -> case (actual, Oracle.parseFileWith oracleDecls source) of
+                (Right (_, nativeNext), Right (_, oracleNext)) -> go nativeNext oracleNext rest
+                (Left _, Left _) -> go nativeDecls oracleDecls rest
+                _ -> pure (Just "file sequence lost its accepted/rejected control")
+
+withNativeBackend :: IO TestResult -> IO TestResult
+withNativeBackend action = bracket (lookupEnv "TERSUS_PARSER") restore $ \_ -> do
+    setEnv "TERSUS_PARSER" "native"
+    result <- action
+    _ <- evaluate (forceTestResult result)
+    pure result
+  where
+    restore Nothing = unsetEnv "TERSUS_PARSER"
+    restore (Just backend) = setEnv "TERSUS_PARSER" backend
+
+nativeSourceRecordLf :: IO TestResult
+nativeSourceRecordLf = do
+    ready <- NativeParser.runParserTool False ["return 1;"]
+    directory <- Native.cacheDirectory
+    case (ready, directory, File.writeFileRequest emptyDecls "") of
+        (Left err, _, _) -> pure (Just err)
+        (_, Error err, _) -> pure (Just err)
+        (_, _, Error err) -> pure (Just err)
+        (Right _, Ok home, Ok request) -> do
+            let exe = home </> ("tersus-parser-" ++ fingerprint [emitterHash, parserSource, runtimeSource])
+                unterminated = take (length request - 1) request
+            (code, out, err) <- Native.runWithInputFull exe unterminated
+            pure $ case File.readFileRequest unterminated of
+                Ok _ -> Just "the malformed request control was unexpectedly valid"
+                Error _ -> if code == ExitSuccess && out == "1\n" && not (null err)
+                    then Nothing
+                    else Just ("native parser did not refuse unterminated source record: " ++ show (code, take 80 out, take 80 err))
+
+testNativeFiles :: Test
+testNativeFiles = TestList "native-file-transport"
+    [ TestList "metadata-and-imports"
+        [ nativeFileCase label accepted decls source
+        | (label, accepted, decls, source) <-
+            [ ("empty", True, emptyDecls, "")
+            , ("all ten seeded fields", True, protocolDecls, "")
+            , ("independent optional fields and flags", True, protocolDecls{declSelf = Nothing, declLocate = False}, "")
+            , ("bare import", True, locating emptyDecls, "import app::geo; return 1;")
+            , ("alias", True, locating emptyDecls, "import app::geo::shapes as g; return 1;")
+            , ("selected names", True, locating emptyDecls, "import app::geo { Point, area }; return 1;")
+            , ("alias and selected names", True, locating emptyDecls, "import app::geo::shapes as g { Point, area }; return 1;")
+            , ("line and tab columns", True, locating emptyDecls, "// λ header\n\timport app::geo as g;\n  import app::other { A, B };\nreturn 1;")
+            , ("unlocated body retains import positions", True, emptyDecls, "\n  import app::geo;\nreturn 1;")
+            , ("full library declarations and UTF-8 source", True, locating Compile.probeDecls, "// String in a comment is not a declaration\ns = \"λ🙂\"; return size(s.bytes);")
+            , ("generic and impl scope restoration", True, locating emptyDecls, "struct Vec<T, n> { x: T, bytes: Array<Byte, n> }; impl<T, n> Vec<T, n> { fn get(self: &Self) -> &T from self [{ }] [{ }] { return &self.x; }; };")
+            , ("empty selected names", False, locating emptyDecls, "import app::geo {};")
+            , ("whitespace-only selected names", False, locating emptyDecls, "import app::geo { };")
+            , ("trailing selected-name comma", False, locating emptyDecls, "import app::geo { Point, };")
+            , ("missing alias", False, locating emptyDecls, "import app::geo as ;")
+            , ("seeded Unicode nested type constructor name", True, locating (emptyDecls{declSelfType = Just (TNamed "Wrap" [ArgType (TNamed "é" [])])}), "struct Holder<T> { x: T }; h = Holder<Self> { x: 0 }; return 0;")
+            , ("seeded numeric nested type constructor name", True, locating (emptyDecls{declSelfType = Just (TNamed "Wrap" [ArgType (TNamed "a١" [])])}), "struct Holder<T> { x: T }; h = Holder<Self> { x: 0 }; return 0;")
+            , ("seeded underscore nested type constructor name", True, locating (emptyDecls{declSelfType = Just (TNamed "Wrap" [ArgType (TNamed "a_b" [])])}), "struct Holder<T> { x: T }; h = Holder<Self> { x: 0 }; return 0;")
+            , ("seeded backtick nested type constructor name", True, locating (emptyDecls{declSelfType = Just (TNamed "Wrap" [ArgType (TNamed "`a" [])])}), "struct Holder<T> { x: T }; h = Holder<Self> { x: 0 }; return 0;")
+            , ("Unicode letter alias", True, locating emptyDecls, "import app::geo as é中; return 0;")
+            , ("Unicode symbol alias rejected", False, locating emptyDecls, "import app::geo as 🙂; return 0;")
+            , ("Unicode letter path", True, locating emptyDecls, "import app::中文; return 0;")
+            , ("Unicode symbol path rejected", False, locating emptyDecls, "import app::🙂; return 0;")
+            , ("emoji source identifier rejected", False, locating emptyDecls, "🙂 = 1; return 🙂;")
+            , ("comment immediately after import keyword", True, locating emptyDecls, "import// header\napp::geo; return 0;")
+            , ("seeded impl clears Self and impl parameters", True, (locating emptyDecls){declSelf = Just "Seed", declSelfType = Just (TNamed "Seed" []), declImplParams = ["T"]}, "struct S {}; impl S {};")
+            , ("malformed function field type rejected", False, locating emptyDecls, "struct S { f: fn Int }; return 0;")
+            , ("malformed borrowed function type rejected", False, locating emptyDecls, "fn f(x: &fn Int) -> Int ~ { return 0; };")
+            , ("misplaced import", False, locating emptyDecls, "return 0; import app::geo;")
+            , ("malformed path", False, locating emptyDecls, "import app:::geo;")
+            ]
+        ]
+    , TestList "per-run-declaration-shadowing"
+        [ nativeFileSequence "struct field order"
+            [ (True, "struct S { x: Int, y: Int };")
+            , (True, "struct S { y: Int, x: Int }; s = S { x: 1, y: 2 }; return s.x;")
+            ]
+        , nativeFileSequence "seeded enum preserves re-registered same variants"
+            [ (True, "enum E { A { n: Int }, B };")
+            , (True, "enum E { A { n: Int }, B }; e = E::A { n: 1 }; return e.n;")
+            ]
+        , nativeFileSequence "seeded enum supports generated Clone on same variants"
+            [ (True, "enum E { A { n: Int }, B };")
+            , (True, "enum E { A { n: Int }, B }; impl Clone for E { }; e = E::A { n: 1 }; return 0;")
+            ]
+        , nativeFileSequence "enum shadows enum"
+            [ (True, "enum E { A { old: Int }, B };")
+            , (True, "enum E { C { fresh: Int } }; e = E::C { fresh: 2 }; return match e { E::C { fresh: n } => n, };")
+            ]
+        , nativeFileSequence "struct shadows enum"
+            [ (True, "enum E { A { old: Int }, B };")
+            , (True, "struct E { fresh: Int }; e = E { fresh: 2 }; return e.fresh;")
+            ]
+        , nativeFileSequence "enum shadows struct"
+            [ (True, "struct E { old: Int };")
+            , (True, "enum E { C { fresh: Int } }; e = E::C { fresh: 2 }; return 0;")
+            ]
+        , nativeFileSequence "plain struct removes generic parameters"
+            [ (True, "struct Vec<T> { x: T };")
+            , (True, "struct Vec { fresh: Int }; v = Vec { fresh: 3 }; return v.fresh;")
+            ]
+        , nativeFileSequence "enum removes generic parameters"
+            [ (True, "struct Vec<T, n> { x: T, bytes: Array<Byte, n> };")
+            , (True, "enum Vec { Empty, Some { fresh: Int } }; v = Vec::Some { fresh: 3 }; return 0;")
+            ]
+        , nativeFileSequence "generic struct shadows enum"
+            [ (True, "enum Vec { Empty, Some { old: Int } };")
+            , (True, "struct Vec<T> { fresh: T }; v = Vec<Int> { fresh: 3 }; return v.fresh;")
+            ]
+        , nativeFileSequence "own clone survives file boundary and refusal"
+            [ (True, "fn clone(x: Int) -> Int [{ }] [{ }] { return x; };")
+            , (False, "import app::geo { };")
+            , (True, "return clone(3);")
+            ]
+        ]
+    , TestCase "selected parseFileWith is native" $ withNativeBackend $
+        pure (nativeFileVerdict True (locating emptyDecls) source (NativeParser.parseFileWith (locating emptyDecls) source))
+    , TestCase "native source record requires terminal LF" nativeSourceRecordLf
+    , testCase "tool failure is not a matching parser rejection" $
+        testAssertEq (nativeFileVerdict False emptyDecls "import app { };" (Left "Parser tool failure: sentinel")) (Just "Parser tool failure: sentinel")
+    ]
+  where
+    source = "\nimport app::geo as g { Point };\nstruct Local { z: Int, a: Bool }; return 1;"
+
+{-# NOINLINE nativeLoaderParser #-}
+nativeLoaderParser :: IORef [String] -> FileParser
+nativeLoaderParser failures decls source = unsafePerformIO $ do
+    actual <- NativeParser.parseFileNative decls source
+    case actual of
+        Left err | "Parser tool failure:" `isInfixOf` err -> modifyIORef' failures (err :)
+        _ -> pure ()
+    pure actual
+
+loadedParity :: LoadResult -> LoadResult -> TestResult
+loadedParity (StandaloneResult actualPath actualFile) (StandaloneResult expectedPath expectedFile) =
+    testAssertEq actualPath expectedPath <> testAssertEq actualFile expectedFile
+loadedParity (PackageResult actual) (PackageResult expected) =
+    testAssertEq (packageRootDir actual, packagePackageName actual, packageEntryFile actual, packageEntryModule actual)
+        (packageRootDir expected, packagePackageName expected, packageEntryFile expected, packageEntryModule expected)
+        <> testAssertEq (map moduleView (packageModules actual)) (map moduleView (packageModules expected))
+        <> testAssertEq (map fileView (concatMap loadedModuleFiles (packageModules actual))) (map fileView (concatMap loadedModuleFiles (packageModules expected)))
+  where
+    moduleView modu = (loadedModuleId modu, loadedModuleDeclNames modu, loadedDependencies modu)
+    fileView file = (loadedFileModule file, loadedFileName file, loadedFileStem file, loadedFilePath file, loadedParsed file, loadedDeclNames file, loadedImports file, loadedFileSource file)
+loadedParity _ _ = Just "native and oracle loaders disagreed on standalone/package discovery"
+
+nativeLoadVerdict :: Bool -> Either String LoadResult -> Either String LoadResult -> TestResult
+nativeLoadVerdict accepted actual expected = case actual of
+    Left err | "Parser tool failure:" `isInfixOf` err -> Just err
+    _ -> case (expected, actual) of
+        (Right expectedLoad, Right actualLoad)
+            | accepted -> loadedParity actualLoad expectedLoad
+            | otherwise -> Just "oracle and native loaders accepted rejected control"
+        (Left oracleError, Left nativeError)
+            | not accepted -> Nothing
+            | otherwise -> Just ("both loaders rejected accepted control; oracle: " ++ oracleError ++ "; native: " ++ nativeError)
+        (Left err, Right _) -> Just ("native loader accepted what oracle rejected: " ++ err)
+        (Right _, Left err) -> Just ("native loader rejected accepted control: " ++ err)
+
+nativeLoadCase :: String -> Bool -> IO (Either String LoadResult) -> (FileParser -> IO (Either String LoadResult)) -> Maybe String -> Test
+nativeLoadCase label accepted oracleAction nativeAction expectedOutput = TestCase label $ do
+    failures <- newIORef []
+    expected <- oracleAction
+    actual <- nativeAction (nativeLoaderParser failures)
+    let verdict = nativeLoadVerdict accepted actual expected <> case (actual, expectedOutput) of
+            (Right (PackageResult pkg), Just output) -> case compileModulesToProgram pkg of
+                Error err -> Just ("native-loaded AST did not compile directly: " ++ err)
+                Ok program -> case runProgram program of
+                    Error err -> Just err
+                    Ok returned -> testAssertEq (fmap renderMirValue returned) (Just output)
+            (_, Nothing) -> Nothing
+            _ -> Just "expected native-loaded package for execution control"
+    _ <- evaluate (forceTestResult verdict)
+    toolFailures <- readIORef failures
+    pure (case toolFailures of
+        err : _ -> Just err
+        [] -> verdict)
+
+testNativeModuleLoader :: Test
+testNativeModuleLoader = TestList "native-module-loader"
+    [ TestList "existing module controls"
+        [ nativeLoadCase label accepted (pure (loadFromEntry resolver entry)) (\parser -> pure (loadFromEntryWith parser resolver entry)) output
+        | (label, accepted, files, entry, output) <-
+            [ ("base package", True, basePkg, "app/main.tersus", Nothing)
+            , ("collapse and symbol imports", True, collapsePkg, "app/main.tersus", Nothing)
+            , ("multiple files and same-module imports", True, multiFilePkg, "app/main.tersus", Nothing)
+            , ("module directory entry", True, basePkg, "app/geo/geo.tersus", Nothing)
+            , ("qualified constructors", True, geoFiles "import app::geo; p = geo::Point { x: 3 }; return geo::area(p);", "app/main.tersus", Nothing)
+            , ("aliases and selected imports", True, geoFiles "import app::geo as g { Point, make }; p = make(3); return g::area(p);", "app/main.tersus", Nothing)
+            , ("dependency-derived String", True, stringFiles, "app/main.tersus", Just "3")
+            , ("dependency Eq and Clone", True, cloneFiles, "app/main.tersus", Just "42")
+            , ("missing selected symbol", False, geoFiles "import app::geo { Missing }; return 0;", "app/main.tersus", Nothing)
+            , ("non-entry executable statement", False, [("app/package.tersus", ""), ("app/main.tersus", "import app::geo; return 0;"), ("app/geo/geo.tersus", "x = 1;")], "app/main.tersus", Nothing)
+            , ("standalone", True, [("solo/main.tersus", "return 7;")], "solo/main.tersus", Nothing)
+            , ("standalone import rejected", False, [("solo/main.tersus", "import app::geo; return 7;")], "solo/main.tersus", Nothing)
+            ]
+        , let resolver = resolverFromFiles files
+        ]
+    , TestList "actual MIR package entries"
+        [ nativeLoadCase path True (loadFromFilesystem path) (\parser -> loadFromFilesystemWith parser path) Nothing
+        | path <-
+            [ "examples/mir/emit/emit.tersus", "examples/mir/mir_reader/mir_reader.tersus"
+            , "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus"
+            , "examples/mir/reader/reader.tersus"
+            ]
+        ]
+    , testCase "loader tool failure is not a matching rejection" $
+        testAssertEq (nativeLoadVerdict False (Left "parse error: Parser tool failure: sentinel") (Left "unknown import")) (Just "parse error: Parser tool failure: sentinel")
+    ]
+  where
+    stringFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; s = geo::greeting(); return size(s);")
+        , ("app/geo/geo.tersus", "fn greeting() -> String [{ }] [{ }] { return \"hi\".concat(\"!\"); };")
+        ]
+    cloneFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; p = geo::make(21); q = clone(p); if q = p { return p.x + q.x; }; return 0;")
+        , ("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
+        ]
+
 testModules :: Test
-testModules = TestList "testModules" [testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]
+testModules = TestList "testModules" [testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]

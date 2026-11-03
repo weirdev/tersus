@@ -145,12 +145,53 @@ applications, a standard `Eq` or `Clone` impl is written out, and so on). The
 arena is built in parse order and renumbered at the end into the emission
 order above; nodes a failed speculation built are unreachable and dropped.
 
-The host (`src/TersusParser.hs`) runs it as `MirHousekeeping` runs the checker
-and the eraser written in Tersus: a native executable built with clang from
-the seed and cached by the hash of the parser source, or the program
-interpreted by the MIR executor where it cannot be built. The tool is always
-compiled by the Haskell parser (the bootstrap path), never by itself. Its
-input is exactly:
+The host (`src/TersusParser.hs`) builds the parser through the isolated Haskell
+bootstrap, then runs a native executable. Its fingerprinted disk cache and
+cross-process lock are the existing `Native.cachedProgram` mechanism. Unset
+`TERSUS_PARSER` or `native` selects it. `interpreted` explicitly selects the MIR
+interpreter; `haskell` selects the one-release oracle. Build, process and
+protocol failures are errors, never fallback decisions.
+
+Production source and module loading use the file protocol in
+`src/FileParserProtocol.hs`:
+
+```
+tersus-file-parse 1
+decls
+... counted maps and context records ...
+endDecls
+source <UTF-8 byte count>
+<exact source bytes, to EOF>
+```
+
+The declarations carry all ten `Parse.Decls` fields: constructors, types,
+Self name/type, type parameters, generics, impl parameters, own-Clone status,
+location mode and field types. Records require LF terminators; duplicate keys,
+invalid counts, unsupported types and invalid UTF-8 are rejected.
+
+A successful reply is:
+
+```
+tersus-file 1
+imports <count>
+... import positions, path segments, alias and selected names ...
+decls
+... final declarations ...
+endDecls
+ast
+tersus-ast 1 parsed
+... AST records ...
+root <id>
+```
+
+The AST suffix is decoded by the unchanged `AstData.readParsed`, including
+its single-use tree, stage, position and trailing-record checks. The parser
+returns no value on success: stdout ends at the AST root, with no extra `0`.
+A syntax refusal returns `1` and writes its diagnostic to stderr. The runtime
+prints `1\n`; its process exit may still be successful. A nonzero process exit
+is always a tool failure, even when stdout resembles an AST.
+
+The small `tersus-parse 1` interface remains for raw AST tests:
 
 ```
 tersus-parse 1
@@ -160,32 +201,32 @@ tersus-parse 1
 ... (per segment)
 ```
 
-The segments are the library texts the pipeline puts in front of the program,
-then the program itself; `locating` is `1`, and only the last segment is read
-with statement places kept (a `Mark` before each statement, as
-`Parse.locating` does). The host reads a program twice through the tool, as
-`Compile.parseSourceWith` reads it: a probe with the prelude, the string, the
-map and the set library texts in front (whose statements the host drops; only
-the program's own statements choose its libraries, through
-`Compile.librariesFor`), then the chosen libraries and the program, located.
-The last segment is a file: `import` declarations at its head are read, and a
-file that has any is refused after the whole file is read with the bare line
-`imports are not linked yet: <paths>` on the standard error, as the Haskell
-reading refuses it; an `import` anywhere else fails with
-`import statements must come before any declaration in a file`. On success
-the AST data is on the standard output and the return is `0`. On failure the
-return is `1` and the standard error has one line,
-`line L:C: <what was expected>`.
+`Pipeline.validatedSource` and `compileSource` lower the Tersus-parsed source
+AST through `Compile.lowerSourceParts`. A source-only native probe chooses
+libraries; their frozen ASTs and declarations come from `Compile`'s existing
+cache. The final native file parse receives those declarations. Keeping
+library names, library AST and source AST separate preserves the prepared
+library-prefix cache. Package loading injects the same native file parser
+through `Pipeline.loadFromFilesystem`; imports are linked by the module
+pipeline. Standalone compilation still rejects unlinked imports.
 
-`Pipeline.parseSource` feeds every program to this parser. The Haskell parser
-stays as the oracle for one release: `TERSUS_PARSER=haskell` selects it, and
-any failure of the tool falls back to it with a note on the standard error.
-`Compile.parseSource` is unchanged. Error parity is checked for verdicts, and
-for the one fixture the parser itself rejects the message names the same
-reason; other messages are the Tersus parser's own. `testParser` checks
-byte-for-byte parity over the corpus of `testAstData` plus generated snippets
-for every desugaring, and that the writer the parser shares with
-`examples/ast_reader.tersus` is identical text in both.
+`Compile` and the default `Modules` loaders remain the one-way bootstrap and
+oracle path. Native parsing never uses Haskell to discover user declarations.
+Immutable input is indexed once; consumed state uses lightweight checkpoints
+and append-only arena rollback. Flat arena-list emission is iterative.
+Identifier classifiers are generated as pure Tersus comparisons from the
+serving Haskell oracle's `Data.Char.isLetter`, `isUpper`, `isLower` and
+`isAlphaNum` predicates, so identifier grammar and named-type rendering agree
+without per-character tables or Haskell source parsing. These helpers are
+linked into the parser bootstrap and parser example build, not ordinary
+programs.
+
+`testParser` enforces exact AST parity for every source under `examples/` and
+`lib/`, including rejected sources, plus generated/desugaring and large-arena
+cases. Only three explicit parser smoke programs run interpreted. Tool failures
+fail the gate. `testModules` checks imports, final declaration state and real
+module compilation; Pipeline substitution and failed-bootstrap tests cover the
+production frontend boundary.
 
 ## Tests
 

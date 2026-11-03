@@ -60,9 +60,9 @@ import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
 import Parse
-import Modules (LoadResult (..), loadFromFilesystem)
+import Modules (LoadResult (..))
 import qualified Modules
-import Pipeline (compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Pipeline (loadFromFilesystem, compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
