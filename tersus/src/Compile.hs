@@ -21,9 +21,9 @@ import qualified Data.Map as Map
 import qualified Mir as M
 import MirLower (lowerElaborated, lowerModuleWith)
 import Data.List (intercalate)
-import Interface (mergeInterfacesImportEnv)
+import Interface (mergeInterfacesImportEnv, withoutDeclaredNames)
 import LibParsed (declsForLibModules, libParsed, statementsForLibModules)
-import LibPackage (libModuleOfDisplay, libPackage, libSelection)
+import LibPackage (libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
 import Link (linkPrograms)
 import Modules (ModuleId (..))
 import Parse (Decls, ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, parseStatementBlockWith, renderPath)
@@ -175,6 +175,14 @@ declaredNames stmt = case stmt of
     While _ _ _ body -> concatMap declaredNames body
     ImplDef _ _ _ _ _ body -> concatMap declaredNames body
     BoundedDef _ inner -> declaredNames inner
+    _ -> []
+
+-- The names a program gives its functions, at the top and in impls
+definedFunctionNames :: Statement -> [String]
+definedFunctionNames stmt = case stmt of
+    Assign name (Val VFunct{}) -> [name]
+    ImplDef _ _ _ _ _ body -> concatMap definedFunctionNames body
+    BoundedDef _ inner -> definedFunctionNames inner
     _ -> []
 
 -- Whether the program as it was read has a string literal in it: the application of the builtin that
@@ -375,15 +383,19 @@ lowerSource reserving source =
 
 lowerSourceParts :: Bool -> SourceParts -> Result M.Program String
 lowerSourceParts _reserving (names, _library, stmts) =
-        case libPackage of
-            Error err -> Error err
-            Ok pkg ->
-                let selected = [name | display <- names, Just name <- [libModuleOfDisplay display]]
-                    (ifaces, units) = libSelection pkg selected
-                    importEnv = mergeInterfacesImportEnv ifaces
-                 in stage "Validation failed: " (mapResult fst (elaborateWith importEnv stmts)) `bindResult` \elaborated ->
-                        stage "Lowering failed: " (lowerModuleWith importEnv ifaces elaborated) `bindResult` \entryProgram ->
-                            mapResult completeSpecEnvs (linkPrograms (units ++ [(ModuleId "main" Nothing, entryProgram)]))
+    case libPackage of
+        Error err -> Error err
+        Ok pkg ->
+            let selected = [name | display <- names, Just name <- [libModuleOfDisplay display]]
+             in case libSelectionFor pkg selected stmts of
+                    Left err -> Error err
+                    Right (selectedIfaces, units) ->
+                        let own = concatMap declaredNames stmts ++ concatMap definedFunctionNames stmts
+                            ifaces = map (withoutDeclaredNames own) selectedIfaces
+                            importEnv = mergeInterfacesImportEnv ifaces
+                         in stage "Validation failed: " (mapResult fst (elaborateWith importEnv stmts)) `bindResult` \elaborated ->
+                                stage "Lowering failed: " (lowerModuleWith importEnv ifaces elaborated) `bindResult` \entryProgram ->
+                                    mapResult completeSpecEnvs (linkPrograms (stripDeclaredFromUnits own units ++ [(ModuleId "main" Nothing, entryProgram)]))
 
 -- The ghost environment of a function of a whole program names every
 -- function of the program (the lowering preregisters them all before it
