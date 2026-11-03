@@ -5,60 +5,25 @@ module Link
     , pruneProgram
     ) where
 
-import Data.List (isPrefixOf)
+import Data.List (isPrefixOf, nubBy)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import Data.Char (isAlphaNum)
-
 import qualified Mir as M
-import Modules (ModuleId, declarationNames, renderModuleId)
-import Parse (emptyDecls, parseStatementBlockWith)
-import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
+import Modules (ModuleId, renderModuleId)
 import qualified Syntax
-import Syntax (Proof (..), Statement (..), ValidationStatement (..), VariableProof, Value (..))
+import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)
 import Utils (Result (..), bindResult)
 
-libraryStatements :: [Statement]
-libraryStatements = fst (foldl step ([], emptyDecls) [cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource])
-  where
-    step (stmts, declared) text = case parseStatementBlockWith declared text of
-        Right (more, declared') -> (stmts ++ more, declared')
-        Left _ -> (stmts, declared)
-
-libraryDeclNames :: Set.Set Name
-libraryDeclNames = Set.fromList (declarationNames libraryStatements)
-
-libraryTypeNames :: Set.Set Name
-libraryTypeNames =
-    Set.fromList $
-        [name | StructDef name _ _ _ <- libraryStatements]
-            ++ [name | EnumDef name _ <- libraryStatements]
-            ++ [name | TraitDef name _ _ <- libraryStatements]
-
-isLibraryName :: Name -> Bool
-isLibraryName name = name `Set.member` libraryDeclNames || isLibraryImplName name
-  where
-    isLibraryImplName implName
-        | "<" `isPrefixOf` implName =
-            let inside = takeWhile (/= '>') (drop 1 implName)
-                parts = splitAs inside
-                bases = map baseName parts
-             in any (`Set.member` libraryTypeNames) bases
-        | otherwise = baseName (takeWhile (/= ':') implName) `Set.member` libraryTypeNames
-    splitAs text = case breakOn " as " text of
-        Just (owner, trait) -> [owner, trait]
-        Nothing -> [text]
-    baseName = takeWhile isAlphaNum
-    breakOn needle = go ""
-      where
-        go acc text
-            | needle `isPrefixOf` text = Just (reverse acc, drop (length needle) text)
-            | otherwise = case text of
-                c : rest -> go (c : acc) rest
-                [] -> Nothing
-
+-- Units are merged under the names their declarations were lowered with
+-- (compiler-library units and the entry module keep bare names, the rest
+-- are canonical). The same unit passed twice -- a compiler-library unit
+-- selected by several modules of a package -- is deduplicated by unit
+-- identity; a name defined by two different units with different
+-- definitions is a duplicate-definition error, and only a definition
+-- identical to the one already linked (a declaration an importing unit
+-- carries seeded from the interface it was lowered against) merges.
 linkPrograms :: [(ModuleId, M.Program)] -> Result M.Program String
 linkPrograms [] = Error "link error: no modules to link"
 linkPrograms units =
@@ -68,7 +33,8 @@ linkPrograms units =
                 mergeAll "invariant" [(modu, name, decl) | (modu, program) <- normalized, (name, decl) <- Map.toList (M.progInvariants program)] `bindResult` \invariants ->
                     Ok (M.completeInstances (M.Program types functions linkedMain generics invariants))
   where
-    normalized = [(modu, normalizeExterns program) | (modu, program) <- units]
+    normalized = nubBy sameUnit [(modu, normalizeExterns program) | (modu, program) <- units]
+    sameUnit (a, programA) (b, programB) = a == b && programA == programB
     rootMain = M.progMain (snd (last normalized))
     depGhosts = concatMap unitGhosts (init normalized)
     linkedMain = prependGhosts depGhosts rootMain
@@ -89,7 +55,6 @@ mergeAll what entries = go Map.empty Map.empty entries
     go values origins ((modu, name, value) : rest) = case Map.lookup name values of
         Nothing -> go (Map.insert name value values) (Map.insert name modu origins) rest
         Just existing
-            | isLibraryName name -> go values origins rest
             | existing == value -> go values origins rest
             | otherwise -> Error ("link error: " ++ what ++ " " ++ name ++ " is defined by both module " ++ renderModuleId (origins Map.! name) ++ " and module " ++ renderModuleId modu ++ " with different definitions")
 
@@ -100,7 +65,6 @@ mergeFunctions units = go Map.empty Map.empty [(modu, fn) | (modu, program) <- u
     go functions origins ((modu, fn) : rest) = case Map.lookup (M.fnName fn) functions of
         Nothing -> go (Map.insert (M.fnName fn) fn functions) (Map.insert (M.fnName fn) modu origins) rest
         Just existing
-            | isLibraryName (M.fnName fn) -> go functions origins rest
             | sameFunction existing fn -> go functions origins rest
             | otherwise -> Error ("link error: function " ++ displayName (M.fnName fn) ++ " is defined by both module " ++ renderModuleId (origins Map.! M.fnName fn) ++ " and module " ++ renderModuleId modu ++ " with different definitions")
     displayName name = case externLocal name of
