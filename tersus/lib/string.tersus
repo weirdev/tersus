@@ -265,7 +265,7 @@ impl Sequence<Byte> for String {
         return &get(self.bytes, i);
     };
 
-    fn set(self: Self, i: Int, x: Byte) -> Self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm size(return.bytes) = size(self.bytes); affirm get(return.bytes, i) = x; }] {
+    fn set(self: Self, i: Int, x: Byte) -> Self [{ affirm i >= 0; affirm i < size(self.bytes); }] [{ affirm size(return.bytes) = size(self.bytes); affirm get(return.bytes, i) = x; affirm forall j where j >= 0, j < size(self.bytes), j != i: get(return.bytes, j) = get(self.bytes, j); }] {
         return Self { bytes: set(self.bytes, i, x) };
     };
 };

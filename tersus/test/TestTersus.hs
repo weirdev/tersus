@@ -31,6 +31,8 @@ import TestBox
 import TestDeref
 import TestPointers
 import TestSequence
+import TestSequenceContracts
+import TestRuleScopes
 import TestStrings
 import TestBytes
 import TestConnectives
@@ -156,6 +158,8 @@ originalGroups =
     , testCopies
     , testGenerics
     , testSequence
+    , testSequenceContracts
+    , testRuleScopes
     , testStrings
     , testBytes
     , testConnectives

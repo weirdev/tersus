@@ -14,6 +14,7 @@ module ProofEngine
     , entailsAll
     , constantValues
     , entailsDirect
+    , equivalentTerms
     , applyRewrite
     , deriveRefl
     , reflectProofsByProofs
@@ -26,6 +27,7 @@ import qualified Data.Set as Set
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe, isJust)
 
+import ProofHelpers (proofIotas)
 import Linear
 import StdLib
 import Types
@@ -117,6 +119,17 @@ entailsDirect goals (ProofContext facts cache) =
         (_, _, flags, _) = querySolver start (map lightProof goals)
      in flags
 
+equivalentTerms :: IotaProof -> [IotaProof] -> ProofContext -> [Bool]
+equivalentTerms source targets (ProofContext facts cache) =
+    let start = case cache of
+            Just c -> cacheSolver c
+            Nothing -> satSolver (initialSaturation facts)
+        (solver, ids) = solverGoals start (map lightProof (source : targets))
+        classes = closureFlat (solverClosure solver)
+     in case ids of
+        sourceId : targetIds -> map ((== rep classes sourceId) . rep classes) targetIds
+        [] -> []
+
 entailsAll :: [IotaProof] -> ProofContext -> [Bool]
 entailsAll goals context = fst (entailsBlocked goals context)
 
@@ -177,7 +190,8 @@ entailsFrom originalGoals startSaturation =
     -- guard blocked, so it repeats within a budget. Failing that, the index is compared with an index
     -- the program reads: below it, equal to it, and above it.
     proveForall (Forall index guards body) =
-        let fresh = ATerm (Iota ("$" ++ index))
+        let occupied = Set.fromList (concatMap proofIotas (goals ++ satFacts startSaturation))
+            fresh = ATerm (head [iota | n <- [0 :: Int ..], let iota = Iota ("$forall " ++ index ++ " " ++ show n), iota `Set.notMember` occupied])
             guardFacts = map (substituteIndex index fresh) guards
             bodyGoal = substituteIndex index fresh body
             sat0 = extendSaturation startSaturation guardFacts
@@ -279,7 +293,12 @@ entailsFrom originalGoals startSaturation =
 
 -- The index terms of the get(L, t) a proof contains
 goalIndexes :: IotaProof -> [IotaProof]
-goalIndexes proof = [index | FApp (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) [_, index] <- subterms proof]
+goalIndexes proof =
+    [index | FApp funct (_ : index : _) <- subterms proof, indexedFunction funct]
+  where
+    indexedFunction (ATerm _) = True
+    indexedFunction (CTerm (VFunct _ _ _ (BuiltinFunct Get) _)) = True
+    indexedFunction _ = False
 
 -- The indexes of the get(L, t) in the facts and the goal, one for each class of equal indexes, other
 -- than the index itself. Only the first few are tried, to bound the work of a proof.
@@ -287,9 +306,10 @@ splitIndexes :: [IotaProof] -> IotaProof -> IotaProof -> [IotaProof]
 splitIndexes facts fresh goal =
     let (table, classes, _) = solve facts [goal, fresh]
         getClasses = Map.keys (builtinsByClass table classes (== Get))
+            ++ [rep classes (idOf table accessor) | Forall index _ body <- facts, (accessor, _, _) <- indexedLists index body]
         indexIds =
             [ indexId
-            | (_, (functId, [_, indexId])) <- tableApps table
+            | (_, (functId, _ : indexId : _)) <- tableApps table
             , rep classes functId `elem` getClasses
             , rep classes indexId /= rep classes (idOf table fresh)
             ]
@@ -756,8 +776,8 @@ forallInstances eligible table classes facts known done =
         (\(guards, instantiated, indexTerm, _) -> (guards, instantiated, indexTerm))
         [ (map (substituteIndex index indexTerm) guards, instantiated, indexTerm, key)
         | (place, Forall index guards body) <- zip [0 ..] facts
-        , (accessor, listTerm) <- indexedLists index body
-        , indexTerm <- getIndexesOf accessor listTerm
+        , (accessor, listTerm, sizes) <- indexedLists index body
+        , indexTerm <- getIndexesOf accessor listTerm sizes
         , let key = (place, indexTerm)
         , key `Set.notMember` done
         , let instantiated = substituteIndex index indexTerm body
@@ -771,21 +791,20 @@ forallInstances eligible table classes facts known done =
     getIndexes =
         Map.fromListWith
             (flip (++))
-            [ ((rep classes listId, rep classes functId), [indexTerm])
-            | (_, (functId, [listId, indexId])) <- tableApps table
+            [ ((rep classes listId, rep classes functId, map (rep classes) sizeIds), [indexTerm])
+            | (_, (functId, listId : indexId : sizeIds)) <- tableApps table
             , let indexTerm = termFor indexId
             , eligible indexTerm
             ]
-    getIndexesOf accessor listTerm = Map.findWithDefault [] (rep classes (idOf table listTerm), rep classes (idOf table accessor)) getIndexes
+    getIndexesOf accessor listTerm sizes = Map.findWithDefault [] (rep classes (idOf table listTerm), rep classes (idOf table accessor), map (rep classes . idOf table) sizes) getIndexes
 
--- The (access, list) of the access(L, index) in a proof, where L does not mention the index: the access is a
--- function of two arguments whose second is the index, the builtin get or a function a trait's contract names
-indexedLists :: Variable -> IotaProof -> [(IotaProof, IotaProof)]
+-- Trailing arguments are hidden sizes and must agree as well as the accessor and receiver.
+indexedLists :: Variable -> IotaProof -> [(IotaProof, IotaProof, [IotaProof])]
 indexedLists index (FApp funct args) =
-    [ (funct, listTerm)
-    | FApp f [listTerm, BVar bound] <- [FApp funct args]
+    [ (funct, listTerm, sizes)
+    | listTerm : BVar bound : sizes <- [args]
     , bound == index
-    , not (mentionsIndex index listTerm)
+    , not (any (mentionsIndex index) (funct : listTerm : sizes))
     ]
         ++ concatMap (indexedLists index) (funct : args)
 indexedLists _ _ = []
