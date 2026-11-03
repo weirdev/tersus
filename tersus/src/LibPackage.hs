@@ -54,8 +54,11 @@ libModules =
 libModuleId :: String -> ModuleId
 libModuleId name = ModuleId "tersuslib" (Just name)
 
+-- The imports share the first line of the text (a comment in every lib
+-- file), so the positions of the library's own statements, which the
+-- lowering names temporaries by, are the ones of the text itself.
 libSourceWithImports :: (String, String, String, [String]) -> String
-libSourceWithImports (_, _, text, deps) = concat ["import tersuslib::" ++ dep ++ ";\n" | dep <- deps] ++ text
+libSourceWithImports (_, _, text, deps) = concat ["import tersuslib::" ++ dep ++ "; " | dep <- deps] ++ text
 
 libPackageFiles :: [(FilePath, String)]
 libPackageFiles =
@@ -112,11 +115,13 @@ libPackage = unsafePerformIO $ modifyMVar libPackageCache $ \cached -> case cach
          in pure (Just forced, forced)
 
 -- The interfaces and lowered units of the named library modules, closed
--- over their dependencies and in dependency order.
+-- over their dependencies. The units are in the order librariesFor puts
+-- the libraries in front of a program, as the linked program's ghost
+-- statements follow that order.
 libSelection :: LibPackage -> [String] -> ([ModuleInterface], [(ModuleId, M.Program)])
 libSelection pkg names =
     let wanted = closure names
-        ordered = [name | name <- libOrder pkg, name `elem` wanted]
+        ordered = [name | name <- ["clone", "eq", "prelude", "string", "map", "set"], name `elem` wanted]
      in ( [libInterfaces pkg Map.! name | name <- ordered]
         , [(libModuleId name, libPrograms pkg Map.! name) | name <- ordered]
         )

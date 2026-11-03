@@ -15,20 +15,22 @@ module Compile
     , reservedError
     ) where
 
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Data.Char (isAlphaNum)
 import Data.List (subsequences)
 import qualified Data.Map as Map
-import System.IO.Unsafe (unsafePerformIO)
 
 import qualified Mir as M
-import MirLower (lowerElaborated, lowerLibrary)
+import MirLower (lowerElaborated, lowerModuleWith)
 import Data.List (intercalate)
+import Interface (mergeInterfacesImportEnv)
+import LibPackage (libModuleOfDisplay, libPackage, libSelection)
+import Link (linkPrograms)
+import Modules (ModuleId (..))
 import Parse (Decls, ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, parseStatementBlockWith, renderPath)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource, typesSource)
 import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Statement (..), Termination (..), TraitFn (..), ValidationStatement (..), Value (..))
-import TypeCheck (Elaborated, PreparedPrefix, elaborate, elaborateAfter, gatheredSignatures, preparePrefix)
-import Types (Arg (..), BuiltinFunct (..), Signature (..), Size (..), Type (..), pattern TList, pattern TBox, Variable)
+import TypeCheck (elaborate, elaborateWith)
+import Types (Arg (..), BuiltinFunct (..), Signature (..), Size (..), Type (..), pattern TList, pattern TBox)
 import Utils
 
 -- The front of the pipeline of Pipeline, split out so that MirHousekeeping can compile the checker and the
@@ -362,34 +364,47 @@ nameParts name = case dropWhile (not . isNameChar) name of
 
     isNameChar c = isAlphaNum c || c == '_'
 
-{-# NOINLINE preparedLibraries #-}
-preparedLibraries :: MVar (Map.Map ([String], Map.Map Variable Type) (Result PreparedPrefix String))
-preparedLibraries = unsafePerformIO (newMVar Map.empty)
-
-{-# NOINLINE elaborateSource #-}
-elaborateSource :: [String] -> [Statement] -> [Statement] -> Result Elaborated String
-elaborateSource names library stmts =
-    let gathered = gatheredSignatures (library ++ stmts)
-        prepared = unsafePerformIO $ modifyMVar preparedLibraries $ \cache ->
-            let key = (names, gathered)
-             in case Map.lookup key cache of
-                    Just prefix -> pure (cache, prefix)
-                    Nothing ->
-                        let prefix = preparePrefix gathered library
-                            bounded = if Map.size cache >= 64 then Map.empty else cache
-                         in prefix `seq` pure (Map.insert key prefix bounded, prefix)
-     in prepared `bindResult` \prefix -> elaborateAfter prefix stmts
-
 -- A program lowered to the MIR, before it is checked, its ghosts erased or it is validated: the stages
 -- Pipeline adds on top of this. Errors name the stage that refused the program, as the command line prints them.
+-- The program is the entry module, checked against the interfaces of the
+-- libraries librariesFor selects for it (all their names usable bare, as
+-- if imported), and linked with the library units of the lib package,
+-- which keep their bare names and come first; the entry unit is last,
+-- whose main the link keeps.
 lowerSource :: Bool -> String -> Result M.Program String
 lowerSource reserving source =
     parseSourceParts reserving source `bindResult` lowerSourceParts reserving
 
 lowerSourceParts :: Bool -> SourceParts -> Result M.Program String
-lowerSourceParts reserving (names, library, stmts) =
-    stage "Validation failed: " (elaborateSource names library stmts) `bindResult` \elaborated ->
-        stage "Lowering failed: " ((if reserving then lowerElaborated else lowerLibrary) elaborated)
+lowerSourceParts _reserving (names, _library, stmts) =
+        case libPackage of
+            Error err -> Error err
+            Ok pkg ->
+                let selected = [name | display <- names, Just name <- [libModuleOfDisplay display]]
+                    (ifaces, units) = libSelection pkg selected
+                    importEnv = mergeInterfacesImportEnv ifaces
+                 in stage "Validation failed: " (mapResult fst (elaborateWith importEnv stmts)) `bindResult` \elaborated ->
+                        stage "Lowering failed: " (lowerModuleWith importEnv ifaces elaborated) `bindResult` \entryProgram ->
+                            mapResult completeSpecEnvs (linkPrograms (units ++ [(ModuleId "main" Nothing, entryProgram)]))
+
+-- The ghost environment of a function of a whole program names every
+-- function of the program (the lowering preregisters them all before it
+-- lowers any body); a unit lowered alone names only its own and its
+-- imports'. The linked program is a whole program, so the ghost
+-- environments of its functions are completed to it: what a unit
+-- already names keeps its meaning, and the rest of the program's
+-- functions are named as themselves.
+completeSpecEnvs :: M.Program -> M.Program
+completeSpecEnvs program = program{M.progFunctions = Map.map completeFunction (M.progFunctions program), M.progMain = completeGhosts (M.progMain program)}
+  where
+    functionEnv = Map.fromList [(name, M.Const (M.CFn name)) | name <- Map.keys (M.progFunctions program)]
+    completeFunction fn = completeGhosts fn{M.fnSpec = completeSpec (M.fnSpec fn)}
+    completeGhosts fn = fn{M.fnBlocks = Map.map completeBlock (M.fnBlocks fn)}
+    completeBlock (M.BasicBlock statements term) = M.BasicBlock (map completeStatement statements) term
+    completeStatement (M.Ghost env ghost) = M.Ghost (completeEnv env) ghost
+    completeStatement other = other
+    completeSpec spec = spec{M.specEnv = completeEnv (M.specEnv spec), M.specLoops = Map.map (\loop -> loop{M.loopEnv = completeEnv (M.loopEnv loop)}) (M.specLoops spec)}
+    completeEnv env = Map.union env functionEnv
 
 -- The same for a program given as statements
 lowerStatements :: [Statement] -> Result M.Program String
