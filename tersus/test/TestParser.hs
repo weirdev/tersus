@@ -2,7 +2,9 @@ module TestParser (testParser) where
 
 import Control.Monad (forM)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
-import System.Directory (listDirectory)
+import System.Directory (doesDirectoryExist, listDirectory)
+import System.FilePath ((</>))
+import System.Exit (ExitCode (..))
 
 import qualified AstData as A
 import qualified Compile
@@ -47,14 +49,19 @@ tersusData = TersusParser.toolParseSource
 
 -- The source alone, unlocated, through the interpreted tool: the shape of the generated snippets
 tersusPlain :: String -> IO (Either String String)
-tersusPlain source = TersusParser.runParserToolInterpreted False [source]
+tersusPlain source = TersusParser.runParserTool False [source]
 
 
 compareWith :: (String -> Either String String) -> (String -> IO (Either String String)) -> String -> IO TestResult
 compareWith haskell tool source = do
     tersus <- tool source
     pure $ case (haskell source, tersus) of
-        (Right expected, Right actual) -> testAssertEq actual expected
+        (_, Left e) | "Parser tool failure:" `isPrefixOf` e -> Just e
+        (Right expected, Right actual) -> case A.readParsed actual of
+            Error e -> Just ("native stdout is invalid AstData: " ++ e)
+            Ok parsed -> case A.writeParsed parsed of
+                Error e -> Just e
+                Ok canonical -> firstFailure [sameData "noncanonical native stdout" canonical actual, sameData "native/oracle AST mismatch" expected actual]
         (Left message, Left tersusMessage) ->
             case [s | s <- knownSubstrings, s `isInfixOf` message] of
                 [] -> Nothing
@@ -63,6 +70,13 @@ compareWith haskell tool source = do
                     | otherwise -> Just ("the Tersus parser's message does not name the reason: " ++ take 200 tersusMessage)
         (Right _, Left e) -> Just ("the Tersus parser refused what Haskell accepts: " ++ take 200 e)
         (Left e, Right _) -> Just ("the Tersus parser accepted what Haskell refuses: " ++ take 200 e)
+
+sameData :: String -> String -> String -> TestResult
+sameData label expected actual
+    | expected == actual = Nothing
+    | otherwise = case [(n, want, got) | (n, want, got) <- zip3 [1 :: Int ..] (lines expected) (lines actual), want /= got] of
+        (n, want, got) : _ -> Just (label ++ " at record " ++ show n ++ ": expected " ++ take 200 want ++ "; got " ++ take 200 got)
+        [] -> Just (label ++ ": record counts " ++ show (length (lines expected), length (lines actual)))
 
 compareSource :: (String -> IO (Either String String)) -> String -> IO TestResult
 compareSource = compareWith haskellData
@@ -77,43 +91,31 @@ knownSubstrings =
     ]
 
 corpusPaths :: IO [FilePath]
-corpusPaths = do
-    examples <- files "examples"
-    rejected <- files "examples/rejected"
-    lib <- files "lib"
-    pure (examples ++ rejected ++ lib)
+corpusPaths = (++) <$> files "examples" <*> files "lib"
   where
-    files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
+    files dir = do
+        entries <- sort <$> listDirectory dir
+        fmap concat $ forM entries $ \entry -> do
+            let path = dir </> entry
+            directory <- doesDirectoryExist path
+            if directory then files path else pure [path | ".tersus" `isSuffixOf` entry]
 
 corpusParity :: IO TestResult
 corpusParity = do
     paths <- corpusPaths
     results <- forM paths $ \path -> do
         source <- readFile path
+        putStrLn ("Native corpus file: " ++ path)
         result <- compareSource tersusData source
         pure (fmap ((path ++ ": ") ++) result)
+    putStrLn ("Native corpus parity: " ++ show (length paths) ++ " files, " ++ show (length [e | Just e <- results]) ++ " failures")
     pure (firstFailure results)
 
-smallParity :: IO TestResult
-smallParity = do
-    paths <- corpusPaths
-    small <- filterM smallEnough paths
-    results <- forM small $ \path -> do
-        source <- readFile path
-        result <- compareWith haskellPlainData tersusPlain source
-        pure (fmap ((path ++ ": ") ++) result)
+interpretedSmoke :: IO TestResult
+interpretedSmoke = do
+    let sources = ["return 1 + 2;", "struct Point { x: Int }; p = Point { x: 2 }; return p.x;", "for i in 0..3 { i = 4; }; return 0;"]
+    results <- forM sources $ \source -> compareWith haskellPlainData (TersusParser.runParserToolInterpreted False . pure) source
     pure (firstFailure results)
-  where
-    smallEnough path = do
-        source <- readFile path
-        pure (length source < 3000)
-
-filterM :: (a -> IO Bool) -> [a] -> IO [a]
-filterM _ [] = pure []
-filterM p (x : xs) = do
-    keep <- p x
-    rest <- filterM p xs
-    pure (if keep then x : rest else rest)
 
 snippets :: [(String, String)]
 snippets =
@@ -156,6 +158,24 @@ snippets =
     , ("assume statement", "assume 1 < 2; return 0;")
     , ("nested blocks and marks off", "{ x = 1; { y = 2; }; }; return 0;")
     , ("cast and is", "enum E { A { x: Int }, B }; e = E::A { x: 1 }; if e is E::A { return (e as E::A).x; }; return 0;")
+    , ("accented and mixed-letter identifier", "éπ中 = 3; return éπ中;")
+    , ("CJK identifier", "中文 = 4; return 中文;")
+    , ("Unicode letter continuation", "aé9 = 5; return aé9;")
+    , ("emoji identifier rejected", "🙂 = 1; return 🙂;")
+    , ("Unicode punctuation identifier rejected", "。x = 1; return 。x;")
+    , ("combining start rejected", "́x = 1; return 0;")
+    , ("combining continuation rejected", "á = 1; return 0;")
+    , ("non-ASCII digit continuation rejected", "a١ = 1; return 0;")
+    , ("Unicode lower generic constructor name", "struct é { x: Int }; struct Wrap<T> { x: T }; w = Wrap<é> { x: é { x: 1 } }; return 0;")
+    , ("Unicode continuation generic constructor name", "struct aé { x: Int }; struct Wrap<T> { x: T }; w = Wrap<aé> { x: aé { x: 1 } }; return 0;")
+    , ("underscore identifier rejected", "a_b = 1; return 0;")
+    , ("backtick identifier rejected", "`a = 1; return 0;")
+    , ("Unicode uppercase type parameter", "fn id<Δ>(x: Δ) -> Δ ~ { return x; }; return id(1);")
+    , ("lowercase Unicode escape", "return \"\\u{e9}\\u{1f642}\";")
+    , ("uppercase Unicode escape", "return \"\\u{E9}\\u{1F642}\";")
+    , ("malformed function field type", "struct S { f: fn Int }; return 0;")
+    , ("malformed borrowed function type", "fn f(x: &fn Int) -> Int ~ { return 0; };")
+    , ("function type with malformed return", "struct S { f: fn(Int) -> fn Int }; return 0;")
     , ("function value type", "fn apply(f: fn(Int) -> Int, x: Int) -> Int { return f(x); }; return 0;")
     , ("qualified impl call", "struct S { x: Int }; impl S { fn get(self: &Self) -> Int [{ }] [{ }] { return self.x; }; }; s = S { x: 1 }; return <S>::get(s);")
     , ("misplaced import", "x = 1; import geo; return x;")
@@ -194,6 +214,8 @@ locatedSnippets =
     , ("trait and impl", "trait T { fn get(self: &Self) -> Int [{ }] [{ }]; }; struct S { x: Int }; impl T for S { fn get(self: &Self) -> Int [{ }] [{ }] { return self.x; }; }; return 0;")
     , ("standard Eq impl", "struct S { x: Int }; impl Eq for S { }; return 0;")
     , ("proof statements", "affirm 1 < 2 && 2 < 3; define p = 1; rewrite evalAll; return 0;")
+    , ("generated recursive Eq source positions", "enum Tree { Many { xs: List<Tree> }, Leaf }; impl Eq for Tree { }; return 0;")
+    , ("generated recursive Clone source positions", "enum Tree { Many { xs: List<Tree> }, One { child: Box<Tree> }, Leaf }; impl Clone for Tree { }; return 0;")
     , ("import is not linked", "import geo; return 0;")
     , ("imports with alias and names are not linked", "import geo::shapes as G { Circle }; import units; return 0;")
     , ("empty import name list", "import geo { }; return 0;")
@@ -235,11 +257,29 @@ firstFailure [] = Nothing
 firstFailure (Nothing : xs) = firstFailure xs
 firstFailure (e : _) = e
 
+responseVerdicts :: IO TestResult
+responseVerdicts = pure $ case A.writeParsed [] of
+    Error e -> Just e
+    Ok ast -> firstFailure
+        [ testAssertEq (TersusParser.parserResponse ExitSuccess ast "") (Right ast)
+        , testAssertEq (failed (TersusParser.parserResponse (ExitFailure 9) ast "process failure")) True
+        , testAssertEq (failed (TersusParser.parserResponse ExitSuccess (ast ++ "0\n") "")) True
+        , testAssertEq (failed (TersusParser.parserResponse ExitSuccess "" "")) True
+        , testAssertEq (TersusParser.parserResponse ExitSuccess "1\n" "refused\n") (Left "refused")
+        ]
+  where
+    failed (Left _) = True
+    failed _ = False
+
 testParser :: Test
 testParser = TestList "testParser"
-    [ TestCase "writer identity with ast_reader" writerIdentity
+    [ TestCase "native stdout roundtrip and exact equality" (compareWith haskellPlainData tersusPlain "return 1;\n")
+    , TestCase "large located arena exceeds former recursive stack limit" (compareWith haskellData tersusData (concat ["x" ++ show i ++ " = " ++ show i ++ ";\n" | i <- [0 :: Int .. 4095]] ++ "return 0;\n"))
+    , TestCase "many function-body arenas retain canonical order" (compareWith haskellData tersusData (concat ["fn f" ++ show i ++ "() -> Int ~ { return " ++ show i ++ "; };\n" | i <- [0 :: Int .. 255]] ++ "return 0;\n"))
+    , TestCase "native response framing and OS failures" responseVerdicts
+    , TestCase "writer identity with ast_reader" writerIdentity
     , TestCase "imports are not linked yet" importsVerdict
     , TestCase "generated snippet parity" snippetParity
-    , TestCase "small corpus parity (interpreted or native tool)" smallParity
+    , TestCase "three interpreted smoke programs" interpretedSmoke
     , TestCase "whole corpus parity" corpusParity
     ]

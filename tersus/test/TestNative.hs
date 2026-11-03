@@ -29,7 +29,7 @@ import MirOwnership (insertOwnership)
 import MirHousekeeping (verifyProgram)
 import Native (buildExecutableFast, runExecutable)
 import Parse (parseStatementBlock)
-import Modules (LoadResult (..), loadFromFilesystem)
+import Modules (LoadResult (..))
 import Pipeline
 import TestHarness
 import Utils

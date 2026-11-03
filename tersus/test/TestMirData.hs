@@ -8,9 +8,9 @@ import qualified Data.Map.Strict as Map
 
 import Cli (Command (..), runSource)
 import Mir
-import Modules (LoadResult (..), loadFromFilesystem)
+import Modules (LoadResult (..))
 import MirData
-import Pipeline (ownedSource)
+import Pipeline (ownedSource, loadFromFilesystem)
 import Types (Arg (..), Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestNative (nativeExamples, validatedPrograms)

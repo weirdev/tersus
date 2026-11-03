@@ -2,6 +2,11 @@
 
 module Compile
     ( parseSource
+    , SourceParts
+    , parseSourceParts
+    , parsedLibraries
+    , probeDecls
+    , lowerSourceParts
     , parseWithEquality
     , librariesFor
     , lowerSource
@@ -88,7 +93,9 @@ probeParseFile seeded plain source = case parseFileWith seeded source of
 parseSourceWith :: Bool -> String -> Result [Statement] String
 parseSourceWith reserving source = mapResult (\(_, library, stmts) -> library ++ stmts) (parseSourceParts reserving source)
 
-parseSourceParts :: Bool -> String -> Result ([String], [Statement], [Statement]) String
+type SourceParts = ([String], [Statement], [Statement])
+
+parseSourceParts :: Bool -> String -> Result SourceParts String
 parseSourceParts reserving source = case probeParseFile (locating probeDecls) (locating emptyDecls) source of
     Left err -> Error ("Parse error: " ++ show err)
     Right (probedFile, _) ->
@@ -372,9 +379,12 @@ elaborateSource names library stmts =
 -- Pipeline adds on top of this. Errors name the stage that refused the program, as the command line prints them.
 lowerSource :: Bool -> String -> Result M.Program String
 lowerSource reserving source =
-    parseSourceParts reserving source `bindResult` \(names, library, stmts) ->
-        stage "Validation failed: " (elaborateSource names library stmts) `bindResult` \elaborated ->
-            stage "Lowering failed: " ((if reserving then lowerElaborated else lowerLibrary) elaborated)
+    parseSourceParts reserving source `bindResult` lowerSourceParts reserving
+
+lowerSourceParts :: Bool -> SourceParts -> Result M.Program String
+lowerSourceParts reserving (names, library, stmts) =
+    stage "Validation failed: " (elaborateSource names library stmts) `bindResult` \elaborated ->
+        stage "Lowering failed: " ((if reserving then lowerElaborated else lowerLibrary) elaborated)
 
 -- The same for a program given as statements
 lowerStatements :: [Statement] -> Result M.Program String

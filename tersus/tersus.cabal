@@ -20,13 +20,16 @@ extra-source-files:
     lib/eq.tersus
     lib/clone.tersus
     lib/string.tersus
-    examples/emit.tersus
+    examples/mir/package.tersus
+    examples/mir/reader/reader.tersus
+    examples/mir/emit/emit.tersus
+    examples/mir/mir_reader/mir_reader.tersus
     examples/ast_reader.tersus
     AST_DATA.md
     bootstrap/emitter.sha256
     examples/parser.tersus
-    examples/mir_verify.tersus
-    examples/mir_erase.tersus
+    examples/mir/mir_verify/mir_verify.tersus
+    examples/mir/mir_erase/mir_erase.tersus
     lib/validation.tersus
     lib/stdlib.tersus
     lib/box.tersus
@@ -65,7 +68,9 @@ library
       ModuleResolve
       Modules
       Native
+      PackageCompile
       Parse
+      ParserUnicodeSource
       Pipeline
       PreludeSource
       Pretty
@@ -173,10 +178,12 @@ test-suite tersus-test
       TestMirReader
       TestMirVerify
       TestModules
-      TestParity
       TestNative
       TestOwnership
+      TestParity
       TestParser
+      TestParserBootstrap
+      TestParserUnicode
       TestPipeline
       TestPointers
       TestProofs

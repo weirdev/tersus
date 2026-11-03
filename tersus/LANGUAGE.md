@@ -2,7 +2,7 @@
 
 Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, booleans, lists, user-defined functions, nested blocks, and a proof validator built around an internal proof engine for equality, simple rewrites, and builtin function contracts.
 
-This guide describes the implementation in this package. (Programs are parsed by the parser written in Tersus, `examples/parser.tersus`; the Haskell parser stays as an oracle behind the environment variable `TERSUS_PARSER=haskell` for one release, and a program the tool cannot parse is parsed by it instead, with a note on the standard error. Which programs parse is unchanged; the wording of a parse error is the Tersus parser's own, a line and column and what was expected.) Runnable programs that demonstrate the features below are in [`examples/`](examples/README.md).
+This guide describes the implementation in this package. Source and module files use the native parser written in Tersus (`examples/parser.tersus`). Its first build needs clang and the pinned emitter seed; subsequent runs use the fingerprinted cache. Native tool failures are errors. `TERSUS_PARSER=interpreted` explicitly selects the reference parser interpreter, and `TERSUS_PARSER=haskell` keeps the Haskell oracle for one release. Parser diagnostics retain the Tersus parser's wording. Runnable programs are in [`examples/`](examples/README.md).
 
 ## Program Shape
 
@@ -14,7 +14,7 @@ y = size(x);
 affirm y = 4;
 ```
 
-Whitespace can be spaces, tabs, or newlines. Identifiers must start with a letter and may contain letters and digits.
+Whitespace can be spaces, tabs, or newlines. Identifiers start with a Unicode letter and continue with Unicode letters or ASCII digits (`Data.Char.isLetter` and `isDigit` in the serving oracle). Accented and CJK names are valid; emoji, combining marks and underscores are not identifier characters. Uppercase type parameters use that oracle's `isUpper` predicate. The parser's native comparisons are generated from the same Unicode version.
 
 ## Comments
 
@@ -42,7 +42,7 @@ stack run -- llvm program.tersus    # validate, then print the LLVM IR
 stack run -- build program.tersus -o program   # validate, then compile to an executable with clang
 ```
 
-`run` never runs a program that fails validation. It is `build` to a temporary executable that is run and removed, so it needs `clang`; `eval` runs the validated MIR with the interpreter of the MIR (`MirEval`) and needs nothing, and is the reference that native code is tested against. `mir` prints the program as the blocks the machine runs (see `MIR.md`). What a program writes (see Output) comes first, then the value it returns on a line of its own, the same in `run`, `eval` and an executable. A program that does not `return` prints no value. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
+`run` never runs a program that fails validation. It is `build` to a temporary executable that is run and removed, so it needs `clang`; `eval` interprets the validated MIR rather than building a user executable; the default parser still needs clang on its first build. It is the reference that native code is tested against. `mir` prints the program as the blocks the machine runs (see `MIR.md`). What a program writes (see Output) comes first, then the value it returns on a line of its own, the same in `run`, `eval` and an executable. A program that does not `return` prints no value. Integers print as digits, lists as `[1, 2]`, and booleans as `true`/`false`. Pass `-` instead of a file name to read the program from standard input.
 
 `build` writes the IR and the C runtime to uniquely named files in the temporary directory, runs `clang -O2` on them, and removes those files; it needs `clang` on the path. The executable prints the return value as `eval` does and stops on an `Integer overflow` with the same message and exit status. Native code handles every type of the language, and values print as `eval` prints them. It does not check what validation proved (a divisor that is not 0, an index in range), so a program that validates cannot trip them, and a bug in the validator would be undefined behaviour here and an error in `eval`.
 

@@ -5,6 +5,10 @@ module Pipeline
     , parseWithEquality
     , validatedSource
     , compileSource
+    , validatedSourceWith
+    , compileSourceWith
+    , loadFromEntry
+    , loadFromFilesystem
     , CompiledModule (..)
     , CompiledPackage (..)
     , compileModules
@@ -19,37 +23,29 @@ module Pipeline
     , assumptionsOf
     ) where
 
-import Data.List (sortBy)
-import Data.Ord (comparing)
 import qualified Data.Map as Map
 import qualified Mir as M
-import Compile (librariesFor, lowerSource, lowerStatements, parseWithEquality)
+import Compile (SourceParts, lowerSourceParts, lowerStatements, parseWithEquality)
 import TersusParser (parseSource)
+import qualified TersusParser
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesValidated)
-import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv)
-import Link (linkPrograms, pruneProgram)
-import ModuleResolve (rewriteFileReferences)
+import Link (pruneProgram)
 import qualified Modules as Mod
-import Parse (ParsedFile (..), emptyDecls, parseStatementBlockWith)
-import PreludeSource (preludeSource)
 import MirOwnership (expandRefWrites, insertOwnership)
 import MirHousekeeping (eraseGhosts, verifyProgram, validatedListLibrary)
 import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
-import MirLower (lowerModuleWith)
 import MirValidate (Validated, validateProgram)
 import MirLists (lowerLists)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..), exprToProof)
-import TypeCheck (Elaborated (..), elaborateWith)
-import Types (Signature (..), Size (..), Type (..), pattern TList, pattern TBox, baseNameOf)
+import Types (Size (..), Type (..))
 import Utils
 
 -- The stages a program goes through, each built on the one before and each giving back what the next needs:
 --
---   source -> AST (parseSource: the parser written in Tersus, hosted by TersusParser; Compile.parseSource
---   is the Haskell oracle behind TERSUS_PARSER=haskell and the fallback) -> checked AST (elaborate)
---          -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateProgram) -> executed (runProgram)
+--   source -> AST (TersusParser.parseSourceParts; Compile stays the explicit Haskell oracle/bootstrap)
+--          -> checked AST (elaborate) -> MIR (lowering, in Compile) -> checked MIR (verifyProgram) -> validated MIR (validateProgram) -> executed (runProgram)
 --                                                                    or -> owned MIR (ownedSource) -> LLVM IR (the emitter written in Tersus, see Bootstrap)
 --
 -- The validated MIR has its permissions (ghost values, POINTERS.md) taken out by `eraseGhosts` before anything runs it or makes native code of it.
@@ -92,19 +88,28 @@ assumptionsOf source = mapResult (snd . statements Nothing) (parseSource source)
 -- The MIR of a program that passes every check, before its ghosts are erased: what the eraser written in Tersus
 -- (examples/mir/mir_erase/mir_erase.tersus) is given, as `tersus mir --ghost-data` writes it
 validatedSource :: String -> Result M.Program String
-validatedSource source =
-    lowerSource True source `bindResult` \program ->
+validatedSource = validatedSourceWith TersusParser.parseSourceParts
+
+validatedSourceWith :: (Bool -> String -> Result SourceParts String) -> String -> Result M.Program String
+validatedSourceWith readSource source =
+    readSource True source `bindResult` lowerSourceParts True `bindResult` \program ->
         checkedLowered program `bindResult` \checked ->
             stage "Validation failed: " (validateProgram checked) `bindResult` \_ ->
                 Ok checked
 
 -- The MIR of a program that passes every check
 compileSource :: String -> Result M.Program String
-compileSource source =
-    lowerSource True source `bindResult` \program ->
-        checkedLowered program `bindResult` \checked ->
-            stage "Validation failed: " (validateProgram checked) `bindResult` \_ ->
-                eraseGhosts checked
+compileSource = compileSourceWith TersusParser.parseSourceParts
+
+compileSourceWith :: (Bool -> String -> Result SourceParts String) -> String -> Result M.Program String
+compileSourceWith readSource source = validatedSourceWith readSource source `bindResult` eraseGhosts
+
+-- The production file boundary; the default Modules loaders remain the isolated bootstrap path.
+loadFromEntry :: Mod.Resolver -> FilePath -> Either String Mod.LoadResult
+loadFromEntry = Mod.loadFromEntryWith TersusParser.parseFileWith
+
+loadFromFilesystem :: FilePath -> IO (Either String Mod.LoadResult)
+loadFromFilesystem = Mod.loadFromFilesystemWith TersusParser.parseFileWith
 
 -- A lowered program that the checker written in Tersus (MirHousekeeping) accepts; a refusal is the
 -- lowering's, as it was when the lowering checked its own work

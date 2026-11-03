@@ -21,6 +21,7 @@ import Data.List (isSuffixOf, sort)
 import Hash (fingerprint)
 import Language.Haskell.TH.Syntax (addDependentFile, lift, runIO)
 import System.Directory (listDirectory)
+import ParserUnicodeSource (parserUnicodeSource)
 
 compilerSourceHash :: String
 compilerSourceHash =
@@ -154,10 +155,9 @@ seedSha256 =
      )
 
 parserSource :: String
-parserSource =
+parserSource = parserUnicodeSource ++
     $( do
         addDependentFile "examples/parser.tersus"
         contents <- runIO (readFile "examples/parser.tersus")
         lift contents
      )
-
