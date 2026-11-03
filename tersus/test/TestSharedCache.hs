@@ -28,7 +28,7 @@ import System.Timeout (timeout)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
-import Native (cachedProgram)
+import Native (cacheDirectory, cachedProgram, runWithInputFull)
 import MirData (forNative)
 import TestHarness
 import Types (Type (..))
@@ -47,7 +47,10 @@ testSharedCache :: Test
 testSharedCache =
     TestList
         "testSharedCache"
-        [ TestCase "frozen tool reuse keeps the full freshly validated program" toolValidationParity
+        (map requireParser
+        [ TestCase "truncated named List declaration is refused natively" (rawNamedTruncation "List" "")
+        , TestCase "truncated named Box element is refused natively" (rawNamedTruncation "Box" " type")
+        , TestCase "frozen tool reuse keeps the full freshly validated program" toolValidationParity
         , TestCase "package snapshots invalidate on dependencies, entry, imports and file layout" packageSnapshots
         , TestCase "duplicate paths and normalized aliases use the resolver's snapshot" packageAliases
         , TestCase "independent processes reuse a package snapshot" packageProcesses
@@ -76,7 +79,37 @@ testSharedCache =
         , TestCase "native crashed builders release the lock for retry" (nativeRecovery "crash")
         , TestCase "native killed builders release the lock for retry" (nativeRecovery "hold")
         , TestCase "native threads still build once" nativeThreads
-        ]
+        ])
+  where
+    requireParser (TestCase name action) = TestCase name $ do
+        ready <- TersusParser.runParserTool False ["return 0;"]
+        case ready of
+            Left e -> pure (Just e)
+            Right _ -> action
+    requireParser test = test
+
+rawNamedTruncation :: String -> String -> IO TestResult
+rawNamedTruncation name suffix = do
+    cache <- cacheDirectory
+    case cache of
+        Error e -> pure (Just e)
+        Ok dir -> do
+            let exe = dir </> ("tersus-parser-" ++ fingerprint [emitterHash, parserSource, runtimeSource])
+                request ty = unlines
+                    [ "tersus-file-parse 1", "decls", "ctors 0", "types 0", "self none"
+                    , "selfType some " ++ ty, "typeParams 0", "generics 0", "implParams 0"
+                    , "ownClone false", "locate false", "fieldTypes 0", "endDecls", "source 0"
+                    ]
+                prefix = "named " ++ show name ++ " 1"
+            (goodCode, goodOut, _) <- runWithInputFull exe (request (prefix ++ " type int"))
+            (badCode, badOut, errors) <- runWithInputFull exe (request (prefix ++ suffix))
+            pure $ firstFailure
+                [ testAssertEq goodCode ExitSuccess
+                , testAssertTrue ("tersus-file 1\n" `isPrefixOf` goodOut)
+                , testAssertEq badCode ExitSuccess
+                , testAssertEq badOut "1\n"
+                , testAssertTrue (not (null errors))
+                ]
 
 testSharedCacheProbe :: Test
 testSharedCacheProbe = TestList "testSharedCacheProbe" [TestCase "probe" probe]
