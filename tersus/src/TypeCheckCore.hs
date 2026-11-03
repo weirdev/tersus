@@ -665,6 +665,7 @@ rewriteOldStatement (Assume proof) = Assume (rewriteOld proof)
 rewriteOldStatement other = other
 
 placeRootOf :: Expression -> Maybe Variable
+placeRootOf expr | Just (_, _, permission) <- rawReadArgs expr = placeRootOf permission
 placeRootOf expr = case expr of
     Var var -> Just var
     F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeRootOf sub
@@ -690,6 +691,7 @@ lhsField _ = Nothing
 
 -- A place as the root it starts from and its steps (Just a field, Nothing an element of it), where it is one
 placeSteps :: Expression -> Maybe (Variable, [Maybe Variable])
+placeSteps expr | Just (_, _, permission) <- rawReadArgs expr = fmap (\(root, steps) -> (root, steps ++ [Nothing])) (placeSteps permission)
 placeSteps expr = case expr of
     Var var -> Just (var, [])
     F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> fmap (\(r, ss) -> (r, ss ++ [Just field])) (placeSteps sub)
@@ -751,13 +753,44 @@ refResultFrom name params ptys rty fromNames = do
         else case fromNames of
             _ : _ -> do
                 forM_ fromNames $ \p -> case lookup p (zip params ptys) of
-                    Just t | isRefType t -> return ()
+                    Just t | isRefType t -> do
+                        runtimeResult <- hasRuntimeRepresentation (unref rty)
+                        runtimeOwner <- hasRuntimeRepresentation (unref t)
+                        when (runtimeResult && not runtimeOwner) $ failTc ("Type error: " ++ name ++ " returns a runtime reference from " ++ p ++ ", which is ghost-only: an allocation-backed reference needs a runtime owner")
                     _ -> failTc ("Type error: " ++ name ++ " is written from " ++ p ++ ", which is not a reference parameter of it")
                 return fromNames
             [] -> case [p | (p, t) <- zip params ptys, isRefType t] of
-                [only] -> return [only]
+                [only] -> do
+                    runtimeResult <- hasRuntimeRepresentation (unref rty)
+                    ownerType <- maybe (return TInt) return (lookup only (zip params ptys))
+                    runtimeOwner <- hasRuntimeRepresentation (unref ownerType)
+                    when (runtimeResult && not runtimeOwner) $ failTc ("Type error: " ++ name ++ " returns a runtime reference from " ++ only ++ ", which is ghost-only: an allocation-backed reference needs a runtime owner")
+                    return [only]
                 [] -> failTc ("Type error: " ++ name ++ " returns a reference, but no parameter of it is a reference for the result to be from: write the result as -> &T from <parameter>")
                 _ -> failTc ("Type error: " ++ name ++ " returns a reference and has more than one reference parameter: say which the result is from, as in -> &T from (a, b)")
+
+hasRuntimeRepresentation :: Type -> TC Bool
+hasRuntimeRepresentation = go Set.empty
+  where
+    go seen ty0 = do
+        ty <- zonk ty0
+        case ty of
+            TBlock _ -> return False
+            TRef inner -> go seen inner
+            TMutRef inner -> go seen inner
+            TNamed _ _ | Set.member ty seen -> return True
+            TNamed base args -> do
+                state <- getState
+                let name = instanceName base args
+                    fields = case Map.lookup name (tcCtors state) of
+                        Just (owner, fs) | owner == name -> Just fs
+                        _ -> case Map.lookup base (tcGenerics state) of
+                            Just (parameters, fs) -> instanceFields parameters args fs
+                            Nothing -> Nothing
+                case fields of
+                    Just fs | not (null fs) -> or <$> mapM (go (Set.insert ty seen) . snd) fs
+                    _ -> return True
+            _ -> return True
 
 -- What a value that is or holds references is from, as the roots its places start from, where that can be
 -- told: a borrow of a place, a local that holds references (whose own origins are recorded), a field of one,
@@ -766,8 +799,15 @@ exprRefOrigins :: Ctx -> Env -> Expression -> TC [Variable]
 exprRefOrigins ctx env expr = do
     st <- getState
     case expr of
+        F (Val (VFunct _ _ _ (BuiltinFunct BorrowOf) _)) [place]
+            | Just (_, _, permission) <- rawReadArgs place -> exprRefOrigins ctx env permission
         F (Val (VFunct _ _ _ (BuiltinFunct (Ctor _ _ _)) _)) args -> concat <$> mapM (exprRefOrigins ctx env) args
         F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> exprRefOrigins ctx env sub
+        F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, _] -> exprRefOrigins ctx env sub
+        F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [sub] -> exprRefOrigins ctx env sub
+        F (Val (VFunct _ _ _ (BuiltinFunct AddrGet) _)) [_, _, permission] -> exprRefOrigins ctx env permission
+        F (Val (VFunct _ _ _ (BuiltinFunct funct) _)) args
+            | SigFn _ (TBlock _) <- signatureScheme funct -> concat <$> mapM (exprRefOrigins ctx env) args
         -- (what a local that holds references was made from is what it is from, before any alias of it;
         -- a reference parameter is one too, though in the body it has the type of what it is to)
         Var v -> case Map.lookup v (tcRefOrigins st) of
@@ -836,14 +876,24 @@ recordAlias var ty expr = do
                 F (Val (VFunct _ _ _ (BuiltinFunct BorrowMutOf) _)) [place] -> placeSteps place
                 Var other -> Just (other, [])
                 _ -> Nothing
-    case alias of
+        permissionAlias = case (tyz, expr) of
+            (TBlock _, F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [_]) -> placeSteps expr
+            (TBlock _, Var other) -> Just (other, [])
+            (TBlock _, F (Val (VFunct _ _ _ (BuiltinFunct funct) _)) args) -> case signatureScheme funct of
+                SigFn parameters _ -> case [arg | (parameter, arg) <- zip parameters args, case unref parameter of TBlock _ -> True; _ -> False] of
+                    [permission] -> placeSteps permission
+                    _ -> Nothing
+                _ -> Nothing
+            _ -> alias
+    case permissionAlias of
         Just (root, steps) -> putState st{tcRefAliases = Map.insert var (resolveRefPlace st root steps) (tcRefAliases st)}
-        Nothing -> do
+        Nothing | isRefType tyz -> do
             -- (a result that may be from several places is not an alias of one of them)
             origins <- exprOriginCandidates expr
             case origins of
                 [root] -> putState st{tcRefAliases = Map.insert var (root, []) (tcRefAliases st)}
                 _ -> putState st{tcRefAliases = Map.delete var (tcRefAliases st)}
+        Nothing -> putState st{tcRefAliases = Map.delete var (tcRefAliases st)}
 
 -- The roots a binding's places are from, when its value is or holds references; forgotten when it does not
 recordOrigins :: Ctx -> Env -> Variable -> Type -> Expression -> TC ()
@@ -963,6 +1013,7 @@ holdsRef ty0 = fst <$> go Set.empty ty0
             TMutRef _ -> return (True, seen)
             TList t -> go seen t
             TBox t -> go seen t
+            TBlock t -> go seen t
             TArrayOf t _ -> go seen t
             TUninit t -> go seen t
             TNamed "Self" _ -> return (False, seen)

@@ -339,7 +339,8 @@ checkStatement top ctx env stmt =
                     | Just rt <- refTarget rty -> do
                         tz <- zonk (tType texpr)
                         st <- getState
-                        if isRefType tz || (v `elem` tcReadOnly st || v `elem` tcMutParams st)
+                        if isRefType tz then return inferred0
+                        else if v `elem` tcReadOnly st || v `elem` tcMutParams st
                             then case texpr of TExpr _ e inner -> expect "returned value" rt tz >> return (TExpr rty e inner)
                             else return inferred0
                 _ -> return inferred0
@@ -352,13 +353,14 @@ checkStatement top ctx env stmt =
                     st <- getState
                     case tcResultFrom st of
                         Just froms -> do
-                            origins <- exprRefOrigins ctx env expr
+                            origins <- exprRefOrigins ctx env (tExpr texpr)
                             unless (not (null origins) && all (`elem` froms) origins) $
                                 failTc ("Type error: the value returned is not a reference from " ++ intercalate ", " froms ++ ", which the signature names: return a reference to a place of one of them")
                         Nothing -> return ()
                 -- the program has no declared type: every return in it has the type of the first
                 Nothing -> do
-                    when (isRefType t) $ failTc "Type error: the program cannot return a reference: a reference is from a place in the program, and no place outlives it"
+                    references <- holdsRef t
+                    when references $ failTc "Type error: the program cannot return a reference: a reference is from a place in the program, and no place outlives it"
                     s <- getState
                     case tcProgramReturn s of
                         Nothing -> putState s{tcProgramReturn = Just t}
@@ -436,7 +438,10 @@ checkFunction ctx name params ptys rty sizes types ins outs writes fromNames ter
         paramEnv = [Map.fromList (zip params (map unref ptys))]
     -- (a parameter that is borrowed is only read; one that may update is assigned only through it)
     withBorrowed <- getState
-    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params, tcRefOrigins = Map.empty}
+    parameterOrigins <- fmap Map.fromList $ fmap concat $ forM (zip params ptys) $ \(parameter, ty) -> do
+        references <- holdsRef (unref ty)
+        return [(parameter, [parameter]) | references && not (isRefType ty)]
+    putState withBorrowed{tcReadOnly = [p | (p, TRef _) <- zip params ptys], tcMutParams = [p | (p, TMutRef _) <- zip params ptys], tcWrites = writes, tcRefAliases = Map.empty, tcResultFrom = if null from then Nothing else Just from, tcParams = params, tcRefOrigins = parameterOrigins}
     -- (writes(...) names update parameters, whole or by a field)
     forM_ writes $ \w -> do
         let (root, field) = case break (== '.') w of
@@ -798,6 +803,7 @@ inferExprR ctx env expr =
             ok <- traitArguments "Eq" e
             if isJust ok then return (renderType whole ++ " does not") else zonk e >>= missingEq
     borrowCall mutable place = do
+        when (mutable && isJust (rawReadArgs place)) $ failTc "Type error: a raw-memory slot can only be borrowed for reading; updates use Addr::write with its permission"
         unless (placeForm place) $ failTc "Type error: & is to a place (a variable, a field of one, an element of one, or through a reference, as in &p.x, &get(xs, 0) or &*r): bind the value to a variable first if it needs borrowing"
         st <- getState
         placeT <- case place of
@@ -819,15 +825,16 @@ inferExprR ctx env expr =
             case placeRoot place of
                 Just root | root `elem` tcReadOnly st -> failTc ("Type error: " ++ root ++ " is lent (&T) to this function and can only be read, so it cannot be borrowed for updating (&mut)")
                 _ -> return ()
-            case place of
-                F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [inner] -> do
+            case derefRoot place of
+                Just inner -> do
                     itT <- inferExprR ctx env inner
                     itz <- zonk (tType itT)
                     case itz of
                         TRef _ -> failTc "Type error: an update reference (&mut) cannot be made through a read reference (&T): the read reference does not allow updating what it is to"
                         _ -> return ()
-                _ -> return ()
+                Nothing -> return ()
         return (TExpr (if mutable then TMutRef ptz else TRef ptz) (F (Val (builtinFunct (if mutable then BorrowMutOf else BorrowOf))) [place']) [placeT])
+    placeForm expr | Just (_, _, permission) <- rawReadArgs expr = placeForm permission
     placeForm expr = case expr of
         Var _ -> True
         F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeForm sub
@@ -835,6 +842,7 @@ inferExprR ctx env expr =
         F (Var "get") [sub, _] -> placeForm sub
         F (Val (VFunct _ _ _ (BuiltinFunct DerefOf) _)) [_] -> True
         _ -> False
+    placeRoot expr | Just (_, _, permission) <- rawReadArgs expr = placeRoot permission
     placeRoot expr = case expr of
         Var var -> Just var
         F (Val (VFunct _ _ _ (BuiltinFunct (Field _ _)) _)) [sub] -> placeRoot sub
@@ -1015,7 +1023,10 @@ inferExprR ctx env expr =
         let ats = map tType inferred
         result <- checkBuiltinCall (builtinHead ctx env funct) (describe funct) ft ats
         comparing funct ats
-        return (TExpr result (F (tExpr funct') (map tExpr inferred)) (headTExpr funct' ++ inferred))
+        let resolved = case builtinHead ctx env funct of
+                Just Get -> Val (builtinFunct Get)
+                _ -> tExpr funct'
+        return (TExpr result (F resolved (map tExpr inferred)) (headTExpr funct' ++ inferred))
     describe (Var name) = name
     describe _ = "call"
     isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)

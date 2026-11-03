@@ -805,6 +805,8 @@ fn localRes(f: &Function, id: Int) -> LocalRes [{ }] [{ }] {
 fn ghostTypeAt(types: &List<TypeDecl>, t: &Type, depth: Int) -> Bool ~ {
     if depth > 16 { return false; };
     if t is Type::TBlock { return true; };
+    if t is Type::TRef { return ghostTypeAt(types, Box::unbox((t as Type::TRef).inner), depth + 1); };
+    if t is Type::TMutRef { return ghostTypeAt(types, Box::unbox((t as Type::TMutRef).inner), depth + 1); };
     if t is Type::TNamed {
         i = lookupDecl(types, (t as Type::TNamed).name);
         if i >= 0 {
@@ -992,7 +994,7 @@ fn eraseFunction(types: &List<TypeDecl>, f: &Function) -> Function ~ {
     };
     fromList = [];
     for pid in f.from {
-        if !isGhostLocal(types, f, pid) { fromList = push(fromList, pid); };
+        if !ghostType(types, f.returns) && !isGhostLocal(types, f, pid) { fromList = push(fromList, pid); };
     };
     blocks = [];
     for b in blocks1 {

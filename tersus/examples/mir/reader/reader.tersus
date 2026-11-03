@@ -165,7 +165,7 @@ fn binaryWords() -> List<String> [{ }] [{ affirm size(return) = 11; }] {
     return w;
 };
 
-fn listWords() -> List<String> [{ }] [{ affirm size(return) = 54; }] {
+fn listWords() -> List<String> [{ }] [{ affirm size(return) = 55; }] {
     w = push([], "length");
     w = push(w, "first");
     w = push(w, "last");
@@ -220,6 +220,7 @@ fn listWords() -> List<String> [{ }] [{ affirm size(return) = 54; }] {
     w = push(w, "blockJoin");
     w = push(w, "blockAssume");
     w = push(w, "blockCast");
+    w = push(w, "addrBorrow");
     return w;
 };
 

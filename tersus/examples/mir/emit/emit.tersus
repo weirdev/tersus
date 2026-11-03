@@ -2056,6 +2056,10 @@ fn addressOp(g: Gen, cx: &Ctx, f: &Function, destType: &Type, op: Int, args: &Li
     n = size(args);
     // 22 addrNull, 23 addrOffset, 24 addrCast, 25 addrToInt, 26 addrFromInt, 27 addrAlloc, 28 addrGet, 29 addrWrite, 30 addrTake, 31 addrDropValue, 32 addrDropRange,
     // 33 addrResize, 34 addrFree
+    if op = 54 && n = 3 {
+        if !(destType is Type::TRef) { return failG(g, "Addr borrowing gives a read reference"); };
+        return slotAddress(g, cx, f, get(args, 0), get(args, 1));
+    };
     if op = 22 && n = 0 { return giving(g, "0"); };
     if op = 23 && n = 2 { return slotNumber(g, cx, f, get(args, 0), get(args, 1)); };
     if (op = 24 || op = 25 || op = 26) && n = 1 { return operandValue(g, cx, f, Type::TInt, get(args, 0)); };
@@ -2265,7 +2269,7 @@ fn rvalue(g: Gen, cx: &Ctx, f: &Function, destType: &Type, rv: &Rvalue) -> Gen ~
         n = size(args);
         // 10 writeByte, 11 writeError, 12 readByte, 13 argCount, 14 argByte, 15 pathByte, 16 fileLoad, 17 fileByte, 18 storeByte, 19 fileStore, 20 toByte, 21 fromByte,
         // 22 to 34 the operations on addresses
-        if op >= 22 && op <= 34 { return addressOp(g, cx, f, destType, op, args); };
+        if (op >= 22 && op <= 34) || op = 54 { return addressOp(g, cx, f, destType, op, args); };
         // 35 uninitEmpty, 36 uninitNew, 37 uninitGet, 38 uninitTake, 39 uninitDiscard: an Uninit<T> is a T (an empty one is a T that is 0)
         if op = 35 && n = 0 {
             g1 = typeText(g, destType);

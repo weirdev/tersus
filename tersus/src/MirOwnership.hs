@@ -157,6 +157,7 @@ operandLocal _ = Nothing
 -- Liveness: which locals, and which parts of them, a program still uses after a point
 
 stmtUses :: Statement -> Live
+stmtUses (Ghost _ (GhostLifetime owner roots)) = Set.fromList [(local, Whole) | local <- owner : roots]
 stmtUses (Assign _ rv) = rvalueUses rv
 stmtUses _ = Set.empty
 
@@ -242,6 +243,7 @@ referenceType program = go Set.empty
         TList t -> go seen t
         TBox t -> go seen t
         TArrayOf t _ -> go seen t
+        TAddr t -> go seen t
         TNamed base args -> declared seen (instanceName base args)
         TVariant name -> maybe True (declared seen) (ownerOf program name)
         TParam _ -> True
@@ -256,6 +258,10 @@ referenceType program = go Set.empty
 
 loanStatement :: Function -> Program -> LoanRoots -> Statement -> LoanRoots
 loanStatement fn program loans stmt = case stmt of
+    Ghost _ (GhostLifetime owner roots) ->
+        let origin = Map.findWithDefault emptyOrigin owner loans
+            dependencies = Set.union (originReferences origin) (Set.fromList [(root, Whole) | root <- roots])
+         in Map.insert owner origin{originReferences = dependencies} loans
     Assign dest rv -> assign False dest rv
     Peek dest rv -> assign True dest rv
     _ -> loans
@@ -265,6 +271,7 @@ loanStatement fn program loans stmt = case stmt of
             directRef = case ty of TRef _ -> True; TMutRef _ -> True; _ -> False
             roots = if referenceType program ty
                 then case rv of
+                    ListOp AddrBorrow os | length os `elem` [3, 4], owner : _ <- reverse os, Just root <- operandLocal owner -> borrowRoots fn loans root []
                     Borrow root steps _ -> borrowRoots fn loans root steps
                     _ -> Set.unions [referencesOf loans l | (o, _) <- roles rv, Just l <- [operandLocal o]]
                 else Set.empty

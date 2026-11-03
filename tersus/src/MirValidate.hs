@@ -661,6 +661,7 @@ ghostStatement _ st env g =
         M.GhostFunction name source top -> defineFunction st name source top
         M.GhostPosition _ _ -> return st
         M.GhostDissolve _ -> return st
+        M.GhostLifetime _ _ -> return st
 
 -- A function is validated where it is defined: its body, against what holds everywhere, and its output contract.
 -- The functions of a mutually recursive group are validated together there: each body is checked against the
