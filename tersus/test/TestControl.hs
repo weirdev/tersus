@@ -287,7 +287,7 @@ testTermination =
                 Right stmts -> case elaborate stmts of
                     Ok (Elaborated [Assign _ (Val (VFunct _ _ _ (NativeFunct _ (Just (Counting _)) _) _))] _) -> Nothing
                     other -> Just ("Unexpected: " ++ show other)
-            , parseValidateFailProgramHelper "x = [1]; while x = x shrinks x { x = x; };" "shrinks needs an Int, an enum or a struct, got List<Int>"
+            , parseValidateFailProgramHelper "x = [1]; while x = x shrinks x { x = x; };" "Loop variant does not shrink: x"
             , parseValidateFailProgramHelper "fn f(b: Bool) -> Int shrinks b { return 0; };" "shrinks needs an Int, an enum or a struct, got Bool"
             , -- Evaluation does not use any of it
               parseEvalProgramHelper "i = 0; while i < 3 shrinks 3 - i { i = i + 1; }; return i;" (Just (VInt 3))
