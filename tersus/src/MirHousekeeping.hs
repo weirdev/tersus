@@ -249,8 +249,21 @@ mirEraseEntry = "examples/mir/mir_erase/mir_erase.tersus"
 -- statements of their proofs, which the executor and the data writer alike
 -- pass over), and erasing one to make the eraser would need the eraser made
 -- already.
+{-# NOINLINE validatedPrograms #-}
+validatedPrograms :: MVar (Map.Map FilePath Program)
+validatedPrograms = unsafePerformIO (newMVar Map.empty)
+
+{-# NOINLINE toolValidatedProgram #-}
 toolValidatedProgram :: FilePath -> Result Program String
-toolValidatedProgram entry = case loadFromEntry (resolverFromFiles mirPackageFiles) entry of
+toolValidatedProgram entry = unsafePerformIO $ modifyMVar validatedPrograms $ \made ->
+    case Map.lookup entry made of
+        Just program -> pure (made, Ok program)
+        Nothing -> case compileToolProgram entry of
+            Error e -> pure (made, Error e)
+            Ok program -> pure (Map.insert entry program made, Ok program)
+
+compileToolProgram :: FilePath -> Result Program String
+compileToolProgram entry = case loadFromEntry (resolverFromFiles mirPackageFiles) entry of
     Left e -> Error e
     Right (PackageResult pkg) -> compileModulesValidated pkg
     Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in the mir package")
