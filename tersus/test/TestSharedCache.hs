@@ -778,13 +778,15 @@ packageAliases = do
         (Ok a, Ok b, Ok c) -> firstFailure [testAssertTrue (a /= b), testAssertEq a c]
         _ -> Just "duplicate or normalized paths selected the wrong package contents"
 
+-- Exercise the complete snapshot through one validated cache entry; parser
+-- bootstrap and native erasure are covered separately, not by these child deadlines.
 packageProcesses :: IO TestResult
 packageProcesses = do
     home <- freshHome "tersus-shared-package-processes"
     (do
         (entry, _) <- packageFixture home
         let run = do
-                child <- spawnProbe home [("TERSUS_SHARED_CACHE_PACKAGE", entry)]
+                child <- spawnProbe home [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_PARSER", "haskell")]
                 code <- waitChild 300 child
                 marker <- readMarker (home </> "marker")
                 files <- entryFiles home
@@ -879,7 +881,7 @@ ciPackageProcesses :: Bool -> IO TestResult
 ciPackageProcesses concurrent = withCacheHome $ \home -> do
     (entry, _) <- ciPackageFixture home
     let markers = if concurrent then ["first" ++ show i | i <- [1 .. 4 :: Int]] else ["first"]
-        extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker)]
+        extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_PARSER", "haskell")]
     bracket (mapM (spawnProbe home . extra) markers)
         (mapM_ (\child -> terminateProcess child >> waitForProcess child >> pure ())) $ \children -> do
         codes <- mapM (waitChild 30) children
