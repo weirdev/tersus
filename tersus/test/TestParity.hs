@@ -18,9 +18,10 @@ import qualified Mir as M
 import MirData (forNative, readProgram, writeProgram)
 import MirLower (lowerElaborated)
 import qualified MirValidate as Reference
-import MirHousekeeping (eraseGhosts)
+import MirHousekeeping (eraseGhosts, validatedListLibrary)
+import Compile (lowerSource)
 import Pipeline (ownedSource, parseSource)
-import SelfHostedMir (validateMirSubset)
+import SelfHostedMir (validateMirSubset, sourceContainerView)
 import StdLibDefs (stdLibValCtx)
 import Syntax
 import TestHarness
@@ -66,10 +67,51 @@ testParity :: Test
 testParity =
     TestList
         "testParity"
-        [ TestParallel "validation" [TestCase (parityName c) (validationCase c) | c <- parityCases]
+        [ sourceContainerCapabilities
+        , TestParallel "validation" [TestCase (parityName c) (validationCase c) | c <- parityCases]
         , TestParallel "mirReader" [TestCase (parityName c) (readerCase c) | c <- readerCases]
         , TestCase "corpus summary" summaryCase
         ]
+
+sourceContainerCapabilities :: Test
+sourceContainerCapabilities = TestList "logical container layouts"
+    [ testCase "arithmetic remains eligible" (eligible "return 1;" True)
+    , testCase "source lists remain eligible" (eligible "xs = [1]; return size(xs);" True)
+    , testCase "source Boxes remain eligible" (eligible "b = Box::new(1); return Box::unbox(b);" True)
+    , testCase "source layout metadata matches the canonical library" (case lower "return 1;" of
+        Error e -> Just e
+        Ok program -> testAssertEq
+            [(Map.lookup name (M.progGenerics program), Map.lookup name (M.progInvariants program)) | name <- ["List", "Box"]]
+            [(Map.lookup name (M.progGenerics validatedListLibrary), Map.lookup name (M.progInvariants validatedListLibrary)) | name <- ["List", "Box"]])
+    , testCase "exact List layout with a user invariant is retained" (alteredLayout "List" "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm len >= 99; }]; return [];")
+    , testCase "exact Box layout with a user invariant is retained" (alteredLayout "Box" "struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm cap(blk) = 2; }]; b = Box::new(1); return Box::unbox(b);")
+    , testCase "physical Box fields remain unsupported" (eligible "b = Box::new(1); return b.addr;" False)
+    , testCase "user address fields remain unsupported" (eligible "struct P { addr: Addr<Int> }; p = P { addr: Addr::null() }; return 0;" False)
+    , testCase "user invariants are retained" (case lower "struct P { n: Int } invariant [{ affirm n >= 0; }]; return P { n: 0 - 1 };" of
+        Error e -> Just e
+        Ok program -> case Map.lookup "P" (M.progInvariants program) of
+            Just clauses | not (null clauses) -> testAssertEq (Map.lookup "P" (M.progInvariants (sourceContainerView program))) (Just clauses)
+            _ -> Just "fixture lost its user invariant")
+    , testCase "non-layout declarations named List are retained" (case lower "return 1;" of
+        Error e -> Just e
+        Ok program ->
+            let custom = program{M.progGenerics = Map.insert "List" (["T"], [("item", TParam "T")]) (M.progGenerics program)}
+             in testAssertEq (Map.lookup "List" (M.progGenerics (sourceContainerView custom))) (Just (["T"], [("item", TParam "T")])))
+    ]
+  where
+    lower source = parseSource source `bindResult` elaborate `bindResult` lowerElaborated
+    eligible source expected = case lower source of
+        Error e -> Just e
+        Ok program -> testAssertEq (unsupportedReason program == Nothing) expected
+    alteredLayout name source = case lowerSource False source of
+        Error e -> Just e
+        Ok program -> case Map.lookup name (M.progInvariants program) of
+            Just clauses | not (null clauses) ->
+                let viewed = sourceContainerView program
+                 in if Map.lookup name (M.progInvariants viewed) == Just clauses && unsupportedReason program /= Nothing
+                        then Nothing
+                        else Just "the bridge discarded or accepted a custom container invariant"
+            _ -> Just "fixture lost its custom invariant"
 
 readerEvery :: Int
 readerEvery = 7
@@ -199,7 +241,10 @@ readerCase parityCase = do
                             pure (fmap (\message -> parityName parityCase ++ ": " ++ message) outcome)
 
 unsupportedReason :: M.Program -> Maybe String
-unsupportedReason program
+unsupportedReason = unsupportedSourceReason . sourceContainerView
+
+unsupportedSourceReason :: M.Program -> Maybe String
+unsupportedSourceReason program
     | any isEnumDecl (Map.elems (M.progTypes program)) = Just "enum types"
     | any externFn allFunctions = Just "extern functions"
     | any unsupportedLocalType allFunctions = Just "word, address, block, function, forall, uninit or reference types"

@@ -56,7 +56,12 @@ direct calls with simple contracts) for the Tersus checker;
 return `Nothing` on anything unsupported, and unsupported facts are
 omitted, so a bridge can never invent a proof. `Pipeline.compileSource`
 still calls the Haskell `validateProgram`; the bridges are for
-comparison only.
+comparison only. Their source-container view excludes the standard List/Box
+address/block layout declarations and invariants; those belong to the native
+container-library validator, not to the logical list and Box proof model.
+User declarations and invariants remain subject to the bridge's capability
+checks. Qualified Box storage selectors remain distinct from payload fields
+in the proof bridge.
 
 What blocks the flip, in the bridges' own terms: enums; `extern fn`;
 `Addr*`/`Block*` operations, `TBlock` and `TWord`; loop invariants the

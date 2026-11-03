@@ -796,6 +796,13 @@ selfHostedQueryFamilies program =
                                     _ -> Just "Fixture has no unique m parameter"
                 bridgeFacts = [eq 0 1, lt 1 2, le 2 3]
                 checkBridge query = testAssertEq (querySelfHosted program bridgeFacts query) (Ok (Just (Engine.entails query (Engine.proofContextFromFacts bridgeFacts))))
+                checkBoxFieldBridge ctor expected =
+                    let payload = ATerm (Iota "payload")
+                        fieldValue = ATerm (Iota "field value")
+                        facts = [FApp eqProof [payload, FApp (CTerm (builtinFunct (Ctor ctor [] ["blk"]))) [fieldValue]]]
+                        query = FApp eqProof [FApp (CTerm (builtinFunct (namedField "Box<Int>" "blk"))) [payload], fieldValue]
+                     in testAssertEq (Engine.entails query (Engine.proofContextFromFacts facts)) expected
+                        `orElse` testAssertEq (querySelfHosted program facts query) (Ok (Just expected))
                 variantFact (object, family, constructor, matches) = MData "VariantFact" [("object", MInt object), ("family", MInt family), ("constructor", MInt constructor), ("matches", MBool matches)]
                 variantContext = MData "ValidatorContext" [("equalities", MList []), ("applications", MList []), ("constants", MList []), ("orders", MList []), ("different", MList []), ("variants", MList [variantFact (0, 10, 20, True), variantFact (1, 10, 21, True)]), ("fieldFunctions", MList []), ("constructorFunctions", MList []), ("constructorFields", MList []), ("differences", MList [])]
                 checkVariantGoal name a b expected = testAssertEq (runNamedFunction program "entailsGoal" [variantContext, goal name a b]) (Ok (Just (MBool expected)))
@@ -1069,6 +1076,7 @@ selfHostedQueryFamilies program =
                       , checkCommonContext, checkMergeStates
                       , checkVariantBridge, checkVariantBridgeEqual, checkSymbolicVariantBridge, checkWithinBridge
                       , checkBridge (lt 0 3), checkBridge (lt 3 0), checkBridge (ne 0 3), checkBridge (eq 0 1)
+                      , checkBoxFieldBridge "P" False, checkBoxFieldBridge "Box<Int>" True
                       , testAssertEq (querySelfHosted program [] (BVar "i")) (Ok Nothing)
                       , testAssertErrorContains "Function does not exist" (runNamedFunction program "missing" [])
                       , testAssertErrorContains "expected 3 arguments" (runNamedFunction program "hasEquality" [])
