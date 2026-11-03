@@ -8,7 +8,7 @@ import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
 import GHC.Conc (getNumProcessors)
-import System.Environment (getArgs, getExecutablePath)
+import System.Environment (getArgs, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..), exitFailure)
 import System.IO (BufferMode (LineBuffering), hPutStr, hSetBuffering, stderr, stdout)
 import System.Process (proc, readCreateProcessWithExitCode)
@@ -202,6 +202,8 @@ runInProcess selected = do
 runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
 runInParallel jobs names = do
     self <- getExecutablePath
+    statistics <- lookupEnv "TERSUS_TEST_RTS_STATS"
+    let rtsOptions = ["-s" | statistics == Just "1"]
     putStrLn ("Running " ++ show (length names) ++ " test groups in " ++ show jobs ++ " processes")
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
@@ -216,7 +218,7 @@ runInParallel jobs names = do
                 Just (name, done) -> do
                     started <- getMonotonicTime
                     putStrLn ("[START] " ++ name)
-                    let arguments = [name, "--child", "+RTS", "-N1", "-RTS"]
+                    let arguments = [name, "--child", "+RTS", "-N1"] ++ rtsOptions ++ ["-RTS"]
                     outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
                     finished <- getMonotonicTime
                     putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
