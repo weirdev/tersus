@@ -301,7 +301,21 @@ haskellRefused s = case A.readParsed s of
 interpreted :: [Statement] -> [String] -> IO TestResult
 interpreted ss args = do
     compiled <- programFromFile readerPath
-    pure $ case compiled `bindResult` runProgramIn noWorld{worldInput = dataParsed ss, worldArgs = args} of
+    pure (interpretedProgram compiled ss args)
+
+interpretedSource :: String -> [Statement] -> [String] -> IO TestResult
+interpretedSource source ss args = do
+    files <- Mod.snapshotFromFilesystem readerPath
+    let matching = [path | (path, _) <- files, Mod.normalizePath path == Mod.normalizePath readerPath]
+    case matching of
+        [entry] -> do
+            compiled <- programFromFiles readerPath [(path, if path == entry then source else text) | (path, text) <- files]
+            pure (interpretedProgram compiled ss args)
+        _ -> pure (Just "Mutation did not select exactly one AST reader package entry")
+
+interpretedProgram :: Result M.Program String -> [Statement] -> [String] -> TestResult
+interpretedProgram compiled ss args =
+    case compiled `bindResult` runProgramIn noWorld{worldInput = dataParsed ss, worldArgs = args} of
         Error e -> Just e
         Ok ((out, err), _) ->
             let output = if args == ["count"] then out ++ "\n" else out
@@ -404,7 +418,7 @@ testAstData = TestList "testAstData"
     ]
 
 testAstReader :: Test
-testAstReader = TestList "testAstReader"
+testAstReader = TestList "testAstReader" $
     [ TestCase "interpreted round trip" (interpreted small [])
     , TestCase "interpreted UTF-8 names" (interpreted [Assign "café" (Var "λ\NUL\n\\\"")] [])
     , TestCase "interpreted exact printed byte count" (interpreted small ["count"])
@@ -414,4 +428,22 @@ testAstReader = TestList "testAstReader"
     , TestCase "native semantic mutation" nativeMutation
     , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages
     , TestCase "whole corpus native round trip" nativeCorpus
-    ]
+    ] ++ concat
+        [ [ TestCase ("interpreted array primitive " ++ show primitive) (interpreted statements [])
+          , TestCase ("native parsed array primitive " ++ show primitive) (withAstReader (\exe -> nativeText exe (dataParsed statements)))
+          , TestCase ("native elaborated-envelope array primitive " ++ show primitive) (withAstReader (\exe -> nativeText exe (dataElaborated (Elaborated statements []))))
+          , TestCase ("removing array primitive whitelist entry " ++ show primitive) $ do
+                source <- readFile readerPath
+                let entry = "    w = push(w, \"" ++ show primitive ++ "\");"
+                    mutated = unlines (filter (/= entry) (lines source))
+                if length (filter (== entry) (lines source)) /= 1
+                    then pure (Just "Mutation did not remove exactly one whitelist entry")
+                    else do
+                        result <- interpretedSource mutated statements []
+                        pure $ case result of
+                            Just err | "not the AST as data" `isInfixOf` err -> Nothing
+                            _ -> Just ("Whitelist mutation did not reject its primitive: " ++ show result)
+          ]
+        | primitive <- [AddrTakeArray, TakeArrayPair, BlockPrefixTaken]
+        , let statements = [Return (Val (builtinSymbol primitive))]
+        ]
