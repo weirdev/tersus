@@ -167,7 +167,7 @@ lower source = parseSource source `bindResult` elaborate `bindResult` lowerElabo
 readerCase :: ParityCase -> IO TestResult
 readerCase parityCase = do
     source <- paritySource parityCase
-    readerResult <- compileOnce =<< readFile "examples/mir_reader.tersus"
+    readerResult <- programFromFile "examples/mir/mir_reader/mir_reader.tersus"
     case (ownedSource source, readerResult) of
         (Error _, _) -> do
             bump (\t -> t{tallyReaderSkipped = tallyReaderSkipped t + 1})
