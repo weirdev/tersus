@@ -748,12 +748,23 @@ testModuleLinkDrop =
                 let rendered = M.renderProgram program
                  in testAssertTrue ("<app$geo$geo$Token as Drop>::drop" `isInfixOf` rendered)
                         <> testAssertTrue ("drop " `isInfixOf` rendered)
+        , expectRuns dropSuppressedPreludeFiles "app/main.tersus" "2"
+        , case ownedPkg dropSuppressedPreludeFiles "app/main.tersus" of
+            Left err -> Just ("drop with a suppressed prelude should compile to owned MIR: " ++ err)
+            Right program -> testAssertTrue ("<app$geo$geo$Token as Drop>::drop" `isInfixOf` M.renderProgram program)
         ]
   where
     dropFiles =
         [ ("app/package.tersus", "")
         , ("app/main.tersus", "import app::geo; t = geo::Token::new(2); return t.n;")
         , ("app/geo/geo.tersus", "struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };")
+        ]
+    -- (the geo module declares a prelude trait of its own, so the prelude
+    -- is not selected for it, but its impl Drop still sees the Drop trait)
+    dropSuppressedPreludeFiles =
+        [ ("app/package.tersus", "")
+        , ("app/main.tersus", "import app::geo; t = geo::Token::new(2); return t.n;")
+        , ("app/geo/geo.tersus", "trait Sequence<E> { fn size(self: &Self) -> Int; }; struct Token { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = n; affirm count(blk) = 0; affirm n >= 0; }]; impl Token { fn new(n: Int) -> Self [{ affirm n >= 0; }] [{ }] { (a, b) = Addr::alloc(n); return Self { addr: a, n: n, blk: b }; }; }; impl Drop for Token { fn drop(self: Self) -> Int [{ }] [{ }] { return Addr::free(self.addr, self.blk); }; };")
         ]
 
 testModuleLinkMutual :: Test
