@@ -152,6 +152,7 @@ data GhostStatement
     | -- The value of the local has been taken apart into its fields (`S { a: x, ... } = v;`): it is used up, and a drop of its type is not run
       -- on it. The ghost erasure makes it the clearing of the local's bytes, which native code takes for a value that was moved out.
       GhostDissolve Local
+    | GhostLifetime Local [Local]
     deriving (Show, Eq, Read)
 
 data Rvalue
@@ -204,7 +205,7 @@ data BinOp = Add | Sub | Mul | Div | Mod | Compare Rel
 -- they are erased (by the ghost erasure, `examples/mir/mir_erase/mir_erase.tersus`) with the permissions, as are the permissions given to the others. After that, AddrWrite, AddrDropValue
 -- and AddrDropRange, which give the permission after, give 0.
 data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBoxed | NewEmptyBoxed | FromList | WriteByte | WriteError | ReadByte | ArgCount | ArgByte | PathByte | FileLoad | FileByte | StoreByte | FileStore | ToByte | FromByte
-    | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree
+    | AddrNull | AddrOffset | AddrCast | AddrToInt | AddrFromInt | AddrAlloc | AddrGet | AddrBorrow | AddrWrite | AddrTake | AddrDropValue | AddrDropRange | AddrResize | AddrFree
     | BlockNew | BlockTaken | BlockResized | BlockSplitLo | BlockSplitHi | BlockJoin | BlockAssume | BlockCast
     | -- Uninit<T>: an empty one, one that holds x, a view of what one holds, what one holds moved out, and an empty one used up. Natively
       -- an Uninit<T> is a T (see Pipeline.nativeProgram), an empty one its words cleared.
@@ -553,6 +554,7 @@ renderStatement (Ghost _ (GhostPosition line column)) = "ghost at " ++ show line
 renderStatement (Ghost _ (GhostProof name args _ _ _)) = "ghost proof " ++ name ++ "(" ++ intercalate ", " args ++ ");"
 renderStatement (Ghost _ (GhostFunction name _ _)) = "ghost fn " ++ name ++ ";"
 renderStatement (Ghost _ (GhostDissolve l)) = "ghost dissolve " ++ show l ++ ";"
+renderStatement (Ghost _ (GhostLifetime owner roots)) = "ghost lifetime " ++ show owner ++ " from " ++ intercalate ", " (map show roots) ++ ";"
 renderStatement (Drop l) = "drop " ++ show l ++ ";"
 renderStatement (Peek dest rv) = show dest ++ " = peek " ++ renderRvalue rv ++ ";"
 renderStatement (AssignRef root steps rv) = show root ++ concatMap step steps ++ " := " ++ renderRvalue rv ++ ";"

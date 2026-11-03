@@ -42,6 +42,7 @@ monomorphize program
     -- (what the validator was told names functions that are not there any more; nothing after it needs it)
     unspecified f = f{fnSpec = emptySpec, fnBlocks = Map.map (\(BasicBlock stmts term) -> BasicBlock [s | s <- stmts, not (isGhost s)] term) (fnBlocks f)}
     isGhost s = case s of
+        Ghost _ (GhostLifetime _ _) -> False
         Ghost _ _ -> True
         _ -> False
     generic f = not (null (fnSizeParams f) && null (fnTypeParams f))
@@ -138,6 +139,7 @@ instantiate fn tys sizes =
     block (BasicBlock stmts term) = BasicBlock (map statement stmts) (terminator term)
     statement s = case s of
         Assign l rv -> Assign l (rvalue rv)
+        AssignRef root steps rv -> AssignRef root (map refStep steps) (rvalue rv)
         Peek l rv -> Peek l (rvalue rv)
         Ghost e g -> Ghost (env e) g
         Drop _ -> s
@@ -158,12 +160,11 @@ instantiate fn tys sizes =
         IsVariant o name -> IsVariant (operand o) (named name)
         AsVariant o name -> AsVariant (operand o) (named name)
         CopyOf o -> CopyOf (operand o)
-        Borrow root steps mutable -> Borrow root (map step steps) mutable
+        Borrow root steps mutable -> Borrow root (map refStep steps) mutable
         Deref o -> Deref (operand o)
         TakeField l name field -> TakeField l (named name) field
-      where
-        step (RefField n f) = RefField (named n) f
-        step (RefIndex o) = RefIndex (operand o)
+    refStep (RefField name field) = RefField (named name) field
+    refStep (RefIndex o) = RefIndex (operand o)
     spec s = s{specEnv = env (specEnv s), specLoops = Map.map (\l -> l{loopEnv = env (loopEnv l)}) (specLoops s)}
 
 -- The function with each call of a function with size parameters made a call of the copy for its sizes, and the copies that need

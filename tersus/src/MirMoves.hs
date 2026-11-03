@@ -4,6 +4,7 @@ module MirMoves
     ( checkMoves
     , checkMovesExcluding
     , isCopyType
+    , checkMovesWithLifetimes
     , stripPositions
     ) where
 
@@ -16,7 +17,7 @@ import qualified Data.Set as Set
 
 import Mir
 import MirOwnership (Role (..), isProjection, operandLocal, roles)
-import Types (Name, Type (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
+import Types (Name, Type (..), Arg (..), Size (..), pattern TList, pattern TBox, Variable, baseNameOf, instanceName, tupleGeneric)
 
 -- A copy of a value is made where the program writes `clone(x)`, and nowhere else: a value that is not `Copy` is moved to where it
 -- is wanted, and the local it came from holds nothing after. So a program cannot use it again, and this checks that it does not.
@@ -105,21 +106,29 @@ type Pos = Maybe (Int, Int)
 -- "the interval of a borrow" means here: past the last use of the reference, the place is free again.
 type Loan = (Place, Bool, Pos)
 
-data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place], stConst :: Map Local Integer, stFnAlias :: Map Local Name}
+data St = St {stMoved :: Map Place (Pos, Maybe String), stViews :: Map Local (Set Place), stMay :: Map Local (Set Place), stHeld :: Map Place Pos, stLoans :: Map Local Loan, stExtraLoans :: Map Local [Place], stFieldLoans :: Map (Local, Variable) [Place], stConst :: Map Local Integer, stFnAlias :: Map Local Name, stPermissionOwners :: Map Local (Set Local), stRaw :: Set Local, stExtraMut :: Set Local}
 
 emptySt :: St
-emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty
+emptySt = St Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Map.empty Set.empty Set.empty
 
 joinSt :: St -> St -> St
-joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) (Map.union (stLoans a) (stLoans b)) (Map.unionWith (++) (stExtraLoans a) (stExtraLoans b)) (Map.unionWith (++) (stFieldLoans a) (stFieldLoans b)) (Map.intersection (stConst a) (stConst b)) (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v])
+joinSt a b = St (Map.union (stMoved a) (stMoved b)) (Map.intersectionWith Set.union (stViews a) (stViews b)) (Map.unionWith Set.union (stMay a) (stMay b)) (Map.union (stHeld a) (stHeld b)) loans extras (Map.unionWith mergePlaces (stFieldLoans a) (stFieldLoans b)) constants (Map.fromList [(k, v) | (k, v) <- Map.toList (stFnAlias a), Map.lookup k (stFnAlias b) == Just v]) (Map.unionWith Set.union (stPermissionOwners a) (stPermissionOwners b)) (Set.union (stRaw a) (stRaw b)) (Set.union (stExtraMut a) (stExtraMut b))
+  where
+    loans = Map.unionWith (\(place, mutable, position) (_, otherMutable, _) -> (place, mutable || otherMutable, position)) (stLoans a) (stLoans b)
+    alternatives = Map.fromList [(local, [other]) | (local, (place, _, _)) <- Map.toList (stLoans a), Just (other, _, _) <- [Map.lookup local (stLoans b)], place /= other]
+    extras = Map.unionsWith mergePlaces [stExtraLoans a, stExtraLoans b, alternatives]
+    constants = Map.fromList [(local, value) | (local, value) <- Map.toList (stConst a), Map.lookup local (stConst b) == Just value]
+    mergePlaces left right = Set.toList (Set.fromList (left ++ right))
 
 sameShape :: St -> St -> Bool
-sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.keysSet (stLoans a) == Map.keysSet (stLoans b) && Map.keysSet (stExtraLoans a) == Map.keysSet (stExtraLoans b) && Map.keysSet (stFieldLoans a) == Map.keysSet (stFieldLoans b)
+sameShape a b = Map.keysSet (stMoved a) == Map.keysSet (stMoved b) && stViews a == stViews b && stMay a == stMay b && Map.keysSet (stHeld a) == Map.keysSet (stHeld b) && Map.map loanShape (stLoans a) == Map.map loanShape (stLoans b) && Map.map Set.fromList (stExtraLoans a) == Map.map Set.fromList (stExtraLoans b) && Map.map Set.fromList (stFieldLoans a) == Map.map Set.fromList (stFieldLoans b) && stConst a == stConst b && stFnAlias a == stFnAlias b && stPermissionOwners a == stPermissionOwners b && stRaw a == stRaw b && stExtraMut a == stExtraMut b
+  where
+    loanShape (place, mutable, _) = (place, mutable)
 
 -- Every loan that freezes a place: a reference's own place, and the other places a result that may be from
 -- more than one parameter freezes (a call result: which of them it is is the callee's choice)
 loanEntries :: St -> [(Local, Place, Bool)]
-loanEntries st = [(ref, place, mutable) | (ref, (place, mutable, _)) <- Map.toList (stLoans st)] ++ [(ref, place, False) | (ref, places) <- Map.toList (stExtraLoans st), place <- places]
+loanEntries st = [(ref, place, mutable) | (ref, (place, mutable, _)) <- Map.toList (stLoans st)] ++ [(ref, place, ref `Set.member` stExtraMut st || maybe False (\(_, mutable, _) -> mutable) (Map.lookup ref (stLoans st))) | (ref, places) <- Map.toList (stExtraLoans st), place <- places]
 
 -- The parts of a value of the type that are permissions or values of a linear type, as the steps to each from the value: the value itself
 -- for a Block or a linear struct or enum, the fields that are (or hold) one for any other struct. An enum that holds one in a variant is taken
@@ -163,6 +172,8 @@ data Cx = Cx
     { cxProgram :: Program
     , cxCopies :: Set Name
     , cxFn :: Function
+    , cxRawFunctions :: Set Name
+    , cxRawUnsafeCalls :: Set Name
     , cxLent :: Set Local
     , cxLinear :: Set Name
     , cxDrops :: Set Name
@@ -241,9 +252,47 @@ checkMoves copies linear drops program = checkMovesExcluding copies linear drops
 checkMovesExcluding :: Set Name -> Set Name -> Set Name -> Set Name -> Program -> [String]
 checkMovesExcluding copies linear drops excluded program = concatMap (checkFunction copies linear drops program) ([fn | fn <- Map.elems (progFunctions program), fnName fn `Set.notMember` excluded] ++ [progMain program])
 
+checkMovesWithLifetimes :: Set Name -> Set Name -> Set Name -> Set Name -> Program -> (Program, [String])
+checkMovesWithLifetimes copies linear drops excluded program =
+    let checked = Map.map (\fn -> if fnName fn `Set.member` excluded then (fn, []) else checkFunctionFull copies linear drops program fn) (progFunctions program)
+        (main', errors) = checkFunctionFull copies linear drops program (progMain program)
+     in (program{progFunctions = Map.map fst checked, progMain = main'}, errors ++ concatMap snd (Map.elems checked))
+
 checkFunction :: Set Name -> Set Name -> Set Name -> Program -> Function -> [String]
-checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
+checkFunction copies linear drops program fn = snd (checkFunctionFull copies linear drops program fn)
+
+checkFunctionFull :: Set Name -> Set Name -> Set Name -> Program -> Function -> (Function, [String])
+checkFunctionFull copies linear drops program fn =
+    ( fn{fnBlocks = Map.mapWithKey decorate (fnBlocks fn)}
+    , nub (concat [snd (runBlock cx b st block) | (b, st) <- Map.toList ins, Just block <- [Map.lookup b (fnBlocks fn)]])
+    )
   where
+    decorate blockId block@(BasicBlock statements term) = case Map.lookup blockId ins of
+        Nothing -> block
+        Just initial -> BasicBlock (reverse (third (foldl' visit (initial, Nothing, []) (zip [0 ..] statements)))) term
+      where
+        third (_, _, result) = result
+        visit (state, position, result) (index, statement) =
+            let live = case drop index (Map.findWithDefault [] blockId liveAfter) of next : _ -> next; [] -> Map.findWithDefault Set.empty blockId liveOut
+                current = cx{cxLiveNow = live}
+                (next, pos) = case statement of
+                    Ghost _ (GhostPosition line column) -> (state, Just (line, column))
+                    Assign local rv -> (fst (assign current position state local rv), position)
+                    AssignRef root steps rv -> (fst (updatePlace current position state root steps rv), position)
+                    _ -> (state, position)
+                encoded = case statement of
+                    Assign local (ListOp AddrBorrow [p, i, permission, _]) | Just source <- operandLocal permission ->
+                        case Set.toList (permissionOwners current state source) of
+                            owner : _ -> Assign local (ListOp AddrBorrow [p, i, permission, Copy owner])
+                            [] -> statement
+                    _ -> statement
+                extra = case statement of
+                    Assign local _ | runtime local ->
+                        let roots = nub [root | (reference, (root, _), _) <- loanEntries next, reference == local, root /= local, runtime root]
+                         in [Ghost Map.empty (GhostLifetime local roots) | not (null roots)]
+                    _ -> []
+             in (next, pos, reverse extra ++ encoded : result)
+    runtime local = runtimeType program (typeOf cx local)
     -- (the drop of a type, `<T as Drop>::drop`, is given the value to free: it only reads what native code frees after it (its fields), and
     -- it has to use the permissions the value holds, which nothing else will)
     dropOf = case (implOwner (fnName fn), fnParams fn) of
@@ -251,9 +300,13 @@ checkFunction copies linear drops program fn = nub (concat [snd (runBlock cx b s
         _ -> Nothing
     lent = Set.fromList (fnBorrowed fn ++ [self | Just (_, self) <- [dropOf]])
     (liveAfter, liveOut) = liveness fn
-    cx = Cx program copies fn lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty
+    cx = Cx program copies fn (rawFunctions program) (rawUnsafeFunctions program) lent linear drops (snd <$> dropOf) liveAfter liveOut Set.empty
     -- (a permission given to the function, and not lent, is the function's to use)
-    entry = emptySt{stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)])}
+    entry = emptySt
+        { stHeld = Map.fromList ([((p, steps), Nothing) | p <- fnParams fn, p `Set.notMember` lent, steps <- linearParts linear drops program (typeOf cx p)] ++ [((self, steps), Nothing) | Just (owner, self) <- [dropOf], steps <- linearParts linear (Set.delete owner drops) program (typeOf cx self), not (null steps)])
+        , stExtraLoans = Map.fromList [(p, [(p, [])]) | p <- fnBorrowed fn, referenceBearing program (typeOf cx p)]
+        , stFieldLoans = Map.fromList [((p, field), [(p, [])]) | p <- fnBorrowed fn, field <- refFieldNames cx (typeOf cx p)]
+        }
     isSuffixOf' suffix text = reverse suffix == take (length suffix) (reverse text)
     ins = fixpoint (Map.singleton (BlockId 0) entry)
     fixpoint known =
@@ -294,6 +347,7 @@ refStepConst _ other = refStepOf other
 -- What an rvalue does with the locals it names: the part of the local, and whether it reads it or takes it
 accesses :: Rvalue -> [(Local, [Step], Role)]
 accesses rv = case rv of
+    ListOp AddrBorrow (p : i : permission : _) -> [(l, [], Read) | o <- [p, i, permission], Just l <- [operandLocal o]]
     Borrow root steps _ -> (root, map refStepOf steps, Read) : [(l, [], Read) | RefIndex o <- steps, Just l <- [operandLocal o]]
     Deref o -> [(l, [], Read) | Just l <- [operandLocal o]]
     ReadField o name field -> [(l, [SField name field], Read) | Just l <- [operandLocal o]]
@@ -321,6 +375,112 @@ resolvePlaceChain st = go (8 :: Int) []
             Just ps | not (Set.null ps) -> let (r2, s2) = head (Set.toList ps) in go (n - 1) chain (r2, s2 ++ steps)
             _ -> ((root, steps), chain)
 
+resolvedPlaces :: St -> Place -> [Place]
+resolvedPlaces st = go Set.empty
+  where
+    go seen place@(root, steps)
+        | root `Set.member` seen = [(root, take maxDepth steps)]
+        | otherwise =
+            let next = Set.insert root seen
+                references = [p | (local, p, _) <- loanEntries st, local == root]
+                views = Set.toList (Map.findWithDefault Set.empty root (stViews st))
+                origins = if null references then views else references
+             in if null origins then [place] else nub (concat [go next (r, take maxDepth (ps ++ steps)) | (r, ps) <- origins])
+
+runtimeType :: Program -> Type -> Bool
+runtimeType program = go Set.empty
+  where
+    go seen ty = case ty of
+        TBlock _ -> False
+        TRef inner -> go seen inner
+        TMutRef inner -> go seen inner
+        TNamed _ _ | ty `Set.member` seen -> True
+        TNamed base args -> case Map.lookup (instanceName base args) (progTypes program) of
+            Just (StructDecl fields) | not (null fields) -> any (go (Set.insert ty seen) . snd) fields
+            _ -> True
+        _ -> True
+
+permissionType :: Type -> Bool
+permissionType (TBlock _) = True
+permissionType (TRef inner) = permissionType inner
+permissionType (TMutRef inner) = permissionType inner
+permissionType _ = False
+
+permissionOwners :: Cx -> St -> Local -> Set Local
+permissionOwners cx st local = case Map.lookup local (stPermissionOwners st) of
+    Just owners -> owners
+    Nothing -> Set.fromList [root | (root, _) <- resolvedPlaces st (local, []), runtimeType (cxProgram cx) (typeOf cx root)]
+
+rawFunctions :: Program -> Set Name
+rawFunctions = functionFlow (\(BasicBlock statements _) -> any raw statements)
+  where
+    raw (Assign _ (ListOp AddrBorrow _)) = True
+    raw _ = False
+
+rawUnsafeFunctions :: Program -> Set Name
+rawUnsafeFunctions = functionFlow unsafe
+  where
+    unsafe (BasicBlock statements term) = any stores statements || case term of
+        Call (Const (CFn _)) _ _ _ -> False
+        Call{} -> True
+        _ -> False
+    stores AssignRef{} = True
+    stores (Assign _ rv) = rawStore rv
+    stores _ = False
+
+functionFlow :: (BasicBlock -> Bool) -> Program -> Set Name
+functionFlow seed program = close direct
+  where
+    functions = progMain program : Map.elems (progFunctions program)
+    direct = Set.fromList [fnName fn | fn <- functions, any seed (Map.elems (fnBlocks fn))]
+    close known =
+        let next = Set.union known (Set.fromList [fnName fn | fn <- functions, name <- called fn, name `Set.member` known])
+         in if next == known then known else close next
+    called fn = [name | BasicBlock stmts term <- Map.elems (fnBlocks fn), operand <- (case term of Call callee _ _ _ -> [callee]; _ -> []) ++ [o | Assign _ rv <- stmts, (o, _) <- roles rv], Const (CFn name) <- [operand]]
+
+rawPayloadSupported :: Program -> Type -> Bool
+rawPayloadSupported program = go Set.empty
+  where
+    go seen ty = case ty of
+        TRef _ -> False
+        TMutRef _ -> False
+        TBlock _ -> False
+        TParam _ -> False
+        TVar _ -> False
+        TArrayOf inner (SizeConst _) -> go seen inner
+        TArrayOf _ _ -> False
+        TAddr inner -> go seen inner
+        TUninit inner -> go seen inner
+        TNamed _ _ | ty `Set.member` seen -> True
+        TNamed base args -> all (knownArg seen) args && case Map.lookup (instanceName base args) (progTypes program) of
+            Just (StructDecl fields) -> all (go (Set.insert ty seen) . snd) fields
+            Just (EnumDecl variants) -> all (go (Set.insert ty seen) . snd) (concatMap snd variants)
+            Nothing -> False
+        TVariant variant -> maybe False (go seen . (\name -> TNamed name [])) (ownerOf program variant)
+        TForall{} -> False
+        TFn args result -> all (go seen) (result : args)
+        _ -> True
+    knownArg seen (ArgType ty) = go seen ty
+    knownArg _ (ArgSize (SizeConst _)) = True
+    knownArg _ (ArgSize _) = False
+
+rawOperand :: Cx -> St -> Operand -> Bool
+rawOperand cx st operand = case operand of
+    Const (CFn name) -> name `Set.member` cxRawFunctions cx && maybe False (maybe False (referenceBearing (cxProgram cx)) . fnReturns) (Map.lookup name (progFunctions (cxProgram cx)))
+    _ -> maybe False (`Set.member` stRaw st) (operandLocal operand)
+
+callableType :: Type -> Bool
+callableType TFn{} = True
+callableType _ = False
+
+rawStore :: Rvalue -> Bool
+rawStore rv = case rv of
+    MakeData{} -> True
+    MakeList{} -> True
+    MakeBox{} -> True
+    ListOp op _ -> op `elem` [AddrWrite, UninitNew, Push, Set, NewArray, NewBoxed]
+    _ -> False
+
 -- The places a local stands for: those it is a view of, or itself
 placesOf :: St -> Local -> [Place]
 placesOf st l = case Map.lookup l (stViews st) of
@@ -328,10 +488,31 @@ placesOf st l = case Map.lookup l (stViews st) of
     _ -> [(l, [])]
 
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
-assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts', stFnAlias = fnAlias'}, errs ++ lost cx pos st1 d ++ loanErrs)
+assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts', stFnAlias = fnAlias', stPermissionOwners = permissionOrigins, stRaw = rawLocals, stExtraMut = extraMut}, errs ++ lost cx pos st1 d ++ loanErrs ++ rawErrors)
   where
+    rawInput = any (rawOperand cx st0 . fst) (roles rv)
+    rawValue = case rv of ListOp AddrBorrow _ -> True; _ -> rawInput && (referenceBearing (cxProgram cx) ty || callableType ty || not (null view))
+    rawLocals = (if rawValue then Set.insert else Set.delete) d (stRaw base)
+    extraMut = (if mutableResult then Set.insert else Set.delete) d (stExtraMut base)
+    mutableResult = case ty of
+        TRef _ -> False
+        TMutRef _ -> True
+        _ -> any (\(local, _, mutable) -> mutable && local `elem` [l | (o, _) <- roles rv, Just l <- [operandLocal o]]) (loanEntries st0)
+    permissionOrigins = if permissionType ty || not (runtimeType (cxProgram cx) ty)
+        then Map.insert d (case rv of
+            ReadField o _ _ -> maybe Set.empty (permissionOwners cx st0) (operandLocal o)
+            Borrow root _ _ -> permissionOwners cx st0 root
+            _ -> Set.unions [permissionOwners cx st0 local | (o, _) <- roles rv, Just local <- [operandLocal o], permissionType (typeOf cx local)]) (stPermissionOwners base)
+        else Map.delete d (stPermissionOwners base)
+    rawErrors = [message cx pos "raw-reference lifetime: storing a raw-derived reference is unsupported until checked write footprints are available" | rawInput && rawStore rv]
+        ++ case rv of
+            ListOp AddrBorrow [_, _, permission, _] ->
+                [message cx pos "raw-reference lifetime: raw borrow targets must have concrete reference-free payloads in this intermediate unit" | not (rawPayloadSupported (cxProgram cx) (case ty of TRef inner -> inner; _ -> ty))]
+                ++ [message cx pos "raw-reference lifetime: the checked permission has no known runtime owner" | maybe True (Set.null . permissionOwners cx st0) (operandLocal permission)]
+            _ -> []
     fnAlias' = case rv of
         Use (Const (CFn name)) -> Map.insert d name (stFnAlias base)
+        Use o | Just source <- operandLocal o, Just name <- Map.lookup source (stFnAlias st0) -> Map.insert d name (stFnAlias base)
         _ -> Map.delete d (stFnAlias base)
     consts' = case rv of
         Use (Const (CInt n)) -> Map.insert d n (stConst base)
@@ -347,14 +528,24 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         Nothing -> Map.findWithDefault [] l (stExtraLoans st1)
     clearedFields = Map.filterWithKey (\(root, _) _ -> root /= d) (stFieldLoans base)
     (loans'', extras'', fieldLoans'') = case rv of
+        Borrow root steps _ ->
+            let alternatives = resolvedPlaces st1 (root, map (refStepConst (stConst st1)) steps)
+             in (loans', Map.insert d (nub alternatives) (stExtraLoans base), clearedFields)
         MakeData _ fields ->
             let made = [(f, loansOf l) | (f, o) <- fields, Just l <- [operandLocal o], not (null (loansOf l))]
              in (loans', if null made then Map.delete d (stExtraLoans base) else Map.insert d (concatMap snd made) (stExtraLoans base), foldl' (\m (f, places) -> Map.insert (d, f) places m) clearedFields made)
         ReadField o _ field
-            | (case typeOf cx d of TRef _ -> True; TMutRef _ -> True; _ -> False), Just src <- operandLocal o, Just places <- Map.lookup (src, field) (stFieldLoans st1) ->
+            | Just src <- operandLocal o, Just places <- Map.lookup (src, field) (stFieldLoans st1) ->
                 case places of
-                    place : more -> (Map.insert d (place, case typeOf cx d of TMutRef _ -> True; _ -> False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
-                    [] -> (loans', Map.delete d (stExtraLoans base), clearedFields)
+                    place : more | referenceType ty -> (Map.insert d (place, case ty of TMutRef _ -> True; _ -> False, pos) (stLoans base), if null more then Map.delete d (stExtraLoans base) else Map.insert d more (stExtraLoans base), clearedFields)
+                    _ -> (loans', if null places then Map.delete d (stExtraLoans base) else Map.insert d places (stExtraLoans base), clearedFields)
+        ListOp AddrWrite [_, _, value, permission] -> carryMemory value permission
+        ListOp op os | op `elem` [AddrDropValue, AddrDropRange], permission : _ <- reverse os -> carryMemory (Const (CInt 0)) permission
+        ListOp AddrBorrow [_, _, permission, _] ->
+            withCarried (carried permission ++ [(root, []) | Just local <- [operandLocal permission], root <- Set.toList (permissionOwners cx st1 local)])
+        ListOp AddrGet os | permission : _ <- reverse os -> withCarried (carried permission)
+        Deref o -> withCarried (carried o)
+        ListOp op (source : _) | op `elem` [Get, First, Last], not (null (refFieldNames cx ty)) -> withCarried (carried source)
         MakeList items ->
             let made = concat [loansOf l | Just l <- map operandLocal items]
              in (loans', if null made then Map.delete d (stExtraLoans base) else Map.insert d made (stExtraLoans base), clearedFields)
@@ -377,7 +568,19 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         Use (Move src) -> (loans', transferExtras src, transferFields src True)
         Use (Copy src) -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
         CopyOf o | Just src <- operandLocal o -> (loans', case Map.lookup src (stExtraLoans st1) of Just places -> Map.insert d places (stExtraLoans base); Nothing -> Map.delete d (stExtraLoans base), transferFields src False)
-        _ -> (loans', Map.delete d (stExtraLoans base), clearedFields)
+        _ -> withCarried (concat [carried operand | (operand, _) <- roles rv])
+    referenceType TRef{} = True
+    referenceType TMutRef{} = True
+    referenceType _ = False
+    carried operand = maybe [] loansOf (operandLocal operand)
+    carryMemory value permission = withCarried (carried value ++ carried permission)
+    withCarried roots0 =
+        let roots = if referenceBearing (cxProgram cx) ty then nub roots0 else []
+            primary = case (referenceType ty, roots, rv) of
+                (True, place : _, ListOp AddrGet _) -> Map.insert d (place, False, pos) loans'
+                _ -> loans'
+            fields = foldl' (\m field -> Map.insert (d, field) roots m) clearedFields (refFieldNames cx ty)
+         in (primary, if null roots then Map.delete d (stExtraLoans base) else Map.insert d roots (stExtraLoans base), fields)
     transferExtras src = case Map.lookup src (stExtraLoans st1) of
         Just places -> Map.insert d places (Map.delete src (stExtraLoans base))
         Nothing -> Map.delete d (stExtraLoans base)
@@ -387,10 +590,15 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
          in foldl' (\m (f, places) -> Map.insert (d, f) places m) kept from
     (borrowPlace, borrowChain) = case rv of
         Borrow root steps mutable -> let (place, chain) = resolvePlaceChain st1 (root, map (refStepConst (stConst st1)) steps) in (Just (place, mutable), chain)
+        ListOp AddrBorrow (_ : _ : permission : _) | Just root <- operandLocal permission ->
+            let (place, chain) = resolvePlaceChain st1 (root, [SSlot]) in (Just (place, False), chain)
         _ -> (Nothing, [])
     loans' = case borrowPlace of
         Just (place, mutable) -> Map.insert d (place, mutable, pos) (stLoans base)
-        Nothing -> Map.delete d (stLoans base)
+        Nothing -> case rv of
+            Use o | referenceType ty, Just source <- operandLocal o, Just loan <- Map.lookup source (stLoans st1) -> Map.insert d loan (stLoans base)
+            CopyOf o | referenceType ty, Just source <- operandLocal o, Just loan <- Map.lookup source (stLoans st1) -> Map.insert d loan (stLoans base)
+            _ -> Map.delete d (stLoans base)
     activeLoans = [(ref, place, lmut) | (ref, place, lmut) <- loanEntries st1, ref `Set.member` cxLiveNow cx, ref /= d]
     loanErrs = case borrowPlace of
         Just (place, mutable) ->
@@ -426,10 +634,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
         _ | tuplePart -> []
         _ | isProjection rv, not (isCopy cx d) -> [(r, ps ++ [stepOf rv]) | Just l <- [sourceLocal rv], (r, ps) <- placesOf st1 l]
         AsVariant o _ | not (isCopyType (cxCopies cx) (cxProgram cx) ty), Just l <- operandLocal o -> placesOf st1 l
-        Deref o | not (isCopy cx d), Just l <- operandLocal o -> case Map.lookup l (stLoans st1) of
-            Just ((root, steps), _, _) -> [(root, steps ++ [SDeref])]
-            Nothing | l `Set.member` cxLent cx -> [(l, [SDeref])]
-            Nothing -> []
+        Deref o | not (isCopy cx d), Just l <- operandLocal o -> [(root, take maxDepth (steps ++ [SDeref])) | (root, steps) <- resolvedPlaces st1 (l, [])]
         -- (what a Box holds is read through it, and is the Box's when it is taken)
         Unbox o | not (isCopyType (cxCopies cx) (cxProgram cx) ty), Just l <- operandLocal o -> placesOf st1 l
         Use o | forLoopList, Just l <- operandLocal o -> placesOf st1 l
@@ -451,7 +656,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
 -- An assignment through a reference: the root gets a new version, and no other live loan to the place may be
 -- there (the loan it goes through is the one update loan to exactly this place)
 updatePlace :: Cx -> Pos -> St -> Local -> [RefStep] -> Rvalue -> (St, [String])
-updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ conflicts)
+updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ conflicts ++ [message cx pos "raw-reference lifetime: an assignment through a reference cannot store a raw-derived reference in this intermediate unit" | any (rawOperand cx st0 . fst) (roles rv)])
   where
     (st1, errs) = foldl' (access cx pos) (st0, []) (accesses rv ++ [(root, map refStepOf steps, Read)])
     place = resolvePlace st1 (root, map refStepOf steps)
@@ -459,6 +664,7 @@ updatePlace cx pos st0 root steps rv = (define cx st1 root [], errs ++ conflicts
         [ message cx pos (describe cx place ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be changed through another reference while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
         | (ref, lplace, lmut) <- loanEntries st1
         , ref `Set.member` cxLiveNow cx
+        , not (ref == root && root `elem` fnMutBorrowed (cxFn cx))
         , overlaps place lplace
         , not (lmut && lplace == place)
         ]
@@ -583,6 +789,9 @@ define _ st d view0 =
         , stFieldLoans = stFieldLoans st
         , stConst = stConst st
         , stFnAlias = stFnAlias st
+        , stPermissionOwners = stPermissionOwners st
+        , stRaw = stRaw st
+        , stExtraMut = stExtraMut st
         }
 
 terminator :: Cx -> Pos -> St -> Terminator -> (St, [String])
@@ -593,32 +802,72 @@ terminator cx pos st term = case term of
             mut = mutArguments cx callee (length args)
             argLocals = [(l, b) | (a, b) <- zip args lent, Just l <- [operandLocal a]]
             conflicts = [message cx pos (describeLocal cx l ++ " is lent to this call and moved by it too: write clone(" ++ describeLocal cx l ++ ") for one of them") | (l, True) <- argLocals, (l', False) <- argLocals, l == l', not (isCopy cx l)]
-            argPlace l = maybe (l, []) (\(place, _, _) -> place) (Map.lookup l (stLoans st))
+            argPlace local = resolvePlace st (local, [])
             mutErrs =
                 [ message cx pos (describe cx (argPlace l) ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be lent for updating to this call: the borrow ends at the last use of " ++ describeLocal cx ref)
                 | (a, isMut) <- zip args mut
                 , isMut
                 , Just l <- [operandLocal a]
                 , (ref, lplace, _) <- loanEntries st
-                , ref `Set.member` cxLiveNow cx
+                , ref `Set.member` Set.union (cxLiveNow cx) (Set.fromList (map fst argLocals))
                 , ref /= l
                 , overlaps (argPlace l) lplace
                 ]
-            (st', errs) = foldl' (access cx pos) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
-            defined = define cx st' dest []
+            simultaneous =
+                [ message cx pos "overlapping reference arguments cannot be lent for updating by the same call"
+                | (index, (argument, updating)) <- zip [0 :: Int ..] (zip args mut)
+                , (otherIndex, (other, otherUpdating)) <- zip [0 :: Int ..] (zip args mut)
+                , index < otherIndex, updating || otherUpdating
+                , index < length lent, otherIndex < length lent, lent !! index, lent !! otherIndex
+                , Just local <- [operandLocal argument], Just otherLocal <- [operandLocal other]
+                , overlaps (argPlace local) (argPlace otherLocal)
+                ]
+            callCx = cx{cxLiveNow = Set.union (cxLiveNow cx) (Set.fromList (map fst argLocals))}
+            (st', errs) = foldl' (access callCx pos) (st, []) ([(l, [], Read) | Just l <- [operandLocal callee]] ++ [(l, [], if b then Read else Consume) | (l, b) <- argLocals])
+            defined0 = define cx st' dest []
+            name = case callee of Const (CFn called) -> Just called; _ -> operandLocal callee >>= (`Map.lookup` stFnAlias st)
+            called = name >>= (`Map.lookup` progFunctions (cxProgram cx))
+            rawArgs = [(index, argument) | (index, argument) <- zip [0 ..] args, rawOperand cx st argument]
+            rawResult = referenceBearing (cxProgram cx) (typeOf cx dest) && (not (null rawArgs) || maybe False (`Set.member` cxRawFunctions cx) name)
+            safeParameter index = case called of
+                Just function | index < length (fnParams function) ->
+                    let parameter = fnParams function !! index
+                        ty = maybe (TParam "unknown") localType (Map.lookup parameter (fnLocals function))
+                     in not ("extern " `isPrefixOf` fnName function) && parameter `elem` fnBorrowed function && parameter `notElem` fnMutBorrowed function && rawPayloadSupported (cxProgram cx) ty
+                _ -> False
+            directResult = case typeOf cx dest of TRef inner -> rawPayloadSupported (cxProgram cx) inner; _ -> not (referenceBearing (cxProgram cx) (typeOf cx dest))
+            rawCallErrors =
+                [message cx pos "reference lifetime: the callee's checked return origins are not known" | referenceBearing (cxProgram cx) (typeOf cx dest), called == Nothing, rawOperand cx st callee || not (null rawArgs)]
+                ++ [message cx pos "raw-reference lifetime: raw-derived arguments cannot reach mutable, unresolved, or reference-storing calls in this intermediate unit"
+                | not (null rawArgs), or mut || any (not . safeParameter . fst) rawArgs || not directResult || maybe True (`Set.member` cxRawUnsafeCalls cx) name]
+                ++ [message cx pos "raw-reference lifetime: raw borrow targets must have concrete reference-free payloads in this intermediate unit" | rawResult && not directResult]
+            owners = Set.unions [permissionOwners cx st root | (root, _) <- resultFromPlaces cx st callee args]
+            defined = defined0{stRaw = (if rawResult then Set.insert else Set.delete) dest (stRaw defined0), stPermissionOwners = if permissionType (typeOf cx dest) then Map.insert dest owners (stPermissionOwners defined0) else Map.delete dest (stPermissionOwners defined0)}
             -- (a result that is a reference is a borrow of a place of one of the arguments it is from, made here)
-            loaned = case resultFromPlaces cx st' callee args of
+            returnedPlaces = if referenceBearing (cxProgram cx) (typeOf cx dest) then resultFromPlaces cx st' callee args else []
+            loaned = case returnedPlaces of
                 [] -> defined
-                place : more -> defined{stLoans = Map.insert dest (place, case typeOf cx dest of TMutRef _ -> True; _ -> False, pos) (stLoans defined), stExtraLoans = if null more then Map.delete dest (stExtraLoans defined) else Map.insert dest more (stExtraLoans defined)}
+                places@(place : more) ->
+                    let primary = case typeOf cx dest of TRef _ -> True; TMutRef _ -> True; _ -> False
+                     in if primary
+                        then defined{stLoans = Map.insert dest (place, case typeOf cx dest of TMutRef _ -> True; _ -> False, pos) (stLoans defined), stExtraLoans = if null more then Map.delete dest (stExtraLoans defined) else Map.insert dest more (stExtraLoans defined)}
+                        else defined{stExtraLoans = Map.insert dest places (stExtraLoans defined)}
             -- (a result that holds references: each reference field of it is to one of the same places)
-            windowed = case (refFieldNames cx (typeOf cx dest), resultFromPlaces cx st' callee args) of
+            windowed = case (refFieldNames cx (typeOf cx dest), returnedPlaces) of
                 (fields@(_ : _), places@(_ : _)) -> loaned{stFieldLoans = foldl' (\m f -> Map.insert (dest, f) places m) (Map.filterWithKey (\(root, _) _ -> root /= dest) (stFieldLoans loaned)) fields, stExtraLoans = Map.insert dest places (stExtraLoans loaned)}
                 _ -> loaned
-         in (hold cx pos windowed dest [], errs ++ take 1 conflicts ++ mutErrs ++ lost cx pos st' dest)
+         in (hold cx pos windowed dest [], errs ++ take 1 conflicts ++ mutErrs ++ simultaneous ++ rawCallErrors ++ lost cx pos st' dest)
     -- (what a function returns is given to its caller, and a permission it has not used by then is lost)
     Return ->
         let (st', errs) = if Local 0 `Map.member` fnLocals (cxFn cx) then accessAll [(Local 0, [], Consume)] else (st, [])
-         in (st', errs ++ [message cx pos (unused cx st' q given) | (q, given) <- Map.toList (stHeld st')])
+            directReference = case typeOf cx (Local 0) of TRef _ -> True; TMutRef _ -> True; _ -> False
+            allOrigins = nub [root | (reference, (root, _), _) <- loanEntries st, reference == Local 0]
+            runtimeOrigins = filter (runtimeType (cxProgram cx) . typeOf cx) allOrigins
+            origins = if null runtimeOrigins then allOrigins else runtimeOrigins
+            fromErrors = [message cx pos "reference lifetime: every returned origin must be a borrowed from parameter"
+                | directReference, null origins || any (\root -> root `notElem` fnFrom (cxFn cx) || root `Set.notMember` cxLent cx) origins]
+            callableEscape = [message cx pos "raw-reference lifetime: returning a raw-reference-producing function value requires checked callback footprints" | Local 0 `Set.member` stRaw st, callableType (typeOf cx (Local 0))]
+         in (st', errs ++ fromErrors ++ callableEscape ++ [message cx pos (unused cx st' q given) | (q, given) <- Map.toList (stHeld st')])
     _ -> (st, [])
   where
     accessAll as = foldl' (access cx pos) (st, []) as
@@ -655,28 +904,56 @@ resultFromPlaces :: Cx -> St -> Operand -> [Operand] -> [Place]
 resultFromPlaces cx st callee args = case calleeName of
     Just name | Just f <- Map.lookup name (progFunctions (cxProgram cx)) ->
         let names = [maybe Nothing localName (Map.lookup p (fnLocals f)) | p <- fnParams f]
-         in concat [argumentPlaces (args !! i) | (i, Just n) <- zip [0 ..] names, n `elem` specFrom (fnSpec f), i < length args]
-    _ -> []
+            explicit = concat [argumentPlaces (args !! i) | (i, Just n) <- zip [0 ..] names, n `elem` specFrom (fnSpec f), i < length args]
+            carried = concat [carriedPlaces arg | arg <- args]
+         in if null (specFrom (fnSpec f)) && maybe False (referenceBearing (cxProgram cx)) (fnReturns f) then nub carried else nub explicit
+    _ -> nub (concat [argumentPlaces arg | (arg, borrowed) <- zip args (lentArguments cx callee (length args)), borrowed] ++ concatMap carriedPlaces args)
   where
     calleeName = case callee of
         Const (CFn name) -> Just name
         Copy l -> Map.lookup l (stFnAlias st)
         Move l -> Map.lookup l (stFnAlias st)
         _ -> Nothing
+    carriedPlaces arg = case operandLocal arg of
+        Just local -> case Map.lookup local (stLoans st) of
+            Just (place, _, _) -> place : Map.findWithDefault [] local (stExtraLoans st)
+            Nothing -> Map.findWithDefault [] local (stExtraLoans st)
+        Nothing -> []
     argumentPlaces a = case operandLocal a of
         Just l -> case Map.lookup l (stLoans st) of
             Just (place, _, _) -> place : Map.findWithDefault [] l (stExtraLoans st)
-            Nothing -> case Map.findWithDefault [] l (stExtraLoans st) of
-                [] -> [(l, [])]
-                places -> places
+            Nothing -> nub (placesOf st l ++ Map.findWithDefault [] l (stExtraLoans st))
         Nothing -> []
 
 -- The reference fields of a struct type, which a value of it holds loans in
 refFieldNames :: Cx -> Type -> [Variable]
+refFieldNames cx (TRef inner) = refFieldNames cx inner
+refFieldNames cx (TMutRef inner) = refFieldNames cx inner
 refFieldNames cx (TNamed base args) = case Map.lookup (instanceName base args) (progTypes (cxProgram cx)) of
-    Just (StructDecl fields) -> [f | (f, ft) <- fields, case ft of TRef _ -> True; TMutRef _ -> True; _ -> False]
+    Just (StructDecl fields) -> [field | (field, ty) <- fields, referenceBearing (cxProgram cx) ty]
     _ -> []
 refFieldNames _ _ = []
+
+referenceBearing :: Program -> Type -> Bool
+referenceBearing program = go Set.empty
+  where
+    go seen ty = case ty of
+        TRef _ -> True
+        TMutRef _ -> True
+        TParam _ -> True
+        TVar _ -> True
+        TList inner -> go seen inner
+        TBox inner -> go seen inner
+        TArrayOf inner _ -> go seen inner
+        TBlock inner -> go seen inner
+        TUninit inner -> go seen inner
+        TNamed _ _ | ty `Set.member` seen -> False
+        TNamed base args -> case Map.lookup (instanceName base args) (progTypes program) of
+            Just (StructDecl fields) -> any (go (Set.insert ty seen) . snd) fields
+            Just (EnumDecl variants) -> any (go (Set.insert ty seen) . snd) (concatMap snd variants)
+            Nothing -> True
+        TVariant variant -> maybe True (go seen . (\name -> TNamed name [])) (ownerOf program variant)
+        _ -> False
 
 -- Messages
 

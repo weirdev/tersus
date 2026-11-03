@@ -25,6 +25,7 @@ import TestOwnership
 import TestTraits
 import TestArrays
 import TestBorrow
+import TestAllocationRefs
 import TestCopies
 import TestGenerics
 import TestBox
@@ -159,6 +160,7 @@ originalGroups =
     , testDeref
     , testPointers
     , testBorrow
+    , testAllocationRefs
     , testCopies
     , testGenerics
     , testSequence

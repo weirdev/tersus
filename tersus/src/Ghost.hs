@@ -181,6 +181,7 @@ rvalueCall :: M.Rvalue -> Maybe (BuiltinFunct, [M.Operand])
 rvalueCall rv =
     case rv of
         M.BinaryOp op a b -> Just (binary op, [a, b])
+        M.ListOp M.AddrBorrow os -> Just (AddrGet, take 3 os)
         M.ListOp op os -> Just (list op, os)
         M.MakeData name fields -> Just (Ctor name [] (map fst fields), map snd fields)
         M.ReadField o name field -> Just (namedField name field, [o])

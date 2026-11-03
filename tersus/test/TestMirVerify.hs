@@ -52,6 +52,8 @@ testMirVerify =
             ( TestCase "raw lists and Boxes library" (rawInterpreted True rawLibrary)
                 : [TestCase name (rawInterpreted expected (Ok text)) | (name, text, expected) <- blockCases]
             )
+        , TestList "raw borrow protocol and structural metadata, interpreted"
+            [TestCase name (rawInterpreted expected (Ok text)) | (name, text, expected) <- rawBorrowCases]
         , TestCase "Uninit function type round trips through MIR data" uninitRoundTrip
         , TestList "function-list identity, interpreted"
             [TestCase name (rawInterpreted expected input) | (name, input, expected) <- functionCases]
@@ -159,7 +161,7 @@ rawNative :: IO TestResult
 rawNative = withVerifier $ \exe -> case rawLibrary of
     Error e -> pure (Just e)
     Ok library -> do
-        failures <- mapM (check exe) (("raw lists and Boxes library", library, True) : blockCases)
+        failures <- mapM (check exe) (("raw lists and Boxes library", library, True) : blockCases ++ rawBorrowCases)
         functionFailures <- mapM (\(name, input, expected) -> case input of
             Error e -> pure (Just (name ++ ": " ++ e))
             Ok text -> check exe (name, text, expected)) (functionCases ++ callCases)
@@ -356,6 +358,150 @@ functionCases =
         , "return"
         , "end"
         ]
+
+rawBorrowCases :: [(String, String, Bool)]
+rawBorrowCases = concatMap cases [False, True]
+  where
+    cases erased =
+        [(label name, change (rawBorrowFixture erased), accepted) | (name, change, accepted) <- protocol erased]
+            ++ [(label name, rawBorrowChain erased localOwner namedCallee fromOwner, accepted)
+               | (name, localOwner, namedCallee, fromOwner, accepted) <-
+                    [ ("forward and reborrow through the owner", False, True, True, True)
+                    , ("known function value preserves owner origins", False, False, True, True)
+                    ]]
+            ++ [(label "reference relay preserves its actual from parameter", rawBorrowRelay erased False, True)
+               , (label "forged relay from cannot launder a local raw origin", rawBorrowRelay erased True, False)
+               , (label "scalar call result cannot forge a reference origin", scalarRelay erased, False)
+               ]
+      where label name = "addrBorrow " ++ name ++ if erased then " after erasure" else " before erasure"
+    protocol erased =
+        [ ("accepts its exact protocol", id, True)
+        , ("rejects a missing operand", line borrow (borrowWith (init operands)), False)
+        , ("rejects an extra operand", line borrow (borrowWith (operands ++ ["copy 4"])), False)
+        , ("checks exact index type", line "local 2 none int" "local 2 none bool", False)
+        , ("does not unwrap an index reference", line "local 2 none int" "local 2 none ref int", False)
+        , ("does not unwrap an update index reference", line "local 2 none int" "local 2 none mutref int", False)
+        , ("checks address element against reference element", line "local 1 none addr int" "local 1 none addr bool", False)
+        , ("does not unwrap an address reference", line "local 1 none addr int" "local 1 none ref addr int", False)
+        , ("rejects a non-reference result", result "int", False)
+        , ("rejects an update reference result", result "mutref int", False)
+        , ("rejects a reference-bearing raw payload", result "ref ref int" . line "local 1 none addr int" "local 1 none addr ref int" . line "local 3 none block int" "local 3 none block ref int", False)
+        , ("function payload rejects an unresolved return", payload "fn 0 param \"T\"", False)
+        , ("function payload rejects quantified types", payload "forall 0 1 \"T\" fn 0 param \"T\"", False)
+        , ("function payload rejects reference arguments", payload "fn 1 ref int int", False)
+        , ("function payload rejects reference returns", payload "fn 0 ref int", False)
+        , ("function payload accepts a concrete scalar signature", payload "fn 1 int int", True)
+        , ("rejects a missing owner", owner "copy 999", False)
+        , ("rejects a constant owner", owner "const int 0", False)
+        , ("rejects a moved owner operand", owner "move 4", False)
+        , ("rejects a ghost owner", line ownerLocal "local 4 some \"owner\" block int", False)
+        , ("rejects a reference to a ghost owner", line ownerLocal "local 4 some \"owner\" ref block int", False)
+        , ("rejects an owner without known runtime representation", line ownerLocal "local 4 some \"owner\" param \"T\"", False)
+        , ("rejects an all-ghost struct owner", line ownerLocal "local 4 some \"owner\" named \"GhostOwner\" 0", False)
+        , ("owner must be in from", line header (rawBorrowHeader erased "probe" "ref int" True "1 2"), False)
+        , ("owner must be borrowed", line header (rawBorrowHeader erased "probe" "ref int" False "1 4"), False)
+        , ("owner must be a parameter", line header (removeOwnerParam erased (rawBorrowHeader erased "probe" "ref int" True "1 4")), False)
+        , ("dropped owner cannot support a raw return", line borrow ("drop 4\n" ++ borrow), False)
+        , ("consumed owner cannot support a raw return", line borrow ("peek 9 use move 4\n" ++ borrow) . addLocalOwner, False)
+        , ("scalar address from cannot forge an escaping owner", line header scalarHeader . owner "copy 1", False)
+        , ("scalar address anchor is accepted for a local read", localRead . owner "copy 1", True)
+        , ("a borrowed owner is not droppable after a scalar read", result "int" . line borrow ("assign 5" ++ drop (length "assign 0") borrow ++ "\nassign 0 deref copy 5\ndrop 4"), False)
+        , ("copy chain remains structurally well typed", line borrow ("assign 5" ++ drop (length "assign 0") borrow ++ "\nassign 0 use copy 5"), True)
+        , ("reborrow chain remains structurally well typed", line borrow ("assign 5" ++ drop (length "assign 0") borrow ++ "\nassign 6 borrow 5 0\nassign 0 use copy 6"), True)
+        , ("overwriting cannot hide a local origin", line borrow ("assign 5" ++ drop (length "assign 0") (borrowWith (init operands ++ ["copy 9"])) ++ "\nassign 5" ++ drop (length "assign 0") borrow ++ "\nassign 0 use copy 5") . addLocalOwner, False)
+        , ("every raw owner operand must match from metadata at a branch", branch erased . addLocalOwner, False)
+        , ("reference cycle remains structurally well typed", line borrow ("assign 5" ++ drop (length "assign 0") borrow ++ "\nassign 6 use copy 5\nassign 5 use copy 6\nassign 0 use copy 6"), True)
+        , ("manual tuple anchor needs no Drop or library name", tupleAnchor, True)
+        ]
+            ++ [("checks exact permission element", line "local 3 none block int" "local 3 none block bool", False) | not erased]
+            ++ [("does not unwrap a permission reference", line "local 3 none block int" "local 3 none ref block int", False) | not erased]
+      where
+        operands = rawBorrowOperands erased
+        borrow = borrowWith operands
+        borrowWith os = "assign 0 listop addrBorrow " ++ show (length os) ++ " " ++ unwords os
+        owner o = line borrow (borrowWith (init operands ++ [o]))
+        ownerLocal = "local 4 some \"owner\" named \"Owner\" 0"
+        header = rawBorrowHeader erased "probe" "ref int" True "1 4"
+        scalarHeader = lineText "borrowed 1 4" "borrowed 1 1" (rawBorrowHeader erased "probe" "ref int" True "1 1")
+        result ty = line header (rawBorrowHeader erased "probe" ty True (if ty == "int" then "0" else "1 4")) . line "local 0 none ref int" ("local 0 none " ++ ty)
+        payload ty = result ("ref " ++ ty)
+            . line "local 1 none addr int" ("local 1 none addr " ++ ty)
+            . line "local 3 none block int" ("local 3 none block " ++ ty)
+        localRead = result "int" . line scalarBorrow ("assign 5" ++ drop (length "assign 0") scalarBorrow ++ "\nassign 0 deref copy 5")
+        scalarBorrow = borrowWith (init operands ++ ["copy 1"])
+        tupleAnchor = line ownerLocal "local 4 some \"owner\" named \"AllocationTuple\" 0"
+            . line ("struct \"Owner\" " ++ if erased then "1 \"addr\" addr int" else "2 \"addr\" addr int \"blk\" block int")
+                ("struct \"AllocationTuple\" " ++ if erased then "1 \"0\" addr int" else "2 \"0\" addr int \"1\" block int")
+        addLocalOwner = line "block 0" "local 9 some \"localOwner\" named \"Owner\" 0\nblock 0"
+        branch erased' = line borrow ("switch const bool true 1 2\nblock 1\nassign 5" ++ drop (length "assign 0") borrow ++ "\ngoto 3\nblock 2\nassign 5" ++ drop (length "assign 0") (borrowWith (init (rawBorrowOperands erased') ++ ["copy 9"])) ++ "\ngoto 3\nblock 3\nassign 0 use copy 5")
+    scalarRelay erased = lineText (relay "ref int" ++ "\nlocal 0 none ref int") (relay "int" ++ "\nlocal 0 none int")
+        . line "assign 0 use copy 1" "assign 0 use const int 0" $ rawBorrowRelay erased False
+      where relay result = "function \"relay\" params 2 1 2 returns some " ++ result ++ " sizeparams 0 typeparams 0 borrowed 2 1 2 mutborrowed 0 from 1 1"
+    line old new = unlines . map (\text -> if text == old then new else text) . lines
+    lineText old new text = case splitAtPrefix old text of
+        Just (before, after) -> before ++ new ++ after
+        Nothing -> text
+    splitAtPrefix prefix text
+        | prefix `isPrefixOf` text = Just ("", drop (length prefix) text)
+        | c : rest <- text = do
+            (before, after) <- splitAtPrefix prefix rest
+            pure (c : before, after)
+        | otherwise = Nothing
+    removeOwnerParam erased = lineText (if erased then "params 3 1 2 4" else "params 4 1 2 3 4") (if erased then "params 2 1 2" else "params 3 1 2 3")
+
+rawBorrowOperands :: Bool -> [String]
+rawBorrowOperands erased = ["copy 1", "copy 2"] ++ ["copy 3" | not erased] ++ ["copy 4"]
+
+rawBorrowHeader :: Bool -> String -> String -> Bool -> String -> String
+rawBorrowHeader erased name result borrowed from =
+    "function \"" ++ name ++ "\" params " ++ (if erased then "3 1 2 4" else "4 1 2 3 4")
+        ++ " returns some " ++ result ++ " sizeparams 0 typeparams 0 borrowed " ++ (if borrowed then "1 4" else "0") ++ " mutborrowed 0 from " ++ from
+
+rawBorrowFixture :: Bool -> String
+rawBorrowFixture erased = unlines $
+    [ "tersus-mir 1"
+    , "struct \"Owner\" " ++ if erased then "1 \"addr\" addr int" else "2 \"addr\" addr int \"blk\" block int"
+    , "struct \"GhostOwner\" 1 \"blk\" block int"
+    , rawBorrowHeader erased "probe" "ref int" True "1 4"
+    , "local 0 none ref int", "local 1 none addr int", "local 2 none int"
+    ] ++ ["local 3 none block int" | not erased]
+      ++ [ "local 4 some \"owner\" named \"Owner\" 0", "local 5 none ref int", "local 6 none ref int"
+         , "block 0", "assign 0 listop addrBorrow " ++ show (length operands) ++ " " ++ unwords operands
+         , "return", "end", "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0", "block 0", "return", "end"
+         ]
+  where operands = rawBorrowOperands erased
+
+rawBorrowChain :: Bool -> Bool -> Bool -> Bool -> String
+rawBorrowChain erased localOwner namedCallee fromOwner = unlines $
+    map (\text -> if text == rawBorrowHeader erased "probe" "ref int" True "1 4" then rawBorrowHeader erased "pick" "ref int" True "1 4" else text)
+        (takeWhile (not . isPrefixOf "main ") (lines (rawBorrowFixture erased)))
+        ++ [ header
+           , "local 0 none ref int", "local 1 none addr int", "local 2 none int"
+           ] ++ ["local 3 none block int" | not erased]
+        ++ ["local 4 some \"owner\" named \"Owner\" 0", "local 5 none ref int", "local 6 none ref int"]
+        ++ ["local 8 none fn " ++ show (length operands) ++ " addr int int " ++ (if erased then "" else "block int ") ++ "ref named \"Owner\" 0 ref int" | not namedCallee]
+        ++ ["block 0"] ++ ["assign 8 use const fn \"pick\"" | not namedCallee]
+        ++ [ "call " ++ (if namedCallee then "const fn \"pick\"" else "copy 8") ++ " " ++ show (length operands) ++ " " ++ unwords operands ++ " 5 1"
+           , "block 1", "assign 6 borrow 5 0", "assign 0 use copy 6", "return", "end"
+           , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0", "block 0", "return", "end"
+           ]
+  where
+    operands = rawBorrowOperands erased
+    header = "function \"forward\" params " ++ (if localOwner then if erased then "2 1 2" else "3 1 2 3" else if erased then "3 1 2 4" else "4 1 2 3 4")
+        ++ " returns some ref int sizeparams 0 typeparams 0 borrowed 1 4 mutborrowed 0 from " ++ (if fromOwner then "1 4" else "1 2")
+
+rawBorrowRelay :: Bool -> Bool -> String
+rawBorrowRelay erased forged = unlines $
+    concatMap (\text -> if "assign 0 listop addrBorrow " `isPrefixOf` text
+        then ["assign 5 listop addrBorrow " ++ show (length operands) ++ " " ++ unwords operands, "call const fn \"relay\" 2 copy 5 copy 4 0 1", "block 1"]
+        else if text == "block 0" && forged then ["local 9 some \"localOwner\" named \"Owner\" 0", text]
+        else [text]) (takeWhile (not . isPrefixOf "main ") (lines (rawBorrowFixture erased)))
+        ++ [ "function \"relay\" params 2 1 2 returns some ref int sizeparams 0 typeparams 0 borrowed 2 1 2 mutborrowed 0 from 1 " ++ (if forged then "2" else "1")
+           , "local 0 none ref int", "local 1 none ref int", "local 2 none named \"Owner\" 0"
+           , "block 0", "assign 0 use copy 1", "return", "end"
+           , "main \"main\" params 0 returns none sizeparams 0 typeparams 0 borrowed 0", "block 0", "return", "end"
+           ]
+  where operands = init (rawBorrowOperands erased) ++ [if forged then "copy 9" else "copy 4"]
 
 blockCases :: [(String, String, Bool)]
 blockCases = concatMap cases signatures

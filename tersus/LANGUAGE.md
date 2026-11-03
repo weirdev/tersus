@@ -324,6 +324,10 @@ b = Addr::dropValue(p, 1, b);       // the value of the slot dropped where it is
 return x + y + Addr::free(p, b);    // free gives 0
 ```
 
+A raw-memory read reference is written `&Addr::get(p, i, b)`. It checks the same base, bounds and initialized-slot requirements as `Addr::get`, lends the permission and retains its runtime owner. The permission cannot be written, taken, split, resized or freed while the reference is live. An owning value that supplies the permission is retained as well. A returned raw-memory reference must be from a borrowed, non-ghost owner; a ghost-only `Block` parameter cannot anchor an escaping runtime reference. Raw update borrowing (`&mut Addr::get(...)`) is not supported.
+
+Reading a scalar through a reference produces an ordinary value and ends that read's dependency. This intermediate implementation accepts only concrete, reference-free, ghost-free raw slot payloads; the payload gate walks declarations without a collection-name exception. Raw-derived references may be forwarded through known non-storing read-only calls, but cannot enter fields, arrays, lists, Boxes or Uninit storage, or calls whose source bodies may store references or call opaque callbacks, even when the call has no mutable parameter and returns an Int. Raw-reference-producing function values may be called through known aliases, but cannot be transported through opaque callback contexts. Raw borrows in separately compiled modules are unavailable until checked footprints can be exported. Unbounded generic raw getters are rejected; existing concrete/template specialization can provide a concrete getter. Existing logical List-of-reference operations remain available. The general reference-footprint transport and List getter cutover are not complete.
+
 **What the validator knows of a permission** `b`, which a contract, an `affirm`, an invariant or a `define` says (the program cannot use them as values):
 
 | Function | Is |
