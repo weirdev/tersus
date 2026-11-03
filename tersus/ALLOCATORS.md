@@ -43,7 +43,7 @@ struct Box<T, a: Alloc> {
 } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm filled(blk, 0); affirm allocator(origin(blk)) = a; }];
 ```
 
-The same holds for `Buffer<T, a>`, `StdList<T, a>` (a `Box<Array<T>, a>` and a count), `Vec<T, a>` and `String<a>`. The layout of each is what it is today. The region is not a field, and `blk` is a ghost, which takes no room (`POINTERS.md`, Ghost values: a ghost field is not in `slotsOf`, and a ghost part of a result is not in the call). A `Box` is one word and a list three.
+The same holds for `Buffer<T, a>`, `List<T, a>` (an address, length, capacity and ghost permission), `Vec<T, a>` and `String<a>`. The layout of each is what it is today. The region is not a field, and `blk` is a ghost, which takes no room (`POINTERS.md`, Ghost values: a ghost field is not in `slotsOf`, and a ghost part of a result is not in the call). A `Box` is one word and a list three.
 
 A region is one of these:
 
@@ -177,7 +177,7 @@ After the type checker, every region in the program is known at every call: a gl
 - **A function that does not use its region does not take it.** A function whose body, and whose callees' bodies, make and free nothing in a region has the hidden parameter removed and is not copied per kind. So `count(tree: &Tree)` is compiled once, whatever region the tree is in. This is an optimization over the call graph, and it changes no type. The signature says the region whether or not the body uses it.
 - **Drops are code made per type** (step 30 (a)), after `MirMono`, so the drop of a `Box<Node, a>` is a direct call of `Arena.free` with the hidden handle, and the drop of `Box<Node, System>` a direct call of `free`. Nothing dispatches at run time. The C runtime's walk of descriptors, which calls `release` and cannot reach an allocator, is gone before this step.
 
-**Programs that use only `System` do not change.** A `System` region is erased before `MirMono`. A copy of a function or a type for `System` keeps the name it has today (`StdList<Int>`, not `StdList<Int, System>`, so the matching of `StdList` instances by name in `MirLists` and the MIR checker is unchanged), and a program with no other region skips the region passes, as `MirMono` already returns a program that has no generics unchanged. The tests of that are `TestMirEmit`, the fixpoint of `TestBootstrap`, and a test that the descriptor tables of every example are the same text.
+**Programs that use only `System` do not change.** A System region would be erased before monomorphization, preserving names such as `List<Int>` rather than introducing `List<Int, System>`. The named-container lowering and emitter paths would therefore keep their current identities. `TestMirEmit`, native/heap-model tests and the cold `TestBootstrap` fixpoint must check that the allocator change preserves the emitted behavior. This remains an unimplemented design; no runtime descriptor tables need to be preserved.
 
 ### Drops that free nothing
 
