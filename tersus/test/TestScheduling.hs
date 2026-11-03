@@ -125,7 +125,7 @@ shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted nam
         [] -> 0
         work -> maximum work
 
--- Run 41703123291 (2026-11-03); retain startup-inclusive weights for newly split families.
+-- Run 41703123291 (2026-11-03): startup-inclusive wall priorities, not CPU estimates.
 groupWeight :: String -> Int
 groupWeight name = maybe 1 id (lookup name weights)
   where
@@ -136,11 +136,11 @@ groupWeight name = maybe 1 id (lookup name weights)
             | (original, work) <-
                 [("testMirEmit", [510, 439, 564, 44]),
                  ("testMirVerify", [19, 444, 375, 346]),
-                 ("testNative", [388, 498, 344, 280]),
-                 ("testExamples", [439, 439, 439, 439]),
-                 ("testStrings", [409, 409, 409, 409])],
+                 ("testNative", [388, 498, 344, 280])],
               (index, weight) <- zip [1 :: Int ..] work]
-        ++ [ ("testBootstrap", 324)
+        ++ [ ("testExamples", 439)
+           , ("testStrings", 409)
+           , ("testBootstrap", 324)
            , ("testMirErase", 368)
            , ("testMirReader", 118)
            , ("testAstReader", 268)
@@ -199,7 +199,7 @@ splitTestGroups count original
             | batch@(weight, index, leaves) <- batches]
     unitWeight :: Test -> Int
     unitWeight test = case concat (leafPaths test) of
-        path | any (`elem` path) ["examples/mir/emit/emit.tersus", "examples/mir/mir_reader/mir_reader.tersus", "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus"] -> 30
+        path | "examples/mir/emit/emit.tersus" `elem` path || "examples/mir/mir_reader/mir_reader.tersus" `elem` path -> 30
         path | "the IR of a loop, interpreted" `elem` path || "raw lists and Boxes library" `elem` path -> 30
         path | "MIR loops" `elem` path -> 32
         path | "MIR branches" `elem` path -> 16
@@ -234,6 +234,12 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq (length names) (length (unique names))
     , testCase "every group belongs to exactly one shard for every tested count" $
         testAssertTrue (all complete [1 .. length names + 1])
+    , testCase "six CI shards retain every registered group exactly once" $
+        let selected = [[tree | tree <- names, lookup tree (assignShards 6 names) == Just index] | index <- [1 .. 6]]
+         in testAssertEq (sort (concat selected)) (sort names)
+    , testCase "examples and strings remain unbatched to avoid duplicate cold startup" $
+        testAssertTrue (all (`elem` names) ["testExamples", "testStrings"]
+            && not (any (\name -> "testExamples:" `isPrefixOf` name || "testStrings:" `isPrefixOf` name) names))
     , testCase "empty groups and invalid partition counts are safe" $
         testAssertTrue (null (assignShards 3 []) && null (assignShards 0 names) && null (assignShards (-1) names))
     , testCase "unprofiled groups are retained and ties are deterministic" $

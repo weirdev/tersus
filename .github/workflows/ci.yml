@@ -15,14 +15,13 @@ concurrency:
 
 jobs:
   haskell:
-    name: Haskell build and tests (${{ matrix.shard }}/4)
+    name: Haskell build and tests (${{ matrix.shard }}/6)
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
-    # (the tests that build the emitter written in Tersus, twice, and compile every program with it are the longest)
-    # headroom over the ~13m shards: the heavy groups are split into batches across the shards, but a slow runner should not kill a green suite
+        shard: [1, 2, 3, 4, 5, 6]
+    # Keep the failure bound independent of the measured turnaround target.
     timeout-minutes: 60
     defaults:
       run:
@@ -89,7 +88,7 @@ jobs:
           TERSUS_TEST_RTS_STATS: '1'
         run: |
           python3 dev/ci_resources.py
-          /usr/bin/time -v stack test --test-arguments='--shard ${{ matrix.shard }}/4 +RTS -N2 -RTS'
+          /usr/bin/time -v stack test --test-arguments='-j 4 --shard ${{ matrix.shard }}/6 +RTS -N2 -RTS'
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)

@@ -264,7 +264,9 @@ packageCacheInput path files = show (normalizePath path,
 matchesEmbeddedPackage :: FilePath -> Modules.LoadedPackage -> Bool
 matchesEmbeddedPackage path actual
     | normalizePath path `notElem` map fst mirPackageFiles = False
-    | otherwise = case loadFromEntry (resolverFromFiles mirPackageFiles) (normalizePath path) of
+    -- The cached tool is compiled by the bootstrap/oracle loader. Compare
+    -- against that exact input, not a second production-parser reading.
+    | otherwise = case Modules.loadFromEntry (resolverFromFiles mirPackageFiles) (normalizePath path) of
         Right (PackageResult embedded) -> show actual == show embedded
         _ -> False
 
