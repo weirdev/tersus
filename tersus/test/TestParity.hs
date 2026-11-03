@@ -117,7 +117,57 @@ readerEvery :: Int
 readerEvery = 7
 
 readerCases :: [ParityCase]
-readerCases = [c | (i, c) <- zip [0 :: Int ..] parityCases, i `mod` readerEvery == 0]
+readerCases = [c | (i, c) <- zip [0 :: Int ..] parityCases,
+    i `mod` readerEvery == 0 || parityName c `elem` approvedReaderNames]
+
+-- Keep the approved stack's sampled assertions when upstream adds corpus
+-- entries: positional sampling must not silently replace existing coverage.
+approvedReaderNames :: [String]
+approvedReaderNames =
+    [ "example examples/array_sizes.tersus"
+    , "example examples/basics.tersus"
+    , "example examples/loop_return.tersus"
+    , "example examples/mir/emit/emit.tersus"
+    , "example examples/recursion.tersus"
+    , "example examples/rejected/axiom_input.tersus"
+    , "example examples/rejected/call_violates_contract.tersus"
+    , "example examples/rejected/diverging_loop.tersus"
+    , "example examples/rejected/forall_wrong_element.tersus"
+    , "example examples/rejected/invariant_preserved.tersus"
+    , "example examples/rejected/loop_variant_not_shrinking.tersus"
+    , "example examples/rejected/missing_return.tersus"
+    , "example examples/rejected/mutual_diverging_peer.tersus"
+    , "example examples/rejected/struct_field_type.tersus"
+    , "example examples/rejected/sum_bound_too_strong.tersus"
+    , "example examples/rejected/trait_missing_function.tersus"
+    , "example examples/rules.tersus"
+    , "example examples/sized_structs.tersus"
+    , "example examples/strings.tersus"
+    , "example examples/traits.tersus"
+    , "program a call result overwrites its argument"
+    , "program a field taken in one branch, the branch taken"
+    , "program a loop with two tests"
+    , "program a nested struct with a list is passed"
+    , "program a return in a branch that is not taken"
+    , "program a struct in a struct"
+    , "program a struct is cast to itself and passed"
+    , "program a variant returned in a branch only"
+    , "program an array of a struct with a list"
+    , "program an empty list is equal to an empty list"
+    , "program booleans in a list"
+    , "program comparisons"
+    , "program data in a list"
+    , "program deeper empty lists"
+    , "program division -7 by -2"
+    , "program empty"
+    , "program equal variants"
+    , "program list function"
+    , "program pop in a loop"
+    , "program push does not change its argument"
+    , "program set in a list of structs"
+    , "program struct update"
+    , "program unbox"
+    ]
 
 summaryCase :: IO TestResult
 summaryCase = do
@@ -137,7 +187,7 @@ summaryCase = do
             ++ show (tallyReader tally)
             ++ " read back through the Tersus MIR reader (every "
             ++ show readerEvery
-            ++ "th case), "
+            ++ "th case plus the approved reader manifest), "
             ++ show (tallyReaderSkipped tally)
             ++ " of those not compiled programs, "
             ++ show (length (tallyReaderTimedOut tally))
