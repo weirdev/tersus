@@ -2,6 +2,7 @@ module Interface
     ( InterfaceFunction (..)
     , ModuleInterface (..)
     , extractInterface
+    , extractLibInterface
     , interfaceImportEnv
     , mergeInterfacesImportEnv
     , predeclareOwnEnv
@@ -17,7 +18,7 @@ import Modules (ModuleId (..), renderModuleId)
 import Syntax
 import Types
 import TypeCheck (ImportEnv (..), emptyImportEnv)
-import TypeCheckCore (TcState (..), functionType)
+import TypeCheckCore (TcState (..), Template, functionType)
 import Utils (Result (..))
 
 data InterfaceFunction = InterfaceFunction
@@ -49,6 +50,7 @@ data ModuleInterface = ModuleInterface
     , ifAxioms :: [Statement]
     , ifProofs :: [Statement]
     , ifExterns :: Set.Set Name
+    , ifTemplates :: Map.Map Name Template
     }
     deriving (Show, Eq)
 
@@ -60,8 +62,17 @@ nameInModule :: ModuleId -> Name -> Bool
 nameInModule modu name = modulePrefixOf modu `isPrefixOf` name || modulePrefixOf modu `isPrefixOf` dropWhile (/= '$') (drop 1 name)
 
 extractInterface :: ModuleId -> [Statement] -> [Statement] -> TcState -> Result ModuleInterface String
-extractInterface modu original elaborated state
-    | not (null boundedNames) =
+extractInterface modu = extractInterfaceWith (nameInModule modu) False modu
+
+-- The interface of a compiler-library module (LibPackage): its declarations
+-- keep bare names, so every impl it checked belongs to it, and its bounded
+-- functions travel as templates for importers to instantiate.
+extractLibInterface :: ModuleId -> [Statement] -> [Statement] -> TcState -> Result ModuleInterface String
+extractLibInterface modu = extractInterfaceWith (const True) True modu
+
+extractInterfaceWith :: (Name -> Bool) -> Bool -> ModuleId -> [Statement] -> [Statement] -> TcState -> Result ModuleInterface String
+extractInterfaceWith inModule isLib modu original elaborated state
+    | not isLib && not (null boundedNames) =
         Error
             ( "in module "
                 ++ renderModuleId modu
@@ -81,19 +92,53 @@ extractInterface modu original elaborated state
                 , ifTraits = Map.fromList [(name, functions) | TraitDef name _ functions <- original]
                 , ifTraitParams = Map.fromList [(name, params) | TraitDef name params _ <- original]
                 , ifFunctions = Map.fromList [(name, interfaceFunction params ins outs signature termination exported) | Assign name (Val (VFunct params ins outs (NativeFunct signature termination _) exported)) <- elaborated, name `Set.member` declaredFunctions]
-                , ifImpls = Set.filter (\(trait, ty) -> nameInModule modu trait || nameInModule modu ty) (tcImpls state)
-                , ifAssoc = Map.filterWithKey (\(owner, _) _ -> nameInModule modu owner) (tcAssoc state)
-                , ifImplArgs = Map.filterWithKey (\(trait, ty) _ -> nameInModule modu trait || nameInModule modu ty) (tcImplArgs state)
-                , ifImplBounds = Map.filterWithKey (\(trait, ty) _ -> nameInModule modu trait || nameInModule modu ty) (tcImplBounds state)
-                , ifCopies = Set.union (Set.fromList [name | CopyDef name <- elaborated]) (Set.fromList [ty | ("Copy", ty) <- Set.toList (tcImpls state), nameInModule modu ty])
-                , ifLinear = Set.filter (nameInModule modu) (tcLinear state)
-                , ifDrops = Set.filter (nameInModule modu) (tcDrops state)
+                , ifImpls = Set.filter implVisible (tcImpls state)
+                , ifAssoc = Map.filterWithKey (\(owner, _) _ -> inModule owner) (tcAssoc state)
+                , ifImplArgs = Map.filterWithKey (\(trait, ty) _ -> implVisible (trait, ty)) (tcImplArgs state)
+                , ifImplBounds = Map.filterWithKey (\(trait, ty) _ -> implVisible (trait, ty)) (tcImplBounds state)
+                , ifCopies = Set.union (Set.fromList [name | CopyDef name <- elaborated]) (Set.fromList [ty | ("Copy", ty) <- Set.toList (tcImpls state), if isLib then implHere ("Copy", ty) else inModule ty])
+                , ifLinear = Set.filter typeVisible (tcLinear state)
+                , ifDrops = Set.filter typeVisible (tcDrops state)
                 , ifAxioms = [stmt | stmt@(AxiomDef{}) <- elaborated]
                 , ifProofs = [stmt | stmt@(ProofDef{}) <- elaborated]
                 , ifExterns = Set.fromList [name | ExternDef name <- elaborated]
+                , ifTemplates =
+                    if isLib
+                        then Map.filterWithKey (\name _ -> templateHere name) (tcTemplates state)
+                        else Map.filterWithKey (\name _ -> name `elem` boundedNames) (tcTemplates state)
                 }
   where
     boundedNames = [name | BoundedDef _ (Assign name _) <- original]
+    ownNames = Set.fromList (concatMap declaredTypeOrTrait original)
+    declaredTypeOrTrait stmt = case stmt of
+        StructDef name _ _ _ -> [name]
+        EnumDef name _ -> [name]
+        TraitDef name _ _ -> [name]
+        _ -> []
+    implHere (trait, ty) = trait `Set.member` ownNames || baseNameOf ty `Set.member` ownNames
+    implVisible pair =
+        if isLib
+            then implHere pair
+            else inModule (fst pair) || inModule (snd pair)
+    typeVisible name =
+        if isLib
+            then baseNameOf name `Set.member` ownNames
+            else inModule name
+    templateHere name
+        | name `elem` boundedNames = True
+        | "<" `isPrefixOf` name = case breakOn " as " (takeWhile (/= '>') (drop 1 name)) of
+            Just (owner, trait) -> baseNameOf owner `Set.member` ownNames || trait `Set.member` ownNames
+            Nothing -> baseNameOf (takeWhile (/= '>') (drop 1 name)) `Set.member` ownNames
+        | otherwise = case breakOn " for " name of
+            Just (trait, rest) -> trait `Set.member` ownNames || baseNameOf (takeWhile (/= ':') rest) `Set.member` ownNames
+            Nothing -> False
+    breakOn needle = go ""
+      where
+        go acc text
+            | needle `isPrefixOf` text = Just (reverse acc, drop (length needle) text)
+            | otherwise = case text of
+                c : rest -> go (c : acc) rest
+                [] -> Nothing
     declaredFunctions =
         Set.fromList $
             concatMap
@@ -121,6 +166,7 @@ interfaceImportEnv iface =
         , ieImplBounds = ifImplBounds iface
         , ieLinear = ifLinear iface
         , ieDrops = ifDrops iface
+        , ieTemplates = ifTemplates iface
         , ieRefResults =
             Map.fromList
                 [ (name, (fnParams fn, froms))
@@ -154,5 +200,6 @@ mergeInterfacesImportEnv ifaces = foldr merge emptyImportEnv ifaces
                 , ieLinear = Set.union (ieLinear addition) (ieLinear env)
                 , ieDrops = Set.union (ieDrops addition) (ieDrops env)
                 , ieRefResults = Map.union (ieRefResults addition) (ieRefResults env)
+                , ieTemplates = Map.union (ieTemplates addition) (ieTemplates env)
                 , iePredeclareOwn = iePredeclareOwn env
                 }
