@@ -14,8 +14,63 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Build the tools written in Tersus (the emitter, the parser, the MIR checker and the eraser) once and
+  # hand every shard the same warm ~/.cache/tersus: each entry there is named for what it is made of, so a
+  # shard that built its own would only duplicate this job's work. The warm-up check parses (building the
+  # parser tool), lowers, verifies and erases one small program, which builds the whole set.
+  tools:
+    name: Build the tools written in Tersus
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: tersus
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache Stack
+        uses: actions/cache@v4
+        with:
+          path: ~/.stack
+          key: stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}-tools
+          restore-keys: |
+            stack-${{ runner.os }}-${{ hashFiles('tersus/stack.yaml', 'tersus/stack.yaml.lock') }}-
+            stack-${{ runner.os }}-
+
+      - name: Identify runner image
+        id: runner-image
+        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the tools written in Tersus
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/tersus
+          key: emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}-tools
+          restore-keys: |
+            emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-
+            emitter-${{ runner.os }}-
+
+      - name: Provide ld.gold
+        run: command -v ld.gold || sudo ln -s "$(command -v ld.bfd)" /usr/local/bin/ld.gold
+
+      - name: Build
+        run: stack build
+
+      - name: Build the tools written in Tersus
+        run: |
+          printf 'return 0;' > "$RUNNER_TEMP/warm.tersus"
+          stack run tersus-exe -- check "$RUNNER_TEMP/warm.tersus"
+
+      - name: Hand the tools to the shards
+        uses: actions/upload-artifact@v4
+        with:
+          name: tersus-tools-${{ github.sha }}
+          path: ~/.cache/tersus
+          retention-days: 3
+
   haskell:
     name: Haskell build and tests (${{ matrix.shard }}/4)
+    needs: tools
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -56,20 +111,11 @@ jobs:
       # This has to be restored before the tests run: the test groups build the emitter (and the programs they build with it) into the same directory, and a restore
       # after them only ever helped the two CLI checks at the end. A restore key of an older entry is still useful, for the same reason: what it holds is named
       # for what it is made of, so what is out of date is only not used.
-      - name: Identify runner image
-        id: runner-image
-        run: echo "version=$ImageVersion" >> "$GITHUB_OUTPUT"
-
-      - name: Restore the emitter and test compilation
-        id: tersus-cache
-        uses: actions/cache/restore@v4
+      - name: Take the tools written in Tersus from the tools job
+        uses: actions/download-artifact@v4
         with:
+          name: tersus-tools-${{ github.sha }}
           path: ~/.cache/tersus
-          # Immutable snapshots must change when any build/test input or the runner toolchain changes.
-          key: emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}-shard-${{ matrix.shard }}
-          restore-keys: |
-            emitter-${{ runner.os }}-${{ steps.runner-image.outputs.version }}-${{ github.sha }}-
-            emitter-${{ runner.os }}-
 
       # Stack's GHC 9.6.5 links with -fuse-ld=gold, and the ubuntu-26.04 runner image has no ld.gold, so gcc
       # reports "cannot find 'ld'". ld.bfd takes the same options, so let it answer to that name.
@@ -96,14 +142,6 @@ jobs:
       - name: Check the emitter in Tersus through the CLI
         if: ${{ matrix.shard == 1 }}
         run: stack run tersus-exe -- llvm examples/loops.tersus > "$RUNNER_TEMP/tersus.ll"
-
-      # Keep successfully compiled entries even when later tests or CLI checks fail.
-      - name: Save the emitter and test compilation
-        if: ${{ !cancelled() && steps.tersus-cache.outputs.cache-hit != 'true' && steps.tersus-cache.outputs.cache-primary-key != '' }}
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/tersus
-          key: ${{ steps.tersus-cache.outputs.cache-primary-key }}
 
   complete:
     name: Haskell build and tests
