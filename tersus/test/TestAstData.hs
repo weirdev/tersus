@@ -8,19 +8,15 @@ import System.Exit (ExitCode (..))
 import qualified AstData as A
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
-import Compile (lowerSource, parseSource)
+import Compile (parseSource)
 import Hash (fingerprint)
 import qualified Mir as M
 import MirData (writeProgram)
-import MirHousekeeping (eraseGhosts)
-import MirLists (lowerLists)
-import MirOwnership (expandRefWrites, insertOwnership)
-import MirValidate (validateProgram)
+import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput)
-import PreludeSource (boxSource, listsSource)
-import Seed (cachedSeed, seedHash)
 import Parse (emptyDecls, locating, parseStatementBlockWith)
-import Pipeline (runStatements)
+import Pipeline (nativeProgram, runStatements)
+import Seed (cachedSeed, seedHash)
 import MirEval (fromMirValue)
 import StdLibDefs (stdlibBuiltin)
 import Syntax
@@ -312,7 +308,6 @@ checkOutput _ _ out = case A.readParsed out of
         Error e -> Just e
         Ok result -> testAssertEq (fmap fromMirValue result) (Just (VInt 5))
 
--- The host-tool bootstrap path avoids the master verifier's list-library parse defect, not validation (AST_DATA.md).
 withAstReader :: (FilePath -> IO TestResult) -> IO TestResult
 withAstReader use = do
     available <- clangAvailable
@@ -322,12 +317,11 @@ withAstReader use = do
             source <- readFile readerPath
             checked <- compileOnce source
             seed <- cachedSeed
-            case (checked, seed, astListLibrary) of
-                (Error e, _, _) -> pure (Just e)
-                (_, Error e, _) -> pure (Just e)
-                (_, _, Error e) -> pure (Just e)
-                (Ok program, Ok compiler, Ok library) -> do
-                    let native = insertOwnership (lowerLists library (expandRefWrites program))
+            case (checked, seed) of
+                (Error e, _) -> pure (Just e)
+                (_, Error e) -> pure (Just e)
+                (Ok program, Ok compiler) -> do
+                    let native = insertOwnership (nativeProgram program)
                         dataText = writeProgram native
                         build output = do
                             ir <- runWithInput compiler dataText
@@ -338,11 +332,6 @@ withAstReader use = do
                     case built of
                         Error e -> pure (Just e)
                         Ok exe -> use exe
-
-{-# NOINLINE astListLibrary #-}
-astListLibrary :: Result M.Program String
-astListLibrary = lowerSource False (listsSource ++ "\n" ++ boxSource) `bindResult` \program ->
-    validateProgram program `bindResult` \_ -> eraseGhosts program
 
 nativeText :: FilePath -> String -> IO TestResult
 nativeText exe text = do

@@ -1,7 +1,7 @@
 -- A conservative bridge from a supported MIR subset to the Tersus checker.
 -- Unsupported instructions or proof forms are reported as Nothing, never
 -- accepted. This is not used as the production validator.
-module SelfHostedMir (validateMirSubset) where
+module SelfHostedMir (validateMirSubset, sourceContainerView) where
 
 import Control.Monad (foldM)
 import Data.List (isPrefixOf, nub)
@@ -9,7 +9,7 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 import qualified Mir as M
 import MirEval (MirValue (..), runNamedFunction)
-import MirHousekeeping (verifyProgram)
+import MirHousekeeping (verifyProgram, validatedListLibrary)
 import StdLib (builtinFunct)
 import StdLibDefs (stdLibValCtx)
 import Types
@@ -776,11 +776,29 @@ encode program
         (Just callerIndex, Just calledIndex) -> calledIndex >= callerIndex
         _ -> True
 
+-- The bridge models source containers; their canonical native layouts are not proof facts.
+sourceContainerView :: M.Program -> M.Program
+sourceContainerView program = program
+    { M.progTypes = Map.filterWithKey keep (M.progTypes program)
+    , M.progGenerics = Map.filterWithKey keep (M.progGenerics program)
+    , M.progInvariants = Map.filterWithKey keep (M.progInvariants program)
+    }
+  where
+    keep name _ = baseNameOf name `Set.notMember` layouts
+    layouts = Set.fromList
+        [ name
+        | name <- ["List", "Box"]
+        , Just generic <- [Map.lookup name (M.progGenerics validatedListLibrary)]
+        , Just invariant <- [Map.lookup name (M.progInvariants validatedListLibrary)]
+        , Map.lookup name (M.progGenerics program) == Just generic
+        , Map.lookup name (M.progInvariants program) == Just invariant
+        ]
+
 -- The first argument is the validated lib/validation.tersus program. A false
 -- result means an obligation was unproved; Nothing means the MIR is outside
 -- this bridge's current subset (including most loop shapes and function calls).
 validateMirSubset :: M.Program -> M.Program -> Result (Maybe Bool) String
-validateMirSubset checker program = verifyProgram program `bindResult` \_ -> case encode program of
+validateMirSubset checker program = verifyProgram program `bindResult` \_ -> case encode (sourceContainerView program) of
     Nothing -> Ok Nothing
     Just functions -> checkFunctions functions
   where

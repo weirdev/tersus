@@ -153,15 +153,13 @@ input.
 
 The native tests use the validated host-tool bootstrap route already used by
 `MirHousekeeping`: the reader goes through `compileOnce` (including production
-AST/proof validation), the list/Box library goes through `lowerSource False`,
-`validateProgram` and `eraseGhosts`, and the owned MIR is compiled by the pinned
-`Seed.cachedSeed` executable. The cache key is the actual owned MIR and seed
-hash. This test-only helper is needed because master `cdcebd707`'s normal
-`ownedSource` path refuses the valid list library as "not the MIR as data";
-that baseline defect also affects an unchanged native build of `basics`.
-Every validation, erasure and code-generation result on this route must
-succeed; failures still fail the test. No production pipeline is changed.
-The reader itself also passes the normal production `check` command.
+AST/proof validation), and `Pipeline.nativeProgram` supplies the canonical
+container library validated by `validateContainerLibrary` and erased by
+`MirHousekeeping`. The owned MIR is compiled by the pinned `Seed.cachedSeed`
+executable. The cache key is the actual owned MIR and seed hash. Every
+validation, erasure and code-generation result on this route must succeed;
+failures still fail the test. There is no separate AST-reader container
+validation policy. The reader itself also passes the production `check` command.
 
 ```
 stack test --test-arguments='-j 2 testAstData testAstReader'

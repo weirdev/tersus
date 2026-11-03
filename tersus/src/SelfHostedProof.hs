@@ -95,6 +95,8 @@ constructorFieldFacts enc =
   where
     constructorShape (CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name _ fields)) _)) = Just (name, fields)
     constructorShape _ = Nothing
+    selects name field (CTerm (VFunct _ _ _ (BuiltinFunct funct@(Field (Just owner) selected)) _))
+        | namedField owner selected == funct = name == owner && field == selected
     selects _ field (CTerm (VFunct _ _ _ (BuiltinFunct (Field _ selected)) _)) = field == selected
     selects name field (CTerm (VFunct _ _ _ (BuiltinFunct (Project variant selected)) _)) = name == variant && field == selected
     selects _ _ _ = False
