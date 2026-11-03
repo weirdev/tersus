@@ -1,4 +1,6 @@
 {-# LANGUAGE CPP #-}
+-- Retries must not share a forced failure from the unsafePerformIO-backed pipeline.
+{-# OPTIONS_GHC -fno-cse -fno-full-laziness #-}
 
 module TestHarness
     ( TestResult
@@ -26,6 +28,7 @@ module TestHarness
     , programFromFile
     , validatedFromFile
     , ownedFromFile
+    , ownedFromFiles
     , mirDataOf
     , mirDataFromFile
     , encodeProgram
@@ -46,7 +49,7 @@ import Data.Char (isHexDigit, isSpace, toLower)
 import Data.List (isInfixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, renameFile)
-import System.Environment (getExecutablePath)
+import System.Environment (getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
 import System.IO (SeekMode (AbsoluteSeek), hClose, hPutStr, openTempFile)
@@ -62,7 +65,7 @@ import Native (cacheDirectory)
 import Parse
 import Modules (LoadResult (..))
 import qualified Modules
-import Pipeline (loadFromFilesystem, compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Pipeline (loadFromEntry, compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
@@ -224,8 +227,8 @@ decodeProgram text = case stripPrefix programCodecHeader text of
 
 -- The compilation of a program, remembered for the process and, when it succeeded, on disk:
 -- test groups run in processes of their own, so without the disk entry every group would
--- validate the same big programs again. Only successful compilations are written; an error
--- is remembered in this process (as compileOnce always did) and recomputed by others.
+-- validate the same big programs again. Only successful compilations are remembered,
+-- so a transient tool failure can be retried in the same process.
 compileOnce :: String -> IO (Result Program String)
 compileOnce source = sharedProgram "compile" source (compileSource source)
 
@@ -247,26 +250,23 @@ validatedFromFile path = cachedFromPackage "validated" path compileModulesValida
 ownedFromFile :: FilePath -> IO (Result Program String)
 ownedFromFile path = cachedFromPackage "owned" path compileModulesToOwned
 
-{-# NOINLINE packagePrograms #-}
-packagePrograms :: MVar (Map.Map (String, FilePath) (Result Program String))
-packagePrograms = unsafePerformIO (newMVar Map.empty)
-
 cachedFromPackage :: String -> FilePath -> (Modules.LoadedPackage -> Result Program String) -> IO (Result Program String)
 cachedFromPackage stage path compile = do
-    known <- modifyMVar packagePrograms $ \cache -> pure (cache, Map.lookup (stage, path) cache)
-    case known of
-        Just result -> pure result
-        Nothing -> do
-            result <- fromPackage path compile
-            modifyMVar packagePrograms $ \cache -> pure (Map.insert (stage, path) result cache, result)
+    files <- Modules.snapshotFromFilesystem path
+    cachedFromFiles stage path files compile
 
-fromPackage :: FilePath -> (Modules.LoadedPackage -> Result Program String) -> IO (Result Program String)
-fromPackage path compile = do
-    loaded <- loadFromFilesystem path
-    pure $ case loaded of
-        Left e -> Error e
-        Right (PackageResult pkg) -> compile pkg
-        Right _ -> Error (path ++ " is not in a package")
+ownedFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
+ownedFromFiles path files = cachedFromFiles "owned" path files compileModulesToOwned
+
+cachedFromFiles :: String -> FilePath -> [(FilePath, String)] -> (Modules.LoadedPackage -> Result Program String) -> IO (Result Program String)
+cachedFromFiles stage path files compile = do
+    let entry = Modules.normalizePath path
+        snapshot = show (entry, files)
+        computed = case loadFromEntry (Modules.resolverFromFiles files) entry of
+            Left e -> Error e
+            Right (PackageResult pkg) -> compile pkg
+            Right _ -> Error (path ++ " is not in a package")
+    sharedProgram ("package-" ++ stage) snapshot computed
 
 mirDataFromFile :: FilePath -> IO (Result String String)
 mirDataFromFile path = do
@@ -277,18 +277,21 @@ mirDataFromFile path = do
 
 sharedProgram :: String -> String -> Result Program String -> IO (Result Program String)
 sharedProgram stage source compute = do
+    backend <- lookupEnv "TERSUS_PARSER"
+    let key = (show (stage, backend), source)
+        lookupCached = modifyMVar compiledSources $ \cache -> pure (cache, Map.lookup key cache)
     known <- lookupCached
     case known of
         Just result -> pure result
-        Nothing -> withEntryThreadLock (stage, source) $ do
+        Nothing -> withEntryThreadLock key $ do
             again <- lookupCached
             case again of
                 Just result -> pure result
                 Nothing -> do
                     result <- sharedOnDisk stage source compute
-                    modifyMVar compiledSources $ \cache -> pure (Map.insert (stage, source) result cache, result)
-  where
-    lookupCached = modifyMVar compiledSources $ \cache -> pure (cache, Map.lookup (stage, source) cache)
+                    case result of
+                        Error _ -> pure result
+                        Ok _ -> modifyMVar compiledSources $ \cache -> pure (Map.insert key result cache, result)
 
 {-# NOINLINE compiledSources #-}
 compiledSources :: MVar (Map.Map (String, String) (Result Program String))
@@ -412,9 +415,10 @@ sharedProgramCacheFile :: String -> String -> IO (Maybe FilePath)
 sharedProgramCacheFile stage source = do
     cache <- cacheDirectory
     built <- binaryIdentity
+    backend <- lookupEnv "TERSUS_PARSER"
     case (cache, built) of
         (Ok dir, Just identity) -> do
-            key <- sha256 [] (show [stage, source, identity, programCodecHeader])
+            key <- sha256 [] (show (stage, source, identity, programCodecHeader, backend))
             pure ((\digest -> dir </> "test-programs" </> digest) <$> key)
         _ -> pure Nothing
 

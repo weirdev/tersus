@@ -25,6 +25,7 @@ module Modules
     , loadFromEntryWith
     , loadFromFilesystem
     , loadFromFilesystemWith
+    , snapshotFromFilesystem
     , findPackageRootIO
     ) where
 
@@ -1190,21 +1191,26 @@ loadFromFilesystem = loadFromFilesystemWith haskellFileParser
 
 loadFromFilesystemWith :: FileParser -> FilePath -> IO (Either String LoadResult)
 loadFromFilesystemWith fileParser entry = do
+    files <- snapshotFromFilesystem entry
+    return (loadFromEntryWith fileParser (resolverFromFiles files) entry)
+
+snapshotFromFilesystem :: FilePath -> IO [(FilePath, String)]
+snapshotFromFilesystem entry = do
     root <- findPackageRootIO entry
     case root of
         Nothing -> do
             exists <- doesFileExist entry
             if not exists
-                then return (Left ("file not found: " ++ entry))
+                then return []
                 else do
                     text <- readFile entry
-                    return (loadFromEntryWith fileParser (resolverFromFiles [(normalizePath entry, text)]) entry)
+                    return [(normalizePath entry, text)]
         Just packageRoot -> do
             packageFiles <- snapshotPackage packageRoot
             let parent = takeDirectory packageRoot
             siblings <- listDirectory parent >>= filterM (isSiblingPackage parent)
             siblingFiles <- fmap concat (mapM (\sib -> snapshotPackage (parent </> sib)) siblings)
-            return (loadFromEntryWith fileParser (resolverFromFiles (packageFiles ++ siblingFiles)) entry)
+            return (sort (packageFiles ++ siblingFiles))
   where
     isSiblingPackage parent name = do
         let dir = parent </> name

@@ -1,19 +1,16 @@
 module TestMirReader (testMirReader, withProgram, sameText) where
 
 import Data.List (isPrefixOf)
-import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
-import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesFileExist, removeFile, renameFile)
+import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import System.FilePath ((</>))
-import System.IO (hClose, openTempFile)
-import System.IO.Unsafe (unsafePerformIO)
+import PreludeSource (parserSource)
 
 import Bootstrap (emitterHash, llvmOfOwned, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runProgramIn, runSourceIn)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import Native (buildExecutable, cacheDirectory)
+import Native (buildExecutable, cachedProgram)
+import qualified Modules
 import TestHarness
 import TestNative (clangAvailable, nativeExamples, runExecutableBytes, validatedPrograms)
 import Utils
@@ -77,41 +74,24 @@ withProgram path name use = do
     if not available
         then pure Nothing
         else do
-            built <- modifyMVar builtPrograms $ \built ->
-                case Map.lookup name built of
-                    Just exe -> pure (built, Right exe)
-                    Nothing -> do
-                        source <- readFile path
-                        readerText <- if "examples/mir/" `isPrefixOf` path then readFile "examples/mir/reader/reader.tersus" else pure ""
-                        cache <- cacheDirectory
-                        case cache of
-                            Error e -> pure (built, Left e)
-                            Ok cacheDir -> do
-                                let dir = cacheDir </> "test-programs"
-                                    exe = dir </> (name ++ "-" ++ fingerprint [source, readerText, emitterHash, runtimeSource])
-                                createDirectoryIfMissing True dir
-                                present <- doesFileExist exe
-                                if present
-                                    then pure (Map.insert name exe built, Right exe)
-                                    else do
-                                        -- (a staging name of this build only: another group may be building the same executable)
-                                        (partial, handle) <- openTempFile dir (name ++ ".building")
-                                        hClose handle
-                                        removeFile partial
-                                        ir <- if "examples/mir/" `isPrefixOf` path then (ownedFromFile path >>= \owned -> case owned of Error e -> pure (Error e); Ok prog -> llvmOfOwned prog) else tersusLlvm source
-                                        result <- case ir of
-                                            Error e -> pure (Error e)
-                                            Ok text -> buildExecutable partial text
-                                        case result of
-                                            Error e -> pure (built, Left e)
-                                            Ok () -> renameFile partial exe >> pure (Map.insert name exe built, Right exe)
+            files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
+            backend <- lookupEnv "TERSUS_PARSER"
+            let hash = fingerprint [show (Modules.normalizePath path, files, backend), emitterHash, parserSource, runtimeSource]
+                build output = do
+                    ir <- if "examples/mir/" `isPrefixOf` path
+                        then ownedFromFiles path files >>= \owned -> case owned of
+                            Error e -> pure (Error e)
+                            Ok prog -> llvmOfOwned prog
+                        else case lookup (Modules.normalizePath path) files of
+                            Nothing -> pure (Error ("file not found: " ++ path))
+                            Just source -> tersusLlvm source
+                    case ir of
+                        Error e -> pure (Error e)
+                        Ok text -> buildExecutable output text
+            built <- cachedProgram ("test-" ++ name) hash ("the test " ++ name) build
             case built of
-                Left e -> pure (Just e)
-                Right exe -> use exe
-
-{-# NOINLINE builtPrograms #-}
-builtPrograms :: MVar (Map.Map String FilePath)
-builtPrograms = unsafePerformIO (newMVar Map.empty)
+                Error e -> pure (Just e)
+                Ok exe -> use exe
 
 withReader :: (FilePath -> IO TestResult) -> IO TestResult
 withReader = withProgram "examples/mir/mir_reader/mir_reader.tersus" "mir-reader"
