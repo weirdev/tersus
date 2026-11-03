@@ -87,7 +87,7 @@ selectGroupNames arguments names
 assignShards :: Int -> [String] -> [(String, Int)]
 assignShards count names
     | count <= 0 = []
-    | otherwise = [(name, index) | (_, index, assigned) <- bins, name <- reverse assigned]
+    | otherwise = [(name, index) | (_, index, assigned) <- balance bins, unit <- reverse assigned, name <- unit]
   where
     selfHosted = filter isSelfHosted names
     units = [selfHosted | not (null selfHosted)] ++ [[name] | name <- names, not (isSelfHosted name)]
@@ -95,8 +95,26 @@ assignShards count names
         (sortBy (comparing (negate . shardWeight)) units)
     assign shards unit =
         let (_, target, _) = minimumBy (comparing (\(weight, index, _) -> (weight, index))) shards
-         in [if index == target then (weight + shardWeight unit, index, reverse unit ++ assigned) else shard
+         in [if index == target then (weight + shardWeight unit, index, unit : assigned) else shard
             | shard@(weight, index, assigned) <- shards]
+    balance [] = []
+    balance shards
+        | spread shards <= 1 = shards
+        | spread best < spread shards = balance best
+        | otherwise = shards
+      where
+        (_, heavy, heavyUnits) = minimumBy (comparing (\(weight, index, _) -> (negate weight, index))) shards
+        (_, light, lightUnits) = minimumBy (comparing (\(weight, index, _) -> (weight, index))) shards
+        best = minimumBy (comparing spread) (shards :
+            [exchange outgoing incoming | outgoing <- heavyUnits, incoming <- [] : lightUnits])
+        exchange outgoing incoming =
+            [ if index == heavy then (weight - shardWeight outgoing + shardWeight incoming, index, replace outgoing incoming assigned)
+              else if index == light then (weight + shardWeight outgoing - shardWeight incoming, index, replace incoming outgoing assigned)
+              else shard
+            | shard@(weight, index, assigned) <- shards]
+        replace outgoing incoming assigned = [incoming | not (null incoming)] ++ delete outgoing assigned
+    spread shards = maximum loads - minimum loads
+      where loads = [weight | (weight, _, _) <- shards]
 
 isSelfHosted :: String -> Bool
 isSelfHosted = isPrefixOf "testMirSelfHosted:"
@@ -105,44 +123,37 @@ shardWeight :: [String] -> Int
 shardWeight names = sum [groupWeight name | name <- names, not (isSelfHosted name)]
     + case [groupWeight name | name <- names, isSelfHosted name] of
         [] -> 0
-        work -> 434 + maximum work
+        work -> maximum work
 
--- Cold CI group seconds on 2026-11-02; self-hosted launch weights exclude shared compilation.
+-- Run 41687475071 (2026-11-03): each batch time includes its cold dependencies and contention.
 groupWeight :: String -> Int
-groupWeight name = case lookup name selfHostedWork of
-    Just weight -> weight
-    Nothing -> case break (== ':') name of
-        (original, ':' : suffix) -> case break (== '/') suffix of
-            (indexText, '/' : countText) -> case (positiveInt indexText, positiveInt countText) of
-                (Just index, Just count) | index <= count ->
-                    let (weight, remainder) = groupWeight original `divMod` count
-                     in weight + if index <= remainder then 1 else 0
-                _ -> 1
-            _ -> 1
-        _ -> case lookup name weights of
-            Just weight -> weight
-            Nothing -> 1
+groupWeight name = maybe 1 id (lookup name weights)
   where
-    selfHostedWork = [("testMirSelfHosted:" ++ show index ++ "/4", weight)
-        | (index, weight) <- zip [1 :: Int ..] [25, 58, 34, 40]]
     weights =
-        [ ("testMirEmit", 567)
-        , ("testMirVerify", 634)
-        , ("testNative", 661)
-        , ("testBootstrap", 449)
-        , ("testMir", 298)
-        , ("testMirSelfHosted", 157)
-        , ("testMirErase", 141)
-        , ("testExamples", 119)
-        , ("testStrings", 72)
-        , ("testMirReader", 49)
-        , ("testOwnership", 11)
-        , ("testMirData", 9)
-        , ("testMirEmitPrograms", 8)
-        , ("testCopies", 5)
-        , ("testSequence", 4)
-        , ("testMirVerifyPrograms", 2)
-        ]
+        [("testMirSelfHosted:" ++ show index ++ "/4", weight)
+            | (index, weight) <- zip [1 :: Int ..] [31, 544, 124, 52]]
+        ++ [(original ++ ":" ++ show index ++ "/4", weight)
+            | (original, work) <-
+                [("testMirEmit", [408, 671, 566, 374]),
+                 ("testMirVerify", [373, 687, 627, 673]),
+                 ("testNative", [512, 704, 476, 471])],
+              (index, weight) <- zip [1 :: Int ..] work]
+        ++ [ ("testBootstrap", 296)
+           , ("testMir", 437)
+           , ("testMirErase", 285)
+           , ("testExamples", 236)
+           , ("testStrings", 395)
+           , ("testMirReader", 278)
+           , ("testAstReader", 274)
+           , ("testParity", 215)
+           , ("testAstData", 50)
+           , ("testOwnership", 47)
+           , ("testMirData", 171)
+           , ("testMirEmitPrograms", 10)
+           , ("testCopies", 7)
+           , ("testSequence", 8)
+           , ("testMirVerifyPrograms", 5)
+           ]
 
 groupName :: Test -> String
 groupName (TestCase name _) = name
@@ -226,7 +237,7 @@ testScheduling names batches = TestList "testScheduling"
         testAssertEq (assignShards 2 ["newA", "newB", "newC"]) [("newA", 1), ("newC", 1), ("newB", 2)]
     , testCase "largest measured registered groups are spread before small groups" $
         testAssertEq (assignShards 3 ["testNative:1/4", "testMirVerify:1/4", "testMirEmit:1/4", "testBootstrap"])
-            [("testBootstrap", 1), ("testNative:1/4", 2), ("testMirVerify:1/4", 3), ("testMirEmit:1/4", 3)]
+            [("testNative:1/4", 1), ("testMirEmit:1/4", 2), ("testMirVerify:1/4", 3), ("testBootstrap", 3)]
     , testCase "three shard estimated loads differ by at most one short group" $
         testAssertTrue (maximum loads - minimum loads <= 11)
     , testCase "CLI and cold bootstrap are covered exactly once" $
@@ -248,9 +259,14 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue (all (\(original, split) -> length split == 4
             && groupName original `notElem` names
             && all (\batch -> groupName batch `elem` names && not (null (leafPaths batch))) split) batches)
-    , testCase "batch weights sum to their original measured weight" $
-        testAssertTrue (all (\(original, split) ->
-            sum (map (groupWeight . groupName) split) == groupWeight (groupName original)) batches)
+    , testCase "batch launch weights retain measured cold costs without dividing again" $
+        testAssertEq
+            [map (groupWeight . groupName) split | (original, split) <- batches,
+                groupName original `elem` ["testNative", "testMirEmit", "testMirVerify"]]
+            [[512,704,476,471], [408,671,566,374], [373,687,627,673]]
+    , testCase "measured tail groups are not launched as unprofiled one-second work" $
+        testAssertEq (map groupWeight ["testAstReader", "testParity", "testMirData", "testStrings"])
+            [274,215,171,395]
     , testCase "old aliases expand to all batches without duplicates" $
         testAssertTrue (all aliasComplete batches)
     , testCase "alias filters intersect the full-suite shard assignment" $
@@ -281,9 +297,9 @@ testScheduling names batches = TestList "testScheduling"
     , testCase "other original groups remain individually shardable" $
         testAssertEq (map snd (assignShards 4 ["testNative:1/4", "testNative:2/4", "testNative:3/4", "testNative:4/4"]))
             [1,2,3,4]
-    , testCase "self-hosted startup is charged once plus parallel warmed query work" $
+    , testCase "self-hosted cold launch cost is charged once, not per batch" $
         let selfHosted = filter isSelfHosted names
-         in testAssertEq (shardWeight selfHosted) (434 + maximum (map groupWeight selfHosted))
+         in testAssertEq (shardWeight selfHosted) (maximum (map groupWeight selfHosted))
     , testCase "fixed native memory_limit users stay ordered in one batch" $
         testAssertTrue (all memorySerial batches)
     , testCase "small and empty trees never create empty batches" $

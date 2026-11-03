@@ -46,7 +46,7 @@ import Control.Exception (IOException, SomeException, bracket, bracket_, display
 import Control.Monad (forM, when)
 import GHC.Conc (getNumCapabilities)
 import Data.Char (isHexDigit, isSpace, toLower)
-import Data.List (isInfixOf, stripPrefix)
+import Data.List (isInfixOf, sort, stripPrefix)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, renameFile)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -63,9 +63,9 @@ import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
 import Parse
-import Modules (LoadResult (..))
+import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
-import Pipeline (loadFromEntry, compileModulesToOwned, compileModulesToProgram, compileModulesValidated, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
@@ -230,43 +230,48 @@ decodeProgram text = case stripPrefix programCodecHeader text of
 -- validate the same big programs again. Only successful compilations are remembered,
 -- so a transient tool failure can be retried in the same process.
 compileOnce :: String -> IO (Result Program String)
-compileOnce source = sharedProgram "compile" source (compileSource source)
+compileOnce source = sharedProgram "compile" source (pure (compileSource source))
 
 ownedOnce :: String -> IO (Result Program String)
-ownedOnce source = sharedProgram "owned" source (ownedSource source)
+ownedOnce source = sharedProgram "owned" source (pure (ownedSource source))
 
 validatedOnce :: String -> IO (Result Program String)
-validatedOnce source = sharedProgram "validated" source (validatedSource source)
+validatedOnce source = sharedProgram "validated" source (pure (validatedSource source))
 
 -- A program in a package, compiled from its entry file through the module
 -- pipeline (the same stages as compileOnce, ownedOnce and validatedOnce do
 -- for a single-file program given as text)
 programFromFile :: FilePath -> IO (Result Program String)
-programFromFile path = cachedFromPackage "program" path compileModulesToProgram
+programFromFile path = snapshotFromFilesystem path >>= cachedFromPackage "program" path
 
 validatedFromFile :: FilePath -> IO (Result Program String)
-validatedFromFile path = cachedFromPackage "validated" path compileModulesValidated
+validatedFromFile path = snapshotFromFilesystem path >>= cachedFromPackage "validated" path
 
 ownedFromFile :: FilePath -> IO (Result Program String)
-ownedFromFile path = cachedFromPackage "owned" path compileModulesToOwned
-
-cachedFromPackage :: String -> FilePath -> (Modules.LoadedPackage -> Result Program String) -> IO (Result Program String)
-cachedFromPackage stage path compile = do
-    files <- Modules.snapshotFromFilesystem path
-    cachedFromFiles stage path files compile
+ownedFromFile path = snapshotFromFilesystem path >>= ownedFromFiles path
 
 ownedFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
-ownedFromFiles path files = cachedFromFiles "owned" path files compileModulesToOwned
+ownedFromFiles = cachedFromPackage "owned"
 
-cachedFromFiles :: String -> FilePath -> [(FilePath, String)] -> (Modules.LoadedPackage -> Result Program String) -> IO (Result Program String)
-cachedFromFiles stage path files compile = do
-    let entry = Modules.normalizePath path
-        snapshot = show (entry, files)
-        computed = case loadFromEntry (Modules.resolverFromFiles files) entry of
-            Left e -> Error e
-            Right (PackageResult pkg) -> compile pkg
-            Right _ -> Error (path ++ " is not in a package")
-    sharedProgram ("package-" ++ stage) snapshot computed
+cachedFromPackage :: String -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
+cachedFromPackage stage path files = do
+    let input = show (normalizePath path, sort files)
+        loaded = loadFromEntry (resolverFromFiles files) path
+    packageStage stage input loaded
+
+packageStage :: String -> String -> Either String Modules.LoadResult -> IO (Result Program String)
+packageStage stage input loaded = sharedProgram ("package-" ++ stage) input $ case stage of
+    "validated" -> pure $ case loaded of
+        Left e -> Error e
+        Right (PackageResult pkg) -> compileModulesValidated pkg
+        Right (StandaloneResult path _) -> Error (path ++ " is not in a package")
+    "program" -> do
+        validated <- packageStage "validated" input loaded
+        pure (validated `bindResult` erasedModuleProgram)
+    "owned" -> do
+        program <- packageStage "program" input loaded
+        pure (program `bindResult` ownedModuleProgram)
+    _ -> pure (Error ("unknown package compilation stage: " ++ stage))
 
 mirDataFromFile :: FilePath -> IO (Result String String)
 mirDataFromFile path = do
@@ -275,7 +280,7 @@ mirDataFromFile path = do
         Error e -> Error e
         Ok program -> Ok (writeProgram program)
 
-sharedProgram :: String -> String -> Result Program String -> IO (Result Program String)
+sharedProgram :: String -> String -> IO (Result Program String) -> IO (Result Program String)
 sharedProgram stage source compute = do
     backend <- lookupEnv "TERSUS_PARSER"
     let key = (show (stage, backend), source)
@@ -312,17 +317,17 @@ withEntryThreadLock key action = do
             pure (Map.insert key fresh locks, fresh)
     withMVar lock (\_ -> action)
 
-sharedOnDisk :: String -> String -> Result Program String -> IO (Result Program String)
+sharedOnDisk :: String -> String -> IO (Result Program String) -> IO (Result Program String)
 sharedOnDisk stage source compute = do
     file <- sharedProgramCacheFile stage source
     case file of
-        Nothing -> pure compute
+        Nothing -> compute
         Just path -> do
             let dataDir = takeDirectory path
                 entryKey = takeFileName path
             made <- try (createDirectoryIfMissing True dataDir) :: IO (Either IOException ())
             case made of
-                Left _ -> pure compute
+                Left _ -> compute
                 Right () -> do
                     existing <- readEntry entryKey path
                     case existing of
@@ -333,19 +338,21 @@ sharedOnDisk stage source compute = do
                                     waited <- readEntry entryKey path
                                     case waited of
                                         Just program -> pure (Ok program)
-                                        Nothing -> case compute of
-                                            Error e -> pure (Error e)
-                                            Ok program -> do
-                                                written <- try (writeEntryAtomically dataDir path (encodeEntry entryKey program)) :: IO (Either IOException ())
-                                                case written of
-                                                    Right () -> pure (Ok program)
-                                                    Left _ -> pure (Ok program)
+                                        Nothing -> do
+                                            result <- compute
+                                            case result of
+                                                Error e -> pure (Error e)
+                                                Ok program -> do
+                                                    written <- try (writeEntryAtomically dataDir path (encodeEntry entryKey program)) :: IO (Either IOException ())
+                                                    case written of
+                                                        Right () -> pure (Ok program)
+                                                        Left _ -> pure (Ok program)
                             locked <- withKernelLock path produce
                             case locked of
                                 Just result -> pure result
                                 -- the entry cannot be locked (an unwritable directory, a full
                                 -- disk): computing without the cache is always safe
-                                Nothing -> pure compute
+                                Nothing -> compute
   where
     readEntry entryKey file = do
         cached <- try (readFile file >>= \text -> Exception.evaluate (length text) >> pure text) :: IO (Either IOException String)

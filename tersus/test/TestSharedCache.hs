@@ -25,6 +25,7 @@ import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
+import Modules (normalizePath, snapshotFromFilesystem)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
@@ -79,6 +80,10 @@ testSharedCache =
         , TestCase "native crashed builders release the lock for retry" (nativeRecovery "crash")
         , TestCase "native killed builders release the lock for retry" (nativeRecovery "hold")
         , TestCase "native threads still build once" nativeThreads
+        , TestCase "package stages share lossless validated intermediates" packageStages
+        , TestCase "package keys include dependency contents and module layout" packageInputs
+        , TestCase "independent processes reuse package compilation" (ciPackageProcesses False)
+        , TestCase "concurrent processes share package compilation" (ciPackageProcesses True)
         ])
   where
     requireParser (TestCase name action) = TestCase name $ do
@@ -117,7 +122,15 @@ testSharedCacheProbe = TestList "testSharedCacheProbe" [TestCase "probe" probe]
 probe :: IO TestResult
 probe = do
     native <- lookupEnv "TERSUS_NATIVE_CACHE_PROBE"
-    maybe sharedProbe nativeProbe native
+    package <- lookupEnv "TERSUS_PACKAGE_CACHE_PROBE"
+    case package of
+        Just path -> do
+            Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
+            result <- validatedFromFile path
+            case result of
+                Error e -> pure (Just e)
+                Ok program -> writeFile marker (encodeProgram program) >> pure Nothing
+        Nothing -> maybe sharedProbe nativeProbe native
 
 sharedProbe :: IO TestResult
 sharedProbe = do
@@ -802,6 +815,78 @@ parserRetryProbe = do
   where
     describe (Error e) = e
     describe (Ok _) = "success"
+
+ciPackageFixture :: FilePath -> IO (FilePath, FilePath)
+ciPackageFixture home = do
+    let root = home </> "pkg"
+        entry = root </> "main.tersus"
+        dependency = root </> "helper" </> "helper.tersus"
+    createDirectoryIfMissing True (takeDirectory dependency)
+    writeFile (root </> "package.tersus") ""
+    writeFile entry "import pkg::helper::answer; return answer();"
+    writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 41; };"
+    pure (entry, dependency)
+
+packageStages :: IO TestResult
+packageStages = withNativeHome $ \home -> do
+    (entry, _) <- ciPackageFixture home
+    owned <- ownedFromFile entry
+    program <- programFromFile entry
+    validated <- validatedFromFile entry
+    sources <- Modules.snapshotFromFilesystem entry
+    files <- mapM (\stage -> sharedProgramCacheFile ("package-" ++ stage)
+        (show (normalizePath entry, sort sources))) ["owned", "program", "validated"]
+    present <- mapM (maybe (pure False) doesFileExist) files
+    pure $ case (owned, program, validated) of
+        (Ok _, Ok _, Ok original) -> firstFailure
+            [ testAssertTrue (and present && length (Map.fromList [(file, ()) | Just file <- files]) == 3)
+            , testAssertEq (decodeProgram (encodeProgram original)) (Ok original)
+            ]
+        other -> Just (show other)
+
+packageInputs :: IO TestResult
+packageInputs = withNativeHome $ \home -> do
+    (entry, dependency) <- ciPackageFixture home
+    original <- validatedFromFile entry
+    writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 42; };"
+    changed <- validatedFromFile entry
+    writeFile dependency "fn answer() -> Int [{ }] [{ }] { affirm 1 = 2; return 41; };"
+    invalid <- validatedFromFile entry
+    sources <- Modules.snapshotFromFilesystem entry
+    invalidFile <- sharedProgramCacheFile "package-validated" (show (normalizePath entry, sort sources))
+    filed <- maybe (pure False) doesFileExist invalidFile
+    writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 41; };"
+    writeFile (takeDirectory dependency </> "extra.tersus") "fn extra() -> Int { return 1; };"
+    layoutChanged <- validatedFromFile entry
+    removeFile (takeDirectory dependency </> "extra.tersus")
+    restored <- validatedFromFile entry
+    pure $ case (original, changed, invalid, layoutChanged, restored) of
+        (Ok a, Ok b, Error _, Error _, Ok c) ->
+            testAssertTrue (a /= b && a == c && not filed)
+        other -> Just (show other)
+
+ciPackageProcesses :: Bool -> IO TestResult
+ciPackageProcesses concurrent = withNativeHome $ \home -> do
+    (entry, _) <- ciPackageFixture home
+    let markers = if concurrent then ["first" ++ show i | i <- [1 .. 4 :: Int]] else ["first"]
+        extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker)]
+    bracket (mapM (spawnProbe home . extra) markers)
+        (mapM_ (\child -> terminateProcess child >> waitForProcess child >> pure ())) $ \children -> do
+        codes <- mapM (waitChild 30) children
+        outputs <- mapM (readMarker . (home </>)) markers
+        entries <- entryFiles home
+        before <- mapM getModificationTime entries
+        bracket (spawnProbe home (extra "warm"))
+            (\child -> terminateProcess child >> waitForProcess child >> pure ()) $ \child -> do
+            warmCode <- waitChild 30 child
+            warmOutput <- readMarker (home </> "warm")
+            after <- mapM getModificationTime entries
+            pure $ firstFailure
+                [ testAssertEq codes (replicate (length markers) (Just ExitSuccess))
+                , testAssertEq warmCode (Just ExitSuccess)
+                , testAssertTrue (length entries == 1 && all (== warmOutput) outputs)
+                , testAssertEq after before
+                ]
 
 mutatedStillVerified :: IO TestResult
 mutatedStillVerified = do
