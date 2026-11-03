@@ -134,8 +134,9 @@ Work from `tersus/`.
   which runs each registered group in a process of its own with `-N1`;
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and
   `stack test --test-arguments='testBorrow testCopies'` runs only those groups.
-  `testNative`, `testMirEmit`, `testMirVerify` and `testMirSelfHosted` each
-  register four batches named `<original>:1/4` through `<original>:4/4`.
+  `testNative`, `testMirEmit`, `testMirVerify`, `testMirSelfHosted`,
+  `testExamples` and `testStrings` each register four batches named
+  `<original>:1/4` through `<original>:4/4`.
   Selecting an original name selects all its batches; shard filters intersect
   the full-suite assignment. Self-hosted batches share one shard and its full
   validated-program cache; Native memory-limit cases stay ordered in one batch.
