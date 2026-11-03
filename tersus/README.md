@@ -29,6 +29,12 @@ executables use the native cache's existing cross-process build lock. Group
 workers take the next heaviest group from one bounded queue; results are still
 printed in registration order.
 
+CI uses a 16 MiB GHC nursery. `dev/ci_resources.py` records the runner's CPU
+and memory limits; `/usr/bin/time` records the unchanged test command's resource
+use. `TERSUS_TEST_RTS_STATS=1` adds GHC allocation/GC statistics only to group
+workers, not to command-line or probe processes they launch. These diagnostics
+do not select or skip any test groups.
+
 ## Validator written in Tersus
 
 `lib/validation.tersus` starts a Tersus implementation of validation alongside the

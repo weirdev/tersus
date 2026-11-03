@@ -84,7 +84,12 @@ jobs:
       # `stack test --test-arguments='-j 1'` runs the groups one at a time when a failure needs a quiet log.
       # It loads examples/ relative to the package directory, so run from tersus/.
       - name: Test
-        run: stack test --test-arguments='--shard ${{ matrix.shard }}/4'
+        env:
+          GHCRTS: -A16m
+          TERSUS_TEST_RTS_STATS: '1'
+        run: |
+          python3 dev/ci_resources.py
+          /usr/bin/time -v stack test --test-arguments='--shard ${{ matrix.shard }}/4 +RTS -N2 -RTS'
 
       # (the package has two executables and `stack run` without a target runs the first of them, which is `parity`, so
       # every check below names the command line one; without that these steps ran the parity harness instead)
