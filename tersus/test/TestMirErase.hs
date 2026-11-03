@@ -104,13 +104,14 @@ borrowErased :: String
 borrowErased =
     unlines
         [ "tersus-mir 1"
+        , "struct \"List<Int>\" 3 \"addr\" addr int \"len\" int \"cap\" int"
         , "main \"main\" params 0 returns some int sizeparams 0 typeparams 0 borrowed 0"
         , "local 0 none int"
-        , "local 1 some \"xs\" list int"
-        , "local 2 some \"r\" ref list int"
-        , "local 3 none list int"
+        , "local 1 some \"xs\" named \"List\" 1 type int"
+        , "local 2 some \"r\" ref named \"List\" 1 type int"
+        , "local 3 none named \"List\" 1 type int"
         , "local 4 none int"
-        , "local 5 none list int"
+        , "local 5 none named \"List\" 1 type int"
         , "local 6 none int"
         , "block 0"
         , "assign 1 use const list 3 int 1 int 2 int 3"

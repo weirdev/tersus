@@ -1800,7 +1800,12 @@ fn substSizes(t: &Type, names: &List<String>, sizes: &List<Size>) -> Type ~ {
         Type::TInt => { },
         Type::TByte => { },
         Type::TBool => { },
-        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => { },
+        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
+            listElem = listElemOf(t);
+            boxInner = boxInnerOf(t);
+            if listElem.ok { r = Type::TList { elem: Box::new(substSizes(listElem.ty, names, sizes)) }; }
+            else if boxInner.ok { r = Type::TBox { inner: Box::new(substSizes(boxInner.ty, names, sizes)) }; };
+        },
         Type::TVariant { name: name } => { },
         Type::TVar { n: n } => { },
         Type::TParam { name: name } => { },

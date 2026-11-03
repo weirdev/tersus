@@ -380,7 +380,7 @@ wordRange signed bits = if signed then (negate (2 ^ (bits - 1)), 2 ^ (bits - 1))
 pattern TArray :: Type -> Integer -> Type
 pattern TArray t n = TArrayOf t (SizeConst n)
 
--- A Box's storage fields are not the similarly named fields of its payload.
+-- Logical Boxes alias payload values, so their storage projections need a distinct proof symbol.
 namedField :: Name -> Variable -> BuiltinFunct
 namedField name field
     | baseNameOf name == "Box" && field `elem` ["addr", "blk"] = Field (Just name) field

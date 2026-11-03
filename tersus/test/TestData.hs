@@ -154,7 +154,9 @@ testStructs =
             , parseValidateFailProgramHelper (point ++ "p = Point { x: 1, ..5 };") "base of an update of Point: expected Point, got Int"
             , parseFailsWith (point ++ "p = Point { x: 1, y: 2, ..p };") "copies nothing"
             , parseFailsWith "struct Int { x: Int };" "builtin type"
-            , parseFailsWith "struct List { x: Int };" "builtin type"
+            , case parseStatementBlock "struct List { x: Int };" of
+                Right [StructDef "List" [] fields []] -> testAssertEq fields [("x", TInt)]
+                other -> Just ("Unexpected List declaration parse: " ++ show other)
             , -- Parse errors
               parseFailsWith (point ++ "p = Point { x: 1 };") "lacks field y"
             , parseFailsWith (point ++ "p = Point { x: 1, y: 2, z: 3 };") "has no field z"

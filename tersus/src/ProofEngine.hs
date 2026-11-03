@@ -896,7 +896,6 @@ lightProof (FApp funct args) = FApp (lightProof funct) (map lightProof args)
 lightProof (Forall index guards body) = Forall index (map lightProof guards) (lightProof body)
 lightProof other = other
 
--- Ordinary field owners only constrain typing. Box storage owners also distinguish payload projections.
 unowned :: BuiltinFunct -> BuiltinFunct
 unowned funct@(Field (Just owner) field)
     | namedField owner field == funct = funct

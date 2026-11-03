@@ -291,7 +291,7 @@ functionCases =
     | name <- ["in a list", "a function that lends is a value"]
     ]
         ++ [(name, Ok (fixture element result borrowed), expected) | (name, element, result, borrowed, expected) <- signatures]
-        ++ [("function list malformed " ++ label ++ " closer", Ok (fixtureWithLocal (badName, goodType) goodType False ("named \"StdList<" ++ badName ++ ">\" 0")), False) | (label, badName, goodType) <- malformed]
+        ++ [("function list malformed " ++ label ++ " closer", Ok (fixtureWithLocal (badName, goodType) goodType False ("named \"List<" ++ badName ++ ">\" 0")), False) | (label, badName, goodType) <- malformed]
   where
     sourceData name = case lookup name unvalidatedPrograms of
         Nothing -> Error ("no function program named " ++ name)
@@ -339,11 +339,11 @@ functionCases =
         , ("Uninit", "fn(Uninit<Int)) -> Int", "fn 1 uninit int int")
         ]
     fixture element@(_, elementType) (_, resultType) borrowed =
-        fixtureWithLocal element resultType borrowed ("named \"StdList\" 1 type " ++ elementType)
+        fixtureWithLocal element resultType borrowed ("named \"List\" 1 type " ++ elementType)
     fixtureWithLocal (elementName, elementType) resultType borrowed listType = unlines
         [ "tersus-mir 1"
         , "struct \"Integer\" 1 \"n\" int"
-        , "struct \"StdList<" ++ elementName ++ ">\" 3 \"addr\" addr " ++ elementType ++ " \"len\" int \"cap\" int"
+        , "struct \"List<" ++ elementName ++ ">\" 3 \"addr\" addr " ++ elementType ++ " \"len\" int \"cap\" int"
         , "function \"probe\" params 1 1 returns some " ++ resultType ++ " sizeparams 0 typeparams " ++ (if "param \"T\"" `isInfixOf` elementType then "1 \"T\"" else "0") ++ " borrowed " ++ if borrowed then "1 1" else "0"
         , "local 0 none " ++ resultType
         , "local 1 none " ++ listType
