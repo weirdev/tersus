@@ -22,6 +22,13 @@ stay on one shard to avoid repeating that cold compilation on every runner;
 other batches remain individually shardable. The bootstrap test still runs as
 a single group with its own cold cache.
 
+Package test compilations use the same lossless cross-process cache, keyed by
+entry, the loader's complete filesystem snapshot, parser backend and executable
+identity. Only successful results are retained; failures can be retried. Test
+executables use the native cache's existing cross-process build lock. Group
+workers take the next heaviest group from one bounded queue; results are still
+printed in registration order.
+
 ## Validator written in Tersus
 
 `lib/validation.tersus` starts a Tersus implementation of validation alongside the

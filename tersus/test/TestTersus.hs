@@ -1,9 +1,9 @@
 module TestTersus (main, allGroups) where
 
 import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Concurrent.QSem (newQSem, signalQSem, waitQSem)
-import Control.Exception (SomeException, bracket_, displayException, try)
-import Control.Monad (forM, forM_, unless, when)
+import Control.Concurrent.MVar (modifyMVar, newMVar)
+import Control.Exception (SomeException, displayException, try)
+import Control.Monad (forM, forM_, replicateM_, unless, when)
 import Data.List (foldl', isPrefixOf, sortBy)
 import Data.Ord (comparing)
 import GHC.Clock (getMonotonicTime)
@@ -203,20 +203,26 @@ runInParallel :: Int -> [String] -> IO (TestSummary, Bool)
 runInParallel jobs names = do
     self <- getExecutablePath
     putStrLn ("Running " ++ show (length names) ++ " test groups in " ++ show jobs ++ " processes")
-    sem <- newQSem jobs
     slots <- forM names $ \name -> do
         done <- newEmptyMVar
         pure (name, done)
-    forM_ (sortBy (comparing (negate . groupWeight . fst)) slots) $ \(name, done) ->
-        forkIO $
-            bracket_ (waitQSem sem) (signalQSem sem) $ do
-                started <- getMonotonicTime
-                putStrLn ("[START] " ++ name)
-                let arguments = [name, "--child", "+RTS", "-N1", "-RTS"]
-                outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
-                finished <- getMonotonicTime
-                putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
-                putMVar done (name, finished - started, outcome)
+    queue <- newMVar (sortBy (comparing (negate . groupWeight . fst)) slots)
+    let worker = do
+            next <- modifyMVar queue $ \pending -> case pending of
+                [] -> pure ([], Nothing)
+                slot : rest -> pure (rest, Just slot)
+            case next of
+                Nothing -> pure ()
+                Just (name, done) -> do
+                    started <- getMonotonicTime
+                    putStrLn ("[START] " ++ name)
+                    let arguments = [name, "--child", "+RTS", "-N1", "-RTS"]
+                    outcome <- try (readCreateProcessWithExitCode (proc self arguments) "")
+                    finished <- getMonotonicTime
+                    putStrLn ("[DONE] " ++ name ++ " " ++ elapsedText (finished - started))
+                    putMVar done (name, finished - started, outcome)
+                    worker
+    replicateM_ (min jobs (length names)) (forkIO worker)
     -- (the results are taken in the order of the list, so the output has the order it has without the processes)
     outcomes <- forM slots $ \(_, done) -> takeMVar done >>= printOutcome
     pure (foldr combineSummaries (testSummary 0 0) (map fst outcomes), all snd outcomes)

@@ -16,8 +16,9 @@ import System.Timeout (timeout)
 import Compile (lowerSource, lowerStatements, parseSource)
 import qualified Mir as M
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import Parse
-import MirValidate (Validated (..), ValidationCache, emptyValidationCache, validationCacheHits, validateProgram, validateProgramWithCache, validateProgramUncached)
+import MirValidate (Validated (..), ValidationCache, callGroups, emptyValidationCache, validationCacheHits, validateProgram, validateProgramWithCache, validateProgramUncached)
 import Pipeline (compileSource, validateStatements)
 import ProofState (allFacts, initialPState)
 import StdLib
@@ -661,7 +662,8 @@ concurrentReuse = do
 
 testValidationCache :: Test
 testValidationCache = TestList "testValidationCache"
-    [ TestCase "concurrent process-cache parity" concurrentReuse
+    [ recursionGraphTests
+    , TestCase "concurrent process-cache parity" concurrentReuse
     , testCase "common function hit with changed main" (reuse (identity ++ "return identity(3);") (identity ++ "return identity(4);"))
     , testCase "library instance hits and fresh-iota replay" (reuse (cloneProgram "a = size(z); affirm a = 3; return a;") (cloneProgram "a = size(z); affirm a = 3; return a + 1;"))
     , testCase "main assertions still checked" (rejectChanged (identity ++ "return identity(3);") (identity ++ "affirm 1 = 2; return identity(3);"))
@@ -691,3 +693,71 @@ testValidationCache = TestList "testValidationCache"
     largeProgram = concat ["fn f" ++ show i ++ "() -> Int { return " ++ show i ++ "; }; " | i <- [1 .. 65 :: Int]] ++ "return 0;"
     mutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n - 1); }; }; return even(4);"
     brokenMutual = "fn even(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return true; } else { return odd(n - 1); }; }; fn odd(n: Int) -> Bool [{ affirm n >= 0; }] [{ }] shrinks n { if n = 0 { return false; } else { return even(n); }; }; return even(4);"
+
+recursionGraphTests :: Test
+recursionGraphTests = TestList "recursion graph"
+    [ testCase "all three-function graphs and top-level subsets match reachability" graphParity
+    , testCase "missing top-level definitions are still rejected" $
+        let program = graph ["missing"] []
+         in case validateProgramUncached program of
+            Error _ -> Nothing
+            Ok _ -> Just "a missing function definition was accepted"
+    , testCase "mutually recursive input readers stay nondeterministic" $
+        parseValidateFailProgramHelper
+            "fn left(n: Int) -> Int ~ { if n = 0 { return readByte(); }; return right(n - 1); }; fn right(n: Int) -> Int ~ { return left(n); }; x = left(1); y = left(1); affirm x = y;"
+            "Could not prove: x = y"
+    , testCase "contracts and proof-only edges join cycles through nested functions" proofEdges
+    , testCase "input-reading wrappers do not become deterministic" $
+        parseValidateFailProgramHelper
+            "fn byte() -> Int { return readByte(); }; fn wrap() -> Int { return byte(); }; x = wrap(); y = wrap(); affirm x = y;"
+            "Could not prove: x = y"
+    ]
+  where
+    names = ["a", "b", "nested"]
+    base = case lowerSource True "return 0;" of
+        Ok program -> program
+        Error e -> error e
+    subsets [] = [[]]
+    subsets (x : xs) = let rest = subsets xs in rest ++ map (x :) rest
+    graph tops edges = base
+        { M.progMain = (M.progMain base){M.fnBlocks = Map.singleton (M.BlockId 0)
+            (M.BasicBlock [M.Ghost Map.empty (M.GhostFunction name name True) | name <- tops] M.Return)}
+        , M.progFunctions = Map.fromList [(name, (M.progMain base)
+            { M.fnName = name
+            , M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock
+                [M.Assign (M.Local 0) (M.Use (M.Const (M.CFn target))) | (from, target) <- edges, from == name] M.Return)
+            }) | name <- names]
+        }
+    graphParity = testAssertTrue (and
+        [ callGroups (graph tops edges) == Map.fromList [(name, group name tops edges) | name <- tops]
+        | edges <- subsets [(from, target) | from <- names, target <- names]
+        , tops <- subsets names])
+    group name tops edges = Set.fromList [other | other <- tops, other `elem` reach name, name `elem` reach other]
+      where
+        reach start = go [] [start]
+        go seen [] = seen
+        go seen (next : rest)
+            | next `elem` seen = go seen rest
+            | otherwise = go (next : seen) ([target | (from, target) <- edges, from == next] ++ rest)
+    proofEdges = testAssertTrue (all closesCycle edgeForms)
+    closesCycle change =
+        let program = graph ["a", "b"] [("nested", "b"), ("b", "a")]
+            changed = program{M.progFunctions = Map.adjust change "a" (M.progFunctions program)}
+         in callGroups changed == Map.fromList [(name, Set.fromList ["a", "b"]) | name <- ["a", "b"]]
+    term = ATerm "nested"
+    assertion = ProofAssert term
+    ghost value fn = fn{M.fnBlocks = Map.singleton (M.BlockId 0) (M.BasicBlock [M.Ghost Map.empty value] M.Return)}
+    edgeForms =
+        [ \fn -> fn{M.fnSpec = (M.fnSpec fn){M.specRequires = [assertion]}}
+        , \fn -> fn{M.fnSpec = (M.fnSpec fn){M.specEnsures = [assertion]}}
+        , ghost (M.GhostValidation assertion)
+        , ghost (M.GhostValidation (Assume term))
+        , ghost (M.GhostValidation (AssignProofVar "x" (F (Var "nested") [])))
+        , ghost (M.GhostValidation (Rewrite (UserRewrite "rule" [term])))
+        , ghost (M.GhostValidation (Rewrite (Refl term)))
+        , ghost (M.GhostValidation (Rewrite (CheckGtZero term)))
+        , ghost (M.GhostValidation (Rewrite (CheckRel term)))
+        , ghost (M.GhostAxiom "rule" [] [assertion] [])
+        , ghost (M.GhostAxiom "rule" [] [] [assertion])
+        , ghost (M.GhostProof "rule" [] [] [] [assertion])
+        ]

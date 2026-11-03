@@ -7,11 +7,13 @@ module MirValidate
     , ValidationCache
     , emptyValidationCache
     , validationCacheHits
+    , callGroups
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import Control.Monad (filterM, foldM, forM_, unless, when)
 import Data.Containers.ListUtils (nubOrd)
+import Data.Graph (SCC (..), stronglyConnComp)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -49,15 +51,15 @@ topLevelSources :: M.Program -> Map Name Variable
 topLevelSources program = Map.fromList [(name, source) | block <- Map.elems (M.fnBlocks (M.progMain program)), M.Ghost _ (M.GhostFunction name source True) <- M.blockStatements block]
 
 -- What a call of a function is taken to give before its body has been checked: only what its output contract says of its parameters and result
-assumedInfo :: M.Program -> Name -> FnInfo
-assumedInfo program name =
+assumedInfo :: Set Name -> M.Program -> Name -> FnInfo
+assumedInfo readers program name =
     case Map.lookup name (M.progFunctions program) of
         Nothing -> FnInfo [] [] [] Nothing (ATerm (fnIota name)) True (KUser name) False []
         Just fn ->
             let spec = M.fnSpec fn
                 names = [n | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just n <- [M.localName d]]
                 assumed = [p | ProofAssert p <- M.specEnsures spec, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
-             in FnInfo names (M.specRequires spec) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name (M.readersOfInput program)) (M.specMutParams spec)
+             in FnInfo names (M.specRequires spec) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name readers) (M.specMutParams spec)
 
 -- What a function depends on: the functions it calls or names, and the ones its contracts and proofs call,
 -- since a proof that calls a function uses its contract as a call in the code does. Nested functions are
@@ -96,18 +98,18 @@ dependencies program fn = Set.intersection (Map.keysSet (M.progFunctions program
 -- function, which is a dependency on the way). A function defined inside another is in no group of its
 -- own: it can call the one around it only under the rule for that (both declared ~), which the recursive
 -- call itself checks.
-callGroup :: M.Program -> Name -> Set Name
-callGroup program name = Set.filter (\other -> Set.member other tops && Set.member name (reach other)) (reach name)
+callGroups :: M.Program -> Map Name (Set Name)
+callGroups program = Map.fromList
+    [(name, group) | component <- components,
+        let group = Set.intersection tops (Set.fromList (members component)),
+        name <- Set.toList group]
   where
-    fns = M.progFunctions program
     tops = Map.keysSet (topLevelSources program)
-    callees n = maybe Set.empty (dependencies program) (Map.lookup n fns)
-    reach n = go Set.empty [n]
-      where
-        go seen [] = seen
-        go seen (x : xs)
-            | Set.member x seen = go seen xs
-            | otherwise = go (Set.insert x seen) (Set.toList (callees x) ++ xs)
+    components = stronglyConnComp
+        [(name, name, Set.toList (dependencies program fn))
+        | (name, fn) <- Map.toList (M.progFunctions program)]
+    members (AcyclicSCC name) = [name]
+    members (CyclicSCC names) = names
 
 {-# NOINLINE processValidationCache #-}
 processValidationCache :: MVar ValidationCache
@@ -157,7 +159,12 @@ validateContainerLibrary program
 validateProgramV :: Bool -> M.Program -> V Validated
 validateProgramV physicalContainers program = do
     let main' = M.progMain program
-        seeded = (initialPState program){psPhysicalContainers = physicalContainers, psFns = Map.fromList [(name, assumedInfo program name) | name <- Map.keys (topLevelSources program)]}
+        initial = initialPState program
+        seeded = initial
+            { psPhysicalContainers = physicalContainers
+            , psFns = Map.fromList [(name, assumedInfo (psReaders initial) program name) | name <- Map.keys (topLevelSources program)]
+            , psCallGroups = callGroups program
+            }
         st0 = withFunctions main' seeded
     returned <- walkFunction st0 main'
     -- (a function whose definition main never reaches, past a return, has still to be checked)
@@ -674,7 +681,7 @@ defineFunction st name source top
     | Map.member source (psGlobals st) = throwV ("Function already defined: " ++ source)
     | otherwise = do
         let program = psProgram st
-            group = callGroup program name
+            group = Map.findWithDefault Set.empty name (psCallGroups st)
             sources = topLevelSources program
             members = Set.toList group
             termOf member = maybe Nothing (M.specTermination . M.fnSpec) (Map.lookup member (M.progFunctions program))

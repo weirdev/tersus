@@ -146,6 +146,7 @@ data PState = PState
     , psCache :: Maybe FactCache
     , psProgram :: M.Program
     , psReaders :: Set.Set Name -- the functions of the program that read the standard input
+    , psCallGroups :: Map Name (Set.Set Name)
     , psBorrows :: Map M.Local (M.Local, [M.RefStep]) -- the place each reference local is to, so that an assignment to the root re-versions what reads through it see it as
     , psValidated :: Set.Set Name -- the top-level functions whose bodies have been checked (a mutually recursive group is checked together)
     }
@@ -177,6 +178,7 @@ initialPState program =
             , psCache = Just (Engine.factCacheAdd Engine.emptyFactCache globalFacts)
             , psProgram = program
             , psReaders = M.readersOfInput program
+            , psCallGroups = Map.empty
             , psBorrows = Map.empty
             , psValidated = Set.empty
             }

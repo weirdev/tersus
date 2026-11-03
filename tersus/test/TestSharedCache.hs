@@ -4,9 +4,14 @@ import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, 
 import Control.Exception (SomeException, bracket, finally, throwIO, try)
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
-import Data.List (isInfixOf, sort)
+import Data.List (isInfixOf, isPrefixOf, sort)
+import Hash (fingerprint)
+import LlvmRuntime (runtimeSource)
+import PreludeSource (parserSource)
+import Seed (emitterHash)
+import qualified TersusParser
 import qualified Data.Map.Strict as Map
-import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, setModificationTime)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
@@ -39,7 +44,11 @@ testSharedCache :: Test
 testSharedCache =
     TestList
         "testSharedCache"
-        [ TestCase "lossless roundtrip keeps contracts, invariants, generics and ghosts" roundtrip
+        [ TestCase "package snapshots invalidate on dependencies, entry, imports and file layout" packageSnapshots
+        , TestCase "duplicate paths and normalized aliases use the resolver's snapshot" packageAliases
+        , TestCase "independent processes reuse a package snapshot" packageProcesses
+        , TestCase "failed native parsing is retried in the same process" parserRetry
+        , TestCase "lossless roundtrip keeps contracts, invariants, generics and ghosts" roundtrip
         , TestCase "source change misses" sourceChange
         , TestCase "stage isolation" stageIsolation
         , TestCase "corrupt and truncated entries recompute" corruptRecomputes
@@ -75,6 +84,13 @@ probe = do
 
 sharedProbe :: IO TestResult
 sharedProbe = do
+    retry <- lookupEnv "TERSUS_SHARED_CACHE_PARSER_RETRY"
+    case retry of
+        Just _ -> parserRetryProbe
+        Nothing -> regularSharedProbe
+
+regularSharedProbe :: IO TestResult
+regularSharedProbe = do
     hold <- lookupEnv "TERSUS_SHARED_CACHE_PROBE_HOLD"
     case hold of
         Just lockPath -> do
@@ -100,7 +116,8 @@ sharedProbe = do
                         Error e -> writeFile path e >> pure Nothing
                         Ok _ -> pure (Just "invalid source reused a successful compilation")
                 Nothing -> do
-                    result <- compileOnce probeSource
+                    package <- lookupEnv "TERSUS_SHARED_CACHE_PACKAGE"
+                    result <- maybe (compileOnce probeSource) programFromFile package
                     case result of
                         Error e -> pure (Just e)
                         Ok program -> do
@@ -641,6 +658,104 @@ entryFiles home = do
 
 readMarker :: FilePath -> IO (Either IOError String)
 readMarker path = try (readFile path >>= \text -> length text `seq` pure text)
+
+packageFixture :: FilePath -> IO (FilePath, FilePath)
+packageFixture home = do
+    let root = home </> "app"
+        entry = root </> "main.tersus"
+        dependency = root </> "geo" </> "geo.tersus"
+    createDirectoryIfMissing True (takeDirectory dependency)
+    writeFile (root </> "package.tersus") ""
+    writeFile entry "import app::geo; return geo::value();"
+    writeFile dependency "fn value() -> Int { return 1; };"
+    pure (entry, dependency)
+
+packageSnapshots :: IO TestResult
+packageSnapshots = do
+    home <- freshHome "tersus-shared-package-snapshot"
+    (do
+        (entry, dependency) <- packageFixture home
+        first <- validatedFromFile entry
+        same <- validatedFromFile entry
+        compiled <- programFromFile entry
+        owned <- ownedFromFile entry
+        writeFile dependency "fn value() -> Int { return 2; };"
+        changed <- validatedFromFile entry
+        writeFile dependency "fn value() -> Int [{ }] [{ affirm return = 3; }] { return 2; };"
+        refused <- validatedFromFile entry
+        writeFile dependency "fn value() -> Int { return 2; };"
+        writeFile entry "import app::geo::geo::value; return value() + 1;"
+        changedEntry <- validatedFromFile entry
+        renameFile dependency (takeDirectory dependency </> "renamed.tersus")
+        renamed <- validatedFromFile entry
+        writeFile entry "import app::geo::renamed::value; return value() + 1;"
+        repaired <- validatedFromFile entry
+        pure $ case (first, same, compiled, owned, changed, refused, changedEntry, renamed, repaired) of
+            (Ok a, Ok b, Ok _, Ok _, Ok c, Error _, Ok d, Error _, Ok _) -> firstFailure
+                [testAssertEq a b, testAssertTrue (a /= c), testAssertTrue (c /= d)]
+            _ -> Just "a changed dependency, contract, entry, import or filename reused the wrong package result")
+        `finally` removeDirectoryRecursive home
+
+packageAliases :: IO TestResult
+packageAliases = do
+    let marker = ("cache_alias/package.tersus", "")
+        one = ("cache_alias/main.tersus", "return 1;")
+        two = ("cache_alias/./main.tersus", "return 2;")
+    first <- ownedFromFiles "cache_alias/main.tersus" [marker, one, two]
+    second <- ownedFromFiles "cache_alias/main.tersus" [marker, two, one]
+    alias <- ownedFromFiles "cache_alias/./main.tersus"
+        [("cache_alias/./package.tersus", ""), ("cache_alias/main.tersus", "return 2;")]
+    pure $ case (first, second, alias) of
+        (Ok a, Ok b, Ok c) -> firstFailure [testAssertTrue (a /= b), testAssertEq a c]
+        _ -> Just "duplicate or normalized paths selected the wrong package contents"
+
+packageProcesses :: IO TestResult
+packageProcesses = do
+    home <- freshHome "tersus-shared-package-processes"
+    (do
+        (entry, _) <- packageFixture home
+        let run = do
+                child <- spawnProbe home [("TERSUS_SHARED_CACHE_PACKAGE", entry)]
+                code <- waitChild 300 child
+                marker <- readMarker (home </> "marker")
+                files <- entryFiles home
+                times <- mapM getModificationTime files
+                pure (code, marker, sort files, times)
+        first <- run
+        second <- run
+        pure $ case (first, second) of
+            ((Just ExitSuccess, Right a, files, times), (Just ExitSuccess, Right b, files', times')) ->
+                firstFailure [testAssertEq a b, testAssertTrue (length files == 1), testAssertEq files files', testAssertEq times times']
+            _ -> Just "package probes failed or did not reuse their cache entry")
+        `finally` removeDirectoryRecursive home
+
+parserRetry :: IO TestResult
+parserRetry = do
+    home <- freshHome "tersus-shared-parser-retry"
+    (do
+        child <- spawnProbe home [("TERSUS_SHARED_CACHE_PARSER_RETRY", "1")]
+        code <- waitChild 300 child
+        pure (testAssertEq code (Just ExitSuccess))) `finally` removeDirectoryRecursive home
+
+parserRetryProbe :: IO TestResult
+parserRetryProbe = do
+    Just home <- lookupEnv "XDG_CACHE_HOME"
+    primed <- TersusParser.runParserTool False ["return 0;"]
+    case primed of
+        Left e -> pure (Just e)
+        Right _ -> do
+            let parser = home </> "tersus" </> ("tersus-parser-" ++ fingerprint [emitterHash, parserSource, runtimeSource])
+                source = "return 987823;"
+            before <- bracket (renameFile parser (parser ++ ".held"))
+                (\_ -> renameFile (parser ++ ".held") parser)
+                (\_ -> compileOnce source)
+            after <- compileOnce source
+            pure $ case (before, after) of
+                (Error e, Ok _) | "Parser tool failure:" `isPrefixOf` e -> Nothing
+                _ -> Just ("native parser retry: before=" ++ describe before ++ "; after=" ++ describe after)
+  where
+    describe (Error e) = e
+    describe (Ok _) = "success"
 
 mutatedStillVerified :: IO TestResult
 mutatedStillVerified = do
