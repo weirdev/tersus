@@ -11,6 +11,8 @@ module Compile
     , librariesFor
     , lowerSource
     , lowerStatements
+    , reservedName
+    , reservedError
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
@@ -109,7 +111,10 @@ parseSourceParts reserving source = case probeParseFile (locating probeDecls) (l
     notLinked imports stmts
         | null imports = Ok stmts
         | otherwise = Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
-    checked stmts = if reserving then maybe (Ok stmts) (\name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them")) (reservedName stmts) else Ok stmts
+    checked stmts = if reserving then maybe (Ok stmts) (Error . reservedError) (reservedName stmts) else Ok stmts
+
+reservedError :: String -> String
+reservedError name = "Type error: " ++ name ++ " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them"
 
 readLibraries :: [(String, String)] -> Decls -> Either String ([Statement], Decls)
 readLibraries [] declared = Right ([], declared)

@@ -15,6 +15,7 @@ copyright:      2024
 license:        BSD-3-Clause
 build-type:     Simple
 extra-source-files:
+    lib/types.tersus
     lib/lists.tersus
     lib/prelude.tersus
     lib/eq.tersus
