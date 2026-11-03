@@ -16,13 +16,13 @@ module Compile
     ) where
 
 import Data.Char (isAlphaNum)
-import Data.List (subsequences)
 import qualified Data.Map as Map
 
 import qualified Mir as M
 import MirLower (lowerElaborated, lowerModuleWith)
 import Data.List (intercalate)
 import Interface (mergeInterfacesImportEnv)
+import LibParsed (declsForLibModules, libParsed, statementsForLibModules)
 import LibPackage (libModuleOfDisplay, libPackage, libSelection)
 import Link (linkPrograms)
 import Modules (ModuleId (..))
@@ -51,20 +51,14 @@ parseWithEquality source = case probeParse probeDecls emptyDecls source of
         Left err -> Left err
         Right (library, declared) -> either (Left . show) (Right . (library ++) . fst) (parseStatementBlockWith declared source)
 
-librarySources :: [(String, String)]
-librarySources = [("the list and Box types", typesSource), ("the clone library", cloneSource), ("the equality library", eqSource), ("the prelude", preludeSource), ("the string library", stringSource), ("the map library", mapSource), ("the set library", setSource)]
-
-{-# NOINLINE libraryParses #-}
-libraryParses :: Map.Map [String] (Either String ([Statement], Decls))
-libraryParses = Map.fromList [(map fst texts, readLibraries texts emptyDecls) | texts <- subsequences librarySources]
-  where
-    readLibraries [] declared = Right ([], declared)
-    readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
-        Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
-        Right (stmts, declared') -> fmap (\(rest, final) -> (stmts ++ rest, final)) (readLibraries more declared')
-
+-- The statements and declarations of the named libraries (by the display
+-- names librariesFor selects), from the libraries' one parse (LibParsed).
 parsedLibraries :: [String] -> Either String ([Statement], Decls)
-parsedLibraries names = libraryParses Map.! names
+parsedLibraries displays = case libParsed of
+    Left err -> Left err
+    Right parsed ->
+        let names = [name | display <- displays, Just name <- [libModuleOfDisplay display]]
+         in Right (statementsForLibModules parsed names, declsForLibModules parsed names)
 
 -- The first reading of a program, with the declarations the libraries make (probeDecls). A program that
 -- declares a name a library would have given it is read over that declaration (Parse.shadowedCtors), but a
@@ -93,6 +87,14 @@ probeParseFile seeded plain source = case parseFileWith seeded source of
         Left _ -> Left err
     Right probed -> Right probed
 
+-- parseSource keeps the textual prepend, unlike the compilation paths
+-- (lowerSource and PackageCompile, which check each module against the
+-- lib package's interfaces and link its units): parseSource's result is
+-- a self-contained statement list that its consumers elaborate and lower
+-- with no import environment at all (Pipeline.assumptionsOf, and the
+-- tests that read a program and elaborate it themselves, frontendParity
+-- among them), so the selected libraries' statements -- from the
+-- libraries' one parse (LibParsed) -- stay in front of the program's.
 -- (the library of lists is the one program that may use the names that a program may not)
 parseSourceWith :: Bool -> String -> Result [Statement] String
 parseSourceWith reserving source = mapResult (\(_, library, stmts) -> library ++ stmts) (parseSourceParts reserving source)
@@ -118,16 +120,12 @@ parseSourceParts reserving source = case probeParseFile (locating probeDecls) (l
 reservedError :: String -> String
 reservedError name = "Type error: " ++ name ++ " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them"
 
-readLibraries :: [(String, String)] -> Decls -> Either String ([Statement], Decls)
-readLibraries [] declared = Right ([], declared)
-readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
-    Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
-    Right (stmts, declared') -> fmap (\(rest, final) -> (stmts ++ rest, final)) (readLibraries more declared')
-
--- The declarations the prelude, the string library, the map library and the set library make, which a program is first read with (see parseSourceWith)
+-- The declarations the prelude, the string library, the map library and
+-- the set library make, which a program is first read with (see
+-- parseSourceWith), from the libraries' one parse (LibParsed).
 probeDecls :: Decls
-probeDecls = case readLibraries [("the prelude", preludeSource), ("the string library", stringSource), ("the map library", mapSource), ("the set library", setSource)] emptyDecls of
-    Right (_, declared) -> declared
+probeDecls = case libParsed of
+    Right parsed -> declsForLibModules parsed ["prelude", "string", "map", "set"]
     Left _ -> emptyDecls
 
 -- A name the program declares that native code uses for lists (see MirLists)

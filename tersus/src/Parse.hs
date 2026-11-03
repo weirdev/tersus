@@ -11,6 +11,7 @@ module Parse
     , Import (..)
     , ParsedFile (..)
     , Decls (..)
+    , declsFromStatements
     , emptyDecls
     , locating
     , namePath
@@ -55,6 +56,37 @@ data Decls = Decls
 
 emptyDecls :: Decls
 emptyDecls = Decls Map.empty Map.empty Nothing Nothing [] Map.empty [] False False Map.empty
+
+-- The Decls a list of already-parsed statements adds, as the parser itself
+-- accumulates them (see structStatement, the enum and trait statements):
+-- what a parse-time seed derived from parsed declarations is made of.
+declsFromStatements :: Decls -> [Statement] -> Decls
+declsFromStatements = foldl step
+  where
+    step d stmt = case stmt of
+        StructDef name params fields _ ->
+            d
+                { declCtors = Map.insert name (map fst fields) (shadowedCtors name d)
+                , declTypes = Map.insert name [name] (declTypes d)
+                , declFieldTypes = Map.insert name fields (declFieldTypes d)
+                , declGenerics = if null params then Map.delete name (declGenerics d) else Map.insert name params (declGenerics d)
+                }
+        EnumDef name variants ->
+            d
+                { declCtors = foldr (\(v, fields) m -> Map.insert v (map fst fields) m) (shadowedCtors name d) variants
+                , declFieldTypes = foldr (\(v, fields) m -> Map.insert v fields m) (declFieldTypes d) variants
+                , declTypes = Map.insert name (map fst variants) (declTypes d)
+                , declGenerics = Map.delete name (declGenerics d)
+                }
+        TraitDef name params _ ->
+            d
+                { declCtors = shadowedCtors name d
+                , declTypes = Map.delete name (declTypes d)
+                , declGenerics = if null params then Map.delete name (declGenerics d) else Map.insert name params (declGenerics d)
+                }
+        BoundedDef _ inner -> step d inner
+        Assign name (Val VFunct{}) | name == "clone" -> d{declOwnClone = True}
+        _ -> d
 
 data Import = Import
     { importPath :: [Name]
