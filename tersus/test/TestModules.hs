@@ -925,6 +925,33 @@ testModuleLibraries =
             "3"
         ]
 
+testModuleLinkLibCollision :: Test
+testModuleLinkLibCollision =
+    testCaseSeq
+        "module-link-lib-collision"
+        [ expectProgramError
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; struct Entry<K, V> { k: K }; e = Entry<Int, Int> { k: 3 }; return e.k + geo::counts();")
+            , ("app/geo/geo.tersus", "fn counts() -> Int [{ }] [{ }] { counts = HashMap::new(); counts = counts.insert(\"the\", 40); return counts.lookup(\"the\", 0); };")
+            ]
+            "app/main.tersus"
+            "link error: generic struct Entry is defined by both module tersuslib::map and module app"
+        , expectProgramError
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; fn findNth(x: Int) -> Int [{ }] [{ }] { return x + 1; }; return findNth(1) + geo::setSize();")
+            , ("app/geo/geo.tersus", "fn setSize() -> Int [{ }] [{ }] { s = HashSet::new().insert(1).insert(2); return s.size(); };")
+            ]
+            "app/main.tersus"
+            "link error: function findNth is defined by both module tersuslib::map and module app"
+        , expectRuns
+            [ ("app/package.tersus", "")
+            , ("app/main.tersus", "import app::geo; struct Entry { x: Int }; e = Entry { x: 3 }; return e.x + geo::counts();")
+            , ("app/geo/geo.tersus", "fn counts() -> Int [{ }] [{ }] { counts = HashMap::new(); counts = counts.insert(\"the\", 40); return counts.lookup(\"the\", 0); };")
+            ]
+            "app/main.tersus"
+            "43"
+        ]
+
 borrowGeo :: String
 borrowGeo = "fn headOf(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); };"
 
@@ -1438,4 +1465,4 @@ testNativeModuleLoader = TestList "native-module-loader"
         ]
 
 testModules :: Test
-testModules = TestList "testModules" [testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries]
+testModules = TestList "testModules" [testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
