@@ -718,6 +718,12 @@ toolValidationParity =
             Right _ -> Error "the frozen eraser is not a package"
      in pure (testAssertEq (MirHousekeeping.toolValidatedProgram entry) fresh)
 
+withCacheHome :: (FilePath -> IO a) -> IO a
+withCacheHome use = withNativeHome $ \home -> do
+    saved <- lookupEnv "XDG_CACHE_HOME"
+    let restore = maybe (unsetEnv "XDG_CACHE_HOME") (setEnv "XDG_CACHE_HOME") saved
+    (setEnv "XDG_CACHE_HOME" home >> use home) `finally` restore
+
 packageFixture :: FilePath -> IO (FilePath, FilePath)
 packageFixture home = do
     let root = home </> "app"
@@ -828,7 +834,7 @@ ciPackageFixture home = do
     pure (entry, dependency)
 
 packageStages :: IO TestResult
-packageStages = withNativeHome $ \home -> do
+packageStages = withCacheHome $ \home -> do
     (entry, _) <- ciPackageFixture home
     owned <- ownedFromFile entry
     program <- programFromFile entry
@@ -845,7 +851,7 @@ packageStages = withNativeHome $ \home -> do
         other -> Just (show other)
 
 packageInputs :: IO TestResult
-packageInputs = withNativeHome $ \home -> do
+packageInputs = withCacheHome $ \home -> do
     (entry, dependency) <- ciPackageFixture home
     original <- validatedFromFile entry
     writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 42; };"
@@ -866,7 +872,7 @@ packageInputs = withNativeHome $ \home -> do
         other -> Just (show other)
 
 ciPackageProcesses :: Bool -> IO TestResult
-ciPackageProcesses concurrent = withNativeHome $ \home -> do
+ciPackageProcesses concurrent = withCacheHome $ \home -> do
     (entry, _) <- ciPackageFixture home
     let markers = if concurrent then ["first" ++ show i | i <- [1 .. 4 :: Int]] else ["first"]
         extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker)]
