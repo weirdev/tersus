@@ -86,6 +86,7 @@ data Template = Template
     , tmplTermination :: Maybe Termination
     , tmplBody :: [Statement]
     }
+    deriving (Show, Eq)
 
 newtype TC a = TC (TcState -> Either String (a, TcState))
 
@@ -335,6 +336,7 @@ data Ctx = Ctx
     { ctxFns :: Map Variable Type
     , ctxReturn :: Maybe Type
     }
+    deriving (Show, Eq)
 
 lookupVar :: Ctx -> Env -> Variable -> TC Type
 lookupVar ctx env var =
