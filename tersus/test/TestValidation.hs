@@ -234,8 +234,10 @@ testUserRewriteValidation =
         , parseValidationFailHelper
             "{ proof bad(x) [{ define n = x + 1; define m = n + 1; }] [{ affirm m = x + 2; }] { }; x = 5; n = 0; rewrite bad x; affirm 1 = 7; }"
         , parseValidateWEMatchHelper
-            "{ proof bad(x) [{ define n = x + 1; define m = n + 1; }] [{ affirm m = x + 2; }] { }; x = 5; rewrite bad x; affirm x + 2 = x + 2; }"
+            "{ proof bad(x) [{ define n = x + 1; define m = n + 1; }] [{ affirm m = x + 2; }] { }; x = 5; rewrite bad x; affirm x + 1 + 1 = x + 2; }"
             [FApp eqVarProof [FApp (CTerm (builtinFunct Plus)) [FApp (CTerm (builtinFunct Plus)) [ATerm "x", CTerm (VInt 1)], CTerm (VInt 1)], FApp (CTerm (builtinFunct Plus)) [ATerm "x", CTerm (VInt 2)]]]
+        , parseValidationFailHelper
+            "{ proof bad(x) [{ define n = x + 1; define m = n + 1; }] [{ affirm m = x + 3; }] { }; x = 5; rewrite bad x; affirm x + 1 + 1 = x + 2; }"
         ]
 
 testIotaProofVarProofMatch :: Iota -> [IotaProof] -> Variable -> [VariableProof] -> TestResult

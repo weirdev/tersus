@@ -716,7 +716,7 @@ functionValidationKey :: PState -> Name -> Bool -> String
 functionValidationKey st name top = show
     ( name, top
     , (M.progTypes program, M.progFunctions program, M.progGenerics program, M.progInvariants program, topLevelSources program)
-    , (psLocals st, psLocalNames st, psVars st, psView st, psFacts st, psGlobalFacts st, psGlobals st)
+    , (psLocals st, psLocalNames st, psVars st, psRuntimeProofValues st, psView st, psFacts st, psGlobalFacts st, psGlobals st)
     , (psRules st, psFns st, psInBody st, psPhysicalContainers st, psTerminates st, psReaders st, psBorrows st, psValidated st)
     )
   where
@@ -908,8 +908,8 @@ rewriteNeeds _ (CheckRel proof) = [proof]
 rewriteNeeds _ (CheckGtZero proof) = [FApp (CTerm (builtinFunct (Rel Gt))) [proof, CTerm (VInt 0)]]
 rewriteNeeds rules (UserRewrite name args) =
     case Map.lookup name rules of
-        Just (AxiomRule vars inputs _) -> instantiate vars (assertedProofs rules inputs)
-        Just (ProofRule vars inputs _) -> instantiate vars (assertedProofs rules inputs)
+        Just (AxiomRule contract) -> instantiate (ruleParams contract) (assertedProofs rules (ruleInputs contract))
+        Just (ProofRule contract _) -> instantiate (ruleParams contract) (assertedProofs rules (ruleInputs contract))
         Nothing -> []
   where
     instantiate vars proofs

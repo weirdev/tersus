@@ -136,7 +136,7 @@ The point of the design is that it needs few new engine concepts, because compil
 
 **Lists of data.** A list element is just a term. `set` and `push` keep their `forall` frame contracts, and whole-element equality `get(r, j) = get(l, j)` becomes field equality by congruence on the selectors. An element update is `set(nodes, i, Node { next: 3, ..get(nodes, i) })`.
 
-**`forall` triggers.** Instantiation is currently keyed on `get(L, j)` with `j` itself as the index. The motivating invariant fits this:
+**`forall` triggers.** Instantiation matches the accessor, receiver and trailing hidden size arguments of an indexed call such as `get(L, j)`, with `j` itself as the index. Checked wrapper-accessor contracts can compose under that binder without exposing body facts or mixing source container values with native storage invariants. The motivating invariant fits this:
 
 ```tersus
 affirm forall i in 0..size(nodes): get(nodes, get(nodes, i).next).prev = i;

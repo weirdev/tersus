@@ -15,12 +15,12 @@ trait Sequence<E> {
     fn size(self: &Self) -> Int [{ }] [{ affirm return >= 0; }];
     fn get(self: &Self, i: Int) -> E [{ affirm i >= 0; affirm i < size(self); }] [{ }];
     fn getRef(self: &Self, i: Int) -> &E from self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm *return = get(self, i); }];
-    fn set(self: Self, i: Int, x: E) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; }];
+    fn set(self: Self, i: Int, x: E) -> Self [{ affirm i >= 0; affirm i < size(self); }] [{ affirm size(return) = size(self); affirm get(return, i) = x; affirm forall j where j >= 0, j < size(self), j != i: get(return, j) = get(self, j); }];
 };
 
 // What a sequence that can grow has: a push at the end, which an array has not (its size never changes)
 trait Growable<E> {
-    fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; }];
+    fn push(self: Self, x: E) -> Self [{ }] [{ affirm size(return) = size(self) + 1; affirm get(return, size(self)) = x; affirm forall j in 0..size(self): get(return, j) = get(self, j); }];
 };
 
 // A list is a sequence that can grow, which it is by these impls: the functions are the ones a list has, so a call of one of them in a

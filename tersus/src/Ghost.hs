@@ -34,11 +34,14 @@ import Data.Map (Map)
 import qualified Data.Map as Map
 import Data.Maybe (mapMaybe)
 
+import qualified Data.Set as Set
 import qualified ProofEngine as Engine
 import Pretty (renderVarProof)
 import ProofHelpers
     ( iotaProofToVarProof
     , namedIotaMap
+    , proofIotas
+    , substituteProofTerm
     , proofOnlyOfNamedIotasOrConst
     , proofVars
     , valStmtDefinedVars
@@ -66,16 +69,32 @@ runStatement st (Rewrite rule) = rewrite st rule
 runStatement st (ProofAssert varProof) = do
     proof <- liftR (toIotaProof st varProof)
     -- (a call of a function in the proof has to meet the function's contract, and gives what it promises)
-    st' <- evaluateCalls st [proof]
+    st' <- evaluateProofCalls st [proof]
     if Engine.entails proof (proofContext st')
         then return (addFacts st' [proof])
         else throwV ("Could not prove: " ++ renderVarProof varProof)
 runStatement st (AssignProofVar var expr) = assignProofVar st var expr
-runStatement st (Assume varProof) = assumeStatement st (ProofAssert varProof)
+runStatement st (Assume varProof) = assumeNewStatements st [ProofAssert varProof]
 
 -- Takes each statement as true: what a function or loop starts out with
 assumeStatements :: PState -> [ValidationStatement] -> V PState
 assumeStatements = foldM assumeStatement
+
+-- New assumptions admit their calls before any of their claims become premises.
+assumeNewStatements :: PState -> [ValidationStatement] -> V PState
+assumeNewStatements st statements = do
+    (checked, claims) <- foldM admit (st, []) statements
+    return (addFacts checked claims)
+  where
+    admit (state, claims) (Rewrite _) = return (state, claims)
+    admit (state, claims) (AssignProofVar name expression) = do
+        defined <- assignProofVar state name expression
+        return (defined, claims)
+    admit current (Assume proof) = admit current (ProofAssert proof)
+    admit (state, claims) (ProofAssert variableProof) = do
+        proof <- liftR (toIotaProof state variableProof)
+        checked <- evaluateProofCalls state [proof]
+        return (checked, claims ++ [proof])
 
 assumeStatement :: PState -> ValidationStatement -> V PState
 -- (a rewrite is only a way to prove something)
@@ -92,11 +111,11 @@ assignProofVar :: PState -> Variable -> Expression -> V PState
 assignProofVar st var expr = do
     (st', term) <- exprTerm st expr
     case term of
-        ATerm iota -> return st'{psVars = Map.insert var iota (psVars st')}
+        ATerm iota -> return (markRuntimeProofValue st' iota term){psVars = Map.insert var iota (psVars st')}
         _ -> do
             iota <- fresh
             let defined = addFacts st' [FApp eqProof [ATerm iota, term], FApp eqProof [term, ATerm iota]]
-            return defined{psVars = Map.insert var iota (psVars defined)}
+            return (markRuntimeProofValue defined iota term){psVars = Map.insert var iota (psVars defined)}
 
 -- The term for the value of an expression, with the facts its calls give. A call has its own result iota and has to meet
 -- the contract of the function it calls.
@@ -112,9 +131,10 @@ exprTerm st (F funct args) = do
     (st1, functTerm) <- exprTerm st funct
     (st2, argTerms) <- foldM (\(s, ts) a -> (\(s', t) -> (s', ts ++ [t])) <$> exprTerm s a) (st1, []) args
     info <- liftR (resolveFunction st2 functTerm)
+    checkFunctionKind (callName info) info
     result <- fresh
     st3 <- applyCall st2 info argTerms result []
-    return (st3, ATerm result)
+    return (markRuntimeProofValue st3 result (FApp (fnTerm info) argTerms), ATerm result)
 
 -- The function that a term stands for
 resolveFunction :: PState -> IotaProof -> Result FnInfo String
@@ -127,8 +147,8 @@ resolveFunction st term =
             | Just name <- functionOfIota iota -> byName name
             | otherwise -> case functionFact iota of
                 Just value -> resolveFunction st (CTerm value)
-                Nothing -> Error ("Function object not validated. Function iota: " ++ show term)
-        _ -> Error "Object being called must be a function"
+                Nothing -> byAlias term
+        _ -> byAlias term
   where
     -- (the iota of a function of the program, `fnIota`, is that function)
     functionOfIota iota = case iota of
@@ -138,6 +158,13 @@ resolveFunction st term =
         case [value | FApp eq [ATerm lhs, CTerm value] <- allFacts st, eq == eqProof, lhs == iota, isFunction value] of
             value : _ -> Just value
             [] -> Nothing
+    byAlias callable =
+        let names = nubOrd (Map.keys (psFns st) ++ [name | name <- Map.keys (M.progFunctions (psProgram st)), Just _ <- [wrapperInfo st name]])
+            -- An inconsistent context entails every equality, but does not identify the callee.
+            flags = Engine.equivalentTerms callable [ATerm (fnIota name) | name <- names] (proofContext st)
+         in case [name | (name, True) <- zip names flags] of
+            name : _ -> byName name
+            [] -> Error ("Function object not validated. Function iota: " ++ show callable)
     isFunction VFunct{} = True
     isFunction VFnRef{} = True
     isFunction _ = False
@@ -257,25 +284,143 @@ applyCall st info args result mutPosts = do
 -- the function, exactly as a call in the code does, and the term `size(v)` then has the facts the function promises about its result.
 -- A function that may not end promises nothing about a value it does not give, so a proof does not call one.
 evaluateCalls :: PState -> [IotaProof] -> V PState
-evaluateCalls st0 proofs = go (200 :: Int) st0 (concatMap (callTerms st0) proofs)
+evaluateCalls = evaluateCallsWith False
+
+evaluateProofCalls :: PState -> [IotaProof] -> V PState
+evaluateProofCalls = evaluateCallsWith True
+
+-- Quantified promises are already checked. Rechecking their calls during contract-only
+-- export would demand body facts; checked goals compose under their own guards instead.
+evaluateCallsWith :: Bool -> PState -> [IotaProof] -> V PState
+evaluateCallsWith quantified st0 proofs = fst <$> go (200 :: Int) Set.empty st0 (concatMap (callTerms st0) proofs)
   where
-    go _ st [] = return st
-    go budget st (term : rest)
-        | budget <= 0 || evaluated st term = go budget st rest
+    go budget _ st [] = return (st, budget)
+    go budget active st (term : rest)
+        | evaluated st term = go budget active st rest
+        | budget <= 0 = throwV "Proof contract composition budget exhausted"
         | otherwise = case term of
+            Forall index guards body
+                | not quantified -> do
+                    mapM_ (checkCallKind st) (concatMap (callTerms st) (body : guards))
+                    go budget active st rest
+                | term `Set.member` active -> go budget active st rest
+                | otherwise -> do
+                    iota <- fresh
+                    let replace a b p = fromMaybe p (substituteProofTerm a b p)
+                        instantiate = replace (BVar index) (ATerm iota)
+                        guardFacts = map instantiate guards
+                        guardCalls = concatMap (callTerms st) guardFacts
+                        staticCalls = filter (notElem iota . proofIotas) guardCalls
+                    (guarded, remaining) <- go (budget - 1) (Set.insert term active) st staticCalls
+                    let simpleGuards = filter (all (evaluated guarded) . callTerms guarded) guardFacts
+                    (checkedGuards, remaining') <- go remaining (Set.insert term active) (addFacts guarded simpleGuards) guardCalls
+                    let scoped = addFacts checkedGuards guardFacts
+                    (checked, remaining'') <- go remaining' (Set.insert term active) scoped (callTerms scoped (instantiate body))
+                    let visible = Set.fromList (iota : concatMap proofIotas (proofs ++ allFacts st) ++ Map.elems (psGlobals st))
+                        generalize = replace (ATerm iota) (BVar index)
+                        consequences =
+                            [ Forall index guards (generalize fact)
+                            | fact <- newFacts guarded checked
+                            , fact `notElem` guardFacts
+                            , all (`Set.member` visible) (proofIotas fact)
+                            , not (isEvaluation fact)
+                            , not (isForall fact)
+                            ]
+                        guardConsequences =
+                            [ fact
+                            | fact <- newFacts st guarded
+                            , iota `notElem` proofIotas fact
+                            , all (`Set.member` visible) (proofIotas fact)
+                            , not (isEvaluation fact)
+                            ]
+                    go remaining'' active (addFacts st (evaluatedFact term : guardConsequences ++ consequences)) rest
             FApp (ATerm (Iota name)) _ | name `elem` worldNames -> throwV ("A proof calls " ++ name ++ ", which reads the input or the arguments: it has no value in a proof")
-            FApp (ATerm iota) args | Just (name, info) <- calledFunction st iota -> do
+            FApp funct args | Just (name, info) <- calledFunction st funct -> do
                 st' <- evaluateCall st name info args term
-                -- (what it promises may call functions too)
-                new <- return (concatMap (callTerms st') (newFacts st st'))
-                go (budget - 1) st' (rest ++ new)
-            _ -> go budget st rest
-    newFacts before after = filter (`notElem` psFacts before) (psFacts after)
+                let new = concatMap (callTerms st') (newFacts st st')
+                go (budget - 1) active st' (rest ++ new)
+            FApp funct args | runtimeCallable st funct -> do
+                info <- liftR (resolveFunction st funct)
+                st' <- evaluateCall st (callName info) info args term
+                let new = concatMap (callTerms st') (newFacts st st')
+                go (budget - 1) active st' (rest ++ new)
+            _ -> go budget active st rest
+    newFacts before after = filter (`notElem` allFacts before) (psFacts after)
+    isEvaluation (FApp (ATerm (Iota "$evaluated")) _) = True
+    isEvaluation _ = False
+    isForall Forall{} = True
+    isForall _ = False
 
 -- The function a term in a proof is the head of the calls of, if it is one of the program
-calledFunction :: PState -> Iota -> Maybe (Name, FnInfo)
-calledFunction st (Iota ('$' : name)) = (,) name <$> Map.lookup name (psFns st)
+calledFunction :: PState -> IotaProof -> Maybe (Name, FnInfo)
+calledFunction st (ATerm (Iota ('$' : name))) | Just info <- Map.lookup name (psFns st) = Just (name, info)
+calledFunction st term
+    | potentialCallable term
+    , Ok info <- resolveFunction st term = Just (callName info, info)
 calledFunction _ _ = Nothing
+
+potentialCallable :: IotaProof -> Bool
+potentialCallable (ATerm (Iota "$evaluated")) = False
+potentialCallable ATerm{} = True
+potentialCallable (CTerm VFnRef{}) = True
+potentialCallable FApp{} = True
+potentialCallable _ = False
+
+potentialCalls :: IotaProof -> Bool
+potentialCalls (FApp function args) = potentialCallable function || any potentialCalls (function : args)
+potentialCalls (Forall _ guards body) = any potentialCalls (body : guards)
+potentialCalls _ = False
+
+-- Rule-formal expressions remain opaque; runtime provenance follows value projections.
+runtimeCallable :: PState -> IotaProof -> Bool
+runtimeCallable _ (CTerm VFnRef{}) = True
+runtimeCallable _ CTerm{} = False
+runtimeCallable st term = runtimeOrigin st term
+
+runtimeOrigin :: PState -> IotaProof -> Bool
+runtimeOrigin st (ATerm iota) =
+    iota `elem` Map.elems (psLocals st)
+        || iota `Set.member` psRuntimeProofValues st
+        || case iota of
+            Iota ('$' : name) -> Map.member name (psFns st)
+            _ -> iota `elem` Map.elems (psGlobals st) && any (isFunctionFact iota) (allFacts st)
+  where
+    isFunctionFact i (FApp eq [ATerm lhs, CTerm VFunct{}]) = eq == eqProof && lhs == i
+    isFunctionFact i (FApp eq [ATerm lhs, CTerm VFnRef{}]) = eq == eqProof && lhs == i
+    isFunctionFact _ _ = False
+runtimeOrigin _ (CTerm value) = functionValue value
+  where
+    functionValue VFnRef{} = True
+    functionValue VFunct{} = True
+    functionValue (VData _ fields) = any (functionValue . snd) fields
+    functionValue (VList values) = any functionValue values
+    functionValue _ = False
+runtimeOrigin st (FApp (CTerm (VFunct _ _ _ (BuiltinFunct b) _)) args) = case b of
+    Ctor{} -> any (runtimeOrigin st) args
+    Field{} -> receiver
+    Project{} -> receiver
+    Cast{} -> receiver
+    DerefOf -> receiver
+    Get -> receiver
+    First -> receiver
+    Last -> receiver
+    _ -> any (runtimeOrigin st) args
+  where
+    receiver = case args of
+        value : _ -> runtimeOrigin st value
+        [] -> False
+runtimeOrigin st (FApp function _) = runtimeCallable st function
+runtimeOrigin _ _ = False
+
+markRuntimeProofValue :: PState -> Iota -> IotaProof -> PState
+markRuntimeProofValue st iota term
+    | runtimeOrigin st term = st{psRuntimeProofValues = Set.insert iota (psRuntimeProofValues st)}
+    | otherwise = st
+
+callName :: FnInfo -> Name
+callName info = case fnKind info of
+    KUser name -> name
+    KBuiltin _ -> "function value"
 
 -- The names of the standard library that read the input or the arguments (a program cannot declare them again)
 worldNames :: [String]
@@ -286,13 +431,13 @@ callTerms :: PState -> IotaProof -> [IotaProof]
 callTerms st proof = case proof of
     -- (readByte is a name of the standard library, which a program cannot declare again)
     FApp (ATerm (Iota name)) args | name `elem` worldNames -> concatMap (callTerms st) args ++ [proof]
-    FApp (ATerm iota) args
-        | Just _ <- calledFunction st iota -> concatMap (callTerms st) args ++ [proof]
-        | otherwise -> concatMap (callTerms st) args
-    FApp funct args -> concatMap (callTerms st) (funct : args)
-    -- (a call under a forall is under its binder: what it needs is what the guards say, which the proof of the
-    -- forall itself answers for, so it is not called here, where the bound index is not a value)
-    Forall{} -> []
+    FApp funct args
+        | Just _ <- calledFunction st funct -> concatMap (callTerms st) (funct : args) ++ [proof]
+        | runtimeCallable st funct -> concatMap (callTerms st) (funct : args) ++ [proof]
+        | otherwise -> concatMap (callTerms st) (funct : args)
+    Forall _ guards body
+        | any potentialCalls (body : guards) -> [proof]
+        | otherwise -> []
     _ -> []
 
 evaluated :: PState -> IotaProof -> Bool
@@ -302,16 +447,30 @@ evaluated st term = evaluatedFact term `elem` allFacts st
 evaluatedFact :: IotaProof -> IotaProof
 evaluatedFact term = FApp (ATerm (Iota "$evaluated")) [term]
 
-evaluateCall :: PState -> Name -> FnInfo -> [IotaProof] -> IotaProof -> V PState
-evaluateCall st name info args term = do
-    let params = fnParamNames info
-    when (length params /= length args) (throwV ("Function " ++ name ++ " expected " ++ show (length params) ++ " arguments, got " ++ show (length args)))
+checkCallKind :: PState -> IotaProof -> V ()
+checkCallKind st proof = case proof of
+    Forall _ guards body -> mapM_ (checkCallKind st) (concatMap (callTerms st) (body : guards))
+    FApp (ATerm (Iota name)) _ | name `elem` worldNames -> throwV ("A proof calls " ++ name ++ ", which reads the input or the arguments: it has no value in a proof")
+    FApp funct _ | Just (name, info) <- calledFunction st funct -> checkFunctionKind name info
+    FApp funct _ | runtimeCallable st funct -> do
+        info <- liftR (resolveFunction st funct)
+        checkFunctionKind (callName info) info
+    _ -> return ()
+
+checkFunctionKind :: Name -> FnInfo -> V ()
+checkFunctionKind name info = do
     case fnTermination info of
         Just MayDiverge -> throwV ("A proof calls " ++ name ++ ", which is declared ~ and may not end")
         Just (Recursing _) -> throwV ("A proof calls " ++ name ++ " from its own contract or body")
         _ -> return ()
     when (fnReads info) (throwV ("A proof calls " ++ name ++ ", which reads the input: what it gives is not determined by its arguments"))
-    checkInputs st params args (fnRequires info)
+
+evaluateCall :: PState -> Name -> FnInfo -> [IotaProof] -> IotaProof -> V PState
+evaluateCall st name info args term = do
+    let params = fnParamNames info
+    when (length params /= length args) (throwV ("Function " ++ name ++ " expected " ++ show (length params) ++ " arguments, got " ++ show (length args)))
+    checkFunctionKind name info
+    prefixError ("A proof calls " ++ name ++ ": ") (checkInputs st params args (fnRequires info))
     (st', instantiated) <- instantiateOutputsWith st params args term (fnExported info)
     return (addFacts st' (evaluatedFact term : instantiated))
 
@@ -379,7 +538,7 @@ instantiateOutputsMut st params args result mutPosts exported = do
         argOf name = fromMaybe (CTerm (VInt 0)) (lookup name (zip params args))
         view = (calleeView st ([(name, maybe (argOf name) (ATerm . id) (lookup name mutPosts)) | name <- params] ++ [("$old " ++ name, argOf name) | (name, _) <- mutPosts] ++ [("return", result)])){psVars = Map.fromList bound}
     proofs <- liftR (flatResultMap (toIotaProof view) exported)
-    return (st{psVars = Map.union (Map.fromList bound) (psVars st)}, proofs)
+    return (st{psRuntimeProofValues = Set.union (Set.fromList iotas) (psRuntimeProofValues st)}, proofs)
 
 -- The value of a term when the facts say what it is
 termValue :: PState -> IotaProof -> Maybe Value
@@ -478,38 +637,30 @@ rewriteUserRule :: PState -> Variable -> [VariableProof] -> V PState
 rewriteUserRule st name actualArgs =
     case Map.lookup name (psRules st) of
         Nothing -> throwV ("Unknown rewrite rule: " ++ name)
-        Just (AxiomRule formals inputs outputs) -> applyAxiom st name formals inputs outputs actualArgs
-        Just (ProofRule formals inputs exported) -> applyProofRule st name formals inputs exported actualArgs
+        Just (AxiomRule contract) -> do
+            scoped <- enterRule st name contract actualArgs
+            applied <- prefixError ("Rewrite rule " ++ name ++ " output instantiation failed: ") (assumeNewStatements scoped (ruleOutputs contract))
+            return (leaveRule st applied)
+        Just (ProofRule contract exported) -> do
+            scoped <- enterRule st name contract actualArgs
+            defined <- prefixError ("Rewrite rule " ++ name ++ " output definition failed: ") (runStatements scoped [definition | definition@AssignProofVar{} <- ruleOutputs contract])
+            proofs <- prefixError ("Rewrite rule " ++ name ++ " output instantiation failed: ") (liftR (flatResultMap (toIotaProof defined) exported))
+            checkedCalls <- prefixError ("Rewrite rule " ++ name ++ " output call validation failed: ") (evaluateProofCalls defined proofs)
+            return (leaveRule st (addFacts checkedCalls proofs))
 
-applyAxiom :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> [VariableProof] -> V PState
-applyAxiom st name formals inputs outputs actualArgs
-    | length formals /= length actualArgs =
-        throwV ("Rewrite rule " ++ name ++ " expected " ++ show (length formals) ++ " arguments, got " ++ show (length actualArgs))
-    | any proofHasForall actualArgs = throwV ("Rewrite rule " ++ name ++ " cannot take a forall as an argument")
-    | otherwise = do
-        let bindings = Map.fromList (zip formals actualArgs)
-        checked <- tryV (checkStatements st (map (substituteValidationStatement bindings) inputs))
-        case checked of
-            Error e -> throwV ("Rewrite rule " ++ name ++ " input validation failed: " ++ e)
-            Ok () -> do
-                assumed <- tryV (assumeStatements st (map (substituteValidationStatement bindings) outputs))
-                case assumed of
-                    Error e -> throwV ("Rewrite rule " ++ name ++ " output instantiation failed: " ++ e)
-                    Ok st' -> return st'
+enterRule :: PState -> Variable -> RuleContract -> [VariableProof] -> V PState
+enterRule st name contract actualArgs = do
+    let formals = ruleParams contract
+    when (length formals /= length actualArgs) (throwV ("Rewrite rule " ++ name ++ " expected " ++ show (length formals) ++ " arguments, got " ++ show (length actualArgs)))
+    when (any proofHasForall actualArgs) (throwV ("Rewrite rule " ++ name ++ " cannot take a forall as an argument"))
+    arguments <- liftR (flatResultMap (toIotaProof st) actualArgs)
+    let scoped = (calleeView st (zip formals arguments)){psGlobals = ruleGlobals contract}
+    prefixError ("Rewrite rule " ++ name ++ " input validation failed: ") (runStatements scoped (ruleInputs contract))
 
-applyProofRule :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [VariableProof] -> [VariableProof] -> V PState
-applyProofRule st name formals inputs exported actualArgs
-    | length formals /= length actualArgs =
-        throwV ("Rewrite rule " ++ name ++ " expected " ++ show (length formals) ++ " arguments, got " ++ show (length actualArgs))
-    | any proofHasForall actualArgs = throwV ("Rewrite rule " ++ name ++ " cannot take a forall as an argument")
-    | otherwise = do
-        let bindings = Map.fromList (zip formals actualArgs)
-        checked <- tryV (checkStatements st (map (substituteValidationStatement bindings) inputs))
-        case checked of
-            Error e -> throwV ("Rewrite rule " ++ name ++ " input validation failed: " ++ e)
-            Ok () -> case flatResultMap (toIotaProof st . substituteVariableProof bindings) exported of
-                Error e -> throwV ("Rewrite rule " ++ name ++ " output instantiation failed: " ++ e)
-                Ok proofs -> return (addFacts st proofs)
+leaveRule :: PState -> PState -> PState
+leaveRule caller scoped =
+    addFacts caller{psRuntimeProofValues = Set.union (psRuntimeProofValues caller) (psRuntimeProofValues scoped)}
+        (filter (`notElem` allFacts caller) (psFacts scoped))
 
 substituteValidationStatement :: Map Variable VariableProof -> ValidationStatement -> ValidationStatement
 substituteValidationStatement bindings (Rewrite rule) = Rewrite (substituteRwRule bindings rule)
@@ -519,7 +670,9 @@ substituteValidationStatement bindings (Assume varProof) = Assume (substituteVar
 
 substituteRwRule :: Map Variable VariableProof -> RwRule -> RwRule
 substituteRwRule bindings (Refl varProof) = Refl (substituteVariableProof bindings varProof)
-substituteRwRule _ (Eval var) = Eval var
+substituteRwRule bindings (Eval var) = case Map.lookup var bindings of
+    Just (ATerm renamed) -> Eval renamed
+    _ -> Eval var
 substituteRwRule _ EvalAll = EvalAll
 substituteRwRule bindings (CheckGtZero varProof) = CheckGtZero (substituteVariableProof bindings varProof)
 substituteRwRule bindings (CheckRel varProof) = CheckRel (substituteVariableProof bindings varProof)
@@ -554,7 +707,10 @@ proofToExpression (FApp funct args) = F (proofToExpression funct) (map proofToEx
 -- Rules
 
 defineAxiom :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> V PState
-defineAxiom st name args inputs outputs = insertRule st name (AxiomRule args inputs outputs)
+defineAxiom st name args inputs outputs =
+    let (formals, inputEnv, inputs') = renameRuleInputs name args inputs
+        (_, outputs') = renameRuleStatements name "output" inputEnv outputs
+     in insertRule st name (AxiomRule (RuleContract formals inputs' outputs' (psGlobals st)))
 
 insertRule :: PState -> Variable -> UserRule -> V PState
 insertRule st name rule
@@ -564,29 +720,48 @@ insertRule st name rule
 -- A proof is checked once, for any arguments that meet its input contract, and then gives what it exports
 defineProofRule :: PState -> Variable -> [Variable] -> [ValidationStatement] -> [ValidationStatement] -> [ValidationStatement] -> V PState
 defineProofRule st name args inputs outputs body = do
+    let (formals, inputEnv, inputs') = renameRuleInputs name args inputs
+        (bodyEnv, body') = renameRuleStatements name "body" inputEnv body
+        (_, outputs') = renameRuleStatements name "output" bodyEnv outputs
+        bodyLocals = concatMap valStmtDefinedVars body'
+        outputReferences = concatMap statementProofVars outputs'
+    when (any (`elem` bodyLocals) outputReferences) (throwV ("Proof " ++ name ++ " output depends on a private body binding"))
     let inner = bodyState st
-    iotas <- freshN (length args)
-    let bindings = zip args iotas
+    iotas <- freshN (length formals)
+    let bindings = zip formals iotas
         start = (calleeView inner [(a, ATerm i) | (a, i) <- bindings]){psInBody = True}
-    assumed <- assumeStatements start inputs
-    done <- runStatements assumed body
-    exported <- exportOutputs done bindings inputs outputs
-    let rebound = Map.fromList [(var, renderVarProof (exprToProof expr)) | AssignProofVar var expr <- body ++ outputs]
-        written = Map.fromList [(var, renderVarProof (exprToProof expr)) | AssignProofVar var expr <- inputs]
-        expand acc (var, proof) = Map.insert var (substituteProofDefinitions acc proof) acc
-        expanded = foldl expand Map.empty [(var, exprToProof expr) | AssignProofVar var expr <- inputs]
-        definitions = Map.filterWithKey (\var _ -> Map.lookup var rebound `elem` [Nothing, Just (written Map.! var)]) expanded
-        exported' = map (substituteProofDefinitions definitions) exported
-    insertRule st name (ProofRule args inputs exported')
+    assumed <- assumeStatements start inputs'
+    done <- runStatements assumed body'
+    exported <- exportOutputs done bindings inputs' outputs'
+    insertRule st name (ProofRule (RuleContract formals inputs' outputs' (psGlobals st)) exported)
 
-substituteProofDefinitions :: Map Variable VariableProof -> VariableProof -> VariableProof
-substituteProofDefinitions definitions proof = case proof of
-    ATerm name -> Map.findWithDefault proof name definitions
-    FApp function arguments -> FApp (substituteProofDefinitions definitions function) (map (substituteProofDefinitions definitions) arguments)
-    Forall index guards body ->
-        let scoped = Map.delete index definitions
-         in Forall index (map (substituteProofDefinitions scoped) guards) (substituteProofDefinitions scoped body)
-    _ -> proof
+renameRuleInputs :: Variable -> [Variable] -> [ValidationStatement] -> ([Variable], Map Variable VariableProof, [ValidationStatement])
+renameRuleInputs name args inputs =
+    let formals = ["$rule " ++ name ++ " formal " ++ show index | index <- [0 :: Int .. length args - 1]]
+        scope = Map.fromList (zip args (map ATerm formals))
+        (inputEnv, inputs') = renameRuleStatements name "input" scope inputs
+     in (formals, inputEnv, inputs')
+
+renameRuleStatements :: Variable -> String -> Map Variable VariableProof -> [ValidationStatement] -> (Map Variable VariableProof, [ValidationStatement])
+renameRuleStatements name phase scope statements = foldl rename (scope, []) (zip [0 :: Int ..] statements)
+  where
+    rename (env, renamed) (index, AssignProofVar var expression) =
+        let local = "$rule " ++ name ++ " " ++ phase ++ " " ++ show index
+            expression' = substituteExpression env expression
+         in (Map.insert var (ATerm local) env, renamed ++ [AssignProofVar local expression'])
+    rename (env, renamed) (_, statement) = (env, renamed ++ [substituteValidationStatement env statement])
+
+statementProofVars :: ValidationStatement -> [Variable]
+statementProofVars (ProofAssert proof) = proofVars proof
+statementProofVars (Assume proof) = proofVars proof
+statementProofVars (AssignProofVar _ expression) = proofVars (exprToProof expression)
+statementProofVars (Rewrite rule) = case rule of
+    Refl proof -> proofVars proof
+    Eval var -> [var]
+    EvalAll -> []
+    CheckGtZero proof -> proofVars proof
+    CheckRel proof -> proofVars proof
+    UserRewrite _ proofs -> concatMap proofVars proofs
 
 -- What a function or rule promises, as facts over the names it gives its parameters and result: the outputs are checked
 -- once more, and then the facts about those values are what is left.

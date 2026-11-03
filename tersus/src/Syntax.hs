@@ -211,9 +211,17 @@ data RwRule
     | UserRewrite Variable [VariableProof]
     deriving (Show, Eq, Ord, Read) -- TODO | LtTrans Variable Variable | GtTrans Variable Variable | LtEqTrans Variable Variable deriving Show
 
+data RuleContract = RuleContract
+    { ruleParams :: [Variable]
+    , ruleInputs :: [ValidationStatement]
+    , ruleOutputs :: [ValidationStatement]
+    , ruleGlobals :: Map Variable Iota
+    }
+    deriving (Show, Eq, Ord, Read)
+
 data UserRule
-    = AxiomRule [Variable] [ValidationStatement] [ValidationStatement]
-    | ProofRule [Variable] [ValidationStatement] [VariableProof]
+    = AxiomRule RuleContract
+    | ProofRule RuleContract [VariableProof]
     deriving (Show, Eq, Ord, Read)
 
 type RuleContext = Map Variable UserRule

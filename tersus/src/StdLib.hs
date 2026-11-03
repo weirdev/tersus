@@ -157,7 +157,7 @@ stdLibRuleCtx :: RuleContext
 stdLibRuleCtx =
     fromList
         [ ( "eqToLtPlus1"
-          , AxiomRule
+          , axiom
                 ["x"]
                 []
                 [ AssignProofVar "xPlusOne" (F (Val (builtinFunct Plus)) [Var "x", Val (VInt 1)])
@@ -169,7 +169,7 @@ stdLibRuleCtx =
                 ]
           )
         , ( "eqToGtZero"
-          , AxiomRule
+          , axiom
                 ["x"]
                 [ Rewrite (CheckGtZero (ATerm "x"))
                 , ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])
@@ -177,6 +177,8 @@ stdLibRuleCtx =
                 [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [ATerm "x", CTerm (VInt 0)])]
           )
         ]
+  where
+    axiom params inputs outputs = AxiomRule (RuleContract params inputs outputs (fromList []))
 
 -- Function symbols for the terms push(list, x) and set(list, index, x) in contracts and frame
 -- rules. They cannot be the full builtin values, which contain these very contracts.

@@ -134,6 +134,7 @@ data PState = PState
     { psLocals :: Map M.Local Iota
     , psLocalNames :: Map M.Local Variable -- the names of the program for the locals of the function being walked
     , psVars :: Map Variable Iota -- the variables of proofs (define)
+    , psRuntimeProofValues :: Set.Set Iota
     , psView :: Map Variable IotaProof -- what the names of the source mean in the statement being validated
     , psFacts :: [IotaProof] -- the facts of this path
     , psGlobalFacts :: [IotaProof] -- the facts that hold everywhere: the standard library, and the functions of the program
@@ -166,6 +167,7 @@ initialPState program =
             { psLocals = Map.empty
             , psLocalNames = Map.empty
             , psVars = Map.empty
+            , psRuntimeProofValues = Set.empty
             , psView = Map.empty
             , psFacts = []
             , psGlobalFacts = globalFacts
@@ -199,6 +201,7 @@ bodyState st =
     st
         { psLocals = Map.empty
         , psVars = Map.empty
+        , psRuntimeProofValues = Set.empty
         , psView = Map.empty
         , psFacts = []
         , psFns = Map.filter fnGlobal (psFns st)
