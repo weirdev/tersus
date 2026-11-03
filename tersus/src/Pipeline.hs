@@ -15,6 +15,8 @@ module Pipeline
     , compileModulesValidated
     , compileModulesToProgram
     , compileModulesToOwned
+    , erasedModuleProgram
+    , ownedModuleProgram
     , assumptionsOfPackage
     , ownedSource
     , nativeProgram
@@ -171,16 +173,21 @@ runStatements stmts =
 
 
 compileModulesToProgram :: Mod.LoadedPackage -> Result M.Program String
-compileModulesToProgram pkg = mapResult pruneProgram (compileModulesValidated pkg `bindResult` eraseGhosts)
+compileModulesToProgram pkg = compileModulesValidated pkg `bindResult` erasedModuleProgram
+
+erasedModuleProgram :: M.Program -> Result M.Program String
+erasedModuleProgram = mapResult pruneProgram . eraseGhosts
 
 compileModulesToOwned :: Mod.LoadedPackage -> Result M.Program String
-compileModulesToOwned pkg =
-    compileModulesToProgram pkg `bindResult` \program ->
-        if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
-            then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
-            else
-                let owned = pruneProgram (insertOwnership (nativeProgram program))
-                 in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
+compileModulesToOwned pkg = compileModulesToProgram pkg `bindResult` ownedModuleProgram
+
+ownedModuleProgram :: M.Program -> Result M.Program String
+ownedModuleProgram program =
+    if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
+        then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
+        else
+            let owned = pruneProgram (insertOwnership (nativeProgram program))
+             in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)
     hasUnsizedRef ty = case ty of
