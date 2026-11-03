@@ -7,9 +7,12 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import PreludeSource (parserSource)
+import PreludeSource (mirPackageFiles, parserSource)
 import Seed (emitterHash)
 import qualified TersusParser
+import qualified Modules
+import qualified PackageCompile
+import qualified MirHousekeeping
 import qualified Data.Map.Strict as Map
 import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
@@ -44,7 +47,8 @@ testSharedCache :: Test
 testSharedCache =
     TestList
         "testSharedCache"
-        [ TestCase "package snapshots invalidate on dependencies, entry, imports and file layout" packageSnapshots
+        [ TestCase "frozen tool reuse keeps the full freshly validated program" toolValidationParity
+        , TestCase "package snapshots invalidate on dependencies, entry, imports and file layout" packageSnapshots
         , TestCase "duplicate paths and normalized aliases use the resolver's snapshot" packageAliases
         , TestCase "independent processes reuse a package snapshot" packageProcesses
         , TestCase "failed native parsing is retried in the same process" parserRetry
@@ -658,6 +662,15 @@ entryFiles home = do
 
 readMarker :: FilePath -> IO (Either IOError String)
 readMarker path = try (readFile path >>= \text -> length text `seq` pure text)
+
+toolValidationParity :: IO TestResult
+toolValidationParity =
+    let entry = MirHousekeeping.mirEraseEntry
+        fresh = case Modules.loadFromEntry (Modules.resolverFromFiles mirPackageFiles) entry of
+            Left e -> Error e
+            Right (Modules.PackageResult pkg) -> PackageCompile.compileModulesValidated pkg
+            Right _ -> Error "the frozen eraser is not a package"
+     in pure (testAssertEq (MirHousekeeping.toolValidatedProgram entry) fresh)
 
 packageFixture :: FilePath -> IO (FilePath, FilePath)
 packageFixture home = do
