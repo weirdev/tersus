@@ -38,8 +38,8 @@ import System.Directory (doesDirectoryExist, doesFileExist, listDirectory)
 import System.FilePath (takeDirectory, (</>))
 
 import qualified Parse
-import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, parseStatementBlockWith, renderPath)
-import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource)
+import LibParsed (LibParsed (..), libParsed)
+import Parse (Decls, Import (..), ParsedFile (..), emptyDecls, locating, renderPath)
 import Syntax
 import Types hiding (baseNameOf)
 
@@ -631,12 +631,14 @@ parseModuleFiles fileParser resolver layout moduleId ownEntries ownTexts =
             Right (parsedFile, d') -> go d' rest remaining ((fePath entry, parsedFile) : done)
             Left _ -> go d rest ((entry, text) : remaining) done
 
+-- The declarations the compiler libraries make, from their one parse
+-- (LibParsed): the seed every package file is read with, so a file can
+-- name a library type (a String literal, a HashMap) before the module's
+-- libraries are selected.
 libraryDecls :: Decls
-libraryDecls = foldl step emptyDecls [cloneSource, eqSource, preludeSource, stringSource, mapSource, setSource]
-  where
-    step decls text = case parseStatementBlockWith decls text of
-        Right (_, decls') -> decls'
-        Left _ -> decls
+libraryDecls = case libParsed of
+    Right parsed -> lpDecls parsed
+    Left _ -> emptyDecls
 
 seedDecls :: FileParser -> Resolver -> Layout -> [FileEntry] -> Decls
 seedDecls fileParser resolver layout ownEntries = loop libraryDecls texts
