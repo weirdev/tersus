@@ -276,8 +276,11 @@ completeErasedInstances = completeInstancesWith True
 
 completeInstancesWith :: Bool -> Program -> Program
 completeInstancesWith erased program
-    | otherwise = program{progTypes = go (progTypes program) argMap (Set.toList mentioned)}
+    | otherwise = program{progTypes = go (Map.map eraseDecl (progTypes program)) argMap (Set.toList mentioned)}
   where
+    eraseFields fields = [(f, t) | (f, t) <- fields, not (erased && isPermission t)]
+    eraseDecl (StructDecl fields) = StructDecl (eraseFields fields)
+    eraseDecl (EnumDecl variants) = EnumDecl [(name, eraseFields fields) | (name, fields) <- variants]
     functions = progMain program : Map.elems (progFunctions program)
     mentioned =
         Set.fromList
@@ -312,7 +315,7 @@ completeInstancesWith erased program
             (False, Just (base, args))
                 | Just (params, fields) <- maybe (tupleGeneric base) Just (Map.lookup base (progGenerics program))
                 , Just fields0 <- instanceFields params args fields ->
-                    let fields' = [(f, t) | (f, t) <- fields0, not (erased && isPermission t)]
+                    let fields' = eraseFields fields0
                         discovered = [(instanceName b a, (b, a)) | (_, t) <- fields', (b, a) <- namedArgs t]
                      in go (Map.insert name (StructDecl fields') types) (foldr (uncurry Map.insert) argsMap discovered) (concatMap (typeNames . snd) fields' ++ rest)
             _ -> go types argsMap rest

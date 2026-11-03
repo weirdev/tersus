@@ -156,7 +156,7 @@ rvalueCall rv =
         M.BinaryOp op a b -> Just (binary op, [a, b])
         M.ListOp op os -> Just (list op, os)
         M.MakeData name fields -> Just (Ctor name [] (map fst fields), map snd fields)
-        M.ReadField o _ field -> Just (Field Nothing field, [o])
+        M.ReadField o name field -> Just (namedField name field, [o])
         M.IsVariant o name -> Just (Is name, [o])
         M.AsVariant o name -> Just (Cast name, [o])
         M.Use _ -> Nothing
@@ -653,5 +653,5 @@ invariantFacts st name value =
     case invariantOf st name of
         Nothing -> []
         Just (base, invariant) ->
-            let view = calleeView st [(f, FApp (CTerm (builtinFunct (Field Nothing f))) [value]) | f <- fieldNames st base]
+            let view = calleeView st [(f, FApp (CTerm (builtinFunct (namedField name f))) [value]) | f <- fieldNames st base]
              in [fact | ProofAssert proof <- invariant, Ok fact <- [toIotaProof view proof]]

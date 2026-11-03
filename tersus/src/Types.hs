@@ -380,6 +380,12 @@ wordRange signed bits = if signed then (negate (2 ^ (bits - 1)), 2 ^ (bits - 1))
 pattern TArray :: Type -> Integer -> Type
 pattern TArray t n = TArrayOf t (SizeConst n)
 
+-- A Box's storage fields are not the similarly named fields of its payload.
+namedField :: Name -> Variable -> BuiltinFunct
+namedField name field
+    | baseNameOf name == "Box" && field `elem` ["addr", "blk"] = Field (Just name) field
+    | otherwise = Field Nothing field
+
 -- The declared parameter types and return type of a user function, its size parameters, which are the last parameters (of type Int),
 -- given by the call and not written in it, and its type parameters, which a call gives too
 data Signature = Signature [Type] Type [Variable] [Variable] [Variable] [Variable] deriving (Show, Eq, Ord, Read) -- parameter types, return type, size parameters, type parameters, writes footprint, and the parameters a reference result is from (REFERENCES.md)

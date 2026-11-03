@@ -846,7 +846,7 @@ lowerPlace expr = case expr of
     F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> do
         fieldTy <- claim
         (root, steps, subTy) <- lowerPlace sub
-        ctor <- structCtor subTy
+        ctor <- fieldCtor field subTy
         return (root, steps ++ [M.RefField ctor field], fieldTy)
     F (Val (VFunct _ _ _ (BuiltinFunct (Cast variant)) _)) [sub] -> do
         variantTy <- claim
@@ -978,7 +978,7 @@ lowerDerefPlace expr = case expr of
     F (Val (VFunct _ _ _ (BuiltinFunct (Field _ field)) _)) [sub] -> do
         fieldTy <- claim
         (root, steps, subTy) <- lowerDerefPlace sub
-        ctor <- structCtor subTy
+        ctor <- fieldCtor field subTy
         return (root, steps ++ [M.RefField ctor field], fieldTy)
     F (Val (VFunct _ _ _ (BuiltinFunct Get) _)) [sub, index] -> lowerDerefIndex sub index
     F (Var "get") [sub, index] -> lowerDerefIndex sub index
@@ -1087,7 +1087,7 @@ builtinRvalue b tys ops =
         (Ctor name _ fields, _) | Just _ <- tupleGeneric name, length fields == length ops -> return (M.MakeData (typeName (tupleType tys)) (zip fields ops))
         (Ctor name _ fields, _) | length fields == length ops -> return (M.MakeData name (zip fields ops))
         (Field owner field, [o]) -> do
-            ctor <- maybe (structCtor (head tys)) return owner
+            ctor <- maybe (fieldCtor field (head tys)) return owner
             return (M.ReadField o ctor field)
         (Project variant field, [o]) -> return (M.ReadField o variant field)
         (NewBox, [o]) -> return (M.MakeBox o)
@@ -1131,9 +1131,10 @@ pointerOp b = lookup b
     ]
 
 -- The constructor that a struct type has, or the variant a value is known to be
-structCtor :: Type -> L Name
-structCtor ty = case ty of
-    TBox inner -> structCtor inner
+fieldCtor :: Variable -> Type -> L Name
+fieldCtor field ty = case ty of
+    TBox inner
+        | field `notElem` ["addr", "blk"] -> fieldCtor field inner
     TNamed base args -> do
         let name = instanceName base args
         s <- getS
