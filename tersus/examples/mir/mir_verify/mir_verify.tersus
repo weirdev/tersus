@@ -1393,8 +1393,52 @@ fn addrBorrowWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, args
     return out;
 };
 
+fn addrTakeArrayWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, args: &List<Operand>) -> List<String> ~ {
+    n = size(args);
+    if n != 2 && n != 3 { return one("addrTakeArray needs an address, a size and an optional ghost permission"); };
+    if !(d is Type::TArray) { return one("addrTakeArray needs an inline array result"); };
+    elem = Box::unbox((d as Type::TArray).elem);
+    sz = (d as Type::TArray).size;
+    sizeOk = false;
+    given = argAt(args, 1);
+    if sz is Size::SConst {
+        if given is Operand::Const {
+            c = (given as Operand::Const).value;
+            if c is Constant::CInt { sizeOk = (c as Constant::CInt).n = (sz as Size::SConst).n && (c as Constant::CInt).n >= 0; };
+        };
+    };
+    if sz is Size::SParam {
+        l = 0 - 1;
+        if given is Operand::Copy { l = (given as Operand::Copy).local; };
+        if l >= 0 {
+            declaration = findLocal(f, l);
+            if declaration >= 0 && declaration < size(f.locals) {
+                decl = get(f.locals, declaration);
+                name = (sz as Size::SParam).name;
+                if decl.named && decl.name = name && size(f.sizeParams) <= size(f.params) {
+                    firstSize = size(f.params) - size(f.sizeParams);
+                    k = 0;
+                    while k < size(f.sizeParams) [{ affirm k >= 0; affirm k <= size(f.sizeParams); }] ~ {
+                        if get(f.sizeParams, k) = name && get(f.params, firstSize + k) = l { sizeOk = true; };
+                        k = k + 1;
+                    };
+                };
+            };
+        };
+    };
+    out = exactOperandWhy(p, funcs, f, Type::TAddr { inner: Box::new(clone(elem)) }, argAt(args, 0));
+    for w in exactOperandWhy(p, funcs, f, Type::TInt, given) { out = push(out, clone(w)); };
+    if !sizeOk { out = push(out, "addrTakeArray size operand must equal its result's constant or declared size parameter"); };
+    if n = 3 {
+        for w in exactOperandWhy(p, funcs, f, Type::TBlock { inner: Box::new(clone(elem)) }, argAt(args, 2)) { out = push(out, clone(w)); };
+    };
+    return out;
+};
+
 fn listOpWhy(p: &Program, funcs: &List<String>, f: &Function, d: &Type, op: Int, args: &List<Operand>, inSet: Bool) -> List<String> ~ {
     if op = 54 { return addrBorrowWhy(p, funcs, f, d, args); };
+    if op = 55 { return addrTakeArrayWhy(p, funcs, f, d, args); };
+    if op = 56 { return blockOpWhy(p, funcs, f, d, op, args); };
     out = [];
     n = size(args);
     if op = 0 {

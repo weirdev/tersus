@@ -2497,6 +2497,16 @@ fn assignAggregate(g: Gen, cx: &Ctx, f: &Function, dropsOld: Bool, dest: Int, ty
             at = clone(g1.last);
             return fromPart(g1, cx, dropsOld, ty, dest, at, false);
         };
+        if op = 55 && n = 2 && arr.ok {
+            if bytes = 0 { return freeOld(g, cx, dropsOld, ty, dest); };
+            g1 = operandValue(g, cx, f, Type::TInt, get(args, 0));
+            address = clone(g1.last);
+            g2 = ins(g1, "p", "inttoptr i64 ".then(address).then(" to ptr"));
+            source = clone(g2.last);
+            g3 = freeOld(g2, cx, dropsOld, ty, dest);
+            g4 = emit(g3, "call void @llvm.memcpy.p0.p0.i64(ptr ".then(target).then(", ptr ").then(source).then(", i64 ").then(showInt(bytes)).then(", i1 false)"));
+            return zeroWords(g4, source, bytes);
+        };
         // Array::fromList: the elements of the list move into the array, and only the buffer of the list is freed
         if op = 45 && n = 1 && ty is Type::TArray && get(args, 0) is Operand::Move {
             o = get(args, 0);

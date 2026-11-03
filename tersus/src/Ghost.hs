@@ -237,6 +237,8 @@ rvalueCall rv =
         M.AddrGet -> AddrGet
         M.AddrWrite -> AddrWrite
         M.AddrTake -> AddrTake
+        M.AddrTakeArray -> AddrTakeArray
+        M.BlockPrefixTaken -> BlockPrefixTaken
         M.AddrDropValue -> AddrDropValue
         M.AddrDropRange -> AddrDropRange
         M.AddrResize -> AddrResize

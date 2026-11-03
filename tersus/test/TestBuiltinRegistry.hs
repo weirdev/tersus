@@ -20,6 +20,7 @@ representatives =
     , ToByte, FromByte, BytesFrom, Unsize, NewBox, UnBox, CloneOf
     , BorrowOf, BorrowMutOf, DerefOf, OldOf
     , AddrNull, AddrOffset, AddrCast, AddrToInt, AddrFromInt, AddrAlloc, AddrGet, AddrWrite, AddrTake
+    , AddrTakeArray, TakeArrayPair, BlockPrefixTaken
     , AddrDropValue, AddrDropRange, AddrResize, AddrFree, AllocPair, TakePair, ResizePair, SplitPair
     , BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast
     , BlockBase, BlockCap, BlockFilled, BlockContents, BlockOrigin, BlockStart, BlockExtent, BlockCount

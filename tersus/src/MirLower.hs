@@ -1050,6 +1050,7 @@ pairParts :: BuiltinFunct -> Maybe (M.ListOp, M.ListOp)
 pairParts b = case b of
     AllocPair -> Just (M.AddrAlloc, M.BlockNew)
     TakePair -> Just (M.AddrTake, M.BlockTaken)
+    TakeArrayPair -> Just (M.AddrTakeArray, M.BlockPrefixTaken)
     ResizePair -> Just (M.AddrResize, M.BlockResized)
     SplitPair -> Just (M.BlockSplitLo, M.BlockSplitHi)
     _ -> Nothing
@@ -1067,6 +1068,7 @@ pairRvalue b first second result ops = do
             secondOps <- case (b, ops) of
                 (AllocPair, [n]) -> return [M.Copy x, n]
                 (TakePair, [_, i, blk]) -> return [blk, i]
+                (TakeArrayPair, [_, n, blk]) -> return [blk, n]
                 (ResizePair, [_, n, blk]) -> return [blk, M.Copy x, n]
                 (SplitPair, _) -> return ops
                 _ -> failL ("A builtin was applied to the wrong number of arguments: " ++ show b)

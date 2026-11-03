@@ -112,7 +112,7 @@ roles rv =
         ListOp AddrDropValue [p, i, b] -> [(p, Read), (i, Read), (b, Consume)]
         ListOp AddrDropRange [p, i, n, b] -> [(p, Read), (i, Read), (n, Read), (b, Consume)]
         ListOp AddrFree [p, b] -> [(p, Read), (b, Consume)]
-        ListOp op (b : rest) | op `elem` [BlockTaken, BlockResized, BlockSplitHi, BlockCast] -> (b, Consume) : [(o, Read) | o <- rest]
+        ListOp op (b : rest) | op `elem` [BlockPrefixTaken, BlockTaken, BlockResized, BlockSplitHi, BlockCast] -> (b, Consume) : [(o, Read) | o <- rest]
         ListOp BlockJoin os -> [(o, Consume) | o <- os]
         ListOp op [u] | op `elem` [UninitNew, UninitTake, UninitDiscard] -> [(u, Consume)]
         ListOp _ os -> [(o, Read) | o <- os]

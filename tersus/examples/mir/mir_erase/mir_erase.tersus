@@ -782,7 +782,7 @@ fn typeText(t: &Type) -> String ~ {
 
 // The operations that make a permission, whose indices in the table of the list operations are 46 to 53
 fn ghostOp(op: Int) -> Bool [{ }] [{ }] {
-    return op >= 46 && op <= 53;
+    return (op >= 46 && op <= 53) || op = 56;
 };
 
 // The local of a function with an index, or nothing

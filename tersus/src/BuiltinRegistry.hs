@@ -56,6 +56,7 @@ data BuiltinKind
     | KBorrowOf | KBorrowMutOf | KDerefOf | KOldOf
     | KAddrNull | KAddrOffset | KAddrCast | KAddrToInt | KAddrFromInt
     | KAddrAlloc | KAddrGet | KAddrWrite | KAddrTake | KAddrDropValue | KAddrDropRange | KAddrResize | KAddrFree
+    | KAddrTakeArray | KTakeArrayPair | KBlockPrefixTaken
     | KAllocPair | KTakePair | KResizePair | KSplitPair
     | KBlockNew | KBlockTaken | KBlockResized | KBlockSplitLo | KBlockSplitHi | KBlockJoin | KBlockAssume | KBlockCast
     | KBlockBase | KBlockCap | KBlockFilled | KBlockContents | KBlockOrigin | KBlockStart | KBlockExtent | KBlockCount
@@ -116,6 +117,9 @@ builtinKind b = case b of
     AddrGet -> KAddrGet
     AddrWrite -> KAddrWrite
     AddrTake -> KAddrTake
+    AddrTakeArray -> KAddrTakeArray
+    TakeArrayPair -> KTakeArrayPair
+    BlockPrefixTaken -> KBlockPrefixTaken
     AddrDropValue -> KAddrDropValue
     AddrDropRange -> KAddrDropRange
     AddrResize -> KAddrResize
@@ -336,6 +340,9 @@ builtinRegistry =
     , entry KAddrFree [AddrFree] [(PointerName, "Addr::free", AddrFree)] (params ["p", "b"]) (sig [TAddr tp, TBlock tp] TInt) (primitive primAddrFree)
     , entry KAllocPair [AllocPair] [(PointerName, "Addr::alloc", AllocPair)] (params ["a1"]) (sig [TInt] (tupleType [TAddr tp, TBlock tp])) none
     , entry KTakePair [TakePair] [(PointerName, "Addr::take", TakePair)] (params ["a1", "a2", "a3"]) (sig [TAddr tp, TInt, TBlock tp] (tupleType [tp, TBlock tp])) none
+    , entry KAddrTakeArray [AddrTakeArray] [] (params ["p", "n", "b"]) (noSig "Addr array transfer is lowered from Addr::takeArray(p, n, b)") (primitive primAddrTakeArray)
+    , entry KTakeArrayPair [TakeArrayPair] [(PointerName, "Addr::takeArray", TakeArrayPair)] (params ["p", "n", "b"]) (noSig "Addr::takeArray is called with an address, an inline size and a permission") none
+    , ghostly (entry KBlockPrefixTaken [BlockPrefixTaken] [] (params ["b", "n"]) (sig [TBlock tp, TInt] (TBlock tp)) (primitive primBlockPrefixTaken))
     , entry KResizePair [ResizePair] [(PointerName, "Addr::resize", ResizePair)] (params ["a1", "a2", "a3"]) (sig [TAddr tp, TInt, TBlock tp] (tupleType [TAddr tp, TBlock tp])) none
     , entry KSplitPair [SplitPair] [(PointerName, "Block::split", SplitPair)] (params ["a1", "a2"]) (sig [TBlock tp, TInt] (tupleType [TBlock tp, TBlock tp])) none
     , ghostly (entry KBlockNew [BlockNew] [] (params ["p", "n"]) (sig [TAddr tp, TInt] (TBlock tp)) (primitive primBlockNew))
@@ -514,6 +521,31 @@ primAddrWrite =
            ]
         ++ sameExcept "return" "b" (ATerm "i")
     )
+
+prefixFilled :: [ValidationStatement]
+prefixFilled =
+    [ atLeastZero (ATerm "n")
+    , ProofAssert (relP LtEq (ATerm "n") (blockCap (ATerm "b")))
+    , ProofAssert (relP GtEq (blockCount (ATerm "b")) (ATerm "n"))
+    , ProofAssert (indexIn "j" (CTerm (VInt 0)) (ATerm "n") (relP Eq (blockFilled (ATerm "b") (BVar "j")) (CTerm (VBool True))))
+    ]
+
+primAddrTakeArray :: ([ValidationStatement], [VariableProof])
+primAddrTakeArray =
+    (ProofAssert (relP Eq (blockBase (ATerm "b")) (ATerm "p")) : prefixFilled
+    , [ relP Eq (ptrApp Size [ATerm "return"]) (ATerm "n")
+      , indexIn "j" (CTerm (VInt 0)) (ATerm "n") (relP Eq (ptrApp Get [ATerm "return", BVar "j"]) (blockAt (ATerm "b") (BVar "j")))
+      ])
+
+primBlockPrefixTaken :: ([ValidationStatement], [VariableProof])
+primBlockPrefixTaken =
+    (prefixFilled
+    , keeps "return" "b" ++
+        [ indexIn "j" (CTerm (VInt 0)) (ATerm "n") (relP Eq (blockFilled (ATerm "return") (BVar "j")) (CTerm (VBool False)))
+        , indexIn "j" (ATerm "n") (blockCap (ATerm "b")) (relP Eq (blockFilled (ATerm "return") (BVar "j")) (blockFilled (ATerm "b") (BVar "j")))
+        , relP Eq (ptrApp BlockContents [ATerm "return"]) (ptrApp BlockContents [ATerm "b"])
+        , relP Eq (blockCount (ATerm "return")) (minusP (blockCount (ATerm "b")) (ATerm "n"))
+        ])
 
 primAddrTake :: ([ValidationStatement], [VariableProof])
 primAddrTake = (slotOf "b" ++ [isFilled "b" (ATerm "i")], [relP Eq (ATerm "return") (blockAt (ATerm "b") (ATerm "i"))])

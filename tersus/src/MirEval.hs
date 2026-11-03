@@ -738,6 +738,11 @@ memoryOp op = case op of
     AddrGet -> Just (\args -> case args of
         [MInt p, MInt i] -> readSlot False (p + i)
         _ -> bad)
+    AddrTakeArray -> Just (\args -> case args of
+        [MInt p, MInt n]
+            | n < 0 -> failE "Addr::takeArray needs a non-negative prefix length"
+            | otherwise -> MList <$> mapM (readSlot True . (p +)) [0 .. n - 1]
+        _ -> bad)
     AddrTake -> Just (\args -> case args of
         [MInt p, MInt i] -> readSlot True (p + i)
         _ -> bad)

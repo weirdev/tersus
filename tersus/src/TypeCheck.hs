@@ -717,6 +717,21 @@ inferExprR ctx env expr =
                     _ -> do
                         result <- checkCall name ft (map tType inferred)
                         return (TExpr result (F (Val (builtinFunct b)) (map tExpr inferred)) inferred)
+        F (Var "Addr::takeArray") args -> case args of
+            [p, n, b] -> do
+                p' <- inferExprR ctx env p
+                n' <- inferExprR ctx env n
+                b' <- inferExprR ctx env b
+                element <- freshVar
+                expect "argument 1 of Addr::takeArray" (TAddr element) (tType p')
+                expect "argument 2 of Addr::takeArray" TInt (tType n')
+                expect "argument 3 of Addr::takeArray" (TBlock element) (tType b')
+                (size, sizeArgument') <- arraySize (constantInt (tExpr n')) (tExpr n')
+                let array = TArrayOf element size
+                    result = tupleType [array, TBlock element]
+                arrayOk array
+                return (TExpr result (F (Val (builtinFunct TakeArrayPair)) [tExpr p', sizeArgument', tExpr b']) [p', tLeaf TInt sizeArgument', b'])
+            _ -> failTc ("Type error: Addr::takeArray takes 3 arguments, got " ++ show (length args))
         -- Addr::alloc(n), Addr::get(p, i, b), Block::split(b, i), ...: the operations on addresses and permissions (POINTERS.md)
         F (Var name) args
             | Just b <- pointerBuiltin name, not (any (Map.member name) env), not (Map.member name (ctxFns ctx)) -> do
