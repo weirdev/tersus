@@ -21,27 +21,46 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   Packages and modules are in `src/Modules.hs` (package discovery, the module
   graph and the loader, canonical names), `src/Interface.hs` (what a checked
   module exposes to its importers), `src/ModuleResolve.hs` (rewriting a file's
-  references to canonical names through its imports) and `src/Link.hs`
+  references to canonical names through its imports), `src/LibPackage.hs` (the
+  compiler libraries compiled once as a synthetic `tersuslib` package, one
+  module per lib file, from the `PreludeSource` texts) and `src/Link.hs`
   (merging the lowered modules into one program and pruning what the entry
   program does not reach); `src/Pipeline.hs` compiles each module with the
-  implicit libraries its own text calls for and links the package.
-- `tersus/lib/` (Tersus sources the Haskell implementation depends on):
-  - `eq.tersus`: the trait `Eq` that `=` and `!=` call, and its impls for lists, arrays and Boxes, put in front of every program that does not
-    declare a trait `Eq` (`Pipeline.libraries`). Embedded by `PreludeSource`.
-  - `clone.tersus`: the trait `Clone` that `clone(x)` and `x.clone()` call, and its impls for lists, arrays and Boxes, put in front of every program that does not
-    declare a trait `Clone` (`Pipeline.libraries`). Embedded by `PreludeSource`.
-  - `prelude.tersus`: the traits `Sequence`, `Growable`, `Copy`, `Drop`
-    and `Deref`, put in front of a program that mentions any of them and does
-    not declare it (`Pipeline.libraries`). Embedded by `PreludeSource`.
+  implicit libraries its own text calls for (`Compile.librariesFor`, consumed
+  via synthesised implicit imports on both the single-file and package paths,
+  the package path in `src/PackageCompile.hs`) and links the package.
+- `tersus/lib/` (Tersus sources the Haskell implementation depends on). The
+  first seven are the compiler libraries: each is compiled as one module of the
+  synthetic `tersuslib` package (`src/LibPackage.hs`) from its `PreludeSource`
+  text, selected per module by `Compile.librariesFor` and consumed via
+  synthesised implicit imports on both the single-file and package paths:
+  - `types.tersus`: the structs `List` and `Box` that a list and a Box are
+    values of, imported for every program that does not declare `List` or
+    `Box`. Embedded by `PreludeSource`.
+  - `eq.tersus`: the trait `Eq` that `=` and `!=` call, and its impls for lists, arrays and Boxes, imported for every program that does not
+    declare a trait `Eq`. Embedded by `PreludeSource`.
+  - `clone.tersus`: the trait `Clone` that `clone(x)` and `x.clone()` call, and its impls for lists, arrays and Boxes, imported for every program that does not
+    declare a trait `Clone`. Embedded by `PreludeSource`.
+  - `prelude.tersus`: the traits `Sequence`, `Growable`, `Copy`, `Drop`,
+    `Deref` and `Hash` (with `hashCombine`), imported for a program that
+    mentions any of them (or `hashCombine`) and declares none of them;
+    declaring any prelude trait suppresses the prelude and with it `string`,
+    `map` and `set`. It imports `clone`. Embedded by `PreludeSource`.
+  - `string.tersus`: the struct `String` that a string literal is a value of,
+    imported for a program that writes a string literal or mentions `String`.
+    It imports `prelude`, `eq` and `clone`. Embedded by `PreludeSource`.
+  - `map.tersus`: the struct `HashMap` (and its `Entry`), imported for a
+    program that mentions `HashMap` (a `HashSet` pulls it in too). It imports
+    `prelude`, `eq` and `clone`. Embedded by `PreludeSource`.
+  - `set.tersus`: the struct `HashSet`, made of a map, imported for a program
+    that mentions `HashSet`. It imports `map`, `prelude`, `eq` and `clone`.
+    Embedded by `PreludeSource`.
   - `lists.tersus`: the list that native code is made of (`List`), and
     `box.tersus`: the Box that native code is made of (`Box`). Both embedded
     by `PreludeSource` and lowered with the lists library.
-  - `string.tersus`: the struct `String` that a string literal is a value of,
-    embedded by `PreludeSource` and put after the prelude for a program that
-    writes a string literal or mentions `String`.
   - `stdlib.tersus`: the standard library written in Tersus. Embedded by
     `PreludeSource` and parsed by `StdLibDefs`, which is where the builtins it
-    declares get their contracts; it is not put in front of user programs.
+    declares get their contracts; it is not linked into user programs.
   - `validation.tersus`: the validator written in Tersus, run by
     `SelfHostedMir`/`SelfHostedProof` alongside the Haskell validator, which
     remains the production path. It is not embedded by `PreludeSource`; tests
