@@ -76,7 +76,7 @@ withProgram path name use = do
         else do
             files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
             backend <- lookupEnv "TERSUS_PARSER"
-            let hash = fingerprint [show (Modules.normalizePath path, files, backend), emitterHash, parserSource, runtimeSource]
+            let hash = fingerprint [packageCacheInput path files, show backend, emitterHash, parserSource, runtimeSource]
                 build output = do
                     ir <- if "examples/mir/" `isPrefixOf` path
                         then ownedFromFiles path files >>= \owned -> case owned of

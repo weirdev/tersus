@@ -29,6 +29,8 @@ module TestHarness
     , validatedFromFile
     , ownedFromFile
     , ownedFromFiles
+    , packageCacheInput
+    , matchesEmbeddedPackage
     , mirDataOf
     , mirDataFromFile
     , encodeProgram
@@ -46,7 +48,7 @@ import Control.Exception (IOException, SomeException, bracket, bracket_, display
 import Control.Monad (forM, when)
 import GHC.Conc (getNumCapabilities)
 import Data.Char (isHexDigit, isSpace, toLower)
-import Data.List (isInfixOf, sort, stripPrefix)
+import Data.List (isInfixOf, stripPrefix)
 import qualified Data.Map.Strict as Map
 import System.Directory (createDirectoryIfMissing, renameFile)
 import System.Environment (getExecutablePath, lookupEnv)
@@ -59,6 +61,8 @@ import System.Posix.Types (Fd)
 import System.Process (readProcessWithExitCode)
 
 import Mir (Program)
+import MirHousekeeping (toolValidatedProgram)
+import PreludeSource (mirPackageFiles)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
@@ -253,23 +257,36 @@ ownedFromFile path = snapshotFromFilesystem path >>= ownedFromFiles path
 ownedFromFiles :: FilePath -> [(FilePath, String)] -> IO (Result Program String)
 ownedFromFiles = cachedFromPackage "owned"
 
+packageCacheInput :: FilePath -> [(FilePath, String)] -> String
+packageCacheInput path files = show (normalizePath path,
+    Map.toAscList (Map.fromList [(normalizePath file, source) | (file, source) <- files]))
+
+matchesEmbeddedPackage :: FilePath -> Modules.LoadedPackage -> Bool
+matchesEmbeddedPackage path actual
+    | normalizePath path `notElem` map fst mirPackageFiles = False
+    | otherwise = case loadFromEntry (resolverFromFiles mirPackageFiles) (normalizePath path) of
+        Right (PackageResult embedded) -> show actual == show embedded
+        _ -> False
+
 cachedFromPackage :: String -> FilePath -> [(FilePath, String)] -> IO (Result Program String)
 cachedFromPackage stage path files = do
-    let input = show (normalizePath path, sort files)
-        loaded = loadFromEntry (resolverFromFiles files) path
-    packageStage stage input loaded
+    let input = packageCacheInput path files
+        validated = case loadFromEntry (resolverFromFiles files) path of
+            Left e -> Error e
+            Right (PackageResult pkg)
+                | matchesEmbeddedPackage path pkg -> toolValidatedProgram (normalizePath path)
+                | otherwise -> compileModulesValidated pkg
+            Right _ -> Error (path ++ " is not in a package")
+    packageStage stage input validated
 
-packageStage :: String -> String -> Either String Modules.LoadResult -> IO (Result Program String)
-packageStage stage input loaded = sharedProgram ("package-" ++ stage) input $ case stage of
-    "validated" -> pure $ case loaded of
-        Left e -> Error e
-        Right (PackageResult pkg) -> compileModulesValidated pkg
-        Right (StandaloneResult path _) -> Error (path ++ " is not in a package")
+packageStage :: String -> String -> Result Program String -> IO (Result Program String)
+packageStage stage input validated = sharedProgram ("package-" ++ stage) input $ case stage of
+    "validated" -> pure validated
     "program" -> do
-        validated <- packageStage "validated" input loaded
-        pure (validated `bindResult` erasedModuleProgram)
+        before <- packageStage "validated" input validated
+        pure (before `bindResult` erasedModuleProgram)
     "owned" -> do
-        program <- packageStage "program" input loaded
+        program <- packageStage "program" input validated
         pure (program `bindResult` ownedModuleProgram)
     _ -> pure (Error ("unknown package compilation stage: " ++ stage))
 

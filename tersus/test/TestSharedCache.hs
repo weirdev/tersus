@@ -25,7 +25,8 @@ import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
-import Modules (normalizePath, snapshotFromFilesystem)
+import Modules (LoadResult (..), LoadedPackage (..), LoadedModule (..), LoadedFile (..), ModuleId (..), loadFromFilesystem, normalizePath, snapshotFromFilesystem)
+import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
 import qualified Mir as Mir
 import MirHousekeeping (verifyProgram)
@@ -84,6 +85,9 @@ testSharedCache =
         , TestCase "package keys include dependency contents and module layout" packageInputs
         , TestCase "independent processes reuse package compilation" (ciPackageProcesses False)
         , TestCase "concurrent processes share package compilation" (ciPackageProcesses True)
+        , TestCase "embedded reuse requires identical loaded compiler input" embeddedInputs
+        , TestCase "package keys retain the resolver's duplicate precedence" packageDuplicateKeys
+        , TestCase "changed embedded source still fails validation independently" embeddedChangedSource
         ])
   where
     requireParser (TestCase name action) = TestCase name $ do
@@ -841,7 +845,7 @@ packageStages = withCacheHome $ \home -> do
     validated <- validatedFromFile entry
     sources <- Modules.snapshotFromFilesystem entry
     files <- mapM (\stage -> sharedProgramCacheFile ("package-" ++ stage)
-        (show (normalizePath entry, sort sources))) ["owned", "program", "validated"]
+        (packageCacheInput entry sources)) ["owned", "program", "validated"]
     present <- mapM (maybe (pure False) doesFileExist) files
     pure $ case (owned, program, validated) of
         (Ok _, Ok _, Ok original) -> firstFailure
@@ -859,7 +863,7 @@ packageInputs = withCacheHome $ \home -> do
     writeFile dependency "fn answer() -> Int [{ }] [{ }] { affirm 1 = 2; return 41; };"
     invalid <- validatedFromFile entry
     sources <- Modules.snapshotFromFilesystem entry
-    invalidFile <- sharedProgramCacheFile "package-validated" (show (normalizePath entry, sort sources))
+    invalidFile <- sharedProgramCacheFile "package-validated" (packageCacheInput entry sources)
     filed <- maybe (pure False) doesFileExist invalidFile
     writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 41; };"
     writeFile (takeDirectory dependency </> "extra.tersus") "fn extra() -> Int { return 1; };"
@@ -893,6 +897,38 @@ ciPackageProcesses concurrent = withCacheHome $ \home -> do
                 , testAssertTrue (length entries == 1 && all (== warmOutput) outputs)
                 , testAssertEq after before
                 ]
+
+embeddedInputs :: IO TestResult
+embeddedInputs = do
+    loaded <- loadFromFilesystem emitterEntry
+    pure $ case loaded of
+        Left e -> Just e
+        Right (StandaloneResult _ _) -> Just "the embedded emitter is not a package"
+        Right (PackageResult pkg) ->
+            let sourceChanged = pkg{packageModules = map changeModule (packageModules pkg)}
+                changeModule modu = modu{loadedModuleFiles = map (\file -> file{loadedFileSource = loadedFileSource file ++ "\n"}) (loadedModuleFiles modu)}
+                identityChanged = pkg{packageEntryModule = ModuleId "different" Nothing}
+             in testAssertTrue (matchesEmbeddedPackage emitterEntry pkg
+                && not (matchesEmbeddedPackage emitterEntry sourceChanged)
+                && not (matchesEmbeddedPackage emitterEntry identityChanged))
+
+packageDuplicateKeys :: IO TestResult
+packageDuplicateKeys = pure $ testAssertTrue
+    ( packageCacheInput "pkg/./main.tersus" [("pkg/./main.tersus", "old"), ("pkg/main.tersus", "new")]
+        == packageCacheInput "pkg/main.tersus" [("pkg/main.tersus", "new")]
+      && packageCacheInput "pkg/main.tersus" [("pkg/main.tersus", "old"), ("pkg/main.tersus", "new")]
+        /= packageCacheInput "pkg/main.tersus" [("pkg/main.tersus", "new"), ("pkg/main.tersus", "old")])
+
+embeddedChangedSource :: IO TestResult
+embeddedChangedSource = withCacheHome $ \_ -> do
+    let changed = [(path, if path == emitterEntry
+            then "import mir::reader::reader; return missingEmbedProvider();" else source)
+            | (path, source) <- mirPackageFiles]
+    result <- ownedFromFiles emitterEntry changed
+    file <- sharedProgramCacheFile "package-validated" (packageCacheInput emitterEntry changed)
+    filed <- maybe (pure False) doesFileExist file
+    pure (firstFailure [testAssertErrorContains "missingEmbedProvider" result,
+        testAssertTrue (not filed)])
 
 mutatedStillVerified :: IO TestResult
 mutatedStillVerified = do

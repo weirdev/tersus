@@ -1210,7 +1210,10 @@ snapshotFromFilesystem entry = do
         Just packageRoot -> do
             packageFiles <- snapshotPackage packageRoot
             let parent = takeDirectory packageRoot
-            siblings <- listDirectory parent >>= filterM (isSiblingPackage parent)
+            siblings <- listDirectory parent >>= filterM (\name ->
+                if normalizePath (parent </> name) == normalizePath packageRoot
+                    then pure False
+                    else isSiblingPackage parent name)
             siblingFiles <- fmap concat (mapM (\sib -> snapshotPackage (parent </> sib)) siblings)
             return (sort (packageFiles ++ siblingFiles))
   where
