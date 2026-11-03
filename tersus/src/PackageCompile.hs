@@ -8,17 +8,18 @@ module PackageCompile
     , assumptionsOfPackage
     ) where
 
-import Data.List (sortBy)
+import Data.List (nubBy, sortBy)
 import Data.Ord (comparing)
 import qualified Data.Map as Map
+import qualified Data.Set as Set
 import qualified Mir as M
 import Compile (librariesFor)
 import Interface (InterfaceFunction (..), ModuleInterface (..), extractInterface, mergeInterfacesImportEnv, nameInModule, predeclareOwnEnv)
+import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelection)
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
-import Parse (ParsedFile (..), emptyDecls, parseStatementBlockWith)
-import PreludeSource (preludeSource)
+import Parse (ParsedFile (..))
 import MirLower (lowerModuleWith)
 import MirValidate (validateProgram)
 import Pretty (renderVarProof)
@@ -32,6 +33,8 @@ data CompiledModule = CompiledModule
     , compiledStatements :: [Statement]
     , compiledElaborated :: Elaborated
     , compiledInterface :: ModuleInterface
+    , compiledLibInterfaces :: [ModuleInterface]
+    , compiledLibUnits :: [(Mod.ModuleId, M.Program)]
     }
     deriving (Show)
 
@@ -56,24 +59,42 @@ compileModules pkg = go (Mod.packageModules pkg) Map.empty []
          in if not (null missing)
                 then Error ("in module " ++ Mod.renderModuleId moduId ++ ": dependency " ++ Mod.renderModuleId (head missing) ++ " was not compiled before it (the loader gives modules dependencies first)")
                 else
-                    let env = predeclareOwnEnv (mergeInterfacesImportEnv depInterfaces)
-                     in case prepareModule pkg modu of
+                    case prepareModule pkg modu of
+                        Left err -> Error err
+                        Right prepared -> case orphanCheck moduId prepared of
                             Left err -> Error err
-                            Right prepared -> case orphanCheck moduId prepared of
-                                Left err -> Error err
-                                Right () -> case moduleLibraryStatements depInterfaces modu of
+                            Right () -> case libPackage of
+                                Error err -> Error err
+                                Ok libPkg -> case moduleLibSelection libPkg depInterfaces modu prepared of
                                     Left err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
-                                    Right libraryStmts ->
-                                        let withLibraries = libraryStmts ++ prepared
-                                            augmented = if needsDropTrait withLibraries then dropTraitStatements ++ withLibraries else withLibraries
-                                         in case elaborateWith env augmented of
+                                    Right (libIfaces, libUnits, checkOnlyIfaces) ->
+                                        let env = predeclareOwnEnv (mergeInterfacesImportEnv (libIfaces ++ checkOnlyIfaces ++ depInterfaces))
+                                         in case elaborateWith env prepared of
                                                 Error err -> Error ("in module " ++ Mod.renderModuleId moduId ++ ": " ++ err)
                                                 Ok (elaborated@(Elaborated elaboratedStmts _), state) -> case extractInterface moduId prepared elaboratedStmts state of
                                                     Error err -> Error err
-                                                    Ok iface -> Ok (CompiledModule moduId elaboratedStmts elaborated iface)
+                                                    Ok iface -> Ok (CompiledModule moduId elaboratedStmts elaborated iface (libIfaces ++ checkOnlyIfaces) libUnits)
 
-moduleLibraryStatements :: [ModuleInterface] -> Mod.LoadedModule -> Either String [Statement]
-moduleLibraryStatements depInterfaces modu = readLibraries (librariesFor probed) emptyDecls
+-- The compiler libraries a module is checked against: the interfaces of
+-- the librariesFor-selected lib modules (synthesised implicit imports, all
+-- their names usable bare), closed over their dependencies, plus the lib
+-- units to link. The selection is decided from the module as it was read,
+-- with the dependency interfaces probed for String/HashMap/HashSet, as
+-- before. A module that impls Drop without the prelude being selected
+-- (declaring one of the prelude's traits itself suppresses the prelude)
+-- is checked against the prelude's Drop trait alone, check-only: that is
+-- what the old Drop-trait extraction from the prelude text served, and
+-- no lib unit is linked for it.
+moduleLibSelection :: LibPackage -> [ModuleInterface] -> Mod.LoadedModule -> [Statement] -> Either String ([ModuleInterface], [(Mod.ModuleId, M.Program)], [ModuleInterface])
+moduleLibSelection libPkg depInterfaces modu prepared =
+    let selected = [name | display <- map fst (librariesFor probed), Just name <- [libModuleOfDisplay display]]
+        (libIfaces, libUnits) = libSelection libPkg selected
+        checkOnlyIfaces
+            | needsDropTrait prepared && "prelude" `notElem` selected = case Map.lookup "prelude" (libInterfaces libPkg) of
+                Just preludeIface -> [dropOnlyInterface preludeIface]
+                Nothing -> []
+            | otherwise = []
+     in Right (libIfaces, libUnits, checkOnlyIfaces)
   where
     probed = concatMap (fileBody . Mod.loadedParsed) (Mod.loadedModuleFiles modu) ++ [Return (Var name) | name <- ["String", "HashMap", "HashSet"], name `elem` dependencyTypeNames]
     dependencyTypeNames = concatMap interfaceTypeNames depInterfaces
@@ -98,11 +119,6 @@ moduleLibraryStatements depInterfaces modu = readLibraries (librariesFor probed)
         TFn args ret -> concatMap typeNames (ret : args)
         TForall _ _ inner -> typeNames inner
         _ -> []
-    readLibraries [] _ = Right []
-    readLibraries ((name, text) : more) declared = case parseStatementBlockWith declared text of
-        Left err -> Left ("Parse error in " ++ name ++ ": " ++ show err)
-        Right (stmts, declared') -> fmap (stmts ++) (readLibraries more declared')
-
 needsDropTrait :: [Statement] -> Bool
 needsDropTrait prepared = any implsDrop prepared && not (any declaresDrop prepared)
   where
@@ -114,10 +130,32 @@ needsDropTrait prepared = any implsDrop prepared && not (any declaresDrop prepar
         _ -> False
     localName name = reverse (takeWhile (/= '$') (reverse name))
 
-dropTraitStatements :: [Statement]
-dropTraitStatements = case parseStatementBlockWith emptyDecls preludeSource of
-    Right (stmts, _) -> [stmt | stmt@(TraitDef name _ _) <- stmts, name == "Drop"]
-    Left _ -> []
+-- The prelude interface cut down to its Drop trait: the real bare Drop
+-- trait of the imported prelude unit, for a module that impls Drop while
+-- the prelude is not selected for it (see moduleLibSelection).
+dropOnlyInterface :: ModuleInterface -> ModuleInterface
+dropOnlyInterface iface =
+    iface
+        { ifTypes = Map.empty
+        , ifCtors = Map.empty
+        , ifGenerics = Map.empty
+        , ifInvariants = Map.empty
+        , ifTraits = Map.filterWithKey (\name _ -> name == "Drop") (ifTraits iface)
+        , ifTraitParams = Map.filterWithKey (\name _ -> name == "Drop") (ifTraitParams iface)
+        , ifFunctions = Map.empty
+        , ifImpls = Set.empty
+        , ifAssoc = Map.empty
+        , ifImplArgs = Map.empty
+        , ifImplBounds = Map.empty
+        , ifCopies = Set.empty
+        , ifLinear = Set.empty
+        , ifDrops = Set.empty
+        , ifAxioms = []
+        , ifProofs = []
+        , ifExterns = Set.empty
+        , ifTemplates = Map.empty
+        , ifCompanions = Map.empty
+        }
 
 prepareModule :: Mod.LoadedPackage -> Mod.LoadedModule -> Either String [Statement]
 prepareModule pkg modu = do
@@ -170,9 +208,11 @@ compileModulesValidated pkg =
                 Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
                 Just loaded ->
                     let depIfaces = [ifaceMap Map.! dep | dep <- Mod.loadedDependencies loaded, Map.member dep ifaceMap]
-                     in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv depIfaces) depIfaces (compiledElaborated modu)))
+                        allIfaces = compiledLibInterfaces modu ++ depIfaces
+                     in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
+            libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
          in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units ->
-                linkPrograms units `bindResult` \linked ->
+                linkPrograms (libUnits ++ units) `bindResult` \linked ->
                     stage "Validation failed: " (validateProgram linked) `bindResult` \_ -> Ok linked
 
 assumptionsOfPackage :: CompiledPackage -> [String]
