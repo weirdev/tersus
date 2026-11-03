@@ -328,6 +328,8 @@ Not every collection needs addresses. `Uninit<T>` is room for one `T` that may h
 - **Native code.** An `Addr` is an `i64`. `alloc`, `resize` and `free` call the runtime's `allocate`, `reallocate` and `release`, so `TERSUS_CHECK` counts the blocks. `get`, `write` and `take` copy `size(T)` bytes at `p + i * size(T)`, `offset` adds `i * size(T)`, and `dropValue` and `dropRange` call the `drop$T` function the emitter makes for `T`. An `Uninit<T>` is laid out as a `T`, and dropping, copying and comparing it is nothing.
 - **The emitter, in step.** `examples/mir/emit/emit.tersus` gains the same cases, `examples/mir/mir_reader/mir_reader.tersus` reads the new words, and `bootstrap/emitter.ll` is regenerated.
 
+`Addr::takeArray(p, n, b)` transfers slots `0..n` into `Array<T, n>` using a constant or declared size parameter. The validator checks the permission's base, capacity, count and initialized prefix. Lowering uses `AddrTakeArray [p, n, b]` and ghost `BlockPrefixTaken [b, n]`; native code copies the exact inline-array bytes and clears the source slots without cloning, dropping or freeing them. The suffix, allocation identity and capacity stay unchanged. The interpreter moves the same slot values. Held-reference footprint transport must be integrated before this primitive is used for the final generic List getter/conversion cutover.
+
 ## Order of work
 
 1. **Tuples**: types, values, projections, destructuring, moves of the parts, the validator's terms, and the emitters. These are independent of everything else.

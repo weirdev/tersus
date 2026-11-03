@@ -212,11 +212,12 @@ data ListOp = Length | First | Last | Get | Push | Pop | Set | NewArray | NewBox
       UninitEmpty | UninitNew | UninitGet | UninitTake | UninitDiscard
     | -- An Int as a fixed-width integer (signed, bits), with its range proved: the same number
       Narrow Bool Integer
+    | AddrTakeArray | BlockPrefixTaken
     deriving (Show, Eq, Read)
 
 -- The operations that make a permission, which are erased with it
 ghostOp :: ListOp -> Bool
-ghostOp op = op `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast]
+ghostOp op = op `elem` [BlockPrefixTaken, BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast]
 
 -- Move reads the local and leaves it holding nothing (MirOwnership); it is the last use of what the local owns
 data Operand = Copy Local | Move Local | Const Constant

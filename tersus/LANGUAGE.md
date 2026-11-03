@@ -350,6 +350,7 @@ Reading a scalar through a reference produces an ordinary value and ends that re
 | `Addr::get(p, i, b)` | slot `i` filled | `at(b, i)`, a view: `b` is lent, and the view is gone once `b` is changed or freed |
 | `Addr::write(p, i, x, b)` | slot `i` empty | the permission with `x` in slot `i` |
 | `Addr::take(p, i, b)` | slot `i` filled | `(at(b, i), b2)`: the value, moved out, and the permission with the slot empty |
+| `Addr::takeArray(p, n, b)` | `n` is a constant or declared size parameter, `0 <= n <= cap(b)`, `count(b) >= n`, slots `0..n` filled | `(a, b2)`: `Array<T, n>` containing those moved values; prefix slots become empty, count decreases by `n`, suffix and allocation identity remain unchanged |
 | `Addr::dropValue(p, i, b)` | slot `i` filled | the permission with the slot empty; the value is dropped (what it owns is freed) |
 | `Addr::dropRange(p, i, n, b)` | slots `i..i + n` filled | the permission with them empty |
 | `Addr::resize(p, n, b)` | `whole(b)`, the slots from `n` empty | `(q, b2)`: the slots moved to a new allocation of `n`, at `q` |
@@ -359,6 +360,8 @@ Reading a scalar through a reference produces an ordinary value and ends that re
 | `Block::cast(b)` | `count(b) = 0`, slots of the same size (a list is three words, as native code holds it), aligned no more strictly, and no type parameter or size parameter in either type | the permission to the same memory as slots of another type |
 
 `Addr::null()`, `Addr::offset(p, i)` (`i` slots further on), `Addr::cast(p)`, `Addr::toInt(p)` and `Addr::fromInt(n)` need no permission: an address alone can do no harm. The validator knows `Addr::cast(p)` only as the term `cast(p)`, not as `p`: an offset counts slots of the address's own type, so an offset of a cast address is not the same address as an offset of `p`, and casting back gives `cast(cast(p))`. The base of a block from `Block::cast(b)` is `cast(base(b))`, so the cast of the block's address is what its operations take. Every operation that gives a permission back says the rest of what it knows: the same base, size, origin and start, and the other slots as they were.
+
+`Addr::takeArray` moves the initialized prefix into an inline array without cloning or dropping its elements. It does not allocate or free memory; the caller retains the updated permission and must eventually empty and free the remaining allocation. A zero-length transfer touches no memory, including for a null address with an explicitly assumed empty permission. This primitive does not implement the List-to-array conversion; that library cutover and full held-reference footprint transport are separate integration work.
 
 What this proves, for a program that uses no assumption: every access is in bounds, no slot is read before it is written or written over, nothing is used after it is freed or freed twice, the address given is the one the permission is for, and no value is lost when memory is freed (`free` needs every slot empty, since natively nothing records which are filled, so it cannot drop them).
 

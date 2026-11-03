@@ -34,6 +34,7 @@ import TestPointers
 import TestSequence
 import TestSequenceContracts
 import TestRuleScopes
+import TestRawArrayTransfer
 import TestStrings
 import TestBytes
 import TestConnectives
@@ -166,6 +167,7 @@ originalGroups =
     , testSequence
     , testSequenceContracts
     , testRuleScopes
+    , testRawArrayTransfer
     , testStrings
     , testBytes
     , testConnectives

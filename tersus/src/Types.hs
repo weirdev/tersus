@@ -80,6 +80,9 @@ data BuiltinFunct
     | AddrGet
     | AddrWrite
     | AddrTake
+    | AddrTakeArray
+    | TakeArrayPair
+    | BlockPrefixTaken
     | AddrDropValue
     | AddrDropRange
     | AddrResize
@@ -152,7 +155,7 @@ readsWorld b = b `elem` [ReadByte, ArgCount, ArgByte, PathByte, FileLoad, FileBy
 
 -- The builtins of permissions that give a ghost value or speak of one: they are not in the program that runs
 ghostBuiltin :: BuiltinFunct -> Bool
-ghostBuiltin b = b `elem` [BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast, BlockBase, BlockCap, BlockFilled, BlockContents, BlockOrigin, BlockStart, BlockExtent, BlockCount]
+ghostBuiltin b = b `elem` [BlockPrefixTaken, BlockNew, BlockTaken, BlockResized, BlockSplitLo, BlockSplitHi, BlockJoin, BlockAssume, BlockCast, BlockBase, BlockCap, BlockFilled, BlockContents, BlockOrigin, BlockStart, BlockExtent, BlockCount]
 
 
 -- The types the checker (TypeCheck) knows. They are erased after checking: validation and evaluation never
