@@ -163,9 +163,19 @@ tersus-parse 1
 The segments are the library texts the pipeline puts in front of the program,
 then the program itself; `locating` is `1`, and only the last segment is read
 with statement places kept (a `Mark` before each statement, as
-`Parse.locating` does). On success the AST data is on the standard output and
-the return is `0`. On failure the return is `1` and the standard error has one
-line, `line L:C: <what was expected>`.
+`Parse.locating` does). The host reads a program twice through the tool, as
+`Compile.parseSourceWith` reads it: a probe with the prelude, the string, the
+map and the set library texts in front (whose statements the host drops; only
+the program's own statements choose its libraries, through
+`Compile.librariesFor`), then the chosen libraries and the program, located.
+The last segment is a file: `import` declarations at its head are read, and a
+file that has any is refused after the whole file is read with the bare line
+`imports are not linked yet: <paths>` on the standard error, as the Haskell
+reading refuses it; an `import` anywhere else fails with
+`import statements must come before any declaration in a file`. On success
+the AST data is on the standard output and the return is `0`. On failure the
+return is `1` and the standard error has one line,
+`line L:C: <what was expected>`.
 
 `Pipeline.parseSource` feeds every program to this parser. The Haskell parser
 stays as the oracle for one release: `TERSUS_PARSER=haskell` selects it, and

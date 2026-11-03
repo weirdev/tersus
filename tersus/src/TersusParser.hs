@@ -1,5 +1,6 @@
 module TersusParser
     ( parseSource
+    , toolParseSource
     , runParserTool
     , runParserToolInterpreted
     , parserToolInput
@@ -25,7 +26,7 @@ import MirLists (lowerLists)
 import MirOwnership (expandRefWrites, insertOwnership)
 import MirValidate (validateProgram)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
-import PreludeSource (parserSource)
+import PreludeSource (mapSource, parserSource, preludeSource, setSource, stringSource)
 import Seed (emitterHash)
 import Syntax (Expression (..), Statement (..), Value (..))
 import Types ()
@@ -49,35 +50,80 @@ parseSourceIO source = do
     if flag == Just "haskell"
         then pure (Compile.parseSource source)
         else do
-            tool <- parserTool
-            outcome <- case tool of
-                ToolFailed e -> pure (Error e)
-                ToolNative exe -> do
-                    (_, out, errors) <- runWithInputFull exe input
-                    pure (verdict out errors)
-                ToolInterpreted program -> pure $ case runInterpreted program input of
-                    Error e -> Error e
-                    Ok (out, errors, value)
-                        | value == Just (MInt 1) -> Error (trimEnd errors)
-                        | otherwise -> verdict out errors
+            outcome <- toolParseSource source
             case outcome of
-                Ok text -> case A.readParsed text of
+                Right text -> case A.readParsed text of
                     Ok statements -> pure (reservedCheck statements)
                     Error e -> fallback ("the parser written in Tersus wrote what cannot be read back: " ++ e)
-                Error e -> fallback ("the parser written in Tersus refused: " ++ e)
+                Left e
+                    | importsNotLinked e -> pure (Error e)
+                    | otherwise -> fallback ("the parser written in Tersus refused: " ++ e)
   where
-    input = parserToolInput True (Compile.librarySourcesFor source ++ [source])
-    verdict :: String -> String -> Result String String
-    verdict out errors
-        | not (null (trim errors)) && null (trim out) = Error (trimEnd errors)
-        | take 11 out == "tersus-ast " = Ok out
-        | otherwise = Error (trimEnd errors)
     fallback why = do
         hPutStrLn stderr ("tersus: " ++ why ++ "; using the Haskell parser")
         pure (Compile.parseSource source)
     reservedCheck statements = case reservedName statements of
         Just name -> Error ("Type error: " ++ name ++ " is reserved: native code makes a list of the struct StdList and the functions stdList... of lib/lists.tersus, and a Box of the struct StdBox and the functions stdBox... of lib/box.tersus, so a program does not declare names like them")
         Nothing -> Ok statements
+
+-- A failure of the tool that is the pipeline's own verdict, not a refusal to fall back on: the
+-- Haskell reading of a file with imports gives it too (Compile.parseSourceParts), word for word
+importsNotLinked :: String -> Bool
+importsNotLinked e = "imports are not linked yet: " `isPrefixOf` e
+
+-- The AST data for a program, as the pipeline reads it, through the tool: first a probe reading
+-- with the declarations of the prelude, the string, the map and the set libraries in front (the
+-- probe of Compile.parseSourceWith, through the tool itself), from which Compile.librariesFor
+-- chooses the libraries the program has; then the located reading with those libraries in front
+toolParseSource :: String -> IO (Either String String)
+toolParseSource source = do
+    probed <- probeBody source
+    case probed of
+        Left e -> pure (Left e)
+        Right body -> runParserTool True (map snd (Compile.librariesFor body) ++ [source])
+
+-- The body of the probe reading of a program: with the probe libraries' declarations (their
+-- statements dropped from the result), or, when that reading fails as Compile's plain probe is
+-- tried, with none
+probeBody :: String -> IO (Either String [Statement])
+probeBody source = do
+    seeded <- probeWith [preludeSource, stringSource, mapSource, setSource, source]
+    case seeded of
+        Right body -> pure (Right body)
+        Left e
+            | importsNotLinked e -> pure (Left e)
+            | otherwise -> probeWith [source]
+  where
+    probeWith segments = do
+        counted <- if length segments > 1 then probeLibraryCount else pure (Right 0)
+        case counted of
+            Left e -> pure (Left e)
+            Right skip -> do
+                out <- runParserTool False segments
+                pure $ case out of
+                    Left e -> Left e
+                    Right text -> case A.readParsed text of
+                        Error e -> Left e
+                        Ok statements -> Right (drop skip statements)
+
+{-# NOINLINE probeCountBox #-}
+probeCountBox :: MVar (Maybe (Either String Int))
+probeCountBox = unsafePerformIO (newMVar Nothing)
+
+-- How many statements the probe libraries make, read once through the tool and kept: they are
+-- the same texts in every probe
+probeLibraryCount :: IO (Either String Int)
+probeLibraryCount = modifyMVar probeCountBox $ \made ->
+    case made of
+        Just counted -> pure (made, counted)
+        Nothing -> do
+            out <- runParserTool False [preludeSource, stringSource, mapSource, setSource]
+            let counted = case out of
+                    Left e -> Left e
+                    Right text -> case A.readParsed text of
+                        Error e -> Left e
+                        Ok statements -> Right (length statements)
+            pure (Just counted, counted)
 
 -- A name the program declares that native code uses for lists (Compile.reservedName, over the whole
 -- program: the libraries Compile puts in front declare no such name)
