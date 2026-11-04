@@ -8,7 +8,7 @@
 // numbers on one line: status, block, step, function index. Four zeroes
 // with index -1 mean every function proved.
 
-enum DriverValue { DriverInt { value: Int }, DriverBool { value: Bool }, DriverList { items: List<DriverValue> }, DriverData { name: List<Int>, fields: List<DriverValue> } };
+enum DriverValue { DriverInvalid, DriverInt { value: Int }, DriverBool { value: Bool }, DriverList { items: List<DriverValue> }, DriverData { name: List<Int>, fields: List<DriverValue> } };
 
 impl Clone for DriverValue { };
 
@@ -16,7 +16,7 @@ impl Clone for DriverValue { };
 // reached)
 struct DriverParsed { value: DriverValue, pos: Int };
 
-struct DriverIntParsed { value: Int, pos: Int };
+struct DriverIntParsed { value: Int, pos: Int, ok: Bool };
 
 fn driverReadAll() -> List<Int> [{ }] [{ }] {
     bytes = [];
@@ -47,17 +47,29 @@ fn driverSkipWs(bytes: &List<Int>, start: Int) -> Int {
 fn driverReadInt(bytes: &List<Int>, start: Int) -> DriverIntParsed {
     pos = driverSkipWs(bytes, start);
     sign = 1;
+    if pos >= size(bytes) { return DriverIntParsed { value: 0, pos: pos, ok: false }; };
     if get(bytes, pos) = 45 { sign = 0 - 1; pos = pos + 1; };
-    // accumulated negatively, so the least integer reads without overflow
+    digits = pos;
     value = 0;
     while pos < size(bytes) [{ affirm pos >= 0; }] shrinks size(bytes) - pos {
         c = get(bytes, pos);
-        if c < 48 { return DriverIntParsed { value: driverSigned(sign, value), pos: pos }; };
-        if c > 57 { return DriverIntParsed { value: driverSigned(sign, value), pos: pos }; };
-        value = value * 10 - (c - 48);
+        if c < 48 || c > 57 {
+            if pos = digits || c > 32 || (sign > 0 && value = 0 - 9223372036854775807 - 1) {
+                return DriverIntParsed { value: 0, pos: pos, ok: false };
+            };
+            return DriverIntParsed { value: driverSigned(sign, value), pos: pos, ok: true };
+        };
+        digit = c - 48;
+        if value < 0 - 922337203685477580 || (value = 0 - 922337203685477580 && digit > 8) {
+            return DriverIntParsed { value: 0, pos: pos, ok: false };
+        };
+        value = value * 10 - digit;
         pos = pos + 1;
     };
-    return DriverIntParsed { value: driverSigned(sign, value), pos: pos };
+    if pos = digits || (sign > 0 && value = 0 - 9223372036854775807 - 1) {
+        return DriverIntParsed { value: 0, pos: pos, ok: false };
+    };
+    return DriverIntParsed { value: driverSigned(sign, value), pos: pos, ok: true };
 };
 
 fn driverParseItems(bytes: &List<Int>, start: Int, count: Int) -> DriverParsed [{ }] [{ }] {
@@ -65,6 +77,7 @@ fn driverParseItems(bytes: &List<Int>, start: Int, count: Int) -> DriverParsed [
     pos = start;
     for i in 0..count {
         parsed = driverParseValue(bytes, pos);
+        if parsed.value is DriverValue::DriverInvalid { return parsed; };
         pos = parsed.pos;
         items = push(items, parsed.value);
     };
@@ -73,34 +86,45 @@ fn driverParseItems(bytes: &List<Int>, start: Int, count: Int) -> DriverParsed [
 
 fn driverParseValue(bytes: &List<Int>, start: Int) -> DriverParsed [{ }] [{ }] shrinks size(bytes) - start {
     at = driverSkipWs(bytes, start);
+    if at >= size(bytes) { return DriverParsed { value: DriverValue::DriverInvalid, pos: at }; };
     kind = get(bytes, at);
     if kind = 105 {
         parsed = driverReadInt(bytes, at + 1);
+        if !parsed.ok { return DriverParsed { value: DriverValue::DriverInvalid, pos: parsed.pos }; };
         return DriverParsed { value: DriverValue::DriverInt { value: parsed.value }, pos: parsed.pos };
     };
     if kind = 98 {
         parsed = driverReadInt(bytes, at + 1);
+        if !parsed.ok || (parsed.value != 0 && parsed.value != 1) { return DriverParsed { value: DriverValue::DriverInvalid, pos: parsed.pos }; };
         return DriverParsed { value: DriverValue::DriverBool { value: parsed.value != 0 }, pos: parsed.pos };
     };
     if kind = 108 {
         parsed = driverReadInt(bytes, at + 1);
+        if !parsed.ok || parsed.value < 0 { return DriverParsed { value: DriverValue::DriverInvalid, pos: parsed.pos }; };
         return driverParseItems(bytes, parsed.pos, parsed.value);
     };
     if kind = 100 {
         nameStart = driverSkipWs(bytes, at + 1);
+        if nameStart >= size(bytes) { return DriverParsed { value: DriverValue::DriverInvalid, pos: nameStart }; };
+        if get(bytes, nameStart) != 110 { return DriverParsed { value: DriverValue::DriverInvalid, pos: nameStart }; };
         lenParsed = driverReadInt(bytes, nameStart + 1);
+        if !lenParsed.ok || lenParsed.value < 0 { return DriverParsed { value: DriverValue::DriverInvalid, pos: lenParsed.pos }; };
         name = [];
         pos = lenParsed.pos;
-        // the name follows its length after one space
-        if get(bytes, pos) = 32 { pos = pos + 1; };
+        if pos >= size(bytes) { return DriverParsed { value: DriverValue::DriverInvalid, pos: pos }; };
+        if get(bytes, pos) != 32 { return DriverParsed { value: DriverValue::DriverInvalid, pos: pos }; };
+        pos = pos + 1;
+        if lenParsed.value > size(bytes) - pos { return DriverParsed { value: DriverValue::DriverInvalid, pos: pos }; };
         for i in 0..lenParsed.value { name = push(name, get(bytes, pos + i)); };
         countParsed = driverReadInt(bytes, pos + lenParsed.value);
+        if !countParsed.ok || countParsed.value < 0 { return DriverParsed { value: DriverValue::DriverInvalid, pos: countParsed.pos }; };
         items = driverParseItems(bytes, countParsed.pos, countParsed.value);
         if items.value is DriverValue::DriverList {
             return DriverParsed { value: DriverValue::DriverData { name: name, fields: clone((items.value as DriverValue::DriverList).items) }, pos: items.pos };
         };
+        return items;
     };
-    return DriverParsed { value: DriverValue::DriverInt { value: 0 }, pos: at };
+    return DriverParsed { value: DriverValue::DriverInvalid, pos: at };
 };
 
 fn driverNameIs(name: &List<Int>, text: String) -> Bool {
@@ -176,6 +200,15 @@ fn driverProofStep(value: &DriverValue) -> ProofStep {
 
 fn driverStep(value: &DriverValue) -> ExecutionStep {
     name = driverName(value);
+    if driverNameIs(name, "ExecutionStep::AdmitProofCall") {
+        fields = driverItems(value);
+        if size(fields) != 1 { return ExecutionStep::Unsupported; };
+        function = get(fields, 0);
+        if function is DriverValue::DriverInt {
+            return ExecutionStep::AdmitProofCall { function: (function as DriverValue::DriverInt).value };
+        };
+        return ExecutionStep::Unsupported;
+    };
     if driverNameIs(name, "ExecutionStep::Assign") { return ExecutionStep::Assign { local: driverInt(driverField(value, 0)), value: driverValueRef(driverField(value, 1)) }; };
     if driverNameIs(name, "ExecutionStep::Literal") { return ExecutionStep::Literal { result: driverInt(driverField(value, 0)), function: driverInt(driverField(value, 1)), arguments: driverValueRefs(driverField(value, 2)) }; };
     if driverNameIs(name, "ExecutionStep::Apply") { return ExecutionStep::Apply { local: driverInt(driverField(value, 0)), result: driverInt(driverField(value, 1)), function: driverInt(driverField(value, 2)), arguments: driverValueRefs(driverField(value, 3)) }; };
@@ -194,7 +227,7 @@ fn driverStep(value: &DriverValue) -> ExecutionStep {
     if driverNameIs(name, "ExecutionStep::RequireVariant") { return ExecutionStep::RequireVariant { object: driverValueRef(driverField(value, 0)), family: driverInt(driverField(value, 1)), constructor: driverInt(driverField(value, 2)) }; };
     if driverNameIs(name, "ExecutionStep::CheckWithin") { return ExecutionStep::CheckWithin { inner: driverValueRef(driverField(value, 0)), outer: driverValueRef(driverField(value, 1)) }; };
     if driverNameIs(name, "ExecutionStep::Proof") { return ExecutionStep::Proof { step: driverProofStep(driverField(value, 0)) }; };
-    return ExecutionStep::Havoc { local: 0 };
+    return ExecutionStep::Unsupported;
 };
 
 fn driverSteps(value: &DriverValue) -> List<ExecutionStep> {
@@ -278,6 +311,39 @@ fn driverDifferences(value: &DriverValue) -> List<DifferenceFact> {
     return out;
 };
 
+fn driverProofFunction(value: &DriverValue) -> ProofFunction {
+    bad = ProofFunction { function: driverInt(driverField(value, 0)), dependencies: [], io: false, userMayDiverge: false, unknown: true };
+    if value is DriverValue::DriverData {
+        data = value as DriverValue::DriverData;
+        if driverNameIs(data.name, "ProofFunction") = false || size(data.fields) != 5 { return bad; };
+        function = get(data.fields, 0);
+        dependencies = get(data.fields, 1);
+        io = get(data.fields, 2);
+        diverges = get(data.fields, 3);
+        unknown = get(data.fields, 4);
+        if function is DriverValue::DriverInt && dependencies is DriverValue::DriverList
+            && io is DriverValue::DriverBool && diverges is DriverValue::DriverBool && unknown is DriverValue::DriverBool {
+            targets = [];
+            for dependency in (dependencies as DriverValue::DriverList).items {
+                if dependency is DriverValue::DriverInt { targets = push(targets, (dependency as DriverValue::DriverInt).value); }
+                else { return bad; };
+            };
+            return ProofFunction { function: (function as DriverValue::DriverInt).value, dependencies: targets,
+                io: (io as DriverValue::DriverBool).value, userMayDiverge: (diverges as DriverValue::DriverBool).value,
+                unknown: (unknown as DriverValue::DriverBool).value };
+        };
+    };
+    return bad;
+};
+
+fn driverProofFunctions(value: &DriverValue) -> List<ProofFunction> {
+    rows = [];
+    if value is DriverValue::DriverList {
+        for row in (value as DriverValue::DriverList).items { rows = push(rows, driverProofFunction(row)); };
+    };
+    return rows;
+};
+
 fn driverContext(value: &DriverValue) -> ValidatorContext {
     return ValidatorContext {
         equalities: driverEqualities(driverField(value, 0)),
@@ -290,6 +356,7 @@ fn driverContext(value: &DriverValue) -> ValidatorContext {
         constructorFunctions: driverInts(driverField(value, 7)),
         constructorFields: driverConstructorFields(driverField(value, 8)),
         differences: driverDifferences(driverField(value, 9)),
+        proofFunctions: driverProofFunctions(driverField(value, 10)),
     };
 };
 
@@ -350,13 +417,29 @@ fn driverPrintVerdict(status: Int, block: Int, step: Int, index: Int) -> Int [{ 
 
 bytes = driverReadAll();
 countParsed = driverReadInt(bytes, 0);
+if !countParsed.ok || countParsed.value < 0 {
+    printed = driverPrintVerdict(2, -1, -1, 0);
+    return 0;
+};
 total = countParsed.value;
 at = countParsed.pos;
 index = 0;
 while index < total [{ affirm index >= 0; }] shrinks total - index {
     entryParsed = driverReadInt(bytes, at);
+    if !entryParsed.ok {
+        printed = driverPrintVerdict(2, -1, -1, index);
+        return 0;
+    };
     stateParsed = driverParseValue(bytes, entryParsed.pos);
+    if stateParsed.value is DriverValue::DriverInvalid {
+        printed = driverPrintVerdict(2, -1, -1, index);
+        return 0;
+    };
     blocksParsed = driverParseValue(bytes, stateParsed.pos);
+    if blocksParsed.value is DriverValue::DriverInvalid {
+        printed = driverPrintVerdict(2, -1, -1, index);
+        return 0;
+    };
     at = blocksParsed.pos;
     result = validateExecution(driverBlocks(blocksParsed.value), entryParsed.value, driverState(stateParsed.value));
     if result.status != 0 {
@@ -364,6 +447,10 @@ while index < total [{ affirm index >= 0; }] shrinks total - index {
         return 0;
     };
     index = index + 1;
+};
+if driverSkipWs(bytes, at) != size(bytes) {
+    printed = driverPrintVerdict(2, -1, -1, 0);
+    return 0;
 };
 printed = driverPrintVerdict(0, -1, -1, -1);
 return 0;

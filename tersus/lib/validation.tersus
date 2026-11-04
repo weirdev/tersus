@@ -1023,6 +1023,16 @@ fn contradictoryDifferences(equalities: &List<EqualityFact>, facts: &List<Differ
     return false;
 };
 
+struct ProofFunction {
+    function: Int,
+    dependencies: List<Int>,
+    io: Bool,
+    userMayDiverge: Bool,
+    unknown: Bool,
+};
+
+impl Clone for ProofFunction { };
+
 struct ValidatorContext {
     equalities: List<EqualityFact>,
     applications: List<ApplicationTerm>,
@@ -1034,9 +1044,62 @@ struct ValidatorContext {
     constructorFunctions: List<Int>,
     constructorFields: List<ConstructorField>,
     differences: List<DifferenceFact>,
+    proofFunctions: List<ProofFunction>,
 };
 
 impl Clone for ValidatorContext { };
+
+fn proofAdmission(context: &ValidatorContext, root: Int) -> Int {
+    pending = push([], root);
+    visited = HashSet::new();
+    at = 0;
+    for round in 0..size(context.proofFunctions) + 1 {
+        if at >= size(pending) { return 0; };
+        function = get(pending, at);
+        at = at + 1;
+        if visited.contains(function) = false {
+            count = 0;
+            dependencies = [];
+            io = false;
+            diverges = false;
+            unknown = false;
+            for row in context.proofFunctions {
+                if row.function = function {
+                    count = count + 1;
+                    dependencies = clone(row.dependencies);
+                    io = row.io;
+                    diverges = row.userMayDiverge;
+                    unknown = row.unknown;
+                };
+            };
+            if count != 1 || unknown { return 2; };
+            if io || diverges { return 1; };
+            visited = visited.insert(function);
+            for dependency in dependencies {
+                if visited.contains(dependency) = false && containsValue(pending, dependency) = false {
+                    pending = push(pending, dependency);
+                };
+            };
+        };
+    };
+    if at < size(pending) { return 2; };
+    return 0;
+};
+
+fn unionProofFunctions(left: &List<ProofFunction>, right: &List<ProofFunction>) -> List<ProofFunction> {
+    rows = clone(left);
+    for row in right {
+        found = false;
+        for existing in rows {
+            if existing.function = row.function && existing.dependencies = row.dependencies
+                && existing.io = row.io && existing.userMayDiverge = row.userMayDiverge && existing.unknown = row.unknown {
+                found = true;
+            };
+        };
+        if found = false { rows = push(rows, clone(row)); };
+    };
+    return rows;
+};
 
 // Any equality obtained from bounds relates endpoints of comparisons,
 // differences, constants or disequalities. Equalities to other identifiers
@@ -1617,7 +1680,7 @@ fn canonicalContext(context: &ValidatorContext, known: &List<EqualityFact>) -> V
     for v in context.variants { variants = push(variants, VariantFact { object: canonicalTerm(known, v.object), family: v.family, constructor: v.constructor, matches: v.matches }); };
     differences = [];
     for d in context.differences { differences = push(differences, DifferenceFact { left: canonicalTerm(known, d.left), right: canonicalTerm(known, d.right), bound: d.bound }); };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences, proofFunctions: clone(context.proofFunctions) };
 };
 
 fn linFacts(context: &ValidatorContext) -> List<LinFact> {
@@ -4211,7 +4274,7 @@ fn unionContexts(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     for function in right.constructorFunctions { if constructorSeen.contains(function) = false { constructorSeen = constructorSeen.insert(function); constructorFunctions = push(constructorFunctions, function); }; };
     for field in right.constructorFields { if containsConstructorField(constructorFields, field) = false { constructorFields = push(constructorFields, clone(field)); }; };
     for fact in right.differences { differences = push(differences, clone(fact)); };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences, proofFunctions: unionProofFunctions(left.proofFunctions, right.proofFunctions) };
 };
 
 fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashSet<Int>, term: Int) -> ValueLookup {
@@ -4312,7 +4375,7 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
         object = mergeTerm(joined, ambiguous, fact.object);
         if object is ValueLookup::Found { variants = push(variants, VariantFact { object: (object as ValueLookup::Found).term, family: fact.family, constructor: fact.constructor, matches: fact.matches }); };
     };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences, proofFunctions: clone(context.proofFunctions) };
 };
 
 fn sameEquality(a: &EqualityFact, b: &EqualityFact) -> Bool {
@@ -4356,7 +4419,7 @@ fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     for function in left.constructorFunctions { if rightConstructors.contains(function) { constructorFunctions = push(constructorFunctions, function); }; };
     for field in left.constructorFields { for other in right.constructorFields { if sameConstructorField(field, other) { constructorFields = push(constructorFields, clone(field)); }; }; };
     for fact in left.differences { for other in right.differences { if fact.left = other.left && fact.right = other.right && fact.bound = other.bound { differences = push(differences, clone(fact)); }; }; };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences, proofFunctions: unionProofFunctions(left.proofFunctions, right.proofFunctions) };
 };
 
 // One end of the integer range a term is known to lie in: its constant
@@ -5292,7 +5355,7 @@ fn forgetTerm(context: &ValidatorContext, root: Int) -> ValidatorContext {
         fact = get(context.constants, factPosition);
         if termForgotten(tainted, fact.id) = false { constants = push(constants, clone(fact)); };
     };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
+    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences, proofFunctions: clone(context.proofFunctions) };
 };
 
 fn builtinFacts(context: &ValidatorContext, function: Int, result: Int, args: &List<Int>) -> ValidatorContext {
@@ -5436,6 +5499,8 @@ struct LoopTest { relation: Int, left: ValueRef, right: ValueRef };
 impl Clone for LoopTest { };
 
 enum ExecutionStep {
+    Unsupported,
+    AdmitProofCall { function: Int },
     Assign { local: Int, value: ValueRef },
     Apply { local: Int, result: Int, function: Int, arguments: List<ValueRef> },
     ApplyFresh { local: Int, function: Int, arguments: List<ValueRef> },
@@ -6509,6 +6574,11 @@ fn executeSteps(initial: &ExecutionState, steps: &List<ExecutionStep>) -> Execut
     for i in 0..size(steps) {
         step = get(steps, i);
         handled = false;
+        if step is ExecutionStep::AdmitProofCall {
+            handled = true;
+            admission = proofAdmission(state.context, (step as ExecutionStep::AdmitProofCall).function);
+            if admission != 0 { return ExecutionResult { status: admission, failedAt: i, state: state }; };
+        };
         if step is ExecutionStep::Assign {
             handled = true;
             assign = step as ExecutionStep::Assign;

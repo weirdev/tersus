@@ -2755,7 +2755,7 @@ literalFacts values b0 = foldl addApp ([], b0) (concatMap appsOf (closure Set.em
         _ -> (acc, b)
 
 contextOf :: Build -> MirValue
-contextOf b = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt i | (name, i) <- namedFunctions b, "field:" `isPrefixOf` name]), ("constructorFunctions", MList [MInt i | (name, i) <- namedFunctions b, "ctor:" `isPrefixOf` name]), ("constructorFields", MList [record "ConstructorField" [("constructor", MInt c), ("field", MInt f), ("index", MInt i)] | (c, f, i) <- ctorFields b]), ("differences", MList [])]
+contextOf b = record "ValidatorContext" [("equalities", MList []), ("applications", MList (literalApps b)), ("constants", MList (literalTerms b)), ("orders", MList []), ("different", MList []), ("variants", MList []), ("fieldFunctions", MList [MInt i | (name, i) <- namedFunctions b, "field:" `isPrefixOf` name]), ("constructorFunctions", MList [MInt i | (name, i) <- namedFunctions b, "ctor:" `isPrefixOf` name]), ("constructorFields", MList [record "ConstructorField" [("constructor", MInt c), ("field", MInt f), ("index", MInt i)] | (c, f, i) <- ctorFields b]), ("differences", MList []), ("proofFunctions", MList [])]
 
 -- A proof rule is checked once, generically: its input clauses are assumed
 -- over fresh parameter terms, then its body and output clauses are checked.
