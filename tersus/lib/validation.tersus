@@ -1255,19 +1255,20 @@ fn contradictoryVariants(equalities: &List<EqualityFact>, variants: &List<Varian
 };
 
 fn contradictoryConstructors(equalities: &List<EqualityFact>, applications: &List<ApplicationTerm>, constructors: &List<Int>) -> Bool {
+    // (two constructions in one class whose constructors are not in one class:
+    // each is compared with the first construction of its class)
     constructorSet = HashSet::new();
     for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
+    classes = unionOf(equalities);
+    constructorOfClass = emptyIntMap();
     for aPosition in 0..size(applications) {
-        a = get(applications, aPosition);
-        if constructorSet.contains(a.function) {
-            for bPosition in 0..size(applications) {
-                b = get(applications, bPosition);
-                if constructorSet.contains(b.function) {
-                    if hasEquality(equalities, a.id, b.id) {
-                        if hasEquality(equalities, a.function, b.function) = false { return true; };
-                    };
-                };
-            };
+        function = get(applications, aPosition).function;
+        if constructorSet.contains(function) {
+            r = ufFind(classes, get(applications, aPosition).id);
+            f = ufFind(classes, function);
+            if constructorOfClass.contains(r) {
+                if constructorOfClass.lookup(r, f) != f { return true; };
+            } else { constructorOfClass = constructorOfClass.insert(r, f); };
         };
     };
     return false;
@@ -4439,243 +4440,90 @@ fn sameApplication(a: &ApplicationTerm, b: &ApplicationTerm) -> Bool {
     return a.id = b.id && a.function = b.function && a.arguments = b.arguments;
 };
 
-// The facts both contexts hold, each once. (A fact held twice on each side
-// was kept four times, and the copies multiplied with every join after it.)
-// The facts of the right side are found by a key of each fact, not by a walk
-// over all of them for each fact of the left.
+// A fact a join keeps when both paths hold it: a key that equal facts share,
+// and whether two facts are the same
+trait JoinedFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }];
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }];
+};
+
+impl JoinedFact for EqualityFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return minInt(self.left, self.right); };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameEquality(self, other); };
+};
+
+impl JoinedFact for ApplicationTerm {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.id; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameApplication(self, other); };
+};
+
+impl JoinedFact for ConstantTerm {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.id; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.id = other.id && self.kind = other.kind && self.value = other.value; };
+};
+
+impl JoinedFact for OrderFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.smaller; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.smaller = other.smaller && self.greater = other.greater && self.strict = other.strict; };
+};
+
+impl JoinedFact for DisequalityFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return minInt(self.left, self.right); };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameDisequality(self, other); };
+};
+
+impl JoinedFact for VariantFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.object; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameVariantFact(self, other); };
+};
+
+impl JoinedFact for ConstructorField {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.constructor; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return sameConstructorField(self, other); };
+};
+
+impl JoinedFact for DifferenceFact {
+    fn joinKey(self: &Self) -> Int [{ }] [{ }] { return self.left; };
+    fn sameFact(self: &Self, other: &Self) -> Bool [{ }] [{ }] { return self.left = other.left && self.right = other.right && self.bound = other.bound; };
+};
+
+// The facts of left that right holds too, each once. (A fact held twice on
+// each side was kept four times, and the copies multiplied with every join
+// after it.) The facts of right are found by their key, not by a walk over
+// all of them for each fact of left.
+fn commonFacts<T: JoinedFact + Clone>(left: &List<T>, right: &List<T>) -> List<T> {
+    common = [];
+    byKey = emptyPositions();
+    for rPosition in 0..size(right) {
+        rKey = JoinedFact::joinKey(get(right, rPosition));
+        byKey = byKey.insert(rKey, push(byKey.lookup(rKey, []), rPosition));
+    };
+    kept = emptyPositions();
+    for lPosition in 0..size(left) {
+        lKey = JoinedFact::joinKey(get(left, lPosition));
+        matched = false;
+        for candidate in byKey.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right) {
+                if JoinedFact::sameFact(get(left, lPosition), get(right, candidate)) { matched = true; };
+            };
+        };
+        if matched {
+            already = false;
+            for earlier in kept.lookup(lKey, []) {
+                if already = false && earlier >= 0 && earlier < size(left) {
+                    if JoinedFact::sameFact(get(left, lPosition), get(left, earlier)) { already = true; };
+                };
+            };
+            if already = false {
+                kept = kept.insert(lKey, push(kept.lookup(lKey, []), lPosition));
+                common = push(common, clone(get(left, lPosition)));
+            };
+        };
+    };
+    return common;
+};
+
 fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
-    equalities = [];
-    equalitiesRight = emptyPositions();
-    for rPosition in 0..size(right.equalities) {
-        rKey = minInt(get(right.equalities, rPosition).left, get(right.equalities, rPosition).right);
-        equalitiesRight = equalitiesRight.insert(rKey, push(equalitiesRight.lookup(rKey, []), rPosition));
-    };
-    equalitiesKept = emptyPositions();
-    for lPosition in 0..size(left.equalities) {
-        fact = get(left.equalities, lPosition);
-        lKey = minInt(fact.left, fact.right);
-        matched = false;
-        for candidate in equalitiesRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.equalities) {
-                if sameEquality(fact, get(right.equalities, candidate)) { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in equalitiesKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.equalities) {
-                    if sameEquality(fact, get(left.equalities, earlier)) { kept = true; };
-                };
-            };
-            if kept = false {
-                equalitiesKept = equalitiesKept.insert(lKey, push(equalitiesKept.lookup(lKey, []), lPosition));
-                equalities = push(equalities, clone(fact));
-            };
-        };
-    };
-    applications = [];
-    applicationsRight = emptyPositions();
-    for rPosition in 0..size(right.applications) {
-        rKey = get(right.applications, rPosition).id;
-        applicationsRight = applicationsRight.insert(rKey, push(applicationsRight.lookup(rKey, []), rPosition));
-    };
-    applicationsKept = emptyPositions();
-    for lPosition in 0..size(left.applications) {
-        fact = get(left.applications, lPosition);
-        lKey = fact.id;
-        matched = false;
-        for candidate in applicationsRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.applications) {
-                if sameApplication(fact, get(right.applications, candidate)) { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in applicationsKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.applications) {
-                    if sameApplication(fact, get(left.applications, earlier)) { kept = true; };
-                };
-            };
-            if kept = false {
-                applicationsKept = applicationsKept.insert(lKey, push(applicationsKept.lookup(lKey, []), lPosition));
-                applications = push(applications, clone(fact));
-            };
-        };
-    };
-    constants = [];
-    constantsRight = emptyPositions();
-    for rPosition in 0..size(right.constants) {
-        rKey = get(right.constants, rPosition).id;
-        constantsRight = constantsRight.insert(rKey, push(constantsRight.lookup(rKey, []), rPosition));
-    };
-    constantsKept = emptyPositions();
-    for lPosition in 0..size(left.constants) {
-        fact = get(left.constants, lPosition);
-        lKey = fact.id;
-        matched = false;
-        for candidate in constantsRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.constants) {
-                if fact.id = get(right.constants, candidate).id && fact.kind = get(right.constants, candidate).kind && fact.value = get(right.constants, candidate).value { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in constantsKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.constants) {
-                    if fact.id = get(left.constants, earlier).id && fact.kind = get(left.constants, earlier).kind && fact.value = get(left.constants, earlier).value { kept = true; };
-                };
-            };
-            if kept = false {
-                constantsKept = constantsKept.insert(lKey, push(constantsKept.lookup(lKey, []), lPosition));
-                constants = push(constants, clone(fact));
-            };
-        };
-    };
-    orders = [];
-    ordersRight = emptyPositions();
-    for rPosition in 0..size(right.orders) {
-        rKey = get(right.orders, rPosition).smaller;
-        ordersRight = ordersRight.insert(rKey, push(ordersRight.lookup(rKey, []), rPosition));
-    };
-    ordersKept = emptyPositions();
-    for lPosition in 0..size(left.orders) {
-        fact = get(left.orders, lPosition);
-        lKey = fact.smaller;
-        matched = false;
-        for candidate in ordersRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.orders) {
-                if fact.smaller = get(right.orders, candidate).smaller && fact.greater = get(right.orders, candidate).greater && fact.strict = get(right.orders, candidate).strict { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in ordersKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.orders) {
-                    if fact.smaller = get(left.orders, earlier).smaller && fact.greater = get(left.orders, earlier).greater && fact.strict = get(left.orders, earlier).strict { kept = true; };
-                };
-            };
-            if kept = false {
-                ordersKept = ordersKept.insert(lKey, push(ordersKept.lookup(lKey, []), lPosition));
-                orders = push(orders, clone(fact));
-            };
-        };
-    };
-    different = [];
-    differentRight = emptyPositions();
-    for rPosition in 0..size(right.different) {
-        rKey = minInt(get(right.different, rPosition).left, get(right.different, rPosition).right);
-        differentRight = differentRight.insert(rKey, push(differentRight.lookup(rKey, []), rPosition));
-    };
-    differentKept = emptyPositions();
-    for lPosition in 0..size(left.different) {
-        fact = get(left.different, lPosition);
-        lKey = minInt(fact.left, fact.right);
-        matched = false;
-        for candidate in differentRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.different) {
-                if sameDisequality(fact, get(right.different, candidate)) { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in differentKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.different) {
-                    if sameDisequality(fact, get(left.different, earlier)) { kept = true; };
-                };
-            };
-            if kept = false {
-                differentKept = differentKept.insert(lKey, push(differentKept.lookup(lKey, []), lPosition));
-                different = push(different, clone(fact));
-            };
-        };
-    };
-    variants = [];
-    variantsRight = emptyPositions();
-    for rPosition in 0..size(right.variants) {
-        rKey = get(right.variants, rPosition).object;
-        variantsRight = variantsRight.insert(rKey, push(variantsRight.lookup(rKey, []), rPosition));
-    };
-    variantsKept = emptyPositions();
-    for lPosition in 0..size(left.variants) {
-        fact = get(left.variants, lPosition);
-        lKey = fact.object;
-        matched = false;
-        for candidate in variantsRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.variants) {
-                if sameVariantFact(fact, get(right.variants, candidate)) { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in variantsKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.variants) {
-                    if sameVariantFact(fact, get(left.variants, earlier)) { kept = true; };
-                };
-            };
-            if kept = false {
-                variantsKept = variantsKept.insert(lKey, push(variantsKept.lookup(lKey, []), lPosition));
-                variants = push(variants, clone(fact));
-            };
-        };
-    };
-    constructorFields = [];
-    constructorFieldsRight = emptyPositions();
-    for rPosition in 0..size(right.constructorFields) {
-        rKey = get(right.constructorFields, rPosition).constructor;
-        constructorFieldsRight = constructorFieldsRight.insert(rKey, push(constructorFieldsRight.lookup(rKey, []), rPosition));
-    };
-    constructorFieldsKept = emptyPositions();
-    for lPosition in 0..size(left.constructorFields) {
-        fact = get(left.constructorFields, lPosition);
-        lKey = fact.constructor;
-        matched = false;
-        for candidate in constructorFieldsRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.constructorFields) {
-                if sameConstructorField(fact, get(right.constructorFields, candidate)) { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in constructorFieldsKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.constructorFields) {
-                    if sameConstructorField(fact, get(left.constructorFields, earlier)) { kept = true; };
-                };
-            };
-            if kept = false {
-                constructorFieldsKept = constructorFieldsKept.insert(lKey, push(constructorFieldsKept.lookup(lKey, []), lPosition));
-                constructorFields = push(constructorFields, clone(fact));
-            };
-        };
-    };
-    differences = [];
-    differencesRight = emptyPositions();
-    for rPosition in 0..size(right.differences) {
-        rKey = get(right.differences, rPosition).left;
-        differencesRight = differencesRight.insert(rKey, push(differencesRight.lookup(rKey, []), rPosition));
-    };
-    differencesKept = emptyPositions();
-    for lPosition in 0..size(left.differences) {
-        fact = get(left.differences, lPosition);
-        lKey = fact.left;
-        matched = false;
-        for candidate in differencesRight.lookup(lKey, []) {
-            if matched = false && candidate >= 0 && candidate < size(right.differences) {
-                if fact.left = get(right.differences, candidate).left && fact.right = get(right.differences, candidate).right && fact.bound = get(right.differences, candidate).bound { matched = true; };
-            };
-        };
-        if matched {
-            kept = false;
-            for earlier in differencesKept.lookup(lKey, []) {
-                if kept = false && earlier >= 0 && earlier < size(left.differences) {
-                    if fact.left = get(left.differences, earlier).left && fact.right = get(left.differences, earlier).right && fact.bound = get(left.differences, earlier).bound { kept = true; };
-                };
-            };
-            if kept = false {
-                differencesKept = differencesKept.insert(lKey, push(differencesKept.lookup(lKey, []), lPosition));
-                differences = push(differences, clone(fact));
-            };
-        };
-    };
     fieldFunctions = [];
     rightFields = HashSet::new();
     for function in right.fieldFunctions { rightFields = rightFields.insert(function); };
@@ -4684,7 +4532,7 @@ fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> Validator
     rightConstructors = HashSet::new();
     for function in right.constructorFunctions { rightConstructors = rightConstructors.insert(function); };
     for function in left.constructorFunctions { if rightConstructors.contains(function) { constructorFunctions = push(constructorFunctions, function); }; };
-    return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
+    return ValidatorContext { equalities: commonFacts(left.equalities, right.equalities), applications: commonFacts(left.applications, right.applications), constants: commonFacts(left.constants, right.constants), orders: commonFacts(left.orders, right.orders), different: commonFacts(left.different, right.different), variants: commonFacts(left.variants, right.variants), fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: commonFacts(left.constructorFields, right.constructorFields), differences: commonFacts(left.differences, right.differences) };
 };
 
 // One end of the integer range a term is known to lie in: its constant
@@ -5403,6 +5251,20 @@ fn evalHasApplication(context: &ValidatorContext, id: Int) -> Bool {
     return false;
 };
 
+// A value the context gives a term directly: a constant, or a term its
+// equalities make one (the evaluator asks this of every term it meets, and
+// the closure integerValue reads under is too dear for that)
+fn directIntegerValue(context: &ValidatorContext, term: Int) -> IntegerLookup {
+    classes = unionOf(context.equalities);
+    r = ufFind(classes, term);
+    for cPosition in 0..size(context.constants) {
+        if get(context.constants, cPosition).kind = 0 {
+            if ufFind(classes, get(context.constants, cPosition).id) = r { return IntegerLookup::Found { value: get(context.constants, cPosition).value }; };
+        };
+    };
+    return IntegerLookup::Missing;
+};
+
 fn evalListSize(context: &ValidatorContext, list: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     if evalHasApplication(context, list) = false { return IntegerLookup::Missing; };
     app = evalApplication(context, list);
@@ -5468,7 +5330,7 @@ fn evalListGet(context: &ValidatorContext, list: Int, index: Int, depth: Int) ->
 };
 
 fn evalTermValue(context: &ValidatorContext, term: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
-    known = integerValue(context, term);
+    known = directIntegerValue(context, term);
     if known is IntegerLookup::Found { return known; };
     if depth <= 0 { return IntegerLookup::Missing; };
     if evalHasApplication(context, term) = false { return IntegerLookup::Missing; };
@@ -5523,7 +5385,7 @@ fn evalTermValue(context: &ValidatorContext, term: Int, depth: Int) -> IntegerLo
 // constant, so the searches see it like any other known value.
 fn recordEvaluatedValue(state: &ExecutionState, term: Int) -> ExecutionState {
     out = clone(state);
-    if integerValue(state.context, term) is IntegerLookup::Missing {
+    if directIntegerValue(state.context, term) is IntegerLookup::Missing {
         value = evalTermValue(state.context, term, 6);
         if value is IntegerLookup::Found {
             out = ExecutionState { context: ValidatorContext { constants: push(clone(state.context.constants), ConstantTerm { id: term, kind: 0, value: (value as IntegerLookup::Found).value }), ..clone(state.context) }, locals: clone(state.locals), templates: clone(state.templates) };
