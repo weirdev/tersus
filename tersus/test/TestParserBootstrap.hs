@@ -394,8 +394,8 @@ coldAndReuse = modifyMVar coldReuseResults $ \saved -> case saved of
             (worker "cold" home [("TERSUS_PARSER_BOOTSTRAP_PARTICIPANT", "A")])
             (worker "concurrent" home [("TERSUS_PARSER_BOOTSTRAP_PARTICIPANT", "B")]) $ \readFirst readSecond -> do
                 first <- try readFirst :: IO (Either SomeException (ExitCode, String, String))
-                second <- try readSecond :: IO (Either SomeException (ExitCode, String, String))
                 cold <- workerResult "cold A" first
+                second <- try readSecond :: IO (Either SomeException (ExitCode, String, String))
                 peer <- workerResult "cold B" second
                 names <- listDirectory (home </> "tersus")
                 let concurrent = firstFailure [cold, peer,
@@ -427,11 +427,18 @@ coldAndReuse = modifyMVar coldReuseResults $ \saved -> case saved of
         Just _ -> throwIO ex
         Nothing -> pure (Just (displayException ex))
 
+coldWorkerStages :: IO TestResult
+coldWorkerStages = do
+    result <- coldStages
+    case result of
+        Just e -> pure (Just e)
+        Nothing -> warmStages
+
 coldProcess :: IO TestResult
 coldProcess = do
     mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
     case mode of
-        Just "cold" -> coldStages
+        Just "cold" -> coldWorkerStages
         Just _ -> pure Nothing
         Nothing -> do
             (cold, _, _) <- coldAndReuse
@@ -451,7 +458,7 @@ concurrentCold :: IO TestResult
 concurrentCold = do
     mode <- lookupEnv "TERSUS_PARSER_BOOTSTRAP_WORKER"
     case mode of
-        Just "concurrent" -> coldStages
+        Just "concurrent" -> coldWorkerStages
         Just _ -> pure Nothing
         Nothing -> do
             (_, _, concurrent) <- coldAndReuse
