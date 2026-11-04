@@ -35,7 +35,7 @@ import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import Seed (cachedSeed, emitterHash)
 import Modules (LoadResult (..), loadFromEntry, resolverFromFiles)
 import PackageCompile (compileModulesValidated)
-import PreludeSource (boxSource, listsSource, mirPackageFiles)
+import PreludeSource (boxSource, listsSource, mirPackageFiles, toolPackageFiles)
 import Types (Type (..))
 import Utils
 
@@ -263,10 +263,10 @@ toolValidatedProgram entry = unsafePerformIO $ modifyMVar validatedPrograms $ \m
             Ok program -> pure (Map.insert entry program made, Ok program)
 
 compileToolProgram :: FilePath -> Result Program String
-compileToolProgram entry = case loadFromEntry (resolverFromFiles mirPackageFiles) entry of
+compileToolProgram entry = case loadFromEntry (resolverFromFiles toolPackageFiles) entry of
     Left e -> Error e
     Right (PackageResult pkg) -> compileModulesValidated pkg
-    Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in the mir package")
+    Right (StandaloneResult _ _) -> Error ("internal: " ++ entry ++ " is not in an embedded tool package")
 
 -- The program that native code is made of, for a program of the mir package
 -- the host compiles itself (the emitter, the checker, the eraser): validated,

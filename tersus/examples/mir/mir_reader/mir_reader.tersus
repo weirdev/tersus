@@ -1,3 +1,5 @@
+import data::codec::codec { Parsed, printInt, printWord, printName, printNames, printInts, newLine, printType, wordOf };
+
 // The MIR as data, read and written by a program (step 31 of the roadmap, see STEP31.md). It reads what `tersus mir --data` prints (see MirData in MIR.md)
 // from the standard input into the types below, which are those of Mir.hs, and writes it again: the output is the input. It is the start of the lowering to LLVM IR
 // that is written in Tersus (the emitter reads the program in this form), and the first program of its size, so it is also a test of the validator.
@@ -18,124 +20,12 @@
 // not longer than `lineLimit` bytes. An end of the input, or an empty line, is the end of the file. The types, tokenizer and parsers are the shared
 // reader of the mir package (`examples/mir/reader/reader.tersus`), imported below; this file keeps the writer and the program that runs.
 
-import mir::reader::reader { Size, Type, Field, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords, wordOf, quoted, programAt, readLines };
+import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords, programAt, readLines };
 
 
 // Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
 
-fn hexDigit(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
-    if d < 10 { return toByte(48 + d); };
-    return toByte(55 + d);
-};
-
-fn printInt(n: Int) -> Int [{ }] [{ }] {
-    return " ".print() + String::fromInt(n).print();
-};
-
-fn printWord(w: &String) -> Int [{ }] [{ }] {
-    return " ".print() + w.print();
-};
-
 // A name in quotes: the bytes that are printable ASCII as they are, and the others, `"` and `\` as `\xHH`
-fn printName(name: &String) -> Int [{ }] [{ }] {
-    n = " \"".print();
-    for i in 0..size(name.bytes) {
-        c = toInt(get(&name.bytes, i));
-        if c >= 32 && c < 127 && c != 34 && c != 92 {
-            writeByte(toByte(c));
-            n = n + 1;
-        } else {
-            writeByte(toByte(92));
-            writeByte(toByte(120));
-            writeByte(hexDigit(c / 16));
-            writeByte(hexDigit(c % 16));
-            n = n + 4;
-        };
-    };
-    writeByte(toByte(34));
-    return n + 1;
-};
-
-fn printNames(names: &List<String>) -> Int [{ }] [{ }] {
-    n = printInt(size(names));
-    for name in &names {
-        n = n + printName(name);
-    };
-    return n;
-};
-
-fn printInts(ints: &List<Int>) -> Int [{ }] [{ }] {
-    n = printInt(size(ints));
-    for v in &ints {
-        n = n + printInt(v);
-    };
-    return n;
-};
-
-fn newLine() -> Int [{ }] [{ }] {
-    writeByte(toByte(10));
-    return 1;
-};
-
-fn printSize(s: &Size) -> Int [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => " c".print() + printInt(n),
-        Size::SAny => " any".print(),
-        Size::SParam { name: name } => " p".print() + printName(name),
-        Size::SVar { n: n } => " v".print() + printInt(n),
-    };
-};
-
-fn printType(t: &Type) -> Int ~ {
-    n = 0;
-    match t {
-        Type::TInt => { n = " int".print(); },
-        Type::TByte => { n = " byte".print(); },
-        Type::TBool => { n = " bool".print(); },
-        Type::TList { elem: e } => { n = " named \"List\" 1 type".print() + printType(Box::unbox(e)); },
-        Type::TArray { elem: e, size: s } => { n = " array".print() + printType(Box::unbox(e)) + printSize(s); },
-        Type::TBox { inner: e } => { n = " named \"Box\" 1 type".print() + printType(Box::unbox(e)); },
-        Type::TFn { args: args, ret: r } => {
-            n = " fn".print() + printInt(size(args));
-            i = 0;
-            while i < size(args) [{ affirm i >= 0; affirm i <= size(args); }] ~ {
-                n = n + printType(get(args, i));
-                i = i + 1;
-            };
-            n = n + printType(Box::unbox(r));
-        },
-        Type::TNamed { name: name, base: base, argc: argc, argTokens: argTokens } => {
-            n = " named".print() + printName(base) + printInt(argc);
-            for tok in argTokens {
-                if tok.quoted {
-                    n = n + printName(&tok.text);
-                } else {
-                    n = n + printWord(&tok.text);
-                };
-            };
-        },
-        Type::TVariant { name: name } => { n = " variant".print() + printName(name); },
-        Type::TVar { n: v } => { n = " var".print() + printInt(v); },
-        Type::TForall { sizes: sizes, types: types, body: body } => {
-            n = " forall".print() + printNames(sizes) + printNames(types) + printType(Box::unbox(body));
-        },
-        Type::TParam { name: name } => { n = " param".print() + printName(name); },
-        Type::TRef { inner: e } => { n = " ref".print() + printType(Box::unbox(e)); },
-        Type::TMutRef { inner: e } => { n = " mutref".print() + printType(Box::unbox(e)); },
-        Type::TAddr { inner: e } => { n = " addr".print() + printType(Box::unbox(e)); },
-        Type::TBlock { inner: e } => { n = " block".print() + printType(Box::unbox(e)); },
-        Type::TUninit { inner: e } => { n = " uninit".print() + printType(Box::unbox(e)); },
-        Type::TWord { signed: signed, bits: bits } => {
-            w = " u32";
-            if signed && bits = 8 { w = " i8"; };
-            if signed && bits = 16 { w = " i16"; };
-            if signed && bits = 32 { w = " i32"; };
-            if !signed && bits = 16 { w = " u16"; };
-            n = w.print();
-        },
-    };
-    return n;
-};
 
 fn printConstant(c: &Constant) -> Int ~ {
     n = 0;

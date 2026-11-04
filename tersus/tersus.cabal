@@ -1,6 +1,6 @@
 cabal-version: 2.2
 
--- This file has been generated from package.yaml by hpack version 0.34.6.
+-- This file has been generated from package.yaml by hpack version 0.37.0.
 --
 -- see: https://github.com/sol/hpack
 
@@ -25,10 +25,15 @@ extra-source-files:
     examples/mir/reader/reader.tersus
     examples/mir/emit/emit.tersus
     examples/mir/mir_reader/mir_reader.tersus
-    examples/ast_reader.tersus
+    examples/data/package.tersus
+    examples/data/codec/codec.tersus
+    examples/data/ast/ast.tersus
+    examples/ast_reader/package.tersus
+    examples/ast_reader/ast_reader.tersus
     AST_DATA.md
     bootstrap/emitter.sha256
-    examples/parser.tersus
+    examples/parser/package.tersus
+    examples/parser/parser.tersus
     examples/mir/mir_verify/mir_verify.tersus
     examples/mir/mir_erase/mir_erase.tersus
     lib/validation.tersus
@@ -53,6 +58,8 @@ library
       Ghost
       Hash
       Interface
+      LibPackage
+      LibParsed
       Linear
       Link
       LlvmRuntime
@@ -166,12 +173,14 @@ test-suite tersus-test
       TestControl
       TestCopies
       TestData
+      TestDataCodec
       TestDeref
       TestEq
       TestGenerics
       TestHarness
       TestHashMap
       TestHashSet
+      TestLibModules
       TestMirData
       TestMirEmit
       TestMirErase

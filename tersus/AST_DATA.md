@@ -1,6 +1,6 @@
 # AST as data
 
-`AstData` and `examples/ast_reader.tersus` exchange syntax without running the
+`AstData` and `examples/ast_reader/ast_reader.tersus` exchange syntax without running the
 proof engine. This is a development-stage bridge for the frontend and MIR
 lowering ports in `REPLACING_HASKELL.md`, not a new CLI command or production
 frontend. Parsing, elaboration and validation are unchanged.
@@ -24,7 +24,13 @@ preserves **both** `[Statement]` and the complete ordered `[Type]` of
 bridge neither infers them again nor claims to validate an elaborated program.
 A parsed reader refuses an elaborated header, and vice versa.
 
-Tersus (`examples/ast_reader.tersus`, one file, no include/module dependency):
+Tersus (`examples/ast_reader/ast_reader.tersus`, entry of the `ast_reader` package):
+
+It imports `data::codec::codec` for the shared token, integer, escaping and
+size/type wire codec, and `data::ast::ast` for the AST arena schema and writer.
+The native parser imports those same modules. The AST reader's strict record
+and UTF-8 checks remain local; MIR records and legacy eraser type output remain
+in the MIR package.
 
 - `readAst() -> Parsed<AstProgram>` reads standard input. Only `ok: true` gives
   a usable program.
@@ -120,8 +126,9 @@ relations are `Eq`, `NotEq`, `Lt`, `Gt`, `LtEq`, `GtEq`.
 The builtin's `Arg` is structural even when its type contains such a named
 type. `DataCodec` shares Haskell quoting, token parsing and type/size output
 with `MirData`; the AST reader adds strict numeric, count and UTF-8 checks.
-The copied Tersus codec is identity-tested against `mir_reader.tersus` and
-its type definitions against `emit.tersus`.
+The shared Tersus modules are checked by canonical import identity, exact wire
+output, preserved named-type argument tokens, malformed-input refusals and the
+existing AST/MIR/native parser parity sweeps.
 
 Unquoted numeric payloads and MIR type/size numbers are signed 64-bit decimal;
 counts must be nonnegative and fit the record. Records are bounded by the
@@ -135,7 +142,7 @@ integer **value** literals have no such numeric limit.
 
 ## The parser written in Tersus
 
-`examples/parser.tersus` is a hand-written parser over bytes (in the manner of
+`examples/parser/parser.tersus` is a hand-written parser over bytes (in the manner of
 `examples/mir_reader.tersus`) for the whole language. It builds the arena of
 this document directly and writes `tersus-ast 1 parsed` for it, byte for byte
 as `AstData.writeParsed` writes the Haskell parse of the same program,
@@ -145,9 +152,15 @@ applications, a standard `Eq` or `Clone` impl is written out, and so on). The
 arena is built in parse order and renumbered at the end into the emission
 order above; nodes a failed speculation built are unreachable and dropped.
 
-The host (`src/TersusParser.hs`) builds the parser through the isolated Haskell
-bootstrap, then runs a native executable. Its fingerprinted disk cache and
-cross-process lock are the existing `Native.cachedProgram` mechanism. Unset
+The host (`src/TersusParser.hs`) loads `PreludeSource.parserPackageFiles` through
+the ordinary `Modules` resolver and `PackageCompile` Haskell bootstrap, then
+runs a native executable. The embedded snapshot includes the package markers,
+shared data modules and generated `unicode.tersus` root-module file, whose
+predicates use the serving Haskell compiler's Unicode categories. No native
+parser is called to build itself. The cache key covers every snapshot path and
+source, the emitter and runtime; source changes in an imported module rekey it.
+Its fingerprinted disk cache and cross-process lock are the existing
+`Native.cachedProgram` mechanism. Unset
 `TERSUS_PARSER` or `native` selects it. `interpreted` explicitly selects the MIR
 interpreter; `haskell` selects the one-release oracle. Build, process and
 protocol failures are errors, never fallback decisions.

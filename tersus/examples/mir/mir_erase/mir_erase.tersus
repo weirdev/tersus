@@ -1,3 +1,5 @@
+import data::codec::codec { Token, Size, Type, quoted, parseInt, printInt, printWord, printName, printNames, printInts, newLine, printSize, wordOf };
+
 // The ghosts of a program, erased by a program in Tersus. The host runs this on every program (MirHousekeeping) after validation and before anything else. It is checked against the erasure it replaced by TestMirErase.
 // It reads the MIR as data before its ghosts are erased (`tersus mir --ghost-data`, version 2 of the data in MirData: the types
 // include `block T` and `uninit T`, and the statements include `ghost` and `dissolve L`), takes the permissions and the rest of
@@ -18,73 +20,12 @@
 // data; earlier this file's copy of the reader ordered that table differently and used its own numbers 35 to 42,
 // 48 (for `uninitEmpty`) and 42 (for `blockCast`), which are 46 to 53, 35 and 53 in the shared table.
 
-import mir::reader::reader { Token, Size, Type, Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords, wordOf, parseInt, quoted, ghostProgramAt, readLines };
+import mir::reader::reader { Field, Variant, TypeDecl, Constant, Operand, RefStep, Rvalue, Statement, Terminator, MirBlock, LocalDecl, Function, Program, binaryWords, listWords, ghostProgramAt, readLines };
 
 
 // Writing. A token is written with a space before it, and a record starts with its word without one. Every function gives the number of bytes it wrote.
 
-fn hexDigit(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
-    if d < 10 { return toByte(48 + d); };
-    return toByte(55 + d);
-};
-
-fn printInt(n: Int) -> Int [{ }] [{ }] {
-    return " ".print() + String::fromInt(n).print();
-};
-
-fn printWord(w: &String) -> Int [{ }] [{ }] {
-    return " ".print() + w.print();
-};
-
 // A name in quotes: the bytes that are printable ASCII as they are, and the others, `"` and `\` as `\xHH`
-fn printName(name: &String) -> Int [{ }] [{ }] {
-    n = " \"".print();
-    for i in 0..size(name.bytes) {
-        c = toInt(get(name.bytes, i));
-        if c >= 32 && c < 127 && c != 34 && c != 92 {
-            writeByte(toByte(c));
-            n = n + 1;
-        } else {
-            writeByte(toByte(92));
-            writeByte(toByte(120));
-            writeByte(hexDigit(c / 16));
-            writeByte(hexDigit(c % 16));
-            n = n + 4;
-        };
-    };
-    writeByte(toByte(34));
-    return n + 1;
-};
-
-fn printNames(names: &List<String>) -> Int [{ }] [{ }] {
-    n = printInt(size(names));
-    for name in names {
-        n = n + printName(name);
-    };
-    return n;
-};
-
-fn printInts(ints: &List<Int>) -> Int [{ }] [{ }] {
-    n = printInt(size(ints));
-    for v in ints {
-        n = n + printInt(v);
-    };
-    return n;
-};
-
-fn newLine() -> Int [{ }] [{ }] {
-    writeByte(toByte(10));
-    return 1;
-};
-
-fn printSize(s: &Size) -> Int [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => " c".print() + printInt(n),
-        Size::SAny => " any".print(),
-        Size::SParam { name: name } => " p".print() + printName(name),
-        Size::SVar { n: n } => " v".print() + printInt(n),
-    };
-};
 
 fn printType(t: &Type) -> Int ~ {
     n = 0;
@@ -775,8 +716,6 @@ fn typeText(t: &Type) -> String ~ {
     };
     return r;
 };
-
-
 
 // ---- the erasure ----
 

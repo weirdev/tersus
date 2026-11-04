@@ -19,7 +19,7 @@ import qualified Data.Map as Map
 import Cli
 import Modules (LoadResult (..))
 import qualified Modules
-import PreludeSource (parserSource)
+import PreludeSource (parserPackageFiles)
 import qualified Mir as M
 import MirEval
 import MirLower
@@ -53,9 +53,11 @@ testExampleFile :: FilePath -> ExampleExpectation -> Test
 testExampleFile path expectation = TestCase path $ do
     root <- Modules.findPackageRootIO path
     lowered <- case root of
-        Nothing -> if path == "examples/parser.tersus" then pure (compileSource parserSource) else compileSource <$> readFile path
+        Nothing -> compileSource <$> readFile path
         Just _ -> do
-            loaded <- loadFromFilesystem path
+            loaded <- if path == "examples/parser/parser.tersus"
+                then pure (Modules.loadFromEntry (Modules.resolverFromFiles parserPackageFiles) path)
+                else loadFromFilesystem path
             case loaded of
                 Left err -> pure (Error err)
                 Right (PackageResult pkg) -> pure (compileModulesToProgram pkg)
@@ -134,8 +136,8 @@ exampleExpectations =
     , ("examples/upper.tersus", ((ExpectReturn (VInt 0))))
     , ("examples/text.tersus", ((ExpectReturn (VInt 504))))
     , ("examples/mir/mir_reader/mir_reader.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/ast_reader.tersus", ((ExpectReturn (VInt 1))))
-    , ("examples/parser.tersus", ((ExpectReturn (VInt 1))))
+    , ("examples/ast_reader/ast_reader.tersus", ((ExpectReturn (VInt 1))))
+    , ("examples/parser/parser.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/mir/mir_verify/mir_verify.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/mir/mir_erase/mir_erase.tersus", ((ExpectReturn (VInt 1))))
     , ("examples/mir/emit/emit.tersus", ((ExpectReturn (VInt 1))))

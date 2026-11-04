@@ -14,12 +14,6 @@ import Syntax (Statement)
 import TestHarness
 import Utils
 
-parserPath :: FilePath
-parserPath = "examples/parser.tersus"
-
-readerPath :: FilePath
-readerPath = "examples/ast_reader.tersus"
-
 haskellParsed :: String -> Either String [Statement]
 haskellParsed source = case Compile.parseSource source of
     Ok statements -> Right statements
@@ -231,26 +225,6 @@ importsVerdict = do
         , testAssertEq (haskellData "import geo; import geo::Point as P { x }; return 0;") (Left "imports are not linked yet: geo, geo::Point")
         ]
 
-writerIdentity :: IO TestResult
-writerIdentity = do
-    parser <- readFile parserPath
-    reader <- readFile readerPath
-    let block start end text = takeWhile (not . isPrefixOf' end) (dropWhile (not . isPrefixOf' start) (lines text))
-        isPrefixOf' prefix line = prefix `isInfixOf` line
-        writerFunctions = ["hexDigit", "printInt", "printWord", "printName", "printNames", "printInts", "newLine", "printSize", "printType", "isWord", "printNode", "printBool", "printAst"]
-        function name text = unlines (takeThrough (== "};") (dropWhile (\line -> not (("fn " ++ name) `isPrefixOf` line)) (lines text)))
-        functionPrint = function
-        astTypes = block "enum AstName" "enum AstNode" parser
-        astTypesReader = block "enum AstName" "enum AstNode" reader
-    pure $ firstFailure
-        ( testAssertEq astTypes astTypesReader
-        : [prefix name (testAssertEq (function name parser) (functionPrint name reader)) | name <- writerFunctions]
-        )
-  where
-    takeThrough _ [] = []
-    takeThrough p (x : xs) = x : if p x then [] else takeThrough p xs
-    prefix :: String -> TestResult -> TestResult
-    prefix n = fmap ((n ++ ": ") ++)
 
 firstFailure :: [TestResult] -> TestResult
 firstFailure [] = Nothing
@@ -277,7 +251,6 @@ testParser = TestList "testParser"
     , TestCase "large located arena exceeds former recursive stack limit" (compareWith haskellData tersusData (concat ["x" ++ show i ++ " = " ++ show i ++ ";\n" | i <- [0 :: Int .. 4095]] ++ "return 0;\n"))
     , TestCase "many function-body arenas retain canonical order" (compareWith haskellData tersusData (concat ["fn f" ++ show i ++ "() -> Int ~ { return " ++ show i ++ "; };\n" | i <- [0 :: Int .. 255]] ++ "return 0;\n"))
     , TestCase "native response framing and OS failures" responseVerdicts
-    , TestCase "writer identity with ast_reader" writerIdentity
     , TestCase "imports are not linked yet" importsVerdict
     , TestCase "generated snippet parity" snippetParity
     , TestCase "three interpreted smoke programs" interpretedSmoke

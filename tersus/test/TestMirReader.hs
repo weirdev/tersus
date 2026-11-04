@@ -1,9 +1,9 @@
 module TestMirReader (testMirReader, withProgram, sameText) where
 
+import qualified TersusParser
 import Data.List (isPrefixOf)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
-import PreludeSource (parserSource)
 
 import Bootstrap (emitterHash, llvmOfOwned, tersusLlvm)
 import Cli (Command (..), World (..), noWorld, runProgramIn, runSourceIn)
@@ -76,7 +76,7 @@ withProgram path name use = do
         else do
             files <- Modules.snapshotFromFilesystem (Modules.normalizePath path)
             backend <- lookupEnv "TERSUS_PARSER"
-            let hash = fingerprint [packageCacheInput path files, show backend, emitterHash, parserSource, runtimeSource]
+            let hash = fingerprint [packageCacheInput path files, show backend, emitterHash, TersusParser.parserHash, runtimeSource]
                 build output = do
                     ir <- if "examples/mir/" `isPrefixOf` path
                         then ownedFromFiles path files >>= \owned -> case owned of

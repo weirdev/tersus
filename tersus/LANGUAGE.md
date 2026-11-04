@@ -2,7 +2,13 @@
 
 Tersus is a small imperative language for writing ordinary computations next to proof and validation statements. The current implementation supports integers, booleans, lists, user-defined functions, nested blocks, and a proof validator built around an internal proof engine for equality, simple rewrites, and builtin function contracts.
 
-This guide describes the implementation in this package. Source and module files use the native parser written in Tersus (`examples/parser.tersus`). Its first build needs clang and the pinned emitter seed; subsequent runs use the fingerprinted cache. Native tool failures are errors. `TERSUS_PARSER=interpreted` explicitly selects the reference parser interpreter, and `TERSUS_PARSER=haskell` keeps the Haskell oracle for one release. Parser diagnostics retain the Tersus parser's wording. Runnable programs are in [`examples/`](examples/README.md).
+This guide describes the implementation in this package. Source and module files use the native parser written in Tersus (`examples/parser/parser.tersus`). Its first build needs clang and the pinned emitter seed; subsequent runs use the fingerprinted cache. Native tool failures are errors. `TERSUS_PARSER=interpreted` explicitly selects the reference parser interpreter, and `TERSUS_PARSER=haskell` keeps the Haskell oracle for one release. Parser diagnostics retain the Tersus parser's wording. Runnable programs are in [`examples/`](examples/README.md).
+
+The parser bootstrap uses the embedded `parser` package and its shared
+`data::codec` / `data::ast` imports, including generated Unicode predicates.
+Imported constructors are seeded under their source spellings; canonical
+identities retain their declaring package, including enum arms reached through
+aliases. Imports do not make unrelated sibling declarations visible.
 
 ## Program Shape
 

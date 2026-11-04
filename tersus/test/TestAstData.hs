@@ -5,6 +5,10 @@ import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (listDirectory)
 import System.Exit (ExitCode (..))
 
+import qualified Modules as Mod
+import qualified PackageCompile as Package
+import Parse (fileBody)
+import PreludeSource (toolPackageFiles)
 import qualified AstData as A
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
@@ -20,6 +24,7 @@ import Seed (cachedSeed, seedHash)
 import MirEval (fromMirValue)
 import StdLibDefs (stdlibBuiltin)
 import Syntax
+import TestDataCodec (testDataCodec)
 import TestHarness
 import TestNative (clangAvailable, runExecutableBytes)
 import TypeCheck (Elaborated (..), elaborate)
@@ -27,13 +32,18 @@ import Types
 import Utils
 
 readerPath :: FilePath
-readerPath = "examples/ast_reader.tersus"
+readerPath = "examples/ast_reader/ast_reader.tersus"
 
-corpus :: IO [(String, String)]
+corpus :: IO [(String, Result [Statement] String)]
 corpus = do
     paths <- concat <$> mapM files ["examples", "examples/rejected", "lib"]
     fromFiles <- mapM (\p -> (,) p <$> readFile p) paths
-    pure (fromFiles ++ generated)
+    let packages = ["examples/parser/parser.tersus", readerPath]
+        packageTrees entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) entry of
+            Left err -> [(entry, Error err)]
+            Right (Mod.PackageResult pkg) -> [(Mod.loadedFilePath file, Ok (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
+            Right _ -> [(entry, Error "AST corpus tool is not a package")]
+    pure ([(path, parsed source) | (path, source) <- fromFiles ++ generated] ++ concatMap packageTrees packages)
   where
     files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
     generated =
@@ -96,13 +106,34 @@ corpusHaskell :: IO TestResult
 corpusHaskell = do
     sources <- corpus
     pure $ firstFailure
-        [ prefix name $ case parsed source of
+        [ prefix name $ case tree of
             Error e -> if knownParserRejection name e then Nothing else Just e
             Ok ss -> firstFailure [roundTrip ss, case elaborate ss of
                 Error _ -> Nothing
                 Ok e -> elaboratedRoundTrip e]
-        | (name, source) <- sources
+        | (name, tree) <- sources
         ]
+
+toolElaborated :: FilePath -> Result [Elaborated] String
+toolElaborated entry = case Mod.loadFromEntry (Mod.resolverFromFiles toolPackageFiles) entry of
+    Left err -> Error err
+    Right (Mod.PackageResult pkg) -> Package.compileModules pkg `bindResult` \compiled ->
+        Ok (map Package.compiledElaborated (Package.compiledModules compiled))
+    Right _ -> Error "AST corpus tool is not a package"
+
+packageElaboratedRoundTrips :: IO TestResult
+packageElaboratedRoundTrips = pure $ firstFailure
+    [case toolElaborated entry of
+        Error err -> Just err
+        Ok modules -> firstFailure (map elaboratedRoundTrip modules)
+    | entry <- [readerPath, "examples/parser/parser.tersus"]]
+
+nativeElaboratedPackages :: IO TestResult
+nativeElaboratedPackages = withAstReader $ \exe -> do
+    results <- forM [readerPath, "examples/parser/parser.tersus"] $ \entry -> case toolElaborated entry of
+        Error err -> pure (Just err)
+        Ok modules -> firstFailure <$> mapM (nativeText exe . dataElaborated) modules
+    pure (firstFailure results)
 
 firstFailure :: [TestResult] -> TestResult
 firstFailure [] = Nothing
@@ -266,29 +297,10 @@ haskellRefused s = case A.readParsed s of
     Error _ -> Nothing
     Ok _ -> Just "accepted malformed AST"
 
-sameCodec :: IO TestResult
-sameCodec = do
-    ast <- readFile readerPath
-    reader <- readFile "examples/mir/reader/reader.tersus"
-    mirReader <- readFile "examples/mir/mir_reader/mir_reader.tersus"
-    emit <- readFile "examples/mir/emit/emit.tersus"
-    let mir = reader ++ "\n" ++ mirReader
-        emitter = reader ++ "\n" ++ emit
-    let block s = takeWhile (not . isPrefixOf "struct Field") (dropWhile (not . isPrefixOf "struct Token") (lines s))
-        function n s = unlines (takeThrough (== "};") (dropWhile (not . isPrefixOf ("fn " ++ n)) (lines s)))
-        names = ["failed", "done", "noNames", "noInts", "hexValue", "quoted", "tokenize", "parseInt", "wordAt", "nameAt", "intAt", "countAt", "namesAt", "intsAt", "sizeAt", "catStrings", "renderSizeForName", "isBareLowerName", "renderTypeForName", "typeAt", "hexDigit", "printInt", "printWord", "printName", "printNames", "printInts", "newLine", "printSize", "printType", "isWord", "indexOf", "wordOf"]
-        astTypes = takeWhile (not . isPrefixOf "// ---- end MIR codec types") (dropWhile (not . isPrefixOf "struct Token") (lines ast))
-    pure $ firstFailure
-        (testAssertEq astTypes (block mir) : testAssertEq (block emitter) (block mir) :
-        [prefix n (testAssertEq (function n ast) (function n mir)) | n <- names])
-  where
-    takeThrough _ [] = []
-    takeThrough p (x : xs) = x : if p x then [] else takeThrough p xs
 
 interpreted :: [Statement] -> [String] -> IO TestResult
 interpreted ss args = do
-    source <- readFile readerPath
-    compiled <- compileOnce source
+    compiled <- programFromFile readerPath
     pure $ case compiled `bindResult` runProgramIn noWorld{worldInput = dataParsed ss, worldArgs = args} of
         Error e -> Just e
         Ok ((out, err), _) ->
@@ -314,8 +326,8 @@ withAstReader use = do
     if not available
         then putStrLn "[SKIP] native AST reader: clang is unavailable" >> pure Nothing
         else do
-            source <- readFile readerPath
-            checked <- compileOnce source
+            files <- Mod.snapshotFromFilesystem readerPath
+            checked <- programFromFiles readerPath files
             seed <- cachedSeed
             case (checked, seed) of
                 (Error e, _) -> pure (Just e)
@@ -328,7 +340,7 @@ withAstReader use = do
                             case ir of
                                 Error e -> pure (Error e)
                                 Ok text -> buildExecutable output text
-                    built <- cachedProgram "test-ast-reader" (fingerprint [dataText, seedHash]) "the validated AST reader" build
+                    built <- cachedProgram "test-ast-reader" (fingerprint [packageCacheInput readerPath files, dataText, seedHash]) "the validated AST reader" build
                     case built of
                         Error e -> pure (Just e)
                         Ok exe -> use exe
@@ -341,7 +353,7 @@ nativeText exe text = do
 nativeCorpus :: IO TestResult
 nativeCorpus = withAstReader $ \exe -> do
     sources <- corpus
-    results <- forM sources $ \(name, source) -> case parsed source of
+    results <- forM sources $ \(name, tree) -> case tree of
         Error e -> pure (if knownParserRejection name e then Nothing else Just (name ++ ": " ++ e), 0 :: Int, 0 :: Int)
         Ok ss -> do
             p <- nativeText exe (dataParsed ss)
@@ -379,7 +391,7 @@ nativeMutation = withAstReader $ \exe -> do
 
 testAstData :: Test
 testAstData = TestList "testAstData"
-    [ TestCase "MIR copied codec identity" sameCodec
+    [ testDataCodec
     , testCase "checked writer refuses unsupported numeric and record sizes" writerLimits
     , testCase "all syntax constructors and builtins" (roundTrip fixtures)
     , testCase "builtin Eq hides metadata but serialization preserves it" metadata
@@ -387,6 +399,7 @@ testAstData = TestList "testAstData"
     , testCase "deep expression arena" (roundTrip deep)
     , testCase "long UTF-8 names are chunked" (firstFailure [roundTrip longNames, testAssertTrue (all ((< 10000) . length) (lines (dataParsed longNames)))])
     , TestList "malformed protocol" [testCase n (firstFailure [haskellAccepted control, haskellRefused bad]) | (n, control, bad) <- refusals]
+    , TestCase "packaged tools retain elaborated AST and occurrence types" packageElaboratedRoundTrips
     , TestCase "whole parsed and elaborated source corpus" corpusHaskell
     ]
 
@@ -399,5 +412,6 @@ testAstReader = TestList "testAstReader"
     , TestCase "native exact printed byte counts" nativeCount
     , TestCase "native malformed protocol" nativeRefusals
     , TestCase "native semantic mutation" nativeMutation
+    , TestCase "packaged elaborated tools native round trip" nativeElaboratedPackages
     , TestCase "whole corpus native round trip" nativeCorpus
     ]

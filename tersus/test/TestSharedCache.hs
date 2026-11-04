@@ -7,7 +7,7 @@ import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, sort)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
-import PreludeSource (mirPackageFiles, parserSource)
+import PreludeSource (mirPackageFiles)
 import Seed (emitterHash)
 import qualified TersusParser
 import qualified Modules
@@ -103,7 +103,7 @@ rawNamedTruncation name suffix = do
     case cache of
         Error e -> pure (Just e)
         Ok dir -> do
-            let exe = dir </> ("tersus-parser-" ++ fingerprint [emitterHash, parserSource, runtimeSource])
+            let exe = dir </> ("tersus-parser-" ++ TersusParser.parserHash)
                 request ty = unlines
                     [ "tersus-file-parse 1", "decls", "ctors 0", "types 0", "self none"
                     , "selfType some " ++ ty, "typeParams 0", "generics 0", "implParams 0"
@@ -815,7 +815,7 @@ parserRetryProbe = do
     case primed of
         Left e -> pure (Just e)
         Right _ -> do
-            let parser = home </> "tersus" </> ("tersus-parser-" ++ fingerprint [emitterHash, parserSource, runtimeSource])
+            let parser = home </> "tersus" </> ("tersus-parser-" ++ TersusParser.parserHash)
                 source = "return 987823;"
             before <- bracket (renameFile parser (parser ++ ".held"))
                 (\_ -> renameFile (parser ++ ".held") parser)

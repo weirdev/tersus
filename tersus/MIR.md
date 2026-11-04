@@ -271,6 +271,13 @@ A local that is given a value frees the one it held (assigning null does nothing
 
 ## The MIR as data
 
+The MIR package imports `data::codec::codec` for `Token`, `Parsed`, `Size`,
+`Type`, tokenization, escaping, decimal numbers and size/type read/write helpers.
+AST consumers import that same module; the MIR record schema and program
+readers/writers stay in `examples/mir`. The eraser keeps its local type writer
+because its legacy `list`/`box` spelling differs from the normalizing AST/MIR
+round-trip writer.
+
 `tersus mir --data <file>` prints the MIR that native code is made from (the owned MIR of the Ownership section) as text that a program can read, and `MirData` reads and writes it (`readProgram (writeProgram p) = Ok (forNative p)`, for every example and every program of the native tests: `TestMirData`). It is what the lowering to LLVM IR written in Tersus is given (`STEP31.md`), and the emitter gives the same IR for the program read back from the data as for the program (`TestMirEmit`), so the data is all that the code made needs. Only what the emitter uses is in it: the ghost statements, the contracts and loop invariants, the structs with sizes and the invariants of structs are left out (`forNative`), since the validator is done with them and monomorphization has made their copies.
 
 The reader and writer in Tersus are `examples/mir/mir_reader/mir_reader.tersus`: the types of the MIR as enums and structs (`Type`, `Constant`, `Operand`, `Rvalue`, `Statement`, `Terminator`, `Block`, `Function`, `Program`; a binary or list operation is its index in the table of words `binaryWords` or `listWords`, the order of `MirData`), a tokenizer, a parser for each of them and a writer. `tersus mir --data p.tersus | tersus run examples/mir/mir_reader/mir_reader.tersus` prints the data again, byte for byte (`TestMirReader` does it natively for every example, every program of the native tests, and for the reader's own data, and has it refuse the texts that are not the data of a program). It reads the file that the writer of `MirData` makes: the types, then the functions, then `main`, a record to a line, and it stops at the first empty line. `examples/mir/emit/emit.tersus` is the lowering to LLVM IR written with that reader; it writes all of the IR of the program (`TestMirEmit`), and with the arguments `outline` and `bodies` the declarations with the descriptors and the entry point, and the code of each function.
