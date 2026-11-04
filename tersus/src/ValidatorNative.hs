@@ -10,8 +10,9 @@
 -- own regression test validates it like any other program. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits, withVerdictLock) where
 
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
@@ -137,14 +138,28 @@ oneAtATime (text : rest) found = do
             let found' = Map.insert (Map.size found) v found
              in if status /= 0 then pure (Ok found') else oneAtATime rest found'
 
+{-# NOINLINE verdictLocks #-}
+verdictLocks :: MVar (Map.Map FilePath (MVar ()))
+verdictLocks = unsafePerformIO (newMVar Map.empty)
+
+verdictLock :: FilePath -> IO (MVar ())
+verdictLock path = modifyMVar verdictLocks $ \locks -> case Map.lookup path locks of
+    Just lock -> pure (locks, lock)
+    Nothing -> do
+        lock <- newMVar ()
+        pure (Map.insert path lock locks, lock)
+
 withVerdictLock :: String -> IO a -> IO a
 withVerdictLock text action = do
     file <- verdictFile text
     case file of
         Nothing -> action
         Just path -> do
-            createDirectoryIfMissing True (takeDirectory path)
-            bracket (openFile (path ++ ".lock") ReadWriteMode) hClose (\handle -> hLock handle ExclusiveLock >> action)
+            lock <- verdictLock path
+            -- GHC locks writable Handles in-process before hLock can wait.
+            withMVar lock $ \_ -> do
+                createDirectoryIfMissing True (takeDirectory path)
+                bracket (openFile (path ++ ".lock") ReadWriteMode) hClose (\handle -> hLock handle ExclusiveLock >> action)
 
 -- The compiled validator's verdicts over the functions given: each one up
 -- to the first refused is proved, the refused one has its own

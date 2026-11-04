@@ -185,6 +185,7 @@ originalGroups =
     , testModules
     , testBuiltinRegistry
     , testSharedCache
+    , testVerdictLocks
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
