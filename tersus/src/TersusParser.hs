@@ -18,6 +18,7 @@ module TersusParser
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
 import System.Environment (lookupEnv)
+import System.Directory (doesFileExist, findExecutable)
 import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
 
@@ -35,7 +36,7 @@ import MirHousekeeping (cachedEmitter, nativeProgram, toolProgram)
 import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import PreludeSource (parserPackageFiles)
-import Seed (emitterHash, cachedParserSeed)
+import Seed (emitterHash, cachedParserSeed, cachedSeed)
 import Syntax (Statement)
 import Utils
 
@@ -158,11 +159,15 @@ toolBox :: MVar (Maybe Tool)
 toolBox = unsafePerformIO (newMVar Nothing)
 
 parserTool :: IO Tool
-parserTool = modifyMVar toolBox $ \made -> case made of
-    Just tool -> pure (made, tool)
-    Nothing -> do
-        tool <- nativeTool
-        pure (Just tool, tool)
+parserTool = modifyMVar toolBox $ \made -> do
+    live <- case made of
+        Just tool@(ToolNative exe) -> do
+            present <- doesFileExist exe
+            pure (if present then Just tool else Nothing)
+        _ -> pure Nothing
+    tool <- maybe nativeTool pure live
+    let keep = case tool of ToolNative _ -> Just tool; _ -> Nothing
+    pure (keep, tool)
 
 {-# NOINLINE interpretedBox #-}
 interpretedBox :: MVar (Maybe Tool)
@@ -178,30 +183,46 @@ interpretedToolOnce = modifyMVar interpretedBox $ \made -> case made of
                 Ok _ -> case validatedParserProgram of
                     Error e -> ToolFailed e
                     Ok program -> ToolInterpreted program
-        pure (Just tool, tool)
+        let keep = case tool of ToolInterpreted _ -> Just tool; _ -> Nothing
+        pure (keep, tool)
 
 nativeTool :: IO Tool
 nativeTool = do
-    made <- cachedProgram "tersus-parser" parserHash "the parser written in Tersus" buildTool
-    pure $ case made of
-        Ok exe -> ToolNative exe
-        Error e -> ToolFailed ("Native parser bootstrap failed: " ++ e)
+    seed <- cachedParserSeed
+    case seed of
+        Error e -> pure (ToolFailed e)
+        Ok _ -> do
+            made <- cachedProgram "tersus-parser" parserHash "the parser written in Tersus" buildTool
+            pure $ case made of
+                Ok exe -> ToolNative exe
+                Error e -> ToolFailed ("Native parser bootstrap failed: " ++ e)
 
 buildTool :: FilePath -> IO (Result () String)
 buildTool output = do
-    ir <- emitParserIr
-    case ir of
-        Error e -> pure (Error e)
-        Ok text -> buildExecutable output text
+    clang <- findExecutable "clang"
+    case clang of
+        Nothing -> pure (Error "Could not run clang: clang was not found")
+        Just _ -> do
+            ir <- emitParserIr
+            case ir of
+                Error e -> pure (Error e)
+                Ok text -> buildExecutable output text
 
 emitParserIr :: IO (Result String String)
 emitParserIr = do
-    emitter <- cachedEmitter
-    case emitter of
+    parser <- cachedParserSeed
+    zero <- case parser of
         Error e -> pure (Error e)
-        Ok exe -> case ownedParserProgram of
-            Error e -> pure (Error e)
-            Ok program -> runWithInput exe (writeProgram program)
+        Ok _ -> cachedSeed
+    case zero of
+        Error e -> pure (Error e)
+        Ok _ -> do
+            emitter <- cachedEmitter
+            case emitter of
+                Error e -> pure (Error e)
+                Ok exe -> case ownedParserProgram of
+                    Error e -> pure (Error e)
+                    Ok program -> runWithInput exe (writeProgram program)
 
 {-# NOINLINE validatedParserProgram #-}
 validatedParserProgram :: Result Program String
