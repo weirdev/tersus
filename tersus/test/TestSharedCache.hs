@@ -893,7 +893,7 @@ copyCompiledTools from to = do
 
 compiledToolName :: String -> Bool
 compiledToolName name = any (`isPrefixOf` name)
-    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "tersus_rt_"]
+    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "parser-seed-", "tersus-parser-", "tersus_rt_"]
     && not (".lock" `isInfixOf` name)
 
 withCacheHome :: (FilePath -> IO a) -> IO a
