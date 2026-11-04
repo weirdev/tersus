@@ -13,6 +13,7 @@ import System.FilePath ((</>))
 import System.IO.Unsafe (unsafePerformIO)
 
 import qualified AstData
+import qualified PackageCompile
 import qualified Compile
 import FileParserProtocol
 import qualified FileParserProtocol as File
@@ -1423,7 +1424,12 @@ nativeLoadCase label accepted oracleAction nativeAction expectedOutput = TestCas
 
 testNativeModuleLoader :: Test
 testNativeModuleLoader = TestList "native-module-loader"
-    [ TestList "existing module controls"
+    [ TestList "cross-package codec prerequisites"
+        [ nativeLoadCase label accepted (pure (loadFromEntry resolver "pkgs/app/main.tersus")) (\parser -> pure (loadFromEntryWith parser resolver "pkgs/app/main.tersus")) Nothing
+        | (label, accepted, source) <- crossPackageSyntax
+        , let resolver = resolverFromFiles (crossPackageFiles source)
+        ]
+    , TestList "existing module controls"
         [ nativeLoadCase label accepted (pure (loadFromEntry resolver entry)) (\parser -> pure (loadFromEntryWith parser resolver entry)) output
         | (label, accepted, files, entry, output) <-
             [ ("base package", True, basePkg, "app/main.tersus", Nothing)
@@ -1464,5 +1470,122 @@ testNativeModuleLoader = TestList "native-module-loader"
         , ("app/geo/geo.tersus", "struct Point { x: Int }; impl Clone for Point { }; impl Eq for Point { }; fn make(x: Int) -> Point [{ }] [{ }] { return Point { x: x }; };")
         ]
 
+crossPackageFiles :: String -> Files
+crossPackageFiles source =
+    [ ("pkgs/app/package.tersus", ""), ("pkgs/app/main.tersus", source)
+    , ("pkgs/left/package.tersus", ""), ("pkgs/left/a/a.tersus", "enum E { A, B };")
+    , ("pkgs/left/generic/generic.tersus", "struct Packet<T> { value: T }; struct Empty { };")
+    , ("pkgs/left/model.tersus", "struct Twin { value: Int };")
+    , ("pkgs/right/package.tersus", ""), ("pkgs/right/right.tersus", "enum E { A, B, C };")
+    , ("pkgs/right/model.tersus", "struct Twin { value: Int };")
+    , ("pkgs/unrelated/package.tersus", ""), ("pkgs/unrelated/a/a.tersus", "enum E { A { incompatible: Bool } };")
+    ]
+
+crossPackageSyntax :: [(String, Bool, String)]
+crossPackageSyntax =
+    [ ("qualified generic struct", True, "import left::generic as l; p = l::Packet<Int> { value: 12 }; return p.value;")
+    , ("qualified empty struct", True, "import left::generic as l; p = l::Empty { }; return 1;")
+    , ("unknown qualified single struct arm", False, "import left::generic { Empty }; p = Empty { }; return match p { bogus::Empty { } => 1, };")
+    , ("qualified struct still requires braces", False, "import left::generic as l; p = l::Empty; return 1;")
+    , ("imported enum Clone generation uses source names", True, "import left::a as p; trait Clone { fn clone(self: &Self) -> Self [{ }] [{ affirm return = self; }]; }; impl Clone for p::E { }; return 0;")
+    , ("selected enum keeps its owner", True, "import left::a { E }; import right; s = E::B; return match s { E::A => 1, E::B => 2, };")
+    , ("foreign fieldless final arm", False, "import left::a { E }; import right as q; s = E::B; return match s { E::A => 1, q::right::E::B => 2, };")
+    , ("unknown qualified final arm", False, "import left::a { E }; s = E::B; return match s { E::A => 1, bogus::E::B => 2, };")
+    , ("alias duplicate variant", False, "import left::a as l { E }; s = E::A; return match s { E::A => 1, l::E::A => 2, E::B => 3, };")
+    , ("unimported qualified literal", False, "s = left::a::E::A; return 0;")
+    , ("unimported qualified type", True, "fn f(s: left::a::E) -> Int { return 0; }; return 0;")
+    ]
+
+testCrossPackageBoundaries :: Test
+testCrossPackageBoundaries = TestList "cross-package-boundaries"
+    ([testCase label (case loadPkg (crossPackageFiles source) "pkgs/app/main.tersus" of
+        Left err -> if accepted then Just err else Nothing
+        Right _ -> if accepted then Nothing else Just "invalid imported constructor accepted")
+      | (label, accepted, source) <- crossPackageSyntax]
+    ++ [ testCase "owning package preserves nominal identity" $ case loadPkg (crossPackageFiles "import left as l; import right as r; fn bad(x: l::model::Twin) -> r::model::Twin { return x; }; return 0;") "pkgs/app/main.tersus" of
+            Left err -> Just err
+            Right pkg -> testAssertErrorContains "right$model$Twin" (PackageCompile.compileModulesValidated pkg)
+       , testCase "unimported type cannot compile" $ case loadPkg (crossPackageFiles "fn f(s: left::a::E) -> Int { return 0; }; return 0;") "pkgs/app/main.tersus" of
+            Left _ -> Nothing
+            Right pkg -> testAssertErrorContains "unknown type" (PackageCompile.compileModulesValidated pkg)
+       , testCase "unused dependency root cannot introduce a cycle" $ case loadPkg
+            [ ("pkgs/app/package.tersus", ""), ("pkgs/app/main.tersus", "import dep::core { Point }; p = Point { x: 1 }; return p.x;")
+            , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "import dep::unused;")
+            , ("pkgs/dep/unused/unused.tersus", "import dep;")
+            , ("pkgs/dep/core/core.tersus", "struct Point { x: Int };")
+            ] "pkgs/app/main.tersus" of
+                Left err -> Just err
+                Right pkg -> testAssertEq (moduleOrder pkg) ["dep::core", "app"]
+       , testCase "unused root bodies do not need foreign constructors" $ case loadPkg
+            [ ("pkgs/app/package.tersus", ""), ("pkgs/app/main.tersus", "import dep::core { Point }; p = Point { x: 1 }; return p.x;")
+            , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "import common::e as c; fn unused() -> Int ~ { x = c::E::A; return 0; };")
+            , ("pkgs/dep/core/core.tersus", "struct Point { x: Int };")
+            , ("pkgs/common/package.tersus", ""), ("pkgs/common/e/e.tersus", "enum E { A };")
+            ] "pkgs/app/main.tersus" of
+                Left err -> Just err
+                Right pkg -> testAssertEq (moduleOrder pkg) ["dep::core", "app"]
+       , testCase "declaration scan ignores comments and quoted bodies" $ case Oracle.parseDeclarationNames "// fn hidden() {};\nfn core() -> Int { s = \"{ fn fake; }\"; return 0; }; enum E { A { x: Int }, B }; struct S { x: Int };" of
+            Left err -> Just (show err)
+            Right names -> testAssertEq names ["core", "E", "E::A", "E::B", "S"]
+       , testCase "callback deletion of an overlapped seed is retained" $ case loadFromEntryWith deleteCallback (resolverFromFiles
+            [ ("pkgs/app/package.tersus", ""), ("pkgs/app/a.tersus", "@deleted@"), ("pkgs/app/gate.tersus", "@gate@"), ("pkgs/app/z.tersus", "import dep { Gate };\n@delete@")
+            , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "@incoming@")
+            ]) "pkgs/app/a.tersus" of
+                Left err -> Just err
+                Right (PackageResult _) -> Nothing
+                Right _ -> Just "expected callback package"
+       , testCase "callback delta survives without imported seed leakage" $ case loadFromEntryWith callback (resolverFromFiles
+            [ ("pkgs/app/package.tersus", ""), ("pkgs/app/a.tersus", "@need-final@"), ("pkgs/app/z.tersus", "import dep;\n@promote@")
+            , ("pkgs/dep/package.tersus", ""), ("pkgs/dep/dep.tersus", "@seed@")
+            ]) "pkgs/app/a.tersus" of
+                Left err -> Just err
+                Right (PackageResult pkg) -> testAssertTrue (any (elem (Return (Val (VInt 88))) . fileBody . loadedParsed) [file | modu <- packageModules pkg, file <- loadedModuleFiles modu, loadedFileName file == "a.tersus"])
+                Right _ -> Just "expected callback package"
+       ])
+  where
+    deleteCallback decls source
+        | source == "@incoming@" = Right (ParsedFile [] [StructDef "Gate" [] [("new", TBool)] []], decls{declCtors = Map.insert "Gate" ["new"] (declCtors decls)})
+        | source == "@gate@" = Right (ParsedFile [] [StructDef "Gate" [] [("old", TInt)] []], decls{declCtors = Map.insert "Gate" ["old"] (declCtors decls)})
+        | source == "import dep { Gate };\n@delete@" = Right (ParsedFile [Import ["dep"] Nothing (Just ["Gate"]) 1 1] [], decls{declCtors = Map.insert "deleted" [] (Map.delete "Gate" (declCtors decls))})
+        | source == "@deleted@", Map.member "deleted" (declCtors decls), Map.notMember "Gate" (declCtors decls) = Right (ParsedFile [] [Return (Val (VInt 88))], decls)
+        | otherwise = Left "callback deletion was not preserved"
+    callback decls source
+        | source == "@seed@" = Right (ParsedFile [] [StructDef "Seed" [] [] []], decls)
+        | source == "import dep;\n@promote@" = do
+            (parsedFile, returned) <- injectedFileParser decls "@promote@"
+            Right (parsedFile{fileImports = [Import ["dep"] Nothing Nothing 1 1]}, returned)
+        | source == "@need-final@", any (`Map.member` declCtors decls) ["dep::Seed", "dep::dep::Seed"] = Left "imported seed leaked between files"
+        | otherwise = injectedFileParser decls source
+
+testCrossPackageConstructors :: Test
+testCrossPackageConstructors = testCaseSeq "cross-package-constructor-seeds"
+    [ accepts "import provider::shapes as p; s = p::Shape::A { value: 7 }; return match s { p::Shape::A { value: v } => v, p::Shape::B => 0, };" 7
+    , accepts "import provider::shapes::shapes { Shape }; s = Shape::A { value: 8 }; return match s { Shape::A { value: v } => v, Shape::B => 0, };" 8
+    , accepts "import provider::shapes::Shape; s = Shape::A { value: 9 }; return match s { Shape::A { value: v } => v, Shape::B => 0, };" 9
+    , accepts "import provider::shapes as p; enum Shape { Local }; s = p::Shape::A { value: 10 }; return match s { p::Shape::A { value: v } => v, p::Shape::B => 0, };" 10
+    , accepts "import provider::shapes as p; import other as q; a = p::Shape::A { value: 11 }; b = q::other::Shape::Other { flag: true }; return match a { p::Shape::A { value: v } => v, p::Shape::B => 0, };" 11
+    , refuses "s = provider::shapes::Shape::A { value: 7 }; return 0;"
+    , refuses "fn f(s: provider::shapes::Shape) -> Int { return 0; }; return 0;"
+    , refuses "import provider::shapes as p; fn f(s: other::shapes::Shape) -> Int { return 0; }; return 0;"
+    , refuses "import provider::shapes as p; s = other::shapes::Shape::Other { flag: true }; return 0;"
+    ]
+  where
+    files source =
+        [ ("pkgs/app/package.tersus", ""), ("pkgs/app/main.tersus", source)
+        , ("pkgs/provider/package.tersus", ""), ("pkgs/provider/shapes/shapes.tersus", "enum Shape { A { value: Int }, B };")
+        , ("pkgs/other/package.tersus", ""), ("pkgs/other/other.tersus", "enum Shape { Other { flag: Bool } };")
+        ]
+    checked source = case loadPkg (files source) "pkgs/app/main.tersus" of
+        Left err -> Error err
+        Right pkg -> PackageCompile.compileModulesValidated pkg
+    accepts source expected = case checked source of
+        Error err -> Just err
+        Ok program -> case runProgram program of
+            Error err -> Just err
+            Ok result -> testAssertEq (fmap renderMirValue result) (Just (show expected))
+    refuses source = case checked source of
+        Error _ -> Nothing
+        Ok _ -> Just "unimported qualified constructor/type became visible"
+
 testModules :: Test
-testModules = TestList "testModules" [testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]
+testModules = TestList "testModules" [testCrossPackageBoundaries, testCrossPackageConstructors, testNativeFiles, testNativeModuleLoader, testFileProtocol, testLoaderInjection, testPaths, testMatchOverReference, testCanonical, testImports, testLoaderDiscovery, testLoaderGraph, testLoaderErrors, testLoaderLevels, testLoaderFilesystem, testModuleCheckBasic, testModuleCheckTraits, testModuleCheckWithin, testModuleLinkEval, testModuleLinkPrune, testModuleLinkGenerics, testModuleLinkDrop, testModuleLinkMutual, testModuleLinkRoot, testModuleLinkExtern, testModuleLinkBorrow, testModuleQualifiedGenerics, testModuleAssumptions, testModuleCliFilesystem, testModuleLibraries, testModuleLinkLibCollision]

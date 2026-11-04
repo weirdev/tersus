@@ -16,6 +16,7 @@ module Modules
     , renderModuleId
     , ImportLevel (..)
     , ResolvedImport (..)
+    , importPrefixes
     , LoadedFile (..)
     , LoadedModule (..)
     , LoadedPackage (..)
@@ -30,7 +31,7 @@ module Modules
     ) where
 
 import Control.Monad (filterM)
-import Data.List (intercalate, isPrefixOf, nub, sort, stripPrefix)
+import Data.List (intercalate, isInfixOf, isPrefixOf, nub, sort, stripPrefix)
 import qualified Data.Map.Strict as Map
 import Data.Maybe (fromMaybe)
 import qualified Data.Set as Set
@@ -349,6 +350,30 @@ data ResolvedImport = ResolvedImport
     }
     deriving (Eq, Show)
 
+importPrefixes :: String -> Bool -> Name -> ResolvedImport -> [[String]]
+importPrefixes fileSeg isCollapsed local ri =
+    let imp = resolvedImport ri
+        modu = resolvedTargetModule ri
+        pkgName = modulePackage modu
+        moduleSeg = fromMaybe pkgName (moduleName modu)
+        modSegs = maybe [] pure (moduleName modu)
+        alias = importAlias imp
+        bareForListed = case importNames imp of
+            Just names -> local `elem` names || takeWhile (/= ':') local `elem` names
+            Nothing -> False
+        levelPrefixes = case resolvedLevel ri of
+            LevelSymbol -> [[]]
+            LevelFile -> [[fileSeg]] ++ maybe [] (\name -> [[name]]) alias
+            LevelModule ->
+                let full = [pkgName] ++ modSegs ++ [fileSeg]
+                    shortened = [moduleSeg, fileSeg]
+                    collapsedFull = [pkgName] ++ modSegs
+                    collapsedShort = [moduleSeg]
+                    bases = [shortened, full] ++ (if isCollapsed then [collapsedShort, collapsedFull] else [])
+                    aliased = maybe [] (\name -> [[name, fileSeg]] ++ (if isCollapsed then [[name]] else [])) alias
+                 in bases ++ aliased
+     in (if bareForListed || resolvedLevel ri == LevelSymbol then [[]] else []) ++ levelPrefixes
+
 data LoadedFile = LoadedFile
     { loadedFileModule :: ModuleId
     , loadedFileName :: String
@@ -475,6 +500,7 @@ data LState = LState
     { lsFileParser :: FileParser
     , lsLayouts :: Map.Map String Layout
     , lsParsed :: Map.Map ModuleId PModule
+    , lsParsing :: [ModuleId]
     , lsResolved :: Map.Map (ModuleId, String) [ResolvedImport]
     , lsOrder :: [ModuleId]
     , lsDone :: Set.Set ModuleId
@@ -569,25 +595,29 @@ checkDeclarationsOnly moduleId entry False body = go 1 body
                         ++ " is not a declaration"
                     )
 
--- Parsing one module (all its files as one unit), without resolving
--- its imports. The entry file is exempt from declarations-only.
+-- Imported constructors must be available before the body can parse.
+-- The entry file is exempt from declarations-only.
 parseModule :: Resolver -> FilePath -> Layout -> Maybe String -> LoadM PModule
 parseModule resolver entryPath layout moduleName = do
     state <- getM
     let moduleId = layoutModuleId layout moduleName
     case Map.lookup moduleId (lsParsed state) of
         Just parsed -> pureM parsed
-        Nothing -> do
-            files <- parseFiles (lsFileParser state)
-            let parsed = PModule layout moduleId moduleName files
-            modifyM (\s -> s{lsParsed = Map.insert moduleId parsed (lsParsed s)})
-            pureM parsed
+        Nothing
+            | moduleId `elem` lsParsing state -> failM ("module import cycle: " ++ intercalate " -> " (map renderModuleId (dropWhile (/= moduleId) (lsParsing state) ++ [moduleId])))
+            | otherwise -> do
+                modifyM (\s -> s{lsParsing = lsParsing s ++ [moduleId]})
+                seeds <- mapM_M importSeedFor entries
+                files <- parseFiles (lsFileParser state) seeds
+                let parsed = PModule layout moduleId moduleName files
+                modifyM (\s -> s{lsParsed = Map.insert moduleId parsed (lsParsed s), lsParsing = lsParsing state})
+                pureM parsed
   where
     moduleId = layoutModuleId layout moduleName
     entries = layoutModuleFiles layout moduleName
-    parseFiles fileParser = do
+    parseFiles fileParser seeds = do
         texts <- mapM_M readEntry entries
-        case parseModuleFiles fileParser resolver layout moduleId entries texts of
+        case parseModuleFiles fileParser resolver layout moduleId entries seeds texts of
             Left err -> failM err
             Right parsedFiles -> mapM_M checkOne (zip texts parsedFiles)
       where
@@ -597,6 +627,69 @@ parseModule resolver entryPath layout moduleName = do
         checkOne ((entry, source), parsedFile) = case checkDeclarationsOnly moduleId entry (fePath entry == entryPath) (fileBody parsedFile) of
             Left err -> failM err
             Right () -> pureM (PFile entry parsedFile (declarationNames (fileBody parsedFile)) source)
+    importSeedFor entry = do
+        source <- maybe (failM ("file not found: " ++ fePath entry)) pureM (resolverReadFile resolver (fePath entry))
+        imports <- case Parse.parseImportPrefix source of
+            Left err -> failM ("parse error in file " ++ fePath entry ++ ": " ++ show err)
+            Right found -> pureM found
+        declarations <- mapM_M (seedImport entry) imports
+        pureM (fePath entry, foldl addImportedDecls emptyDecls declarations)
+    seedImport entry imp = do
+        target <- ensureLayout resolver layout (head (importPath imp))
+        case target of
+            Left _ -> resolveImport True resolver entryPath layout (PModule layout moduleId moduleName []) entry imp >> pureM emptyDecls
+            Right targetLayout -> do
+                let rest = tail (importPath imp)
+                    targetName = case rest of
+                        name : _ | Map.member name (layModules targetLayout) -> Just name
+                        _ -> Nothing
+                    targetId = layoutModuleId targetLayout targetName
+                if targetId == moduleId then pureM emptyDecls else do
+                    targetModule <- parseModule resolver entryPath targetLayout targetName
+                    (resolved, _) <- resolveImport True resolver entryPath layout (PModule layout moduleId moduleName []) entry imp
+                    let collapsed = layoutCollapsedFile targetLayout targetName
+                        covers file = maybe True (== feStem (pfEntry file)) (resolvedTargetFile resolved)
+                        visible name = maybe True (\n -> name == n || takeWhile (/= ':') name == n) (resolvedTargetSymbol resolved)
+                        rename file name = [intercalate "::" (prefix ++ Parse.splitPath name) | prefix <- importPrefixes (feStem (pfEntry file)) (fmap feStem collapsed == Just (feStem (pfEntry file))) name resolved]
+                        declared file = [stmt | stmt <- fileBody (pfParsed file), case stmt of StructDef{} -> True; EnumDef{} -> True; TraitDef{} -> True; _ -> False]
+                    pureM (foldl addImportedDecls emptyDecls [seedSpelling name spelling (canonicalOf (pmId targetModule) (Just (feStem (pfEntry file))) (Just name)) stmt | file <- pmFiles targetModule, covers file, stmt <- declared file, name <- take 1 (declarationNames [stmt]), visible name, spelling <- rename file name])
+    seedSpelling old new canonical stmt = case stmt of
+        StructDef _ params fields invariant ->
+            let seed = Parse.declsFromStatements emptyDecls [StructDef new params fields invariant]
+             in seed{Parse.declTypes = Map.singleton new [canonical]}
+        EnumDef _ variants ->
+            let seed = Parse.declsFromStatements emptyDecls [EnumDef new [(new ++ drop (length old) variant, fields) | (variant, fields) <- variants]]
+             in seed{Parse.declTypes = Map.singleton new [canonical ++ drop (length old) variant | (variant, _) <- variants]}
+        TraitDef _ params functions -> Parse.declsFromStatements emptyDecls [TraitDef new params functions]
+        _ -> emptyDecls
+
+addImportedDecls :: Decls -> Decls -> Decls
+addImportedDecls base imported = base
+    { Parse.declCtors = Map.union (Parse.declCtors imported) (Parse.declCtors base)
+    , Parse.declTypes = Map.union (Parse.declTypes imported) (Parse.declTypes base)
+    , Parse.declGenerics = Map.union (Parse.declGenerics imported) (Parse.declGenerics base)
+    , Parse.declFieldTypes = Map.union (Parse.declFieldTypes imported) (Parse.declFieldTypes base)
+    }
+
+withoutImportedDecls :: Decls -> Decls -> Decls -> [Statement] -> Decls
+withoutImportedDecls base imported parsed body = parsed
+    { Parse.declCtors = restore Parse.declCtors
+    , Parse.declTypes = restore Parse.declTypes
+    , Parse.declGenerics = restore Parse.declGenerics
+    , Parse.declFieldTypes = restore Parse.declFieldTypes
+    }
+  where
+    own = Parse.declsFromStatements emptyDecls body
+    restore :: Eq a => (Decls -> Map.Map Name a) -> Map.Map Name a
+    restore field =
+        let before = field base
+            incoming = field imported
+            after = field parsed
+            declared = field own
+            unchanged key value = Map.lookup key after == Just value && Map.notMember key declared
+         in Map.union
+                (Map.filterWithKey (\key value -> Map.lookup key incoming /= Just value || Map.member key declared) after)
+                (Map.intersection before (Map.filterWithKey unchanged incoming))
 
 -- A file can name, in a struct or enum literal, a match pattern, an
 -- `is`/`as` test or explicit generic arguments, a type declared in
@@ -608,9 +701,26 @@ parseModule resolver entryPath layout moduleName = do
 -- round makes no progress. A file that still does not parse is
 -- reported with the error it gives on its own, exactly as a
 -- single-file parse reports it.
-parseModuleFiles :: FileParser -> Resolver -> Layout -> ModuleId -> [FileEntry] -> [(FileEntry, String)] -> Either String [ParsedFile]
-parseModuleFiles fileParser resolver layout moduleId ownEntries ownTexts =
-    let seed = seedDecls fileParser resolver layout ownEntries
+parseModuleDeclarations :: Resolver -> Layout -> LoadM PModule
+parseModuleDeclarations resolver layout = do
+    state <- getM
+    let moduleId = layoutModuleId layout Nothing
+    files <- mapM_M (readNames (lsFileParser state)) (layRootFiles layout)
+    pureM (PModule layout moduleId Nothing files)
+  where
+    readNames fileParser entry = do
+        source <- maybe (failM ("file not found: " ++ fePath entry)) pureM (resolverReadFile resolver (fePath entry))
+        case fileParser (locating libraryDecls) source of
+            Right (parsed, _) -> pureM (PFile entry parsed (declarationNames (fileBody parsed)) source)
+            Left err
+                | "Parser tool failure:" `isInfixOf` err -> failM err
+                | otherwise -> case Parse.parseDeclarationNames source of
+                    Left err' -> failM ("parse error in file " ++ fePath entry ++ ": " ++ show err')
+                    Right names -> pureM (PFile entry (ParsedFile [] []) names source)
+
+parseModuleFiles :: FileParser -> Resolver -> Layout -> ModuleId -> [FileEntry] -> [(FilePath, Decls)] -> [(FileEntry, String)] -> Either String [ParsedFile]
+parseModuleFiles fileParser resolver layout moduleId ownEntries seeds ownTexts =
+    let seed = seedDecls fileParser resolver layout ownEntries seeds
         ordered = [entry | (entry, _) <- ownTexts]
      in case iterateParses seed ownTexts [] of
             Right done -> Right [parsedFile | entry <- ordered, Just parsedFile <- [lookup (fePath entry) done]]
@@ -627,8 +737,8 @@ parseModuleFiles fileParser resolver layout moduleId ownEntries ownTexts =
     pass decls pending = go decls pending [] []
       where
         go d [] remaining done = (d, reverse remaining, reverse done)
-        go d ((entry, text) : rest) remaining done = case fileParser (locating d) text of
-            Right (parsedFile, d') -> go d' rest remaining ((fePath entry, parsedFile) : done)
+        go d ((entry, text) : rest) remaining done = case fileParser (locating (addImportedDecls d (fromMaybe emptyDecls (lookup (fePath entry) seeds)))) text of
+            Right (parsedFile, d') -> go (withoutImportedDecls d (fromMaybe emptyDecls (lookup (fePath entry) seeds)) d' (fileBody parsedFile)) rest remaining ((fePath entry, parsedFile) : done)
             Left _ -> go d rest ((entry, text) : remaining) done
 
 -- The declarations the compiler libraries make, from their one parse
@@ -640,8 +750,8 @@ libraryDecls = case libParsed of
     Right parsed -> lpDecls parsed
     Left _ -> emptyDecls
 
-seedDecls :: FileParser -> Resolver -> Layout -> [FileEntry] -> Decls
-seedDecls fileParser resolver layout ownEntries = loop libraryDecls texts
+seedDecls :: FileParser -> Resolver -> Layout -> [FileEntry] -> [(FilePath, Decls)] -> Decls
+seedDecls fileParser resolver layout ownEntries seeds = loop libraryDecls texts
   where
     layoutEntries = layRootFiles layout ++ concat (Map.elems (layModules layout))
     ordered = ownEntries ++ [entry | entry <- layoutEntries, fePath entry `notElem` map fePath ownEntries]
@@ -655,8 +765,8 @@ seedDecls fileParser resolver layout ownEntries = loop libraryDecls texts
     pass decls pending = go decls pending []
       where
         go d [] remaining = (d, reverse remaining)
-        go d ((entry, text) : rest) remaining = case fileParser (locating d) text of
-            Right (_, d') -> go d' rest remaining
+        go d ((entry, text) : rest) remaining = case fileParser (locating (addImportedDecls d (fromMaybe emptyDecls (lookup (fePath entry) seeds)))) text of
+            Right (parsed, d') -> go (withoutImportedDecls d (fromMaybe emptyDecls (lookup (fePath entry) seeds)) d' (fileBody parsed)) rest remaining
             Left _ -> go d rest ((entry, text) : remaining)
 
 -- Import resolution.
@@ -682,6 +792,7 @@ listDecls names = case nub names of
     unique -> intercalate ", " unique
 
 resolveImport ::
+    Bool ->
     Resolver ->
     FilePath ->
     Layout ->
@@ -689,11 +800,11 @@ resolveImport ::
     FileEntry ->
     Import ->
     LoadM (ResolvedImport, Maybe ModuleId)
-resolveImport resolver entryPath sourceLayout sourceModule sourceFile imp = do
+resolveImport seeding resolver entryPath sourceLayout sourceModule sourceFile imp = do
     targetLayout <- ensureLayout resolver sourceLayout (head segments)
     case targetLayout of
         Left err -> failM (atImport err)
-        Right layout -> resolveInPackage resolver entryPath sourceModule sourceFile imp layout (tail segments)
+        Right layout -> resolveInPackage seeding resolver entryPath sourceModule sourceFile imp layout (tail segments)
   where
     segments = importPath imp
     atImport message =
@@ -747,6 +858,7 @@ ensureLayout resolver sourceLayout pkgName = do
 -- The level determination itself. @rest@ is the import path with the
 -- package segment removed.
 resolveInPackage ::
+    Bool ->
     Resolver ->
     FilePath ->
     PModule ->
@@ -755,7 +867,7 @@ resolveInPackage ::
     Layout ->
     [String] ->
     LoadM (ResolvedImport, Maybe ModuleId)
-resolveInPackage resolver entryPath sourceModule sourceFile imp layout rest = do
+resolveInPackage seeding resolver entryPath sourceModule sourceFile imp layout rest = do
     let finish level targetModule targetFile targetSymbol =
             let resolved =
                     ResolvedImport
@@ -800,9 +912,15 @@ resolveInPackage resolver entryPath sourceModule sourceFile imp layout rest = do
                 ++ message
         rootId = layoutModuleId layout Nothing
         moduleIdOf name = layoutModuleId layout (Just name)
-        parsedOf moduleName = parseModule resolver entryPath layout moduleName
+        parsedOf Nothing = do
+            state <- getM
+            case Map.lookup rootId (lsParsed state) of
+                Just parsed -> pureM parsed
+                Nothing -> parseModuleDeclarations resolver layout
+        parsedOf name = parseModule resolver entryPath layout name
     case rest of
         [] -> finish LevelModule rootId Nothing Nothing
+        [x] | seeding, Map.member x (layModules layout) -> finish LevelModule (moduleIdOf x) Nothing Nothing
         [x] -> do
             rootParsed <- parsedOf Nothing
             let isModule = Map.member x (layModules layout)
@@ -856,7 +974,7 @@ resolveInPackage resolver entryPath sourceModule sourceFile imp layout rest = do
             let isModule = Map.member m (layModules layout)
                 rootFileStem = [feStem e | e <- layRootFiles layout, feStem e == m]
             modParsed <- if isModule then fmap Just (parsedOf (Just m)) else pureM Nothing
-            rootParsed <- parsedOf Nothing
+            rootParsed <- if seeding && isModule then pureM (PModule layout rootId Nothing []) else parsedOf Nothing
             let moduleReading = case modParsed of
                     Just pmod ->
                         let entries = layoutModuleFiles layout (Just m)
@@ -1088,7 +1206,7 @@ visitModule resolver entryPath stack moduleId layout moduleName = do
         resolved <- mapM_M (resolveOne pmod pfile) (fileImports (pfParsed pfile))
         modifyM (\s -> s{lsResolved = Map.insert (pmId pmod, feName (pfEntry pfile)) (map fst resolved) (lsResolved s)})
         pureM (feName (pfEntry pfile), [dep | (_, Just dep) <- resolved])
-    resolveOne pmod pfile imp = resolveImport resolver entryPath (pmLayout pmod) pmod (pfEntry pfile) imp
+    resolveOne pmod pfile imp = resolveImport False resolver entryPath (pmLayout pmod) pmod (pfEntry pfile) imp
     visitDep chain (ModuleId pkg name) = do
         depLayout <- ensureLayoutFor pkg
         case depLayout of
@@ -1136,6 +1254,7 @@ loadFromEntryWith fileParser resolver rawEntry = case discoverEntry resolver ent
                             fileParser
                             (Map.singleton pkgName layout)
                             Map.empty
+                            []
                             Map.empty
                             []
                             Set.empty

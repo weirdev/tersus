@@ -186,7 +186,7 @@ prepareModule pkg modu = do
     prepareFile file =
         let identity
                 | Mod.loadedModuleId modu == Mod.packageEntryModule pkg = Mod.rootModuleIdentity (Mod.packagePackageName pkg) (Mod.loadedFileStem file ++ ".tersus")
-                | otherwise = Mod.fileModuleIdentity (Mod.packagePackageName pkg) (maybe "" id (Mod.moduleName (Mod.loadedFileModule file))) (Mod.loadedFileStem file ++ ".tersus")
+                | otherwise = Mod.fileModuleIdentity (Mod.modulePackage (Mod.loadedFileModule file)) (maybe "" id (Mod.moduleName (Mod.loadedFileModule file))) (Mod.loadedFileStem file ++ ".tersus")
             canonical = Mod.canonicalizeDeclarations identity (fileBody (Mod.loadedParsed file))
          in case rewriteFileReferences pkg file canonical of
                 Left err -> Left ("in module " ++ Mod.renderModuleId (Mod.loadedModuleId modu) ++ " file " ++ Mod.loadedFileName file ++ ": " ++ err)

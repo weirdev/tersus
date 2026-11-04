@@ -11,7 +11,8 @@ import Data.List (intercalate, isInfixOf, isPrefixOf, nub, stripPrefix)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import Modules
+import Modules hiding (importPrefixes)
+import qualified Modules
 import Parse (Import (..), ParsedFile (..), splitPath)
 import Syntax
 import Types
@@ -46,7 +47,7 @@ canonicalForFile pkg file local = canonicalName (fileIdentity pkg file) local
 fileIdentity :: LoadedPackage -> LoadedFile -> ModuleIdentity
 fileIdentity pkg file
     | loadedFileModule file == packageEntryModule pkg = rootModuleIdentity (packagePackageName pkg) (loadedFileStem file ++ ".tersus")
-    | otherwise = fileModuleIdentity (packagePackageName pkg) (maybe "" id (moduleName (loadedFileModule file))) (loadedFileStem file ++ ".tersus")
+    | otherwise = fileModuleIdentity (modulePackage (loadedFileModule file)) (maybe "" id (moduleName (loadedFileModule file))) (loadedFileStem file ++ ".tersus")
 
 variantCanonical :: LoadedPackage -> LoadedFile -> Name -> Name
 variantCanonical pkg file variant = case splitOn "::" variant of
@@ -96,7 +97,7 @@ packageDecls pkg = [decl | modu <- packageModules pkg, file <- loadedModuleFiles
 
 collapsedStem :: LoadedPackage -> ModuleId -> Maybe String
 collapsedStem pkg modu = case [file | m <- packageModules pkg, loadedModuleId m == modu, file <- loadedModuleFiles m] of
-    [file] | loadedFileStem file == maybe (packagePackageName pkg) id (moduleName modu) -> Just (loadedFileStem file)
+    [file] | loadedFileStem file == maybe (modulePackage modu) id (moduleName modu) -> Just (loadedFileStem file)
     _ -> Nothing
 
 moduleSegment :: LoadedPackage -> ModuleId -> String
@@ -113,30 +114,7 @@ prefixesFor pkg current decl
         LevelModule -> True
         LevelFile -> resolvedTargetFile ri == Just (diFileStem decl)
         LevelSymbol -> resolvedTargetSymbol ri == Just (diLocal decl) || resolvedTargetSymbol ri == Just (takeWhile (/= ':') (diLocal decl))
-    importPrefixes ri =
-        let imp = resolvedImport ri
-            localParts = splitPath (diLocal decl)
-            fileSeg = diFileStem decl
-            modu = diModule decl
-            pkgName = modulePackage modu
-            modSegs = maybe [] (\name -> [name]) (moduleName modu)
-            isCollapsed = collapsedStem pkg modu == Just fileSeg
-            alias = importAlias imp
-            bareForListed = case importNames imp of
-                Just names -> diLocal decl `elem` names || takeWhile (/= ':') (diLocal decl) `elem` names
-                Nothing -> False
-            levelPrefixes = case resolvedLevel ri of
-                LevelSymbol -> [[]]
-                LevelFile -> [[fileSeg]] ++ maybe [] (\name -> [[name]]) alias
-                LevelModule ->
-                    let full = [pkgName] ++ modSegs ++ [fileSeg]
-                        shortened = [moduleSegment pkg modu, fileSeg]
-                        collapsedFull = [pkgName] ++ modSegs
-                        collapsedShort = [moduleSegment pkg modu]
-                        bases = [shortened, full] ++ (if isCollapsed then [collapsedShort, collapsedFull] else [])
-                        aliased = maybe [] (\name -> [[name, fileSeg]] ++ (if isCollapsed then [[name]] else [])) alias
-                     in bases ++ aliased
-         in (if bareForListed || resolvedLevel ri == LevelSymbol then [[]] else []) ++ levelPrefixes
+    importPrefixes ri = Modules.importPrefixes (diFileStem decl) (collapsedStem pkg (diModule decl) == Just (diFileStem decl)) (diLocal decl) ri
 
 spellingsFor :: LoadedPackage -> LoadedFile -> DeclInfo -> [String]
 spellingsFor pkg current decl = [intercalate "::" (prefix ++ splitPath (diLocal decl)) | prefix <- prefixesFor pkg current decl]
