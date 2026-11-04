@@ -1,0 +1,718 @@
+import mir::support::support { Res, Layout, noStrings, beforeAngle, escaped, renderType, declName, lookupDecl, canonical, variantsOf, sizedArray, isSizedArray, isAggregate, declaredName, roundUp, wordLayout, simpleLayout };
+import data::codec::codec { Size, Type };
+import mir::reader::reader { Field, TypeDecl, Constant, Operand, RefStep, Function, Program };
+
+impl String {
+    fn then(self: Self, other: &String) -> Self [{ }] [{ }] {
+        return self.concat(other);
+    };
+};
+
+fn noTypes() -> List<Type> [{ }] [{ }] {
+    return [];
+};
+
+fn noConstants() -> List<Constant> [{ }] [{ }] {
+    return [];
+};
+
+// The name of a global: quoted, so that any name will do
+fn global(prefix: &String, name: &String) -> String [{ }] [{ }] {
+    return "@\"".then(prefix).then(escaped(name)).then("\"");
+};
+
+// Types
+
+
+// A type, if there is one (what a list of native code holds)
+struct Held { ok: Bool, ty: Type };
+
+impl Clone for Held { };
+
+fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
+    if t is Type::TBlock { return Layout { size: 0, align: 1 }; };
+    if t is Type::TUninit { return layoutOf(types, Box::unbox((t as Type::TUninit).inner)); };
+    simple = simpleLayout(t);
+    if simple.ok { return clone(simple.layout); };
+    arr = sizedArray(t);
+    if arr.ok {
+        e = layoutOf(types, arr.elem);
+        return Layout { size: arr.length * e.size, align: e.align };
+    };
+    n = declaredName(types, t);
+    if !n.ok { return wordLayout(); };
+    i = lookupDecl(types, n.text);
+    if i < 0 { return wordLayout(); };
+    r = wordLayout();
+    d = &get(types, i);
+    match *d {
+        TypeDecl::DStruct { name: name, fields: fields } => {
+            align = 1;
+            end = 0;
+            for f in fields {
+                l = layoutOf(types, &f.ty);
+                if l.align > align { align = l.align; };
+                end = roundUp(end, l.align) + l.size;
+            };
+            r = Layout { size: roundUp(end, align), align: align };
+        },
+        TypeDecl::DEnum { name: name, variants: variants } => {
+            payload = 1;
+            widest = 0;
+            for v in variants {
+                align = 1;
+                end = 0;
+                for f in v.fields {
+                    l = layoutOf(types, &f.ty);
+                    if l.align > align { align = l.align; };
+                    end = roundUp(end, l.align) + l.size;
+                };
+                if align > payload { payload = align; };
+                if roundUp(end, align) > widest { widest = roundUp(end, align); };
+            };
+            start = roundUp(4, payload);
+            align = payload;
+            if align < 4 { align = 4; };
+            r = Layout { size: roundUp(start + widest, align), align: align };
+        },
+    };
+    return r;
+};
+
+// The layout of a struct of these fields
+fn fieldsLayout(types: &List<TypeDecl>, fields: &List<Field>) -> Layout ~ {
+    align = 1;
+    end = 0;
+    for f in fields {
+        l = layoutOf(types, &f.ty);
+        if l.align > align { align = l.align; };
+        end = roundUp(end, l.align) + l.size;
+    };
+    return Layout { size: roundUp(end, align), align: align };
+};
+
+// The layout of a declared struct or enum
+fn declLayout(types: &List<TypeDecl>, d: &TypeDecl) -> Layout ~ {
+    return layoutOf(types, Type::TNamed { name: declName(d), base: declName(d), argc: 0, argTokens: [] });
+};
+
+// The 8-byte words of room a value held inline takes in a frame (Mir.slotsOf)
+fn slotsOf(types: &List<TypeDecl>, t: &Type) -> Int ~ {
+    return (layoutOf(types, t).size + 7) / 8;
+};
+
+// An extern function (`extern fn`, named `extern f` in the MIR) is the C function f
+fn isExtern(name: &String) -> Bool [{ }] [{ }] {
+    return name.startsWith("extern ");
+};
+
+// The symbol of a function of the program. Quoted, since a lifted function is named outer::inner. An extern function is the C function of its name.
+fn functionSymbol(name: &String) -> String [{ }] [{ }] {
+    if isExtern(name) && size(name.bytes) >= 7 { return "@\"".then(escaped(name.slice(7, size(name.bytes)))).then("\""); };
+    return global("fn.", name);
+};
+
+fn containsName(names: &List<String>, n: &String) -> Bool [{ }] [{ }] {
+    for s in names {
+        if s = n { return true; };
+    };
+    return false;
+};
+
+// The name of the drop of a struct or an enum (Mir.dropFunction)
+fn dropName(n: &String) -> String [{ }] [{ }] {
+    return "<".then(n).then(" as Drop>::drop");
+};
+
+// Whether a value owns something to free: a Box, or an array, struct or enum that holds one or has a drop (MirOwnership.needsDrop). The names
+// are those of the functions of the program, which have the drop of a type that has one.
+fn needsDrop(types: &List<TypeDecl>, fns: &List<String>, t: &Type) -> Bool ~ {
+    if t is Type::TBox { return true; };
+    if t is Type::TArray { return needsDrop(types, fns, Box::unbox((t as Type::TArray).elem)); };
+    n = declaredName(types, t);
+    if !n.ok { return false; };
+    // (the struct that a list is made of owns the memory at its address)
+    if beforeAngle(n.text) = "List" { return true; };
+    // (a struct or an enum with a drop has something to do when it is freed, whatever its fields are)
+    if containsName(fns, dropName(n.text)) { return true; };
+    i = lookupDecl(types, n.text);
+    if i < 0 { return false; };
+    d = get(types, i);
+    r = false;
+    match d {
+        TypeDecl::DStruct { name: name, fields: fields } => {
+            for f in fields {
+                if needsDrop(types, fns, f.ty) { r = true; };
+            };
+        },
+        TypeDecl::DEnum { name: name, variants: variants } => {
+            for v in variants {
+                for f in v.fields {
+                    if needsDrop(types, fns, f.ty) { r = true; };
+                };
+            };
+        },
+    };
+    return r;
+};
+
+// The symbol of the function that frees what a value of the type owns, made for the type below
+fn dropSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("drop.", renderType(canonical(types, t)));
+};
+
+// The symbol of the function that prints a value of the type, made for the type below
+fn printSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("print.", renderType(canonical(types, t)));
+};
+
+// The symbol of the function that copies a value of the type into room of its own, made for the type below: the copy
+// that is made when the type has no `Clone` impl to call (a copy of a type that has one is that impl, called)
+fn cloneSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("clone.", renderType(canonical(types, t)));
+};
+
+// The symbol of the function that frees what each of a run of values of the type owns
+fn dropRangeSymbol(types: &List<TypeDecl>, t: &Type) -> String ~ {
+    return global("droprange.", renderType(canonical(types, t)));
+};
+
+// Whether a value is a word that is a number: an Int, a Byte or an address
+fn isNumberWord(t: &Type) -> Bool [{ }] [{ }] {
+    return t is Type::TInt || t is Type::TByte || t is Type::TAddr || t is Type::TWord;
+};
+
+// The LLVM type of a value that is a word, or why there is none
+fn llvmType(t: &Type) -> Res ~ {
+    unsupported = Res { ok: false, text: "Native code does not support ".then(renderType(t)).then(" yet") };
+    if isNumberWord(t) { return Res { ok: true, text: "i64" }; };
+    if t is Type::TBool { return Res { ok: true, text: "i1" }; };
+    if t is Type::TRef || t is Type::TMutRef { return Res { ok: true, text: "ptr" }; };
+    arr = sizedArray(t);
+    if arr.ok {
+        inner = llvmType(arr.elem);
+        if !inner.ok { return inner; };
+        return Res { ok: true, text: "ptr" };
+    };
+    if t is Type::TNamed || t is Type::TVariant || t is Type::TFn { return Res { ok: true, text: "ptr" }; };
+    return unsupported;
+};
+
+// The types inside a type (a type that contains itself is there once)
+fn parts(types: &List<TypeDecl>, t: &Type) -> List<Type> ~ {
+    out = noTypes();
+    if t is Type::TAddr {
+        out = push(out, canonical(types, Box::unbox((t as Type::TAddr).inner)));
+        return out;
+    };
+    arr = sizedArray(t);
+    if arr.ok {
+        out = push(out, canonical(types, arr.elem));
+        return out;
+    };
+    if t is Type::TNamed {
+        for v in variantsOf(types, (t as Type::TNamed).name) {
+            for f in v.fields { out = push(out, canonical(types, f.ty)); };
+        };
+    };
+    return out;
+};
+
+fn contains(seen: &List<Type>, t: &Type) -> Bool [{ }] [{ }] {
+    i = 0;
+    while i < size(seen) [{ affirm i >= 0; affirm i <= size(seen); }] shrinks size(seen) - i {
+        s = &get(seen, i);
+        if s = t { return true; };
+        i = i + 1;
+    };
+    return false;
+};
+
+fn closeTypes(types: &List<TypeDecl>, roots: &List<Type>) -> List<Type> ~ {
+    // Retain the first root occurrence so the depth-first output order stays unchanged.
+    unique = noTypes();
+    i = 0;
+    while i < size(roots) [{ affirm i >= 0; affirm i <= size(roots); }] shrinks size(roots) - i {
+        t = canonical(types, &get(roots, i));
+        if !contains(unique, t) { unique = push(unique, t); };
+        i = i + 1;
+    };
+    work = noTypes();
+    i = size(unique);
+    while i > 0 [{ affirm i >= 0; affirm i <= size(unique); }] shrinks i {
+        i = i - 1;
+        work = push(work, clone(get(unique, i)));
+    };
+    seen = noTypes();
+    while size(work) > 0 [{ }] ~ {
+        t = last(work);
+        work = pop(work);
+        if !contains(seen, t) {
+            seen = push(seen, clone(t));
+            ps = parts(types, t);
+            j = size(ps);
+            while j > 0 [{ affirm j >= 0; affirm j <= size(ps); }] shrinks j {
+                j = j - 1;
+                work = push(work, clone(get(ps, j)));
+            };
+        };
+    };
+    return seen;
+};
+
+// The names of the functions of the program
+fn functionNames(program: &Program) -> List<String> ~ {
+    names = noStrings();
+    for f in program.functions { names = push(names, clone(f.name)); };
+    return names;
+};
+
+fn resultStruct(t: &String) -> String [{ }] [{ }] {
+    return "{ ".then(t).then(", i1 }");
+};
+
+// What a call needs to know of a function of the program: the types of its parameters and of its result. (Looking a function up in the program itself copies it, and all
+// its blocks, so they are taken once.)
+struct Sig { name: String, params: List<Type>, ptrs: List<Bool>, paramsOk: Bool, hasReturn: Bool, returns: Type };
+
+impl Clone for Sig { };
+
+// What builds a value: a struct (tag 0, which has no word for it) or a variant of an enum (its position in the enum), the enum it is of, and its fields
+struct Ctor { name: String, owner: String, tag: Int, tagged: Bool, fields: List<Field> };
+
+impl Clone for Ctor { };
+
+// The types of the program and the signatures of its functions, and for each type what is asked of it again and again, worked out once: the names, to look one up without
+// copying the declarations, whether a value of it owns something and the words it takes, and the constructors
+struct Ctx { types: List<TypeDecl>, sigs: List<Sig>, names: List<String>, drops: List<Bool>, sizes: List<Int>, aligns: List<Int>, ctors: List<Ctor>, ctorNames: List<String>, clones: List<String>, cloneTys: List<String> };
+
+impl Clone for Ctx { };
+
+struct LT { ok: Bool, ty: Type };
+
+impl Clone for LT { };
+
+// The type of a local of a function (the locals are numbered from 0 in order, and the search is for those that are not)
+fn localTypeOf(f: &Function, l: Int) -> LT [{ }] [{ }] {
+    if l >= 0 && l < size(f.locals) {
+        d = get(f.locals, l);
+        if d.id = l { return LT { ok: true, ty: clone(d.ty) }; };
+    };
+    for d in f.locals {
+        if d.id = l { return LT { ok: true, ty: clone(d.ty) }; };
+    };
+    return LT { ok: false, ty: Type::TInt };
+};
+
+fn hasInt(l: &List<Int>, x: Int) -> Bool [{ }] [{ }] {
+    for y in l {
+        if y = x { return true; };
+    };
+    return false;
+};
+
+fn noBools() -> List<Bool> [{ }] [{ }] {
+    return [];
+};
+
+fn sigOf(f: &Function) -> Sig [{ }] [{ }] {
+    params = noTypes();
+    ptrs = noBools();
+    ok = true;
+    for param in f.params {
+        r = localTypeOf(f, param);
+        if r.ok { params = push(params, r.ty); } else {
+            params = push(params, Type::TInt);
+            ok = false;
+        };
+        ptrs = push(ptrs, hasInt(f.borrowed, param) || hasInt(f.mutBorrowed, param));
+    };
+    return Sig { name: clone(f.name), params: params, ptrs: ptrs, paramsOk: ok, hasReturn: f.hasReturn, returns: clone(f.returns) };
+};
+
+fn noCtors() -> List<Ctor> [{ }] [{ }] {
+    return [];
+};
+
+fn noInts2() -> List<Int> [{ }] [{ }] {
+    return [];
+};
+
+// The constructors of the program: the structs first and then the variants of the enums, in order, so that the first with a name is what Mir.constructor finds
+fn ctorsOf(types: &List<TypeDecl>) -> List<Ctor> ~ {
+    out = noCtors();
+    for d in types {
+        if d is TypeDecl::DStruct {
+            out = push(out, Ctor { name: clone((d as TypeDecl::DStruct).name), owner: clone((d as TypeDecl::DStruct).name), tag: 0, tagged: false, fields: clone((d as TypeDecl::DStruct).fields) });
+        };
+    };
+    for d in types {
+        if d is TypeDecl::DEnum {
+            variants = (d as TypeDecl::DEnum).variants;
+            i = 0;
+            while i < size(variants) [{ affirm i >= 0; affirm i <= size(variants); }] shrinks size(variants) - i {
+                v = get(variants, i);
+                out = push(out, Ctor { name: clone(v.name), owner: clone((d as TypeDecl::DEnum).name), tag: i, tagged: true, fields: clone(v.fields) });
+                i = i + 1;
+            };
+        };
+    };
+    return out;
+};
+
+fn contextOf(program: &Program) -> Ctx ~ {
+    fns = functionNames(program);
+    sigs = [];
+    for f in program.functions { sigs = push(sigs, sigOf(f)); };
+    names = noStrings();
+    drops = noBools();
+    sizes = noInts2();
+    aligns = noInts2();
+    for d in program.types {
+        names = push(names, declName(d));
+        drops = push(drops, needsDrop(program.types, fns, Type::TNamed { name: declName(d), base: declName(d), argc: 0, argTokens: [] }));
+        l = declLayout(program.types, d);
+        sizes = push(sizes, l.size);
+        aligns = push(aligns, l.align);
+    };
+    ctors = ctorsOf(program.types);
+    ctorNames = noStrings();
+    for c in ctors { ctorNames = push(ctorNames, clone(c.name)); };
+    clones = noStrings();
+    cloneTys = noStrings();
+    for s in sigs {
+        if s.hasReturn && size(s.params) > 0 && hasText(s.name, " as Clone>::clone") {
+            clones = push(clones, clone(s.name));
+            cloneTys = push(cloneTys, renderType(canonical(program.types, s.returns)));
+        };
+    };
+    return Ctx { types: clone(program.types), sigs: sigs, names: names, drops: drops, sizes: sizes, aligns: aligns, ctors: ctors, ctorNames: ctorNames, clones: clones, cloneTys: cloneTys };
+};
+
+// The index of the declaration of a struct or an enum, or -1 (the same as lookupDecl, without copying the declarations)
+fn declIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.names); }] {
+    i = 0;
+    while i < size(cx.names) [{ affirm i >= 0; affirm i <= size(cx.names); }] shrinks size(cx.names) - i {
+        if get(cx.names, i) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn sigIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.sigs); }] {
+    i = 0;
+    while i < size(cx.sigs) [{ affirm i >= 0; affirm i <= size(cx.sigs); }] shrinks size(cx.sigs) - i {
+        if get(cx.sigs, i).name = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// Whether `hay` holds `needle`
+fn hasText(hay: &String, needle: &String) -> Bool ~ {
+    i = 0;
+    while i < size(hay.bytes) [{ affirm i >= 0; affirm i <= size(hay.bytes); }] shrinks size(hay.bytes) - i {
+        if hay.slice(i, size(hay.bytes)).startsWith(needle) { return true; };
+        i = i + 1;
+    };
+    return size(needle.bytes) = 0;
+};
+
+// The `Clone` impl of a type, when the program has one: the function a copy of the type is. It is the one whose
+// name says it is the `clone` of the trait `Clone` and whose result is the type (the impl of a list is named
+// for `List`, and its result is the `List` the list is made of, so the name is not made from the type)
+fn cloneImplName(cx: &Ctx, t: &Type) -> Res ~ {
+    want = renderType(canonical(&cx.types, t));
+    i = 0;
+    while i < size(cx.clones) && i < size(cx.cloneTys) [{ affirm i >= 0; affirm i <= size(cx.clones); affirm i <= size(cx.cloneTys); }] shrinks size(cx.clones) - i {
+        if get(cx.cloneTys, i) = want { return Res { ok: true, text: clone(get(cx.clones, i)) }; };
+        i = i + 1;
+    };
+    return Res { ok: false, text: "" };
+};
+
+// The index of the constructor with a name, or -1 (Mir.constructor)
+fn ctorIndex(cx: &Ctx, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(cx.ctorNames); }] {
+    i = 0;
+    while i < size(cx.ctorNames) [{ affirm i >= 0; affirm i <= size(cx.ctorNames); }] shrinks size(cx.ctorNames) - i {
+        if get(cx.ctorNames, i) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The struct or enum that a type is a value of: a struct or an enum itself, or a variant (whose enum is looked up)
+fn declaredIn(cx: &Ctx, t: &Type) -> Res [{ }] [{ }] {
+    if t is Type::TNamed { return Res { ok: true, text: clone((t as Type::TNamed).name) }; };
+    if t is Type::TVariant {
+        i = ctorIndex(cx, (t as Type::TVariant).name);
+        if i >= 0 && i < size(cx.ctors) { return Res { ok: true, text: clone(get(cx.ctors, i).owner) }; };
+    };
+    return Res { ok: false, text: "" };
+};
+
+// Whether a value owns something to free (needsDrop, with the answer for a struct or an enum taken from the table)
+fn needsDropIn(cx: &Ctx, t: &Type) -> Bool ~ {
+    if t is Type::TBox { return true; };
+    if t is Type::TArray { return needsDropIn(cx, Box::unbox((t as Type::TArray).elem)); };
+    n = declaredIn(cx, t);
+    if !n.ok { return false; };
+    i = declIndex(cx, n.text);
+    if i < 0 || i >= size(cx.drops) { return false; };
+    return get(cx.drops, i);
+};
+
+// The layout of a value held inline (layoutOf, with the answer for a struct or an enum taken from the table)
+fn layoutIn(cx: &Ctx, t: &Type) -> Layout ~ {
+    simple = simpleLayout(t);
+    if simple.ok { return clone(simple.layout); };
+    arr = sizedArray(t);
+    if arr.ok {
+        e = layoutIn(cx, arr.elem);
+        return Layout { size: arr.length * e.size, align: e.align };
+    };
+    n = declaredIn(cx, t);
+    if !n.ok { return wordLayout(); };
+    i = declIndex(cx, n.text);
+    if i < 0 || i >= size(cx.sizes) || i >= size(cx.aligns) { return wordLayout(); };
+    return Layout { size: get(cx.sizes, i), align: get(cx.aligns, i) };
+};
+
+fn bytesIn(cx: &Ctx, t: &Type) -> Int ~ {
+    return layoutIn(cx, t).size;
+};
+
+// The 8-byte words of room a value held inline takes in a frame
+fn slotsIn(cx: &Ctx, t: &Type) -> Int ~ {
+    return (bytesIn(cx, t) + 7) / 8;
+};
+
+// Whether a local of the type has something to free: a value held inline that holds something of the heap (a list or a Box of the library,
+// which is a word of it)
+fn ownsIn(cx: &Ctx, t: &Type) -> Bool ~ {
+    return isAggregate(t) && needsDropIn(cx, t);
+};
+
+// A struct is its own constructor, and a variant has its enum's representation
+fn constructedType(cx: &Ctx, name: &String) -> Type [{ }] [{ }] {
+    i = declIndex(cx, name);
+    if i >= 0 && i < size(&cx.types) {
+        d = get(&cx.types, i);
+        if d is TypeDecl::DStruct { return Type::TNamed { name: clone(name), base: clone(name), argc: 0, argTokens: [] }; };
+    };
+    return Type::TVariant { name: clone(name) };
+};
+
+// An array of a size that is a constant or not, and a Box of an array of any size (the arrays that a Box holds are on the heap)
+fn isArray(t: &Type) -> Bool [{ }] [{ }] {
+    return isSizedArray(t);
+};
+
+// A list of native code: the struct List of lib/lists.tersus, whose first field is the address of the elements, so that an element is read from the address that the struct
+// starts with
+fn isListStruct(t: &Type) -> Bool [{ }] [{ }] {
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "List"; };
+    return false;
+};
+
+// The type of the elements of a list of native code: what the address that is its first field is of
+fn listElement(cx: &Ctx, t: &Type) -> Held ~ {
+    if !(t is Type::TNamed) { return Held { ok: false, ty: Type::TInt }; };
+    i = lookupDecl(&cx.types, (t as Type::TNamed).name);
+    if i < 0 || i >= size(&cx.types) { return Held { ok: false, ty: Type::TInt }; };
+    d = get(&cx.types, i);
+    if d is TypeDecl::DStruct {
+        fields = (d as TypeDecl::DStruct).fields;
+        if size(fields) > 0 {
+            first = get(fields, 0).ty;
+            if first is Type::TAddr { return Held { ok: true, ty: clone(Box::unbox((first as Type::TAddr).inner)) }; };
+        };
+    };
+    return Held { ok: false, ty: Type::TInt };
+};
+
+// A Box of native code: the struct Box of lib/box.tersus, whose one word is the address of what it holds, as a Box's is
+fn isBoxStruct(t: &Type) -> Bool [{ }] [{ }] {
+    if t is Type::TNamed { return beforeAngle((t as Type::TNamed).name) = "Box"; };
+    return false;
+};
+
+// Whether the contents of a constant say what it is made of: a number or a Bool does, and a list when one element does
+fn constantKnown(c: &Constant) -> Bool ~ {
+    if c is Constant::CList {
+        for x in (c as Constant::CList).items {
+            if constantKnown(x) { return true; };
+        };
+        return false;
+    };
+    if c is Constant::CArray {
+        for x in (c as Constant::CArray).items {
+            if constantKnown(x) { return true; };
+        };
+        return false;
+    };
+    return true;
+};
+
+// The type of a constant, as far as its contents say: an empty list of lists is a List<List<Int>>
+fn constantShape(cx: &Ctx, c: &Constant) -> Type ~ {
+    if c is Constant::CBool { return Type::TBool; };
+    if c is Constant::CList || c is Constant::CArray {
+        items = noConstants();
+        if c is Constant::CList { items = (c as Constant::CList).items; };
+        if c is Constant::CArray { items = (c as Constant::CArray).items; };
+        // the shape of the first element that shows what it is made of, or of the first
+        elem = Type::TInt;
+        found = false;
+        for x in items {
+            if !found && constantKnown(x) {
+                elem = constantShape(cx, x);
+                found = true;
+            };
+        };
+        if !found && size(items) > 0 { elem = constantShape(cx, get(items, 0)); };
+        if c is Constant::CList { return Type::TList { elem: Box::new(elem) }; };
+        return Type::TArray { elem: Box::new(elem), size: Size::SConst { n: size(items) } };
+    };
+    if c is Constant::CData { return constructedType(cx, (c as Constant::CData).name); };
+    if c is Constant::CFn {
+        i = sigIndex(cx, (c as Constant::CFn).name);
+        if i >= 0 {
+            sig = get(cx.sigs, i);
+            ret = Type::TInt;
+            if sig.hasReturn { ret = clone(sig.returns); };
+            return Type::TFn { args: clone(sig.params), ret: Box::new(ret) };
+        };
+        return Type::TInt;
+    };
+    return Type::TInt;
+};
+
+// The type that the operands of an operation share. A local has a type; a constant has one only where it holds a number or a Bool, and the nesting of an empty list is all it
+// says of its elements, so the type of a local comes first, then that of a constant that shows its leaves, then the shape of one that does not, with Int for the leaf.
+fn sharedType(cx: &Ctx, f: &Function, os: &List<Operand>) -> Type ~ {
+    for o in os {
+        if o is Operand::Copy {
+            r = localTypeOf(f, (o as Operand::Copy).local);
+            if r.ok { return r.ty; };
+        };
+        if o is Operand::Move {
+            r = localTypeOf(f, (o as Operand::Move).local);
+            if r.ok { return r.ty; };
+        };
+    };
+    for o in os {
+        if o is Operand::Const {
+            c = (o as Operand::Const).value;
+            if constantKnown(c) { return constantShape(cx, c); };
+        };
+    };
+    for o in os {
+        if o is Operand::Const { return constantShape(cx, (o as Operand::Const).value); };
+    };
+    return Type::TInt;
+};
+
+// The constructor at an index of the table (a made-up one when there is none, which constructorG has said)
+fn ctorAt(cx: &Ctx, i: Int) -> Ctor [{ }] [{ }] {
+    if i >= 0 && i < size(cx.ctors) { return clone(get(cx.ctors, i)); };
+    return Ctor { name: "", owner: "", tag: 0, tagged: false, fields: [] };
+};
+
+// The index of a field in the fields of a constructor, or -1
+fn fieldIndex(fields: &List<Field>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(fields); }] {
+    i = 0;
+    while i < size(fields) [{ affirm i >= 0; affirm i <= size(fields); }] shrinks size(fields) - i {
+        if get(fields, i).name = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The byte offset of the field at a position of a constructor: an enum value starts with a word that says the variant, a struct with its first field. A field is a word, or
+// the words of a value held inline.
+fn fieldOffset(cx: &Ctx, c: &Ctor, i: Int) -> Int ~ {
+    // (the fields of a variant of an enum start after the tag, where every variant's fields can start: Mir.fieldOffsets)
+    types = &cx.types;
+    start = 0;
+    if c.tagged {
+        payload = 1;
+        k = lookupDecl(types, c.owner);
+        if k >= 0 {
+            d = &get(types, k);
+            match *d {
+                TypeDecl::DEnum { name: name, variants: variants } => {
+                    for v in variants {
+                        l = fieldsLayout(types, &v.fields);
+                        if l.align > payload { payload = l.align; };
+                    };
+                },
+                TypeDecl::DStruct { name: name, fields: fields } => { },
+            };
+        };
+        start = roundUp(4, payload);
+    };
+    offset = 0;
+    j = 0;
+    while j < i && j < size(c.fields) [{ affirm j >= 0; affirm j <= size(c.fields); }] shrinks size(c.fields) - j {
+        l = layoutIn(cx, &get(c.fields, j).ty);
+        offset = roundUp(offset, l.align) + l.size;
+        j = j + 1;
+    };
+    if i >= 0 && i < size(c.fields) { offset = roundUp(offset, layoutIn(cx, &get(c.fields, i).ty).align); };
+    return start + offset;
+};
+
+// The position of a name in a list of names, or -1
+fn fieldIndex2(names: &List<String>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(names); }] {
+    i = 0;
+    while i < size(names) [{ affirm i >= 0; affirm i <= size(names); }] shrinks size(names) - i {
+        if get(names, i) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+// The value of an rvalue that is a word, in `last`
+// The address of the place a borrow is of, in `last`: the root local's own room, then each step to the place. A root or a value
+// held inline is its room; what a list or a Box holds is at the address that is its first word, which an index step starts from.
+// What a reference is to, or the type itself if it is not a reference
+fn refTargetOf(t: &Type) -> Type ~ {
+    if t is Type::TRef { return clone(Box::unbox(clone((t as Type::TRef).inner))); };
+    if t is Type::TMutRef { return clone(Box::unbox(clone((t as Type::TMutRef).inner))); };
+    return clone(t);
+};
+
+fn assignRefType(cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>) -> Type ~ {
+    lt = localTypeOf(f, root);
+    if !lt.ok { return Type::TInt; };
+    ty = refTargetOf(lt.ty);
+    i = 0;
+    while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+        ty = refTargetOf(ty);
+        step = get(steps, i);
+        if step is RefStep::Field {
+            ctorName = (step as RefStep::Field).ctor;
+            fieldName = (step as RefStep::Field).field;
+            k = 0;
+            while k < size(cx.ctors) [{ affirm k >= 0; affirm k <= size(cx.ctors); }] ~ {
+                ctor = get(cx.ctors, k);
+                if ctor.name = ctorName {
+                    j = fieldIndex(ctor.fields, fieldName);
+                    if j >= 0 { ty = clone(get(ctor.fields, j).ty); };
+                };
+                k = k + 1;
+            };
+        };
+        if step is RefStep::Index {
+            elem = Held { ok: false, ty: Type::TInt };
+            if isListStruct(ty) { elem = listElement(cx, ty); };
+            if isBoxStruct(ty) { elem = listElement(cx, ty); };
+            arr = sizedArray(ty);
+            if arr.ok { elem = Held { ok: true, ty: clone(arr.elem) }; };
+            if elem.ok { ty = clone(elem.ty); };
+        };
+        i = i + 1;
+    };
+    return ty;
+};

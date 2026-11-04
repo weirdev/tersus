@@ -1,0 +1,316 @@
+import mir::emit::types { Ctx, bytesIn, functionSymbol, hasInt, llvmType, localTypeOf, needsDropIn, noBools, noTypes, ownsIn, refTargetOf, resultStruct, sharedType, sigIndex, slotsIn };
+import mir::emit::values { Gen, blockLabel, copyWords, emit, entryTemp, failG, giving, ins, label, loadAt, memcpyText, newGen, operandLocalType, operandValue, slot, typeText, zeroOf };
+import mir::emit::operations { emitStatement, storeResult };
+import mir::support::support { Res, noStrings, showInt, joinWith, isAggregate };
+import data::codec::codec { Type };
+import mir::reader::reader { Constant, Operand, Terminator, MirBlock, Function };
+
+// A call of a function, given its symbol or the address of it, the types of its parameters and of its result
+fn call(g: Gen, cx: &Ctx, entry: Bool, f: &Function, target: &String, argTypes: &List<Type>, ptrs: &List<Bool>, returnType: &Type, args: &List<Operand>, dest: Int, next: Int) -> Gen ~ {
+    values = noStrings();
+    g1 = g;
+    i = 0;
+    while i < size(argTypes) && i < size(args) [{ affirm i >= 0; affirm i <= size(argTypes); affirm i <= size(args); }] ~ {
+        wanted = get(argTypes, i);
+        argument = get(args, i);
+        given = operandLocalType(f, argument);
+        // (a local that is a reference to what the parameter wants is given what it is to: the value itself, or for a value held inline the address of its words, which is the pointer the reference holds)
+        if i < size(ptrs) && get(ptrs, i) {
+            if given.ok && (given.ty is Type::TRef || given.ty is Type::TMutRef) {
+                g1 = operandValue(g1, cx, f, given.ty, argument);
+            } else {
+                if argument is Operand::Copy { g1 = giving(g1, slot((argument as Operand::Copy).local)); };
+                if argument is Operand::Move { g1 = giving(g1, slot((argument as Operand::Move).local)); };
+                if !(argument is Operand::Copy) && !(argument is Operand::Move) {
+                    g1 = operandValue(g1, cx, f, wanted, argument);
+                    if isAggregate(wanted) {
+                        address = clone(g1.last);
+                        g1 = giving(g1, address);
+                    } else {
+                        value = clone(g1.last);
+                        g1 = entryTemp(g1, 1);
+                        room = clone(g1.last);
+                        g1 = typeText(g1, wanted);
+                        text = clone(g1.last);
+                        g1 = emit(g1, "store ".then(text).then(" ").then(value).then(", ptr ").then(room));
+                        g1 = giving(g1, room);
+                    };
+                };
+            };
+        } else if given.ok && (given.ty is Type::TRef || given.ty is Type::TMutRef) && refTargetOf(given.ty) = wanted {
+            g1 = operandValue(g1, cx, f, given.ty, argument);
+            if !isAggregate(wanted) {
+                address = clone(g1.last);
+                g1 = loadAt(g1, wanted, address);
+            };
+        } else {
+            g1 = operandValue(g1, cx, f, wanted, argument);
+        };
+        values = push(values, clone(g1.last));
+        i = i + 1;
+    };
+    arguments = noStrings();
+    j = 0;
+    while j < size(values) && j < size(argTypes) [{ affirm j >= 0; affirm j <= size(values); affirm j <= size(argTypes); }] ~ {
+        if j < size(ptrs) && get(ptrs, j) {
+            arguments = push(arguments, "ptr ".then(get(values, j)));
+        } else {
+            g1 = typeText(g1, get(argTypes, j));
+            arguments = push(arguments, clone(g1.last).then(" ").then(get(values, j)));
+        };
+        j = j + 1;
+    };
+    g2 = typeText(g1, returnType);
+    result = clone(g2.last);
+    if isAggregate(returnType) {
+        // the callee makes a value held inline in the room it is given. If the local that gets it owns something, the room is one of the function's own and the local is given
+        // the value after what it held is freed; otherwise it is the slot of the local (the callee has copied its arguments by the time it writes, so the local may be one of them).
+        owns = ownsIn(cx, returnType);
+        // (an argument that is lent is not copied by the callee, so the room for the result is not the local that is lent)
+        lends = false;
+        for a in args {
+            if a is Operand::Copy {
+                if (a as Operand::Copy).local = dest { lends = true; };
+            };
+        };
+        g3 = g2;
+        if owns || lends {
+            g3 = entryTemp(g3, slotsIn(cx, returnType));
+            room = clone(g3.last);
+            all = noStrings();
+            all = push(all, "ptr ".then(room));
+            for a in arguments { all = push(all, clone(a)); };
+            g3 = emit(g3, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
+            g3 = copyWords(g3, slot(dest), room, bytesIn(cx, returnType));
+        } else {
+            all = noStrings();
+            all = push(all, "ptr ".then(slot(dest)));
+            for a in arguments { all = push(all, clone(a)); };
+            g3 = emit(g3, "call void ".then(target).then("(").then(joinWith(", ", all)).then(")"));
+        };
+        if entry && dest = 0 { g3 = emit(g3, "store i1 true, ptr %returned"); };
+        return emit(g3, "br label %".then(blockLabel(next)));
+    };
+    g3 = ins(g2, "c", "call ".then(result).then(" ").then(target).then("(").then(joinWith(", ", arguments)).then(")"));
+    value = clone(g3.last);
+    g4 = storeResult(g3, cx, entry, f, dest, value);
+    return emit(g4, "br label %".then(blockLabel(next)));
+};
+
+fn emitTerminator(g: Gen, cx: &Ctx, entry: Bool, f: &Function, t: &Terminator) -> Gen ~ {
+    if t is Terminator::Goto { return emit(g, "br label %".then(blockLabel((t as Terminator::Goto).block))); };
+    if t is Terminator::Switch {
+        g1 = operandValue(g, cx, f, Type::TBool, (t as Terminator::Switch).cond);
+        v = clone(g1.last);
+        return emit(g1, "br i1 ".then(v).then(", label %").then(blockLabel((t as Terminator::Switch).yes)).then(", label %").then(blockLabel((t as Terminator::Switch).no)));
+    };
+    if t is Terminator::Unreachable { return emit(g, "unreachable"); };
+    if t is Terminator::Call {
+        callee = (t as Terminator::Call).callee;
+        args = (t as Terminator::Call).args;
+        dest = (t as Terminator::Call).dest;
+        next = (t as Terminator::Call).next;
+        if callee is Operand::Const {
+            c = (callee as Operand::Const).value;
+            if c is Constant::CFn {
+                name = (c as Constant::CFn).name;
+                i = sigIndex(cx, name);
+                if i < 0 { return failG(g, "Call of a function that does not exist: ".then(name)); };
+                target = get(cx.sigs, i);
+                if !target.paramsOk { return failG(g, "Undeclared local of ".then(name)); };
+                if !target.hasReturn { return failG(g, "Function without a result: ".then(name)); };
+                return call(g, cx, entry, f, functionSymbol(name), target.params, target.ptrs, target.returns, args, dest, next);
+            };
+        };
+        // a function value: the address of a function, with the types its type says
+        callees = push([], clone(callee));
+        ty = sharedType(cx, f, callees);
+        if ty is Type::TFn {
+            g1 = operandValue(g, cx, f, ty, callee);
+            address = clone(g1.last);
+            return call(g1, cx, entry, f, address, (ty as Type::TFn).args, noBools(), Box::unbox((ty as Type::TFn).ret), args, dest, next);
+        };
+        return failG(g, "Call of something that is not a function");
+    };
+    // Return
+    if !f.hasReturn { return emit(g, "ret void"); };
+    ty = f.returns;
+    if isAggregate(ty) {
+        g1 = copyWords(g, "%ret", slot(0), bytesIn(cx, ty));
+        if entry {
+            g2 = ins(g1, "f", "load i1, ptr %returned");
+            returned = clone(g2.last);
+            return emit(g2, "ret i1 ".then(returned));
+        };
+        return emit(g1, "ret void");
+    };
+    g1 = typeText(g, ty);
+    tt = clone(g1.last);
+    g2 = ins(g1, "v", "load ".then(tt).then(", ptr ").then(slot(0)));
+    v = clone(g2.last);
+    if entry {
+        g3 = ins(g2, "f", "load i1, ptr %returned");
+        returned = clone(g3.last);
+        result = resultStruct(tt);
+        g4 = ins(g3, "w", "insertvalue ".then(result).then(" undef, ").then(tt).then(" ").then(v).then(", 0"));
+        withValue = clone(g4.last);
+        g5 = ins(g4, "w", "insertvalue ".then(result).then(" ").then(withValue).then(", i1 ").then(returned).then(", 1"));
+        both = clone(g5.last);
+        return emit(g5, "ret ".then(result).then(" ").then(both));
+    };
+    return emit(g2, "ret ".then(tt).then(" ").then(v));
+};
+
+fn emitBlock(g: Gen, cx: &Ctx, entry: Bool, f: &Function, b: &MirBlock) -> Gen ~ {
+    g1 = label(g, blockLabel(b.id));
+    for st in b.stmts { g1 = emitStatement(g1, cx, entry, f, st); };
+    return emitTerminator(g1, cx, entry, f, b.term);
+};
+
+// The lines of the blocks of a function
+fn emitBody(cx: &Ctx, entry: Bool, f: &Function) -> Gen ~ {
+    g = newGen(f.name);
+    for b in f.blocks { g = emitBlock(g, cx, entry, f, b); };
+    return g;
+};
+
+// The function around its blocks
+
+// What a function is as text: its lines, and the types its code makes a function for (the newest first), or why there is none
+struct FnOut { ok: Bool, error: String, lines: List<String>, types: List<Type> };
+
+impl Clone for FnOut { };
+
+fn failedFn(message: &String) -> FnOut [{ }] [{ }] {
+    return FnOut { ok: false, error: clone(message), lines: noStrings(), types: noTypes() };
+};
+
+// What a local takes in the frame: a word, or for a value held inline all the words it is made of
+fn storageText(cx: &Ctx, t: &Type) -> Res ~ {
+    if isAggregate(t) { return Res { ok: true, text: "[".then(showInt(slotsIn(cx, t))).then(" x i64]") }; };
+    return llvmType(t);
+};
+
+// Whether a parameter is lent and held inline
+fn lentInline(f: &Function, l: Int) -> Bool ~ {
+    return hasInt(f.borrowed, l) || hasInt(f.mutBorrowed, l);
+};
+
+// The declaration of a C function: its parameters and its result are words
+fn externDeclaration(f: &Function) -> FnOut ~ {
+    ptexts = noStrings();
+    for p in f.params {
+        lt = localTypeOf(f, p);
+        if !lt.ok { return failedFn("Undeclared local ".then(showInt(p))); };
+        r = llvmType(lt.ty);
+        if !r.ok { return failedFn(r.text); };
+        ptexts = push(ptexts, r.text);
+    };
+    ret = "void";
+    if f.hasReturn {
+        r = llvmType(f.returns);
+        if !r.ok { return failedFn(r.text); };
+        ret = r.text;
+    };
+    line = "declare ".then(ret).then(" ").then(functionSymbol(f.name)).then("(").then(joinWith(", ", ptexts)).then(")");
+    return FnOut { ok: true, error: "", lines: push(noStrings(), line), types: noTypes() };
+};
+
+// The IR of a function: `entry` is for main, which also keeps whether the return slot was assigned
+fn emitFunction(cx: &Ctx, entry: Bool, symbol: &String, f: &Function) -> FnOut ~ {
+    prefix = "In ".then(f.name).then(": ");
+    ptexts = noStrings();
+    for p in f.params {
+        lt = localTypeOf(f, p);
+        if !lt.ok { return failedFn(prefix.then("Undeclared local ").then(showInt(p))); };
+        r = llvmType(lt.ty);
+        if !r.ok { return failedFn(prefix.then(r.text)); };
+        if lentInline(f, p) { ptexts = push(ptexts, "ptr"); } else { ptexts = push(ptexts, r.text); };
+    };
+    valueType = "void";
+    if f.hasReturn {
+        r = llvmType(f.returns);
+        if !r.ok { return failedFn(prefix.then(r.text)); };
+        valueType = r.text;
+    };
+    returnsAggregate = f.hasReturn && isAggregate(f.returns);
+    // (a value held inline comes back in room that the caller gives, as the first parameter)
+    returnType = clone(valueType);
+    if returnsAggregate {
+        if entry { returnType = "i1"; } else { returnType = "void"; };
+    } else {
+        if entry && f.hasReturn { returnType = resultStruct(valueType); };
+    };
+    localTexts = noStrings();
+    for d in f.locals {
+        r = storageText(cx, d.ty);
+        if !r.ok { return failedFn(prefix.then(r.text)); };
+        localTexts = push(localTexts, r.text);
+    };
+    body = emitBody(cx, entry, f);
+    if size(body.error.bytes) > 0 { return failedFn(prefix.then(body.error)); };
+    // a parameter that is lent and held inline is the caller's words, which the function reads where they are: it has no room of its own
+    params = noStrings();
+    if returnsAggregate { params = push(params, "ptr %ret"); };
+    i = 0;
+    while i < size(f.params) && i < size(ptexts) [{ affirm i >= 0; affirm i <= size(f.params); affirm i <= size(ptexts); }] ~ {
+        p = get(f.params, i);
+        name = "%p.".then(showInt(p));
+        if lentInline(f, p) { name = slot(p); };
+        params = push(params, clone(get(ptexts, i)).then(" ").then(name));
+        i = i + 1;
+    };
+    header = "define internal ".then(returnType).then(" ").then(symbol).then("(").then(joinWith(", ", params)).then(") {");
+    lines = noStrings();
+    for l in body.globals { lines = push(lines, clone(l)); };
+    lines = push(lines, header);
+    lines = push(lines, "entry:");
+    j = 0;
+    while j < size(f.locals) && j < size(localTexts) [{ affirm j >= 0; affirm j <= size(f.locals); affirm j <= size(localTexts); }] ~ {
+        d = get(f.locals, j);
+        if !lentInline(f, d.id) { lines = push(lines, "    ".then(slot(d.id)).then(" = alloca ").then(get(localTexts, j))); };
+        j = j + 1;
+    };
+    for l in body.temps { lines = push(lines, clone(l)); };
+    for d in f.locals {
+        if isAggregate(d.ty) && needsDropIn(cx, d.ty) && !hasInt(f.params, d.id) {
+            lines = push(lines, "    call void @llvm.memset.p0.i64(ptr ".then(slot(d.id)).then(", i8 0, i64 ").then(showInt(bytesIn(cx, d.ty))).then(", i1 false)"));
+        };
+    };
+    k = 0;
+    while k < size(f.params) && k < size(ptexts) [{ affirm k >= 0; affirm k <= size(f.params); affirm k <= size(ptexts); }] ~ {
+        p = get(f.params, k);
+        lt = localTypeOf(f, p);
+        // (a value held inline is given by its address, and the function works on its own copy, unless it is lent)
+        if lt.ok {
+            if !lentInline(f, p) {
+                if isAggregate(lt.ty) {
+                    lines = push(lines, "    ".then(memcpyText(slot(p), "%p.".then(showInt(p)), bytesIn(cx, lt.ty))));
+                } else {
+                    lines = push(lines, "    store ".then(get(ptexts, k)).then(" %p.").then(showInt(p)).then(", ptr ").then(slot(p)));
+                };
+            };
+        } else {
+            lines = push(lines, "    store ".then(get(ptexts, k)).then(" %p.").then(showInt(p)).then(", ptr ").then(slot(p)));
+        };
+        k = k + 1;
+    };
+    if entry && f.hasReturn {
+        lines = push(lines, "    %returned = alloca i1");
+        lines = push(lines, "    store i1 false, ptr %returned");
+        if !returnsAggregate { lines = push(lines, "    store ".then(valueType).then(" ").then(zeroOf(valueType)).then(", ptr ").then(slot(0))); };
+    };
+    lines = push(lines, "    br label %bb0");
+    for l in body.lines { lines = push(lines, clone(l)); };
+    lines = push(lines, "overflow:");
+    lines = push(lines, "    call void @tersus_overflow()");
+    lines = push(lines, "    unreachable");
+    lines = push(lines, "}");
+    newest = noTypes();
+    m = size(body.types);
+    while m > 0 [{ affirm m >= 0; affirm m <= size(body.types); }] shrinks m {
+        m = m - 1;
+        newest = push(newest, clone(get(body.types, m)));
+    };
+    return FnOut { ok: true, error: "", lines: lines, types: newest };
+};
