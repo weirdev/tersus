@@ -1,0 +1,538 @@
+import mir::emit::types { Ctx, Held, LT, bytesIn, cloneImplName, cloneSymbol, ctorAt, ctorIndex, dropSymbol, fieldIndex, fieldIndex2, fieldOffset, functionSymbol, global, isArray, isBoxStruct, isListStruct, isNumberWord, listElement, llvmType, localTypeOf, needsDropIn, noTypes, ownsIn, refTargetOf, slotsIn };
+import mir::support::support { Res, noStrings, showInt, joinWith, renderType, sizedArray, isAggregate };
+import data::codec::codec { Type, parseInt };
+import mir::reader::reader { Constant, Operand, RefStep, Function };
+
+// The code of a function
+//
+// The Haskell emits a block in a state monad `G`: a counter for the names of temporaries and labels, the lines so far, the types the code makes a function for, the
+// globals it needs and the rooms in the frame for values it builds. Here the state is a `Gen` that each function takes and gives back. A function that also gives a value
+// leaves its text in `last` (the name of the value that an instruction made, a number, the type of a local): the caller reads it at once, with `g.last`. The state is never
+// in a struct with the value, since a field read from a struct that is used again afterwards is a copy, and a copy of the lines so far for each instruction would make the
+// time to emit a function grow with the square of its size. An error is the first message in `error`: what comes after it is not looked at.
+//
+// Everything the Haskell emits is here: words, values held inline (arrays, structs and enums), Boxes, clones and drops, the calls and returns of each, and the function
+// around its blocks. `bodies` shows the blocks of each function, `ir` is all of the IR.
+
+struct Gen { count: Int, lines: List<String>, types: List<Type>, globals: List<String>, temps: List<String>, error: String, last: String, owner: String };
+
+impl Clone for Gen { };
+
+fn newGen(owner: &String) -> Gen [{ }] [{ }] {
+    return Gen { count: 0, lines: noStrings(), types: noTypes(), globals: noStrings(), temps: noStrings(), error: "", last: "", owner: clone(owner) };
+};
+
+// The first error is the one that is kept
+fn failG(g: Gen, message: &String) -> Gen [{ }] [{ }] {
+    if size(g.error.bytes) > 0 { return g; };
+    return Gen { error: clone(message), ..g };
+};
+
+// The value of what was done: a text for the caller to take
+fn giving(g: Gen, text: &String) -> Gen [{ }] [{ }] {
+    return Gen { last: clone(text), ..g };
+};
+
+// An instruction
+fn emit(g: Gen, line: &String) -> Gen [{ }] [{ }] {
+    return Gen { lines: push(g.lines, "    ".then(line)), ..g };
+};
+
+// The start of a block
+fn label(g: Gen, name: &String) -> Gen [{ }] [{ }] {
+    return Gen { lines: push(g.lines, clone(name).then(":")), ..g };
+};
+
+// A name for a label that no other has
+fn freshLabel(g: Gen, base: &String) -> Gen [{ }] [{ }] {
+    return Gen { count: g.count + 1, last: clone(base).then(showInt(g.count)), ..g };
+};
+
+// An instruction that gives a value, and the name of that value
+fn ins(g: Gen, base: &String, text: &String) -> Gen [{ }] [{ }] {
+    name = "%".then(base).then(showInt(g.count));
+    line = "    ".then(name).then(" = ").then(text);
+    return Gen { count: g.count + 1, lines: push(g.lines, line), last: name, ..g };
+};
+
+fn slot(l: Int) -> String [{ }] [{ }] {
+    return "%l.".then(showInt(l));
+};
+
+fn blockLabel(b: Int) -> String [{ }] [{ }] {
+    return "bb".then(showInt(b));
+};
+
+// The value a slot holds before anything is assigned to it
+fn zeroOf(t: &String) -> String [{ }] [{ }] {
+    if t = "i1" { return "false"; };
+    if t = "ptr" { return "null"; };
+    return "0";
+};
+
+// The type of a local, which is in `ty`; an error in the state when there is no such local
+struct LTG { g: Gen, ty: Type };
+
+impl Clone for LTG { };
+
+// The LLVM type of a value that is a word, as text in `last`; the state has the error when there is none
+fn typeText(g: Gen, t: &Type) -> Gen ~ {
+    r = llvmType(t);
+    if !r.ok { return failG(g, r.text); };
+    return giving(g, r.text);
+};
+
+// A type the code makes a function for (a drop, a copy or a print of it), put with the types of the program
+fn descriptor(g: Gen, cx: &Ctx, t: &Type) -> Gen ~ {
+    return Gen { types: push(g.types, clone(t)), ..g };
+};
+
+// Copies the value of the type at `from` into `to`, which then shares nothing with it: the copy the type
+// makes itself, which is its `Clone` impl when it has one (which is assumed to be a value that is made of
+// copies of its parts, as the impl the language makes for `impl Clone for T { };` is) and the made function
+// of the type when it does not
+fn cloneValue(g: Gen, cx: &Ctx, current: &String, t: &Type, to: &String, from: &String) -> Gen ~ {
+    g1 = descriptor(g, cx, t);
+    implName = cloneImplName(cx, t);
+    // (a copy inside the `Clone` impl of the type itself is the copy the impl is made of, not the impl called
+    // again: the impl of a Box copies the Box it makes, and the impl of a list the list it holds)
+    if implName.ok && implName.text = current { implName = Res { ok: false, text: "" }; };
+    if implName.ok {
+        return emit(g1, "call void ".then(functionSymbol(implName.text)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
+    };
+    return emit(g1, "call void ".then(cloneSymbol(&cx.types, t)).then("(ptr ").then(clone(to)).then(", ptr ").then(clone(from)).then(")"));
+};
+
+// Frees what the value a local holds owns (nothing, if it holds none), and leaves a Box it held holding nothing
+fn dropSlot(g: Gen, cx: &Ctx, t: &Type, l: Int) -> Gen ~ {
+    g1 = descriptor(g, cx, t);
+    return emit(g1, "call void ".then(dropSymbol(&cx.types, t)).then("(ptr ").then(slot(l)).then(")"));
+};
+
+fn memcpyText(to: &String, from: &String, bytes: Int) -> String [{ }] [{ }] {
+    return "call void @llvm.memcpy.p0.p0.i64(ptr ".then(to).then(", ptr ").then(from).then(", i64 ").then(showInt(bytes)).then(", i1 false)");
+};
+
+// Copies the words of a value to where another is (nothing to do when it is where it is)
+fn copyWords(g: Gen, to: &String, from: &String, bytes: Int) -> Gen [{ }] [{ }] {
+    if to = from || bytes = 0 { return g; };
+    return emit(g, memcpyText(to, from, bytes));
+};
+
+// Clears the words of a value that has been moved out
+fn zeroWords(g: Gen, at: &String, bytes: Int) -> Gen [{ }] [{ }] {
+    if bytes = 0 { return g; };
+    return emit(g, "call void @llvm.memset.p0.i64(ptr ".then(at).then(", i8 0, i64 ").then(showInt(bytes)).then(", i1 false)"));
+};
+
+// Room in the frame of the function for a value it builds, made at its start; its name in `last`
+fn entryTemp(g: Gen, count: Int) -> Gen [{ }] [{ }] {
+    name = "%t.".then(showInt(g.count));
+    return Gen { count: g.count + 1, temps: push(g.temps, "    ".then(name).then(" = alloca [").then(showInt(count)).then(" x i64]")), last: name, ..g };
+};
+
+// The constructor with a name, as the index in the table of the context (the error is in the state)
+struct CtorAt { g: Gen, i: Int };
+
+impl Clone for CtorAt { };
+
+fn constructorG(g: Gen, cx: &Ctx, name: &String) -> CtorAt [{ }] [{ }] {
+    i = ctorIndex(cx, name);
+    if i < 0 || i >= size(cx.ctors) { return CtorAt { g: failG(g, "Unknown struct or variant: ".then(name)), i: 0 }; };
+    return CtorAt { g: g, i: i };
+};
+
+// The LLVM type a number of the type is stored as
+fn memoryType(t: &Type) -> String [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TBool { return "i8"; };
+    if t is Type::TWord { return "i".then(showInt((t as Type::TWord).bits)); };
+    return "i64";
+};
+
+// A value in memory is as many bytes as its type has (layoutOf): an Int or an address 8, a Bool 1 (0 or 1), a Byte 1 and a fixed-width integer its bits over 8, and a
+// pointer 8. In a register a number is an i64 and a Bool an i1, so a narrower one is truncated to be stored and widened when it is loaded (with its sign, for a signed one).
+fn storeAt(g: Gen, t: &Type, p: &String, value: &String) -> Gen [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TWord {
+        width = memoryType(t);
+        g1 = ins(g, "w", "trunc i64 ".then(value).then(" to ").then(width));
+        w = clone(g1.last);
+        return emit(g1, "store ".then(width).then(" ").then(w).then(", ptr ").then(p));
+    };
+    if isNumberWord(t) { return emit(g, "store i64 ".then(value).then(", ptr ").then(p)); };
+    if t is Type::TBool {
+        g1 = ins(g, "w", "zext i1 ".then(value).then(" to i8"));
+        w = clone(g1.last);
+        return emit(g1, "store i8 ".then(w).then(", ptr ").then(p));
+    };
+    return emit(g, "store ptr ".then(value).then(", ptr ").then(p));
+};
+
+fn loadAt(g: Gen, t: &Type, p: &String) -> Gen [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TWord {
+        width = memoryType(t);
+        how = "zext";
+        if t is Type::TWord && (t as Type::TWord).signed { how = "sext"; };
+        g1 = ins(g, "w", "load ".then(width).then(", ptr ").then(p));
+        w = clone(g1.last);
+        return ins(g1, "v", clone(how).then(" ").then(width).then(" ").then(w).then(" to i64"));
+    };
+    if isNumberWord(t) { return ins(g, "v", "load i64, ptr ".then(p)); };
+    if t is Type::TBool {
+        g1 = ins(g, "w", "load i8, ptr ".then(p));
+        w = clone(g1.last);
+        return ins(g1, "b", "icmp ne i8 ".then(w).then(", 0"));
+    };
+    return ins(g, "v", "load ptr, ptr ".then(p));
+};
+
+// A slot of a struct or an enum value, at a byte offset
+fn storeSlot(g: Gen, cx: &Ctx, t: &Type, object: &String, offset: Int, value: &String) -> Gen ~ {
+    g1 = ins(g, "p", "getelementptr i8, ptr ".then(object).then(", i64 ").then(showInt(offset)));
+    p = clone(g1.last);
+    if isAggregate(t) { return copyWords(g1, p, value, bytesIn(cx, t)); };
+    return storeAt(g1, t, p, value);
+};
+
+fn loadSlot(g: Gen, t: &Type, object: &String, offset: Int) -> Gen [{ }] [{ }] {
+    g1 = ins(g, "p", "getelementptr i8, ptr ".then(object).then(", i64 ").then(showInt(offset)));
+    p = clone(g1.last);
+    return loadAt(g1, t, p);
+};
+
+// The address of an element at an index, an element being so many bytes
+fn elementAddress(g: Gen, base: &String, index: &String, bytes: Int) -> Gen [{ }] [{ }] {
+    g1 = ins(g, "o", "mul i64 ".then(index).then(", ").then(showInt(bytes)));
+    offset = clone(g1.last);
+    return ins(g1, "p", "getelementptr i8, ptr ".then(base).then(", i64 ").then(offset));
+};
+
+// The numbers in a constant array, flattened
+fn flattenConstant(ws: List<String>, c: &Constant) -> List<String> ~ {
+    out = ws;
+    if c is Constant::CInt { out = push(out, showInt((c as Constant::CInt).n)); };
+    if c is Constant::CBool {
+        if (c as Constant::CBool).b { out = push(out, "1"); } else { out = push(out, "0"); };
+    };
+    if c is Constant::CArray {
+        for x in (c as Constant::CArray).items { out = flattenConstant(out, x); };
+    };
+    return out;
+};
+
+// Whether a constant is, or has in it, a Bool
+fn hasBool(c: &Constant) -> Bool ~ {
+    if c is Constant::CBool { return true; };
+    if c is Constant::CArray {
+        for x in (c as Constant::CArray).items {
+            if hasBool(x) { return true; };
+        };
+    };
+    return false;
+};
+
+// The words of a constant array as a global that the code only reads: its name in `last`
+fn constantWords(g: Gen, cs: &List<Constant>) -> Gen ~ {
+    k = global("const.", clone(g.owner).then("#").then(showInt(g.count)));
+    ws = noStrings();
+    for c in cs { ws = flattenConstant(ws, c); };
+    // (an array literal is of Ints, which are 8 bytes, or of Bools, which are 1)
+    element = "i64";
+    for c in cs {
+        if hasBool(c) { element = "i8"; };
+    };
+    body = "zeroinitializer";
+    if size(ws) > 0 {
+        parts = noStrings();
+        for w in ws { parts = push(parts, clone(element).then(" ").then(w)); };
+        body = "[".then(joinWith(", ", parts)).then("]");
+    };
+    line = clone(k).then(" = private constant [").then(showInt(size(ws))).then(" x ").then(element).then("] ").then(body);
+    return Gen { count: g.count + 1, globals: push(g.globals, line), last: k, ..g };
+};
+
+// Writes a constant into the words at an address, of the type that it is
+fn writeConstant(g: Gen, cx: &Ctx, ty: &Type, at: &String, c: &Constant) -> Gen ~ {
+    if c is Constant::CInt { return emit(g, "store ".then(memoryType(ty)).then(" ").then(showInt((c as Constant::CInt).n)).then(", ptr ").then(at)); };
+    if c is Constant::CBool {
+        if (c as Constant::CBool).b { return emit(g, "store i8 1, ptr ".then(at)); };
+        return emit(g, "store i8 0, ptr ".then(at));
+    };
+    if c is Constant::CFn { return emit(g, "store ptr ".then(functionSymbol((c as Constant::CFn).name)).then(", ptr ").then(at)); };
+    if c is Constant::CList { return failG(g, "Native code has no list constant: ".then(renderType(ty))); };
+    if c is Constant::CArray {
+        g1 = constantWords(g, (c as Constant::CArray).items);
+        from = clone(g1.last);
+        return copyWords(g1, at, from, bytesIn(cx, ty));
+    };
+    if !(c is Constant::CData) { return failG(g, "A constant of the wrong type"); };
+    name = (c as Constant::CData).name;
+    names = (c as Constant::CData).fields;
+    values = (c as Constant::CData).values;
+    k = constructorG(g, cx, name);
+    g1 = k.g;
+    if size(g1.error.bytes) > 0 { return g1; };
+    ctor = ctorAt(cx, k.i);
+    if ctor.tagged { g1 = emit(g1, "store i32 ".then(showInt(ctor.tag)).then(", ptr ").then(at)); };
+    i = 0;
+    while i < size(ctor.fields) [{ affirm i >= 0; affirm i <= size(ctor.fields); }] ~ {
+        field = get(ctor.fields, i);
+        j = fieldIndex2(names, field.name);
+        if j < 0 || j >= size(values) { return failG(g1, "A field is missing: ".then(name).then(".").then(field.name)); };
+        offset = fieldOffset(cx, ctor, i);
+        g2 = ins(g1, "p", "getelementptr i8, ptr ".then(at).then(", i64 ").then(showInt(offset)));
+        p = clone(g2.last);
+        g1 = writeConstant(g2, cx, field.ty, p, get(values, j));
+        i = i + 1;
+    };
+    return g1;
+};
+
+// A constant that is held inline: an array literal is a global, and a struct or an enum is built in room of its own each time it is wanted (it can hold a list, which is
+// made then); its address in `last`
+fn constantAggregate(g: Gen, cx: &Ctx, ty: &Type, c: &Constant) -> Gen ~ {
+    if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
+    g1 = entryTemp(g, slotsIn(cx, ty));
+    room = clone(g1.last);
+    g2 = writeConstant(g1, cx, ty, room, c);
+    return giving(g2, room);
+};
+
+// The text of a constant, in `last`
+fn constantValue(g: Gen, cx: &Ctx, ty: &Type, c: &Constant) -> Gen ~ {
+    if c is Constant::CInt { return giving(g, showInt((c as Constant::CInt).n)); };
+    if c is Constant::CBool {
+        if (c as Constant::CBool).b { return giving(g, "true"); };
+        return giving(g, "false");
+    };
+    // a function is its address
+    if c is Constant::CFn { return giving(g, functionSymbol((c as Constant::CFn).name)); };
+    if c is Constant::CArray || c is Constant::CData { return constantAggregate(g, cx, ty, c); };
+    return failG(g, "A constant of the wrong type is not a ".then(renderType(ty)));
+};
+
+// The address of the words of a value held inline that an operand is, ready for something to take: a value that is moved out of a local and owns something is copied to room
+// of its own and the local is cleared, so that what takes it can copy it later with the local already empty. A constant is built in room of its own.
+fn operandAddress(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
+    if o is Operand::Const { return constantAggregate(g, cx, ty, (o as Operand::Const).value); };
+    if o is Operand::Copy { return giving(g, slot((o as Operand::Copy).local)); };
+    if o is Operand::Move {
+        l = (o as Operand::Move).local;
+        lt = localTypeOf(f, l);
+        if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+        if ownsIn(cx, lt.ty) {
+            bytes = bytesIn(cx, lt.ty);
+            g1 = entryTemp(g, (bytes + 7) / 8);
+            room = clone(g1.last);
+            g2 = copyWords(g1, room, slot(l), bytes);
+            g3 = zeroWords(g2, slot(l), bytes);
+            return giving(g3, room);
+        };
+        return giving(g, slot(l));
+    };
+    return g;
+};
+
+// The text that stands for an operand where a value of the type is wanted, in `last`: the value loaded from the slot of a local, a number or a Bool, or the address of a value
+// held inline
+fn operandValue(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
+    if o is Operand::Const { return constantValue(g, cx, ty, (o as Operand::Const).value); };
+    l = 0;
+    moved = false;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move {
+        l = (o as Operand::Move).local;
+        moved = true;
+    };
+    lt = localTypeOf(f, l);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    g1 = typeText(g, lt.ty);
+    t = clone(g1.last);
+    // (a value held inline is the address of the words it is made of)
+    if isAggregate(lt.ty) {
+        if moved { return operandAddress(g1, cx, f, lt.ty, o); };
+        return giving(g1, slot(l));
+    };
+    g2 = ins(g1, "v", "load ".then(t).then(", ptr ").then(slot(l)));
+    if moved {
+        v = clone(g2.last);
+        g3 = emit(g2, "store ".then(t).then(" ").then(zeroOf(t)).then(", ptr ").then(slot(l)));
+        return giving(g3, v);
+    };
+    return g2;
+};
+
+// The type of a local that an operand is
+fn operandLocalType(f: &Function, o: &Operand) -> LT [{ }] [{ }] {
+    if o is Operand::Copy { return localTypeOf(f, (o as Operand::Copy).local); };
+    if o is Operand::Move { return localTypeOf(f, (o as Operand::Move).local); };
+    return LT { ok: false, ty: Type::TInt };
+};
+
+// The address of the words of a struct or an enum value that an operand is: a local holds them, and a Box holds a pointer to them; in `last`
+fn dataBase(g: Gen, cx: &Ctx, f: &Function, ty: &Type, o: &Operand) -> Gen ~ {
+    if o is Operand::Const { return constantAggregate(g, cx, ty, (o as Operand::Const).value); };
+    l = 0;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move { l = (o as Operand::Move).local; };
+    lt = localTypeOf(f, l);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    // (a Box of the library is the address of what it holds, as a Box is: lib/box.tersus; its own field is read from it)
+    if isBoxStruct(lt.ty) && !isBoxStruct(ty) { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
+    if lt.ty is Type::TRef || lt.ty is Type::TMutRef { return ins(g, "b", "load ptr, ptr ".then(slot(l))); };
+    return giving(g, slot(l));
+};
+
+// Whether an operand is an array
+fn isArrayOperand(f: &Function, o: &Operand) -> Bool [{ }] [{ }] {
+    if o is Operand::Const { return (o as Operand::Const).value is Constant::CArray; };
+    lt = operandLocalType(f, o);
+    if !lt.ok { return false; };
+    if isArray(lt.ty) || isListStruct(lt.ty) { return true; };
+    if lt.ty is Type::TRef { return isListStruct(clone(Box::unbox(clone((lt.ty as Type::TRef).inner)))); };
+    if lt.ty is Type::TMutRef { return isListStruct(clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner)))); };
+    return false;
+};
+
+// The address of the words of an array operand: a local, or a constant that is a global; in `last`
+fn arrayPtr(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
+    if o is Operand::Const {
+        c = (o as Operand::Const).value;
+        if c is Constant::CArray { return constantWords(g, (c as Constant::CArray).items); };
+        return failG(g, "Not an array");
+    };
+    lt = operandLocalType(f, o);
+    l = 0;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move { l = (o as Operand::Move).local; };
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    // (a list of native code holds the address of the elements in its first word)
+    if isListStruct(lt.ty) { return ins(g, "a", "load ptr, ptr ".then(slot(l))); };
+    if lt.ty is Type::TRef || lt.ty is Type::TMutRef {
+        g1 = ins(g, "a", "load ptr, ptr ".then(slot(l)));
+        at = clone(g1.last);
+        inner = Type::TInt;
+        if lt.ty is Type::TRef { inner = clone(Box::unbox(clone((lt.ty as Type::TRef).inner))); };
+        if lt.ty is Type::TMutRef { inner = clone(Box::unbox(clone((lt.ty as Type::TMutRef).inner))); };
+        if isListStruct(inner) { return ins(g1, "a", "load ptr, ptr ".then(at)); };
+        return g1;
+    };
+    return giving(g, slot(l));
+};
+
+// What an element of a list or an array is, ready to be written: the word, or for a value held inline the address of its words
+fn elementValue(g: Gen, cx: &Ctx, f: &Function, elementTy: &Type, o: &Operand) -> Gen ~ {
+    if isAggregate(elementTy) { return operandAddress(g, cx, f, elementTy, o); };
+    return operandValue(g, cx, f, elementTy, o);
+};
+
+// Frees what an element owns, before another is written over it
+fn dropElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String) -> Gen ~ {
+    if !needsDropIn(cx, elementTy) { return g; };
+    if !(elementTy is Type::TNamed || elementTy is Type::TVariant || sizedArray(elementTy).ok) { return g; };
+    bytes = bytesIn(cx, elementTy);
+    g1 = elementAddress(g, base, index, bytes);
+    p = clone(g1.last);
+    g2 = descriptor(g1, cx, elementTy);
+    return emit(g2, "call void ".then(dropSymbol(&cx.types, elementTy)).then("(ptr ").then(p).then(")"));
+};
+
+fn writeElement(g: Gen, cx: &Ctx, elementTy: &Type, base: &String, index: &String, value: &String) -> Gen ~ {
+    bytes = bytesIn(cx, elementTy);
+    g1 = elementAddress(g, base, index, bytes);
+    p = clone(g1.last);
+    if isAggregate(elementTy) { return copyWords(g1, p, value, bytes); };
+    return storeAt(g1, elementTy, p, value);
+};
+
+// The number of elements of an array operand, as text in `last`: a constant when the size is in the type, and what a Box of an array of no size carries otherwise
+fn arrayLength(g: Gen, f: &Function, o: &Operand) -> Gen ~ {
+    if o is Operand::Const {
+        c = (o as Operand::Const).value;
+        if c is Constant::CArray { return giving(g, showInt(size((c as Constant::CArray).items))); };
+        return failG(g, "Not an array");
+    };
+    lt = operandLocalType(f, o);
+    l = 0;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; };
+    if o is Operand::Move { l = (o as Operand::Move).local; };
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    arr = sizedArray(lt.ty);
+    if arr.ok { return giving(g, showInt(arr.length)); };
+    return failG(g, "Not an array: Local ".then(showInt(l)));
+};
+
+// The text of the index of the last element, given the text of the length
+fn lastIndex(g: Gen, count: &String) -> Gen [{ }] [{ }] {
+    n = parseInt(count);
+    if n.ok { return giving(g, showInt(n.value - 1)); };
+    return ins(g, "i", "sub i64 ".then(count).then(", 1"));
+};
+
+fn placeAddress(g: Gen, cx: &Ctx, f: &Function, root: Int, steps: &List<RefStep>) -> Gen ~ {
+    lt = localTypeOf(f, root);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(root))); };
+    g1 = g;
+    at = slot(root);
+    ty = clone(lt.ty);
+    // (the root may itself be a reference: a reborrow is to what the reference is to)
+    if ty is Type::TRef || ty is Type::TMutRef {
+        g1 = ins(g1, "p", "load ptr, ptr ".then(at));
+        at = clone(g1.last);
+        ty = refTargetOf(lt.ty);
+    };
+    i = 0;
+    while i < size(steps) [{ affirm i >= 0; affirm i <= size(steps); }] ~ {
+        // (a step may start from a reference met on the way, which is followed the same way)
+        if ty is Type::TRef || ty is Type::TMutRef {
+            g1 = ins(g1, "p", "load ptr, ptr ".then(at));
+            at = clone(g1.last);
+            ty = refTargetOf(ty);
+        };
+        step = get(steps, i);
+        if step is RefStep::Field {
+            ctorName = (step as RefStep::Field).ctor;
+            fieldName = (step as RefStep::Field).field;
+            k = constructorG(g1, cx, ctorName);
+            if size(k.g.error.bytes) > 0 { return k.g; };
+            ctor = ctorAt(cx, k.i);
+            j = fieldIndex(ctor.fields, fieldName);
+            if j < 0 { return failG(k.g, "Variant ".then(ctorName).then(" has no field ").then(fieldName)); };
+            g1 = ins(k.g, "p", "getelementptr i8, ptr ".then(at).then(", i64 ").then(showInt(fieldOffset(cx, ctor, j))));
+            at = clone(g1.last);
+            ty = clone(get(ctor.fields, j).ty);
+        };
+        if step is RefStep::Index {
+            o = (step as RefStep::Index).o;
+            elem = Held { ok: false, ty: Type::TInt };
+            if isListStruct(ty) { elem = listElement(cx, ty); };
+            if isBoxStruct(ty) { elem = listElement(cx, ty); };
+            arr = sizedArray(ty);
+            if arr.ok { elem = Held { ok: true, ty: clone(arr.elem) }; };
+            if !elem.ok { return failG(g1, "A reference to an element of this is not made by native code"); };
+            g1 = operandValue(g1, cx, f, Type::TInt, o);
+            index = clone(g1.last);
+            base = clone(at);
+            if isListStruct(ty) || isBoxStruct(ty) {
+                g1 = ins(g1, "a", "load ptr, ptr ".then(at));
+                base = clone(g1.last);
+            };
+            g1 = elementAddress(g1, base, index, bytesIn(cx, elem.ty));
+            at = clone(g1.last);
+            ty = clone(elem.ty);
+        };
+        i = i + 1;
+    };
+    return giving(g1, at);
+};
+
+fn operandPointer(g: Gen, cx: &Ctx, f: &Function, o: &Operand) -> Gen ~ {
+    l = 0;
+    isLocal = false;
+    if o is Operand::Copy { l = (o as Operand::Copy).local; isLocal = true; };
+    if o is Operand::Move { l = (o as Operand::Move).local; isLocal = true; };
+    if !isLocal { return operandValue(g, cx, f, Type::TInt, o); };
+    lt = localTypeOf(f, l);
+    if !lt.ok { return failG(g, "Undeclared local ".then(showInt(l))); };
+    if lt.ty is Type::TRef || lt.ty is Type::TMutRef { return operandValue(g, cx, f, lt.ty, o); };
+    return giving(g, slot(l));
+};

@@ -145,6 +145,16 @@ for phase-neutral type/declaration metadata and rendering. The codec still
 owns Type/Size and the reader owns the MIR records. Each tool retains its
 full layout rules; the eraser retains its legacy data writer (see MIR.md).
 
+The emitter is one six-file `mir::emit` module: `types.tersus` owns its model,
+layouts, names and context; `values.tersus` owns generation state and operands;
+`operations.tersus` lowers rvalues and statements; `functions.tersus` emits calls,
+control flow and function frames; `helpers.tersus` generates drop/clone/print
+functions. `emit.tersus` assembles the output and is the only executable file.
+Files import the declarations they use explicitly. Keeping one build unit retains
+bare emitter identities and the single module-local foreign `String.then` method.
+`PreludeSource.mirPackageFiles` embeds all six files; cache keys include their paths
+and contents. The CLI entry, MIR protocol and runtime ABI are unchanged.
+
 ## Interpreter flow
 
 The native parser produces the AST; Haskell checks its types and lowers it to MIR, then the native Tersus validator checks it before execution (the stages are chained by `Pipeline`, which type checks the program once; steps 1 to 6 below):

@@ -25,6 +25,11 @@ extra-source-files:
     examples/mir/reader/reader.tersus
     examples/mir/support/support.tersus
     examples/mir/emit/emit.tersus
+    examples/mir/emit/types.tersus
+    examples/mir/emit/values.tersus
+    examples/mir/emit/operations.tersus
+    examples/mir/emit/functions.tersus
+    examples/mir/emit/helpers.tersus
     examples/mir/mir_reader/mir_reader.tersus
     examples/data/package.tersus
     examples/data/codec/codec.tersus

@@ -12,6 +12,8 @@ import MirEval (MirValue (..), runNamedFunction)
 import MirLower (lowerModuleWith)
 import qualified Modules as Mod
 import qualified PackageCompile as Package
+import Parse (ParsedFile (..))
+import qualified Syntax as S
 import PreludeSource (mirPackageFiles)
 import TestHarness (Test (..), TestResult, testAssertEq, testAssertErrorContains, testCase)
 import Types (Type (..), Arg (..), Signature (..))
@@ -27,8 +29,15 @@ testMirSupport = TestList "testMirSupport"
             , testCase "borrowed inputs and owned results survive lowering" (inspect snapshot borrowedMetadata)
             , testCase "phase layout calls shared symbols directly without forwarding" (inspect snapshot directCalls)
             , testCase "support unit identity deduplicates only identical units" (inspect snapshot supportUnitIdentity)
+            , testCase "phase-local helper declarations retain their real file owner" (inspect snapshot phaseLocalOwners)
             ]
         | (name, snapshot) <- toolSnapshots
+        ]
+    , TestList "emitter file boundaries"
+        [ testCase "one six-file build unit preserves bare declarations and file imports" (inspect (snd (head toolSnapshots)) emitterFileLayout)
+        , TestCase "embedded emitter files match their source files" emitterSourceSnapshot
+        , testCase "missing same-module values import is refused" (emitterImportRefusal)
+        , testCase "non-entry emitter files cannot execute" (emitterDeclarationRefusal)
         ]
     , TestList "rendering matches pre-extraction outputs"
         ([ testCase ("size " ++ label) (callSupport "renderSize" [value] (text expected))
@@ -127,6 +136,60 @@ testMirSupport = TestList "testMirSupport"
         | (phase, (name, snapshot)) <- zip [0..] toolSnapshots
         ]
     ]
+
+emitterFiles :: [String]
+emitterFiles = ["emit", "functions", "helpers", "operations", "types", "values"]
+
+emitterFileLayout :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
+emitterFileLayout (loaded, compiled, program) = firstFailure
+    [ testAssertEq (map Mod.loadedFileStem files) emitterFiles
+    , testAssertEq (length [m | m <- Package.compiledModules compiled, Package.compiledModuleId m == entryId]) 1
+    , testAssertEq [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]
+        [name | file <- files, S.Assign name (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file), '$' `notElem` name]
+    , testAssertEq (length [() | file <- files, S.Assign _ (S.Val S.VFunct{}) <- fileBody (Mod.loadedParsed file)]) 155
+    , testAssertEq (Set.fromList [name | file <- files, S.StructDef name _ _ _ <- fileBody (Mod.loadedParsed file)])
+        (Set.fromList ["Held", "Entry", "Gen", "Sig", "Ctor", "Ctx", "LT", "LTG", "CtorAt", "FnOut"])
+    , testAssertEq (all (`Map.member` M.progFunctions program) ["ir", "outline", "bodies", "fieldOffset", "operandValue", "emitStatement", "emitFunction", "<String>::then"]) True
+    , firstFailure
+        [ testAssertEq (Set.fromList [stem | ri <- Mod.loadedImports file, Mod.resolvedTargetModule ri == entryId, Just stem <- [Mod.resolvedTargetFile ri]]) (Set.fromList expected)
+        | (stem, expected) <- [("emit", ["types", "values", "functions", "helpers"]), ("functions", ["types", "values", "operations"]), ("helpers", ["types"]), ("operations", ["types", "values"]), ("types", []), ("values", ["types"])]
+        , file <- files, Mod.loadedFileStem file == stem
+        ]
+    ]
+  where
+    entryId = Mod.packageEntryModule loaded
+    files = [file | m <- Mod.packageModules loaded, Mod.loadedModuleId m == entryId, file <- Mod.loadedModuleFiles m]
+
+phaseLocalOwners :: (Mod.LoadedPackage, Package.CompiledPackage, M.Program) -> TestResult
+phaseLocalOwners (loaded, _, _) = firstFailure
+    [ testAssertEq [Mod.loadedFileStem file | file <- files, name `elem` Mod.loadedDeclNames file]
+        (if phase == Just "mir_erase" && name `elem` ["global", "slotsOf"] then [] else [owner])
+    | name <- ["layoutOf", "fieldsLayout", "global", "slotsOf", "<String>::then"] ++ ["Held" | phase == Just "emit"]
+    ]
+  where
+    phase = Mod.moduleName (Mod.packageEntryModule loaded)
+    owner = if phase == Just "emit" then "types" else maybe "" id phase
+    files = [file | m <- Mod.packageModules loaded, Mod.loadedModuleId m == Mod.packageEntryModule loaded, file <- Mod.loadedModuleFiles m]
+
+emitterSourceSnapshot :: IO TestResult
+emitterSourceSnapshot = do
+    actual <- mapM (\stem -> let path = "examples/mir/emit/" ++ stem ++ ".tersus" in do source <- readFile path; pure (path, source)) emitterFiles
+    pure (firstFailure [testAssertEq (lookup path mirPackageFiles) (Just source) | (path, source) <- actual])
+
+emitterImportRefusal :: TestResult
+emitterImportRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles changed) "examples/mir/emit/emit.tersus" of
+    Left err -> Just ("removing the values import unexpectedly failed loading: " ++ err)
+    Right (Mod.PackageResult pkg) -> testAssertErrorContains "covering import" (Package.compileModules pkg)
+    Right _ -> Just "emitter stopped being a package"
+  where
+    changed = [(path, if path == "examples/mir/emit/functions.tersus" then unlines (filter (not . isPrefixOf "import mir::emit::values ") (lines source)) else source) | (path, source) <- mirPackageFiles]
+
+emitterDeclarationRefusal :: TestResult
+emitterDeclarationRefusal = case Mod.loadFromEntry (Mod.resolverFromFiles changed) "examples/mir/emit/emit.tersus" of
+    Left err -> testAssertEq ("modules declare, programs run" `isInfixOf` err) True
+    Right _ -> Just "a non-entry emitter file executed"
+  where
+    changed = [(path, if path == "examples/mir/emit/helpers.tersus" then source ++ "\nreturn 0;\n" else source) | (path, source) <- mirPackageFiles]
 
 supportId :: Mod.ModuleId
 supportId = Mod.ModuleId "mir" (Just "support")
