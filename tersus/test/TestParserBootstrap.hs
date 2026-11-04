@@ -213,10 +213,14 @@ coldStages = do
         Ok home -> do
             before <- listDirectory home
             seed <- timed "P0" cachedParserSeed
+            case ParserSeed.parseImportPrefix userMain of
+                Right [Import ["bootstrapprobe", "math"] Nothing (Just ["twice"]) 1 1] -> pure ()
+                Left e -> fail e
+                Right imports -> fail ("unexpected user-package import metadata: " ++ show imports)
             emitter <- timed "E1+checker+eraser+ListBox" Bootstrap.cachedEmitter
             parser <- timed "P1" (TersusParser.parseFileNative emptyDecls "return 42;")
             source <- timed "source" (evaluate (Pipeline.compileSource "return 42;"))
-            package <- timed "user package" $ evaluate $ case Pipeline.loadFromEntry (resolver userPackage) "bootstrap_probe/main.tersus" of
+            package <- timed "user package" $ evaluate $ case Pipeline.loadFromEntry (resolver userPackage) "bootstrapprobe/main.tersus" of
                 Left e -> Error e
                 Right (PackageResult pkg) -> Pipeline.compileModulesValidated pkg
                 Right _ -> Error "the importing user program is not a package"
@@ -233,10 +237,11 @@ coldStages = do
                 ]
   where
     resolver = resolverFromFiles
+    userMain = "import bootstrapprobe::math { twice }; return twice(21);"
     userPackage =
-        [ ("bootstrap_probe/package.tersus", "")
-        , ("bootstrap_probe/main.tersus", "import bootstrap_probe::math { twice }; return twice(21);")
-        , ("bootstrap_probe/math/math.tersus", "fn twice(x: Int) -> Int ~ { return x + x; };")
+        [ ("bootstrapprobe/package.tersus", "")
+        , ("bootstrapprobe/main.tersus", userMain)
+        , ("bootstrapprobe/math/math.tersus", "fn twice(x: Int) -> Int ~ { return x + x; };")
         ]
 
 warmStages :: IO TestResult
