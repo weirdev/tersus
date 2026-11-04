@@ -2,6 +2,7 @@
 
 module Native
     ( cacheDirectory
+    , cacheLock
     , cachedProgram
     , buildExecutable
     , buildExecutableWith
