@@ -319,20 +319,22 @@ withLoanRoots :: LoanRoots -> Live -> Live
 withLoanRoots loans live = Set.union live (Set.unions [referencesOf loans l | (l, _) <- Set.toList live])
 
 blockLiveness :: Program -> Function -> Map BlockId LoanRoots -> BlockId -> Live -> (Live, [Live])
-blockLiveness program fn entries block out =
+blockLiveness program fn entries block =
     let BasicBlock stmts term = fnBlocks fn Map.! block
         states = scanl (loanStatement fn program) (Map.findWithDefault Map.empty block entries) stmts
         termLoans = last states
-        termLive = withLoanRoots termLoans (stepTerm term (withLoanRoots (loanTerminator fn program termLoans term) out))
-        lives = scanr (\(loans, stmt) after -> withLoanRoots loans (stepStmt stmt after)) termLive (zip states stmts)
-     in (head lives, tail lives)
+        afterTerm = loanTerminator fn program termLoans term
+     in \out ->
+        let termLive = withLoanRoots termLoans (stepTerm term (withLoanRoots afterTerm out))
+            lives = scanr (\(loans, stmt) after -> withLoanRoots loans (stepStmt stmt after)) termLive (zip states stmts)
+         in (head lives, tail lives)
 
 -- What is live when each block ends
-liveOuts :: Program -> Function -> Map BlockId LoanRoots -> Map BlockId Live
-liveOuts program fn entries = go (Map.map (const Set.empty) (fnBlocks fn))
+liveOuts :: Function -> Map BlockId (Live -> (Live, [Live])) -> Map BlockId Live
+liveOuts fn transfers = go (Map.map (const Set.empty) (fnBlocks fn))
   where
     go outs =
-        let ins = Map.mapWithKey (\b _ -> fst (blockLiveness program fn entries b (outs Map.! b))) (fnBlocks fn)
+        let ins = Map.mapWithKey (\b transfer -> fst (transfer (outs Map.! b))) transfers
             outs' = Map.map (\(BasicBlock _ term) -> Set.unions [Map.findWithDefault Set.empty s ins | s <- successors term]) (fnBlocks fn)
          in if outs' == outs then outs else go outs'
 
@@ -360,8 +362,9 @@ ownFunction :: Program -> Function -> Function
 ownFunction program fn0 =
     let fn = fuseCasts fn0
         entries = loanEntries program fn
-        outs = liveOuts program fn entries
-        afters = Map.mapWithKey (\b _ -> snd (blockLiveness program fn entries b (outs Map.! b))) (fnBlocks fn)
+        transfers = Map.mapWithKey (\b _ -> blockLiveness program fn entries b) (fnBlocks fn)
+        outs = liveOuts fn transfers
+        afters = Map.mapWithKey (\b transfer -> snd (transfer (outs Map.! b))) transfers
         statements = Map.map blockStatements (fnBlocks fn)
         -- (a parameter has a value from the start, so what is assigned to it is a second one)
         defsOf = Map.fromListWith (+) ([(d, 1 :: Int) | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Just d <- map stmtDef stmts] ++ [(d, 1) | BasicBlock _ (Call _ _ d _) <- Map.elems (fnBlocks fn)] ++ [(p, 1) | p <- fnParams fn])

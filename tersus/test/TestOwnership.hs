@@ -1097,6 +1097,22 @@ borrowedRootTests =
                     ] Return)
                 ]
          in testAssertTrue (any (\stmt -> case stmt of Assign (Local 5) (Use (Move (Local 2))) -> True; _ -> False) [stmt | BasicBlock stmts _ <- Map.elems (fnBlocks fn), stmt <- stmts])
+    , testCase "a late successor reference use keeps its owner field live" $
+        let fn = own [(Local 1, TNamed "Holder" []), (Local 2, TRef list), (Local 3, list), (Local 4, list)]
+                ([ (BlockId 0, BasicBlock [Assign (Local 2) (Borrow (Local 1) [RefField "Holder" "xs"] False)] (Goto (BlockId 1)))
+                 , (BlockId 1, BasicBlock [Assign (Local 3) (ReadField (Copy (Local 1)) "Holder" "xs")] (Goto (BlockId 2)))
+                 ] ++ [(BlockId i, BasicBlock [] (Goto (BlockId (i + 1)))) | i <- [2 .. 11]]
+                   ++ [(BlockId 12, BasicBlock [Assign (Local 4) (Deref (Copy (Local 2))), Assign (Local 0) (ListOp Length [Copy (Local 4)])] Return)])
+         in testAssertEq [() | BasicBlock stmts _ <- Map.elems (fnBlocks fn), Assign _ (TakeField (Local 1) "Holder" "xs") <- stmts] []
+    , testCase "a changed loop entry propagates both reborrow owners to its successor" $
+        let fn = own [(Local 1, list), (Local 2, list), (Local 3, TRef list), (Local 4, TRef list), (Local 5, list), (Local 6, list)]
+                [ (BlockId 0, BasicBlock [Assign (Local 3) (Borrow (Local 1) [] False)] (Goto (BlockId 1)))
+                , (BlockId 1, BasicBlock [Assign (Local 4) (Borrow (Local 3) [] False), Assign (Local 3) (Borrow (Local 2) [] False)] (SwitchBool (Const (CBool False)) (BlockId 1) (BlockId 2)))
+                , (BlockId 2, BasicBlock [Assign (Local 5) (Use (Copy (Local 2))), Assign (Local 6) (Deref (Copy (Local 4))), Assign (Local 0) (ListOp Length [Copy (Local 6)])] Return)
+                ]
+            stmts = [stmt | BasicBlock statements _ <- Map.elems (fnBlocks fn), stmt <- statements]
+         in testAssertTrue (any (\stmt -> case stmt of Assign _ (CopyOf (Copy (Local 2))) -> True; _ -> False) stmts
+            && not (any (\stmt -> case stmt of Assign (Local 5) (Use (Move (Local 2))) -> True; _ -> False) stmts))
     ]
   where
     list = TNamed "List" [ArgType TInt]
