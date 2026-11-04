@@ -98,20 +98,20 @@ fn driverParseValue(bytes: &List<Int>, start: Int) -> DriverParsed [{ affirm sta
         nameStart = driverSkipWs(bytes, at + 1);
         if nameStart >= size(bytes) { return DriverParsed { value: DriverValue::DriverInt { value: 0 }, pos: nameStart }; };
         lenParsed = driverReadInt(bytes, nameStart + 1);
+        // (the end of the bytes as a local: what holds on both sides of a join is
+        // found among the locals)
+        limit = size(bytes);
         name = [];
         pos = lenParsed.pos;
         // the name follows its length after one space
-        if pos < size(bytes) {
+        if pos < limit {
             if get(bytes, pos) = 32 { pos = pos + 1; };
         };
         length = lenParsed.value;
         if length < 0 { length = 0; };
         for i in 0..length {
-            if pos + i < size(bytes) { name = push(name, get(bytes, pos + i)); };
+            if pos + i < limit { name = push(name, get(bytes, pos + i)); };
         };
-        // (the end of the bytes as a local: what holds on both sides of a join is
-        // found among the locals)
-        limit = size(bytes);
         end = pos + length;
         if end > limit { end = limit; };
         if end < pos { end = pos; };
