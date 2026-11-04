@@ -1,4 +1,4 @@
-module MirLower (lowerProgram, lowerElaborated, lowerLibrary, lowerModuleWith) where
+module MirLower (lowerProgram, lowerElaborated, lowerLibrary, lowerModuleWith, lowerEntryWith) where
 
 import Control.Monad (forM, unless, when)
 import Data.List (intercalate)
@@ -7,6 +7,8 @@ import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
 import Interface (InterfaceFunction (..), ModuleInterface (..))
+import Link (linkPrograms)
+import Modules (ModuleId(..))
 import qualified Mir as M
 import MirMoves (checkMovesWithLifetimes, stripPositions)
 import Pretty (renderType)
@@ -43,6 +45,18 @@ lowerWith checking elaborated@(Elaborated stmts _) =
     case runL (program stmts) ((initialState elaborated){lsChecking = checking}) of
         Left e -> Error e
         Right (p, _) -> Ok p
+
+lowerEntryWith :: ImportEnv -> [ModuleInterface] -> [(ModuleId, M.Program)] -> Elaborated -> Result M.Program String
+lowerEntryWith _env ifaces dependencies elaborated@(Elaborated stmts _) =
+    case runL (program stmts) ((seededModuleState ifaces elaborated){lsChecking = False}) of
+        Left err -> Error err
+        Right (entry, state) ->
+            let withoutStubs = entry{M.progFunctions = Map.withoutKeys (M.progFunctions entry) (lsStubs state)}
+             in linkPrograms (dependencies ++ [(ModuleId "main" Nothing, withoutStubs)]) `bindResult` \linked ->
+                let (checked, errors) = checkMovesWithLifetimes (lsCopies state) (lsLinear state) (lsDrops state) Set.empty linked
+                 in case errors of
+                    [] -> Ok (stripPositions checked)
+                    _ -> Error (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
 lowerModuleWith :: ImportEnv -> [ModuleInterface] -> Elaborated -> Result M.Program String
 lowerModuleWith _env ifaces elaborated@(Elaborated stmts _) =
@@ -365,7 +379,7 @@ program stmts = do
     -- and lowerModuleWith takes them out of the unit it returns.)
     let (withLifetimes, moveErrors) = if lsChecking s then checkMovesWithLifetimes (lsCopies s) (lsLinear s) (lsDrops s) (lsStubs s) result else (result, [])
     case moveErrors of
-        [] -> return (stripPositions withLifetimes)
+        [] -> return (if lsChecking s then stripPositions withLifetimes else withLifetimes)
         errors -> failL (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
 
 -- One type variable the checker never learned (the elements of a list that is never used) is an Int

@@ -19,13 +19,11 @@ import Data.Char (isAlphaNum)
 import qualified Data.Map as Map
 
 import qualified Mir as M
-import MirLower (lowerElaborated, lowerModuleWith)
+import MirLower (lowerElaborated, lowerEntryWith)
 import Data.List (intercalate)
 import Interface (mergeInterfacesImportEnv, withoutDeclaredNames)
 import LibParsed (declsForLibModules, libParsed, statementsForLibModules)
 import LibPackage (libModuleOfDisplay, libPackage, libSelectionFor, stripDeclaredFromUnits)
-import Link (linkPrograms)
-import Modules (ModuleId (..))
 import Parse (Decls, ParsedFile (..), emptyDecls, importPath, locating, parseFileWith, parseStatementBlockWith, renderPath)
 import PreludeSource (cloneSource, eqSource, mapSource, preludeSource, setSource, stringSource, typesSource)
 import Syntax (Expression (..), FunctBody (..), Proof (..), RwRule (..), Statement (..), Termination (..), TraitFn (..), ValidationStatement (..), Value (..))
@@ -394,8 +392,7 @@ lowerSourceParts _reserving (names, _library, stmts) =
                             ifaces = map (withoutDeclaredNames own) selectedIfaces
                             importEnv = mergeInterfacesImportEnv ifaces
                          in stage "Validation failed: " (mapResult fst (elaborateWith importEnv stmts)) `bindResult` \elaborated ->
-                                stage "Lowering failed: " (lowerModuleWith importEnv ifaces elaborated) `bindResult` \entryProgram ->
-                                    mapResult completeSpecEnvs (linkPrograms (stripDeclaredFromUnits own units ++ [(ModuleId "main" Nothing, entryProgram)]))
+                                mapResult completeSpecEnvs (stage "Lowering failed: " (lowerEntryWith importEnv ifaces (stripDeclaredFromUnits own units) elaborated))
 
 -- The ghost environment of a function of a whole program names every
 -- function of the program (the lowering preregisters them all before it

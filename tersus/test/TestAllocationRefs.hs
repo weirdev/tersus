@@ -10,7 +10,10 @@ import System.IO (hClose, openTempFile)
 import Bootstrap (llvmOfOwned)
 import Cli (Command(..), runSource)
 import Compile (lowerSource, parseSource)
-import MirLower (lowerModuleWith)
+import MirLower (lowerModuleWith, lowerEntryWith)
+import Interface (mergeInterfacesImportEnv)
+import qualified Modules as Modules
+import qualified PackageCompile as Package
 import TypeCheck (elaborate, emptyImportEnv)
 import Types (Type (..))
 import Mir
@@ -32,9 +35,52 @@ testAllocationRefs = TestList "testAllocationRefs"
     , testCase "unchecked raw targets detect free and resize, and reread the current slot" runtimeTargets
     , testCase "exited and cross-evaluation frame references are refused" expiredFrames
     , testCase "old non-raw carrier callbacks retain borrowed argument origins" (testAssertEq (lowerSource False legacyCallback `bindResult` Eval.runProgram) (Ok (Just (Eval.MInt 42))))
+    , testCase "closed entry move errors retain source coordinates" (testAssertErrorContains "line 3:1" (lowerSource True "xs = [1];\nys = xs;\nreturn size(xs);\n"))
+    , testCase "closed entry raw-loan errors retain source coordinates" (testAssertErrorContains "line 4:1" (lowerSource True "(p, b) = Addr::alloc(1);\nb = Addr::write(p, 0, 7, b);\nr = &Addr::get(p, 0, b);\nb = Addr::dropValue(p, 0, b);\nreturn *r + Addr::free(p, b);\n"))
+    , testCase "successful closed-entry output has no position rows" noEntryPositions
+    , testCase "closed entry checks the actual read-only imported body" (closedCallback False)
+    , testCase "closed entry refuses a reference-storing imported body" (closedCallback True)
+    , testCase "a genuinely exported raw getter remains unavailable without footprints" exportedRawModule
     , testCase "raw module exports require checked footprints" (testAssertErrorContains "exported checked footprints"
         (parseSource (standalone ++ "r=&Addr::get(p,0,b);n=*r;" ++ clear ++ "return n;") `bindResult` elaborate `bindResult` lowerModuleWith emptyImportEnv []))
     ]
+
+noEntryPositions :: TestResult
+noEntryPositions = case lowerSource True (standalone ++ "r = &Addr::get(p, 0, b); n = *r;" ++ clear ++ "return n;") of
+    Error err -> Just err
+    Ok program -> testAssertEq [() | fn <- progMain program : Map.elems (progFunctions program), block <- Map.elems (fnBlocks fn), Ghost _ GhostPosition{} <- blockStatements block] []
+
+closedCallback :: Bool -> TestResult
+closedCallback storing =
+    let body = if storing then "struct Held { value: &Int }; fn read(value: &Int) -> Int { h = Held { value: &value }; return *h.value; };" else "fn read(value: &Int) -> Int { return *value; };"
+        source = "import app::callback { read }; " ++ standalone ++ "r = &Addr::get(p, 0, b); n = read(r); " ++ clear ++ "return n;"
+        files = [("app/package.tersus", ""), ("app/main.tersus", source), ("app/callback/callback.tersus", body)]
+        loaded = case Modules.loadFromEntry (Modules.resolverFromFiles files) "app/main.tersus" of
+            Left err -> Error err
+            Right (Modules.PackageResult package) -> Ok package
+            Right _ -> Error "Expected a package"
+        lowered = loaded `bindResult` Package.compileModules `bindResult` \compiled ->
+            case Package.compiledModules compiled of
+                [dependency, entry] ->
+                    let depIfaces = Package.compiledLibInterfaces dependency
+                     in lowerModuleWith (mergeInterfacesImportEnv depIfaces) depIfaces (Package.compiledElaborated dependency) `bindResult` \dep ->
+                        let ifaces = Package.compiledLibInterfaces entry ++ [Package.compiledInterface dependency]
+                            units = Package.compiledLibUnits entry ++ Package.compiledLibUnits dependency ++ [(Package.compiledModuleId dependency, dep)]
+                         in lowerEntryWith (mergeInterfacesImportEnv ifaces) ifaces units (Package.compiledElaborated entry)
+                _ -> Error "Expected a dependency and one entry module"
+     in if storing then testAssertErrorContains "reference-storing calls" lowered else case lowered of
+        Error err -> Just err
+        Ok _ -> Nothing
+
+exportedRawModule :: TestResult
+exportedRawModule =
+    let source = "struct Buffer { addr: Addr<Int>, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0); }]; fn read(o: &Buffer) -> &Int from o { return &Addr::get(o.addr, 0, o.blk); };"
+        files = [("app/package.tersus", ""), ("app/main.tersus", "import app::raw { read }; return 0;"), ("app/raw/raw.tersus", source)]
+        checked = case Modules.loadFromEntry (Modules.resolverFromFiles files) "app/main.tersus" of
+            Left err -> Error err
+            Right (Modules.PackageResult package) -> Package.compileModulesValidated package
+            Right _ -> Error "Expected a package"
+     in testAssertErrorContains "exported checked footprints" checked
 
 owner :: String
 owner = ownerFor "Int"
