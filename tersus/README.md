@@ -139,6 +139,11 @@ includes a generated Unicode root-module file. The ordinary Haskell module
 loader/compiler builds those tools without invoking the native parser itself.
 Native tool fingerprints cover the snapshot paths and source contents.
 
+The MIR emitter, checker and eraser import `examples/mir/support/support.tersus`
+for phase-neutral type/declaration metadata and rendering. The codec still
+owns Type/Size and the reader owns the MIR records. Each tool retains its
+full layout rules; the eraser retains its legacy data writer (see MIR.md).
+
 ## Interpreter flow
 
 The Haskell implementation parses to the AST, checks its types, lowers it to the MIR, validates the MIR, and runs it (the stages are chained by `Pipeline`, which type checks the program once; steps 1 to 6 below):

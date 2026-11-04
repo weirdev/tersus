@@ -1,0 +1,225 @@
+import data::codec::codec { Size, Type, catStrings };
+import mir::reader::reader { Variant, TypeDecl };
+
+struct Res { ok: Bool, text: String };
+impl Clone for Res { };
+
+struct ArrayInfo { ok: Bool, length: Int, elem: Type };
+impl Clone for ArrayInfo { };
+
+struct Layout { size: Int, align: Int };
+impl Clone for Layout { };
+
+struct Simple { ok: Bool, layout: Layout };
+impl Clone for Simple { };
+
+fn noStrings() -> List<String> [{ }] [{ }] {
+    return [];
+};
+
+fn showInt(n: Int) -> String [{ }] [{ }] {
+    return String::fromInt(n);
+};
+
+fn joinWith(sep: &String, parts: &List<String>) -> String [{ }] [{ }] {
+    out = "";
+    for i in 0..size(parts) {
+        if i > 0 { out = out.concat(sep); };
+        out = out.concat(get(parts, i));
+    };
+    return out;
+};
+
+fn beforeAngle(name: &String) -> String [{ }] [{ }] {
+    i = name.find(toByte(60), 0);
+    return name.slice(0, i);
+};
+
+fn withoutBackticks(name: &String) -> String [{ }] [{ }] {
+    out = "";
+    for i in 0..size(name.bytes) {
+        b = get(name.bytes, i);
+        if b != toByte(96) { out = push(out, b); };
+    };
+    return out;
+};
+
+fn hexUpper(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
+    if d < 10 { return toByte(48 + d); };
+    return toByte(55 + d);
+};
+
+fn escaped(name: &String) -> String [{ }] [{ }] {
+    out = "";
+    for i in 0..size(name.bytes) {
+        c = toInt(get(name.bytes, i));
+        if c >= 32 && c < 127 && c != 34 && c != 92 {
+            out = push(out, toByte(c));
+        } else {
+            out = push(out, toByte(92));
+            out = push(out, hexUpper(c / 16));
+            out = push(out, hexUpper(c % 16));
+        };
+    };
+    return out;
+};
+
+fn renderSize(s: &Size) -> String [{ }] [{ }] {
+    return match s {
+        Size::SConst { n: n } => showInt(n),
+        Size::SAny => "?",
+        Size::SParam { name: name } => clone(name),
+        Size::SVar { n: n } => catStrings("_", showInt(n)),
+    };
+};
+
+fn renderType(t: &Type) -> String ~ {
+    r = "";
+    match t {
+        Type::TInt => { r = "Int"; },
+        Type::TByte => { r = "Byte"; },
+        Type::TBool => { r = "Bool"; },
+        Type::TList { elem: e } => { r = catStrings(catStrings("List<", renderType(Box::unbox(e))), ">"); },
+        Type::TBox { inner: e } => { r = catStrings(catStrings("Box<", renderType(Box::unbox(e))), ">"); },
+        Type::TArray { elem: e, size: s } => { r = catStrings(catStrings(catStrings(catStrings("Array<", renderType(Box::unbox(e))), ", "), renderSize(s)), ">"); },
+        Type::TRef { inner: e } => { r = catStrings("&", renderType(Box::unbox(e))); },
+        Type::TMutRef { inner: e } => { r = catStrings("&mut ", renderType(Box::unbox(e))); },
+        Type::TAddr { inner: e } => { r = catStrings(catStrings("Addr<", renderType(Box::unbox(e))), ">"); },
+        Type::TBlock { inner: e } => { r = catStrings(catStrings("Block<", renderType(Box::unbox(e))), ">"); },
+        Type::TUninit { inner: e } => { r = catStrings(catStrings("Uninit<", renderType(Box::unbox(e))), ">"); },
+        Type::TWord { signed: signed, bits: bits } => {
+            if signed { r = catStrings("I", showInt(bits)); } else { r = catStrings("U", showInt(bits)); };
+        },
+        Type::TParam { name: name } => { r = clone(name); },
+        Type::TForall { sizes: sizes, types: types, body: body } => {
+            names = noStrings();
+            for tn in types { names = push(names, clone(tn)); };
+            for sn in sizes { names = push(names, clone(sn)); };
+            r = catStrings(catStrings(catStrings("<", joinWith(", ", names)), ">"), renderType(Box::unbox(body)));
+        },
+        Type::TFn { args: args, ret: ret } => {
+            parts = noStrings();
+            for a in args { parts = push(parts, renderType(a)); };
+            r = catStrings(catStrings(catStrings("fn(", joinWith(", ", parts)), ") -> "), renderType(Box::unbox(ret)));
+        },
+        Type::TNamed { name: name } => { r = withoutBackticks(name); },
+        Type::TVariant { name: name } => { r = clone(name); },
+        Type::TVar { n: n } => { r = "?"; },
+    };
+    return r;
+};
+
+fn declName(d: &TypeDecl) -> String [{ }] [{ }] {
+    if d is TypeDecl::DStruct { return clone((d as TypeDecl::DStruct).name); };
+    return clone((d as TypeDecl::DEnum).name);
+};
+
+fn lookupDecl(types: &List<TypeDecl>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(types); }] {
+    i = 0;
+    while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
+        d = &get(types, i);
+        if declName(d) = name { return i; };
+        i = i + 1;
+    };
+    return 0 - 1;
+};
+
+fn variantNamed(variants: &List<Variant>, name: &String) -> Bool [{ }] [{ }] {
+    for v in variants {
+        if v.name = name { return true; };
+    };
+    return false;
+};
+
+fn ownerOf(types: &List<TypeDecl>, v: &String) -> Res [{ }] [{ }] {
+    i = lookupDecl(types, v);
+    if i >= 0 {
+        d = get(types, i);
+        if d is TypeDecl::DStruct { return Res { ok: true, text: clone(v) }; };
+    };
+    for d in types {
+        match d {
+            TypeDecl::DStruct { name: name, fields: fields } => { },
+            TypeDecl::DEnum { name: name, variants: variants } => {
+                if variantNamed(variants, v) { return Res { ok: true, text: clone(name) }; };
+            },
+        };
+    };
+    return Res { ok: false, text: "" };
+};
+
+fn canonical(types: &List<TypeDecl>, t: &Type) -> Type [{ }] [{ }] {
+    if t is Type::TVariant {
+        o = ownerOf(types, (t as Type::TVariant).name);
+        if o.ok { return Type::TNamed { name: clone(o.text), base: o.text, argc: 0, argTokens: [] }; };
+    };
+    return clone(t);
+};
+
+fn variantsOf(types: &List<TypeDecl>, n: &String) -> List<Variant> [{ }] [{ }] {
+    out = [];
+    i = lookupDecl(types, n);
+    if i >= 0 {
+        d = get(types, i);
+        match d {
+            TypeDecl::DStruct { name: name, fields: fields } => { out = push(out, Variant { name: clone(name), fields: clone(fields) }); },
+            TypeDecl::DEnum { name: name, variants: variants } => { out = clone(variants); },
+        };
+    };
+    return out;
+};
+
+fn isEnum(types: &List<TypeDecl>, n: &String) -> Bool [{ }] [{ }] {
+    i = lookupDecl(types, n);
+    if i >= 0 {
+        d = get(types, i);
+        return d is TypeDecl::DEnum;
+    };
+    return false;
+};
+
+fn notArray() -> ArrayInfo [{ }] [{ }] {
+    return ArrayInfo { ok: false, length: 0, elem: Type::TInt };
+};
+
+fn sizedArray(t: &Type) -> ArrayInfo [{ }] [{ }] {
+    if t is Type::TArray {
+        s = (t as Type::TArray).size;
+        if s is Size::SConst {
+            return ArrayInfo { ok: true, length: (s as Size::SConst).n, elem: clone(Box::unbox((t as Type::TArray).elem)) };
+        };
+    };
+    return notArray();
+};
+
+fn isSizedArray(t: &Type) -> Bool [{ }] [{ }] {
+    return sizedArray(t).ok;
+};
+
+fn isAggregate(t: &Type) -> Bool [{ }] [{ }] {
+    return isSizedArray(t) || t is Type::TNamed || t is Type::TVariant;
+};
+
+fn declaredName(types: &List<TypeDecl>, t: &Type) -> Res [{ }] [{ }] {
+    if t is Type::TNamed { return Res { ok: true, text: clone((t as Type::TNamed).name) }; };
+    if t is Type::TVariant { return ownerOf(types, (t as Type::TVariant).name); };
+    return Res { ok: false, text: "" };
+};
+
+fn roundUp(n: Int, a: Int) -> Int [{ }] [{ }] {
+    if a <= 1 { return n; };
+    return (n + a - 1) / a * a;
+};
+
+fn wordLayout() -> Layout [{ }] [{ }] {
+    return Layout { size: 8, align: 8 };
+};
+
+fn simpleLayout(t: &Type) -> Simple [{ }] [{ }] {
+    if t is Type::TByte || t is Type::TBool { return Simple { ok: true, layout: Layout { size: 1, align: 1 } }; };
+    if t is Type::TWord {
+        b = (t as Type::TWord).bits / 8;
+        return Simple { ok: true, layout: Layout { size: b, align: b } };
+    };
+    return Simple { ok: false, layout: wordLayout() };
+};

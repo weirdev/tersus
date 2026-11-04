@@ -299,9 +299,19 @@ A local that is given a value frees the one it held (assigning null does nothing
 The MIR package imports `data::codec::codec` for `Token`, `Parsed`, `Size`,
 `Type`, tokenization, escaping, decimal numbers and size/type read/write helpers.
 AST consumers import that same module; the MIR record schema and program
-readers/writers stay in `examples/mir`. The eraser keeps its local type writer
-because its legacy `list`/`box` spelling differs from the normalizing AST/MIR
-round-trip writer.
+readers/writers stay in `examples/mir`. `mir::support::support` imports those
+codec types and the reader's declarations. It owns the shared declaration
+lookup and variant ownership, array classification, primitive layout results,
+Tersus type/name rendering and LLVM name escaping. Its result records and
+Clone impls live there, not in the consumers. It is an ordinary package module,
+not an implicit compiler library; the reader does not depend on it.
+
+The emitter, verifier and eraser keep their full layouts local. The emitter
+uses zero-sized `Block` and unwraps `Uninit`; the verifier retains its legacy
+24-byte List and Box-of-array layout; the eraser combines those rules before
+removing permissions. Their field layouts call those local rules. The eraser
+also keeps its local type writer because its legacy `list`/`box` spelling
+differs from the normalizing AST/MIR round-trip writer.
 
 `tersus mir --data <file>` prints the MIR that native code is made from (the owned MIR of the Ownership section) as text that a program can read, and `MirData` reads and writes it (`readProgram (writeProgram p) = Ok (forNative p)`, for every example and every program of the native tests: `TestMirData`). It is what the lowering to LLVM IR written in Tersus is given (`STEP31.md`), and the emitter gives the same IR for the program read back from the data as for the program (`TestMirEmit`), so the data is all that the code made needs. Only what the emitter uses is in it: the ghost statements, the contracts and loop invariants, the structs with sizes and the invariants of structs are left out (`forNative`), since the validator is done with them and monomorphization has made their copies.
 
