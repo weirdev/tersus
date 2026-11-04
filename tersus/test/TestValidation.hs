@@ -14,6 +14,10 @@ import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
 import Control.Exception (evaluate)
 import System.Timeout (timeout)
 import Compile (lowerSource, lowerStatements, parseSource)
+import LibPackage (libPackage, libSelection)
+import MirLower (lowerEntryWith)
+import TypeCheck (Elaborated(..), emptyImportEnv)
+import Modules (ModuleId(..))
 import qualified Mir as M
 import qualified Data.Map as Map
 import qualified Data.Set as Set
@@ -638,6 +642,45 @@ unreachedDefinitions program = program{M.progMain = main'{M.fnBlocks = Map.inser
     definitions = [stmt | block <- Map.elems blocks, stmt <- M.blockStatements block, isDefinition stmt]
     stripped = Map.map (\block -> block{M.blockStatements = filter (not . isDefinition) (M.blockStatements block)}) blocks
 
+lifetimeEnvs :: TestResult
+lifetimeEnvs = case lowerSource True "x = \"hello\"; return size(x);" of
+    Error err -> Just err
+    Ok program ->
+        let rows = [Map.size env | fn <- M.progMain program : Map.elems (M.progFunctions program), block <- Map.elems (M.fnBlocks fn), M.Ghost env M.GhostLifetime{} <- M.blockStatements block]
+         in testAssertTrue (not (null rows) && all (== 0) rows)
+
+lifetimeRows :: M.Program -> Map.Map String [(M.Local, [M.Local])]
+lifetimeRows program = Map.fromList [(M.fnName fn, [(local, roots) | block <- Map.elems (M.fnBlocks fn), M.Ghost _ (M.GhostLifetime local roots) <- M.blockStatements block]) | fn <- M.progMain program : Map.elems (M.progFunctions program)]
+
+lifetimeIdempotence :: TestResult
+lifetimeIdempotence = case (lowerSource True "x = \"hello\"; return size(x);", libPackage) of
+    (Error err, _) -> Just err
+    (_, Error err) -> Just err
+    (Ok original, Ok libraries) ->
+        let (ifaces, _) = libSelection libraries ["types", "eq", "clone", "prelude", "string"]
+            recheck program = lowerEntryWith emptyImportEnv ifaces [(ModuleId "checked" Nothing, program)] (Elaborated [] [])
+         in case recheck original of
+            Error err -> Just err
+            Ok once -> case recheck once of
+                Error err -> Just err
+                Ok twice -> testAssertEq (lifetimeRows once, lifetimeRows twice) (lifetimeRows original, lifetimeRows original)
+
+sourceGlobals :: TestResult
+sourceGlobals = case lowerSource True "fn helper(x: Int) -> Int [{ }] [{ affirm return = x; }] { return x; }; fn wrapped(x: Int) -> Int [{ }] [{ affirm return = helper(x); }] { return x; }; proof fixed(x) [{ affirm helper(x) = x; }] [{ affirm helper(x) = x; }] { }; rewrite fixed 5; return wrapped(5);" of
+    Error err -> Just err
+    Ok program ->
+        let sourceRows = [env | fn <- M.progMain program : Map.elems (M.progFunctions program), block <- Map.elems (M.fnBlocks fn), M.Ghost env ghost <- M.blockStatements block, sourceBearing ghost]
+            contractRows = [M.specEnv (M.fnSpec fn) | fn <- Map.elems (M.progFunctions program)]
+         in case (validateProgramUncached program, validateProgramWithCache emptyValidationCache program) of
+            (Ok _, Ok _) -> testAssertTrue (not (null sourceRows) && all (Map.member "helper") (sourceRows ++ contractRows))
+            _ -> Just "Completed source globals failed cached or uncached validation"
+  where
+    sourceBearing M.GhostValidation{} = True
+    sourceBearing M.GhostAxiom{} = True
+    sourceBearing M.GhostProof{} = True
+    sourceBearing M.GhostFunction{} = True
+    sourceBearing _ = False
+
 frontendParity :: String -> TestResult
 frontendParity source = case parseSource source of
     Error e -> Just e
@@ -689,6 +732,9 @@ testValidationCache = TestList "testValidationCache"
     , testCase "prepared prefix does not retain user declarations" (frontendParity "struct Item { value: Int }; x = Item { value: 1 }; return x.value;")
     , testCase "next program can redefine the same type" (frontendParity "struct Item { value: Bool }; x = Item { value: true }; return x.value;")
     , testCase "string and prelude prefix parity" (frontendParity "x = \"hello\"; return size(x);")
+    , testCase "compiler lifetime metadata remains local during global completion" lifetimeEnvs
+    , testCase "linked lifetime recomputation is idempotent" lifetimeIdempotence
+    , testCase "source contract and rule globals remain completed" sourceGlobals
     , testCase "user-owned trait prefix parity" (frontendParity "trait Eq { fn eq(self: &Self, other: &Self) -> Bool; }; return 1;")
     ]
   where

@@ -408,6 +408,7 @@ completeSpecEnvs program = program{M.progFunctions = Map.map completeFunction (M
     completeFunction fn = completeGhosts fn{M.fnSpec = completeSpec (M.fnSpec fn)}
     completeGhosts fn = fn{M.fnBlocks = Map.map completeBlock (M.fnBlocks fn)}
     completeBlock (M.BasicBlock statements term) = M.BasicBlock (map completeStatement statements) term
+    completeStatement statement@(M.Ghost _ M.GhostLifetime{}) = statement
     completeStatement (M.Ghost env ghost) = M.Ghost (completeEnv env) ghost
     completeStatement other = other
     completeSpec spec = spec{M.specEnv = completeEnv (M.specEnv spec), M.specLoops = Map.map (\loop -> loop{M.loopEnv = completeEnv (M.loopEnv loop)}) (M.specLoops spec)}

@@ -53,10 +53,16 @@ lowerEntryWith _env ifaces dependencies elaborated@(Elaborated stmts _) =
         Right (entry, state) ->
             let withoutStubs = entry{M.progFunctions = Map.withoutKeys (M.progFunctions entry) (lsStubs state)}
              in linkPrograms (dependencies ++ [(ModuleId "main" Nothing, withoutStubs)]) `bindResult` \linked ->
-                let (checked, errors) = checkMovesWithLifetimes (lsCopies state) (lsLinear state) (lsDrops state) Set.empty linked
+                let withoutLifetimes = linked{M.progMain = clearLifetimes (M.progMain linked), M.progFunctions = Map.map clearLifetimes (M.progFunctions linked)}
+                    (checked, errors) = checkMovesWithLifetimes (lsCopies state) (lsLinear state) (lsDrops state) Set.empty withoutLifetimes
                  in case errors of
                     [] -> Ok (stripPositions checked)
                     _ -> Error (intercalate "\n" (take 100 (map ("Move error: " ++) errors) ++ ["... and " ++ show (length errors - 100) ++ " more" | length errors > 100]))
+  where
+    clearLifetimes function = function{M.fnBlocks = Map.map clearBlock (M.fnBlocks function)}
+    clearBlock (M.BasicBlock statements term) = M.BasicBlock (filter keep statements) term
+    keep (M.Ghost _ M.GhostLifetime{}) = False
+    keep _ = True
 
 lowerModuleWith :: ImportEnv -> [ModuleInterface] -> Elaborated -> Result M.Program String
 lowerModuleWith _env ifaces elaborated@(Elaborated stmts _) =
