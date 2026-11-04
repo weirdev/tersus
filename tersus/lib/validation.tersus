@@ -506,6 +506,13 @@ fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -
 // The element at an index that data gives (a node of a template, an entry
 // a map holds), or a value of none where the index is not in the list: the
 // data is made so that it always is, which nothing here proves
+fn emptyPositions() -> HashMap<Int, List<Int>> { return HashMap::new(); };
+
+fn minInt(a: Int, b: Int) -> Int {
+    if a < b { return a; };
+    return b;
+};
+
 fn intAt(xs: &List<Int>, i: Int, fallback: Int) -> Int {
     if i >= 0 && i < size(xs) { return get(xs, i); };
     return fallback;
@@ -4432,31 +4439,251 @@ fn sameApplication(a: &ApplicationTerm, b: &ApplicationTerm) -> Bool {
     return a.id = b.id && a.function = b.function && a.arguments = b.arguments;
 };
 
+// The facts both contexts hold, each once. (A fact held twice on each side
+// was kept four times, and the copies multiplied with every join after it.)
+// The facts of the right side are found by a key of each fact, not by a walk
+// over all of them for each fact of the left.
 fn commonContext(left: &ValidatorContext, right: &ValidatorContext) -> ValidatorContext {
     equalities = [];
+    equalitiesRight = emptyPositions();
+    for rPosition in 0..size(right.equalities) {
+        rKey = minInt(get(right.equalities, rPosition).left, get(right.equalities, rPosition).right);
+        equalitiesRight = equalitiesRight.insert(rKey, push(equalitiesRight.lookup(rKey, []), rPosition));
+    };
+    equalitiesKept = emptyPositions();
+    for lPosition in 0..size(left.equalities) {
+        fact = get(left.equalities, lPosition);
+        lKey = minInt(fact.left, fact.right);
+        matched = false;
+        for candidate in equalitiesRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.equalities) {
+                if sameEquality(fact, get(right.equalities, candidate)) { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in equalitiesKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.equalities) {
+                    if sameEquality(fact, get(left.equalities, earlier)) { kept = true; };
+                };
+            };
+            if kept = false {
+                equalitiesKept = equalitiesKept.insert(lKey, push(equalitiesKept.lookup(lKey, []), lPosition));
+                equalities = push(equalities, clone(fact));
+            };
+        };
+    };
     applications = [];
+    applicationsRight = emptyPositions();
+    for rPosition in 0..size(right.applications) {
+        rKey = get(right.applications, rPosition).id;
+        applicationsRight = applicationsRight.insert(rKey, push(applicationsRight.lookup(rKey, []), rPosition));
+    };
+    applicationsKept = emptyPositions();
+    for lPosition in 0..size(left.applications) {
+        fact = get(left.applications, lPosition);
+        lKey = fact.id;
+        matched = false;
+        for candidate in applicationsRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.applications) {
+                if sameApplication(fact, get(right.applications, candidate)) { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in applicationsKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.applications) {
+                    if sameApplication(fact, get(left.applications, earlier)) { kept = true; };
+                };
+            };
+            if kept = false {
+                applicationsKept = applicationsKept.insert(lKey, push(applicationsKept.lookup(lKey, []), lPosition));
+                applications = push(applications, clone(fact));
+            };
+        };
+    };
     constants = [];
+    constantsRight = emptyPositions();
+    for rPosition in 0..size(right.constants) {
+        rKey = get(right.constants, rPosition).id;
+        constantsRight = constantsRight.insert(rKey, push(constantsRight.lookup(rKey, []), rPosition));
+    };
+    constantsKept = emptyPositions();
+    for lPosition in 0..size(left.constants) {
+        fact = get(left.constants, lPosition);
+        lKey = fact.id;
+        matched = false;
+        for candidate in constantsRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.constants) {
+                if fact.id = get(right.constants, candidate).id && fact.kind = get(right.constants, candidate).kind && fact.value = get(right.constants, candidate).value { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in constantsKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.constants) {
+                    if fact.id = get(left.constants, earlier).id && fact.kind = get(left.constants, earlier).kind && fact.value = get(left.constants, earlier).value { kept = true; };
+                };
+            };
+            if kept = false {
+                constantsKept = constantsKept.insert(lKey, push(constantsKept.lookup(lKey, []), lPosition));
+                constants = push(constants, clone(fact));
+            };
+        };
+    };
     orders = [];
+    ordersRight = emptyPositions();
+    for rPosition in 0..size(right.orders) {
+        rKey = get(right.orders, rPosition).smaller;
+        ordersRight = ordersRight.insert(rKey, push(ordersRight.lookup(rKey, []), rPosition));
+    };
+    ordersKept = emptyPositions();
+    for lPosition in 0..size(left.orders) {
+        fact = get(left.orders, lPosition);
+        lKey = fact.smaller;
+        matched = false;
+        for candidate in ordersRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.orders) {
+                if fact.smaller = get(right.orders, candidate).smaller && fact.greater = get(right.orders, candidate).greater && fact.strict = get(right.orders, candidate).strict { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in ordersKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.orders) {
+                    if fact.smaller = get(left.orders, earlier).smaller && fact.greater = get(left.orders, earlier).greater && fact.strict = get(left.orders, earlier).strict { kept = true; };
+                };
+            };
+            if kept = false {
+                ordersKept = ordersKept.insert(lKey, push(ordersKept.lookup(lKey, []), lPosition));
+                orders = push(orders, clone(fact));
+            };
+        };
+    };
     different = [];
+    differentRight = emptyPositions();
+    for rPosition in 0..size(right.different) {
+        rKey = minInt(get(right.different, rPosition).left, get(right.different, rPosition).right);
+        differentRight = differentRight.insert(rKey, push(differentRight.lookup(rKey, []), rPosition));
+    };
+    differentKept = emptyPositions();
+    for lPosition in 0..size(left.different) {
+        fact = get(left.different, lPosition);
+        lKey = minInt(fact.left, fact.right);
+        matched = false;
+        for candidate in differentRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.different) {
+                if sameDisequality(fact, get(right.different, candidate)) { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in differentKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.different) {
+                    if sameDisequality(fact, get(left.different, earlier)) { kept = true; };
+                };
+            };
+            if kept = false {
+                differentKept = differentKept.insert(lKey, push(differentKept.lookup(lKey, []), lPosition));
+                different = push(different, clone(fact));
+            };
+        };
+    };
     variants = [];
-    fieldFunctions = [];
-    constructorFunctions = [];
+    variantsRight = emptyPositions();
+    for rPosition in 0..size(right.variants) {
+        rKey = get(right.variants, rPosition).object;
+        variantsRight = variantsRight.insert(rKey, push(variantsRight.lookup(rKey, []), rPosition));
+    };
+    variantsKept = emptyPositions();
+    for lPosition in 0..size(left.variants) {
+        fact = get(left.variants, lPosition);
+        lKey = fact.object;
+        matched = false;
+        for candidate in variantsRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.variants) {
+                if sameVariantFact(fact, get(right.variants, candidate)) { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in variantsKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.variants) {
+                    if sameVariantFact(fact, get(left.variants, earlier)) { kept = true; };
+                };
+            };
+            if kept = false {
+                variantsKept = variantsKept.insert(lKey, push(variantsKept.lookup(lKey, []), lPosition));
+                variants = push(variants, clone(fact));
+            };
+        };
+    };
     constructorFields = [];
+    constructorFieldsRight = emptyPositions();
+    for rPosition in 0..size(right.constructorFields) {
+        rKey = get(right.constructorFields, rPosition).constructor;
+        constructorFieldsRight = constructorFieldsRight.insert(rKey, push(constructorFieldsRight.lookup(rKey, []), rPosition));
+    };
+    constructorFieldsKept = emptyPositions();
+    for lPosition in 0..size(left.constructorFields) {
+        fact = get(left.constructorFields, lPosition);
+        lKey = fact.constructor;
+        matched = false;
+        for candidate in constructorFieldsRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.constructorFields) {
+                if sameConstructorField(fact, get(right.constructorFields, candidate)) { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in constructorFieldsKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.constructorFields) {
+                    if sameConstructorField(fact, get(left.constructorFields, earlier)) { kept = true; };
+                };
+            };
+            if kept = false {
+                constructorFieldsKept = constructorFieldsKept.insert(lKey, push(constructorFieldsKept.lookup(lKey, []), lPosition));
+                constructorFields = push(constructorFields, clone(fact));
+            };
+        };
+    };
     differences = [];
-    for fact in left.equalities { for other in right.equalities { if sameEquality(fact, other) { equalities = push(equalities, clone(fact)); }; }; };
-    for fact in left.applications { for other in right.applications { if sameApplication(fact, other) { applications = push(applications, clone(fact)); }; }; };
-    for fact in left.constants { for other in right.constants { if fact.id = other.id && fact.kind = other.kind && fact.value = other.value { constants = push(constants, clone(fact)); }; }; };
-    for fact in left.orders { for other in right.orders { if fact.smaller = other.smaller && fact.greater = other.greater && fact.strict = other.strict { orders = push(orders, clone(fact)); }; }; };
-    for fact in left.different { for other in right.different { if sameDisequality(fact, other) { different = push(different, clone(fact)); }; }; };
-    for fact in left.variants { for other in right.variants { if sameVariantFact(fact, other) { variants = push(variants, clone(fact)); }; }; };
+    differencesRight = emptyPositions();
+    for rPosition in 0..size(right.differences) {
+        rKey = get(right.differences, rPosition).left;
+        differencesRight = differencesRight.insert(rKey, push(differencesRight.lookup(rKey, []), rPosition));
+    };
+    differencesKept = emptyPositions();
+    for lPosition in 0..size(left.differences) {
+        fact = get(left.differences, lPosition);
+        lKey = fact.left;
+        matched = false;
+        for candidate in differencesRight.lookup(lKey, []) {
+            if matched = false && candidate >= 0 && candidate < size(right.differences) {
+                if fact.left = get(right.differences, candidate).left && fact.right = get(right.differences, candidate).right && fact.bound = get(right.differences, candidate).bound { matched = true; };
+            };
+        };
+        if matched {
+            kept = false;
+            for earlier in differencesKept.lookup(lKey, []) {
+                if kept = false && earlier >= 0 && earlier < size(left.differences) {
+                    if fact.left = get(left.differences, earlier).left && fact.right = get(left.differences, earlier).right && fact.bound = get(left.differences, earlier).bound { kept = true; };
+                };
+            };
+            if kept = false {
+                differencesKept = differencesKept.insert(lKey, push(differencesKept.lookup(lKey, []), lPosition));
+                differences = push(differences, clone(fact));
+            };
+        };
+    };
+    fieldFunctions = [];
     rightFields = HashSet::new();
     for function in right.fieldFunctions { rightFields = rightFields.insert(function); };
     for function in left.fieldFunctions { if rightFields.contains(function) { fieldFunctions = push(fieldFunctions, function); }; };
+    constructorFunctions = [];
     rightConstructors = HashSet::new();
     for function in right.constructorFunctions { rightConstructors = rightConstructors.insert(function); };
     for function in left.constructorFunctions { if rightConstructors.contains(function) { constructorFunctions = push(constructorFunctions, function); }; };
-    for field in left.constructorFields { for other in right.constructorFields { if sameConstructorField(field, other) { constructorFields = push(constructorFields, clone(field)); }; }; };
-    for fact in left.differences { for other in right.differences { if fact.left = other.left && fact.right = other.right && fact.bound = other.bound { differences = push(differences, clone(fact)); }; }; };
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
@@ -6346,11 +6573,11 @@ fn saturationRound(given: &Saturation) -> RoundResult {
             if bv is IntegerLookup::Found { if (bv as IntegerLookup::Found).value = 0 { baseZero = true; }; };
             for gPosition in 0..size(gets) {
                 g = get(gets, gPosition);
-                k = get(g.arguments, 1);
+                k = intAt(g.arguments, 1, 0);
                 for side in 0..2 {
                     onSide = false;
-                    if side = 0 { onSide = sameClass(start, get(g.arguments, 0), fb); };
-                    if side = 1 { onSide = sameClass(start, get(g.arguments, 0), fa); };
+                    if side = 0 { onSide = sameClass(start, intAt(g.arguments, 0, 0), fb); };
+                    if side = 1 { onSide = sameClass(start, intAt(g.arguments, 0, 0), fa); };
                     if onSide && size(instances) < 240 {
                         if keyDone(done, start, 2 + side, fact.id, k) = false && keyDone(pending, start, 2 + side, fact.id, k) = false {
                             pending = push(pending, DoneKey { kind: 2 + side, owner: fact.id, index: k });
@@ -6394,15 +6621,15 @@ fn saturationRound(given: &Saturation) -> RoundResult {
         z = (zero as ValueLookup::Found).term;
         for gPosition in 0..size(gets) {
             g = get(gets, gPosition);
-            k = get(g.arguments, 1);
+            k = intAt(g.arguments, 1, 0);
             for wPosition in 0..size(writes) {
                 w = get(writes, wPosition);
-                onWrite = w.id = get(g.arguments, 0);
-                if onWrite = false { onWrite = sameClass(start, w.id, get(g.arguments, 0)); };
+                onWrite = w.id = intAt(g.arguments, 0, 0);
+                if onWrite = false { onWrite = sameClass(start, w.id, intAt(g.arguments, 0, 0)); };
                 if onWrite && size(instances) < 240 {
                     if keyDone(done, start, 1, w.id, k) = false && keyDone(pending, start, 1, w.id, k) = false {
                         pending = push(pending, DoneKey { kind: 1, owner: w.id, index: k });
-                        inner = get(w.arguments, 0);
+                        inner = intAt(w.arguments, 0, 0);
                         generation = generationOf(births, k) + 1;
                         sized = applicationTerm(state, -13, push([], inner), nextTerm);
                         sizeTerm = sized.term;
@@ -6414,7 +6641,7 @@ fn saturationRound(given: &Saturation) -> RoundResult {
                         nextTerm = read.next;
                         state = read.state;
                         guards = push(push([], TermRelation { relation: 3, left: z, right: k }), TermRelation { relation: 2, left: k, right: sizeTerm });
-                        if w.function = -17 { guards = push(guards, TermRelation { relation: 1, left: k, right: get(w.arguments, 1) }); };
+                        if w.function = -17 { guards = push(guards, TermRelation { relation: 1, left: k, right: intAt(w.arguments, 1, 0) }); };
                         instances = push(instances, SatInstance { key: DoneKey { kind: 1, owner: w.id, index: k }, guards: guards, body: TermRelation { relation: 0, left: g.id, right: readTerm } });
                     };
                 };
