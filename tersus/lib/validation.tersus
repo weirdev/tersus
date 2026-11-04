@@ -388,6 +388,120 @@ fn sameSignature(uf: &HashMap<Int, Int>, a: &ApplicationTerm, b: &ApplicationTer
     return true;
 };
 
+// The union-find of a congruence closure after one pass of a rule, and whether the pass joined two classes
+struct ClosureRound { parent: HashMap<Int, Int>, weight: HashMap<Int, Int>, changed: Bool };
+
+impl Clone for ClosureRound { };
+
+fn signatureRound(parent: HashMap<Int, Int>, weights: HashMap<Int, Int>, terms: &List<ApplicationTerm>) -> ClosureRound {
+    uf = parent;
+    weight = weights;
+    changed = false;
+    // (equal functions of equal arguments)
+    signatures = emptyIntMap();
+    for i in 0..size(terms) {
+        a = get(terms, i);
+        h = termSignature(uf, a);
+        if signatures.contains(h) {
+            j = signatures.lookup(h, 0);
+            b = applicationAt(terms, j);
+            if sameSignature(uf, a, b) {
+                if ufFind(uf, a.id) != ufFind(uf, b.id) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, b.id); changed = true; };
+            } else {
+                for k in 0..i {
+                    c = get(terms, k);
+                    if sameSignature(uf, a, c) {
+                        if ufFind(uf, a.id) != ufFind(uf, c.id) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, c.id); changed = true; };
+                    };
+                };
+            };
+        } else { signatures = signatures.insert(h, i); };
+    };
+    return ClosureRound { parent: uf, weight: weight, changed: changed };
+};
+
+fn constructorRound(parent: HashMap<Int, Int>, weights: HashMap<Int, Int>, terms: &List<ApplicationTerm>, constructors: &List<Int>, constructorSet: &HashSet<Int>, constructorFields: &List<ConstructorField>) -> ClosureRound {
+    uf = parent;
+    weight = weights;
+    changed = false;
+    // (a constructor application of each class)
+    byClass = emptyIntMap();
+    if size(constructors) > 0 {
+        for i in 0..size(terms) {
+            a = get(terms, i);
+            if constructorSet.contains(a.function) {
+                r = ufFind(uf, a.id);
+                if byClass.contains(r) {
+                    b = applicationAt(terms, byClass.lookup(r, 0));
+                    if ufFind(uf, a.function) = ufFind(uf, b.function) && size(a.arguments) = size(b.arguments) {
+                        for k in 0..size(a.arguments) {
+                            x = get(a.arguments, k);
+                            y = get(b.arguments, k);
+                            if ufFind(uf, x) != ufFind(uf, y) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, x, y); changed = true; };
+                        };
+                    };
+                } else { byClass = byClass.insert(r, i); };
+            };
+        };
+        for fieldAppPosition in 0..size(terms) {
+            fieldApp = get(terms, fieldAppPosition);
+            if size(fieldApp.arguments) = 1 {
+                r = ufFind(uf, get(fieldApp.arguments, 0));
+                if byClass.contains(r) {
+                    a = applicationAt(terms, byClass.lookup(r, 0));
+                    for selectionPosition in 0..size(constructorFields) {
+                        selection = get(constructorFields, selectionPosition);
+                        if selection.constructor = a.function && selection.field = fieldApp.function {
+                            if selection.index >= 0 && selection.index < size(a.arguments) {
+                                value = get(a.arguments, selection.index);
+                                if ufFind(uf, fieldApp.id) != ufFind(uf, value) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, fieldApp.id, value); changed = true; };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return ClosureRound { parent: uf, weight: weight, changed: changed };
+};
+
+fn differenceRound(parent: HashMap<Int, Int>, weights: HashMap<Int, Int>, terms: &List<ApplicationTerm>) -> ClosureRound {
+    uf = parent;
+    weight = weights;
+    changed = false;
+    // (the sums of each class, so that a difference finds the sums it undoes)
+    sumsOfClass = emptyPositions();
+    for bPosition in 0..size(terms) {
+        if get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
+            rb = ufFind(uf, get(terms, bPosition).id);
+            sumsOfClass = sumsOfClass.insert(rb, push(sumsOfClass.lookup(rb, []), bPosition));
+        };
+    };
+    for aPosition in 0..size(terms) {
+        a = get(terms, aPosition);
+        if a.function = -2 && size(a.arguments) = 2 {
+            r = ufFind(uf, get(a.arguments, 0));
+            subtrahend = ufFind(uf, get(a.arguments, 1));
+            for bPosition in sumsOfClass.lookup(r, []) {
+                if bPosition >= 0 && bPosition < size(terms) && get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
+                    b = get(terms, bPosition);
+                    if ufFind(uf, b.id) = r {
+                        leftPart = get(b.arguments, 0);
+                        rightPart = get(b.arguments, 1);
+                        if subtrahend = ufFind(uf, leftPart) {
+                            if ufFind(uf, a.id) != ufFind(uf, rightPart) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, rightPart); changed = true; };
+                        };
+                        if subtrahend = ufFind(uf, rightPart) {
+                            if ufFind(uf, a.id) != ufFind(uf, leftPart) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, leftPart); changed = true; };
+                        };
+                    };
+                };
+            };
+        };
+    };
+    return ClosureRound { parent: uf, weight: weight, changed: changed };
+};
+
 fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, constants: &List<ConstantTerm>, constructors: &List<Int>, constructorFields: &List<ConstructorField>) -> List<EqualityFact> {
     constructorSet = HashSet::new();
     for constructor in constructors { constructorSet = constructorSet.insert(constructor); };
@@ -412,95 +526,10 @@ fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, 
     changed = true;
     for round in 0..size(terms) + 2 {
         if changed {
-            changed = false;
-            // (equal functions of equal arguments)
-            signatures = emptyIntMap();
-            for i in 0..size(terms) {
-                a = get(terms, i);
-                h = termSignature(uf, a);
-                if signatures.contains(h) {
-                    j = signatures.lookup(h, 0);
-                    b = applicationAt(terms, j);
-                    if sameSignature(uf, a, b) {
-                        if ufFind(uf, a.id) != ufFind(uf, b.id) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, b.id); changed = true; };
-                    } else {
-                        for k in 0..i {
-                            c = get(terms, k);
-                            if sameSignature(uf, a, c) {
-                                if ufFind(uf, a.id) != ufFind(uf, c.id) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, c.id); changed = true; };
-                            };
-                        };
-                    };
-                } else { signatures = signatures.insert(h, i); };
-            };
-            // (a constructor application of each class)
-            byClass = emptyIntMap();
-            if size(constructors) > 0 {
-                for i in 0..size(terms) {
-                    a = get(terms, i);
-                    if constructorSet.contains(a.function) {
-                        r = ufFind(uf, a.id);
-                        if byClass.contains(r) {
-                            b = applicationAt(terms, byClass.lookup(r, 0));
-                            if ufFind(uf, a.function) = ufFind(uf, b.function) && size(a.arguments) = size(b.arguments) {
-                                for k in 0..size(a.arguments) {
-                                    x = get(a.arguments, k);
-                                    y = get(b.arguments, k);
-                                    if ufFind(uf, x) != ufFind(uf, y) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, x, y); changed = true; };
-                                };
-                            };
-                        } else { byClass = byClass.insert(r, i); };
-                    };
-                };
-                for fieldAppPosition in 0..size(terms) {
-                    fieldApp = get(terms, fieldAppPosition);
-                    if size(fieldApp.arguments) = 1 {
-                        r = ufFind(uf, get(fieldApp.arguments, 0));
-                        if byClass.contains(r) {
-                            a = applicationAt(terms, byClass.lookup(r, 0));
-                            for selectionPosition in 0..size(constructorFields) {
-                                selection = get(constructorFields, selectionPosition);
-                                if selection.constructor = a.function && selection.field = fieldApp.function {
-                                    if selection.index >= 0 && selection.index < size(a.arguments) {
-                                        value = get(a.arguments, selection.index);
-                                        if ufFind(uf, fieldApp.id) != ufFind(uf, value) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, fieldApp.id, value); changed = true; };
-                                    };
-                                };
-                            };
-                        };
-                    };
-                };
-            };
-            // (the sums of each class, so that a difference finds the sums it undoes)
-            sumsOfClass = emptyPositions();
-            for bPosition in 0..size(terms) {
-                if get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
-                    rb = ufFind(uf, get(terms, bPosition).id);
-                    sumsOfClass = sumsOfClass.insert(rb, push(sumsOfClass.lookup(rb, []), bPosition));
-                };
-            };
-            for aPosition in 0..size(terms) {
-                a = get(terms, aPosition);
-                if a.function = -2 && size(a.arguments) = 2 {
-                    r = ufFind(uf, get(a.arguments, 0));
-                    subtrahend = ufFind(uf, get(a.arguments, 1));
-                    for bPosition in sumsOfClass.lookup(r, []) {
-                        if bPosition >= 0 && bPosition < size(terms) && get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
-                            b = get(terms, bPosition);
-                            if ufFind(uf, b.id) = r {
-                                leftPart = get(b.arguments, 0);
-                                rightPart = get(b.arguments, 1);
-                                if subtrahend = ufFind(uf, leftPart) {
-                                    if ufFind(uf, a.id) != ufFind(uf, rightPart) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, rightPart); changed = true; };
-                                };
-                                if subtrahend = ufFind(uf, rightPart) {
-                                    if ufFind(uf, a.id) != ufFind(uf, leftPart) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, leftPart); changed = true; };
-                                };
-                            };
-                        };
-                    };
-                };
-            };
+            ClosureRound { parent: uf, weight: weight, changed: bySignature } = signatureRound(uf, weight, terms);
+            ClosureRound { parent: uf, weight: weight, changed: byConstructor } = constructorRound(uf, weight, terms, constructors, constructorSet, constructorFields);
+            ClosureRound { parent: uf, weight: weight, changed: byDifference } = differenceRound(uf, weight, terms);
+            changed = bySignature || byConstructor || byDifference;
         };
     };
     result = [];
@@ -2724,104 +2753,95 @@ fn forallEqualPair(context: &ValidatorContext, analysis: &ContextAnalysis, left:
     return forallEqualPairWithin(context, analysis, left, right, lg, rg, 2);
 };
 
-fn forallEqualPairWithin(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
-    equalities = analysis.equalities;
-    differences = analysis.differences;
+fn forallEqualPairWithin(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks 2 * fuel + 1 {
     for appPosition in 0..size(context.applications) {
         app = get(context.applications, appPosition);
-        if app.function = -30 {
-            if size(app.arguments) = 5 {
-                a = get(app.arguments, 0);
-                b = get(app.arguments, 1);
-                lo = get(app.arguments, 2);
-                hi = get(app.arguments, 3);
-                base = get(app.arguments, 4);
-                if lg.found {
-                    if rg.found {
-                        lists = listsOfFact(context, equalities, lg.seq, rg.seq, a, b);
-                        sameLists = lists.same;
-                        pushed = lists.pushed;
-                        innerList = lists.inner;
-                        if sameLists {
-                            j = rg.at;
-                            offsetAt = lg.at;
-                            indexMatches = hasEquality(equalities, offsetAt, j) || sumOfEqual(context, equalities, offsetAt, base, j);
-                            if indexMatches = false {
-                                j = lg.at;
-                                offsetAt = rg.at;
-                                indexMatches = hasEquality(equalities, offsetAt, j) || sumOfEqual(context, equalities, offsetAt, base, j);
-                            };
-                            if indexMatches {
-                                if hasDifference(equalities, differences, lo, j, 0) {
-                                    below = hasDifference(equalities, differences, j, hi, -1);
-                                    if below = false { below = linearEntails(context, j, hi, -1); };
-                                    if below {
-                                        if pushed {
-                                            st = sizeTermOf(context, equalities, innerList);
-                                            if st.found {
-                                                if hasDifference(equalities, differences, lg.at, st.term, -1) { return true; };
-                                                if linearEntails(context, lg.at, st.term, -1) { return true; };
-                                            };
-                                        } else { return true; };
-                                    };
-                                    atMost = hasDifference(equalities, differences, j, hi, 0);
-                                    if atMost = false { atMost = linearEntails(context, j, hi, 0); };
-                                    if atMost {
-                                        alreadyStrict = strictOrderStated(context, equalities, j, hi);
-                                        strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
-                                        strictAnalysis = analyzeContext(strictContext);
-                                        if alreadyStrict = false && fuel > 0 && forallEqualPairWithin(strictContext, strictAnalysis, left, right, lg, rg, fuel - 1) {
-                                            eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
-                                            eqAnalysis = analyzeContext(eqContext);
-                                            if eqAnalysis.contradictory { return true; };
-                                            if contextEqual(eqAnalysis.equalities, eqAnalysis.differences, left, right) { return true; };
-                                            // (at the end of the range the element may follow from another
-                                            // forall at that index: get(out, i) = get(a, i), say)
-                                            instances = forallInstanceEqualities(eqContext, eqAnalysis);
-                                            if size(instances) > 0 {
-                                                widerEqualities = clone(eqContext.equalities);
-                                                for e in instances { widerEqualities = push(widerEqualities, e); };
-                                                wider = ValidatorContext { equalities: widerEqualities, ..clone(eqContext) };
-                                                widerAnalysis = analyzeContext(wider);
-                                                if widerAnalysis.contradictory { return true; };
-                                                if contextEqual(widerAnalysis.equalities, widerAnalysis.differences, left, right) { return true; };
-                                            };
-                                            if endReadsEqual(context, eqContext, eqAnalysis.equalities, a, b, lg.seq, rg.seq, hi, base, offsetAt) { return true; };
-                                        };
-                                    };
-                                };
-                            };
-                        };
-                    };
-                };
-                listPair = false;
-                if hasEquality(equalities, left, a) {
-                    if hasEquality(equalities, right, b) { listPair = true; };
-                };
-                if hasEquality(equalities, left, b) {
-                    if hasEquality(equalities, right, a) { listPair = true; };
-                };
-                if listPair {
-                    sa = sizeTermOf(context, equalities, a);
-                    sb = sizeTermOf(context, equalities, b);
-                    if sa.found {
-                        if sb.found {
-                            if contextEqual(equalities, differences, sa.term, sb.term) {
-                                loValue = integerValue(context, lo);
-                                baseValue = integerValue(context, base);
-                                if loValue is IntegerLookup::Found {
-                                    if baseValue is IntegerLookup::Found {
-                                        if (loValue as IntegerLookup::Found).value = 0 {
-                                            if (baseValue as IntegerLookup::Found).value = 0 {
-                                                if hasEquality(equalities, hi, sa.term) { return true; };
-                                            };
-                                        };
-                                    };
-                                };
-                            };
-                        };
-                    };
-                };
+        if app.function = -30 && size(app.arguments) = 5 {
+            a = get(app.arguments, 0);
+            b = get(app.arguments, 1);
+            lo = get(app.arguments, 2);
+            hi = get(app.arguments, 3);
+            base = get(app.arguments, 4);
+            if lg.found && rg.found {
+                if forallPairInRange(context, analysis, left, right, lg, rg, fuel, a, b, lo, hi, base) { return true; };
+            };
+            if forallPairWhole(context, analysis, left, right, a, b, lo, hi, base) { return true; };
+        };
+    };
+    return false;
+};
+
+// Two reads of the lists of a forall fact (or of a push onto one), at indexes the fact relates, inside its range
+fn forallPairInRange(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact, fuel: Int, a: Int, b: Int, lo: Int, hi: Int, base: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks 2 * fuel {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    lists = listsOfFact(context, equalities, lg.seq, rg.seq, a, b);
+    if lists.same = false { return false; };
+    j = rg.at;
+    offsetAt = lg.at;
+    indexMatches = hasEquality(equalities, offsetAt, j) || sumOfEqual(context, equalities, offsetAt, base, j);
+    if indexMatches = false {
+        j = lg.at;
+        offsetAt = rg.at;
+        indexMatches = hasEquality(equalities, offsetAt, j) || sumOfEqual(context, equalities, offsetAt, base, j);
+    };
+    if indexMatches = false { return false; };
+    if hasDifference(equalities, differences, lo, j, 0) = false { return false; };
+    below = hasDifference(equalities, differences, j, hi, -1);
+    if below = false { below = linearEntails(context, j, hi, -1); };
+    if below {
+        if lists.pushed {
+            st = sizeTermOf(context, equalities, lists.inner);
+            if st.found {
+                if hasDifference(equalities, differences, lg.at, st.term, -1) { return true; };
+                if linearEntails(context, lg.at, st.term, -1) { return true; };
+            };
+        } else { return true; };
+    };
+    atMost = hasDifference(equalities, differences, j, hi, 0);
+    if atMost = false { atMost = linearEntails(context, j, hi, 0); };
+    if atMost = false || fuel <= 0 || strictOrderStated(context, equalities, j, hi) { return false; };
+    strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+    strictAnalysis = analyzeContext(strictContext);
+    if forallEqualPairWithin(strictContext, strictAnalysis, left, right, lg, rg, fuel - 1) = false { return false; };
+    return forallPairAtEnd(context, left, right, lg, rg, a, b, hi, base, j, offsetAt);
+};
+
+// The two reads at the end of the range, j = hi, where the fact says nothing
+fn forallPairAtEnd(context: &ValidatorContext, left: Int, right: Int, lg: GetFact, rg: GetFact, a: Int, b: Int, hi: Int, base: Int, j: Int, offsetAt: Int) -> Bool {
+    eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+    eqAnalysis = analyzeContext(eqContext);
+    if eqAnalysis.contradictory { return true; };
+    if contextEqual(eqAnalysis.equalities, eqAnalysis.differences, left, right) { return true; };
+    // (at the end of the range the element may follow from another
+    // forall at that index: get(out, i) = get(a, i), say)
+    instances = forallInstanceEqualities(eqContext, eqAnalysis);
+    if size(instances) > 0 {
+        widerEqualities = clone(eqContext.equalities);
+        for e in instances { widerEqualities = push(widerEqualities, e); };
+        wider = ValidatorContext { equalities: widerEqualities, ..clone(eqContext) };
+        widerAnalysis = analyzeContext(wider);
+        if widerAnalysis.contradictory { return true; };
+        if contextEqual(widerAnalysis.equalities, widerAnalysis.differences, left, right) { return true; };
+    };
+    return endReadsEqual(context, eqContext, eqAnalysis.equalities, a, b, lg.seq, rg.seq, hi, base, offsetAt);
+};
+
+// The two lists of a forall fact over all of both, from 0, of one size: equal lists
+fn forallPairWhole(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, a: Int, b: Int, lo: Int, hi: Int, base: Int) -> Bool {
+    equalities = analysis.equalities;
+    listPair = (hasEquality(equalities, left, a) && hasEquality(equalities, right, b)) || (hasEquality(equalities, left, b) && hasEquality(equalities, right, a));
+    if listPair = false { return false; };
+    sa = sizeTermOf(context, equalities, a);
+    sb = sizeTermOf(context, equalities, b);
+    if sa.found = false || sb.found = false { return false; };
+    if contextEqual(equalities, analysis.differences, sa.term, sb.term) = false { return false; };
+    loValue = integerValue(context, lo);
+    baseValue = integerValue(context, base);
+    if loValue is IntegerLookup::Found {
+        if baseValue is IntegerLookup::Found {
+            if (loValue as IntegerLookup::Found).value = 0 && (baseValue as IntegerLookup::Found).value = 0 {
+                return hasEquality(equalities, hi, sa.term);
             };
         };
     };
@@ -3155,139 +3175,125 @@ fn forallShiftSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTe
     return false;
 };
 
-fn forallShiftSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
-    equalities = analysis.equalities;
-    differences = analysis.differences;
+fn forallShiftSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks 2 * fuel + 1 {
     for appPosition in 0..size(context.applications) {
         app = get(context.applications, appPosition);
-        if app.function = -33 {
-            if size(app.arguments) = 7 {
-                a = get(app.arguments, 0);
-                b = get(app.arguments, 1);
-                lo = get(app.arguments, 2);
-                hi = get(app.arguments, 3);
-                base = get(app.arguments, 4);
-                delta = get(app.arguments, 5);
-                modeTerm = get(app.arguments, 6);
-                seqMatches = hasEquality(equalities, gf.seq, a);
-                viaPush = false;
-                if seqMatches = false {
-                    for pushAppPosition in 0..size(context.applications) {
-                        pushApp = get(context.applications, pushAppPosition);
-                        if pushApp.function = -16 {
-                            if size(pushApp.arguments) = 2 {
-                                if hasEquality(equalities, pushApp.id, gf.seq) {
-                                    if hasEquality(equalities, get(pushApp.arguments, 0), a) { seqMatches = true; viaPush = true; };
-                                };
-                            };
-                        };
-                    };
-                };
-                if seqMatches {
-                    modeValue = integerValue(context, modeTerm);
-                    if modeValue is IntegerLookup::Found {
-                        mode = (modeValue as IntegerLookup::Found).value;
-                        j = gf.at;
-                        jFound = false;
-                        bv = integerValue(context, base);
-                        if bv is IntegerLookup::Found {
-                            if (bv as IntegerLookup::Found).value = 0 { jFound = true; };
-                        };
-                        if jFound = false {
-                            for sumPosition in 0..size(context.applications) {
-                                sum = get(context.applications, sumPosition);
-                                if sum.function = -1 {
-                                    if size(sum.arguments) = 2 {
-                                        if hasEquality(equalities, sum.id, gf.at) {
-                                            if hasEquality(equalities, get(sum.arguments, 0), base) { j = get(sum.arguments, 1); jFound = true; };
-                                            if hasEquality(equalities, get(sum.arguments, 1), base) { j = get(sum.arguments, 0); jFound = true; };
-                                        };
-                                    };
-                                };
-                            };
-                        };
-                        if jFound {
-                            gb = 0;
-                            gbFound = false;
-                            for gappPosition in 0..size(context.applications) {
-                                gapp = get(context.applications, gappPosition);
-                                if gapp.function = -14 {
-                                    if size(gapp.arguments) = 2 {
-                                        if hasEquality(equalities, get(gapp.arguments, 0), b) {
-                                            if hasEquality(equalities, get(gapp.arguments, 1), j) { gb = gapp.id; gbFound = true; };
-                                        };
-                                    };
-                                };
-                            };
-                            if gbFound {
-                                exprMatches = false;
-                                for eappPosition in 0..size(context.applications) {
-                                    eapp = get(context.applications, eappPosition);
-                                    if hasEquality(equalities, eapp.id, exprTerm) {
-                                        if size(eapp.arguments) = 2 {
-                                            u = get(eapp.arguments, 0);
-                                            v = get(eapp.arguments, 1);
-                                            if eapp.function = -1 {
-                                                if mode = 0 {
-                                                    if hasEquality(equalities, u, gb) {
-                                                        if hasEquality(equalities, v, delta) { exprMatches = true; };
-                                                    };
-                                                    if hasEquality(equalities, v, gb) {
-                                                        if hasEquality(equalities, u, delta) { exprMatches = true; };
-                                                    };
-                                                };
-                                            };
-                                            if eapp.function = -2 {
-                                                if mode = 1 {
-                                                    if hasEquality(equalities, u, gb) {
-                                                        if hasEquality(equalities, v, delta) { exprMatches = true; };
-                                                    };
-                                                };
-                                            };
-                                        };
-                                    };
-                                };
-                                if exprMatches {
-                                    if hasDifference(equalities, differences, lo, j, 0) {
-                                        below = hasDifference(equalities, differences, j, hi, -1);
-                                        if below = false { below = linearEntails(context, j, hi, -1); };
-                                        if below {
-                                            if viaPush {
-                                                st = sizeTermOf(context, equalities, a);
-                                                if st.found {
-                                                    if hasDifference(equalities, differences, gf.at, st.term, -1) { return true; };
-                                                    if linearEntails(context, gf.at, st.term, -1) { return true; };
-                                                };
-                                            } else { return true; };
-                                        };
-                                        atMost = hasDifference(equalities, differences, j, hi, 0);
-                                        if atMost = false { atMost = linearEntails(context, j, hi, 0); };
-                                        if atMost {
-                                            strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
-                                            strictAnalysis = analyzeContext(strictContext);
-                                            deeper = false;
-                                            if fuel > 0 {
-                                                for gfDeeper in getFactsTranslated(strictContext, strictAnalysis.equalities, getTerm) {
-                                                    if deeper = false { deeper = forallShiftSideFor(strictContext, strictAnalysis, getTerm, exprTerm, gfDeeper, fuel - 1); };
-                                                };
-                                            };
-                                            if deeper {
-                                                eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
-                                                eqAnalysis = analyzeContext(eqContext);
-                                                if eqAnalysis.contradictory { return true; };
-                                                if contextEqual(eqAnalysis.equalities, eqAnalysis.differences, getTerm, exprTerm) { return true; };
-                                            };
-                                        };
-                                    };
-                                };
-                            };
-                        };
-                    };
-                };
+        if app.function = -33 && size(app.arguments) = 7 {
+            if forallShiftFromFact(context, analysis, getTerm, exprTerm, gf, fuel, app.arguments) { return true; };
+        };
+    };
+    return false;
+};
+
+// How a read's list is a list a fact is about: 0 when it is not, 1 when it is that list, 2 when it is a push onto it
+fn readListOf(context: &ValidatorContext, equalities: &List<EqualityFact>, seq: Int, list: Int) -> Int {
+    if hasEquality(equalities, seq, list) { return 1; };
+    for pushAppPosition in 0..size(context.applications) {
+        pushApp = get(context.applications, pushAppPosition);
+        if pushApp.function = -16 && size(pushApp.arguments) = 2 {
+            if hasEquality(equalities, pushApp.id, seq) && hasEquality(equalities, get(pushApp.arguments, 0), list) { return 2; };
+        };
+    };
+    return 0;
+};
+
+// The index j that a read at `at` is at past base: at = base + j (j = at when base is 0)
+fn indexPastBase(context: &ValidatorContext, equalities: &List<EqualityFact>, at: Int, base: Int) -> SizeFact {
+    bv = integerValue(context, base);
+    if bv is IntegerLookup::Found {
+        if (bv as IntegerLookup::Found).value = 0 { return SizeFact { term: at, found: true }; };
+    };
+    result = SizeFact { term: at, found: false };
+    for sumPosition in 0..size(context.applications) {
+        sum = get(context.applications, sumPosition);
+        if sum.function = -1 && size(sum.arguments) = 2 {
+            if hasEquality(equalities, sum.id, at) {
+                if hasEquality(equalities, get(sum.arguments, 0), base) { result = SizeFact { term: get(sum.arguments, 1), found: true }; };
+                if hasEquality(equalities, get(sum.arguments, 1), base) { result = SizeFact { term: get(sum.arguments, 0), found: true }; };
+            };
+        };
+    };
+    return result;
+};
+
+// A read of a list at an index, as a term (the last one recorded)
+fn readTermAt(context: &ValidatorContext, equalities: &List<EqualityFact>, list: Int, index: Int) -> SizeFact {
+    result = SizeFact { term: 0, found: false };
+    for gappPosition in 0..size(context.applications) {
+        gapp = get(context.applications, gappPosition);
+        if gapp.function = -14 && size(gapp.arguments) = 2 {
+            if hasEquality(equalities, get(gapp.arguments, 0), list) && hasEquality(equalities, get(gapp.arguments, 1), index) { result = SizeFact { term: gapp.id, found: true }; };
+        };
+    };
+    return result;
+};
+
+// Whether a term is the read shifted by delta: read + delta in mode 0, read - delta in mode 1
+fn shiftedRead(context: &ValidatorContext, equalities: &List<EqualityFact>, exprTerm: Int, read: Int, delta: Int, mode: Int) -> Bool {
+    for eappPosition in 0..size(context.applications) {
+        eapp = get(context.applications, eappPosition);
+        if hasEquality(equalities, eapp.id, exprTerm) && size(eapp.arguments) = 2 {
+            u = get(eapp.arguments, 0);
+            v = get(eapp.arguments, 1);
+            if eapp.function = -1 && mode = 0 {
+                if hasEquality(equalities, u, read) && hasEquality(equalities, v, delta) { return true; };
+                if hasEquality(equalities, v, read) && hasEquality(equalities, u, delta) { return true; };
+            };
+            if eapp.function = -2 && mode = 1 {
+                if hasEquality(equalities, u, read) && hasEquality(equalities, v, delta) { return true; };
             };
         };
     };
     return false;
+};
+
+// One shift fact, get(a, base + j) = get(b, j) + delta (or - delta) for lo <= j < hi, at the read and the expression
+fn forallShiftFromFact(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact, fuel: Int, args: &List<Int>) -> Bool [{ affirm fuel >= 0; affirm size(args) = 7; }] [{ }] shrinks 2 * fuel {
+    equalities = analysis.equalities;
+    differences = analysis.differences;
+    a = get(args, 0);
+    b = get(args, 1);
+    lo = get(args, 2);
+    hi = get(args, 3);
+    base = get(args, 4);
+    delta = get(args, 5);
+    listOf = readListOf(context, equalities, gf.seq, a);
+    if listOf = 0 { return false; };
+    modeValue = integerValue(context, get(args, 6));
+    if modeValue is IntegerLookup::Missing { return false; };
+    mode = (modeValue as IntegerLookup::Found).value;
+    index = indexPastBase(context, equalities, gf.at, base);
+    if index.found = false { return false; };
+    j = index.term;
+    gb = readTermAt(context, equalities, b, j);
+    if gb.found = false { return false; };
+    if shiftedRead(context, equalities, exprTerm, gb.term, delta, mode) = false { return false; };
+    if hasDifference(equalities, differences, lo, j, 0) = false { return false; };
+    below = hasDifference(equalities, differences, j, hi, -1);
+    if below = false { below = linearEntails(context, j, hi, -1); };
+    if below {
+        if listOf = 2 {
+            st = sizeTermOf(context, equalities, a);
+            if st.found {
+                if hasDifference(equalities, differences, gf.at, st.term, -1) { return true; };
+                if linearEntails(context, gf.at, st.term, -1) { return true; };
+            };
+        } else { return true; };
+    };
+    atMost = hasDifference(equalities, differences, j, hi, 0);
+    if atMost = false { atMost = linearEntails(context, j, hi, 0); };
+    if atMost = false || fuel <= 0 { return false; };
+    strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
+    strictAnalysis = analyzeContext(strictContext);
+    deeper = false;
+    for gfDeeper in getFactsTranslated(strictContext, strictAnalysis.equalities, getTerm) {
+        if deeper = false { deeper = forallShiftSideFor(strictContext, strictAnalysis, getTerm, exprTerm, gfDeeper, fuel - 1); };
+    };
+    if deeper = false { return false; };
+    eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
+    eqAnalysis = analyzeContext(eqContext);
+    if eqAnalysis.contradictory { return true; };
+    return contextEqual(eqAnalysis.equalities, eqAnalysis.differences, getTerm, exprTerm);
 };
 
 // `a % d` is `a` itself when `0 <= a < d`.
@@ -4138,104 +4144,67 @@ fn goalSides(goal: &ValidatorGoal) -> List<Int> {
 // times along a path.
 struct SplitResult { holds: Bool, used: Int };
 
-fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks depth {
-    if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0 }; };
-    used = 0;
-    context = clone(state.context);
-    analysis = analyzeContext(context);
-    equalities = analysis.equalities;
-    sides = goalSides(goal);
+// A write that a read may read through: a set at its index, or a push at the old size, read at an index known not to
+// be past it
+struct WriteOf { written: Bool, pushed: Bool, inner: Int, idx: Int, value: Int };
+
+impl Clone for WriteOf { };
+
+fn writeOf(context: &ValidatorContext, equalities: &List<EqualityFact>, k: Int, setApp: &ApplicationTerm) -> WriteOf {
+    if setApp.function = -17 && size(setApp.arguments) = 3 {
+        return WriteOf { written: true, pushed: false, inner: get(setApp.arguments, 0), idx: get(setApp.arguments, 1), value: get(setApp.arguments, 2) };
+    };
+    if setApp.function = -16 && size(setApp.arguments) = 2 {
+        st = sizeTermOf(context, equalities, get(setApp.arguments, 0));
+        if st.found {
+            if linearEntails(context, k, st.term, 0) {
+                return WriteOf { written: true, pushed: true, inner: get(setApp.arguments, 0), idx: st.term, value: get(setApp.arguments, 1) };
+            };
+        };
+    };
+    return WriteOf { written: false, pushed: false, inner: 0, idx: 0, value: 0 };
+};
+
+// The terms of the goal's sides and the arguments of the applications they are
+fn nearTerms(context: &ValidatorContext, equalities: &List<EqualityFact>, sides: &List<Int>) -> List<Int> {
     near = clone(sides);
     for appPosition in 0..size(context.applications) {
         app = get(context.applications, appPosition);
         for sidePosition in 0..size(sides) {
-            side = get(sides, sidePosition);
-            if hasEquality(equalities, app.id, side) {
+            if hasEquality(equalities, app.id, get(sides, sidePosition)) {
                 for argument in app.arguments { near = push(near, argument); };
             };
         };
     };
+    return near;
+};
+
+fn equalToAny(equalities: &List<EqualityFact>, term: Int, terms: &List<Int>) -> Bool {
+    for t in terms { if hasEquality(equalities, term, t) { return true; }; };
+    return false;
+};
+
+fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
+    if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0 }; };
+    used = 0;
+    analysis = analyzeContext(state.context);
+    near = nearTerms(state.context, analysis.equalities, goalSides(goal));
     tried = 0;
     // (the newest reads first: a read a split made is the one to split next)
-    count = size(context.applications);
+    count = size(state.context.applications);
     for back in 0..count {
-        app = applicationAt(context.applications, count - 1 - back);
-        if app.function = -14 && tried < 3 && used < budget && size(state.templates) = 0 {
-            if size(app.arguments) = 2 {
-                relevant = false;
-                for t in near { if hasEquality(equalities, app.id, t) { relevant = true; }; };
-                if relevant {
-                    k = get(app.arguments, 1);
-                    for setAppPosition in 0..size(context.applications) {
-                        setApp = get(context.applications, setAppPosition);
-                        // (a write is a set at its index, or a push at the old size, read at
-                        // an index known not to be past it)
-                        written = false;
-                        pushed = false;
-                        inner = 0;
-                        idx = 0;
-                        value = 0;
-                        if setApp.function = -17 && size(setApp.arguments) = 3 {
-                            written = true;
-                            inner = get(setApp.arguments, 0);
-                            idx = get(setApp.arguments, 1);
-                            value = get(setApp.arguments, 2);
-                        };
-                        if setApp.function = -16 && size(setApp.arguments) = 2 {
-                            st = sizeTermOf(context, equalities, get(setApp.arguments, 0));
-                            if st.found {
-                                if linearEntails(context, k, st.term, 0) {
-                                    written = true;
-                                    pushed = true;
-                                    inner = get(setApp.arguments, 0);
-                                    idx = st.term;
-                                    value = get(setApp.arguments, 1);
-                                };
-                            };
-                        };
-                        if written {
-                            if size(setApp.arguments) > 0 {
-                                if hasEquality(equalities, setApp.id, get(app.arguments, 0)) {
-                                    tried = tried + 1;
-                                    sameIndex = hasEquality(equalities, k, idx);
-                                    otherIndex = contextDifferent(equalities, context.applications, context.orders, context.different, analysis.differences, k, idx);
-                                    atOk = otherIndex;
-                                    if atOk = false {
-                                        atIdx = ValidatorContext { equalities: push(push(clone(context.equalities), EqualityFact { left: k, right: idx }), EqualityFact { left: app.id, right: value }), ..clone(context) };
-                                        atOk = analyzeContext(atIdx).contradictory;
-                                        if atOk = false { used = used + 1; atOk = entailsGoal(atIdx, clone(goal)); };
-                                        // (the value may itself be read from a write: a node set from the node there)
-                                        if atOk = false && used < budget {
-                                            deeper = splitReadOverWrite(ExecutionState { context: clone(atIdx), ..clone(state) }, clone(goal), depth - 1, budget - used);
-                                            used = used + deeper.used;
-                                            atOk = deeper.holds;
-                                        };
-                                    };
-                                    if atOk {
-                                        elseOk = sameIndex;
-                                        if elseOk = false {
-                                            fresh = freshValue(state);
-                                            if fresh is ValueLookup::Found {
-                                                newRead = (fresh as ValueLookup::Found).term;
-                                                apps = push(clone(context.applications), ApplicationTerm { id: newRead, function: -14, arguments: push(push([], inner), k) });
-                                                elsewhere = ValidatorContext { applications: apps, equalities: push(clone(context.equalities), EqualityFact { left: app.id, right: newRead }), different: push(clone(context.different), DisequalityFact { left: k, right: idx }), ..clone(context) };
-                                                if pushed {
-                                                    elsewhere = ValidatorContext { orders: push(clone(elsewhere.orders), OrderFact { smaller: k, greater: idx, strict: true }), ..clone(elsewhere) };
-                                                };
-                                                elseState = ExecutionState { context: clone(elsewhere), ..clone(state) };
-                                                elseOk = analyzeContext(elsewhere).contradictory;
-                                                if elseOk = false { used = used + 1; elseOk = entailsGoal(elsewhere, clone(goal)); };
-                                                if elseOk = false {
-                                                    deeper = splitReadOverWrite(elseState, clone(goal), depth - 1, budget - used);
-                                                    used = used + deeper.used;
-                                                    elseOk = deeper.holds;
-                                                };
-                                            };
-                                        };
-                                        if elseOk { return SplitResult { holds: true, used: used }; };
-                                    };
-                                };
-                            };
+        app = applicationAt(state.context.applications, count - 1 - back);
+        if app.function = -14 && size(app.arguments) = 2 && tried < 3 && used < budget && size(state.templates) = 0 {
+            if equalToAny(analysis.equalities, app.id, near) {
+                k = get(app.arguments, 1);
+                for setAppPosition in 0..size(state.context.applications) {
+                    w = writeOf(state.context, analysis.equalities, k, get(state.context.applications, setAppPosition));
+                    if w.written {
+                        if hasEquality(analysis.equalities, get(state.context.applications, setAppPosition).id, get(app.arguments, 0)) {
+                            tried = tried + 1;
+                            r = splitAtWrite(state, analysis, goal, depth, budget - used, app.id, k, w);
+                            used = used + r.used;
+                            if r.holds { return SplitResult { holds: true, used: used }; };
                         };
                     };
                 };
@@ -4246,43 +4215,23 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
     // the fact's bound: the goal holds below the bound and at or above it)
     rangeTried = 0;
     for back in 0..count {
-        app = applicationAt(context.applications, count - 1 - back);
+        app = applicationAt(state.context.applications, count - 1 - back);
         if app.function = -14 && size(app.arguments) = 2 && rangeTried < 2 && used < budget {
-            relevant = false;
-            for t in near { if hasEquality(equalities, app.id, t) { relevant = true; }; };
-            if relevant {
+            if equalToAny(analysis.equalities, app.id, near) {
                 k = get(app.arguments, 1);
                 list = get(app.arguments, 0);
-                for factPosition in 0..size(context.applications) {
-                    fact = get(context.applications, factPosition);
+                for factPosition in 0..size(state.context.applications) {
+                    fact = get(state.context.applications, factPosition);
                     if fact.function = -30 && size(fact.arguments) = 5 && rangeTried < 2 && used < budget {
-                        if hasEquality(equalities, get(fact.arguments, 0), list) || hasEquality(equalities, get(fact.arguments, 1), list) {
+                        if hasEquality(analysis.equalities, get(fact.arguments, 0), list) || hasEquality(analysis.equalities, get(fact.arguments, 1), list) {
                             for side in 0..2 {
                                 bound = get(fact.arguments, 2 + side);
                                 if rangeTried < 2 && used < budget {
-                                    if linearEntails(context, bound, k, 0) = false && linearEntails(context, k, bound, -1) = false {
+                                    if linearEntails(state.context, bound, k, 0) = false && linearEntails(state.context, k, bound, -1) = false {
                                         rangeTried = rangeTried + 1;
-                                        below = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: k, greater: bound, strict: true }), ..clone(context) };
-                                        below = withInstances(state, below);
-                                        belowOk = analyzeContext(below).contradictory;
-                                        if belowOk = false { used = used + 1; belowOk = entailsGoal(below, clone(goal)); };
-                                        if belowOk = false {
-                                            deeper = splitReadOverWrite(ExecutionState { context: clone(below), ..clone(state) }, clone(goal), depth - 1, budget - used);
-                                            used = used + deeper.used;
-                                            belowOk = deeper.holds;
-                                        };
-                                        if belowOk {
-                                            above = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: bound, greater: k, strict: false }), ..clone(context) };
-                                            above = withInstances(state, above);
-                                            aboveOk = analyzeContext(above).contradictory;
-                                            if aboveOk = false { used = used + 1; aboveOk = entailsGoal(above, clone(goal)); };
-                                            if aboveOk = false {
-                                                deeper = splitReadOverWrite(ExecutionState { context: clone(above), ..clone(state) }, clone(goal), depth - 1, budget - used);
-                                                used = used + deeper.used;
-                                                aboveOk = deeper.holds;
-                                            };
-                                            if aboveOk { return SplitResult { holds: true, used: used }; };
-                                        };
+                                        r = splitAtBound(state, goal, depth, budget - used, k, bound);
+                                        used = used + r.used;
+                                        if r.holds { return SplitResult { holds: true, used: used }; };
                                     };
                                 };
                             };
@@ -4293,6 +4242,69 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
         };
     };
     return SplitResult { holds: false, used: used };
+};
+
+// The goal at a read of a write: at the write's index the read is the value written; elsewhere it is a read of the
+// list written to, at an index other than the write's (below it, for a push)
+fn splitAtWrite(state: &ExecutionState, analysis: &ContextAnalysis, goal: &ValidatorGoal, depth: Int, budget: Int, readId: Int, k: Int, w: &WriteOf) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
+    used = 0;
+    context = clone(state.context);
+    sameIndex = hasEquality(analysis.equalities, k, w.idx);
+    atOk = contextDifferent(analysis.equalities, context.applications, context.orders, context.different, analysis.differences, k, w.idx);
+    if atOk = false {
+        atIdx = ValidatorContext { equalities: push(push(clone(context.equalities), EqualityFact { left: k, right: w.idx }), EqualityFact { left: readId, right: w.value }), ..clone(context) };
+        atOk = analyzeContext(atIdx).contradictory;
+        if atOk = false { used = used + 1; atOk = entailsGoal(atIdx, clone(goal)); };
+        // (the value may itself be read from a write: a node set from the node there)
+        if atOk = false && used < budget {
+            deeper = splitReadOverWrite(ExecutionState { context: clone(atIdx), ..clone(state) }, clone(goal), depth - 1, budget - used);
+            used = used + deeper.used;
+            atOk = deeper.holds;
+        };
+    };
+    if atOk = false { return SplitResult { holds: false, used: used }; };
+    if sameIndex { return SplitResult { holds: true, used: used }; };
+    fresh = freshValue(state);
+    if fresh is ValueLookup::Missing { return SplitResult { holds: false, used: used }; };
+    newRead = (fresh as ValueLookup::Found).term;
+    apps = push(clone(context.applications), ApplicationTerm { id: newRead, function: -14, arguments: push(push([], w.inner), k) });
+    elsewhere = ValidatorContext { applications: apps, equalities: push(clone(context.equalities), EqualityFact { left: readId, right: newRead }), different: push(clone(context.different), DisequalityFact { left: k, right: w.idx }), ..clone(context) };
+    if w.pushed {
+        elsewhere = ValidatorContext { orders: push(clone(elsewhere.orders), OrderFact { smaller: k, greater: w.idx, strict: true }), ..clone(elsewhere) };
+    };
+    elseOk = analyzeContext(elsewhere).contradictory;
+    if elseOk = false { used = used + 1; elseOk = entailsGoal(elsewhere, clone(goal)); };
+    if elseOk = false {
+        deeper = splitReadOverWrite(ExecutionState { context: clone(elsewhere), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        used = used + deeper.used;
+        elseOk = deeper.holds;
+    };
+    return SplitResult { holds: elseOk, used: used };
+};
+
+// The goal at a read on no known side of a forall fact's bound: below the bound, and at or above it
+fn splitAtBound(state: &ExecutionState, goal: &ValidatorGoal, depth: Int, budget: Int, k: Int, bound: Int) -> SplitResult [{ affirm depth >= 1; }] [{ }] shrinks 2 * depth {
+    used = 0;
+    below = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: k, greater: bound, strict: true }), ..clone(state.context) };
+    below = withInstances(state, below);
+    belowOk = analyzeContext(below).contradictory;
+    if belowOk = false { used = used + 1; belowOk = entailsGoal(below, clone(goal)); };
+    if belowOk = false {
+        deeper = splitReadOverWrite(ExecutionState { context: clone(below), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        used = used + deeper.used;
+        belowOk = deeper.holds;
+    };
+    if belowOk = false { return SplitResult { holds: false, used: used }; };
+    above = ValidatorContext { orders: push(clone(state.context.orders), OrderFact { smaller: bound, greater: k, strict: false }), ..clone(state.context) };
+    above = withInstances(state, above);
+    aboveOk = analyzeContext(above).contradictory;
+    if aboveOk = false { used = used + 1; aboveOk = entailsGoal(above, clone(goal)); };
+    if aboveOk = false {
+        deeper = splitReadOverWrite(ExecutionState { context: clone(above), ..clone(state) }, clone(goal), depth - 1, budget - used);
+        used = used + deeper.used;
+        aboveOk = deeper.holds;
+    };
+    return SplitResult { holds: aboveOk, used: used };
 };
 
 // (below every term the state mentions, found in one pass over it)
@@ -6425,6 +6437,12 @@ fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, 
     return NodeTerms { state: current, terms: terms, found: found, next: counter, births: born };
 };
 
+// What a round of saturation carries from one of its passes to the next: the state it adds terms to, the generations
+// of the terms, the instances made and the keys they are made for, and the next free term
+struct SatWork { state: ExecutionState, births: HashMap<Int, Int>, pending: List<DoneKey>, instances: List<SatInstance>, nextTerm: Int };
+
+impl Clone for SatWork { };
+
 fn saturationRound(given: &Saturation) -> RoundResult {
     state = clone(given.state);
     births = clone(given.births);
@@ -6443,6 +6461,46 @@ fn saturationRound(given: &Saturation) -> RoundResult {
     pending = noDoneKeys();
     instances = [];
     nextTerm = leastTermInUse(state) - 1;
+    sat = SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
+    sat = saturateTemplates(sat, start, gets, writes, done);
+    sat = saturateRangeFacts(sat, start, gets, writes, done);
+    sat = saturateFrames(sat, start, gets, writes, done);
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
+    // (a guard is asked of the closure of the facts alone, as a solver would:
+    // the slower heuristics of entailsGoal are for the goal)
+    closed = clone(start);
+    context = clone(state.context);
+    accepted = 0;
+    blocked = noBlocked();
+    for instPosition in 0..size(instances) {
+        inst = get(instances, instPosition);
+        failing = 0;
+        missing = TermRelation { relation: 0, left: 0, right: 0 };
+        for grPosition in 0..size(inst.guards) {
+            gr = get(inst.guards, grPosition);
+            if failing < 2 {
+                if closedHolds(closed, gr.relation, gr.left, gr.right) = false { failing = failing + 1; missing = clone(gr); };
+            };
+        };
+        if failing = 0 {
+            context = assumeRelation(context, inst.body.relation, inst.body.left, inst.body.right);
+            if inst.body.relation = 0 { context = assumeBooleanFact(context, inst.body.left, inst.body.right); };
+            done = push(done, clone(inst.key));
+            accepted = accepted + 1;
+        };
+        if failing = 1 && missing.left != missing.right {
+            if sameClass(closed, missing.left, missing.right) = false {
+                blocked = push(blocked, BlockedGuard { relation: missing.relation, left: missing.left, right: missing.right, index: inst.key.index });
+            };
+        };
+    };
+    after = closedFacts(context);
+    next = Saturation { state: ExecutionState { context: context, ..state }, births: births, done: done, blocked: blocked, closed: push([], after) };
+    return RoundResult { saturation: next, accepted: accepted };
+};
+
+fn saturateTemplates(sat: SatWork, start: &ClosedFacts, gets: &List<ApplicationTerm>, writes: &List<ApplicationTerm>, done: &List<DoneKey>) -> SatWork {
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
     templates = clone(state.templates);
     count = size(templates);
     for back in 0..count {
@@ -6497,6 +6555,11 @@ fn saturationRound(given: &Saturation) -> RoundResult {
             };
         };
     };
+    return SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
+};
+
+fn saturateRangeFacts(sat: SatWork, start: &ClosedFacts, gets: &List<ApplicationTerm>, writes: &List<ApplicationTerm>, done: &List<DoneKey>) -> SatWork {
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
     // (a fact that two lists agree over a range, get(a, base + j) = get(b, j)
     // for lo <= j < hi, is used at the reads of either list like a forall)
     for fact in state.context.applications {
@@ -6552,6 +6615,11 @@ fn saturationRound(given: &Saturation) -> RoundResult {
             };
         };
     };
+    return SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
+};
+
+fn saturateFrames(sat: SatWork, start: &ClosedFacts, gets: &List<ApplicationTerm>, writes: &List<ApplicationTerm>, done: &List<DoneKey>) -> SatWork {
+    SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm } = sat;
     // (the frames: a read of set(l, p, v) at k is the read of l at k when
     // 0 <= k < size(l) and k != p; of push(l, x), when 0 <= k < size(l))
     zero = constantTermWithValue(state.context, 0);
@@ -6586,37 +6654,7 @@ fn saturationRound(given: &Saturation) -> RoundResult {
             };
         };
     };
-    // (a guard is asked of the closure of the facts alone, as a solver would:
-    // the slower heuristics of entailsGoal are for the goal)
-    closed = clone(start);
-    context = clone(state.context);
-    accepted = 0;
-    blocked = noBlocked();
-    for instPosition in 0..size(instances) {
-        inst = get(instances, instPosition);
-        failing = 0;
-        missing = TermRelation { relation: 0, left: 0, right: 0 };
-        for grPosition in 0..size(inst.guards) {
-            gr = get(inst.guards, grPosition);
-            if failing < 2 {
-                if closedHolds(closed, gr.relation, gr.left, gr.right) = false { failing = failing + 1; missing = clone(gr); };
-            };
-        };
-        if failing = 0 {
-            context = assumeRelation(context, inst.body.relation, inst.body.left, inst.body.right);
-            if inst.body.relation = 0 { context = assumeBooleanFact(context, inst.body.left, inst.body.right); };
-            done = push(done, clone(inst.key));
-            accepted = accepted + 1;
-        };
-        if failing = 1 && missing.left != missing.right {
-            if sameClass(closed, missing.left, missing.right) = false {
-                blocked = push(blocked, BlockedGuard { relation: missing.relation, left: missing.left, right: missing.right, index: inst.key.index });
-            };
-        };
-    };
-    after = closedFacts(context);
-    next = Saturation { state: ExecutionState { context: context, ..state }, births: births, done: done, blocked: blocked, closed: push([], after) };
-    return RoundResult { saturation: next, accepted: accepted };
+    return SatWork { state: state, births: births, pending: pending, instances: instances, nextTerm: nextTerm };
 };
 
 // The closure of a context's facts, with its classes and its differences
@@ -6775,303 +6813,416 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
     return SplitResult { holds: allHold, used: used };
 };
 
+// The steps of a block in order, as far as the first that fails (a step of a kind not known fails as unsupported)
 fn executeSteps(initial: ExecutionState, steps: &List<ExecutionStep>) -> ExecutionResult {
     state = initial;
     for i in 0..size(steps) {
-        step = get(steps, i);
-        handled = false;
-        if step is ExecutionStep::Assign {
-            handled = true;
-            assign = step as ExecutionStep::Assign;
-            value = resolveValue(state, assign.value);
-            if value is ValueLookup::Found {
-                locals = bindLocal(state.locals, assign.local, (value as ValueLookup::Found).term);
-                state = ExecutionState { locals: locals, ..state };
-            } else {
-                return ExecutionResult { status: 2, failedAt: i, state: state };
-            };
-        };
-        if step is ExecutionStep::Apply {
-            handled = true;
-            apply = step as ExecutionStep::Apply;
-            args = resolveArguments(state, apply.arguments);
-            if args is ArgumentsLookup::Found {
-                terms = (args as ArgumentsLookup::Found).terms;
-                if termInUse(state, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                if apply.result = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                if containsValue(terms, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                ExecutionState { context: applyContext, locals: applyLocals, templates: applyTemplates } = state;
-                context = builtinFacts(contextWithApplication(applyContext, ApplicationTerm { id: apply.result, function: apply.function, arguments: clone(terms) }), apply.function, apply.result, terms);
-                state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(applyLocals, apply.local, apply.result), templates: applyTemplates }, apply.result);
-            } else {
-                return ExecutionResult { status: 2, failedAt: i, state: state };
-            };
-        };
-        // (what a list or array literal is, the same term everywhere: known
-        // again where a block names it, and nothing new where it is known)
-        if step is ExecutionStep::Literal {
-            handled = true;
-            literal = step as ExecutionStep::Literal;
-            args = resolveArguments(state, literal.arguments);
-            if args is ArgumentsLookup::Found {
-                terms = (args as ArgumentsLookup::Found).terms;
-                known = false;
-                for aPosition in 0..size(state.context.applications) {
-                    a = get(state.context.applications, aPosition);
-                    if a.id = literal.result && a.function = literal.function && a.arguments = terms { known = true; };
-                };
-                if known = false {
-                    ExecutionState { context: literalContext, locals: literalLocals, templates: literalTemplates } = state;
-                    context = builtinFacts(contextWithApplication(literalContext, ApplicationTerm { id: literal.result, function: literal.function, arguments: clone(terms) }), literal.function, literal.result, terms);
-                    state = recordEvaluatedValue(ExecutionState { context: context, locals: literalLocals, templates: literalTemplates }, literal.result);
-                };
-            } else {
-                return ExecutionResult { status: 2, failedAt: i, state: state };
-            };
-        };
-        if step is ExecutionStep::ApplyFresh {
-            handled = true;
-            apply = step as ExecutionStep::ApplyFresh;
-            args = resolveArguments(state, apply.arguments);
-            if args is ArgumentsLookup::Found {
-                terms = (args as ArgumentsLookup::Found).terms;
-                existing = existingApplication(state.context, apply.function, terms);
-                if existing is ValueLookup::Found {
-                    locals = bindLocal(state.locals, apply.local, (existing as ValueLookup::Found).term);
-                    state = ExecutionState { locals: locals, ..state };
-                } else {
-                  fresh = freshValue(state);
-                  if fresh is ValueLookup::Found {
-                    resultId = (fresh as ValueLookup::Found).term;
-                    if resultId = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                    if containsValue(terms, resultId) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                    ExecutionState { context: freshContext, locals: freshLocals, templates: freshTemplates } = state;
-                    context = builtinFacts(contextWithApplication(freshContext, ApplicationTerm { id: resultId, function: apply.function, arguments: clone(terms) }), apply.function, resultId, terms);
-                    state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(freshLocals, apply.local, resultId), templates: freshTemplates }, resultId);
-                  } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::Push {
-            handled = true;
-            pushStep = step as ExecutionStep::Push;
-            list = resolveValue(state, pushStep.list);
-            value = resolveValue(state, pushStep.value);
-            zero = resolveValue(state, pushStep.zero);
-            if list is ValueLookup::Found {
-                if value is ValueLookup::Found {
-                    if zero is ValueLookup::Found {
-                        pushed = pushSequence(state, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
-                        if pushed.status != 0 { return ExecutionResult { status: pushed.status, failedAt: i, state: pushed.state }; };
-                        state = pushed.state;
-                        madeTerm = resolveValue(state, ValueRef::Local { local: pushStep.local });
-                        if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
-                    } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::Last {
-            handled = true;
-            last = step as ExecutionStep::Last;
-            list = resolveValue(state, last.list);
-            zero = resolveValue(state, last.zero);
-            if list is ValueLookup::Found {
-                if zero is ValueLookup::Found {
-                    result = lastSequence(state, last.local, (list as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
-                    if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
-                    state = result.state;
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::Set {
-            handled = true;
-            setStep = step as ExecutionStep::Set;
-            list = resolveValue(state, setStep.list);
-            index = resolveValue(state, setStep.index);
-            value = resolveValue(state, setStep.value);
-            if list is ValueLookup::Found {
-                if index is ValueLookup::Found {
-                    if value is ValueLookup::Found {
-                        result = setSequence(state, setStep.local, (list as ValueLookup::Found).term, (index as ValueLookup::Found).term, (value as ValueLookup::Found).term);
-                        if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
-                        state = result.state;
-                        madeTerm = resolveValue(state, ValueRef::Local { local: setStep.local });
-                        if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
-                    } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::Pop {
-            handled = true;
-            popStep = step as ExecutionStep::Pop;
-            list = resolveValue(state, popStep.list);
-            if list is ValueLookup::Found {
-                result = popSequence(state, popStep.local, (list as ValueLookup::Found).term);
-                if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
-                state = result.state;
-                madeTerm = resolveValue(state, ValueRef::Local { local: popStep.local });
-                if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::NewArray {
-            handled = true;
-            array = step as ExecutionStep::NewArray;
-            length = resolveValue(state, array.length);
-            value = resolveValue(state, array.value);
-            if length is ValueLookup::Found {
-                if value is ValueLookup::Found {
-                    fresh = freshValue(state);
-                    if fresh is ValueLookup::Found {
-                        result = (fresh as ValueLookup::Found).term;
-                        lengthTerm = (length as ValueLookup::Found).term;
-                        valueTerm = (value as ValueLookup::Found).term;
-                        make = ApplicationTerm { id: result, function: -19, arguments: push(push([], lengthTerm), valueTerm) };
-                        sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
-                        apps = push(push(clone(state.context.applications), make), sizeApp);
-                        context = ValidatorContext { applications: apps, ..state.context };
-                        locals = bindLocal(state.locals, array.local, result);
-                        state = ExecutionState { context: context, locals: locals, ..state };
-                    } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::Havoc {
-            handled = true;
-            havoc = step as ExecutionStep::Havoc;
-            fresh = freshValue(state);
-            if fresh is ValueLookup::Found {
-                locals = bindLocal(state.locals, havoc.local, (fresh as ValueLookup::Found).term);
-                state = ExecutionState { locals: locals, ..state };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::RequireDefined {
-            handled = true;
-            required = step as ExecutionStep::RequireDefined;
-            value = resolveValue(state, required.value);
-            if value is ValueLookup::Missing {
-                return ExecutionResult { status: 2, failedAt: i, state: state };
-            };
-        };
-        if step is ExecutionStep::Check {
-            handled = true;
-            check0 = step as ExecutionStep::Check;
-            // (a relation code past 10 is a quiet check: a candidate invariant the
-            // inference tries, which is not worth case splits when it fails)
-            quiet = check0.relation >= 10;
-            relation = check0.relation;
-            if quiet { relation = relation - 10; };
-            if relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            if relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            left = resolveValue(state, check0.left);
-            right = resolveValue(state, check0.right);
-            if left is ValueLookup::Found {
-                if right is ValueLookup::Found {
-                    a = (left as ValueLookup::Found).term;
-                    b = (right as ValueLookup::Found).term;
-                    g = localGoal(relation, a, b);
-                    ok = entailsGoal(state.context, g);
-                    if ok = false {
-                        if relation = 0 { ok = booleanCheck(state.context, 0, a, b); };
-                        if relation = 1 { ok = booleanCheck(state.context, 1, a, b); };
-                    };
-                    if ok = false && quiet = false && size(state.templates) > 0 {
-                        // (each saturation of a large context is costly: a check it cannot
-                        // prove is given up after fewer of them)
-                        saturations = 40;
-                        if size(state.context.applications) > 150 { saturations = 12; };
-                        ok = proveBySaturation(Saturation { state: clone(state), births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() }, relation, a, b, 8, saturations, noBlocked()).holds;
-                    };
-                    if ok = false && quiet = false {
-                        // (a small context affords more cases: each costs about its size)
-                        budget = 8;
-                        if size(state.context.applications) < 200 { budget = 24; };
-                        ok = splitReadOverWrite(state, localGoal(relation, a, b), 3, budget).holds;
-                    };
-                    if ok = false {
-                        return ExecutionResult { status: 1, failedAt: i, state: state };
-                    };
-                    ExecutionState { context: checkContext, locals: checkLocals, templates: checkTemplates } = state;
-                    context = assumeRelation(checkContext, relation, a, b);
-                    if relation = 0 {
-                        context = assumeBooleanFact(context, a, b);
-                    };
-                    state = ExecutionState { context: context, locals: checkLocals, templates: checkTemplates };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::AssumeForall {
-            handled = true;
-            assumed = step as ExecutionStep::AssumeForall;
-            newTemplate = clone(assumed.template);
-            kept = noTemplates();
-            for t in state.templates { if t.id != newTemplate.id { kept = push(kept, clone(t)); }; };
-            kept = push(kept, newTemplate);
-            state = ExecutionState { templates: kept, ..state };
-        };
-        if step is ExecutionStep::Assume {
-            handled = true;
-            assumed = step as ExecutionStep::Assume;
-            if assumed.relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            if assumed.relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            left = resolveValue(state, assumed.left);
-            right = resolveValue(state, assumed.right);
-            if left is ValueLookup::Found {
-                if right is ValueLookup::Found {
-                    ExecutionState { context: assumeContext, locals: assumeLocals, templates: assumeTemplates } = state;
-                    context = assumeRelation(assumeContext, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
-                    if assumed.relation = 0 {
-                        context = assumeBooleanFact(context, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
-                    };
-                    state = ExecutionState { context: context, locals: assumeLocals, templates: assumeTemplates };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::CheckWithin {
-            handled = true;
-            cw = step as ExecutionStep::CheckWithin;
-            inner = resolveValue(state, cw.inner);
-            outer = resolveValue(state, cw.outer);
-            if inner is ValueLookup::Found {
-                if outer is ValueLookup::Found {
-                    if entailsGoal(state.context, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
-                        return ExecutionResult { status: 1, failedAt: i, state: state };
-                    };
-                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::AssumeVariant {
-            handled = true;
-            av = step as ExecutionStep::AssumeVariant;
-            object = resolveValue(state, av.object);
-            if object is ValueLookup::Found {
-                variants = push(clone(state.context.variants), VariantFact { object: (object as ValueLookup::Found).term, family: av.family, constructor: av.constructor, matches: av.matches });
-                context = ValidatorContext { variants: variants, ..state.context };
-                state = ExecutionState { context: context, ..state };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::RequireVariant {
-            handled = true;
-            rv = step as ExecutionStep::RequireVariant;
-            object = resolveValue(state, rv.object);
-            if object is ValueLookup::Found {
-                term = (object as ValueLookup::Found).term;
-                if knownVariant(closeContext(state.context), state.context.variants, term, rv.family, rv.constructor) = 1 {
-                    variants = push(clone(state.context.variants), VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
-                    context = ValidatorContext { variants: variants, ..state.context };
-                    state = ExecutionState { context: context, ..state };
-                } else { return ExecutionResult { status: 1, failedAt: i, state: state }; };
-            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
-        };
-        if step is ExecutionStep::Proof {
-            handled = true;
-            p = step as ExecutionStep::Proof;
-            result = runProofSteps(state.context, push([], p.step));
-            if result.valid = false { return ExecutionResult { status: 1, failedAt: i, state: state }; };
-            state = ExecutionState { context: result.state, ..state };
-        };
-        if handled = false { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        result = executeStep(state, get(steps, i), i);
+        if result.status != 0 { return result; };
+        state = result.state;
     };
     return ExecutionResult { status: 0, failedAt: -1, state: state };
+};
+
+fn executeStep(state: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    if step is ExecutionStep::Assign { return stepAssign(state, step, i); };
+    if step is ExecutionStep::Apply { return stepApply(state, step, i); };
+    if step is ExecutionStep::Literal { return stepLiteral(state, step, i); };
+    if step is ExecutionStep::ApplyFresh { return stepApplyFresh(state, step, i); };
+    if step is ExecutionStep::Push { return stepPush(state, step, i); };
+    if step is ExecutionStep::Last { return stepLast(state, step, i); };
+    if step is ExecutionStep::Set { return stepSet(state, step, i); };
+    if step is ExecutionStep::Pop { return stepPop(state, step, i); };
+    if step is ExecutionStep::NewArray { return stepNewArray(state, step, i); };
+    if step is ExecutionStep::Havoc { return stepHavoc(state, step, i); };
+    if step is ExecutionStep::RequireDefined { return stepRequireDefined(state, step, i); };
+    if step is ExecutionStep::Check { return stepCheck(state, step, i); };
+    if step is ExecutionStep::AssumeForall { return stepAssumeForall(state, step, i); };
+    if step is ExecutionStep::Assume { return stepAssume(state, step, i); };
+    if step is ExecutionStep::CheckWithin { return stepCheckWithin(state, step, i); };
+    if step is ExecutionStep::AssumeVariant { return stepAssumeVariant(state, step, i); };
+    if step is ExecutionStep::RequireVariant { return stepRequireVariant(state, step, i); };
+    if step is ExecutionStep::Proof { return stepProof(state, step, i); };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepAssign(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Assign {
+        assign = step as ExecutionStep::Assign;
+        value = resolveValue(state, assign.value);
+        if value is ValueLookup::Found {
+            locals = bindLocal(state.locals, assign.local, (value as ValueLookup::Found).term);
+            state = ExecutionState { locals: locals, ..state };
+        } else {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepApply(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Apply {
+        apply = step as ExecutionStep::Apply;
+        args = resolveArguments(state, apply.arguments);
+        if args is ArgumentsLookup::Found {
+            terms = (args as ArgumentsLookup::Found).terms;
+            if termInUse(state, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            if apply.result = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            if containsValue(terms, apply.result) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            ExecutionState { context: applyContext, locals: applyLocals, templates: applyTemplates } = state;
+            context = builtinFacts(contextWithApplication(applyContext, ApplicationTerm { id: apply.result, function: apply.function, arguments: clone(terms) }), apply.function, apply.result, terms);
+            state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(applyLocals, apply.local, apply.result), templates: applyTemplates }, apply.result);
+        } else {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+// (what a list or array literal is, the same term everywhere: known
+// again where a block names it, and nothing new where it is known)
+fn stepLiteral(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Literal {
+        literal = step as ExecutionStep::Literal;
+        args = resolveArguments(state, literal.arguments);
+        if args is ArgumentsLookup::Found {
+            terms = (args as ArgumentsLookup::Found).terms;
+            known = false;
+            for aPosition in 0..size(state.context.applications) {
+                a = get(state.context.applications, aPosition);
+                if a.id = literal.result && a.function = literal.function && a.arguments = terms { known = true; };
+            };
+            if known = false {
+                ExecutionState { context: literalContext, locals: literalLocals, templates: literalTemplates } = state;
+                context = builtinFacts(contextWithApplication(literalContext, ApplicationTerm { id: literal.result, function: literal.function, arguments: clone(terms) }), literal.function, literal.result, terms);
+                state = recordEvaluatedValue(ExecutionState { context: context, locals: literalLocals, templates: literalTemplates }, literal.result);
+            };
+        } else {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepApplyFresh(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::ApplyFresh {
+        apply = step as ExecutionStep::ApplyFresh;
+        args = resolveArguments(state, apply.arguments);
+        if args is ArgumentsLookup::Found {
+            terms = (args as ArgumentsLookup::Found).terms;
+            existing = existingApplication(state.context, apply.function, terms);
+            if existing is ValueLookup::Found {
+                locals = bindLocal(state.locals, apply.local, (existing as ValueLookup::Found).term);
+                state = ExecutionState { locals: locals, ..state };
+            } else {
+              fresh = freshValue(state);
+              if fresh is ValueLookup::Found {
+                resultId = (fresh as ValueLookup::Found).term;
+                if resultId = apply.function { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                if containsValue(terms, resultId) { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+                ExecutionState { context: freshContext, locals: freshLocals, templates: freshTemplates } = state;
+                context = builtinFacts(contextWithApplication(freshContext, ApplicationTerm { id: resultId, function: apply.function, arguments: clone(terms) }), apply.function, resultId, terms);
+                state = recordEvaluatedValue(ExecutionState { context: context, locals: bindLocal(freshLocals, apply.local, resultId), templates: freshTemplates }, resultId);
+              } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepPush(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Push {
+        pushStep = step as ExecutionStep::Push;
+        list = resolveValue(state, pushStep.list);
+        value = resolveValue(state, pushStep.value);
+        zero = resolveValue(state, pushStep.zero);
+        if list is ValueLookup::Found {
+            if value is ValueLookup::Found {
+                if zero is ValueLookup::Found {
+                    pushed = pushSequence(state, pushStep.local, (list as ValueLookup::Found).term, (value as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
+                    if pushed.status != 0 { return ExecutionResult { status: pushed.status, failedAt: i, state: pushed.state }; };
+                    state = pushed.state;
+                    madeTerm = resolveValue(state, ValueRef::Local { local: pushStep.local });
+                    if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepLast(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Last {
+        last = step as ExecutionStep::Last;
+        list = resolveValue(state, last.list);
+        zero = resolveValue(state, last.zero);
+        if list is ValueLookup::Found {
+            if zero is ValueLookup::Found {
+                result = lastSequence(state, last.local, (list as ValueLookup::Found).term, (zero as ValueLookup::Found).term);
+                if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
+                state = result.state;
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepSet(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Set {
+        setStep = step as ExecutionStep::Set;
+        list = resolveValue(state, setStep.list);
+        index = resolveValue(state, setStep.index);
+        value = resolveValue(state, setStep.value);
+        if list is ValueLookup::Found {
+            if index is ValueLookup::Found {
+                if value is ValueLookup::Found {
+                    result = setSequence(state, setStep.local, (list as ValueLookup::Found).term, (index as ValueLookup::Found).term, (value as ValueLookup::Found).term);
+                    if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
+                    state = result.state;
+                    madeTerm = resolveValue(state, ValueRef::Local { local: setStep.local });
+                    if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepPop(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Pop {
+        popStep = step as ExecutionStep::Pop;
+        list = resolveValue(state, popStep.list);
+        if list is ValueLookup::Found {
+            result = popSequence(state, popStep.local, (list as ValueLookup::Found).term);
+            if result.status != 0 { return ExecutionResult { status: result.status, failedAt: i, state: result.state }; };
+            state = result.state;
+            madeTerm = resolveValue(state, ValueRef::Local { local: popStep.local });
+            if madeTerm is ValueLookup::Found { state = recordEvaluatedSize(state, (madeTerm as ValueLookup::Found).term); };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepNewArray(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::NewArray {
+        array = step as ExecutionStep::NewArray;
+        length = resolveValue(state, array.length);
+        value = resolveValue(state, array.value);
+        if length is ValueLookup::Found {
+            if value is ValueLookup::Found {
+                fresh = freshValue(state);
+                if fresh is ValueLookup::Found {
+                    result = (fresh as ValueLookup::Found).term;
+                    lengthTerm = (length as ValueLookup::Found).term;
+                    valueTerm = (value as ValueLookup::Found).term;
+                    make = ApplicationTerm { id: result, function: -19, arguments: push(push([], lengthTerm), valueTerm) };
+                    sizeApp = ApplicationTerm { id: lengthTerm, function: -13, arguments: push([], result) };
+                    apps = push(push(clone(state.context.applications), make), sizeApp);
+                    context = ValidatorContext { applications: apps, ..state.context };
+                    locals = bindLocal(state.locals, array.local, result);
+                    state = ExecutionState { context: context, locals: locals, ..state };
+                } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepHavoc(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Havoc {
+        havoc = step as ExecutionStep::Havoc;
+        fresh = freshValue(state);
+        if fresh is ValueLookup::Found {
+            locals = bindLocal(state.locals, havoc.local, (fresh as ValueLookup::Found).term);
+            state = ExecutionState { locals: locals, ..state };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepRequireDefined(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::RequireDefined {
+        required = step as ExecutionStep::RequireDefined;
+        value = resolveValue(state, required.value);
+        if value is ValueLookup::Missing {
+            return ExecutionResult { status: 2, failedAt: i, state: state };
+        };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepCheck(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Check {
+        check0 = step as ExecutionStep::Check;
+        // (a relation code past 10 is a quiet check: a candidate invariant the
+        // inference tries, which is not worth case splits when it fails)
+        quiet = check0.relation >= 10;
+        relation = check0.relation;
+        if quiet { relation = relation - 10; };
+        if relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        if relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        left = resolveValue(state, check0.left);
+        right = resolveValue(state, check0.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found {
+                a = (left as ValueLookup::Found).term;
+                b = (right as ValueLookup::Found).term;
+                g = localGoal(relation, a, b);
+                ok = entailsGoal(state.context, g);
+                if ok = false {
+                    if relation = 0 { ok = booleanCheck(state.context, 0, a, b); };
+                    if relation = 1 { ok = booleanCheck(state.context, 1, a, b); };
+                };
+                if ok = false && quiet = false && size(state.templates) > 0 {
+                    // (each saturation of a large context is costly: a check it cannot
+                    // prove is given up after fewer of them)
+                    saturations = 40;
+                    if size(state.context.applications) > 150 { saturations = 12; };
+                    ok = proveBySaturation(Saturation { state: clone(state), births: emptyIntMap(), done: noDoneKeys(), blocked: noBlocked(), closed: noClosed() }, relation, a, b, 8, saturations, noBlocked()).holds;
+                };
+                if ok = false && quiet = false {
+                    // (a small context affords more cases: each costs about its size)
+                    budget = 8;
+                    if size(state.context.applications) < 200 { budget = 24; };
+                    ok = splitReadOverWrite(state, localGoal(relation, a, b), 3, budget).holds;
+                };
+                if ok = false {
+                    return ExecutionResult { status: 1, failedAt: i, state: state };
+                };
+                ExecutionState { context: checkContext, locals: checkLocals, templates: checkTemplates } = state;
+                context = assumeRelation(checkContext, relation, a, b);
+                if relation = 0 {
+                    context = assumeBooleanFact(context, a, b);
+                };
+                state = ExecutionState { context: context, locals: checkLocals, templates: checkTemplates };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepAssumeForall(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::AssumeForall {
+        assumed = step as ExecutionStep::AssumeForall;
+        newTemplate = clone(assumed.template);
+        kept = noTemplates();
+        for t in state.templates { if t.id != newTemplate.id { kept = push(kept, clone(t)); }; };
+        kept = push(kept, newTemplate);
+        state = ExecutionState { templates: kept, ..state };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepAssume(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Assume {
+        assumed = step as ExecutionStep::Assume;
+        if assumed.relation < 0 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        if assumed.relation > 3 { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        left = resolveValue(state, assumed.left);
+        right = resolveValue(state, assumed.right);
+        if left is ValueLookup::Found {
+            if right is ValueLookup::Found {
+                ExecutionState { context: assumeContext, locals: assumeLocals, templates: assumeTemplates } = state;
+                context = assumeRelation(assumeContext, assumed.relation, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                if assumed.relation = 0 {
+                    context = assumeBooleanFact(context, (left as ValueLookup::Found).term, (right as ValueLookup::Found).term);
+                };
+                state = ExecutionState { context: context, locals: assumeLocals, templates: assumeTemplates };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepCheckWithin(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::CheckWithin {
+        cw = step as ExecutionStep::CheckWithin;
+        inner = resolveValue(state, cw.inner);
+        outer = resolveValue(state, cw.outer);
+        if inner is ValueLookup::Found {
+            if outer is ValueLookup::Found {
+                if entailsGoal(state.context, ValidatorGoal::Within { inner: (inner as ValueLookup::Found).term, outer: (outer as ValueLookup::Found).term }) = false {
+                    return ExecutionResult { status: 1, failedAt: i, state: state };
+                };
+            } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepAssumeVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::AssumeVariant {
+        av = step as ExecutionStep::AssumeVariant;
+        object = resolveValue(state, av.object);
+        if object is ValueLookup::Found {
+            variants = push(clone(state.context.variants), VariantFact { object: (object as ValueLookup::Found).term, family: av.family, constructor: av.constructor, matches: av.matches });
+            context = ValidatorContext { variants: variants, ..state.context };
+            state = ExecutionState { context: context, ..state };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepRequireVariant(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::RequireVariant {
+        rv = step as ExecutionStep::RequireVariant;
+        object = resolveValue(state, rv.object);
+        if object is ValueLookup::Found {
+            term = (object as ValueLookup::Found).term;
+            if knownVariant(closeContext(state.context), state.context.variants, term, rv.family, rv.constructor) = 1 {
+                variants = push(clone(state.context.variants), VariantFact { object: term, family: rv.family, constructor: rv.constructor, matches: true });
+                context = ValidatorContext { variants: variants, ..state.context };
+                state = ExecutionState { context: context, ..state };
+            } else { return ExecutionResult { status: 1, failedAt: i, state: state }; };
+        } else { return ExecutionResult { status: 2, failedAt: i, state: state }; };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
+};
+
+fn stepProof(initial: ExecutionState, step: &ExecutionStep, i: Int) -> ExecutionResult {
+    state = initial;
+    if step is ExecutionStep::Proof {
+        p = step as ExecutionStep::Proof;
+        result = runProofSteps(state.context, push([], p.step));
+        if result.valid = false { return ExecutionResult { status: 1, failedAt: i, state: state }; };
+        state = ExecutionState { context: result.state, ..state };
+        return ExecutionResult { status: 0, failedAt: -1, state: state };
+    };
+    return ExecutionResult { status: 2, failedAt: i, state: state };
 };
 
 // A loop being walked: its header, the blocks that can get back to it, what
@@ -7271,6 +7422,14 @@ fn hasSizeOf(context: &ValidatorContext, term: Int) -> Bool {
     return false;
 };
 
+// What the inference of loop candidates carries from one of its passes to the next: the state it adds terms to, the
+// numbers of the temporaries it made, the subjects and anchors, and the candidate goals
+struct InferState { work: ExecutionState, index: Int, candIndex: Int, assigned: List<InferSubject>, anchors: List<InferSubject>, goals: List<InferGoal> };
+
+impl Clone for InferState { };
+
+fn noInferGoals() -> List<InferGoal> { return []; };
+
 fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<InferGoal> {
     work = clone(initial);
     assigned = [];
@@ -7289,6 +7448,34 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             };
         };
     };
+    goals = noInferGoals();
+    st = InferState { work: work, index: index, candIndex: 0, assigned: assigned, anchors: anchors, goals: goals };
+    st = inferPhase1(st, initial, havoc);
+    st = inferPhase2(st, initial, havoc);
+    st = inferPhase3(st, initial, havoc);
+    st = inferPhase4(st, initial, havoc);
+    st = inferPhase5(st, initial, havoc);
+    st = inferPhase6(st, initial, havoc);
+    st = inferPhase7(st, initial, havoc);
+    st = inferPhase8(st, initial, havoc);
+    st = inferPhase9(st, initial, havoc);
+    st = inferPhase10(st, initial, havoc);
+    st = inferPhase11(st, initial, havoc);
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
+    analysis = analyzeContext(work.context);
+    kept = [];
+    for gi in 0..size(goals) {
+        goal = clone(get(goals, gi));
+        holds = false;
+        if goal.relation = 0 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::Equal { left: goal.left, right: goal.right }); };
+        if goal.relation = 3 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::AtMost { left: goal.left, right: goal.right }); };
+        if holds { if size(kept) < 32 { kept = push(kept, goal); }; };
+    };
+    return kept;
+};
+
+fn inferPhase1(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     extraAssigned = [];
     for subjectPosition in 0..size(assigned) {
         subject = get(assigned, subjectPosition);
@@ -7306,6 +7493,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         };
     };
     for subject in extraAssigned { assigned = push(assigned, subject); };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase2(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     extraAnchors = [];
     for subjectPosition in 0..size(anchors) {
         subject = get(anchors, subjectPosition);
@@ -7323,6 +7515,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         };
     };
     for subject in extraAnchors { anchors = push(anchors, subject); };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase3(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     extraElems = [];
     for subjectPosition in 0..size(assigned) {
         subject = get(assigned, subjectPosition);
@@ -7360,8 +7557,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         };
     };
     for subject in extraElems { assigned = push(assigned, subject); };
-    goals = [];
-    candIndex = 0;
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase4(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for subjPosition in 0..size(assigned) {
         subj = get(assigned, subjPosition);
         kv = evalTermValue(work.context, subj.term, 6);
@@ -7383,6 +7583,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             };
         };
     };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase5(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for i in 0..size(assigned) {
         for j in 0..size(assigned) {
             if i < j {
@@ -7486,6 +7691,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             };
         };
     };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase6(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     // (equalities first: the orders of every pair can fill the candidates up)
     for subjPosition in 0..size(assigned) {
         subj = get(assigned, subjPosition);
@@ -7496,6 +7706,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             };
         };
     };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase7(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for subjPosition in 0..size(assigned) {
         subj = get(assigned, subjPosition);
         for anchorPosition in 0..size(anchors) {
@@ -7506,6 +7721,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             };
         };
     };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase8(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for i in 0..size(assigned) {
         for j in 0..size(assigned) {
             if i < j {
@@ -7569,6 +7789,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             };
         };
     };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase9(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     analysis0 = analyzeContext(work.context);
     trimmed = [];
     for gi in 0..size(goals) {
@@ -7579,6 +7804,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         if holds { trimmed = push(trimmed, goal); };
     };
     goals = trimmed;
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase10(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     analysis = analyzeContext(work.context);
     entailedEqs = [];
     for gi in 0..size(goals) {
@@ -7659,6 +7889,11 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
         };
     };
         };
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
+};
+
+fn inferPhase11(st: InferState, initial: &ExecutionState, havoc: &List<Int>) -> InferState {
+    InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals } = st;
     for i in 0..size(assigned) {
         for j in 0..size(assigned) {
             if i < j {
@@ -7697,16 +7932,7 @@ fn inferLoopCandidateGoals(initial: &ExecutionState, havoc: &List<Int>) -> List<
             };
         };
     };
-    analysis = analyzeContext(work.context);
-    kept = [];
-    for gi in 0..size(goals) {
-        goal = clone(get(goals, gi));
-        holds = false;
-        if goal.relation = 0 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::Equal { left: goal.left, right: goal.right }); };
-        if goal.relation = 3 { holds = entailsGoalAnalyzed(work.context, analysis, ValidatorGoal::AtMost { left: goal.left, right: goal.right }); };
-        if holds { if size(kept) < 32 { kept = push(kept, goal); }; };
-    };
-    return kept;
+    return InferState { work: work, index: index, candIndex: candIndex, assigned: assigned, anchors: anchors, goals: goals };
 };
 
 fn walkExecution(blocks: &HashMap<Int, ExecutionBlock>, id: Int, initial: &ExecutionState, fuel: Int, loops: List<LoopFrame>) -> ExecutionFlowResult [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
