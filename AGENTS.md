@@ -81,7 +81,11 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
   reader, the MIR checker and the ghost erasure written in Tersus. The host
   runs the checker and the erasure on the MIR as data (`MirHousekeeping`);
   they are the production path, and the examples' expectations in
-  `test/TestPipeline.hs` say what running them with no input does.
+  `test/TestPipeline.hs` say what running them with no input does. The emitter's
+  declaration-only `types.tersus`, `values.tersus`, `operations.tersus`,
+  `functions.tersus` and `helpers.tersus` files are siblings of `emit.tersus`
+  in one `mir::emit` module; only `emit.tersus` runs. All six are embedded by
+  `PreludeSource.mirPackageFiles` and listed in `package.yaml`.
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
   (see Build, Test, and Development Commands).

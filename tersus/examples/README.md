@@ -103,7 +103,7 @@ The files are declarations-only modules, except the entry file, which runs. `tes
 
 ## A package: mir
 
-`mir/` is a package (package name `mir`) whose four entry programs share one reader of the MIR as data instead of each carrying a copy of it. The emitter, checker and eraser also import the declarations-only `support` module for phase-neutral type and declaration metadata. Each entry program is the only file of its own module, so it may run. Full layouts and the eraser's legacy data writer stay local.
+`mir/` is a package (package name `mir`) whose four entry programs share one reader of the MIR as data instead of each carrying a copy of it. The emitter, checker and eraser also import the declarations-only `support` module for phase-neutral type and declaration metadata. Only the selected entry file may run; the emitter's other files are declarations in the same `mir::emit` build unit. Full layouts and the eraser's legacy data writer stay local.
 
 ```
 stack run tersus-exe -- eval examples/mir/mir_reader/mir_reader.tersus   # with MIR data on stdin, writes it again
@@ -115,7 +115,12 @@ stack run tersus-exe -- check examples/mir/emit/emit.tersus              # print
 | `mir/reader/reader.tersus` | The MIR record types and parsers; imports the common token and type codec (`programAt` for version 1, `ghostProgramAt` for version 2 with `ghost`/`dissolve`). It declares only, and runs nothing |
 | `mir/support/support.tersus` | Shared declaration lookup, variant ownership, array classification, primitive layout results, type/name rendering and LLVM escaping. Owns its result records and Clone impls; reuses the codec's `catStrings` for text construction. Imports the codec and reader; full layouts and wire writers are not shared |
 | `mir/mir_reader/mir_reader.tersus` | The reader program: imports the reader names it writes and reads/writes the data |
-| `mir/emit/emit.tersus` | The emitter: imports the reader and writes LLVM IR |
+| `mir/emit/emit.tersus` | The emitter entry and program assembly: imports the lowering files and writes LLVM IR |
+| `mir/emit/types.tersus` | Emitter model, layouts, symbols, type closure and cached context; owns the module-local `String.then` |
+| `mir/emit/values.tersus` | Generation state, memory primitives, constants, operands and reference places |
+| `mir/emit/operations.tersus` | Arithmetic, array/address operations, rvalues, aggregate construction and statements |
+| `mir/emit/functions.tersus` | Calls, terminators, blocks, function signatures and frames |
+| `mir/emit/helpers.tersus` | Generated drop, clone and print functions |
 | `mir/mir_verify/mir_verify.tersus` | The checker the host runs on every program: imports the reader |
 | `mir/mir_erase/mir_erase.tersus` | The ghost erasure the host runs on every program: imports the reader and reads it with `ghostProgramAt` |
 
