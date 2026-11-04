@@ -952,13 +952,35 @@ packageAliases = do
 
 -- Exercise the complete snapshot through one validated cache entry; parser
 -- bootstrap and native erasure are covered separately, not by these child deadlines.
+primeBootstrapTools :: FilePath -> IO ()
+primeBootstrapTools home = do
+    ready <- TersusParser.runParserTool False ["return 0;"]
+    case ready of
+        Left e -> fail e
+        Right _ -> do
+            tool <- TersusParser.parserExecutable
+            case tool of
+                Error e -> fail e
+                Ok executable -> do
+                    let source = takeDirectory executable
+                        target = home </> "tersus"
+                    createDirectoryIfMissing True target
+                    names <- listDirectory source
+                    mapM_ (\name -> do
+                        let output = target </> name
+                        exists <- doesFileExist output
+                        when (not exists) (copyFile (source </> name) output))
+                        [name | name <- names, '.' `notElem` name,
+                            any (`isPrefixOf` name) ["seed-", "parser-seed-", "emitter-", "mir-verify-", "mir-erase-", "tersus-parser-"]]
+
 packageProcesses :: IO TestResult
 packageProcesses = do
     home <- freshHome "tersus-shared-package-processes"
     (do
+        primeBootstrapTools home
         (entry, _) <- packageFixture home
         let run = do
-                child <- spawnProbe home [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_PARSER", "haskell")]
+                child <- spawnProbe home [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_PARSER", "native")]
                 code <- waitChild 300 child
                 marker <- readMarker (home </> "marker")
                 files <- entryFiles home
@@ -976,6 +998,7 @@ parserRetry :: IO TestResult
 parserRetry = do
     home <- freshHome "tersus-shared-parser-retry"
     (do
+        primeBootstrapTools home
         child <- spawnProbe home [("TERSUS_SHARED_CACHE_PARSER_RETRY", "1")]
         code <- waitChild 300 child
         pure (testAssertEq code (Just ExitSuccess))) `finally` removeDirectoryRecursive home
@@ -1083,9 +1106,10 @@ ciPackageProcesses :: Bool -> IO TestResult
 ciPackageProcesses concurrent =
   -- (each probe has 30 seconds for the package)
   withToolsCacheHome $ \home -> do
+    primeBootstrapTools home
     (entry, _) <- ciPackageFixture home
     let markers = if concurrent then ["first" ++ show i | i <- [1 .. 4 :: Int]] else ["first"]
-        extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_PARSER", "haskell")]
+        extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_PARSER", "native")]
     bracket (mapM (spawnProbe home . extra) markers)
         (mapM_ (\child -> terminateProcess child >> waitForProcess child >> pure ())) $ \children -> do
         codes <- mapM (waitChild 30) children

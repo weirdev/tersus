@@ -1,28 +1,41 @@
 module TestParser (testParser) where
 
 import Control.Monad (forM)
+import Control.Exception (evaluate)
+import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
+import System.IO.Unsafe (unsafePerformIO)
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (doesDirectoryExist, listDirectory)
-import System.FilePath ((</>))
+import System.FilePath ((</>), takeFileName)
 import System.Exit (ExitCode (..))
 
 import qualified AstData as A
+import qualified Mir as M
+import qualified Data.Map as Map
 import qualified Compile
 import qualified TersusParser
-import Parse (emptyDecls, parseStatementBlockWith)
-import Syntax (Statement)
+import MirHousekeeping (cachedEmitter)
+import ParsedFile (Decls, ParsedFile, emptyDecls, fileBody, locating)
+import qualified FileParserProtocol as File
+import PreludeSource (toolPackageFiles)
+import qualified Modules
+import qualified SourceParse
+import qualified ParserSeed
+import Syntax (Expression (..), Statement (..), Value (..))
+import Types (Type (..))
+import qualified TestParserFragments as Fragment
 import TestHarness
 import Utils
 
-haskellParsed :: String -> Either String [Statement]
-haskellParsed source = case Compile.parseSource source of
+seedParsed :: String -> Either String [Statement]
+seedParsed source = case Compile.parseSource source of
     Ok statements -> Right statements
     Error e -> Left e
 
-haskellPlainParsed :: String -> Either String [Statement]
-haskellPlainParsed source = case parseStatementBlockWith emptyDecls source of
-    Left e -> Left (show e)
-    Right (statements, _) -> Right statements
+seedPlainParsed :: String -> Either String [Statement]
+seedPlainParsed source = case ParserSeed.parseFileWith emptyDecls source of
+    Left e -> Left e
+    Right (parsed, _) -> Right (fileBody parsed)
 
 writeData :: Either String [Statement] -> Either String String
 writeData (Left e) = Left e
@@ -30,11 +43,11 @@ writeData (Right statements) = case A.writeParsed statements of
     Ok text -> Right text
     Error e -> Left e
 
-haskellData :: String -> Either String String
-haskellData = writeData . haskellParsed
+seedData :: String -> Either String String
+seedData = writeData . seedParsed
 
-haskellPlainData :: String -> Either String String
-haskellPlainData = writeData . haskellPlainParsed
+seedPlainData :: String -> Either String String
+seedPlainData = writeData . seedPlainParsed
 
 -- The same program as the pipeline parses it: the probe, the libraries it chooses, then the
 -- source located, all through the tool
@@ -47,23 +60,24 @@ tersusPlain source = TersusParser.runParserTool False [source]
 
 
 compareWith :: (String -> Either String String) -> (String -> IO (Either String String)) -> String -> IO TestResult
-compareWith haskell tool source = do
+compareWith seed tool source = do
     tersus <- tool source
-    pure $ case (haskell source, tersus) of
+    pure $ case (seed source, tersus) of
+        (Left e, _) | "Parser tool failure:" `isPrefixOf` e -> Just e
         (_, Left e) | "Parser tool failure:" `isPrefixOf` e -> Just e
         (Right expected, Right actual) -> case A.readParsed actual of
             Error e -> Just ("native stdout is invalid AstData: " ++ e)
             Ok parsed -> case A.writeParsed parsed of
                 Error e -> Just e
-                Ok canonical -> firstFailure [sameData "noncanonical native stdout" canonical actual, sameData "native/oracle AST mismatch" expected actual]
+                Ok canonical -> firstFailure [sameData "noncanonical native stdout" canonical actual, sameData "P0/P1 AST mismatch" expected actual]
         (Left message, Left tersusMessage) ->
             case [s | s <- knownSubstrings, s `isInfixOf` message] of
                 [] -> Nothing
                 s : _
                     | s `isInfixOf` tersusMessage -> Nothing
                     | otherwise -> Just ("the Tersus parser's message does not name the reason: " ++ take 200 tersusMessage)
-        (Right _, Left e) -> Just ("the Tersus parser refused what Haskell accepts: " ++ take 200 e)
-        (Left e, Right _) -> Just ("the Tersus parser accepted what Haskell refuses: " ++ take 200 e)
+        (Right _, Left e) -> Just ("the Tersus parser refused what P0 accepts: " ++ take 200 e)
+        (Left e, Right _) -> Just ("the Tersus parser accepted what P0 refuses: " ++ take 200 e)
 
 sameData :: String -> String -> String -> TestResult
 sameData label expected actual
@@ -73,7 +87,7 @@ sameData label expected actual
         [] -> Just (label ++ ": record counts " ++ show (length (lines expected), length (lines actual)))
 
 compareSource :: (String -> IO (Either String String)) -> String -> IO TestResult
-compareSource = compareWith haskellData
+compareSource = compareWith seedData
 
 knownSubstring :: String
 knownSubstring = "The body of a for loop cannot assign its loop variable"
@@ -97,18 +111,72 @@ corpusPaths = (++) <$> files "examples" <*> files "lib"
 corpusParity :: IO TestResult
 corpusParity = do
     paths <- corpusPaths
-    results <- forM paths $ \path -> do
-        source <- readFile path
+    sources <- forM paths $ \path -> do source <- readFile path; pure (path, source)
+    let resolver = Modules.resolverFromFiles (sources ++ toolPackageFiles)
+    results <- forM sources $ \(path, source) -> do
         putStrLn ("Native corpus file: " ++ path)
-        result <- compareSource tersusData source
+        result <- case Modules.discoverEntry resolver path of
+            Modules.InPackage _ _ | takeFileName path /= "package.tersus" -> comparePreparedPackage resolver path
+            _ -> do
+                ast <- compareSource tersusData source
+                wire <- compareFileRecords source
+                pure (firstFailure [ast, wire])
         pure (fmap ((path ++ ": ") ++) result)
     putStrLn ("Native corpus parity: " ++ show (length paths) ++ " files, " ++ show (length [e | Just e <- results]) ++ " failures")
     pure (firstFailure results)
 
+comparePreparedPackage :: Modules.Resolver -> FilePath -> IO TestResult
+comparePreparedPackage resolver path = do
+    observations <- newIORef []
+    let paired declared source = unsafePerformIO $ do
+            seed <- ParserSeed.parseFileNative declared source
+            current <- TersusParser.parseFileNative declared source
+            let result = case (seed, current) of
+                    (Right (a, da), Right (b, db)) -> testAssertEq a b <> testAssertEq (File.writeParsedFile a da) (File.writeParsedFile b db)
+                    (Left a, Left b) | not (ParserSeed.toolFailure a || ParserSeed.toolFailure b) -> Nothing
+                    (Left e, _) -> Just ("P0 prepared package file: " ++ e)
+                    (_, Left e) -> Just ("P1 prepared package file: " ++ e)
+            modifyIORef' observations (result :)
+            pure current
+        loaded = Modules.loadFromEntryWith paired resolver path
+    _ <- evaluate (length (show loaded))
+    results <- readIORef observations
+    pure $ firstFailure (case loaded of
+        Left e -> Just e : results
+        Right (Modules.PackageResult _) -> testAssertTrue (not (null results)) : results
+        Right _ -> Just "expected a prepared package" : results)
+
+{-# NOINLINE recordedFile #-}
+recordedFile :: IORef [Either String String] -> (Decls -> String -> IO (Either String (ParsedFile, Decls))) -> Decls -> String -> Either String (ParsedFile, Decls)
+recordedFile history parser declared source = unsafePerformIO $ do
+    answer <- parser declared source
+    let record = case answer of
+            Left e -> Left e
+            Right (parsed, final) -> case File.writeParsedFile parsed final of
+                Error e -> Left (ParserSeed.failure e)
+                Ok wire -> Right wire
+    modifyIORef' history (record :)
+    pure answer
+
+fileRecords :: (Decls -> String -> IO (Either String (ParsedFile, Decls))) -> String -> IO [Either String String]
+fileRecords parser source = do
+    history <- newIORef []
+    let result = SourceParse.parseSourcePartsWith (recordedFile history parser) True source
+    _ <- evaluate (length (show result))
+    reverse <$> readIORef history
+
+compareFileRecords :: String -> IO TestResult
+compareFileRecords source = do
+    seed <- fileRecords ParserSeed.parseFileNative source
+    current <- fileRecords TersusParser.parseFileNative source
+    pure $ firstFailure
+        ([Just e | Left e <- seed ++ current, ParserSeed.toolFailure e]
+        ++ [testAssertTrue (not (null seed)), testAssertEq current seed])
+
 interpretedSmoke :: IO TestResult
 interpretedSmoke = do
     let sources = ["return 1 + 2;", "struct Point { x: Int }; p = Point { x: 2 }; return p.x;", "for i in 0..3 { i = 4; }; return 0;"]
-    results <- forM sources $ \source -> compareWith haskellPlainData (TersusParser.runParserToolInterpreted False . pure) source
+    results <- forM sources $ \source -> compareWith seedPlainData (TersusParser.runParserToolInterpreted False . pure) source
     pure (firstFailure results)
 
 snippets :: [(String, String)]
@@ -187,7 +255,7 @@ snippets =
 snippetParity :: IO TestResult
 snippetParity = do
     results <- forM snippets $ \(name, source) -> do
-        plain <- compareWith haskellPlainData tersusPlain source
+        plain <- compareWith seedPlainData tersusPlain source
         pure (fmap ((name ++ ": ") ++) plain)
     located <- forM locatedSnippets $ \(name, source) -> do
         result <- compareSource tersusData source
@@ -215,14 +283,14 @@ locatedSnippets =
     , ("empty import name list", "import geo { }; return 0;")
     ]
 
--- A file with imports is parsed whole and then refused as the Haskell reading refuses it, in
--- the same words (Compile.parseSourceParts), not by falling back to the Haskell parser
+-- A file with imports is parsed whole and then refused as the P0 reading refuses it, in
+-- the same words (Compile.parseSourceParts), not by falling back to the P0 parser
 importsVerdict :: IO TestResult
 importsVerdict = do
     tersus <- TersusParser.toolParseSource "import geo; import geo::Point as P { x }; return 0;"
     pure $ firstFailure
         [ testAssertEq tersus (Left "imports are not linked yet: geo, geo::Point")
-        , testAssertEq (haskellData "import geo; import geo::Point as P { x }; return 0;") (Left "imports are not linked yet: geo, geo::Point")
+        , testAssertEq (seedData "import geo; import geo::Point as P { x }; return 0;") (Left "imports are not linked yet: geo, geo::Point")
         ]
 
 
@@ -245,12 +313,69 @@ responseVerdicts = pure $ case A.writeParsed [] of
     failed (Left _) = True
     failed _ = False
 
+fragmentEnds :: IO TestResult
+fragmentEnds = pure $ firstFailure
+    [ testAssertEq (Fragment.parseExpression "1") (Right (Val (VInt 1)))
+    , testAssertEq (Fragment.parseExpression "1 // comment") (Right (Val (VInt 1)))
+    , testAssertEq (Fragment.parseStatement "return 1") (Right (Return (Val (VInt 1))))
+    , testAssertEq (Fragment.parseStatement "return 1 // comment") (Right (Return (Val (VInt 1))))
+    , rejectedAt "line 1:2:" (Fragment.parseExpression "1;")
+    , rejectedAt "line 1:2:" (Fragment.parseExpression "1; // comment")
+    , rejectedAt "line 1:2:" (Fragment.parseExpression "1; 2")
+    , rejectedAt "line 1:9:" (Fragment.parseStatement "return 1;")
+    , rejectedAt "line 1:9:" (Fragment.parseStatement "return 1; return 2")
+    , rejectedAt "line 1:4:" (Fragment.parseExpression "1 +")
+    , rejectedAt "line 2:4:" (Fragment.parseExpression "\n1 +")
+    ]
+  where
+    rejectedAt position result = case result of
+        Left e | ParserSeed.toolFailure e -> Just e
+               | otherwise -> testAssertTrue (position `isPrefixOf` e)
+        Right _ -> Just "a strict native fragment accepted trailing input"
+
+constructorConditions :: IO TestResult
+constructorConditions = pure $ firstFailure
+    [ testAssertEq (Fragment.parseStatementBlock "struct P { x: Int }; if P { }; while P { };")
+        (Right [StructDef "P" [] [("x", TInt)] [], If (Var "P") [] [], While (Var "P") [] Nothing []])
+    , case Fragment.parseStatementBlock "struct P { x: Int }; if P { }; x =;" of
+        Left e | ParserSeed.toolFailure e -> Just e
+               | otherwise -> testAssertTrue ("expected a name" `isInfixOf` e && not ("lacks field" `isInfixOf` e))
+        Right _ -> Just "a later malformed assignment was accepted"
+    ]
+
+noArenaCopies :: IO TestResult
+noArenaCopies = do
+    emitter <- cachedEmitter
+    pure $ case emitter of
+        Error e -> Just e
+        Ok _ -> case TersusParser.ownedParserProgram of
+            Error e -> Just e
+            Ok program -> case Map.lookup "nameLedExpr" (M.progFunctions program) of
+                Nothing -> Just "nameLedExpr is missing"
+                Just fn -> testAssertEq
+                    [operand | body <- Map.elems (M.fnBlocks fn), M.Assign _ (M.CopyOf operand) <- M.blockStatements body, operandType fn operand == Just (TNamed "St" [])]
+                    []
+  where
+    operandType fn operand = case operand of
+        M.Copy local -> M.localType <$> Map.lookup local (M.fnLocals fn)
+        M.Move local -> M.localType <$> Map.lookup local (M.fnLocals fn)
+        _ -> Nothing
+
+largeConstructorFallback :: IO TestResult
+largeConstructorFallback = pure $ testAssertEq
+    (Fragment.parseStatementBlock ("struct P { x: Int };\n" ++ concat ["x" ++ show i ++ " = P;\n" | i <- [0 :: Int .. 1023]]))
+    (Right (StructDef "P" [] [("x", TInt)] [] : [Assign ("x" ++ show i) (Var "P") | i <- [0 :: Int .. 1023]]))
+
 testParser :: Test
 testParser = TestList "testParser"
-    [ TestCase "native stdout roundtrip and exact equality" (compareWith haskellPlainData tersusPlain "return 1;\n")
-    , TestCase "large located arena exceeds former recursive stack limit" (compareWith haskellData tersusData (concat ["x" ++ show i ++ " = " ++ show i ++ ";\n" | i <- [0 :: Int .. 4095]] ++ "return 0;\n"))
-    , TestCase "many function-body arenas retain canonical order" (compareWith haskellData tersusData (concat ["fn f" ++ show i ++ "() -> Int ~ { return " ++ show i ++ "; };\n" | i <- [0 :: Int .. 255]] ++ "return 0;\n"))
+    [ TestCase "native stdout roundtrip and exact equality" (compareWith seedPlainData tersusPlain "return 1;\n")
+    , TestCase "large located arena exceeds former recursive stack limit" (compareWith seedData tersusData (concat ["x" ++ show i ++ " = " ++ show i ++ ";\n" | i <- [0 :: Int .. 4095]] ++ "return 0;\n"))
+    , TestCase "many function-body arenas retain canonical order" (compareWith seedData tersusData (concat ["fn f" ++ show i ++ "() -> Int ~ { return " ++ show i ++ "; };\n" | i <- [0 :: Int .. 255]] ++ "return 0;\n"))
     , TestCase "native response framing and OS failures" responseVerdicts
+    , TestCase "native fragments preserve strict ends and original source coordinates" fragmentEnds
+    , TestCase "constructor-name conditions retain variable ASTs and later errors" constructorConditions
+    , TestCase "diagnostic observation borrows the parser state without copying its arena" noArenaCopies
+    , TestCase "many known-constructor variables preserve exact fallback ASTs" largeConstructorFallback
     , TestCase "imports are not linked yet" importsVerdict
     , TestCase "generated snippet parity" snippetParity
     , TestCase "three interpreted smoke programs" interpretedSmoke

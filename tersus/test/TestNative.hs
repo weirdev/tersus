@@ -28,7 +28,7 @@ import MirLower (lowerProgram)
 import MirOwnership (insertOwnership)
 import MirHousekeeping (verifyProgram)
 import Native (buildExecutableFast, runExecutable)
-import Parse (parseStatementBlock)
+import TestParserFragments (parseStatementBlock)
 import Modules (LoadResult (..))
 import Pipeline
 import TestHarness

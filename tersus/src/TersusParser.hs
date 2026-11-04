@@ -3,25 +3,29 @@ module TersusParser
     , parseSourceParts
     , parseFileWith
     , parseFileNative
+    , parserExecutable
     , parseFileInterpreted
     , toolParseSource
     , runParserTool
     , runParserToolInterpreted
     , parserToolInput
     , parserResponse
+    , emitParserIr
+    , ownedParserProgram
+    , parseWithEquality
     , parserHash
     ) where
 
 import Control.Concurrent.MVar (MVar, modifyMVar, newMVar)
-import Data.List (intercalate, isPrefixOf)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
 import System.IO.Unsafe (unsafePerformIO)
 
 import qualified AstData as A
-import qualified Compile
 import qualified FileParserProtocol as File
-import qualified Parse as Oracle
+import qualified ParsedFile as FileData
+import qualified ParserSeed
+import SourceParse (SourceParts, parseSourcePartsWith, parseWithEqualityWith)
 import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import Mir (Program)
@@ -31,86 +35,55 @@ import MirHousekeeping (cachedEmitter, nativeProgram, toolProgram)
 import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import PreludeSource (parserPackageFiles)
-import Seed (emitterHash)
+import Seed (emitterHash, cachedParserSeed)
 import Syntax (Statement)
 import Utils
 
--- Compile and the default Modules loader remain the one-way bootstrap/oracle path.
--- Only an explicit haskell setting selects the oracle for user source. Native failures
--- are errors, never a reason to switch parser implementations.
 parseSource :: String -> Result [Statement] String
 parseSource source = mapResult (\(_, library, body) -> library ++ body) (parseSourceParts True source)
 
-parseSourceParts :: Bool -> String -> Result Compile.SourceParts String
+parseSourceParts :: Bool -> String -> Result SourceParts String
 parseSourceParts reserving source = unsafePerformIO $ do
     selected <- parserBackend
-    case selected of
-        Left e -> pure (Error e)
-        Right "haskell" -> pure (Compile.parseSourceParts reserving source)
-        Right "interpreted" -> sourcePartsWith parseFileInterpreted reserving source
-        Right _ -> sourcePartsWith parseFileNative reserving source
+    pure $ case selected of
+        Left e -> Error e
+        Right _ -> parseSourcePartsWith parseFileWith reserving source
+
+parseWithEquality :: String -> Either String [Statement]
+parseWithEquality = parseWithEqualityWith parseFileWith
 
 parserBackend :: IO (Either String String)
 parserBackend = do
     selected <- lookupEnv "TERSUS_PARSER"
     pure $ case selected of
         Nothing -> Right "native"
-        Just name | name `elem` ["native", "interpreted", "haskell"] -> Right name
-        Just name -> Left ("Unknown TERSUS_PARSER backend: " ++ name ++ "; expected native, interpreted or haskell")
+        Just name | name `elem` ["native", "interpreted"] -> Right name
+        Just name -> Left ("Unknown TERSUS_PARSER backend: " ++ name ++ "; expected native or interpreted")
 
--- Frozen libraries and their declarations reuse Compile's canonical library cache.
--- Both per-run source readings, including constructor shadowing and the plain probe
--- retry, are performed by the selected Tersus parser, not by the Haskell parser.
-sourcePartsWith :: (Oracle.Decls -> String -> IO (Either String (Oracle.ParsedFile, Oracle.Decls))) -> Bool -> String -> IO (Result Compile.SourceParts String)
-sourcePartsWith readSourceFile reserving source = do
-    seeded <- readSourceFile (Oracle.locating Compile.probeDecls) source
-    probed <- case seeded of
-        Right parsed -> pure (Right parsed)
-        Left e | toolFailure e -> pure (Left e)
-        Left e -> do
-            plain <- readSourceFile (Oracle.locating Oracle.emptyDecls) source
-            pure $ case plain of
-                Right parsed -> Right parsed
-                Left plainError | toolFailure plainError -> Left plainError
-                Left _ -> Left e
-    case probed of
-        Left e -> pure (Error (stageParseError e))
-        Right (probedFile, _) -> do
-            let names = map fst (Compile.librariesFor (Oracle.fileBody probedFile))
-            case Compile.parsedLibraries names of
-                Left e -> pure (Error e)
-                Right (library, declarations) -> do
-                    parsed <- readSourceFile (Oracle.locating declarations) source
-                    pure $ case parsed of
-                        Left e -> Error (stageParseError e)
-                        Right (Oracle.ParsedFile imports body, _)
-                            | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (Oracle.renderPath . Oracle.importPath) imports))
-                            | reserving, Just name <- Compile.reservedName body -> Error (Compile.reservedError name)
-                            | otherwise -> Ok (names, library, body)
-  where
-    stageParseError e | toolFailure e = e
-                     | otherwise = "Parse error: " ++ e
-
-parseFileWith :: Oracle.Decls -> String -> Either String (Oracle.ParsedFile, Oracle.Decls)
+parseFileWith :: FileData.Decls -> String -> Either String (FileData.ParsedFile, FileData.Decls)
 parseFileWith declarations source = unsafePerformIO $ do
     selected <- parserBackend
     case selected of
         Left e -> pure (Left e)
-        Right "haskell" -> pure $ either (Left . show) Right (Oracle.parseFileWith declarations source)
         Right "interpreted" -> parseFileInterpreted declarations source
         Right _ -> parseFileNative declarations source
 
-parseFileNative :: Oracle.Decls -> String -> IO (Either String (Oracle.ParsedFile, Oracle.Decls))
-parseFileNative = fileWithTool parserTool
+parseFileNative :: FileData.Decls -> String -> IO (Either String (FileData.ParsedFile, FileData.Decls))
+parseFileNative = ParserSeed.parseFileWithTool parserExecutable
 
-parseFileInterpreted :: Oracle.Decls -> String -> IO (Either String (Oracle.ParsedFile, Oracle.Decls))
-parseFileInterpreted = fileWithTool interpretedToolOnce
+parserExecutable :: IO (Result FilePath String)
+parserExecutable = do
+    tool <- parserTool
+    pure $ case tool of
+        ToolNative exe -> Ok exe
+        ToolFailed e -> Error e
+        _ -> Error "native parser tool is not native"
 
-fileWithTool :: IO Tool -> Oracle.Decls -> String -> IO (Either String (Oracle.ParsedFile, Oracle.Decls))
-fileWithTool makeTool declarations source = case File.writeFileRequest declarations source of
+parseFileInterpreted :: FileData.Decls -> String -> IO (Either String (FileData.ParsedFile, FileData.Decls))
+parseFileInterpreted declarations source = case File.writeFileRequest declarations source of
     Error e -> pure (Left (failure e))
     Ok input -> do
-        tool <- makeTool
+        tool <- interpretedToolOnce
         answer <- runTool tool input
         pure $ case answer of
             Left e -> Left e
@@ -118,10 +91,10 @@ fileWithTool makeTool declarations source = case File.writeFileRequest declarati
                 Error e -> Left (failure ("invalid file reply: " ++ e))
                 Ok parsed -> Right parsed
 
--- An explicitly native full-source parity entry point, independent of the oracle flag.
+-- The exact production source orchestration with the native parser.
 toolParseSource :: String -> IO (Either String String)
 toolParseSource source = do
-    parsed <- sourcePartsWith parseFileNative True source
+    let parsed = parseSourcePartsWith (\declared text -> unsafePerformIO (parseFileNative declared text)) True source
     pure $ case parsed of
         Error e -> Left e
         Ok (_, library, body) -> case A.writeParsed (library ++ body) of
@@ -176,10 +149,7 @@ parserResponse code out errors = case code of
         | otherwise -> Left (failure ("no valid AST or refusal: " ++ show (take 80 out) ++ "; " ++ trimEnd (decodeUtf8 errors)))
 
 failure :: String -> String
-failure e = "Parser tool failure: " ++ e
-
-toolFailure :: String -> Bool
-toolFailure = isPrefixOf "Parser tool failure:"
+failure = ParserSeed.failure
 
 data Tool = ToolNative FilePath | ToolInterpreted Program | ToolFailed String
 
@@ -201,10 +171,14 @@ interpretedBox = unsafePerformIO (newMVar Nothing)
 interpretedToolOnce :: IO Tool
 interpretedToolOnce = modifyMVar interpretedBox $ \made -> case made of
     Just tool -> pure (made, tool)
-    Nothing -> let tool = case validatedParserProgram of
-                      Error e -> ToolFailed e
-                      Ok program -> ToolInterpreted program
-               in pure (Just tool, tool)
+    Nothing -> do
+        seed <- cachedParserSeed
+        let tool = case seed of
+                Error e -> ToolFailed e
+                Ok _ -> case validatedParserProgram of
+                    Error e -> ToolFailed e
+                    Ok program -> ToolInterpreted program
+        pure (Just tool, tool)
 
 nativeTool :: IO Tool
 nativeTool = do
@@ -215,21 +189,23 @@ nativeTool = do
 
 buildTool :: FilePath -> IO (Result () String)
 buildTool output = do
+    ir <- emitParserIr
+    case ir of
+        Error e -> pure (Error e)
+        Ok text -> buildExecutable output text
+
+emitParserIr :: IO (Result String String)
+emitParserIr = do
     emitter <- cachedEmitter
     case emitter of
         Error e -> pure (Error e)
         Ok exe -> case ownedParserProgram of
             Error e -> pure (Error e)
-            Ok program -> do
-                ir <- runWithInput exe (writeProgram program)
-                case ir of
-                    Error e -> pure (Error e)
-                    Ok text -> buildExecutable output text
+            Ok program -> runWithInput exe (writeProgram program)
 
 {-# NOINLINE validatedParserProgram #-}
 validatedParserProgram :: Result Program String
-validatedParserProgram =
-    toolProgram "examples/parser/parser.tersus"
+validatedParserProgram = toolProgram "examples/parser/parser.tersus"
 
 ownedParserProgram :: Result Program String
 ownedParserProgram = validatedParserProgram `bindResult` \program ->

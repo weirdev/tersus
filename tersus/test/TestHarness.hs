@@ -71,7 +71,7 @@ import PreludeSource (toolPackageFiles, mirPackageFiles)
 import MirData (writeProgram)
 import MirEval (fromMirValue)
 import Native (cacheDirectory)
-import Parse
+import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
 import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)

@@ -29,8 +29,8 @@ module Pipeline
 import qualified Data.Map as Map
 import qualified Data.Set as Set
 import qualified Mir as M
-import Compile (SourceParts, lowerSourceParts, lowerStatements, parseWithEquality)
-import TersusParser (parseSource)
+import Compile (SourceParts, lowerSourceParts, lowerStatements)
+import TersusParser (parseSource, parseWithEquality)
 import qualified TersusParser
 import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfPackage, compileModules, compileModulesLinked)
 import Link (pruneProgram)

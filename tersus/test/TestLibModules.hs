@@ -8,7 +8,8 @@ import qualified Data.Set as Set
 
 import qualified Compile
 import qualified Modules
-import qualified Parse
+import qualified ParserSeed as Parse
+import qualified ParsedFile as Parse
 import PreludeSource (typesSource, eqSource, cloneSource, preludeSource, stringSource, mapSource, setSource, listsSource, boxSource)
 import qualified Mir as M
 import ValidatorNative (validateCompiled, validateLibrary)

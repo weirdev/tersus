@@ -2,3 +2,4 @@
 .stack-work/
 *~
 /tersus/bootstrap/emitter.ll
+/tersus/bootstrap/parser.ll

@@ -7,7 +7,7 @@ module TestControl
     , testCfgValidation
     ) where
 
-import Parse
+import TestParserFragments
 import Types
 import Syntax
 import TypeCheck

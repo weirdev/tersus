@@ -20,7 +20,7 @@ import LibPackage (LibPackage (..), libModuleOfDisplay, libPackage, libSelection
 import Link (linkPrograms)
 import ModuleResolve (rewriteFileReferences)
 import qualified Modules as Mod
-import Parse (ParsedFile (..))
+import ParsedFile (ParsedFile (..))
 import MirLower (lowerModuleWith)
 import Pretty (renderVarProof)
 import Syntax (Expression (..), FunctBody (..), Statement (..), ValidationStatement (..), Value (..))

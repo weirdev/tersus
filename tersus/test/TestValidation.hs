@@ -18,7 +18,7 @@ import Compile (lowerSource, lowerStatements, parseSource)
 import qualified Mir as M
 import qualified Data.Map as Map
 import qualified Data.Set as Set
-import Parse
+import TestParserFragments
 import Pipeline (compileSource, validateStatements)
 import ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits)
 import StdLib

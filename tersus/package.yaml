@@ -25,6 +25,7 @@ extra-source-files:
 - examples/ast_reader/ast_reader.tersus
 - AST_DATA.md
 - bootstrap/emitter.sha256
+- bootstrap/parser.sha256
 - examples/parser/package.tersus
 - examples/parser/parser.tersus
 - examples/mir/mir_verify/mir_verify.tersus
@@ -77,6 +78,14 @@ executables:
     - -threaded
     - -rtsopts
     - -with-rtsopts=-N
+    dependencies:
+    - tersus
+  parser-seed:
+    main:                Main.hs
+    source-dirs:         dev/parser-seed
+    ghc-options:
+    - -threaded
+    - -rtsopts
     dependencies:
     - tersus
 

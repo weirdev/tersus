@@ -10,6 +10,9 @@ module PreludeSource
     , stringSource
     , mapSource
     , setSource
+    , libModules
+    , nativeStorageModules
+    , libPackageFiles
     , mirPackageFiles
     , parserPackageFiles
     , astReaderPackageFiles
@@ -19,6 +22,7 @@ module PreludeSource
     , validationSource
     , validationDriverSource
     , seedSha256
+    , parserSeedSha256
     ) where
 
 import Data.List (isSuffixOf, sort)
@@ -39,6 +43,25 @@ compilerSourceHash =
             pure [file, contents]) files
         lift (fingerprint (concat inputs))
      )
+
+libModules :: [(String, String, String)]
+libModules =
+    [ ("types", "the list and Box types", typesSource)
+    , ("clone", "the clone library", cloneSource)
+    , ("eq", "the equality library", eqSource)
+    , ("prelude", "the prelude", preludeSource)
+    , ("string", "the string library", stringSource)
+    , ("map", "the map library", mapSource)
+    , ("set", "the set library", setSource)
+    , ("lists", "the native list helpers", listsSource)
+    , ("box", "the native Box helpers", boxSource)
+    ]
+
+nativeStorageModules :: [String]
+nativeStorageModules = ["lists", "box"]
+
+libPackageFiles :: [(FilePath, String)]
+libPackageFiles = ("tersuslib/package.tersus", "") : [("tersuslib/" ++ name ++ "/" ++ name ++ ".tersus", text) | (name, _, text) <- libModules]
 
 -- The text of lib/types.tersus: the structs List and Box, which every program has
 typesSource :: String
@@ -175,6 +198,14 @@ seedSha256 =
     $( do
         addDependentFile "bootstrap/emitter.sha256"
         contents <- runIO (readFile "bootstrap/emitter.sha256")
+        lift (head (words contents))
+     )
+
+parserSeedSha256 :: String
+parserSeedSha256 =
+    $( do
+        addDependentFile "bootstrap/parser.sha256"
+        contents <- runIO (readFile "bootstrap/parser.sha256")
         lift (head (words contents))
      )
 

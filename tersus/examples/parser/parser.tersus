@@ -1,7 +1,7 @@
 import data::codec::codec { Token, Parsed, Size, Type, hexValue, quoted, catStrings, renderTypeForName, printInt, printName, printNames, newLine, printType };
 import data::ast::ast { AstName, AstValue, AstBody, AstExpression, AstTermination, AstValidation, AstProof, AstRule, AstStatement, AstSignature, AstTraitFn, AstBound, AstField, AstVariant, AstValueField, AstArg, AstOptName, AstOptTermination, AstBuiltin, AstNames, AstValues, AstStatements, AstExpressions, AstValidations, AstProofs, AstFields, AstVariants, AstValueFields, AstTypes, AstArgs, AstTraitFns, AstBounds, AstElaborated, AstNode, AstProgram, printBool, printAst };
 
-// The Tersus parser, written in Tersus: reads source segments and writes the AST as data (`tersus-ast 1 parsed`, AST_DATA.md), byte for byte as AstData.writeParsed of the Haskell parser (src/Parse.hs) writes it. The host protocol is documented in AST_DATA.md.
+// The Tersus parser, written in Tersus: reads source segments and writes the AST as data (`tersus-ast 1 parsed`, AST_DATA.md), using the shared AST/file codecs. The host protocol is documented in AST_DATA.md.
 
 // ---- parser state ----
 
@@ -127,12 +127,14 @@ fn newSt() -> St ~ {
 
 fn fail<T>(st: St, v: T, msg: &String) -> Res<T> ~ {
     s = st;
-    if size(s.err.bytes) = 0 { s = St { err: clone(msg), ..s }; s = St { errPos: s.pos, ..s }; };
+    if size(s.err.bytes) = 0 || s.pos > s.errPos { s = St { err: clone(msg), errPos: s.pos, ..s }; };
     return Res<T> { st: s, v: v, ok: false };
 };
 
 fn ok<T>(st: St, v: T) -> Res<T> ~ {
-    return Res<T> { st: st, v: v, ok: true };
+    s = st;
+    if size(s.err.bytes) > 0 && s.pos >= s.errPos { s = St { err: "", errPos: 0, ..s }; };
+    return Res<T> { st: s, v: v, ok: true };
 };
 
 fn nameAtOr(xs: &List<String>, i: Int, fallback: &String) -> String ~ {
@@ -2231,13 +2233,21 @@ fn exprArgs(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     return ok( s, args);
 };
 
+fn errorText(st: &St) -> String ~ { return clone(st.err); };
+fn errorPosition(st: &St) -> Int ~ { return st.errPos; };
+
 fn nameLedExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
     s = st;
     save = checkpoint(s);
     // struct literal attempt
     lit = tryStructLiteralExpr(sourceText, s); Res { st: resultPartslitState, v: resultPartslitValue, ok: resultPartslitOk } = lit;
     if resultPartslitOk { return Res<Int> { st: resultPartslitState, v: resultPartslitValue, ok: resultPartslitOk }; };
+    literalError = errorText(resultPartslitState);
+    literalPos = errorPosition(resultPartslitState);
     s = restore(resultPartslitState, save);
+    if size(literalError.bytes) > 0 && (size(s.err.bytes) = 0 || literalPos > s.errPos) {
+        s = St { err: literalError, errPos: literalPos, ..s };
+    };
     // call or variable
     q = qualifiedName(sourceText, s); Res { st: resultPartsqState, v: resultPartsqValue, ok: resultPartsqOk } = q;
     if !resultPartsqOk { return Res<Int> { st: resultPartsqState, v: 0, ok: false }; };
@@ -8198,21 +8208,45 @@ fn runFileRequest(mode: Int) -> Int ~ {
         for name in names { "name".print(); printName(name); newLine(); };
         return 0;
     };
-    head = fileHeadDetailed(input, initial);
-    Res { st: headState, v: imports, ok: headOk } = head;
-    if !headOk { fileParseError(input, headState); return 1; };
-    if mode = 1 {
-        "tersus-imports 1\n".print();
-        printFileImports(imports);
-        return 0;
+    state = skipWs(input, initial);
+    imports = [];
+    body = [];
+    if mode <= 1 {
+        head = fileHeadDetailed(input, state);
+        Res { st: headState, v: foundImports, ok: headOk } = head;
+        if !headOk { fileParseError(input, headState); return 1; };
+        if mode = 1 {
+            "tersus-imports 1\n".print();
+            printFileImports(foundImports);
+            return 0;
+        };
+        imports = foundImports;
+        parsed = statementBlock(input, headState);
+        Res { st: parsedState, v: foundBody, ok: parsedOk } = parsed;
+        if !parsedOk { fileParseError(input, parsedState); return 1; };
+        state = parsedState;
+        body = foundBody;
+    } else if mode = 3 {
+        value = expression(input, state);
+        Res { st: valueState, v: valueId, ok: valueOk } = value;
+        if !valueOk { fileParseError(input, valueState); return 1; };
+        wrapped = stmtNode(valueState, AstStatement::Return { e: valueId });
+        Res { st: wrappedState, v: wrappedId, ok: wrappedOk } = wrapped;
+        if !wrappedOk { "tersus parser: internal arena failure\n".printError(); return 1; };
+        state = wrappedState;
+        body = push(body, wrappedId);
+    } else {
+        parsed = statement(input, state);
+        Res { st: parsedState, v: statementId, ok: parsedOk } = parsed;
+        if !parsedOk { fileParseError(input, parsedState); return 1; };
+        state = parsedState;
+        body = push(body, statementId);
     };
-    parsed = statementBlock(input, headState);
-    Res { st: parsedState, v: body, ok: parsedOk } = parsed;
-    if !parsedOk { fileParseError(input, parsedState); return 1; };
-    s = skipWs(input, parsedState);
+    s = skipWs(input, state);
     if !atEnd(input, s) {
-        s = St { err: "expected the end of the input", errPos: s.pos, ..s };
-        fileParseError(input, s);
+        ended = fail(s, 0, "expected the end of the input");
+        Res { st: endState, v: ignoredEndValue, ok: ignoredEndOk } = ended;
+        fileParseError(input, endState);
         return 1;
     };
     root = statementsList( s, body);
@@ -8233,6 +8267,18 @@ if headerLine = "tersus-file-parse 1" || headerLine = "tersus-import-prefix 1" |
     if headerLine = "tersus-declaration-names 1" { mode = 2; };
     fileStatus = runFileRequest(mode);
     if fileStatus != 0 { return 1; };
+} else if headerLine = "tersus-fragment-parse 1" {
+    fragmentRecord = fileReadRecord("fragment");
+    Parsed { value: fragmentTokens, pos: ignoredFragmentPos, ok: fragmentOk } = fragmentRecord;
+    if !fragmentOk || size(fragmentTokens) != 2 { "tersus parser: bad fragment record\n".printError(); return 1; };
+    kind = fileWordAt(fragmentTokens, 1);
+    if !kind.ok { "tersus parser: unknown fragment kind\n".printError(); return 1; };
+    mode = 0;
+    if kind.value = "expression" { mode = 3; }
+    else if kind.value = "statement" { mode = 4; }
+    else { "tersus parser: unknown fragment kind\n".printError(); return 1; };
+    fragmentStatus = runFileRequest(mode);
+    if fragmentStatus != 0 { return 1; };
 } else {
 if headerLine != "tersus-parse 1" { "tersus parser: bad header, expected tersus-parse 1\n".printError(); return 1; };
 metaLine = String::readLine(64);
@@ -8274,11 +8320,13 @@ while si < segmentCount && !parseFailed ~ {
             } else {
                 s = skipWs(sourceText, resultPartsparsedState);
                 if !atEnd(sourceText, s) {
+                    ended = fail(s, 0, "expected the end of the input");
+                    Res { st: endState, v: ignoredEndValue, ok: ignoredEndOk } = ended;
                     parseFailed = true;
-                    failMessage = "expected the end of the input";
+                    failMessage = clone(endState.err);
                     failSource = clone(sourceText.text);
-                    failPos = s.pos;
-                    state = s;
+                    failPos = endState.errPos;
+                    state = endState;
                 } else {
                     state = s;
                     for x in resultPartsparsedValue { allStatements = push(allStatements, x); };

@@ -85,6 +85,8 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
 - `tersus/bootstrap/emitter.sha256`: the SHA-256 pin of the seed IR the Tersus
   emitter is bootstrapped from; the seed itself is a GitHub release asset
   (see Build, Test, and Development Commands).
+- `tersus/bootstrap/parser.sha256`: the SHA-256 pin of the native parser LLVM
+  seed; `TERSUS_PARSER_SEED_FILE` supplies verified local bytes before release.
 - `tersus/test/`: regression tests. `TestTersus.hs` runs the test groups; the
   groups live in `TestBasics`, `TestValidation`, `TestProofs`, `TestControl`,
   `TestData`, `TestPipeline`, `TestNative`, `TestOwnership`, `TestTraits`,
@@ -136,6 +138,13 @@ Work from `tersus/`.
   check the stage 0 / stage 1 fixpoint. Do not redirect straight into a seed
   file the running compiler is using: the shell truncates it before the
   compiler runs.
+- Production parsing uses native P1. Bootstrap readers (`StdLibDefs`,
+  `LibParsed`, `Compile`, default `Modules`) use the pinned native P0 leaf;
+  there is no Haskell grammar or fallback. Building Haskell needs no clang
+  or network; the first language parse needs clang and verified parser/emitter
+  seeds. The parser seed override is `TERSUS_PARSER_SEED_FILE` (the emitter's
+  remains `TERSUS_SEED_FILE`). `AST_DATA.md` describes seed regeneration through
+  the exact prepared parser package and its P0/P1/P2 fixpoint.
 - `stack test`: run the custom Haskell test harness in `test/TestTersus.hs`,
   which runs each registered group in a process of its own with `-N1`;
   `stack test --test-arguments='-j 1'` runs the groups one at a time, and

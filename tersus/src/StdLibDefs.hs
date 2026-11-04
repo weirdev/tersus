@@ -7,7 +7,8 @@ module StdLibDefs
 import qualified Data.Map as Map
 
 import BuiltinRegistry (builtinDecls, stdBindings)
-import Parse (emptyDecls, parseStatementBlockWith)
+import ParsedFile (emptyDecls, fileBody)
+import qualified ParserSeed
 import PreludeSource (stdlibSource)
 import StdLib (builtinFunct, eqProof)
 import Types
@@ -18,10 +19,10 @@ import Syntax
 -- are the ones written there. This module, and not a Haskell literal, is what the checker, the lowering
 -- and the validator take those contracts from.
 stdlibTextDefs :: Map.Map BuiltinFunct Value
-stdlibTextDefs = case parseStatementBlockWith emptyDecls stdlibSource of
-    Left err -> error ("lib/stdlib.tersus does not parse: " ++ show err)
-    Right (stmts, _) ->
-        let defs = Map.fromList [(builtin, canonicalValue value) | Assign _ (Val value@(VFunct _ _ _ (BuiltinFunct builtin) _)) <- stmts]
+stdlibTextDefs = case ParserSeed.parseFileWith emptyDecls stdlibSource of
+    Left err -> error (if ParserSeed.toolFailure err then err else "lib/stdlib.tersus does not parse: " ++ err)
+    Right (parsed, _) ->
+        let defs = Map.fromList [(builtin, canonicalValue value) | Assign _ (Val value@(VFunct _ _ _ (BuiltinFunct builtin) _)) <- fileBody parsed]
          in case [name | (name, builtin) <- builtinDecls, not (Map.member builtin defs)] of
                 [] -> defs
                 missing -> error ("lib/stdlib.tersus does not declare: " ++ unwords missing)

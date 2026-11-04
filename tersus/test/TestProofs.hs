@@ -14,7 +14,7 @@ module TestProofs
     ) where
 
 import Data.List (isInfixOf)
-import Parse
+import TestParserFragments
 import Pipeline (validateStatements)
 import StdLib
 import Types

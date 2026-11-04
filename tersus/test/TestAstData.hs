@@ -8,20 +8,21 @@ import System.Exit (ExitCode (..))
 
 import qualified Modules as Mod
 import qualified PackageCompile as Package
-import Parse (fileBody)
+import ParsedFile (fileBody)
 import PreludeSource (toolPackageFiles)
 import qualified LibParsed as Lib
 import qualified AstData as A
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
-import Compile (parseSource)
+import qualified ParserSeed
 import Hash (fingerprint)
 import qualified Mir as M
 import MirData (writeProgram)
 import MirOwnership (insertOwnership)
 import Native (buildExecutable, cachedProgram, runWithInput)
-import Parse (emptyDecls, locating, parseStatementBlockWith)
-import Pipeline (nativeProgram, runStatements)
+import ParsedFile (emptyDecls, locating)
+import TestParserFragments (parseStatementBlockWith)
+import Pipeline (nativeProgram, parseSource, runStatements)
 import Seed (cachedSeed, seedHash)
 import MirEval (fromMirValue)
 import StdLibDefs (stdlibBuiltin)
@@ -68,6 +69,7 @@ corpus = do
 parsed :: String -> Result [Statement] String
 parsed source = case parseSource source of
     Ok ss -> Ok ss
+    Error e | ParserSeed.toolFailure e -> Error e
     Error _ -> case parseStatementBlockWith (locating emptyDecls) source of
         Left e -> Error (show e)
         Right (ss, _) -> Ok ss

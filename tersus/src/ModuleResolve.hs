@@ -13,7 +13,7 @@ import qualified Data.Set as Set
 
 import Modules hiding (importPrefixes)
 import qualified Modules
-import Parse (Import (..), ParsedFile (..), splitPath)
+import ParsedFile (Import (..), ParsedFile (..), splitPath)
 import Syntax
 import Types
 

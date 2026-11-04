@@ -2,7 +2,7 @@ module TestDataCodec (testDataCodec) where
 
 import Data.List (sort)
 import qualified Modules as Mod
-import Parse (fileBody)
+import ParsedFile (fileBody)
 import ModuleResolve (canonicalForFile, rewriteFileReferences)
 import qualified PackageCompile
 import PreludeSource (toolPackageFiles, parserPackageFiles)

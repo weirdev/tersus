@@ -1,6 +1,9 @@
 module TestArrays (testArrays) where
 
 import Syntax
+import Pipeline (parseWithEquality)
+import qualified ParserSeed
+import Utils (Result (..))
 import TestHarness
 
 -- Array<T, N>: N elements held inline, wherever the array is made. The size is a constant and part of the type; the validator
@@ -10,6 +13,10 @@ testArrays =
     let runs body expected = parseEvalProgramHelper body (Just expected)
         valid = parseValidProgramHelper
         rejected = parseValidateFailProgramHelper
+        parseRejected source reason = case parseWithEquality source of
+            Left e | ParserSeed.toolFailure e -> Just e
+                   | otherwise -> testAssertErrorContains reason (Error e :: Result () String)
+            Right _ -> Just ("Expected a native parse rejection for: " ++ source)
         ints = VList . map VInt
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
@@ -205,7 +212,7 @@ testArrays =
                 , testCase "its sizes are given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P) -> Int { return 0; }; return 1;" "P has parameters <n>, which a type gives")
                 , testCase "as many as it has" (parseFails "struct P<n> { id: Int, body: Array<Int, n> }; x = P<1, 2> { id: 1, body: #[5] }; return 1;")
                 , testCase "a size that no field uses still fits in an Int" (runs "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775807> { x: 0 });" (VInt 9223372036854775807))
-                , testCase "and not more" (rejected "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775808> { x: 0 });" "the size 9223372036854775808 in Tag<9223372036854775808> is more than an Int can hold")
+                , testCase "and not more" (parseRejected "struct Tag<n> { x: Int }; fn width<m>(p: Tag<m>) -> Int { return m; }; return width(Tag<9223372036854775808> { x: 0 });" "Integer literal out of range (Int is 64 bits)")
                 , testCase "a size is a name that the struct declares" (rejected "struct Q<n> { body: Array<Int, k> }; return 1;" "k is not a size here")
                 , testCase "a size is not named twice" (rejected "struct Q<n, n> { body: Array<Int, n> }; return 1;" "names a parameter twice")
                 , testCase "a size that is not given" (rejected "struct P<n> { id: Int, body: Array<Int, n> };  fn f(p: P<?>) -> Int { return 0; }; return 1;" "a size that is not given")

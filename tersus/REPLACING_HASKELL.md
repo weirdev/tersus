@@ -253,7 +253,7 @@ expression-occurrence types); `examples/ast_reader/ast_reader.tersus` defines th
 syntax as typed arena payloads and reads/writes the same versioned records.
 It reuses the MIR `Type` and `Size`, preserves contracts and builtin
 metadata, and includes no solver or Iota state. The bridge is developmental:
-no frontend or lowering stage has moved to Tersus yet. See `AST_DATA.md`
+the elaborated bridge is developmental; parsed AST data now carries the production native parser output. See `AST_DATA.md`
 for its checked APIs, format, explicit type/size limits and corpus tests.
 
 ### 5. Retire `MirEval` (572 lines) instead of porting it
@@ -274,43 +274,46 @@ needed `Types` values as Tersus structs/enums, and exchanges parsed or
 elaborated syntax with `AstData` (`AST_DATA.md`). It is not a source parser
 or type checker.
 
-Nothing can be deleted end to end until source text can enter a Tersus
-program, so this gates the finish even though it is the hardest part.
-Parser first: `Parse` is Parsec combinators, which have no Tersus
-analogue, so the Tersus parser is a hand-written reader over bytes in
-the manner of `examples/mir/mir_reader/mir_reader.tersus`, producing the AST of
-`TersusTypes` re-declared as Tersus structs and enums. Then the
-elaborator on that AST. Error-message parity is part of the target:
-tests name the stage that refused a program and, for many programs, the
-message, so the Tersus checker must refuse the same programs with the
-same words, or the tests change deliberately with the messages.
+The parser was a set of Parsec combinators and is now a hand-written Tersus
+reader over bytes that produces the AST as data. The remaining frontend work
+is elaboration over that AST. Error messages are part of the target: tests
+name the stage that refused a program and often its reason, so a Tersus checker
+must preserve those verdicts or change them deliberately with the tests.
 
-Status: production source and package entry points use the parser written in
-Tersus. `TersusParser.parseSourceParts` supplies the source AST to
-`Pipeline.validatedSource` and `compileSource`; `Pipeline.loadFromFilesystem`
-injects the same file parser into module loading. The file reply carries
-imports, all declaration state and the exact parsed AST (`AST_DATA.md`).
-Native is the default, with the existing fingerprinted disk cache and locks.
-`TERSUS_PARSER=interpreted` is explicit; `haskell` keeps the oracle for one
-release. Native build, process and protocol failures are errors, not fallback
-signals.
+Status (2026-11-03): the parser grammar is native-only. `Parse.hs` and the
+`TERSUS_PARSER=haskell` oracle are deleted. `TersusParser` supplies P1 ASTs to
+production source and package entry points; `ParsedFile` holds the shared data
+records, and `Syntax` owns `Elaborated`. The elaborator remains Haskell.
 
-The source probe runs natively against frozen declarations. Its AST chooses
-libraries through `Compile.librariesFor`; cached library ASTs and declarations
-seed the final native file parse. `Compile.lowerSourceParts` preserves the
-library/source split and prepared-prefix cache. Module imports are resolved
-by the module pipeline rather than rejected by the source-only entry point.
-`Compile` and the default `Modules` loaders retain the isolated Haskell
-bootstrap, so building the parser and MIR tools does not recurse into the
-production frontend. The elaborator remains Haskell.
+A pinned parser LLVM seed provides P0 below the compiler. It verifies
+`bootstrap/parser.sha256`, links the existing runtime and builds with clang.
+P0 reads the standard library, sequential implicit-library contexts, current
+prepared parser source and embedded MIR package. The unchanged checker and
+lowering produce owned MIR; the existing emitter seed builds E1, which emits
+P1. `Compile` and the default `Modules` loaders are explicit P0 bootstrap
+consumers, so producing P1 never enters a P1 cache lock recursively.
+`SourceParse` shares the lazy library AST/declaration cache, source probe and
+selection with production. `Compile.lowerSourceParts` retains the
+library/source split and prepared-prefix cache.
 
-`testParser` checks the full native source/rejection corpus and generated
-cases, with three explicit interpreted parser smokes. File state, imports,
-generated Eq/Clone positions, Unicode identifiers and constructor names are
-compared against the oracle. Character predicates are generated from that
-oracle's serving `Data.Char` version and linked only into the parser bootstrap
-and parser example build; they are not implicit libraries of ordinary code.
-Parser error wording remains the Tersus parser's own.
+The first language parse now requires clang and verified native P0 even for
+`TERSUS_PARSER=interpreted`. Haskell package compilation remains clang- and
+network-free. Failed seed verification, native builds, processes or protocols
+are explicit tool errors, with no alternate grammar.
+
+`testParser` compares P0/P1 over the full source/rejection corpus and generated
+cases. File state, imports, all ten declaration fields, shadowing and refusal
+state remain covered; the language tests keep independent literal ASTs and
+verdicts through native fragment helpers. Current GHC predicates are generated
+into P1 and tested at their Unicode boundaries. P0 keeps its asset's baked
+classifier version, so Unicode-version-sensitive identifier tests target P1;
+the ASCII bootstrap corpus must still be accepted by P0.
+
+The parser fixpoint uses the same prepared current source in P0 and P1. Its
+ASTs, final declarations, checked/lowered MIR and E1-emitted IR must agree,
+with P2 behavior checked too. Historical seed LLVM need not equal current LLVM.
+Cold-process, concurrent-process, cache-reuse and corrupt/missing-seed controls
+cover the bootstrap. `AST_DATA.md` documents provenance and seed regeneration.
 
 ### 7. The host glue, and a bootstrap with no GHC (deletes `Cli`, `Pipeline`, `Bootstrap`, `PreludeSource`, `LlvmRuntime`, `Native`, `Hash`, `Utils`, `Pretty`, `app/Main.hs`; ~1,600 lines)
 
