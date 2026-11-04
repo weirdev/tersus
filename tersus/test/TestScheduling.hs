@@ -335,6 +335,8 @@ testScheduling names batches = TestList "testScheduling"
         testAssertTrue
             ( assignShards 6 ["testBootstrap"] == [("testBootstrap", 6)]
               && assignShards 6 ["testParserBootstrap"] == [("testParserBootstrap", 5)]
+              && assignShards 6 ["testParserBootstrap", "newA", "newB", "newC", "newD", "newE"]
+                  == [("newA", 1), ("newB", 2), ("newC", 3), ("newD", 4), ("newE", 6), ("testParserBootstrap", 5)]
               && assignShards 6 ["testBootstrap", "testParserBootstrap"] == [("testParserBootstrap", 5), ("testBootstrap", 6)]
               && assignShards 6 ["newA", "newB"] == [("newA", 1), ("newB", 2)]
               && assignShards 1 ["testBootstrap", "newA"] == [("testBootstrap", 1), ("newA", 1)]
