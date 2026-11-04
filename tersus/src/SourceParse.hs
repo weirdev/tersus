@@ -7,6 +7,8 @@ module SourceParse
 
 import Data.Char (isAlphaNum)
 import Data.List (intercalate)
+import System.IO.Unsafe (unsafePerformIO)
+import Seed (cachedParserSeed)
 import ParsedFile
 import qualified ParserSeed
 import LibParsed (declsForLibModules, libModules, libParsed, statementsForLibModules)
@@ -39,27 +41,42 @@ probeFile parser seeded source = case parser seeded source of
         Left plainError | ParserSeed.toolFailure plainError -> Left plainError
         Left _ -> Left e
 
+-- Do not force immutable library CAFs after a transient seed failure.
+{-# NOINLINE parseSourcePartsWith #-}
 parseSourcePartsWith :: FileParser -> Bool -> String -> Result SourceParts String
-parseSourcePartsWith parser reserving source = case probeDecls >>= (\declared -> probeFile parser (locating declared) source) of
-    Left e -> Error (ParserSeed.stageParseError e)
-    Right (probedFile, _) ->
-        let names = map fst (librariesFor (fileBody probedFile))
-         in case parsedLibraries names of
-                Left e -> Error e
-                Right (library, declared) -> case parser (locating declared) source of
-                    Left e -> Error (ParserSeed.stageParseError e)
-                    Right (ParsedFile imports body, _)
-                        | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
-                        | reserving, Just name <- reservedName body -> Error (reservedError name)
-                        | otherwise -> Ok (names, library, body)
+parseSourcePartsWith parser reserving source = unsafePerformIO $ do
+    seed <- cachedParserSeed
+    pure $ case seed of
+        Error e -> Error (ParserSeed.failure e)
+        Ok _ -> readSource
+  where
+    readSource = case probeDecls >>= (\declared -> probeFile parser (locating declared) source) of
+        Left e -> Error (ParserSeed.stageParseError e)
+        Right (probedFile, _) ->
+            let names = map fst (librariesFor (fileBody probedFile))
+             in case parsedLibraries names of
+                    Left e -> Error e
+                    Right (library, declared) -> case parser (locating declared) source of
+                        Left e -> Error (ParserSeed.stageParseError e)
+                        Right (ParsedFile imports body, _)
+                            | not (null imports) -> Error ("imports are not linked yet: " ++ intercalate ", " (map (renderPath . importPath) imports))
+                            | reserving, Just name <- reservedName body -> Error (reservedError name)
+                            | otherwise -> Ok (names, library, body)
 
+{-# NOINLINE parseWithEqualityWith #-}
 parseWithEqualityWith :: FileParser -> String -> Either String [Statement]
-parseWithEqualityWith parser source = do
-    declared <- probeDecls
-    (probed, _) <- probeFile parser declared source
-    (library, seed) <- parsedLibraries [name | (name, _) <- librariesFor (fileBody probed), name `elem` ["the list and Box types", "the clone library", "the equality library"]]
-    (parsed, _) <- parser seed source
-    if null (fileImports parsed) then Right (library ++ fileBody parsed) else Left "import statements must come before any declaration in a file"
+parseWithEqualityWith parser source = unsafePerformIO $ do
+    seed <- cachedParserSeed
+    pure $ case seed of
+        Error e -> Left (ParserSeed.failure e)
+        Ok _ -> readSource
+  where
+    readSource = do
+        declared <- probeDecls
+        (probed, _) <- probeFile parser declared source
+        (library, seed) <- parsedLibraries [name | (name, _) <- librariesFor (fileBody probed), name `elem` ["the list and Box types", "the clone library", "the equality library"]]
+        (parsed, _) <- parser seed source
+        if null (fileImports parsed) then Right (library ++ fileBody parsed) else Left "import statements must come before any declaration in a file"
 
 reservedError :: String -> String
 reservedError name = "Type error: " ++ name ++ " is reserved: native code makes a list of the struct List and the functions list... of lib/lists.tersus, and a Box of the struct Box and the functions box... of lib/box.tersus, so a program does not declare names like them"

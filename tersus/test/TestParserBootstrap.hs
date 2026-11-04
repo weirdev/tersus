@@ -5,8 +5,8 @@ import Control.Exception (bracket, evaluate)
 import Control.Monad (forM)
 import Data.List (isPrefixOf, sort)
 import GHC.Clock (getMonotonicTime)
-import System.Directory (createDirectory, createFileLink, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile)
-import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
+import System.Directory (createDirectory, createFileLink, doesFileExist, findExecutable, getTemporaryDirectory, getModificationTime, listDirectory, removeDirectoryRecursive, removeFile, renameFile)
+import System.Environment (getEnvironment, getExecutablePath, getEnv, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
 import System.IO (hClose, openTempFile)
@@ -30,7 +30,9 @@ import Syntax (Expression (..), Statement (..), Value (..))
 import ParsedFile
 import qualified ParserSeed
 import qualified Pipeline
-import PreludeSource (toolPackageFiles, mirPackageFiles)
+import PreludeSource (boxSource, compilerSourceHash, listsSource, stdlibSource, toolPackageFiles, mirPackageFiles)
+import LibParsed (libModules)
+import Hash (fingerprint)
 import Seed (cachedParserSeed, parserSeedHash, seedHash, emitterHash)
 import qualified SourceParse
 import qualified TersusParser
@@ -106,6 +108,63 @@ failureCase mode expected = inFreshWorker mode setup $ do
                     Nothing -> pure ()) ["sha256sum", "shasum", "curl"]
             pure [("PATH", bin)]
         _ -> fail ("unknown bootstrap control: " ++ mode)
+
+withSetting :: String -> Maybe String -> IO a -> IO a
+withSetting name value action = bracket (lookupEnv name) restore $ \_ -> restore value >> action
+  where
+    restore Nothing = unsetEnv name
+    restore (Just text) = setEnv name text
+
+retryStages :: IO TestResult
+retryStages = inFreshWorker "repair" (const (pure [])) $ do
+    directory <- cacheDirectory
+    case directory of
+        Error e -> pure (Just e)
+        Ok cache -> withDirectory $ \home -> do
+            let missing = home </> "missing-parser.ll"
+                bin = home </> "bin"
+                sourceValue answer = case answer of
+                    Left e -> Just e
+                    Right wire -> case AstData.readParsed wire of
+                        Error e -> Just e
+                        Ok body -> testAssertTrue (not (null body)) <> testAssertEq (last body) (Return (Val (VInt 43)))
+                refused answer = case answer of
+                    Left e -> testAssertTrue (ParserSeed.toolFailure e)
+                    Right _ -> Just "transient bootstrap error was not refused"
+                parsed answer = testAssertEq (fmap fst answer) (Right (ParsedFile [] [Return (Val (VInt 42))]))
+            createDirectory bin
+            mapM_ (\name -> do
+                found <- findExecutable name
+                case found of
+                    Nothing -> pure ()
+                    Just path -> createFileLink path (bin </> name)) ["sha256sum", "shasum"]
+            sourceFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.toolParseSource "return 41;")
+            nativeFailed <- withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.parseFileNative emptyDecls "return 42;")
+            clangFailed <- withSetting "PATH" (Just bin) (TersusParser.parseFileNative emptyDecls "return 42;")
+            emitterFailed <- withSetting "TERSUS_SEED_FILE" (Just (home </> "missing-emitter.ll")) (TersusParser.parseFileNative emptyDecls "return 42;")
+            nativeReady <- TersusParser.parseFileNative emptyDecls "return 42;"
+            sourceReady <- TersusParser.toolParseSource "return 43;"
+            case firstFailure [refused sourceFailed, refused nativeFailed, refused clangFailed, refused emitterFailed, parsed nativeReady, sourceValue sourceReady] of
+                Just e -> pure (Just e)
+                Nothing -> do
+                    executable <- TersusParser.parserExecutable
+                    case executable of
+                        Error e -> pure (Just e)
+                        Ok path -> do
+                            removeFile path
+                            rebuilt <- TersusParser.parseFileNative emptyDecls "return 42;"
+                            present <- doesFileExist path
+                            let p0 = cache </> ("parser-seed-" ++ parserSeedHash)
+                            interpretedFailed <- bracket (renameFile p0 (p0 ++ ".held"))
+                                (\_ -> renameFile (p0 ++ ".held") p0)
+                                (\_ -> withSetting "TERSUS_PARSER_SEED_FILE" (Just missing) (TersusParser.parseFileInterpreted emptyDecls "return 42;"))
+                            interpretedReady <- TersusParser.parseFileInterpreted emptyDecls "return 42;"
+                            pure (firstFailure [parsed rebuilt, testAssertTrue present, refused interpretedFailed, parsed interpretedReady])
+
+bootstrapLibraryHash :: IO TestResult
+bootstrapLibraryHash = pure $ testAssertEq emitterHash
+    (fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, text) -> [path, text]) mirPackageFiles
+        ++ [text | (_, _, text, _) <- libModules] ++ [listsSource, boxSource, stdlibSource, compilerSourceHash]))
 
 timed :: String -> IO a -> IO a
 timed name action = do
@@ -265,5 +324,7 @@ testParserBootstrap = TestList "testParserBootstrap"
     , TestCase "cold process reaches P0 E1 P1 source and package" (inFreshWorker "cold" (const (pure [])) coldStages)
     , TestCase "fresh processes reuse every bootstrap cache entry without writes" cacheReuse
     , TestCase "concurrent empty-cache processes converge" concurrentCold
+    , TestCase "same-process transient failures repair without stale library or executable caches" retryStages
+    , TestCase "bootstrap fingerprints cover the complete compiler library manifest" bootstrapLibraryHash
     , TestCase "P0 P1 current-source fixpoint regenerates identical IR and P2 behavior" parserFixpoint
     ]
