@@ -6,6 +6,7 @@ module Ghost
     , defineProofRule
     , exportOutputs
     , exportContract
+    , closeFunctionContract
     , applyCall
     , builtinInfo
     , rvalueCall
@@ -522,6 +523,16 @@ unreachable st =
         impossible = FApp (CTerm (builtinFunct (Rel Lt))) [CTerm (VInt 0), CTerm (VInt 0)]
      in Engine.entails (CTerm (VBool False)) context || Engine.entails impossible context
 
+closeFunctionContract :: Map Variable VariableProof -> [Variable] -> [ValidationStatement] -> [ValidationStatement]
+closeFunctionContract globals params = snd . foldl close (foldr Map.delete globals ("return" : params), [])
+  where
+    close (bindings, done) statement =
+        let rewritten = substituteValidationStatement bindings statement
+            bindings' = case statement of
+                AssignProofVar name _ -> Map.delete name bindings
+                _ -> bindings
+         in (bindings', done ++ [rewritten])
+
 -- What the function promises, for these arguments and this result. A name the promise defines gets a value of its own.
 instantiateOutputs :: PState -> [Variable] -> [IotaProof] -> Iota -> [VariableProof] -> V (PState, [IotaProof])
 instantiateOutputs st params args result = instantiateOutputsWith st params args (ATerm result)
@@ -535,7 +546,7 @@ instantiateOutputsWith st params args result exported = instantiateOutputsMut st
 -- its version after the call, and `$old x` is the version it had at entry (REFERENCES.md, Mutation in the proof model)
 instantiateOutputsMut :: PState -> [Variable] -> [IotaProof] -> IotaProof -> [(Variable, Iota)] -> [VariableProof] -> V (PState, [IotaProof])
 instantiateOutputsMut st params args result mutPosts exported = do
-    let defined = filter (\var -> var /= "return" && var `notElem` params && not ("$old " `isPrefixOf` var) && Map.notMember var (psGlobals st)) (nubOrd (concatMap proofVars exported))
+    let defined = filter (\var -> var /= "return" && var `notElem` params && not ("$old " `isPrefixOf` var)) (nubOrd (concatMap proofVars exported))
     iotas <- freshN (length defined)
     let bound = zip defined iotas
         argOf name = fromMaybe (CTerm (VInt 0)) (lookup name (zip params args))
@@ -791,13 +802,23 @@ exportFacts checked bindings inputs outputs = do
     let allowed = nubOrd (map fst bindings ++ concatMap valStmtDefinedVars inputs ++ concatMap valStmtDefinedVars outputs)
         nameIotas = [(name, iota) | name <- allowed, Just (ATerm iota) <- [lookupName checked name]]
         -- (the functions of the program are the same in every state)
-        functions = [(source, iota) | (source, iota@(Iota ('$' : fnName))) <- Map.toList (psGlobals checked), Just info <- [Map.lookup fnName (psFns checked)], fnGlobal info]
-        byIota = namedIotaMap (reverse nameIotas ++ functions)
+        globalScope = refreshCache checked{psFacts = [], psVars = Map.empty, psView = Map.empty}
+        functions = [(source, iota, info) | (source, iota) <- Map.toList (psGlobals checked), Ok info <- [resolveFunction globalScope (ATerm iota)], fnGlobal info]
+        byIota = namedIotaMap (reverse nameIotas ++ [(source, iota) | (source, iota, _) <- functions])
         -- (names that are the same value are said to be equal, since a fact is said once about one of them)
         aliases = [FApp eqVarProof [ATerm canonical, ATerm name] | (name, iota) <- nameIotas, Just canonical <- [lookup iota [(i, n) | (n, i) <- nameIotas]], canonical /= name]
         -- (what holds everywhere is not part of a promise: the function iotas are named for the calls in the facts, not for these)
+        canonicalFunctions = Map.fromList [(iota, functionValue info) | (_, iota, info) <- functions]
+        functionValue info = case fnKind info of
+            KBuiltin builtin -> CTerm (builtinFunct builtin)
+            KUser name -> CTerm (VFnRef name)
+        closeGlobal proof@(ATerm iota) = Map.findWithDefault proof iota canonicalFunctions
+        closeGlobal (FApp funct args) = FApp (closeGlobal funct) (map closeGlobal args)
+        closeGlobal (Forall index guards body) = Forall index (map closeGlobal guards) (closeGlobal body)
+        closeGlobal proof = proof
+        functionBindings = [FApp eqVarProof [ATerm name, value] | (name, iota) <- nameIotas, Just value <- [Map.lookup iota canonicalFunctions]]
         facts = filter (proofOnlyOfNamedIotasOrConst byIota) (filter (`notElem` psGlobalFacts checked) (allFacts checked))
-    return (nubOrd (mapMaybe (iotaProofToVarProof byIota) facts ++ aliases))
+    return (nubOrd (mapMaybe (iotaProofToVarProof byIota . closeGlobal) facts ++ functionBindings ++ aliases))
 
 -- Invariants of structs
 

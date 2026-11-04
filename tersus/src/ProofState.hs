@@ -239,6 +239,7 @@ lookupName st name =
             Nothing -> ATerm <$> Map.lookup name (psGlobals st)
 
 toIotaProof :: PState -> VariableProof -> Result IotaProof String
+toIotaProof _ (CTerm (VFnRef name)) = Ok (ATerm (fnIota name))
 toIotaProof _ (CTerm val) = Ok (CTerm val)
 toIotaProof _ (BVar index) = Ok (BVar index)
 toIotaProof st (Forall index guards body) =

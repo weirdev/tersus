@@ -50,6 +50,13 @@ data Validated = Validated
 topLevelSources :: M.Program -> Map Name Variable
 topLevelSources program = Map.fromList [(name, source) | block <- Map.elems (M.fnBlocks (M.progMain program)), M.Ghost _ (M.GhostFunction name source True) <- M.blockStatements block]
 
+functionRequires :: M.Program -> M.Function -> [Variable] -> [ValidationStatement]
+functionRequires program function params = closeFunctionContract globals params (M.specRequires spec)
+  where
+    spec = M.fnSpec function
+    tops = topLevelSources program
+    globals = Map.fromList [(source, CTerm (VFnRef name)) | (source, M.Const (M.CFn name)) <- Map.toList (M.specEnv spec), Map.member name tops]
+
 -- What a call of a function is taken to give before its body has been checked: only what its output contract says of its parameters and result
 assumedInfo :: Set Name -> M.Program -> Name -> FnInfo
 assumedInfo readers program name =
@@ -59,7 +66,7 @@ assumedInfo readers program name =
             let spec = M.fnSpec fn
                 names = [n | p <- M.fnParams fn, Just d <- [Map.lookup p (M.fnLocals fn)], Just n <- [M.localName d]]
                 assumed = [p | ProofAssert p <- M.specEnsures spec, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
-             in FnInfo names (M.specRequires spec) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name readers) (M.specMutParams spec)
+             in FnInfo names (functionRequires program fn names) assumed (M.specTermination spec) (ATerm (fnIota name)) True (KUser name) (Set.member name readers) (M.specMutParams spec)
 
 -- What a function depends on: the functions it calls or names, and the ones its contracts and proofs call,
 -- since a proof that calls a function uses its contract as a call in the code does. Nested functions are
@@ -737,7 +744,7 @@ validateFunctionBody st name top = do
         ensures = M.specEnsures spec
         params = M.fnParams fn
         names = [n | p <- params, Just d <- [Map.lookup p (M.fnLocals fn)], Just n <- [M.localName d]]
-        term' = FnInfo names requires [] term (ATerm (fnIota name)) top (KUser name) (Set.member name (psReaders st)) (M.specMutParams spec)
+        term' = FnInfo names (functionRequires (psProgram st) fn names) [] term (ATerm (fnIota name)) top (KUser name) (Set.member name (psReaders st)) (M.specMutParams spec)
         -- the function can call itself: it promises what its output contract says of its parameters and result, and the body is
         -- checked against that
         assumed = [p | ProofAssert p <- ensures, all (`elem` ("return" : names ++ ["$old " ++ n | n <- M.specMutParams spec])) (proofVars p)]
