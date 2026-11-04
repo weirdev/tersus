@@ -10,7 +10,7 @@
 -- own regression test validates it like any other program. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits, withVerdictLock) where
 
 import Control.Concurrent.MVar (withMVar)
 import Control.Exception (IOException, bracket, try)

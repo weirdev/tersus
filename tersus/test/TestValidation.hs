@@ -11,8 +11,8 @@ module TestValidation
     , testHaskellParity
     ) where
 
-import Control.Concurrent (forkIO, newEmptyMVar, putMVar, takeMVar)
-import Control.Exception (evaluate)
+import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, killThread, newEmptyMVar, putMVar, takeMVar)
+import Control.Exception (MaskingState (..), SomeException, bracket, displayException, evaluate, getMaskingState, try)
 import System.Timeout (timeout)
 import Compile (lowerSource, lowerStatements, parseSource)
 import qualified Mir as M
@@ -669,20 +669,33 @@ concurrentReuse = do
     _ <- evaluate (forceTestResult (case lowerSource True "return 0;" of
         Error e -> Just e
         Ok program -> either Just (const Nothing) (case validateCompiled program of { Ok _ -> Right (); Error e -> Left e })))
-    finished <- timeout 600000000 $ do
-        slots <- mapM (\i -> do
-            slot <- newEmptyMVar
-            _ <- forkIO $ do
-                let result = case lowerSource True (identity ++ "return identity(" ++ show i ++ ");") of
-                        Error e -> Just e
-                        Ok program -> testAssertEq (show (validateCompiled program)) (show (validateCompiledUncached program))
-                _ <- evaluate (forceTestResult result)
-                putMVar slot result
-            return slot) [1 .. 8 :: Int]
-        mapM takeMVar slots
+    finished <- timeout 600000000 $
+        bracket (mapM worker [1 .. 8 :: Int]) (mapM_ (killThread . fst)) $ \workers ->
+            mapM (takeMVar . snd) workers
     return $ case finished of
         Nothing -> Just "Concurrent validation did not finish"
         Just results -> foldr (\r acc -> maybe acc Just r) Nothing results
+  where
+    worker i = validationWorker $ do
+        let result = case lowerSource True (identity ++ "return identity(" ++ show i ++ ");") of
+                Error e -> Just e
+                Ok program -> testAssertEq (show (validateCompiled program)) (show (validateCompiledUncached program))
+        _ <- evaluate (forceTestResult result)
+        pure result
+
+validationWorker :: IO TestResult -> IO (ThreadId, MVar TestResult)
+validationWorker action = do
+    slot <- newEmptyMVar
+    thread <- forkIOWithUnmask $ \unmask -> do
+        result <- try (unmask action) :: IO (Either SomeException TestResult)
+        putMVar slot (either (Just . displayException) id result)
+    pure (thread, slot)
+
+validationWorkerMasking :: IO TestResult
+validationWorkerMasking = bracket
+    (validationWorker (getMaskingState >>= \state -> pure (testAssertEq state Unmasked)))
+    (killThread . fst)
+    (\(_, slot) -> timeout 2000000 (takeMVar slot) >>= pure . maybe (Just "validation worker did not finish") id)
 
 named :: String -> Test -> Test
 named name (TestCase _ action) = TestCase name action
@@ -693,7 +706,8 @@ named _ other = other
 -- verdict on a program is always the one it gets uncached
 testValidationCache :: Test
 testValidationCache = TestList "testValidationCache"
-    [ TestCase "concurrent process-cache parity" concurrentReuse
+    [ TestCase "bracketed worker computation is unmasked" validationWorkerMasking
+    , TestCase "concurrent process-cache parity" concurrentReuse
     , named "common function hit with changed main" (reuse (identity ++ "return identity(3);") (identity ++ "return identity(4);"))
     , named "library instance hits" (reuse (cloneProgram "a = size(z); affirm a = 3; return a;") (cloneProgram "a = size(z); affirm a = 3; return a + 1;"))
     , named "main assertions still checked" (rejectChanged (identity ++ "return identity(3);") (identity ++ "affirm 1 = 2; return identity(3);"))
