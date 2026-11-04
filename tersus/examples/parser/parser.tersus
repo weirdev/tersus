@@ -7994,6 +7994,136 @@ fn printFileImports(imports: &List<FileImport>) -> Int ~ {
     return count;
 };
 
+fn scanMetadataTail(sourceText: &Input, st: St, groupOnly: Bool) -> Res<Bool> ~ {
+    s = st;
+    depth = 0;
+    if groupOnly { depth = 1; s = St { pos: s.pos + 1, ..s }; };
+    quotedText = false;
+    scanning = true;
+    while scanning && !atEnd(sourceText, s) ~ {
+        c = byteAt(sourceText, s, s.pos);
+        if quotedText {
+            if c = 92 {
+                s = St { pos: s.pos + 1, ..s };
+                if atEnd(sourceText, s) { return fail(s, false, "expected an escaped character"); };
+            } else { if c = 34 { quotedText = false; }; };
+            s = St { pos: s.pos + 1, ..s };
+        } else {
+            oldPos = s.pos;
+            s = skipWs(sourceText, s);
+            if s.pos = oldPos {
+                if c = 59 && depth = 0 { scanning = false; }
+                else {
+                    if c = 34 { quotedText = true; };
+                    if c = 123 { depth = depth + 1; };
+                    if c = 125 && depth > 0 {
+                        depth = depth - 1;
+                        if groupOnly && depth = 0 { scanning = false; };
+                    };
+                    s = St { pos: s.pos + 1, ..s };
+                };
+            };
+        };
+    };
+    if quotedText { return fail(s, false, "expected closing quote"); };
+    if depth > 0 { return fail(s, false, "expected }"); };
+    return ok(s, true);
+};
+
+fn metadataHeaderStart(sourceText: &Input, st: St) -> St ~ {
+    s = st;
+    if keywordAt(sourceText, s, "linear") { s = St { pos: s.pos + 6, ..s }; s = skipWs(sourceText, s); };
+    return s;
+};
+
+fn metadataEnumHeader(sourceText: &Input, st: St) -> Res<List<String>> ~ {
+    s = metadataHeaderStart(sourceText, st);
+    if !keywordAt(sourceText, s, "enum") { return fail(s, [], "expected enum"); };
+    s = St { pos: s.pos + 4, ..s };
+    owner = parseVariable(sourceText, skipWs(sourceText, s));
+    Res { st: ownerState, v: ownerName, ok: ownerOk } = owner;
+    if !ownerOk { return Res<List<String>> { st: ownerState, v: [], ok: false }; };
+    s = skipWs(sourceText, ownerState);
+    if byteAt(sourceText, s, s.pos) != 123 { return fail(s, [], "expected {"); };
+    s = St { pos: s.pos + 1, ..s };
+    s = skipWs(sourceText, s);
+    names = push([], clone(ownerName));
+    variantsLoop = byteAt(sourceText, s, s.pos) != 125;
+    while variantsLoop ~ {
+        variant = parseVariable(sourceText, s);
+        Res { st: variantState, v: variantName, ok: variantOk } = variant;
+        if !variantOk { return Res<List<String>> { st: variantState, v: [], ok: false }; };
+        names = push(names, cat3(ownerName, "::", variantName));
+        s = skipWs(sourceText, variantState);
+        if byteAt(sourceText, s, s.pos) = 123 {
+            group = scanMetadataTail(sourceText, s, true);
+            Res { st: groupState, v: groupValue, ok: groupOk } = group;
+            if !groupOk { return Res<List<String>> { st: groupState, v: [], ok: false }; };
+            s = skipWs(sourceText, groupState);
+        };
+        if byteAt(sourceText, s, s.pos) = 44 {
+            s = St { pos: s.pos + 1, ..s };
+            s = skipWs(sourceText, s);
+            variantsLoop = byteAt(sourceText, s, s.pos) != 125;
+        } else { variantsLoop = false; };
+    };
+    if byteAt(sourceText, s, s.pos) != 125 { return fail(s, [], "expected }"); };
+    s = St { pos: s.pos + 1, ..s };
+    return ok(s, names);
+};
+
+fn metadataNamedHeader(sourceText: &Input, st: St) -> Res<List<String>> ~ {
+    s = metadataHeaderStart(sourceText, st);
+    if keywordAt(sourceText, s, "extern") || keywordAt(sourceText, s, "builtin") {
+        width = 6;
+        if keywordAt(sourceText, s, "builtin") { width = 7; };
+        s = St { pos: s.pos + width, ..s };
+        s = skipWs(sourceText, s);
+        if !keywordAt(sourceText, s, "fn") { return fail(s, [], "expected fn"); };
+        s = St { pos: s.pos + 2, ..s };
+    } else {
+        width = 0;
+        if keywordAt(sourceText, s, "fn") { width = 2; };
+        if keywordAt(sourceText, s, "struct") { width = 6; };
+        if keywordAt(sourceText, s, "trait") { width = 5; };
+        if keywordAt(sourceText, s, "axiom") { width = 5; };
+        if keywordAt(sourceText, s, "proof") { width = 5; };
+        if width = 0 { return fail(s, [], "expected a named declaration"); };
+        s = St { pos: s.pos + width, ..s };
+    };
+    named = parseVariable(sourceText, skipWs(sourceText, s));
+    Res { st: namedState, v: name, ok: namedOk } = named;
+    if !namedOk { return Res<List<String>> { st: namedState, v: [], ok: false }; };
+    return ok(namedState, push([], name));
+};
+
+fn metadataDeclarationNames(sourceText: &Input, st: St) -> Res<List<String>> ~ {
+    s = skipWs(sourceText, st);
+    names = [];
+    while !atEnd(sourceText, s) ~ {
+        header = metadataEnumHeader(sourceText, clone(s));
+        Res { st: headerState, v: headerNames, ok: headerOk } = header;
+        if !headerOk {
+            named = metadataNamedHeader(sourceText, clone(s));
+            Res { st: namedState, v: namedNames, ok: namedOk } = named;
+            headerState = namedState;
+            headerNames = namedNames;
+            headerOk = namedOk;
+        };
+        if headerOk {
+            s = headerState;
+            for name in headerNames { names = push(names, clone(name)); };
+        };
+        tail = scanMetadataTail(sourceText, s, false);
+        Res { st: tailState, v: tailValue, ok: tailOk } = tail;
+        if !tailOk { return Res<List<String>> { st: tailState, v: [], ok: false }; };
+        s = tailState;
+        if byteAt(sourceText, s, s.pos) = 59 { s = St { pos: s.pos + 1, ..s }; };
+        s = skipWs(sourceText, s);
+    };
+    return ok(s, names);
+};
+
 fn fileProtocolByte(text: &String, index: Int) -> Int ~ {
     if index < 0 || index >= size(text.bytes) { return 0 - 1; };
     return toInt(get(&text.bytes, index));
@@ -8042,7 +8172,7 @@ fn fileParseError(input: &Input, st: &St) -> Int ~ {
     return msg.printError();
 };
 
-fn runFileRequest() -> Int ~ {
+fn runFileRequest(mode: Int) -> Int ~ {
     seeded = readFileDecls();
     Parsed { value: initial, pos: ignored, ok: seedOk } = seeded;
     if !seedOk { "tersus parser: invalid declaration seed\n".printError(); return 1; };
@@ -8059,9 +8189,23 @@ fn runFileRequest() -> Int ~ {
     if readByte() >= 0 { "tersus parser: trailing input\n".printError(); return 1; };
     if !fileProtocolUtf8(text) { "tersus parser: invalid source UTF8\n".printError(); return 1; };
     input = newInput(text);
+    if mode = 2 {
+        scanned = metadataDeclarationNames(input, initial);
+        Res { st: scannedState, v: names, ok: scannedOk } = scanned;
+        if !scannedOk { fileParseError(input, scannedState); return 1; };
+        "tersus-names 1\n".print();
+        "names".print(); printInt(size(names)); newLine();
+        for name in names { "name".print(); printName(name); newLine(); };
+        return 0;
+    };
     head = fileHeadDetailed(input, initial);
     Res { st: headState, v: imports, ok: headOk } = head;
     if !headOk { fileParseError(input, headState); return 1; };
+    if mode = 1 {
+        "tersus-imports 1\n".print();
+        printFileImports(imports);
+        return 0;
+    };
     parsed = statementBlock(input, headState);
     Res { st: parsedState, v: body, ok: parsedOk } = parsed;
     if !parsedOk { fileParseError(input, parsedState); return 1; };
@@ -8083,8 +8227,11 @@ fn runFileRequest() -> Int ~ {
 };
 
 headerLine = String::readLine(64);
-if headerLine = "tersus-file-parse 1" {
-    fileStatus = runFileRequest();
+if headerLine = "tersus-file-parse 1" || headerLine = "tersus-import-prefix 1" || headerLine = "tersus-declaration-names 1" {
+    mode = 0;
+    if headerLine = "tersus-import-prefix 1" { mode = 1; };
+    if headerLine = "tersus-declaration-names 1" { mode = 2; };
+    fileStatus = runFileRequest(mode);
     if fileStatus != 0 { return 1; };
 } else {
 if headerLine != "tersus-parse 1" { "tersus parser: bad header, expected tersus-parse 1\n".printError(); return 1; };
