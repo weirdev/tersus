@@ -3,7 +3,7 @@ module TestBootstrap (testBootstrap) where
 import Control.Exception (bracket)
 import Data.Char (isHexDigit)
 import Data.List (sort)
-import System.Directory (createDirectory, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile)
+import System.Directory (createDirectory, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, doesDirectoryExist, doesFileExist)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv)
 import System.Exit (ExitCode (..))
 import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
@@ -38,6 +38,7 @@ testBootstrap =
         [ TestCase "the hashes of what the emitter is made of" hashShape
         , TestCase "the seed pin and its release" seedPin
         , TestCase "the commands that make IR" commands
+        , TestCase "overlapping bootstrap directories retain their own files and cleanup" directoryIsolation
         , TestCase "cold bootstrap reaches a fixpoint and preserves cache entries" coldBootstrap
         ]
 
@@ -81,6 +82,20 @@ withDirectory name = bracket make removeDirectoryRecursive
         removeFile dir
         createDirectory dir
         pure dir
+
+directoryIsolation :: IO TestResult
+directoryIsolation = do
+    (result, outer) <- withDirectory "tersus-bootstrap-directory-test" $ \outer -> do
+        let marker = outer </> "outer"
+        writeFile marker "kept"
+        (inner, inside) <- withDirectory "tersus-bootstrap-directory-test" $ \inner -> do
+            kept <- doesFileExist marker
+            pure (inner, firstFailure [testAssertEq (inner /= outer) True, testAssertEq kept True])
+        kept <- doesFileExist marker
+        innerExists <- doesDirectoryExist inner
+        pure (firstFailure [inside, testAssertEq kept True, testAssertEq innerExists False], outer)
+    outerExists <- doesDirectoryExist outer
+    pure (firstFailure [result, testAssertEq outerExists False])
 
 coldBootstrap :: IO TestResult
 coldBootstrap = do
