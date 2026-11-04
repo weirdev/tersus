@@ -21,7 +21,7 @@ import MirData (writeProgram)
 import MirEval (runProgram, MirValue (..))
 import Modules (LoadResult (..), resolverFromFiles)
 import qualified Modules
-import PackageCompile (compileModulesValidated)
+import Pipeline (compileModulesValidated)
 import MirHousekeeping (listLibrary)
 import qualified MirHousekeeping as Housekeeping
 import MirLists (lowerLists)
@@ -31,8 +31,7 @@ import Syntax (Expression (..), Statement (..), Value (..))
 import ParsedFile
 import qualified ParserSeed
 import qualified Pipeline
-import PreludeSource (boxSource, compilerSourceHash, listsSource, stdlibSource, toolPackageFiles, mirPackageFiles)
-import LibParsed (libModules)
+import PreludeSource (compilerSourceHash, libPackageFiles, stdlibSource, toolPackageFiles, mirPackageFiles)
 import Hash (fingerprint)
 import Seed (cachedParserSeed, parserSeedHash, seedHash, emitterHash)
 import qualified SourceParse
@@ -195,8 +194,8 @@ emitterRetryStages = inFreshWorker "emitter-repair" (const (pure [])) $ withDire
 
 bootstrapLibraryHash :: IO TestResult
 bootstrapLibraryHash = pure $ testAssertEq emitterHash
-    (fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, text) -> [path, text]) mirPackageFiles
-        ++ [text | (_, _, text, _) <- libModules] ++ [listsSource, boxSource, stdlibSource, compilerSourceHash]))
+    (fingerprint ([seedHash, parserSeedHash] ++ concatMap (\(path, text) -> [path, text]) (mirPackageFiles ++ libPackageFiles)
+        ++ [stdlibSource, compilerSourceHash]))
 
 timed :: String -> IO a -> IO a
 timed name action = do
@@ -332,7 +331,7 @@ parserFixpoint = do
         Right (PackageResult pkg) -> Ok pkg
         Right _ -> Error "parser was not loaded as its current package"
     ownPackage pkg = compileModulesValidated pkg `bindResult` \program ->
-        Ok (insertOwnership (lowerLists listLibrary (expandRefWrites program)))
+        mapResult insertOwnership (lowerLists listLibrary (expandRefWrites program))
     checkedParser current decls source = unsafePerformIO $ do
         p0 <- ParserSeed.parseFileNative decls source
         pn <- current decls source
