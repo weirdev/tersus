@@ -167,8 +167,8 @@ which emits P1. `Native.cachedProgram` supplies the existing caches and build
 locks; imported source, parser pin, compiler and runtime changes rekey them.
 
 `TERSUS_PARSER` unset or `native` selects P1. `interpreted` explicitly runs the
-current parser's validated MIR, but still requires verified native P0 to read
-that parser's source. `haskell` is refused; `Parse.hs` and its grammar are gone.
+current parser's linked, type-checked bootstrap MIR, but still requires verified
+native P0 to read that parser's source. `haskell` is refused; `Parse.hs` and its grammar are gone.
 Build, process and protocol failures never select another parser. Building the
 Haskell package still requires neither clang nor network access; the first
 language parse now requires clang and verified P0. Native P1 also requires the
