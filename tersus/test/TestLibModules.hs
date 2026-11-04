@@ -21,12 +21,18 @@ import LibParsed (LibParsed (..), libParsed, nativeLibParsed, libPackageFiles)
 import Link (linkPrograms)
 import MirHousekeeping (validatedListLibrary)
 import MirLists (lowerLists)
-import Types (Arg (..), Type (..))
+import Types (Arg (..), Type (..), Size (..))
 import MirEval (fromMirValue, runProgram)
 import Pipeline (compileSource, ownedSource, erasedModuleProgram, ownedModuleProgram)
 import Syntax (Value (..))
 import TestHarness (Test (..), forceTestResult, testAssertEq, testAssertTrue, testCase)
-import Utils (Result (..), bindResult)
+import TestStorageOracle (eraseStorageHelper)
+import qualified PackageCompile as Package
+import PreludeSource (toolPackageFiles)
+import MirOwnership (expandRefWrites, insertOwnership)
+import MirData (forNative, readProgram, writeProgram)
+import MirHousekeeping (validatedStorage)
+import Utils (Result (..), bindResult, flatResultMap, mapResult)
 
 -- The compiler libraries (lib/eq.tersus and the rest) compiled as modules
 -- of the synthetic lib package: the package loads, each library checks
@@ -212,6 +218,23 @@ testNativeStorageModules = TestList "testNativeStorageModules"
          in rejectedResult "listNew" (linkPrograms [(libModuleId "lists", p), (Modules.ModuleId "app" Nothing, user)])
     , testCase "an imported List invariant still rejects unfilled live slots" (badImportedLayout "fn bad() -> List<Int> { (a, b) = Addr::alloc(0); return List<Int> { addr: a, len: 1, cap: 0, blk: b }; };")
     , testCase "an imported Box invariant still requires one filled slot" (badImportedLayout "fn bad() -> Box<Int> { (a, b) = Addr::alloc(0); return Box<Int> { addr: a, blk: b }; };")
+    , testCase "helper declaration seeds and raw tool input share a native phase" $ case Compile.lowerSource True "fn probe<T>(xs: &Box<Array<T>>) -> Int { return size(xs); }; return 0;" of
+        Error e -> Just e
+        Ok p -> case erasedHelpers of
+            Error e -> Just e
+            Ok units -> case linkPrograms (units ++ [(Modules.ModuleId "native" Nothing, p)]) of
+                Ok _ -> Just "fixture no longer reproduces mixed ghost/native declarations"
+                Error e | not ("type Box<Array<'T, ?>>" `isInfixOf` e) -> Just e
+                Error _ -> case lowerLists (Ok units) p of
+                    Error e -> Just e
+                    Ok native -> testAssertEq (Map.lookup "Box<Array<'T, ?>>" (M.progTypes native)) (Just (M.StructDecl [("addr", TAddr (TArrayOf (TParam "T") SizeAny))]))
+    , testCase "generic permission fields are erased before linking, not before validation" $ case libPackage of
+        Error e -> Just e
+        Ok pkg -> let p = libPrograms pkg Map.! "types"
+                      erased = M.completeErasedInstances p
+                   in testAssertTrue (Map.lookup "Box" (M.progGenerics p) == Just (["T"], [("addr", TAddr (TParam "T")), ("blk", TBlock (TParam "T"))]) && Map.lookup "Box" (M.progGenerics erased) == Just (["T"], [("addr", TAddr (TParam "T"))]) && M.completeInstances p == p && M.completeErasedInstances erased == erased)
+    , testCase "parser owned MIR constructs before guest compilation" (bootstrapOwned "examples/parser/parser.tersus")
+    , testCase "emitter owned MIR constructs before guest compilation" (bootstrapOwned "examples/mir/emit/emit.tersus")
     , testCase "imported lent signatures survive until checkMoves" $ importedLoan "xs = [1]; r = headOf(xs); n = size(xs); return *r + n;" False
     , testCase "imported from results still freeze their source" $ importedLoan "xs = [1]; r = headOf(xs); xs = [2]; return *r;" True
     ]
@@ -224,8 +247,10 @@ testNativeStorageModules = TestList "testNativeStorageModules"
                 { libInterfaces = foldr (\(Modules.ModuleId _ (Just name), iface, _) -> Map.insert name iface) (libInterfaces pkg) native
                 , libPrograms = foldr (\(Modules.ModuleId _ (Just name), _, p) -> Map.insert name p) (libPrograms pkg) native
                 }
-    lowerNative source = nativeStorageUnits `bindResult` \native ->
-        Compile.lowerSource False source `bindResult` lowerLists (Ok [(modu, p) | (modu, _, p) <- native])
+    lowerNative source = erasedHelpers `bindResult` \units ->
+        Compile.lowerSource False source `bindResult` lowerLists (Ok units)
+    erasedHelpers = validatedStorage `bindResult` \(units, _) ->
+        flatResultMap (\(modu, p) -> mapResult ((,) modu) (eraseStorageHelper p)) units
     selectedHelpers source present absent = case lowerNative source of
         Error e -> Just e
         Ok p -> testAssertTrue (Map.member present (M.progFunctions p) && Map.notMember absent (M.progFunctions p))
@@ -235,6 +260,18 @@ testNativeStorageModules = TestList "testNativeStorageModules"
     runtimeLayout = case Compile.lowerSource True "xs = [1]; b = Box::new(1); return size(xs) + Box::unbox(b);" of
         Error e -> Just e
         Ok p -> runtimeStorageLayout (M.completeErasedInstances p)
+    bootstrapOwned entry = case Modules.loadFromEntry (Modules.resolverFromFiles toolPackageFiles) entry of
+        Left e -> Just e
+        Right (Modules.PackageResult pkg) -> case Package.compileModules pkg `bindResult` Package.lowerCompiledPackage pkg of
+            Error e -> Just e
+            Ok raw -> case erasedHelpers `bindResult` \units -> lowerLists (Ok units) (expandRefWrites raw) of
+                Error e -> Just e
+                Ok native ->
+                    let owned = insertOwnership native
+                     in case readProgram (writeProgram owned) of
+                        Error e -> Just e
+                        Ok restored -> testAssertEq restored (forNative owned)
+        Right _ -> Just "bootstrap fixture is not a package"
     badImportedLayout source = case fixtureModule source of
         Error e -> Just e
         Ok (_, p) -> rejectedResult "does not meet its invariant" (validateContainerLibrary p)

@@ -4,6 +4,7 @@ module PackageCompile
     ( CompiledModule (..)
     , CompiledPackage (..)
     , compileModules
+    , lowerCompiledPackage
     , compileModulesValidated
     , assumptionsOfPackage
     ) where
@@ -223,19 +224,22 @@ orphanCheck modu statements = case [message | ImplDef (Just trait) _ typeName _ 
 
 compileModulesValidated :: Mod.LoadedPackage -> Result M.Program String
 compileModulesValidated pkg =
-    compileModules pkg `bindResult` \compiled ->
-        let ifaceMap = Map.fromList [(compiledModuleId modu, compiledInterface modu) | modu <- compiledModules compiled]
-            loadedMap = Map.fromList [(Mod.loadedModuleId modu, modu) | modu <- Mod.packageModules pkg]
-            lowerOne modu = case Map.lookup (compiledModuleId modu) loadedMap of
-                Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
-                Just loaded ->
-                    let depIfaces = [ifaceMap Map.! dep | dep <- Mod.loadedDependencies loaded, Map.member dep ifaceMap]
-                        allIfaces = compiledLibInterfaces modu ++ depIfaces
-                     in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
-            libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
-         in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units ->
-                linkPrograms (libUnits ++ units) `bindResult` \linked ->
-                    stage "Validation failed: " (validateProgram linked) `bindResult` \_ -> Ok linked
+    compileModules pkg `bindResult` lowerCompiledPackage pkg `bindResult` \linked ->
+        stage "Validation failed: " (validateProgram linked) `bindResult` \_ -> Ok linked
+
+-- Callers must validate the linked program before erasure or execution.
+lowerCompiledPackage :: Mod.LoadedPackage -> CompiledPackage -> Result M.Program String
+lowerCompiledPackage pkg compiled =
+    let ifaceMap = Map.fromList [(compiledModuleId modu, compiledInterface modu) | modu <- compiledModules compiled]
+        loadedMap = Map.fromList [(Mod.loadedModuleId modu, modu) | modu <- Mod.packageModules pkg]
+        lowerOne modu = case Map.lookup (compiledModuleId modu) loadedMap of
+            Nothing -> Error ("internal: compiled module " ++ Mod.renderModuleId (compiledModuleId modu) ++ " is not in the loaded package")
+            Just loaded ->
+                let depIfaces = [ifaceMap Map.! dep | dep <- Mod.loadedDependencies loaded, Map.member dep ifaceMap]
+                    allIfaces = compiledLibInterfaces modu ++ depIfaces
+                 in mapResult (\program -> (compiledModuleId modu, program)) (stage "Lowering failed: " (lowerModuleWith (mergeInterfacesImportEnv allIfaces) allIfaces (compiledElaborated modu)))
+        libUnits = nubBy (\(a, _) (b, _) -> a == b) (concatMap compiledLibUnits (compiledModules compiled))
+     in flatResultMap lowerOne (compiledModules compiled) `bindResult` \units -> linkPrograms (libUnits ++ units)
 
 assumptionsOfPackage :: CompiledPackage -> [String]
 assumptionsOfPackage compiled = concatMap perModule (compiledModules compiled)

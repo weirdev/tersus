@@ -179,7 +179,11 @@ units instead carry the declarations seeded from the authoritative type
 interface. Exact declarations merge; a helper function from a different
 origin does not. `MirLists` transforms only the validated user program and
 links the needed erased helper units afterwards, leaving helper bodies in
-physical form. The stdlib builtin-contract extraction and
+physical form. Native declaration completion removes permission fields from
+both concrete instances and generic templates before linking. This also
+normalizes the imported declaration seeds carried by permission-free bootstrap
+tools, whose runtime erasure is deliberately skipped; it does not change the
+checked helper bodies or their pre-erasure layout proofs. The stdlib builtin-contract extraction and
 `lib/validation.tersus` are not part of this migration.
 
 ## Executing it

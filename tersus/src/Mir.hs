@@ -276,7 +276,10 @@ completeErasedInstances = completeInstancesWith True
 
 completeInstancesWith :: Bool -> Program -> Program
 completeInstancesWith erased program
-    | otherwise = program{progTypes = go (Map.map eraseDecl (progTypes program)) argMap (Set.toList mentioned)}
+    | otherwise = program
+        { progTypes = go (Map.map eraseDecl (progTypes program)) argMap (Set.toList mentioned)
+        , progGenerics = Map.map (\(params, fields) -> (params, eraseFields fields)) (progGenerics program)
+        }
   where
     eraseFields fields = [(f, t) | (f, t) <- fields, not (erased && isPermission t)]
     eraseDecl (StructDecl fields) = StructDecl (eraseFields fields)

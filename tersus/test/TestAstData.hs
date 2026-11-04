@@ -1,6 +1,7 @@
 module TestAstData (testAstData, testAstReader) where
 
 import Control.Monad (forM)
+import qualified Data.Map.Strict as Map
 import Data.List (isInfixOf, isPrefixOf, isSuffixOf, sort)
 import System.Directory (listDirectory)
 import System.Exit (ExitCode (..))
@@ -9,6 +10,7 @@ import qualified Modules as Mod
 import qualified PackageCompile as Package
 import Parse (fileBody)
 import PreludeSource (toolPackageFiles)
+import qualified LibParsed as Lib
 import qualified AstData as A
 import BuiltinRegistry (builtinRegistry, entryInstances, builtinSymbol)
 import Cli (World (..), noWorld, runProgramIn)
@@ -43,8 +45,17 @@ corpus = do
             Left err -> [(entry, Error err)]
             Right (Mod.PackageResult pkg) -> [(Mod.loadedFilePath file, Ok (fileBody (Mod.loadedParsed file))) | modu <- Mod.packageModules pkg, file <- Mod.loadedModuleFiles modu]
             Right _ -> [(entry, Error "AST corpus tool is not a package")]
-    pure ([(path, parsed source) | (path, source) <- fromFiles ++ generated] ++ concatMap packageTrees packages)
+    pure ([(path, parseCorpusFile path source) | (path, source) <- fromFiles ++ generated] ++ concatMap packageTrees packages)
   where
+    parseCorpusFile path source = case [name | name <- Lib.nativeStorageModules, path == "lib/" ++ name ++ ".tersus"] of
+        name : _ -> case Lib.nativeLibParsed of
+            Left e -> Error e
+            Right parsed ->
+                let closure [] done = done
+                    closure (n : rest) done | n `elem` done = closure rest done
+                    closure (n : rest) done = closure (Map.findWithDefault [] n (Lib.lpDependencies parsed) ++ rest) (n : done)
+                 in Ok (Lib.statementsForLibModules parsed (closure [name] []))
+        [] -> parsed source
     files dir = map ((dir ++ "/") ++) . filter (isSuffixOf ".tersus") . sort <$> listDirectory dir
     generated =
         [ ("generated forward call", "fn a(n: Int) -> Int { return b(n); }; fn b(n: Int) -> Int { return n; }; return a(5);")
