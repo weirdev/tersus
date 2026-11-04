@@ -245,6 +245,10 @@ impl Copy for OrderFact { };
 // comparisons suffices in the two-state graph, so two complete scans per round
 // reach a fixed point without trusting a program-supplied termination bound.
 fn hasOrder(equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
+    return hasOrderIn(leastClasses(equalities), orders, left, right, strict);
+};
+
+fn hasOrderIn(classes: &HashMap<Int, Int>, orders: &List<OrderFact>, left: Int, right: Int, strict: Bool) -> Bool {
     // Each term is named by the least member of its class under the
     // equalities (what hasEquality relates), once; the reached terms are
     // sets of those names, and the walk stops when a pass adds nothing.
@@ -252,11 +256,11 @@ fn hasOrder(equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int
     greater = [];
     for edgePosition in 0..size(orders) {
         edge = get(orders, edgePosition);
-        smaller = push(smaller, canonicalTerm(equalities, edge.smaller));
-        greater = push(greater, canonicalTerm(equalities, edge.greater));
+        smaller = push(smaller, canonicalIn(classes, edge.smaller));
+        greater = push(greater, canonicalIn(classes, edge.greater));
     };
     weak = HashSet::new();
-    weak = weak.insert(canonicalTerm(equalities, left));
+    weak = weak.insert(canonicalIn(classes, left));
     strong = HashSet::new();
     changed = true;
     // (each pass that changes anything adds a name to one of the two sets)
@@ -279,7 +283,7 @@ fn hasOrder(equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int
             };
         };
     };
-    target = canonicalTerm(equalities, right);
+    target = canonicalIn(classes, right);
     if strong.contains(target) { return true; };
     if strict { return false; };
     return weak.contains(target);
@@ -408,7 +412,7 @@ fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, 
                 h = termSignature(uf, a);
                 if signatures.contains(h) {
                     j = signatures.lookup(h, 0);
-                    b = get(terms, j);
+                    b = applicationAt(terms, j);
                     if sameSignature(uf, a, b) {
                         if ufFind(uf, a.id) != ufFind(uf, b.id) { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, b.id); changed = true; };
                     } else {
@@ -429,7 +433,7 @@ fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, 
                     if constructorSet.contains(a.function) {
                         r = ufFind(uf, a.id);
                         if byClass.contains(r) {
-                            b = get(terms, byClass.lookup(r, 0));
+                            b = applicationAt(terms, byClass.lookup(r, 0));
                             if ufFind(uf, a.function) = ufFind(uf, b.function) && size(a.arguments) = size(b.arguments) {
                                 for k in 0..size(a.arguments) {
                                     x = get(a.arguments, k);
@@ -445,7 +449,7 @@ fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, 
                     if size(fieldApp.arguments) = 1 {
                         r = ufFind(uf, get(fieldApp.arguments, 0));
                         if byClass.contains(r) {
-                            a = get(terms, byClass.lookup(r, 0));
+                            a = applicationAt(terms, byClass.lookup(r, 0));
                             for selectionPosition in 0..size(constructorFields) {
                                 selection = get(constructorFields, selectionPosition);
                                 if selection.constructor = a.function && selection.field = fieldApp.function {
@@ -497,6 +501,24 @@ fn applicationFactsWithConstructors(facts: &List<EqualityFact>, terms: &List<App
 
 fn applicationFacts(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>) -> List<EqualityFact> {
     return applicationFactsWithConstructors(facts, terms, [], []);
+};
+
+// The element at an index that data gives (a node of a template, an entry
+// a map holds), or a value of none where the index is not in the list: the
+// data is made so that it always is, which nothing here proves
+fn intAt(xs: &List<Int>, i: Int, fallback: Int) -> Int {
+    if i >= 0 && i < size(xs) { return get(xs, i); };
+    return fallback;
+};
+
+fn boolAt(xs: &List<Bool>, i: Int, fallback: Bool) -> Bool {
+    if i >= 0 && i < size(xs) { return get(xs, i); };
+    return fallback;
+};
+
+fn applicationAt(apps: &List<ApplicationTerm>, i: Int) -> ApplicationTerm {
+    if i >= 0 && i < size(apps) { return clone(get(apps, i)); };
+    return ApplicationTerm { id: 0, function: 0 - 999999, arguments: [] };
 };
 
 fn hasApplicationEquality(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, left: Int, right: Int) -> Bool {
@@ -796,15 +818,16 @@ fn hasApplicationDifference(equalities: &List<EqualityFact>, terms: &List<Applic
 // use an order path rather than requiring the bound to be a single input edge.
 fn refinedOrders(equalities: &List<EqualityFact>, orders: &List<OrderFact>, different: &List<DisequalityFact>) -> List<OrderFact> {
     known = clone(orders);
+    classes = leastClasses(equalities);
     for factPosition in 0..size(different) {
         fact = get(different, factPosition);
-        if hasOrder(equalities, known, fact.left, fact.right, false) {
-            if hasOrder(equalities, known, fact.left, fact.right, true) = false {
+        if hasOrderIn(classes, known, fact.left, fact.right, false) {
+            if hasOrderIn(classes, known, fact.left, fact.right, true) = false {
                 known = push(known, OrderFact { smaller: fact.left, greater: fact.right, strict: true });
             };
         };
-        if hasOrder(equalities, known, fact.right, fact.left, false) {
-            if hasOrder(equalities, known, fact.right, fact.left, true) = false {
+        if hasOrderIn(classes, known, fact.right, fact.left, false) {
+            if hasOrderIn(classes, known, fact.right, fact.left, true) = false {
                 known = push(known, OrderFact { smaller: fact.right, greater: fact.left, strict: true });
             };
         };
@@ -1317,40 +1340,42 @@ fn equivalentTermIn(equalities: &List<EqualityFact>, terms: &List<Int>, term: In
 };
 
 fn contextWithin(context: &ValidatorContext, inner: Int, outer: Int) -> Bool {
+    return contextWithinUnder(context, closeContext(context), inner, outer);
+};
+
+// (the classes reached from outer by reading a field or an element, as a set
+// that grows until a pass adds nothing)
+fn contextWithinUnder(context: &ValidatorContext, equalities: &List<EqualityFact>, inner: Int, outer: Int) -> Bool {
     fieldSet = HashSet::new();
     for function in context.fieldFunctions { fieldSet = fieldSet.insert(function); };
-    equalities = closeContext(context);
-    if hasEquality(equalities, inner, outer) { return false; };
-    reached = push([], outer);
+    classes = unionOf(equalities);
+    innerClass = ufFind(classes, inner);
+    outerClass = ufFind(classes, outer);
+    if innerClass = outerClass { return false; };
+    reached = HashSet::new();
+    reached = reached.insert(outerClass);
+    changed = true;
     // Each useful round adds a distinct field-result class; the graph is finite.
     // An element of a list that is a part is a part too (a call's argument has
     // the parameter's type, so it is a smaller value of it).
     for round in 0..size(context.applications) {
-        for appPosition in 0..size(context.applications) {
-            app = get(context.applications, appPosition);
-            if app.function = -14 {
-                if size(app.arguments) = 2 {
-                    parent = get(app.arguments, 0);
-                    if equivalentTermIn(equalities, reached, parent) {
-                        if equivalentTermIn(equalities, reached, app.id) = false {
-                            reached = push(reached, app.id);
-                        };
-                    };
-                };
-            };
-            if fieldSet.contains(app.function) {
-                if size(app.arguments) = 1 {
-                    parent = get(app.arguments, 0);
-                    if equivalentTermIn(equalities, reached, parent) {
-                        if equivalentTermIn(equalities, reached, app.id) = false {
-                            reached = push(reached, app.id);
-                        };
+        if changed {
+            changed = false;
+            for appPosition in 0..size(context.applications) {
+                app = get(context.applications, appPosition);
+                step = false;
+                if app.function = -14 && size(app.arguments) = 2 { step = true; };
+                if size(app.arguments) = 1 && fieldSet.contains(app.function) { step = true; };
+                if step {
+                    if reached.contains(ufFind(classes, get(app.arguments, 0))) {
+                        c = ufFind(classes, app.id);
+                        if reached.contains(c) = false { reached = reached.insert(c); changed = true; };
                     };
                 };
             };
         };
     };
-    return equivalentTermIn(equalities, reached, inner);
+    return reached.contains(innerClass);
 };
 
 enum VariantObjectLookup { Missing, Found { object: Int } };
@@ -1503,6 +1528,7 @@ fn linGcd(a: Int, b: Int) -> Int {
 };
 
 fn linFloorDiv(a: Int, g: Int) -> Int {
+    if g = 0 { return a; };
     // (/ is floor division, as the division facts say it is)
     return a / g;
 };
@@ -1559,36 +1585,36 @@ fn linFact2(t1: Int, c1: Int, t2: Int, c2: Int, bound: Int) -> LinFact {
 // equal terms (a projection of a pair and the pair's part, say), is one
 // variable, so applications and facts are read through representatives.
 fn canonicalTerm(known: &List<EqualityFact>, term: Int) -> Int {
-    rep = term;
-    reached = push([], term);
-    changed = true;
-    // (each round that changes anything reaches a term it had not, and there
-    // are at most two terms to a fact)
-    for round in 0..2 * size(known) + 1 {
-        if changed {
-        changed = false;
-        for fPosition in 0..size(known) {
-            f = get(known, fPosition);
-            if containsValue(reached, f.left) {
-                if containsValue(reached, f.right) = false {
-                    reached = push(reached, f.right);
-                    if f.right < rep { rep = f.right; };
-                    changed = true;
-                };
-            };
-            if containsValue(reached, f.right) {
-                if containsValue(reached, f.left) = false {
-                    reached = push(reached, f.left);
-                    if f.left < rep { rep = f.left; };
-                    changed = true;
-                };
-            };
-        };
-        };
-    };
-    return rep;
+    return canonicalIn(leastClasses(known), term);
 };
 
+// Each term of the facts, mapped to the least member of its class (a term
+// of no fact is its own class)
+fn leastClasses(known: &List<EqualityFact>) -> HashMap<Int, Int> {
+    uf = unionOf(known);
+    least = emptyIntMap();
+    for fPosition in 0..size(known) {
+        f = get(known, fPosition);
+        r = ufFind(uf, f.left);
+        m = least.lookup(r, r);
+        if f.left < m { m = f.left; };
+        if f.right < m { m = f.right; };
+        least = least.insert(r, m);
+    };
+    classes = emptyIntMap();
+    for fPosition in 0..size(known) {
+        f = get(known, fPosition);
+        r = ufFind(uf, f.left);
+        m = least.lookup(r, r);
+        classes = classes.insert(f.left, m);
+        classes = classes.insert(f.right, m);
+    };
+    return classes;
+};
+
+fn canonicalIn(classes: &HashMap<Int, Int>, term: Int) -> Int {
+    return classes.lookup(term, term);
+};
 // Every term the arithmetic reads is replaced by the representative of
 // its equality class: the same value reached through equal terms (a
 // projection of a pair and the pair's part, say) must be one variable,
@@ -1598,25 +1624,26 @@ fn canonicalFacts(context: &ValidatorContext) -> List<EqualityFact> {
 };
 
 fn canonicalContext(context: &ValidatorContext, known: &List<EqualityFact>) -> ValidatorContext {
+    classes = leastClasses(known);
     equalities = [];
-    for f in context.equalities { equalities = push(equalities, EqualityFact { left: canonicalTerm(known, f.left), right: canonicalTerm(known, f.right) }); };
+    for f in context.equalities { equalities = push(equalities, EqualityFact { left: canonicalIn(classes, f.left), right: canonicalIn(classes, f.right) }); };
     applications = [];
     for appPosition in 0..size(context.applications) {
         app = get(context.applications, appPosition);
         args = [];
-        for arg in app.arguments { args = push(args, canonicalTerm(known, arg)); };
-        applications = push(applications, ApplicationTerm { id: canonicalTerm(known, app.id), function: app.function, arguments: args });
+        for arg in app.arguments { args = push(args, canonicalIn(classes, arg)); };
+        applications = push(applications, ApplicationTerm { id: canonicalIn(classes, app.id), function: app.function, arguments: args });
     };
     constants = [];
-    for c in context.constants { constants = push(constants, ConstantTerm { id: canonicalTerm(known, c.id), kind: c.kind, value: c.value }); };
+    for c in context.constants { constants = push(constants, ConstantTerm { id: canonicalIn(classes, c.id), kind: c.kind, value: c.value }); };
     orders = [];
-    for o in context.orders { orders = push(orders, OrderFact { smaller: canonicalTerm(known, o.smaller), greater: canonicalTerm(known, o.greater), strict: o.strict }); };
+    for o in context.orders { orders = push(orders, OrderFact { smaller: canonicalIn(classes, o.smaller), greater: canonicalIn(classes, o.greater), strict: o.strict }); };
     different = [];
-    for d in context.different { different = push(different, DisequalityFact { left: canonicalTerm(known, d.left), right: canonicalTerm(known, d.right) }); };
+    for d in context.different { different = push(different, DisequalityFact { left: canonicalIn(classes, d.left), right: canonicalIn(classes, d.right) }); };
     variants = [];
-    for v in context.variants { variants = push(variants, VariantFact { object: canonicalTerm(known, v.object), family: v.family, constructor: v.constructor, matches: v.matches }); };
+    for v in context.variants { variants = push(variants, VariantFact { object: canonicalIn(classes, v.object), family: v.family, constructor: v.constructor, matches: v.matches }); };
     differences = [];
-    for d in context.differences { differences = push(differences, DifferenceFact { left: canonicalTerm(known, d.left), right: canonicalTerm(known, d.right), bound: d.bound }); };
+    for d in context.differences { differences = push(differences, DifferenceFact { left: canonicalIn(classes, d.left), right: canonicalIn(classes, d.right), bound: d.bound }); };
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: clone(context.fieldFunctions), constructorFunctions: clone(context.constructorFunctions), constructorFields: clone(context.constructorFields), differences: differences };
 };
 
@@ -2247,11 +2274,12 @@ fn entailsGoalDirectly(context: &ValidatorContext, goal: ValidatorGoal) -> Bool 
         a = integerValue(context, g.left);
         b = integerValue(context, g.right);
         if a is IntegerLookup::Found {
+            av = (a as IntegerLookup::Found).value;
             if b is IntegerLookup::Found {
-                if (a as IntegerLookup::Found).value <= (b as IntegerLookup::Found).value { return true; };
+                if av <= (b as IntegerLookup::Found).value { return true; };
             };
             // A size is never negative, whether or not the program said so.
-            if (a as IntegerLookup::Found).value = 0 {
+            if av = 0 {
                 if isSizeTerm(context.applications, g.right) { return true; };
             };
         };
@@ -2289,34 +2317,58 @@ fn analyzeContext(context: &ValidatorContext) -> ContextAnalysis {
 // Two values differ when some part of them differs: if f(a) and f(b) are
 // known different, a and b are (congruence read backwards).
 fn entailsPartDisequality(context: &ValidatorContext, equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int, right: Int) -> Bool {
-    return entailsPartDisequalityWithin(context, equalities, orders, left, right, 2);
+    return entailsPartDisequalityWithin(context, equalities, unionOf(equalities), orders, left, right, 2);
 };
 
-// (a part of a part: two values differ when parts of their parts do, a
-// list of the field of one enum value whose size differs from the other's)
-fn entailsPartDisequalityWithin(context: &ValidatorContext, equalities: &List<EqualityFact>, orders: &List<OrderFact>, left: Int, right: Int, depth: Int) -> Bool {
+// The classes of equalities, as union and find (ufFind names a class by its root)
+fn unionOf(equalities: &List<EqualityFact>) -> HashMap<Int, Int> {
+    uf = emptyIntMap();
+    weight = emptyIntMap();
+    for fPosition in 0..size(equalities) {
+        f = get(equalities, fPosition);
+        UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, f.left, f.right);
+    };
+    return uf;
+};
+
+// (two applications of one function differ where the arguments they differ
+// in differ: only applications with an argument in the class of left or of
+// right can be such a pair, so those are found first)
+fn entailsPartDisequalityWithin(context: &ValidatorContext, equalities: &List<EqualityFact>, classes: &HashMap<Int, Int>, orders: &List<OrderFact>, left: Int, right: Int, depth: Int) -> Bool [{ affirm depth >= 0; }] [{ }] shrinks depth {
+    rl = ufFind(classes, left);
+    rr = ufFind(classes, right);
+    candidates = [];
     for aPosition in 0..size(context.applications) {
         a = get(context.applications, aPosition);
-        for bPosition in 0..size(context.applications) {
-            b = get(context.applications, bPosition);
+        near = false;
+        for xPosition in 0..size(a.arguments) {
+            r = ufFind(classes, get(a.arguments, xPosition));
+            if r = rl || r = rr { near = true; };
+        };
+        if near { candidates = push(candidates, aPosition); };
+    };
+    for ac in 0..size(candidates) {
+        a = applicationAt(context.applications, get(candidates, ac));
+        for bc in 0..size(candidates) {
+            b = applicationAt(context.applications, get(candidates, bc));
             if a.function = b.function {
                 if size(a.arguments) = size(b.arguments) {
                     uses = false;
                     matches = true;
                     for i in 0..size(a.arguments) {
-                        x = get(a.arguments, i);
-                        y = get(b.arguments, i);
-                        if hasEquality(equalities, x, left) {
-                            if hasEquality(equalities, y, right) { uses = true; } else if hasEquality(equalities, x, y) = false { matches = false; };
-                        } else if hasEquality(equalities, x, right) {
-                            if hasEquality(equalities, y, left) { uses = true; } else if hasEquality(equalities, x, y) = false { matches = false; };
-                        } else if hasEquality(equalities, x, y) = false { matches = false; };
+                        x = ufFind(classes, get(a.arguments, i));
+                        y = ufFind(classes, get(b.arguments, i));
+                        if x = rl {
+                            if y = rr { uses = true; } else if x != y { matches = false; };
+                        } else if x = rr {
+                            if y = rl { uses = true; } else if x != y { matches = false; };
+                        } else if x != y { matches = false; };
                     };
                     if uses {
                         if matches {
                             if closedDisequality(equalities, orders, context.different, a.id, b.id) { return true; };
                             if depth > 1 && a.id != left && a.id != right {
-                                if entailsPartDisequalityWithin(context, equalities, orders, a.id, b.id, depth - 1) { return true; };
+                                if entailsPartDisequalityWithin(context, equalities, classes, orders, a.id, b.id, depth - 1) { return true; };
                             };
                             av = integerValue(context, a.id);
                             bv = integerValue(context, b.id);
@@ -2489,6 +2541,10 @@ fn sizeTermOf(context: &ValidatorContext, equalities: &List<EqualityFact>, seq: 
 // known equal separately), and the equality of the lists themselves when
 // the range is the whole of two lists of one size.
 fn forallEqualPair(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact) -> Bool {
+    return forallEqualPairWithin(context, analysis, left, right, lg, rg, 2);
+};
+
+fn forallEqualPairWithin(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int, lg: GetFact, rg: GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     equalities = analysis.equalities;
     differences = analysis.differences;
     for appPosition in 0..size(context.applications) {
@@ -2593,7 +2649,7 @@ fn forallEqualPair(context: &ValidatorContext, analysis: &ContextAnalysis, left:
                                         };
                                         strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
                                         strictAnalysis = analyzeContext(strictContext);
-                                        if alreadyStrict = false && forallEqualPair(strictContext, strictAnalysis, left, right, lg, rg) {
+                                        if alreadyStrict = false && fuel > 0 && forallEqualPairWithin(strictContext, strictAnalysis, left, right, lg, rg, fuel - 1) {
                                             eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
                                             eqAnalysis = analyzeContext(eqContext);
                                             if eqAnalysis.contradictory { return true; };
@@ -2944,12 +3000,12 @@ fn finiteGetEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: 
 // application of function -32 to (a, lo, hi, base, c).
 fn forallConstantSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
     for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
-        if forallConstantSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
+        if forallConstantSideFor(context, analysis, getTerm, otherTerm, gf, 2) { return true; };
     };
     return false;
 };
 
-fn forallConstantSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact) -> Bool {
+fn forallConstantSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     equalities = analysis.equalities;
     differences = analysis.differences;
     for appPosition in 0..size(context.applications) {
@@ -2992,7 +3048,13 @@ fn forallConstantSideFor(context: &ValidatorContext, analysis: &ContextAnalysis,
                                 if atMost {
                                     strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
                                     strictAnalysis = analyzeContext(strictContext);
-                                    if forallConstantSide(strictContext, strictAnalysis, getTerm, otherTerm) {
+                                    deeper = false;
+                                    if fuel > 0 {
+                                        for gfDeeper in getFactsTranslated(strictContext, strictAnalysis.equalities, getTerm) {
+                                            if deeper = false { deeper = forallConstantSideFor(strictContext, strictAnalysis, getTerm, otherTerm, gfDeeper, fuel - 1); };
+                                        };
+                                    };
+                                    if deeper {
                                         eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
                                         eqAnalysis = analyzeContext(eqContext);
                                         if eqAnalysis.contradictory { return true; };
@@ -3014,12 +3076,12 @@ fn forallConstantSideFor(context: &ValidatorContext, analysis: &ContextAnalysis,
 // (a, b, lo, hi, base, d, mode).
 fn forallShiftSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int) -> Bool {
     for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
-        if forallShiftSideFor(context, analysis, getTerm, exprTerm, gf) { return true; };
+        if forallShiftSideFor(context, analysis, getTerm, exprTerm, gf, 2) { return true; };
     };
     return false;
 };
 
-fn forallShiftSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact) -> Bool {
+fn forallShiftSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, exprTerm: Int, gf: &GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     equalities = analysis.equalities;
     differences = analysis.differences;
     for appPosition in 0..size(context.applications) {
@@ -3129,7 +3191,13 @@ fn forallShiftSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, ge
                                         if atMost {
                                             strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
                                             strictAnalysis = analyzeContext(strictContext);
-                                            if forallShiftSide(strictContext, strictAnalysis, getTerm, exprTerm) {
+                                            deeper = false;
+                                            if fuel > 0 {
+                                                for gfDeeper in getFactsTranslated(strictContext, strictAnalysis.equalities, getTerm) {
+                                                    if deeper = false { deeper = forallShiftSideFor(strictContext, strictAnalysis, getTerm, exprTerm, gfDeeper, fuel - 1); };
+                                                };
+                                            };
+                                            if deeper {
                                                 eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
                                                 eqAnalysis = analyzeContext(eqContext);
                                                 if eqAnalysis.contradictory { return true; };
@@ -3273,12 +3341,12 @@ fn entailsUnderEquality(context: &ValidatorContext, x: Int, y: Int, u: Int, v: I
 // application of function -31 to (a, lo, hi, base, c).
 fn forallDifferentSide(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int) -> Bool {
     for gf in getFactsTranslated(context, analysis.equalities, getTerm) {
-        if forallDifferentSideFor(context, analysis, getTerm, otherTerm, gf) { return true; };
+        if forallDifferentSideFor(context, analysis, getTerm, otherTerm, gf, 2) { return true; };
     };
     return false;
 };
 
-fn forallDifferentSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact) -> Bool {
+fn forallDifferentSideFor(context: &ValidatorContext, analysis: &ContextAnalysis, getTerm: Int, otherTerm: Int, gf: &GetFact, fuel: Int) -> Bool [{ affirm fuel >= 0; }] [{ }] shrinks fuel {
     equalities = analysis.equalities;
     differences = analysis.differences;
     for appPosition in 0..size(context.applications) {
@@ -3321,7 +3389,13 @@ fn forallDifferentSideFor(context: &ValidatorContext, analysis: &ContextAnalysis
                                 if atMostD {
                                     strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
                                     strictAnalysis = analyzeContext(strictContext);
-                                    if forallDifferentSide(strictContext, strictAnalysis, getTerm, otherTerm) {
+                                    deeper = false;
+                                    if fuel > 0 {
+                                        for gfDeeper in getFactsTranslated(strictContext, strictAnalysis.equalities, getTerm) {
+                                            if deeper = false { deeper = forallDifferentSideFor(strictContext, strictAnalysis, getTerm, otherTerm, gfDeeper, fuel - 1); };
+                                        };
+                                    };
+                                    if deeper {
                                         eqContext = ValidatorContext { equalities: push(clone(context.equalities), EqualityFact { left: j, right: hi }), ..clone(context) };
                                         eqAnalysis = analyzeContext(eqContext);
                                         if eqAnalysis.contradictory { return true; };
@@ -3348,13 +3422,26 @@ fn differentByParts(context: &ValidatorContext, analysis: &ContextAnalysis, left
     if entailsConstructorDisequality(equalities, context.applications, context.constructorFunctions, left, right) { return true; };
     if entailsVariantDisequality(equalities, context.variants, left, right) { return true; };
     if entailsConstructorArgumentDisequality(context, equalities, left, right) { return true; };
-    if contextWithin(context, left, right) { return true; };
-    if contextWithin(context, right, left) { return true; };
+    if contextWithinUnder(context, equalities, left, right) { return true; };
+    if contextWithinUnder(context, equalities, right, left) { return true; };
     if entailsPartDisequality(context, equalities, analysis.orders, left, right) { return true; };
-    return contextDifferent(equalities, context.applications, analysis.orders, context.different, analysis.differences, left, right);
+    // (the analysis's equalities are closed and do not contradict its facts)
+    if hasDifference(equalities, analysis.differences, left, right, -1) { return true; };
+    if hasDifference(equalities, analysis.differences, right, left, -1) { return true; };
+    return closedDisequality(equalities, analysis.orders, context.different, left, right);
+};
+
+fn booleanConstantTerm(context: &ValidatorContext, term: Int) -> Bool {
+    for cPosition in 0..size(context.constants) {
+        if get(context.constants, cPosition).id = term && get(context.constants, cPosition).kind = 1 { return true; };
+    };
+    return false;
 };
 
 fn relationAppsEqual(context: &ValidatorContext, analysis: &ContextAnalysis, left: Int, right: Int) -> Bool {
+    // (a literal is the class of every comparison known to have its value,
+    // and the classes alone decide a comparison against it)
+    if booleanConstantTerm(context, left) || booleanConstantTerm(context, right) { return false; };
     equalities = analysis.equalities;
     differences = analysis.differences;
     a = relationFactOf(context, equalities, left);
@@ -3466,16 +3553,18 @@ fn forallInstanceEqualities(context: &ValidatorContext, analysis: &ContextAnalys
                     onB = [];
                     for gPosition in 0..size(gets) {
                         g = get(gets, gPosition);
-                        if hasEquality(analysis.equalities, get(g.arguments, 0), a) { onA = push(onA, clone(g)); };
-                        if hasEquality(analysis.equalities, get(g.arguments, 0), b) { onB = push(onB, clone(g)); };
+                        if size(g.arguments) = 2 {
+                            if hasEquality(analysis.equalities, get(g.arguments, 0), a) { onA = push(onA, clone(g)); };
+                            if hasEquality(analysis.equalities, get(g.arguments, 0), b) { onB = push(onB, clone(g)); };
+                        };
                     };
                     for g1Position in 0..size(onA) {
                         g1 = get(onA, g1Position);
-                        k = get(g1.arguments, 1);
+                        k = intAt(g1.arguments, 1, 0);
                         for g2Position in 0..size(onB) {
                             g2 = get(onB, g2Position);
                             if size(found) < 8 {
-                                if hasEquality(analysis.equalities, get(g2.arguments, 1), k) {
+                                if size(g2.arguments) = 2 && hasEquality(analysis.equalities, get(g2.arguments, 1), k) {
                                     if hasEquality(analysis.equalities, g1.id, g2.id) = false {
                                         if linearEntails(context, lo, k, 0) {
                                             if linearEntails(context, k, hi, -1) {
@@ -3978,7 +4067,7 @@ fn goalSides(goal: &ValidatorGoal) -> List<Int> {
 // times along a path.
 struct SplitResult { holds: Bool, used: Int };
 
-fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int) -> SplitResult {
+fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, budget: Int) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks depth {
     if depth <= 0 || budget <= 0 { return SplitResult { holds: false, used: 0 }; };
     used = 0;
     context = clone(state.context);
@@ -3999,7 +4088,7 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
     // (the newest reads first: a read a split made is the one to split next)
     count = size(context.applications);
     for back in 0..count {
-        app = get(context.applications, count - 1 - back);
+        app = applicationAt(context.applications, count - 1 - back);
         if app.function = -14 && tried < 3 && used < budget && size(state.templates) = 0 {
             if size(app.arguments) = 2 {
                 relevant = false;
@@ -4086,7 +4175,7 @@ fn splitReadOverWrite(state: &ExecutionState, goal: ValidatorGoal, depth: Int, b
     // the fact's bound: the goal holds below the bound and at or above it)
     rangeTried = 0;
     for back in 0..count {
-        app = get(context.applications, count - 1 - back);
+        app = applicationAt(context.applications, count - 1 - back);
         if app.function = -14 && size(app.arguments) = 2 && rangeTried < 2 && used < budget {
             relevant = false;
             for t in near { if hasEquality(equalities, app.id, t) { relevant = true; }; };
@@ -4163,13 +4252,25 @@ fn leastTermInUse(state: &ExecutionState) -> Int {
         if fact.left < least { least = fact.left; };
         if fact.right < least { least = fact.right; };
     };
-    for fact in state.context.variants { if fact.object < least { least = fact.object; }; };
-    for constant in state.context.constants { if constant.id < least { least = constant.id; }; };
+    // (an application is read where it is: it holds a list)
+    for vPosition in 0..size(state.context.variants) {
+        object = get(state.context.variants, vPosition).object;
+        if object < least { least = object; };
+    };
+    for cPosition in 0..size(state.context.constants) {
+        id = get(state.context.constants, cPosition).id;
+        if id < least { least = id; };
+    };
     for appPosition in 0..size(state.context.applications) {
-        app = get(state.context.applications, appPosition);
-        if app.id < least { least = app.id; };
-        if app.function < least { least = app.function; };
-        for a in app.arguments { if a < least { least = a; }; };
+        id = get(state.context.applications, appPosition).id;
+        if id < least { least = id; };
+        function = get(state.context.applications, appPosition).function;
+        if function < least { least = function; };
+        count = size(get(state.context.applications, appPosition).arguments);
+        for k in 0..count {
+            a = intAt(get(state.context.applications, appPosition).arguments, k, 0);
+            if a < least { least = a; };
+        };
     };
     return least;
 };
@@ -4558,8 +4659,8 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
         upperTerm = 0;
         for i in 0..size(mergedCandidates) {
             candidate = get(mergedCandidates, i);
-            lc = get(leftCandidates, i);
-            rc = get(rightCandidates, i);
+            lc = intAt(leftCandidates, i, 0);
+            rc = intAt(rightCandidates, i, 0);
             // (a bound both sides keep strictly against a local is kept strictly:
             // r > n after r = n + 1 on one side and r = n + 2 on the other; a
             // constant's own value says as much without the cost)
@@ -4576,7 +4677,7 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
                     if i < firstLocal {
                         // (of the constants below both sides only the greatest is kept:
                         // the others follow from it, and each would be a fact to carry)
-                        v = get(candidateValues, i);
+                        v = intAt(candidateValues, i, 0);
                         if haveLower = false || v > lowerValue { haveLower = true; lowerValue = v; lowerTerm = candidate; };
                     } else {
                         if strict { result = addStrictOrderToState(result, candidate, pair.joined); } else { result = addOrderToState(result, candidate, pair.joined); };
@@ -4594,7 +4695,7 @@ fn addJoinedBounds(state: &ExecutionState, pairs: &List<MergePair>, left: &Execu
                         strict = entailsGoal(right.context, ValidatorGoal::Less { left: pair.right, right: rc });
                     };
                     if i < firstLocal {
-                        v = get(candidateValues, i);
+                        v = intAt(candidateValues, i, 0);
                         if haveUpper = false || v < upperValue { haveUpper = true; upperValue = v; upperTerm = candidate; };
                     } else {
                         if strict { result = addStrictOrderToState(result, pair.joined, candidate); } else { result = addOrderToState(result, pair.joined, candidate); };
@@ -5075,7 +5176,7 @@ fn evalHasApplication(context: &ValidatorContext, id: Int) -> Bool {
     return false;
 };
 
-fn evalListSize(context: &ValidatorContext, list: Int, depth: Int) -> IntegerLookup {
+fn evalListSize(context: &ValidatorContext, list: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     if evalHasApplication(context, list) = false { return IntegerLookup::Missing; };
     app = evalApplication(context, list);
     if app.function = -12 { return IntegerLookup::Found { value: size(app.arguments) }; };
@@ -5096,7 +5197,7 @@ fn evalListSize(context: &ValidatorContext, list: Int, depth: Int) -> IntegerLoo
     return IntegerLookup::Missing;
 };
 
-fn evalListGet(context: &ValidatorContext, list: Int, index: Int, depth: Int) -> IntegerLookup {
+fn evalListGet(context: &ValidatorContext, list: Int, index: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth + 1 {
     if evalHasApplication(context, list) = false { return IntegerLookup::Missing; };
     app = evalApplication(context, list);
     if app.function = -12 {
@@ -5128,6 +5229,7 @@ fn evalListGet(context: &ValidatorContext, list: Int, index: Int, depth: Int) ->
         };
     };
     if app.function = -19 {
+        if depth <= 0 { return IntegerLookup::Missing; };
         if size(app.arguments) = 2 {
             length = evalTermValue(context, get(app.arguments, 0), depth - 1);
             if length is IntegerLookup::Found {
@@ -5138,7 +5240,7 @@ fn evalListGet(context: &ValidatorContext, list: Int, index: Int, depth: Int) ->
     return IntegerLookup::Missing;
 };
 
-fn evalTermValue(context: &ValidatorContext, term: Int, depth: Int) -> IntegerLookup {
+fn evalTermValue(context: &ValidatorContext, term: Int, depth: Int) -> IntegerLookup [{ affirm depth >= 0; }] [{ }] shrinks 2 * depth {
     known = integerValue(context, term);
     if known is IntegerLookup::Found { return known; };
     if depth <= 0 { return IntegerLookup::Missing; };
@@ -6130,7 +6232,7 @@ fn templateTerms(state: &ExecutionState, template: &ForallTemplate, index: Int, 
     for i in 0..size(template.nodes) {
         node = get(template.nodes, i);
         term = 0;
-        if get(depends, i) = dependent {
+        if boolAt(depends, i, false) = dependent {
             if node.kind = 0 { term = index; };
             if node.kind = 1 {
                 v = resolveValue(current, node.value);
@@ -6176,10 +6278,11 @@ fn saturationRound(given: &Saturation) -> RoundResult {
     pending = noDoneKeys();
     instances = [];
     nextTerm = leastTermInUse(state) - 1;
-    count = size(state.templates);
+    templates = clone(state.templates);
+    count = size(templates);
     for back in 0..count {
         if back < 16 {
-            template = clone(get(state.templates, count - 1 - back));
+            template = clone(get(templates, count - 1 - back));
             depends = templateDepends(template);
             free = templateTerms(state, template, 0, [], depends, false, nextTerm, births, 0);
             freeTerms = clone(free.terms);
@@ -6193,14 +6296,16 @@ fn saturationRound(given: &Saturation) -> RoundResult {
                     if node.kind = 2 && node.function = -14 && size(node.arguments) = 2 {
                         listNode = get(node.arguments, 0);
                         indexNode = get(node.arguments, 1);
-                        if get(template.nodes, indexNode).kind = 0 && get(depends, listNode) = false {
-                            lt = get(freeTerms, listNode);
+                        indexIsTheIndex = false;
+                        if indexNode >= 0 && indexNode < size(template.nodes) { indexIsTheIndex = get(template.nodes, indexNode).kind = 0; };
+                        if indexIsTheIndex && boolAt(depends, listNode, true) = false {
+                            lt = intAt(freeTerms, listNode, 0);
                             for gPosition in 0..size(gets) {
                                 g = get(gets, gPosition);
-                                onList = get(g.arguments, 0) = lt;
-                                if onList = false { onList = sameClass(start, get(g.arguments, 0), lt); };
+                                onList = intAt(g.arguments, 0, 0) = lt;
+                                if onList = false { onList = sameClass(start, intAt(g.arguments, 0, 0), lt); };
                                 if onList && size(instances) < 240 {
-                                    k = get(g.arguments, 1);
+                                    k = intAt(g.arguments, 1, 0);
                                     if keyDone(done, start, 0, template.id, k) = false && keyDone(pending, start, 0, template.id, k) = false {
                                         pending = push(pending, DoneKey { kind: 0, owner: template.id, index: k });
                                         generation = generationOf(births, k) + 1;
@@ -6214,9 +6319,9 @@ fn saturationRound(given: &Saturation) -> RoundResult {
                                             guards = [];
                                             for grPosition in 0..size(template.guards) {
                                                 gr = get(template.guards, grPosition);
-                                                guards = push(guards, TermRelation { relation: gr.relation, left: get(madeTerms, gr.left), right: get(madeTerms, gr.right) });
+                                                guards = push(guards, TermRelation { relation: gr.relation, left: intAt(madeTerms, gr.left, 0), right: intAt(madeTerms, gr.right, 0) });
                                             };
-                                            instances = push(instances, SatInstance { key: DoneKey { kind: 0, owner: template.id, index: k }, guards: guards, body: TermRelation { relation: template.body.relation, left: get(madeTerms, template.body.left), right: get(madeTerms, template.body.right) } });
+                                            instances = push(instances, SatInstance { key: DoneKey { kind: 0, owner: template.id, index: k }, guards: guards, body: TermRelation { relation: template.body.relation, left: intAt(madeTerms, template.body.left, 0), right: intAt(madeTerms, template.body.right, 0) } });
                                         };
                                     };
                                 };
@@ -6442,7 +6547,7 @@ fn goalReadIndexes(context: &ValidatorContext, closed: &ClosedFacts, left: Int, 
 // relation(left, right) holds of the saturation, or of each case of a guard
 // that blocked an instance (one guard a level, those at the indexes the goal
 // reads first), within a depth and a budget of saturations
-fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, depth: Int, budget: Int, splits: &List<BlockedGuard>) -> SplitResult {
+fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, depth: Int, budget: Int, splits: &List<BlockedGuard>) -> SplitResult [{ affirm depth >= 0; }] [{ }] shrinks depth {
     if budget <= 0 { return SplitResult { holds: false, used: 0 }; };
     saturated = saturate(given);
     used = 1;
@@ -6481,6 +6586,7 @@ fn proveBySaturation(given: &Saturation, relation: Int, left: Int, right: Int, d
         };
         return SplitResult { holds: false, used: used };
     };
+    if chosen >= size(saturated.blocked) { return SplitResult { holds: false, used: used }; };
     guard = clone(get(saturated.blocked, chosen));
     cases = [];
     if guard.relation = 1 {
