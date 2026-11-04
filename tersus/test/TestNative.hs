@@ -993,7 +993,7 @@ buildAndRun input args file name ir expectation = do
                         if not available
                             then pure Nothing
                             else do
-                                built <- buildExecutableFast [] (exe ++ "_plain") ir
+                                built <- buildExecutableFast ["-DTERSUS_SYSTEM_MALLOC"] (exe ++ "_plain") ir
                                 case built of
                                     Error e -> pure (Just e)
                                     Ok () -> do
