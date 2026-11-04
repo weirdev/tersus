@@ -4,7 +4,7 @@ import Compile (lowerSource)
 import Control.Exception (evaluate)
 import qualified Data.Map.Strict as Map
 import qualified Mir as M
-import ValidatorNative (validateCompiled)
+import ValidatorNative (validateCompiled, validateLibrary)
 import System.Timeout (timeout)
 import Syntax
 import TestHarness
@@ -70,6 +70,17 @@ testBox =
                         , "impl Drop for P { fn drop(self: Self) -> Int { return Addr::free(self.addr, self.blk); }; };"
                         , "fn bad(b: Box<P>) -> Int [{ }] [{ affirm cap(b.blk) = 2; }] { return 0; };"
                         ])
+                , TestCase "generic native Box storage contracts validate" genericBoxStorage
+                , TestCase "monomorphic native Box storage contracts can be called" monomorphicBoxStorage
+                , TestCase "native layout validation rejects a source-level Box operation" $
+                    rejectedLayout "return Box::new(1);" "does not model yet"
+                , TestCase "native layout validation rejects implicit Box payload views" $
+                    rejectedLayout "struct P { x: Int }; fn field(b: Box<P>) -> Int { return b.x; };" "does not model yet"
+                , TestCase "native layout validation still checks constructor invariants" $
+                    rejectedLayout (unlines
+                        [ "struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }];"
+                        , "fn bad() -> Box<Int> { (a, b) = Addr::alloc(0); return Box<Int> { addr: a, blk: b }; };"
+                        ]) "Could not prove"
                 ]
             , TestList
                 "a type that holds itself"
@@ -164,6 +175,24 @@ sourceBoxProof source = checkLowered True source (testAssertErrorContains "Could
 
 rejectedBoxProperty :: String -> IO TestResult
 rejectedBoxProperty source = checkLowered True source (testAssertErrorContains "Could not prove:" . validateCompiled)
+
+genericBoxStorage :: IO TestResult
+genericBoxStorage = nativeStorage "fn address<T>(b: &Box<T>) -> Addr<T> [{ }] [{ affirm return = b.addr; }] { return b.addr; };"
+
+monomorphicBoxStorage :: IO TestResult
+monomorphicBoxStorage = nativeStorage (unlines
+    [ "fn address(b: &Box<Int>) -> Addr<Int> [{ }] [{ affirm return = b.addr; }] { return (*b).addr; };"
+    , "fn test(b: &Box<Int>) -> Addr<Int> [{ }] [{ affirm return = b.addr; }] { return address(b); };"
+    ])
+
+-- (validated as the native storage library is: a Box is the struct it is made of)
+nativeStorage :: String -> IO TestResult
+nativeStorage source = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm base(blk) = addr; affirm cap(blk) = 1; affirm count(blk) = 1; affirm whole(blk); }]; " ++ source) $ \program -> case validateLibrary program of
+        Error e -> Just e
+        Ok _ -> Nothing
+
+rejectedLayout :: String -> String -> IO TestResult
+rejectedLayout source expected = checkLowered False source (testAssertErrorContains expected . validateLibrary)
 
 lowerBox :: String -> (M.Program -> TestResult) -> IO TestResult
 lowerBox body = checkLowered False ("struct Box<T> { addr: Addr<T>, ghost blk: Block<T> }; " ++ body)

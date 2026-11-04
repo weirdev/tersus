@@ -10,14 +10,14 @@
 -- own regression test validates it like any other program. The
 -- interpreted validator (SelfHostedMir.validateMirSubset) remains for
 -- that test; nothing else runs it.
-module ValidatorNative (validateCompiled, validateCompiledUncached, validationCacheHits) where
+module ValidatorNative (validateCompiled, validateCompiledUncached, validateLibrary, validationCacheHits) where
 
 import Control.Exception (IOException, bracket, try)
 import Control.Monad (when)
 import Data.IORef (IORef, atomicModifyIORef', newIORef, readIORef)
 import Data.List (nub)
 import qualified Data.Map.Strict as Map
-import System.Directory (createDirectoryIfMissing, doesFileExist, renameFile)
+import System.Directory (copyFile, createDirectoryIfMissing, doesFileExist, renameFile)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import GHC.IO.Handle.Lock (LockMode (..), hLock)
@@ -29,11 +29,11 @@ import Hash (fingerprint)
 import LlvmRuntime (runtimeSource)
 import MirData (writeProgram)
 import MirEval (MirValue (..))
-import MirHousekeeping (cachedEmitter, ownedProgramOf)
+import MirHousekeeping (cachedEmitter, nativeStorage, ownedProgramOf)
 import Native (buildExecutable, cacheDirectory, cachedProgram, runCommandWithInputFull, runWithInput)
 import PreludeSource (boxSource, listsSource, validationDriverSource, validationSource)
 import Seed (emitterHash)
-import SelfHostedMir (encode, obligationNote)
+import SelfHostedMir (encode, encodeLibrary, obligationNote)
 import Syntax (parseImplCheckName)
 import Utils (Result (..))
 
@@ -49,26 +49,37 @@ import Utils (Result (..))
 -- is kept for the rest of the process under that data, and a function
 -- met again (a library's, in the next program) is not checked again.
 validateCompiled :: M.Program -> Result () String
-validateCompiled = validateWith True
+validateCompiled = validateWith False True
 
 -- The same, with every function checked, for the tests of the cache
 validateCompiledUncached :: M.Program -> Result () String
-validateCompiledUncached = validateWith False
+validateCompiledUncached = validateWith False False
 
-validateWith :: Bool -> M.Program -> Result () String
-validateWith caching program = case encode program of
-    Left what -> Error (unmodeledMessage what)
+-- The native storage library (lib/lists.tersus and lib/box.tersus, linked),
+-- with a List and a Box as the structs they are (SelfHostedMir.encodeLibrary)
+validateLibrary :: M.Program -> Result () String
+validateLibrary = validateWith True True
+
+validateWith :: Bool -> Bool -> M.Program -> Result () String
+validateWith physical caching program = unsafePerformIO (validateWithExe validatorExecutable physical caching program)
+
+-- The same, run by the validator the first argument gives
+validateWithExe :: IO (Result FilePath String) -> Bool -> Bool -> M.Program -> IO (Result () String)
+validateWithExe exe physical caching program = case (if physical then encodeLibrary else encode) program of
+    Left what -> pure (Error (unmodeledMessage what))
     Right functions -> case mapM (\(name, f) -> fmap (\text -> (name, text)) (serializeFunction f)) functions of
-        Left e -> Error e
-        Right texts -> case unsafePerformIO (verdicts caching (map snd texts)) of
-            Error e -> Error e
-            Ok results -> case [(index, verdict) | (index, Just verdict@(status, _, _)) <- zip [0 ..] results, status /= 0] of
-                [] -> Ok ()
-                (index, (status, block, step)) : _ -> Error (message (fst (texts !! index)) status block step)
+        Left e -> pure (Error e)
+        Right texts -> do
+            checked <- verdicts exe caching (map snd texts)
+            pure $ case checked of
+                Error e -> Error e
+                Ok results -> case [(index, verdict) | (index, Just verdict@(status, _, _)) <- zip [0 ..] results, status /= 0] of
+                    [] -> Ok ()
+                    (index, (status, block, step)) : _ -> Error (message (fst (texts !! index)) status block step)
   where
     unmodeledMessage what = "the program uses a feature the Tersus validator does not model yet: " ++ what
     message name status block step = case status of
-        1 -> case (obligationNote program name block step, parseImplCheckName name) of
+        1 -> case (obligationNote physical program name block step, parseImplCheckName name) of
             (Just note, Just (trait, owner, function)) -> "impl " ++ trait ++ " for " ++ owner ++ ": " ++ function ++ " does not meet what " ++ trait ++ " declares: could not prove " ++ note
             (Just note, Nothing) -> "Could not prove: " ++ note ++ " (in " ++ name ++ ")"
             _ -> "Could not prove: an obligation could not be proved by the Tersus validator (in " ++ name ++ ", block " ++ show block ++ ", step " ++ show step ++ ")"
@@ -93,8 +104,8 @@ validationCacheHits = readIORef cacheHitCount
 -- the validator checks the functions in order and stops at the first it
 -- refuses, so a function after it has none (Nothing), and is never
 -- reached when the verdicts are read in order
-verdicts :: Bool -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
-verdicts caching texts = do
+verdicts :: IO (Result FilePath String) -> Bool -> [String] -> IO (Result [Maybe (Int, Int, Int)] String)
+verdicts exe caching texts = do
     inMemory <- if caching then readIORef verdictCache else pure Map.empty
     onDisk <- if caching then fmap (Map.fromList . concat) (mapM (\text -> maybe [] (\v -> [(text, v)]) <$> diskVerdict text) [text | text <- nub texts, Map.notMember text inMemory]) else pure Map.empty
     _ <- atomicModifyIORef' verdictCache (\cache -> (Map.union cache onDisk, ()))
@@ -102,7 +113,7 @@ verdicts caching texts = do
         missing = [(index, text) | (index, text) <- zip [0 :: Int ..] texts, Map.notMember text known]
         hits = length texts - length missing
     _ <- atomicModifyIORef' cacheHitCount (\n -> (n + hits, ()))
-    checked <- if null missing then pure (Ok Map.empty) else if caching then oneAtATime (map snd missing) Map.empty else runValidator (map snd missing)
+    checked <- if null missing then pure (Ok Map.empty) else if caching then oneAtATime exe (map snd missing) Map.empty else runValidator exe (map snd missing)
     case checked of
         Error e -> pure (Error e)
         Ok found -> do
@@ -116,15 +127,15 @@ verdicts caching texts = do
 -- a function another process is checking waits for that verdict instead of
 -- checking it too (the groups of the tests start together, and share most
 -- of the libraries' functions)
-oneAtATime :: [String] -> Map.Map Int (Int, Int, Int) -> IO (Result (Map.Map Int (Int, Int, Int)) String)
-oneAtATime [] found = pure (Ok found)
-oneAtATime (text : rest) found = do
+oneAtATime :: IO (Result FilePath String) -> [String] -> Map.Map Int (Int, Int, Int) -> IO (Result (Map.Map Int (Int, Int, Int)) String)
+oneAtATime _ [] found = pure (Ok found)
+oneAtATime exe (text : rest) found = do
     verdict <- withVerdictLock text $ do
         stored <- diskVerdict text
         case stored of
             Just v -> pure (Ok v)
             Nothing -> do
-                checked <- runValidator [text]
+                checked <- runValidator exe [text]
                 case checked of
                     Error e -> pure (Error e)
                     Ok answers -> do
@@ -135,7 +146,7 @@ oneAtATime (text : rest) found = do
         Error e -> pure (Error e)
         Ok v@(status, _, _) ->
             let found' = Map.insert (Map.size found) v found
-             in if status /= 0 then pure (Ok found') else oneAtATime rest found'
+             in if status /= 0 then pure (Ok found') else oneAtATime exe rest found'
 
 withVerdictLock :: String -> IO a -> IO a
 withVerdictLock text action = do
@@ -148,9 +159,9 @@ withVerdictLock text action = do
 
 -- The compiled validator's verdicts over the functions given: each one up
 -- to the first refused is proved, the refused one has its own
-runValidator :: [String] -> IO (Result (Map.Map Int (Int, Int, Int)) String)
-runValidator texts = do
-    exe <- validatorExecutable
+runValidator :: IO (Result FilePath String) -> [String] -> IO (Result (Map.Map Int (Int, Int, Int)) String)
+runValidator validator texts = do
+    exe <- validator
     case exe of
         Error e -> pure (Error e)
         Ok path -> do
@@ -190,10 +201,38 @@ serializeValue value = case value of
     MEmpty -> Left "an empty value in the data for the validator"
     MRef _ _ -> Left "a reference value in the data for the validator"
 
--- The compiled validator in the cache, built by the emitter in the cache
--- from the validator and its driver
+-- The compiled validator in the cache. It is built from its source without
+-- being validated (no validator is there yet: uncheckedValidator), and then
+-- it validates what it is made of, the native storage library its lists and
+-- Boxes are built with; only a validator that has done so is used.
 validatorExecutable :: IO (Result FilePath String)
-validatorExecutable = cachedProgram "validator" validatorHash "the validator written in Tersus" $ \output -> do
+validatorExecutable = cachedProgram "validator" validatorHash "the validator written in Tersus, checked" $ \output -> do
+    unchecked <- uncheckedValidator
+    case unchecked of
+        Error e -> pure (Error e)
+        Ok exe -> do
+            checked <- selfCheck (pure (Ok exe))
+            case checked of
+                Error e -> pure (Error ("the validator written in Tersus does not validate " ++ e))
+                Ok () -> copyFile exe output >> pure (Ok ())
+
+-- What the validator validates of itself, run by the validator given
+selfCheck :: IO (Result FilePath String) -> IO (Result () String)
+selfCheck exe = case nativeStorage of
+    Error e -> pure (Error ("the native storage library: " ++ e))
+    Ok (_, library) -> do
+        -- (not through the shared verdicts: a process that holds the lock of a
+        -- function waits for this validator, so this build must not wait for it)
+        checked <- validateWithExe exe True False library
+        pure (either (\e -> Error ("the native storage library: " ++ e)) Ok (resultEither checked))
+  where
+    resultEither (Ok a) = Right a
+    resultEither (Error e) = Left e
+
+-- The validator built by the emitter in the cache from the validator and its
+-- driver, not yet validated
+uncheckedValidator :: IO (Result FilePath String)
+uncheckedValidator = cachedProgram "validator-unchecked" validatorHash "the validator written in Tersus" $ \output -> do
     emitter <- cachedEmitter
     case emitter of
         Error e -> pure (Error e)

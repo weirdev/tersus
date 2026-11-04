@@ -1,7 +1,7 @@
 -- The bridge from MIR to the validator written in Tersus
 -- (lib/validation.tersus): encode is a data-only translation, and anything it
 -- does not fully model is reported as an Unmodeled verdict, never accepted.
-module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, obligationNote, sourceContainerView) where
+module SelfHostedMir (Verdict (..), verdictProved, validateMirSubset, validateByTersus, encode, encodeLibrary, obligationNote, sourceContainerView) where
 
 import Control.Monad (foldM)
 import Data.List (find, isInfixOf, isPrefixOf, nub)
@@ -23,10 +23,10 @@ import Syntax
 import Types
 import Utils (Result (..), bindResult, inIntRange)
 
-data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) }
+data Build = Build { nextTerm :: Integer, literalIds :: [(M.Constant, Integer)], literalTerms :: [MirValue], literalApps :: [MirValue], namedFunctions :: [(String, Integer)], ctorFields :: [(Integer, Integer, Integer)], buildFunctions :: Map.Map Name M.Function, buildRules :: Rules, buildInline :: Int, buildReaders :: Set.Set Name, buildInputReaders :: Set.Set Name, buildExports :: Map.Map Name M.Operand, buildLambdas :: [(Integer, Variable, VariableProof, M.Env)], buildKeepForalls :: Bool, buildDefined :: Maybe (Set.Set M.Local) , buildPhysical :: Bool }
 
 emptyBuild :: Build
-emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing
+emptyBuild = Build 0 [] [] [] [] [] Map.empty Map.empty 0 Set.empty Set.empty Map.empty [] True Nothing False
 
 record :: String -> [(String, MirValue)] -> MirValue
 record = MData
@@ -163,7 +163,7 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Project _ field)) _))
     proofOperand env (FApp (CTerm (builtinFunct (Field Nothing field))) [arg]) b0
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [arg]) b0 = do
     (prefix, value, b1) <- proofOperand env arg b0
-    let (function, b2) = namedFunction (fieldKey owner field) b1
+    let (function, b2) = namedFunction (fieldKey b1 owner field) b1
         (i, b3) = fresh b2
         local = negate i - 1
         ref = record "ValueRef::Local" [("local", MInt local)]
@@ -1358,7 +1358,7 @@ statement rules (M.Assign (M.Local dest) (M.MakeData name fields)) b0 = do
         pure (acc ++ [readField, known], b2)
 statement rules (M.Assign (M.Local dest) (M.ReadField source owner field)) b0 = do
     (value, b1) <- operand source b0
-    let (function, b2) = namedFunction (fieldKey (Just owner) field) b1
+    let (function, b2) = namedFunction (fieldKey b1 (Just owner) field) b1
     pure ([step "ApplyFresh" [("local", MInt (toInteger dest)), ("function", MInt function), ("arguments", MList [value])]], b2)
 statement rules (M.Assign (M.Local dest) (M.IsVariant source variantName)) b0 = do
     (value, b1) <- operand source b0
@@ -1789,6 +1789,10 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
         (limit, b2) <- operand (M.Const (M.CInt 256)) b1
         pure ([assume 3 zero value, assume 2 value limit], b2)
     facts (TArrayOf _ (SizeConst size)) b = sized size b
+    -- (a value lent is a value of its type, with the facts of its type)
+    facts (TRef inner) b = facts inner b
+    -- (in the library a list and a Box are the structs they are made of)
+    facts ty@(TNamed base _) b | buildPhysical b, base `elem` ["List", "Box"] = structFacts ty b
     facts (TBox (TArrayOf _ (SizeConst size))) b = sized size b
     facts (TArrayOf _ (SizeParam name)) b = sizedByParam name b
     facts (TBox (TArrayOf _ (SizeParam name))) b = sizedByParam name b
@@ -1799,7 +1803,9 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
         let (i, b1) = fresh b
             localId = negate i - 1
         pure ([step "ApplyFresh" [("local", MInt localId), ("function", MInt (-13)), ("arguments", MList [value])]], b1)
-    facts (TNamed base args) b = do
+    facts ty@(TNamed _ _) b = structFacts ty b
+    facts _ b = Just ([], b)
+    structFacts (TNamed base args) b = do
         let name = instanceName base args
             clauses = Map.findWithDefault [] base invariants
         case Map.lookup name types <|> Map.lookup base types of
@@ -1822,7 +1828,7 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
                 (projections, env, b1) <- foldM project ([], Map.empty, b) fields
                 (assumptions, b2) <- contractSteps rules True env clauses b1
                 pure (projections ++ assumptions, b2)
-    facts _ b = Just ([], b)
+    structFacts _ b = Just ([], b)
     sized size b = do
         (expected, b1) <- operand (M.Const (M.CInt size)) b
         let (i, b2) = fresh b1
@@ -1894,7 +1900,7 @@ exprOperand env expr b0 = case expr of
         exprOperand env (F (Val (builtinFunct (Field Nothing field))) [arg]) b0
     F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [arg] -> do
         (steps, value, b1) <- exprOperand env arg b0
-        let (function, b2) = namedFunction (fieldKey owner field) b1
+        let (function, b2) = namedFunction (fieldKey b1 owner field) b1
             (i, b3) = fresh b2
             local = negate i - 1
             ref = record "ValueRef::Local" [("local", MInt local)]
@@ -2750,8 +2756,8 @@ genericClauses rules assumeMode env0 clauses b0 next0 = foldM go ([], b0, env0, 
         (more, b') <- contractSteps rules True env [ProofAssert proof] b
         pure (steps ++ more, b', env, next)
 
-encodeFunction :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
-encodeFunction types invariants functions rules allowCalls fn
+encodeFunction :: Bool -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
+encodeFunction physical types invariants functions rules allowCalls fn
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals fn)) = Nothing
     | length (M.fnParams fn) /= length (nub (M.fnParams fn)) = Nothing
     | M.Local 0 `elem` M.fnParams fn = Nothing
@@ -2761,8 +2767,12 @@ encodeFunction types invariants functions rules allowCalls fn
     | any parameterAssigned sizeParams = Nothing
     | any wrongSizeName (zip sizeParams (M.fnSizeParams fn)) = Nothing
     | Map.member (M.BlockId (-1)) (M.fnBlocks fn) = Nothing
+    -- (the native library works on the structs a list and a Box are made of:
+    -- an operation of the logical list or Box, which those structs stand for
+    -- in every other program, is not one it may use)
+    | physical && any logicalContainerUse (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) = Nothing
     | otherwise = do
-        let (params, start) = foldl addParam ([], emptyBuild{buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
+        let (params, start) = foldl addParam ([], emptyBuild{buildPhysical = physical, buildFunctions = functions, buildRules = rules, buildReaders = M.readersOfInput (M.Program Map.empty functions fn Map.empty Map.empty), buildInputReaders = inputReadersOf functions}) (M.fnParams fn)
         (paramFacts, withTypes) <- foldM addType ([], start) (M.fnParams fn)
         (sizeFacts, withSizes) <- sizeParameterSteps True fn (M.fnParams fn) withTypes
         (requires0, withRequires0) <- contractSteps rules True (M.specEnv spec) (M.specRequires spec) withSizes
@@ -2791,6 +2801,33 @@ encodeFunction types invariants functions rules allowCalls fn
             entry = record "ExecutionBlock" [("id", MInt (-1)), ("steps", MList (entryLiterals ++ paramFacts ++ sizeFacts ++ requires ++ variantSteps ++ oldSteps ++ entrySteps)), ("end", record "ExecutionEnd::Jump" [("target", MInt 0)])]
         pure (MList (entry : blocks), record "ExecutionState" [("context", context), ("locals", localsMap params), ("templates", MList [])], -1)
   where
+    logicalContainerUse st = case st of
+        M.Assign _ rv -> logicalRvalue rv
+        M.Peek _ rv -> logicalRvalue rv
+        M.AssignRef _ _ rv -> logicalRvalue rv
+        _ -> False
+    logicalRvalue rv = case rv of
+        M.ListOp op args -> op `elem` [M.Length, M.First, M.Last, M.Get, M.Push, M.Pop, M.Set, M.NewArray, M.NewBoxed, M.NewEmptyBoxed, M.FromList] || any containerConstant args
+        M.MakeList _ -> True
+        M.MakeBox _ -> True
+        M.Unbox _ -> True
+        M.Unsize _ -> True
+        M.Use o -> containerConstant o
+        M.ReadField o owner _ -> throughContainer o owner
+        M.IsVariant o owner -> throughContainer o owner
+        M.AsVariant o owner -> throughContainer o owner
+        _ -> False
+    containerConstant (M.Const c) = case c of
+        M.CList _ -> True
+        M.CArray _ -> True
+        _ -> False
+    containerConstant _ = False
+    -- (a field or a variant of what a Box holds, read through the Box)
+    throughContainer (M.Copy l) owner = case M.localType <$> Map.lookup l (M.fnLocals fn) of
+        Just (TNamed base _) | base `elem` ["List", "Box"] -> baseNameOf owner /= base
+        _ -> False
+    throughContainer (M.Move l) owner = throughContainer (M.Copy l) owner
+    throughContainer _ _ = False
     spec = M.fnSpec fn
     sizeParams = drop (length (M.fnParams fn) - length (M.fnSizeParams fn)) (M.fnParams fn)
     parameterAssigned local = any (writes local) (concatMap M.blockStatements (Map.elems (M.fnBlocks fn))) || any (terminatorWrites local . M.blockTerminator) (Map.elems (M.fnBlocks fn))
@@ -2845,11 +2882,25 @@ withoutNotes v = case v of
     _ -> v
 
 encode :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
-encode program = fmap (map (\(name, (blocks, state, entry)) -> (name, (withoutNotes blocks, state, entry)))) (encodeNoted (sourceContainerView program))
+encode = encodeAs False
 
-obligationNote :: M.Program -> Name -> Int -> Int -> Maybe String
-obligationNote program name blockId stepIndex = do
-    functions <- either (const Nothing) Just (encodeNoted (sourceContainerView program))
+-- The native storage library (lib/lists.tersus and lib/box.tersus, linked):
+-- a List and a Box are the structs they are made of, with their invariants,
+-- and its functions, all generic, are checked as written, for any type
+-- (nothing is known of a value of a type parameter, so what is proved holds
+-- for every type)
+encodeLibrary :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
+encodeLibrary = encodeAs True
+
+encodeAs :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
+encodeAs physical program = fmap (map (\(name, (blocks, state, entry)) -> (name, (withoutNotes blocks, state, entry)))) (encodeNoted physical (viewFor physical program))
+
+viewFor :: Bool -> M.Program -> M.Program
+viewFor physical program = if physical then program else sourceContainerView program
+
+obligationNote :: Bool -> M.Program -> Name -> Int -> Int -> Maybe String
+obligationNote physical program name blockId stepIndex = do
+    functions <- either (const Nothing) Just (encodeNoted physical (viewFor physical program))
     (blocks, _, _) <- lookup name functions
     blockList <- listItems blocks
     MData _ fields <- find (\b -> case b of MData _ fs -> lookup "id" fs == Just (MInt (toInteger blockId)); _ -> False) blockList
@@ -2862,12 +2913,12 @@ obligationNote program name blockId stepIndex = do
     listItems (MList items) = Just items
     listItems _ = Nothing
 
-encodeNoted :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
+encodeNoted :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
 -- Generic functions are checked as the copies a call decides (MirMono
 -- makes them for native code after validation there; the validator
 -- written in Tersus is given the same copies, so a call of a generic
 -- function names the copy of it the call decides).
-encodeNoted program0 = encodeMono withTemplates
+encodeNoted physical program0 = encodeMono physical withTemplates
   where
     mono = monomorphizeForValidation program0
     -- A contract can name a generic function nothing calls (a method
@@ -2880,8 +2931,8 @@ encodeNoted program0 = encodeMono withTemplates
     -- makes a copy of it.
     withTemplates = mono { M.progFunctions = Map.union (M.progFunctions mono) (Map.filter (\fn -> not (null (M.fnTypeParams fn)) || not (null (M.fnSizeParams fn))) (M.progFunctions program0)), M.progTypes = Map.union (M.progTypes mono) (M.progTypes program0) }
 
-encodeMono :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
-encodeMono program
+encodeMono :: Bool -> M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
+encodeMono physical program
     | Just fn <- find unsupportedFunction allFunctions = Left ("a type of a local, the result or a reference result of " ++ M.fnName fn)
     | Just (name, _) <- find (unsupportedDecl . snd) (Map.toList (M.progTypes program)) = Left ("a field type of " ++ name)
     | not (null (M.fnParams (M.progMain program))) = Left "a main function with parameters"
@@ -2900,7 +2951,7 @@ encodeMono program
             invariants = M.progInvariants program
             types = M.progTypes program
         rules' <- maybe (Left "an axiom or proof rule") Right (collectRules program)
-        let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction types invariants functions rules' True fn)
+        let encodeOne fn = maybe (Left ("an operation in " ++ M.fnName fn)) (\v -> Right (M.fnName fn, v)) (encodeFunction physical types invariants functions rules' True fn)
         -- A function with type parameters is a template: it is checked
         -- only where a call decides its types, as its instances in the
         -- program (the reference does the same). The one exception is a
@@ -2910,7 +2961,7 @@ encodeMono program
         -- (a builtin used as a value, builtin::first, is a function whose body is
         -- the builtin: every call of it is checked as the builtin's, so it is not
         -- checked as a function with no contract)
-        checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn))]
+        checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), physical || null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn))]
         main <- encodeOne (M.progMain program)
         let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
         pure (checked ++ ruleEntries ++ [main])
@@ -2964,10 +3015,10 @@ encodeMono program
 -- The function a field read is: a Box has the value of what it holds, so
 -- its own storage (its address and its block) is a function of its own, and
 -- a field of the payload with the same name says nothing of it
-fieldKey :: Maybe Name -> Variable -> String
-fieldKey (Just owner) field
-    | baseNameOf owner == "Box" && field `elem` ["addr", "blk"] = "field:Box." ++ field
-fieldKey _ field = "field:" ++ field
+fieldKey :: Build -> Maybe Name -> Variable -> String
+fieldKey b (Just owner) field
+    | not (buildPhysical b), baseNameOf owner == "Box" && field `elem` ["addr", "blk"] = "field:Box." ++ field
+fieldKey _ _ field = "field:" ++ field
 
 -- The bridge models source containers; their canonical native layouts are not proof facts.
 sourceContainerView :: M.Program -> M.Program

@@ -150,7 +150,7 @@ nativeProgram :: M.Program -> Result M.Program String
 nativeProgram = lowerLists listLibrary . expandRefWrites
 
 listLibrary :: Result [(Mod.ModuleId, M.Program)] String
-listLibrary = Housekeeping.validatedStorage `bindResult` \(_, program) ->
+listLibrary = Housekeeping.nativeStorage `bindResult` \(_, program) ->
     checkedLowered program `bindResult` \_ -> Housekeeping.listLibrary
 
 -- Checks and validates a program given as statements, with the validator written in Tersus

@@ -18,7 +18,7 @@ import qualified Mir as M
 import MirData (forNative, readProgram, writeProgram)
 import MirLower (lowerElaborated)
 import ValidatorNative (validateCompiled)
-import MirHousekeeping (eraseGhosts, validatedListLibrary)
+import MirHousekeeping (eraseGhosts, storageProgram)
 import Compile (lowerSource)
 import Pipeline (ownedSource, parseSource)
 import SelfHostedMir (validateMirSubset, sourceContainerView, verdictProved)
@@ -85,7 +85,7 @@ sourceContainerCapabilities = TestList "logical container layouts"
         Error e -> Just e
         Ok program -> testAssertEq
             [(Map.lookup name (M.progGenerics program), Map.lookup name (M.progInvariants program)) | name <- ["List", "Box"]]
-            [(Map.lookup name (M.progGenerics validatedListLibrary), Map.lookup name (M.progInvariants validatedListLibrary)) | name <- ["List", "Box"]])
+            [(Map.lookup name (M.progGenerics storageProgram), Map.lookup name (M.progInvariants storageProgram)) | name <- ["List", "Box"]])
     , testCase "exact List layout with a user invariant is retained" (alteredLayout "List" "struct List<T> { addr: Addr<T>, len: Int, cap: Int, ghost blk: Block<T> } invariant [{ affirm len >= 99; }]; return [];")
     , testCase "exact Box layout with a user invariant is retained" (alteredLayout "Box" "struct Box<T> { addr: Addr<T>, ghost blk: Block<T> } invariant [{ affirm cap(blk) = 2; }]; b = Box::new(1); return Box::unbox(b);")
     , testCase "physical Box fields remain unsupported" (eligible "b = Box::new(1); return b.addr;" False)

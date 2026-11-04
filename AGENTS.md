@@ -59,8 +59,10 @@ The active implementation lives in `tersus/`, a Stack-based Haskell package.
     the same synthetic `tersuslib` package. They import the types and traits
     they use; `types.tersus` alone owns the structs and layout invariants.
     `LibPackage` checks and lowers them separately, and `MirHousekeeping`
-    links them and erases their ghosts; they are not validated, since native
-    code of the validator is made with them.
+    links them and erases their ghosts. Native code of the validator is made
+    with them, so they are built unvalidated, and the validator, once built,
+    validates them (with a List and a Box as the structs they are) before it is
+    used (`ValidatorNative.validatorExecutable`).
     `MirLists` links only the helper units native lowering needs, after user
     validation. Their bodies and Drop impls are never implicit user imports.
   - `stdlib.tersus`: the standard library written in Tersus. Embedded by

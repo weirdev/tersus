@@ -15,7 +15,7 @@ import MirOwnership (insertOwnership)
 import MirLower (lowerProgram)
 import Parse (parseStatementBlock)
 import Pipeline (nativeProgram)
-import MirHousekeeping (validatedListLibrary)
+import MirHousekeeping (storageProgram)
 import Types (Type (..), pattern TList, pattern TBox)
 import TestHarness
 import TestMirReader (sameText, withProgram)
@@ -137,7 +137,7 @@ interpretedWithMessage message source mutate expected = do
     verdict False = "refusal"
 
 rawLibrary :: Result String String
-rawLibrary = Ok (writeProgram validatedListLibrary)
+rawLibrary = Ok (writeProgram storageProgram)
 
 rawInterpreted :: Bool -> Result String String -> IO TestResult
 rawInterpreted expected input = do
