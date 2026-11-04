@@ -1816,11 +1816,23 @@ fn removeTypeInfo(st: St, name: &String) -> St ~ {
     return St { types: push(st.types, entry), ..st };
 };
 
+fn sourceVariants(owner: &String, variants: &List<String>) -> List<String> ~ {
+    out = [];
+    for variant in variants {
+        if containsText(variant, "$") {
+            i = 0;
+            while i < size(variant.bytes) && get(variant.bytes, i) != toByte(58) ~ { i = i + 1; };
+            out = push(out, catStrings(owner, strSlice(variant, i, size(variant.bytes))));
+        } else { out = push(out, clone(variant)); };
+    };
+    return out;
+};
+
 fn typeVariantsNamed(st: &St, name: &String) -> List<String> ~ {
     i = size(st.types) - 1;
     while i >= 0 [{ affirm i + 1 >= 0; affirm i + 1 <= size(st.types); }] ~ {
         entry = get(&st.types, i);
-        if entry.name = name { if !entry.active { return []; }; return clone(entry.variants); };
+        if entry.name = name { if !entry.active { return []; }; return sourceVariants(name, entry.variants); };
         i = i - 1;
     };
     return [];
@@ -2999,7 +3011,7 @@ fn litHead(sourceText: &Input, st: St) -> Res<LitOut> ~ {
     matched = matchedCtorName( s, base);
     declared = findCtor( s, matched);
     if size(matched.bytes) = 0 { return fail( s, LitOut { name: "", ctorArgs: [], declared: [], isVariant: false }, "not a struct or variant"); };
-    isVar = containsText(matched, "::");
+    isVar = !hasTypeNamed(s, baseNameOf(matched));
     ctorArgs = [];
     candidate = clone(base);
     params = findGenerics( s, matched);
@@ -3013,14 +3025,14 @@ fn litHead(sourceText: &Input, st: St) -> Res<LitOut> ~ {
             // a candidate instance is not itself declared; Haskell keeps the matched name's fields
         };
     };
-    if size(declared) = 0 && containsText(candidate, "::") {
+    if size(declared) = 0 && isVar {
         s = skipWs(sourceText, s);
         return ok( s, LitOut { name: candidate, ctorArgs: ctorArgs, declared: declared, isVariant: true });
     };
     s = skipWs(sourceText, s);
     if byteAt(sourceText, s, s.pos) != 123 { return fail( s, LitOut { name: "", ctorArgs: [], declared: [], isVariant: false }, "expected {"); };
     s = St { pos: s.pos + 1, ..s };
-    return ok( s, LitOut { name: candidate, ctorArgs: ctorArgs, declared: declared, isVariant: containsText(candidate, "::") });
+    return ok( s, LitOut { name: candidate, ctorArgs: ctorArgs, declared: declared, isVariant: isVar });
 };
 
 fn tryStructLiteralExpr(sourceText: &Input, st: St) -> Res<Int> ~ {
@@ -5463,40 +5475,58 @@ fn matchStatement(sourceText: &Input, st: St) -> Res<List<Int>> ~ {
     return desugarMatch( s, resultPartsheadValue.scrutinee, arms);
 };
 
+fn variantIdentity(st: &St, name: &String) -> String ~ {
+    matched = matchedCtorName(st, name);
+    if size(matched.bytes) = 0 { return ""; };
+    if hasTypeNamed(st, baseNameOf(matched)) {
+        variants = typeVariantsOf(st, baseNameOf(matched));
+        if size(variants) = 1 {
+            identity = clone(get(variants, 0));
+            if matched != name && containsText(identity, "$") { return ""; };
+            return identity;
+        };
+    };
+    parts = splitPath(matched);
+    if size(parts) < 2 { return ""; };
+    ownerParts = [];
+    for i in 0..(size(parts) - 1) { ownerParts = push(ownerParts, clone(get(parts, i))); };
+    owner = joinFrom(ownerParts, 0);
+    variant = clone(get(parts, size(parts) - 1));
+    for identity in typeVariantsOf(st, owner) {
+        identityParts = splitPath(identity);
+        if size(identityParts) > 0 && get(identityParts, size(identityParts) - 1) = variant {
+            if matched != name && containsText(identity, "$" ) { return ""; };
+            return clone(identity);
+        };
+    };
+    return "";
+};
+
 fn desugarMatch(st: St, scrutinee: Int, arms: &List<Arm>) -> Res<List<Int>> ~ {
     if size(arms) = 0 { return fail( st, [], "A match needs at least one arm"); };
     first = clone(get(arms, 0).name);
+    identities = [];
+    for a in arms { identities = push(identities, variantIdentity(st, a.name)); };
+    firstIdentity = clone(get(identities, 0));
     typeName = "";
     variants = [];
-    bestLen = 0 - 1;
     for c in currentTypes(st) {
         for v in c.variants {
-            if samePath(first, v) {
-                vl = size(splitPath(v));
-                if vl >= bestLen { bestLen = vl; typeName = clone(c.name); variants = clone(c.variants); };
-            };
+            if firstIdentity = v { typeName = clone(c.name); variants = clone(c.variants); };
         };
     };
-    if size(typeName.bytes) = 0 { return fail( st, [], cat3("Unknown variant ", first, "")); };
-    names = [];
-    for a in &arms { names = push(names, clone(a.name)); };
-    for n in names {
-        covered = false;
-        for v in variants { if samePath(n, v) { covered = true; }; };
-        if !covered { return fail( st, [], cat3(cat3("A match over ", typeName, " has an arm of another type"), "", "")); };
+    if size(typeName.bytes) = 0 { return fail(st, [], cat3("Unknown variant ", first, "")); };
+    for identity in identities {
+        if !containsName(variants, identity) { return fail(st, [], cat3("A match over ", typeName, " has an arm of another type")); };
     };
-    if hasDupStrings(names) { return fail( st, [], cat3("A match over ", typeName, " repeats a variant")); };
+    if hasDupStrings(identities) { return fail(st, [], cat3("A match over ", typeName, " repeats a variant")); };
     missing = [];
-    for v in variants {
-        covered = false;
-        for n in names { if samePath(v, n) { covered = true; }; };
-        if !covered { missing = push(missing, clone(v)); };
-    };
+    for v in variants { if !containsName(identities, v) { missing = push(missing, clone(v)); }; };
     if size(missing) > 0 {
         joined = "";
         j = 0;
         for m in missing { if j > 0 { joined = catStrings(joined, " "); }; joined = catStrings(joined, m); j = j + 1; };
-        return fail( st, [], cat3(cat3("A match over ", typeName, " does not cover "), joined, ""));
+        return fail(st, [], cat3(cat3("A match over ", typeName, " does not cover "), joined, ""));
     };
     s = st;
     if size(arms) = 1 {
@@ -7124,9 +7154,9 @@ fn differsText(a: &String, b: &String) -> String ~ {
 };
 
 fn standardEqText(st: &St, typeName: &String) -> String ~ {
-    variants = typeVariantsOf( st, typeName);
+    variants = sourceVariants(typeName, typeVariantsOf(st, typeName));
     body = "";
-    if size(variants) = 1 && !containsText(nameAtOr(variants, 0, ""), "::") {
+    if size(variants) = 1 && nameAtOr(variants, 0, "") = typeName {
         fields = fieldsOfVariant( st, nameAtOr(variants, 0, ""));
         i = 0;
         for f in fields {
@@ -7194,9 +7224,9 @@ fn compareFieldText(st: &St, typeName: &String, n: Int, f: FieldInfo, a: &String
 };
 
 fn standardCloneText(st: &St, typeName: &String) -> String ~ {
-    variants = typeVariantsOf( st, typeName);
+    variants = sourceVariants(typeName, typeVariantsOf(st, typeName));
     body = "";
-    if size(variants) = 1 && !containsText(nameAtOr(variants, 0, ""), "::") {
+    if size(variants) = 1 && nameAtOr(variants, 0, "") = typeName {
         fields = fieldsOfVariant( st, nameAtOr(variants, 0, ""));
         parts = cloneParts( st, typeName, fields, "self.");
         body = catStrings(nameAtOr(parts, 0, ""), cat3("return Self { ", nameAtOr(parts, 1, ""), " };"));

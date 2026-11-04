@@ -8,6 +8,8 @@ module Parse
     , parseStatementBlockWith
     , parseFile
     , parseFileWith
+    , parseImportPrefix
+    , parseDeclarationNames
     , Import (..)
     , ParsedFile (..)
     , Decls (..)
@@ -30,7 +32,7 @@ import qualified Data.Map as Map
 
 import Control.Monad (unless, void, when)
 import Data.Char (isDigit, isLetter, isUpper)
-import Data.List (intercalate, isInfixOf, maximumBy, nub, (\\))
+import Data.List (intercalate, isInfixOf, nub, (\\))
 import Data.Maybe (fromMaybe, isJust)
 
 import BuiltinRegistry (builtinDecls, builtinSymbol, proofBuiltinByName)
@@ -108,7 +110,10 @@ locating :: Decls -> Decls
 locating decls = decls{declLocate = True}
 
 shadowedCtors :: Name -> Decls -> Map.Map Name [Variable]
-shadowedCtors name d = foldr Map.delete (declCtors d) (name : Map.findWithDefault [] name (declTypes d))
+shadowedCtors name d = foldr Map.delete (declCtors d) (name : sourceVariants name (Map.findWithDefault [] name (declTypes d)))
+
+sourceVariants :: Name -> [Name] -> [Name]
+sourceVariants owner = map (\variant -> if '$' `elem` variant then owner ++ dropWhile (/= ':') variant else variant)
 
 type Parser = Parsec String Decls
 
@@ -603,29 +608,29 @@ ghostOnly ghostly ty = when (ghostly && not (ghostType ty)) $ fail "ghost is wri
 -- the way to build a value like another that is only lent, or that is still wanted. The second argument tells a clone from another base.
 structLiteral :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Parser a
 structLiteral element cloned apply = do
-    (name, declared, ctorArgs) <- try $ do
+    (name, declared, ctorArgs, variant) <- try $ do
         base <- qualifiedName
         ctors <- declCtors <$> getState
         (matched, known) <- maybe (fail "not a struct or variant") return (lookupCtorPath base ctors)
         -- (a struct with sizes and types is written with them: Packet<4> { ... }, Vec<Int, 3> { ... })
-        generics <- declGenerics <$> getState
+        declarations <- getState
+        let variant = Map.notMember (selfBase matched) (declTypes declarations)
+            generics = declGenerics declarations
         args <- case Map.lookup matched generics of
-            Just params | not (isVariant matched) -> optionMaybe (try (whitespace >> genericArguments params))
+            Just params | not variant -> optionMaybe (try (whitespace >> genericArguments params))
             _ -> return Nothing
         let candidate = maybe base (instanceName base) args
-        if null known && isVariant candidate
-            then return (candidate, known, fromMaybe [] args)
+        if null known && variant
+            then return (candidate, known, fromMaybe [] args, variant)
             else do
                 whitespace
                 void (char '{')
-                return (candidate, known, fromMaybe [] args)
-    if null declared && isVariant name then whitespace >> return (apply (builtinSymbol (Ctor name [] [])) []) else structFields element cloned apply name ctorArgs declared
-  where
-    isVariant = ("::" `isInfixOf`)
+                return (candidate, known, fromMaybe [] args, variant)
+    if null declared && variant then whitespace >> return (apply (builtinSymbol (Ctor name [] [])) []) else structFields element cloned apply name ctorArgs declared variant
 
 -- The braces of a struct or variant literal, after its name and the opening brace
-structFields :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Name -> [Arg] -> [Variable] -> Parser a
-structFields element cloned0 apply name ctorArgs declared = do
+structFields :: Parser a -> (a -> Maybe a) -> (Value -> [a] -> a) -> Name -> [Arg] -> [Variable] -> Bool -> Parser a
+structFields element cloned0 apply name ctorArgs declared variant = do
     whitespace
     inits <- many fieldInit
     base <- optionMaybe (string ".." >> whitespace >> element <* whitespace <* optional (char ',' >> whitespace))
@@ -650,7 +655,7 @@ structFields element cloned0 apply name ctorArgs declared = do
         optional (char ',' >> whitespace)
         return (field, value')
     fieldOf from field
-        | "::" `isInfixOf` name = apply (builtinSymbol (Field Nothing field)) [apply (builtinSymbol (Cast name)) [from]]
+        | variant = apply (builtinSymbol (Field Nothing field)) [apply (builtinSymbol (Cast name)) [from]]
         | otherwise = apply (builtinSymbol (Field (Just name) field)) [from]
     argument own name base inits field =
         case (lookup field inits, base) of
@@ -718,6 +723,20 @@ declaredCtor = do
     ctors <- declCtors <$> getState
     maybe (fail ("Unknown struct or variant " ++ name)) (\(_, fields) -> return (name, fields)) (lookupCtorPath name ctors)
 
+variantIdentity :: Decls -> Name -> Parser Name
+variantIdentity declarations name = case lookupCtorPath name (declCtors declarations) of
+    Nothing -> fail ("Unknown variant " ++ name)
+    Just (matched, _) ->
+        let owner = renderPath (init (splitPath matched))
+            variant = last (splitPath matched)
+         in case Map.lookup (selfBase matched) (declTypes declarations) of
+                Just [identity] -> if matched /= name && '$' `elem` identity then fail ("Unknown variant " ++ name) else return identity
+                _ -> case Map.lookup owner (declTypes declarations) of
+                    Just variants -> case [identity | identity <- variants, last (splitPath identity) == variant] of
+                        identity : _ -> if matched /= name && '$' `elem` identity then fail ("Unknown variant " ++ name) else return identity
+                        [] -> fail ("Unknown variant " ++ name)
+                    Nothing -> fail ("Unknown variant " ++ name)
+
 -- match scrutinee { Pattern => body, ... } where a pattern is a variant and the fields it binds:
 -- `Shape::Circle { radius: r }`. The body is a block in a statement and an expression after `=` or `return`.
 matchArms :: Parser body -> Parser (Expression, [(Name, [(Variable, Variable)], body)])
@@ -761,13 +780,14 @@ desugarMatch :: Expression -> [(Name, [(Variable, Variable)], [Statement])] -> P
 desugarMatch _ [] = fail "A match needs at least one arm"
 desugarMatch scrutinee arms@((first, _, _) : _) = do
     types <- declTypes <$> getState
-    (typeName, variants) <- case [(length (splitPath variant), found) | found@(_, vs) <- Map.toList types, variant <- vs, samePath first variant] of
+    declarations <- getState
+    identities <- mapM (variantIdentity declarations . (\(name, _, _) -> name)) arms
+    (typeName, variants) <- case [found | found@(_, vs) <- Map.toList types, head identities `elem` vs] of
         [] -> fail ("Unknown variant " ++ first)
-        candidates -> return (snd (maximumBy (\a b -> compare (fst a) (fst b)) candidates))
-    let names = [name | (name, _, _) <- arms]
-        uncovered = [variant | variant <- variants, not (any (samePath variant) names)]
-    when (any (\name -> not (any (samePath name) variants)) names) $ fail ("A match over " ++ typeName ++ " has an arm of another type")
-    when (length (nub names) /= length names) $ fail ("A match over " ++ typeName ++ " repeats a variant")
+        found : _ -> return found
+    let uncovered = [variant | variant <- variants, variant `notElem` identities]
+    when (any (`notElem` variants) identities) $ fail ("A match over " ++ typeName ++ " has an arm of another type")
+    when (length (nub identities) /= length identities) $ fail ("A match over " ++ typeName ++ " repeats a variant")
     when (not (null uncovered)) $ fail ("A match over " ++ typeName ++ " does not cover " ++ unwords uncovered)
     -- The scrutinee is evaluated once into a name no program can write. Each arm is a branch, whose own scope
     -- holds what it binds and first assigns; a match with one arm has no branch, so it gets a block to do so.
@@ -775,11 +795,6 @@ desugarMatch scrutinee arms@((first, _, _) : _) = do
         [(name, binds, body)] -> [Block (Let hidden scrutinee : bindings name binds ++ body)]
         _ -> Let hidden scrutinee : chain arms
   where
-    samePath a b = a == b || isSuffixPath a b || isSuffixPath b a
-    isSuffixPath short long =
-        let shortSegs = splitPath short
-            longSegs = splitPath long
-         in length shortSegs <= length longSegs && drop (length longSegs - length shortSegs) longSegs == shortSegs
     hidden = "$match"
     subject = Var hidden
     chain [] = []
@@ -1040,7 +1055,7 @@ implStatement = do
     -- (`impl Clone for T { };` is the impl that clones the fields, of the same variant for an enum, each with its own Clone, as with Eq)
     let standardClone = trait == Just "Clone" && null written && typeName `notElem` ["List", "Box", "Array", "Int", "Byte", "Bool"]
     fieldTypes <- declFieldTypes <$> getState
-    functions <- if standardEq then generated (standardEqFunction typeName (Map.findWithDefault [] typeName types) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else if standardClone then generated (standardCloneFunction typeName (Map.findWithDefault [] typeName types) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else return written
+    functions <- if standardEq then generated (standardEqFunction typeName (sourceVariants typeName (Map.findWithDefault [] typeName types)) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else if standardClone then generated (standardCloneFunction typeName (sourceVariants typeName (Map.findWithDefault [] typeName types)) fieldTypes) (genericStatementBlock (implFunction typeName trait)) else return written
     let implBounds' = if standardEq then implBounds ++ [(p, "Eq", []) | p <- implParams, isTypeParameter p, (p, "Eq", []) `notElem` implBounds] else if standardClone then implBounds ++ [(p, "Clone", []) | p <- implParams, isTypeParameter p, (p, "Clone", []) `notElem` implBounds] else implBounds
     modifyState (\d -> d{declSelf = Nothing, declSelfType = Nothing, declImplParams = [], declCtors = if selfName == typeName then declCtors d else Map.delete selfName (declCtors d)})
     whitespace
@@ -1077,7 +1092,7 @@ implStatement = do
                 TArrayOf u _ -> mentions u
                 _ -> False
             body = case variants of
-                [single] | not ("::" `isInfixOf` single) -> concatMap (\field -> compareField field "self" "other") (zip [0 ..] (fieldsOf single)) ++ "return true;"
+                [single] | single == typeName -> concatMap (\field -> compareField field "self" "other") (zip [0 ..] (fieldsOf single)) ++ "return true;"
                 _ ->
                     concat
                         [ "if self is " ++ v ++ " { if other is " ++ v ++ " { "
@@ -1115,7 +1130,7 @@ implStatement = do
                 let parts = [fieldClone part (a ++ "." ++ f) | part@(_, (f, _)) <- zip [0 ..] (fieldsOf v)]
                  in (concat (map fst parts), v ++ if null (fieldsOf v) then "" else " { " ++ intercalate ", " [f ++ ": " ++ e | ((_, (f, _)), (_, e)) <- zip (zip [0 ..] (fieldsOf v)) parts] ++ " }")
             body = case variants of
-                [single] | not ("::" `isInfixOf` single) ->
+                [single] | single == typeName ->
                     let parts = [fieldClone part ("self." ++ f) | part@(_, (f, _)) <- zip [0 ..] (fieldsOf single)]
                      in concat (map fst parts) ++ "return Self { " ++ intercalate ", " [f ++ ": " ++ e | ((_, (f, _)), (_, e)) <- zip (zip [0 ..] (fieldsOf single)) parts] ++ " };"
                 _ -> concat [ "if self is " ++ v ++ " { " ++ let (pre, built) = build ("(self as " ++ v ++ ")") v in pre ++ "return " ++ built ++ "; }; " | v <- init variants ] ++ let (pre, built) = build ("(self as " ++ last variants ++ ")") (last variants) in pre ++ "return " ++ built ++ ";"
@@ -1729,6 +1744,53 @@ importDecl = do
                 void (char '}')
                 whitespace
                 return names
+
+parseImportPrefix :: String -> Either ParseError [Import]
+parseImportPrefix = runParser (whitespace >> many importDecl) emptyDecls ""
+
+parseDeclarationNames :: String -> Either ParseError [Name]
+parseDeclarationNames = runParser (whitespace >> concat <$> many declaration <* eof) emptyDecls ""
+  where
+    declaration = do
+        lookAhead anyChar
+        names <- option [] (try enumHeader <|> try namedHeader)
+        skipMany token
+        optional (char ';')
+        whitespace
+        return names
+    namedHeader = do
+        optional (try (keyword "linear" >> whitespace))
+        choice [try (keyword prefix >> whitespace >> keyword "fn") | prefix <- ["extern", "builtin"]]
+            <|> choice [keyword name | name <- ["fn", "struct", "trait", "axiom", "proof"]]
+        whitespace
+        name <- variable
+        return [name]
+    enumHeader = do
+        optional (try (keyword "linear" >> whitespace))
+        keyword "enum"
+        whitespace
+        owner <- variable
+        whitespace
+        char '{'
+        whitespace
+        variants <- variant owner `sepEndBy` (char ',' >> whitespace)
+        char '}'
+        return (owner : variants)
+    variant owner = do
+        name <- variable
+        whitespace
+        optional group
+        whitespace
+        return (owner ++ "::" ++ name)
+    token = requiredWhitespace <|> quotedText <|> group <|> void (satisfy (\c -> c /= ';' && c /= '{' && c /= '"'))
+    group = do
+        char '{'
+        skipMany (requiredWhitespace <|> quotedText <|> group <|> void (satisfy (\c -> c /= '{' && c /= '}' && c /= '"')))
+        void (char '}')
+    quotedText = do
+        char '"'
+        skipMany (void (char '\\' >> anyChar) <|> void (satisfy (/= '"')))
+        void (char '"')
 
 fileParser :: Parser ParsedFile
 fileParser = do
