@@ -63,17 +63,7 @@ testLibModules =
                             [[(["tersuslib", dep], Nothing, Nothing) | dep <- deps] | (_, deps) <- implicitDependencies])
                         (testAssertEq (lpDependencies parsed) (Map.fromList implicitDependencies))
             , testCase "modules compile dependencies first" orderIsDependencyFirst
-            , testCase "eq declares Eq and its impls" (interface "eq" (\iface -> Map.member "Eq" (ifTraits iface) && implsIn iface [("Eq", "List"), ("Eq", "Array"), ("Eq", "Box")]))
-            , testCase "clone declares Clone and its impls" (interface "clone" (\iface -> Map.member "Clone" (ifTraits iface) && implsIn iface [("Clone", "List"), ("Clone", "Array"), ("Clone", "Box")]))
-            , testCase "prelude declares its traits" (interface "prelude" (\iface -> allIn (Map.keys (ifTraits iface)) ["Sequence", "Growable", "Copy", "Drop", "Deref", "Hash"]))
-            , testCase "prelude has the word Hash impls" (interface "prelude" (\iface -> implsIn iface [("Hash", "Int"), ("Hash", "Byte"), ("Hash", "Bool")] && allIn (Map.keys (ifFunctions iface)) ["hashCombine", "<Int as Hash>::hash"]))
-            , testCase "prelude does not re-export Clone" (interface "prelude" (\iface -> not (implsIn iface [("Clone", "List")]) && Map.notMember "cloneBoxedArray" (ifTemplates iface)))
-            , testCase "string declares String and its impls" (interface "string" (\iface -> Map.member "String" (ifTypes iface) && implsIn iface [("Clone", "String"), ("Eq", "String"), ("Hash", "String"), ("Sequence", "String")]))
-            , testCase "map declares HashMap" (interface "map" (\iface -> allIn (Map.keys (ifGenerics iface)) ["HashMap", "Entry"] && implsIn iface [("Clone", "HashMap")]))
-            , testCase "set declares HashSet" (interface "set" (\iface -> Map.member "HashSet" (ifGenerics iface) && implsIn iface [("Clone", "HashSet")]))
-            , testCase "set reaches map's findNth as a function" (interface "map" (\iface -> Map.member "findNth" (ifFunctions iface)))
-            , testCase "bounded helpers travel as templates" (both (interface "eq" (\iface -> Map.member "eqBoxedArrays" (ifTemplates iface))) (both (interface "clone" (\iface -> Map.member "cloneBoxedArray" (ifTemplates iface))) (interface "map" (\iface -> allIn (Map.keys (ifTemplates iface)) ["findIn", "indexFor", "<HashMap>::contains"]))))
-            , testCase "generic impl methods travel as templates" (both (interface "eq" (\iface -> Map.member "<List as Eq>::eq" (ifTemplates iface))) (interface "clone" (\iface -> Map.member "<List as Clone>::clone" (ifTemplates iface))))
+            , TestList "interface declarations" [ testCase name result | (name, result) <- interfaceCases ]
             ]
         , TestList
             "the single-file path through lib modules"
@@ -82,7 +72,7 @@ testLibModules =
             , testCase "a HashSet through the map module" (compiledRuns "s = HashSet::new().insert(1).insert(2); if s.contains(1) { if s.contains(3) { return 9; }; return s.size(); }; return 0;" (VInt 2))
             , testCase "a string made by the string module" (compiledRuns "return size(String::fromInt(1203).bytes);" (VInt 4))
             , testCase "Box of an array compares and clones through templates" (compiledRuns "a = Array::boxed(2, 7); b = Array::boxed(2, 7); c = clone(a); if a = b { if c = a { return size(c); }; }; return 0;" (VInt 2))
-            , testCase "Copy is synthesized through the prelude interface" (compiledRuns "struct P { x: Int, y: Int }; impl Clone for P { }; impl Copy for P { }; fn getX(p: P) -> Int { return p.x; }; p = P { x: 3, y: 4 }; a = getX(p); b = getX(p); return a * 10 + b + p.y;" (VInt 37))
+            , testCase "Copy is synthesized through the prelude interface" (runs (checkedSource "struct P { x: Int, y: Int }; impl Clone for P { }; impl Copy for P { }; fn getX(p: P) -> Int { return p.x; }; p = P { x: 3, y: 4 }; a = getX(p); b = getX(p); return a * 10 + b + p.y;") (VInt 37))
             , testCase "Drop is synthesized through the prelude interface" (compiledRuns (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") (VInt 7))
             , testCase "an Eq of the program's own suppresses the eq module" (compiledRejected "trait Eq { }; if [1] = [1] { return 1; }; return 0;" "List<Int> is compared with =")
             , testCase "a String of the program's own takes its literals" (compiledRuns "struct String { bytes: List<Byte> }; s = \"hi\"; return size(s.bytes);" (VInt 2))
@@ -111,7 +101,6 @@ testLibModules =
              , testCase "suppressed eq helper is not exposed" (rejected (checkedSource (ownEq ++ "s = \"hi\"; a = Array::boxed(1, 1); return eqBoxedArrays(a, a);")) "eqBoxedArrays")
              , testCase "a replacement without cached Eq impls is unrestricted" (runs (checkedSource "trait Eq { }; return 7;") (VInt 7))
              , testCase "supplied single-file AST is lowered without reparsing" (runs (Compile.parseSourceParts True "return 9;" `bindResult` Compile.lowerSourceParts True) (VInt 9))
-             , testCase "Copy source regression" (runs (checkedSource "struct P { x: Int, y: Int }; impl Clone for P { }; impl Copy for P { }; fn getX(p: P) -> Int { return p.x; }; p = P { x: 3, y: 4 }; a = getX(p); b = getX(p); return a * 10 + b + p.y;") (VInt 37))
              , testCase "Drop source validates and retains its implementation" $ case checkedSource (dropper ++ "v = V::new(3); w = V::new(4); return v.n + w.n;") of
                 Error err -> Just err
                 Ok program -> testAssertTrue (Map.member "<V as Drop>::drop" (M.progFunctions program))
@@ -151,6 +140,19 @@ testLibModules =
          in case Modules.loadFromEntryWith parser (Modules.resolverFromFiles [("app/package.tersus", ""), ("app/main.tersus", "@supplied-ast@")]) "app/main.tersus" of
                 Right (Modules.PackageResult pkg) -> runs (compileModulesValidated pkg) (VInt 11)
                 other -> Just ("injected fixture failed: " ++ show other)
+    interfaceCases =
+        [ ("eq declares Eq and its impls", (interface "eq" (\iface -> Map.member "Eq" (ifTraits iface) && implsIn iface [("Eq", "List"), ("Eq", "Array"), ("Eq", "Box")])))
+        , ("clone declares Clone and its impls", (interface "clone" (\iface -> Map.member "Clone" (ifTraits iface) && implsIn iface [("Clone", "List"), ("Clone", "Array"), ("Clone", "Box")])))
+        , ("prelude declares its traits", (interface "prelude" (\iface -> allIn (Map.keys (ifTraits iface)) ["Sequence", "Growable", "Copy", "Drop", "Deref", "Hash"])))
+        , ("prelude has the word Hash impls", (interface "prelude" (\iface -> implsIn iface [("Hash", "Int"), ("Hash", "Byte"), ("Hash", "Bool")] && allIn (Map.keys (ifFunctions iface)) ["hashCombine", "<Int as Hash>::hash"])))
+        , ("prelude does not re-export Clone", (interface "prelude" (\iface -> not (implsIn iface [("Clone", "List")]) && Map.notMember "cloneBoxedArray" (ifTemplates iface))))
+        , ("string declares String and its impls", (interface "string" (\iface -> Map.member "String" (ifTypes iface) && implsIn iface [("Clone", "String"), ("Eq", "String"), ("Hash", "String"), ("Sequence", "String")])))
+        , ("map declares HashMap", (interface "map" (\iface -> allIn (Map.keys (ifGenerics iface)) ["HashMap", "Entry"] && implsIn iface [("Clone", "HashMap")])))
+        , ("set declares HashSet", (interface "set" (\iface -> Map.member "HashSet" (ifGenerics iface) && implsIn iface [("Clone", "HashSet")])))
+        , ("set reaches map's findNth as a function", (interface "map" (\iface -> Map.member "findNth" (ifFunctions iface))))
+        , ("bounded helpers travel as templates", (both (interface "eq" (\iface -> Map.member "eqBoxedArrays" (ifTemplates iface))) (both (interface "clone" (\iface -> Map.member "cloneBoxedArray" (ifTemplates iface))) (interface "map" (\iface -> allIn (Map.keys (ifTemplates iface)) ["findIn", "indexFor", "<HashMap>::contains"])))))
+        , ("generic impl methods travel as templates", (both (interface "eq" (\iface -> Map.member "<List as Eq>::eq" (ifTemplates iface))) (interface "clone" (\iface -> Map.member "<List as Clone>::clone" (ifTemplates iface)))))
+        ]
     restoreParser Nothing = unsetEnv "TERSUS_PARSER"
     restoreParser (Just backend) = setEnv "TERSUS_PARSER" backend
     compiledRuns source expected = case compileSource source `bindResult` runProgram of

@@ -27,7 +27,6 @@ import Seed (cachedSeed, seedHash)
 import MirEval (fromMirValue)
 import StdLibDefs (stdlibBuiltin)
 import Syntax
-import TestDataCodec (testDataCodec)
 import TestHarness
 import TestNative (clangAvailable, runExecutableBytes)
 import TypeCheck (Elaborated (..), elaborate)
@@ -405,8 +404,7 @@ nativeMutation = withAstReader $ \exe -> do
 
 testAstData :: Test
 testAstData = TestList "testAstData"
-    [ testDataCodec
-    , testCase "checked writer refuses unsupported numeric and record sizes" writerLimits
+    [ testCase "checked writer refuses unsupported numeric and record sizes" writerLimits
     , testCase "all syntax constructors and builtins" (roundTrip fixtures)
     , testCase "builtin Eq hides metadata but serialization preserves it" metadata
     , testCase "elaborated wrapper preserves occurrence types" (elaboratedRoundTrip (Elaborated fixtures types))

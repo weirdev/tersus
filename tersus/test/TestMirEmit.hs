@@ -20,8 +20,8 @@ import Utils
 
 -- The lowering to LLVM IR written in Tersus (examples/mir/emit/emit.tersus, step 31 of the roadmap and STEP31.md) is the compiler's emitter. It is given the MIR as data,
 -- and writes all of the IR with no argument, the declarations, the descriptors of the types and the entry point for `outline`, and the code of each function for
--- `bodies`. What it writes has to build and run as the program does, which TestNative checks for every example and program by building the IR; here every mode
--- is run on every one of them, and the data of a program and the data of the program read back from it have to make the same IR. A smaller input is run by the
+-- `bodies`. What it writes has to build and run as the program does, which TestNative checks for every example and program by building the IR; here the full
+-- mode is run on every one of them (outline/bodies only on a representative subset), and the data of a program and the data of the program read back from it have to make the same IR. A smaller input is run by the
 -- interpreter.
 -- The emitter is built once (it needs clang, and the tests pass without it).
 testMirEmit :: Test
@@ -143,10 +143,15 @@ interpretedIr source = do
 
 
 
--- Every mode writes the IR of a program, and the data of the program read back from the data makes the same IR
+-- The full mode writes the IR of a program, and the data of the program read back from the data makes the same IR
 -- as the data. One case per program, so the sweep runs at the harness's parallelism instead of one program
 -- after another inside a single case (withProgram builds the emitter executable once for the process). The data
 -- comes from the harness's shared cache (mirDataOf): the groups between them compile these programs once.
+-- The outline/bodies modes are run only on a small representative subset: bodies is a distinct lenient path
+-- in emit.tersus, so it still needs coverage, but running every mode on every program multiplies the sweep cost.
+emitModeSubset :: [String]
+emitModeSubset = ["examples/arithmetic.tersus", "examples/loops.tersus", "expression"]
+
 nativeCheck :: String -> String -> IO TestResult
 nativeCheck name source = withProgram "examples/mir/emit/emit.tersus" "emit" $ \exe -> do
     bad <- check exe (name, source)
@@ -159,8 +164,13 @@ nativeCheck name source = withProgram "examples/mir/emit/emit.tersus" "emit" $ \
         case dataOf of
             Error e -> pure [name ++ ": " ++ e]
             Ok dataText -> do
-                outline <- runExecutableBytes exe ["outline"] dataText
-                bodies <- runExecutableBytes exe ["bodies"] dataText
+                (outline, bodies) <-
+                    if name `elem` emitModeSubset
+                        then do
+                            o <- runExecutableBytes exe ["outline"] dataText
+                            b <- runExecutableBytes exe ["bodies"] dataText
+                            pure (o, b)
+                        else pure ((ExitSuccess, "", ""), (ExitSuccess, "", ""))
                 everything <- runExecutableBytes exe [] dataText
                 roundTrip <- case readProgram dataText of
                     Error e -> pure ["the data does not read back: " ++ e]

@@ -302,15 +302,13 @@ snippetParity = do
 -- is located throughout.
 locatedSnippets :: [(String, String)]
 locatedSnippets =
-    [ ("integer and arithmetic", "x = 1 + 2 * 3 - 4 / 2 % 3; return x;")
-    , ("struct definition and literal", "struct Point { x: Int, y: Int }; p = Point { x: 1, y: 2 }; return p.x;")
-    , ("enum and match statement", "enum Shape { Circle { r: Int }, Dot }; s = Shape::Circle { r: 3 }; x = 0; match s { Shape::Circle { r: r } => { x = r; }, Shape::Dot => { x = 1; }, }; return x;")
-    , ("for range", "total = 0; for i in 0..10 { total = total + i; }; return total;")
-    , ("function with contract", "fn f(n: Int) -> Int [{ affirm n >= 0; }] [{ affirm return >= 0; }] shrinks n { return n; }; return f(1);")
-    , ("trait and impl", "trait T { fn get(self: &Self) -> Int [{ }] [{ }]; }; struct S { x: Int }; impl T for S { fn get(self: &Self) -> Int [{ }] [{ }] { return self.x; }; }; return 0;")
-    , ("standard Eq impl", "struct S { x: Int }; impl Eq for S { }; return 0;")
-    , ("proof statements", "affirm 1 < 2 && 2 < 3; define p = 1; rewrite evalAll; return 0;")
-    , ("generated recursive Eq source positions", "enum Tree { Many { xs: List<Tree> }, Leaf }; impl Eq for Tree { }; return 0;")
+    [ (name, source)
+    | name <- [ "integer and arithmetic", "struct definition and literal", "enum and match statement"
+              , "for range", "function with contract", "trait and impl", "standard Eq impl", "proof statements" ]
+    , Just source <- [lookup name snippets]
+    ]
+    ++
+    [ ("generated recursive Eq source positions", "enum Tree { Many { xs: List<Tree> }, Leaf }; impl Eq for Tree { }; return 0;")
     , ("generated recursive Clone source positions", "enum Tree { Many { xs: List<Tree> }, One { child: Box<Tree> }, Leaf }; impl Clone for Tree { }; return 0;")
     , ("import is not linked", "import geo; return 0;")
     , ("imports with alias and names are not linked", "import geo::shapes as G { Circle }; import units; return 0;")

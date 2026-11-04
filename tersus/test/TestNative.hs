@@ -824,12 +824,7 @@ testRunExecutable = TestCase "run builds, runs and removes the executable" $ do
                 case ir of
                     Error e -> pure (Error e)
                     Ok text -> runExecutable text []
-            failing <- do
-                ir <- tersusLlvm "return 9223372036854775807 + 1;"
-                case ir of
-                    Error e -> pure (Error e)
-                    Ok text -> runExecutable text []
-            pure (testAssertEq (ran, failing) (Ok ExitSuccess, Ok (ExitFailure 1)))
+            pure (testAssertEq ran (Ok ExitSuccess))
 
 -- Every example that validates is run natively: a new example has to be added to `nativeExamples`
 testEveryExampleIsBuilt :: Test

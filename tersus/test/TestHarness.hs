@@ -10,6 +10,9 @@ module TestHarness
     , combineSummaries
     , testCase
     , testCaseSeq
+    , testCaseNamedSeq
+    , parseFailsWithHelper
+    , parseValidateEvalProgramHelper
     , forceTestResult
     , runTest
     , testAssertTrue
@@ -20,6 +23,9 @@ module TestHarness
     , parseEvalProgramFailHelper
     , parseValidProgramHelper
     , parseValidateFailProgramHelper
+    , pipelineRuns
+    , pipelineValid
+    , pipelineRejected
     , nativeInts
     , vecLibrary
     , compileOnce
@@ -74,7 +80,7 @@ import Native (cacheDirectory)
 import TestParserFragments
 import Modules (LoadResult (..), normalizePath, resolverFromFiles, snapshotFromFilesystem)
 import qualified Modules
-import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseWithEquality, runStatements, validateStatements, validatedSource)
+import Pipeline (loadFromEntry, compileModulesValidated, erasedModuleProgram, ownedModuleProgram, compileSource, ownedSource, parseSource, parseWithEquality, runStatements, validateStatements, validatedSource)
 import Types
 import Syntax
 import Solver
@@ -106,6 +112,29 @@ testCaseSeq name results =
     TestList
         name
         (zipWith (\i result -> testCase (show i) result) [0 :: Integer ..] results)
+
+-- Like testCaseSeq, but each row keeps its own name in the output.
+testCaseNamedSeq :: String -> [(String, TestResult)] -> Test
+testCaseNamedSeq name rows =
+    TestList name (map (uncurry testCase) rows)
+
+-- A parse failure whose message contains the expected text.
+parseFailsWithHelper :: String -> String -> TestResult
+parseFailsWithHelper source expected =
+    case parseStatementBlock source of
+        Left err -> if expected `isInfixOf` show err then Nothing else Just ("Wrong parse error: " ++ show err)
+        Right _ -> Just ("Expected a parse error for: " ++ source)
+
+-- Dual stage: a program must both validate and evaluate to the expected value.
+parseValidateEvalProgramHelper :: String -> Maybe Value -> TestResult
+parseValidateEvalProgramHelper source expected = withProgram source $
+    case parseWithEquality source of
+        Left err -> Just $ "Parse failed: " ++ err
+        Right stmts -> case validateStatements stmts of
+            Error e -> Just $ "Validation failed with error: " ++ e
+            Ok _ -> case runStatements stmts of
+                Ok result -> testAssertEq (fmap fromMirValue result) expected
+                Error e -> Just $ "Evaluation failed with error: " ++ e
 
 forceTestResult :: TestResult -> ()
 forceTestResult Nothing = ()
@@ -216,15 +245,41 @@ parseValidProgramHelper source = withProgram source $
             Ok _ -> Nothing
             Error e -> Just $ "Validation failed with error: " ++ e
 
--- The expected text documents why the old validator refused the program; the
--- Tersus validator's messages are its own, so this asserts the verdict.
+-- Assert validation fails and the error contains the expected substring
+-- (via testAssertErrorContains, whose documented fallback accepts any
+-- "Could not prove: ..." / unmodelled-feature verdict for a specific
+-- "Could not prove: <obligation>" expectation).
 parseValidateFailProgramHelper :: String -> String -> TestResult
-parseValidateFailProgramHelper source _expectedError = withProgram source $
+parseValidateFailProgramHelper source expectedError = withProgram source $
     case parseWithEquality source of
         Left err -> Just $ "Parse failed: " ++ err
         Right stmts -> case validateStatements stmts of
             Ok _ -> Just "Validation passed when it should have failed"
-            Error _ -> Nothing
+            result@(Error _) -> testAssertErrorContains expectedError result
+
+-- The Pipeline.parseSource counterparts of the helpers above: parseSource reads a program as
+-- the command line reads it, with the libraries the pipeline puts in front of it (lib-injected),
+-- where parseWithEquality reads the source alone. pipelineRejected asserts the expected
+-- substring, on a parse failure directly and on a validation failure via
+-- testAssertErrorContains (as parseValidateFailProgramHelper does).
+pipelineRuns :: String -> Value -> TestResult
+pipelineRuns source expected = case parseSource source of
+    Error e -> Just ("Parse failed: " ++ e)
+    Ok stmts -> case runStatements stmts of
+        Ok result -> testAssertEq (fmap fromMirValue result) (Just expected)
+        Error e -> Just ("Evaluation failed with error: " ++ e)
+
+pipelineValid :: String -> TestResult
+pipelineValid source = case parseSource source of
+    Error e -> Just ("Parse failed: " ++ e)
+    Ok stmts -> case validateStatements stmts of
+        Ok _ -> Nothing
+        Error e -> Just ("Validation failed with error: " ++ e)
+
+pipelineRejected :: String -> String -> TestResult
+pipelineRejected source expected = case parseSource source of
+    Error e -> if expected `isInfixOf` e then Nothing else Just ("Expected failure containing: " ++ show expected ++ "\nGot: " ++ e)
+    Ok stmts -> testAssertErrorContains expected (validateStatements stmts)
 
 -- A failure says which program it was about (the start of it)
 withProgram :: String -> TestResult -> TestResult

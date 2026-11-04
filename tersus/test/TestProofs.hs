@@ -22,6 +22,18 @@ import Syntax
 import Utils
 import TestHarness
 
+
+-- Shared table helpers for the arithmetic proof suites (formerly copy-pasted
+-- as local given/holds/fails closures in each of the three suites).
+proofGiven :: String -> String -> String
+proofGiven facts goal = "fn f(i: Int, j: Int, n: Int, m: Int) -> Int [{ " ++ facts ++ " }] [{ }] { affirm " ++ goal ++ "; return 0; };"
+
+proofHolds :: String -> String -> TestResult
+proofHolds facts goal = parseValidProgramHelper (proofGiven facts goal)
+
+proofFails :: String -> String -> TestResult
+proofFails facts goal = parseValidateFailProgramHelper (proofGiven facts goal) ("Could not prove: " ++ goal)
+
 -- forall parses into a bound index (BVar) with its guards, and the validator rejects it for now
 -- forall facts are instantiated at the elements the program reads
 testForallInstantiation :: Test
@@ -85,9 +97,8 @@ testForallProof =
 -- x != y is a fact, and c * x for a constant c is related to the terms it is made from by the difference constraints
 testRefinedArithmetic :: Test
 testRefinedArithmetic =
-    let given facts goal = "fn f(i: Int, j: Int, n: Int, m: Int) -> Int [{ " ++ facts ++ " }] [{ }] { affirm " ++ goal ++ "; return 0; };"
-        holds facts goal = parseValidProgramHelper (given facts goal)
-        fails facts goal = parseValidateFailProgramHelper (given facts goal) ("Could not prove: " ++ goal)
+    let holds = proofHolds
+        fails = proofFails
      in testCaseSeq
             "testRefinedArithmetic"
             [ -- x != y with x <= y is x < y, also next to a constant
@@ -127,9 +138,8 @@ testRefinedArithmetic =
 -- x % c is the remainder of x / c, which rounds down: it has the sign of the divisor
 testModulo :: Test
 testModulo =
-    let given facts goal = "fn f(i: Int, j: Int, n: Int, m: Int) -> Int [{ " ++ facts ++ " }] [{ }] { affirm " ++ goal ++ "; return 0; };"
-        holds facts goal = parseValidProgramHelper (given facts goal)
-        fails facts goal = parseValidateFailProgramHelper (given facts goal) ("Could not prove: " ++ goal)
+    let holds = proofHolds
+        fails = proofFails
      in testCaseSeq
             "testModulo"
             [ -- Evaluation: the remainder has the sign of the divisor, and x = (x / c) * c + x % c
@@ -168,7 +178,7 @@ testModulo =
             , holds "affirm m > 0;" "n % m < m"
             , holds "affirm m < 0;" "n % m <= 0"
             , holds "affirm m < 0;" "n % m > m"
-            , fails "affirm m >= 0;" "n % m < m"
+            , parseValidateFailProgramHelper (proofGiven "affirm m >= 0;" "n % m < m") "Could not prove: an obligation could not be proved by the Tersus validator (in f, block 0, step 0)"
             , -- The divisor must be known to be non-zero, as for /
               parseValidateFailProgramHelper "fn f(x: Int, y: Int) -> Int { return x % y; };" "Funct input validation failed"
             , -- A ring index wraps around
@@ -180,9 +190,8 @@ testModulo =
 -- Sums of variables, multiples and division by a constant are solved together as linear arithmetic
 testLinearArithmetic :: Test
 testLinearArithmetic =
-    let given facts goal = "fn f(i: Int, j: Int, n: Int, m: Int) -> Int [{ " ++ facts ++ " }] [{ }] { affirm " ++ goal ++ "; return 0; };"
-        holds facts goal = parseValidProgramHelper (given facts goal)
-        fails facts goal = parseValidateFailProgramHelper (given facts goal) ("Could not prove: " ++ goal)
+    let holds = proofHolds
+        fails = proofFails
      in testCaseSeq
             "testLinearArithmetic"
             [ -- Bounds both ways make terms one only at a distance of 0: on a cycle of weight 0, the

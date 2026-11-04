@@ -50,6 +50,7 @@ import TestBuiltinRegistry
 import TestSharedCache
 import TestScheduling
 import TestAstData
+import TestDataCodec
 import TestModules
 import TestParity
 import TestParser
@@ -194,6 +195,7 @@ originalGroups =
     , testSharedCacheProbe
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
+    , testDataCodec
     , testParser
     , testParserBootstrap
     , testParserUnicode
