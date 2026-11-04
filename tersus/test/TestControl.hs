@@ -65,6 +65,11 @@ testIfJoin =
               parseValidProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { x = x + 2; }; affirm x > 1;")
             , parseValidProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { }; affirm x > 0;")
             , parseValidateFailProgramHelper (fn' "x = y; if c > 0 { x = x + 1; } else { x = 0; }; affirm x > 0;") "Could not prove: x > 0"
+            , -- A local joined from the value of a local that keeps it: the one that keeps it keeps what is known of it
+              parseValidProgramHelper "fn f(bytes: &List<Int>, p: Int) -> Int { limit = size(bytes); end = p; if end > limit { end = limit; }; affirm limit = size(bytes); affirm end <= size(bytes); return end; }; return 0;"
+            , parseValidProgramHelper "fn f(bytes: &List<Int>, p: Int) -> Int { end = p; if end > size(bytes) { end = size(bytes); }; affirm end <= size(bytes); return end; }; return 0;"
+            , -- Sequential conditional pushes, whose facts once multiplied at each join
+              parseValidProgramHelper ("fn f(c: Int, xs: List<Int>) -> List<Int> { facts = xs; " ++ concat ["if c > " ++ show i ++ " { facts = push(facts, " ++ show i ++ "); }; " | i <- [0 .. 9 :: Int]] ++ "return facts; }; return 0;")
             , -- The branches' own facts still count, and so do the else branch's
               parseValidProgramHelper (fn' "x = 0; if c > 0 { x = 5; } else { x = 5; affirm x = 5; }; affirm x = 5;")
             , parseValidProgramHelper (fn' "x = 0; z = 0; if c > 0 { x = 1; z = 2; } else { x = 3; z = 4; }; affirm x < z;")

@@ -4296,6 +4296,18 @@ fn mergeTerm(joined: &HashMap<Int, Int>, ambiguous: &HashSet<Int>, term: Int) ->
 fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSide: Bool) -> ValidatorContext {
     joined = emptyIntMap();
     ambiguous = HashSet::new();
+    // (a term a local keeps as itself across the join keeps its facts: a local
+    // joined from it on this side is said equal to it here, not renamed into
+    // it, or the local that keeps it would lose what is known of it)
+    kept = HashSet::new();
+    for pairPosition in 0..size(pairs) {
+        pair = get(pairs, pairPosition);
+        if pair.joined = pair.left && pair.joined = pair.right && pair.left < 0 {
+            kept = kept.insert(pair.left);
+            joined = joined.insert(pair.left, pair.left);
+        };
+    };
+    sameAsKept = [];
     for pairPosition in 0..size(pairs) {
         pair = get(pairs, pairPosition);
         source = pair.right;
@@ -4304,6 +4316,8 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
         // value: renaming it would turn m >= 1 into m >= c after c = 1 on one
         // side; the joined value gets its range from the bounds instead)
         if source >= 0 {
+        } else if kept.contains(source) {
+            if pair.joined != source { sameAsKept = push(sameAsKept, EqualityFact { left: pair.joined, right: source }); };
         } else if pair.ambiguous {
             ambiguous = ambiguous.insert(source);
         } else if ambiguous.contains(source) = false {
@@ -4384,6 +4398,7 @@ fn normalizedContext(context: &ValidatorContext, pairs: &List<MergePair>, leftSi
         object = mergeTerm(joined, ambiguous, fact.object);
         if object is ValueLookup::Found { variants = push(variants, VariantFact { object: (object as ValueLookup::Found).term, family: fact.family, constructor: fact.constructor, matches: fact.matches }); };
     };
+    for fact in sameAsKept { equalities = push(equalities, fact); };
     return ValidatorContext { equalities: equalities, applications: applications, constants: constants, orders: orders, different: different, variants: variants, fieldFunctions: fieldFunctions, constructorFunctions: constructorFunctions, constructorFields: constructorFields, differences: differences };
 };
 
@@ -4826,23 +4841,6 @@ fn mergeStates(fork: &ExecutionState, left: &ExecutionState, right: &ExecutionSt
             };
         };
     };
-    // (a term that is also joined on one side keeps that mapping alone)
-    keptPairs = emptyMergePairs();
-    for pairPosition in 0..size(pairs) {
-        pair = get(pairs, pairPosition);
-        identity = pair.joined = pair.left && pair.joined = pair.right;
-        clash = false;
-        if identity {
-            for otherPosition in 0..size(pairs) {
-                other = get(pairs, otherPosition);
-                if other.joined != other.left || other.joined != other.right {
-                    if other.left = pair.left || other.right = pair.left { clash = true; };
-                };
-            };
-        };
-        if clash = false { keptPairs = push(keptPairs, clone(pair)); };
-    };
-    pairs = keptPairs;
     leftContext = normalizedContext(left.context, pairs, true);
     rightContext = normalizedContext(right.context, pairs, false);
     // (a forall both paths assumed holds after the join: its values are locals,
