@@ -1,3 +1,4 @@
+import mir::support::support { Res, Layout, noStrings, showInt, joinWith, beforeAngle, escaped, renderType, declName, lookupDecl, canonical, variantsOf, isEnum, sizedArray, isSizedArray, isAggregate, declaredName, roundUp, wordLayout, simpleLayout };
 import data::codec::codec { Size, Type, done, quoted, parseInt };
 
 // The lowering from the MIR to LLVM IR, written in Tersus (step 31 of the roadmap, see STEP31.md): the compiler's only emitter. It was written function by function
@@ -24,18 +25,12 @@ import mir::reader::reader { Field, Variant, TypeDecl, Constant, Operand, RefSte
 
 // Strings
 
-// `a.then(b)` is `a.concat(b)` that says nothing of its result. The text is put together from many pieces here (a line of the IR is ten of them), and what `concat` promises
-// of the size and the bytes of each is a set of facts that the proof of every later statement of the function has to carry: the time to validate a function with a few
-// of these chains was most of the time to validate the program.
+
 impl String {
     fn then(self: Self, other: &String) -> Self [{ }] [{ }] {
         return self.concat(other);
     };
 };
-
-struct Res { ok: Bool, text: String };
-
-impl Clone for Res { };
 
 fn noTypes() -> List<Type> [{ }] [{ }] {
     return [];
@@ -45,59 +40,6 @@ fn noConstants() -> List<Constant> [{ }] [{ }] {
     return [];
 };
 
-fn noStrings() -> List<String> [{ }] [{ }] {
-    return [];
-};
-
-fn showInt(n: Int) -> String [{ }] [{ }] {
-    return String::fromInt(n);
-};
-
-// The strings of a list with a string between them
-fn joinWith(sep: &String, parts: &List<String>) -> String [{ }] [{ }] {
-    out = "";
-    for i in 0..size(parts) {
-        if i > 0 { out = out.then(sep); };
-        out = out.then(get(parts, i));
-    };
-    return out;
-};
-
-// The text before the first `<` (a struct with sizes prints as the struct)
-fn beforeAngle(name: &String) -> String [{ }] [{ }] {
-    i = name.find(toByte(60), 0);
-    return name.slice(0, i);
-};
-
-fn withoutBackticks(name: &String) -> String [{ }] [{ }] {
-    out = "";
-    for i in 0..size(name.bytes) {
-        b = get(name.bytes, i);
-        if b != toByte(96) { out = push(out, b); };
-    };
-    return out;
-};
-
-fn hexUpper(d: Int) -> Byte [{ affirm d >= 0; affirm d <= 15; }] [{ }] {
-    if d < 10 { return toByte(48 + d); };
-    return toByte(55 + d);
-};
-
-// A name as LLVM writes it in quotes and in a string: the bytes that are printable ASCII as they are and the others (and `"` and `\`) as `\hh`
-fn escaped(name: &String) -> String [{ }] [{ }] {
-    out = "";
-    for i in 0..size(name.bytes) {
-        c = toInt(get(name.bytes, i));
-        if c >= 32 && c < 127 && c != 34 && c != 92 {
-            out = push(out, toByte(c));
-        } else {
-            out = push(out, toByte(92));
-            out = push(out, hexUpper(c / 16));
-            out = push(out, hexUpper(c % 16));
-        };
-    };
-    return out;
-};
 
 // The name of a global: quoted, so that any name will do
 fn global(prefix: &String, name: &String) -> String [{ }] [{ }] {
@@ -106,206 +48,12 @@ fn global(prefix: &String, name: &String) -> String [{ }] [{ }] {
 
 // Types
 
-fn renderSize(s: &Size) -> String [{ }] [{ }] {
-    return match s {
-        Size::SConst { n: n } => showInt(n),
-        Size::SAny => "?",
-        Size::SParam { name: name } => clone(name),
-        Size::SVar { n: n } => "_".then(showInt(n)),
-    };
-};
-
-// A type in Tersus syntax (Pretty.renderType)
-fn renderType(t: &Type) -> String ~ {
-    r = "";
-    match t {
-        Type::TInt => { r = "Int"; },
-        Type::TByte => { r = "Byte"; },
-        Type::TBool => { r = "Bool"; },
-        Type::TList { elem: e } => { r = "List<".then(renderType(Box::unbox(e))).then(">"); },
-        Type::TBox { inner: e } => { r = "Box<".then(renderType(Box::unbox(e))).then(">"); },
-        Type::TArray { elem: e, size: s } => { r = "Array<".then(renderType(Box::unbox(e))).then(", ").then(renderSize(s)).then(">"); },
-        Type::TRef { inner: e } => { r = "&".then(renderType(Box::unbox(e))); },
-        Type::TMutRef { inner: e } => { r = "&mut ".then(renderType(Box::unbox(e))); },
-        Type::TAddr { inner: e } => { r = "Addr<".then(renderType(Box::unbox(e))).then(">"); },
-        Type::TBlock { inner: e } => { r = "Block<".then(renderType(Box::unbox(e))).then(">"); },
-        Type::TUninit { inner: e } => { r = "Uninit<".then(renderType(Box::unbox(e))).then(">"); },
-        Type::TWord { signed: signed, bits: bits } => {
-            if signed { r = "I".then(showInt(bits)); } else { r = "U".then(showInt(bits)); };
-        },
-        Type::TParam { name: name } => { r = clone(name); },
-        Type::TForall { sizes: sizes, types: types, body: body } => {
-            names = noStrings();
-            for tn in types { names = push(names, clone(tn)); };
-            for sn in sizes { names = push(names, clone(sn)); };
-            r = "<".then(joinWith(", ", names)).then(">").then(renderType(Box::unbox(body)));
-        },
-        Type::TFn { args: args, ret: ret } => {
-            parts = noStrings();
-            for a in args { parts = push(parts, renderType(a)); };
-            r = "fn(".then(joinWith(", ", parts)).then(") -> ").then(renderType(Box::unbox(ret)));
-        },
-        Type::TNamed { name: name } => { r = withoutBackticks(name); },
-        Type::TVariant { name: name } => { r = clone(name); },
-        Type::TVar { n: n } => { r = "?"; },
-    };
-    return r;
-};
-
-fn declName(d: &TypeDecl) -> String [{ }] [{ }] {
-    if d is TypeDecl::DStruct { return clone((d as TypeDecl::DStruct).name); };
-    return clone((d as TypeDecl::DEnum).name);
-};
-
-// The index of the declaration of a struct or an enum in the types of the program, or -1
-fn lookupDecl(types: &List<TypeDecl>, name: &String) -> Int [{ }] [{ affirm return >= 0 - 1; affirm return < size(types); }] {
-    i = 0;
-    while i < size(types) [{ affirm i >= 0; affirm i <= size(types); }] shrinks size(types) - i {
-        d = &get(types, i);
-        if declName(d) = name { return i; };
-        i = i + 1;
-    };
-    return 0 - 1;
-};
-
-fn variantNamed(variants: &List<Variant>, name: &String) -> Bool [{ }] [{ }] {
-    for v in variants {
-        if v.name = name { return true; };
-    };
-    return false;
-};
-
-// The enum that has the variant (a struct is its own constructor, and a cast to it has the type of a variant of it): Mir.ownerOf
-fn ownerOf(types: &List<TypeDecl>, v: &String) -> Res [{ }] [{ }] {
-    i = lookupDecl(types, v);
-    if i >= 0 {
-        d = get(types, i);
-        if d is TypeDecl::DStruct { return Res { ok: true, text: clone(v) }; };
-    };
-    for d in types {
-        match d {
-            TypeDecl::DStruct { name: name, fields: fields } => { },
-            TypeDecl::DEnum { name: name, variants: variants } => {
-                if variantNamed(variants, v) { return Res { ok: true, text: clone(name) }; };
-            },
-        };
-    };
-    return Res { ok: false, text: "" };
-};
-
-// A value of a variant has the representation of its enum, so the made functions of one serve both
-fn canonical(types: &List<TypeDecl>, t: &Type) -> Type [{ }] [{ }] {
-    if t is Type::TVariant {
-        o = ownerOf(types, (t as Type::TVariant).name);
-        if o.ok { return Type::TNamed { name: clone(o.text), base: o.text, argc: 0, argTokens: [] }; };
-    };
-    return clone(t);
-};
-
-// The variants of a struct or an enum: a struct is one variant, named as it is
-fn variantsOf(types: &List<TypeDecl>, n: &String) -> List<Variant> [{ }] [{ }] {
-    out = [];
-    i = lookupDecl(types, n);
-    if i >= 0 {
-        d = get(types, i);
-        match d {
-            TypeDecl::DStruct { name: name, fields: fields } => { out = push(out, Variant { name: clone(name), fields: clone(fields) }); },
-            TypeDecl::DEnum { name: name, variants: variants } => { out = clone(variants); },
-        };
-    };
-    return out;
-};
-
-fn isEnum(types: &List<TypeDecl>, n: &String) -> Bool [{ }] [{ }] {
-    i = lookupDecl(types, n);
-    if i >= 0 {
-        d = get(types, i);
-        return d is TypeDecl::DEnum;
-    };
-    return false;
-};
-
-// What a type is when it is an array: whether it is one of the kind asked for, its length when it has one, and the type of its elements. (The cast of an enum is
-// proved by the test just before it, so the tests are made where the cast is.)
-struct ArrayInfo { ok: Bool, length: Int, elem: Type };
-
-impl Clone for ArrayInfo { };
-
-fn notArray() -> ArrayInfo [{ }] [{ }] {
-    return ArrayInfo { ok: false, length: 0, elem: Type::TInt };
-};
-
-// An array of a size that is a constant (the TArray of Haskell)
-fn sizedArray(t: &Type) -> ArrayInfo [{ }] [{ }] {
-    if t is Type::TArray {
-        s = (t as Type::TArray).size;
-        if s is Size::SConst {
-            return ArrayInfo { ok: true, length: (s as Size::SConst).n, elem: clone(Box::unbox((t as Type::TArray).elem)) };
-        };
-    };
-    return notArray();
-};
-
-// An array of no size
-fn unsizedArray(t: &Type) -> ArrayInfo [{ }] [{ }] {
-    if t is Type::TArray {
-        s = (t as Type::TArray).size;
-        if s is Size::SAny {
-            return ArrayInfo { ok: true, length: 0, elem: clone(Box::unbox((t as Type::TArray).elem)) };
-        };
-    };
-    return notArray();
-};
 
 // A type, if there is one (what a list of native code holds)
 struct Held { ok: Bool, ty: Type };
 
 impl Clone for Held { };
 
-fn isSizedArray(t: &Type) -> Bool [{ }] [{ }] {
-    return sizedArray(t).ok;
-};
-
-fn isAggregate(t: &Type) -> Bool [{ }] [{ }] {
-    return isSizedArray(t) || t is Type::TNamed || t is Type::TVariant;
-};
-
-// The struct or enum that a type is a value of: a struct or an enum itself, or a variant (whose enum is looked up)
-fn declaredName(types: &List<TypeDecl>, t: &Type) -> Res [{ }] [{ }] {
-    if t is Type::TNamed { return Res { ok: true, text: clone((t as Type::TNamed).name) }; };
-    if t is Type::TVariant { return ownerOf(types, (t as Type::TVariant).name); };
-    return Res { ok: false, text: "" };
-};
-
-// The layout of a value held inline (Mir.layoutOf, C's rules): its bytes and its alignment. An Int, an address, a function and a Box are 8 bytes, a Box of an
-// array of no size 16, a Byte and a Bool 1, a fixed-width integer its bits over 8; an array is its elements, a struct its fields each at a multiple of its
-// alignment (and the size rounded up to the largest), and an enum a U32 tag and then the fields of its variant from the first offset every variant can start at.
-struct Layout { size: Int, align: Int };
-
-impl Clone for Layout { };
-
-fn roundUp(n: Int, a: Int) -> Int [{ }] [{ }] {
-    if a <= 1 { return n; };
-    return (n + a - 1) / a * a;
-};
-
-fn wordLayout() -> Layout [{ }] [{ }] {
-    return Layout { size: 8, align: 8 };
-};
-
-// The layout of a type that is not a struct or an enum, or of no type when it is one
-struct Simple { ok: Bool, layout: Layout };
-
-impl Clone for Simple { };
-
-fn simpleLayout(t: &Type) -> Simple [{ }] [{ }] {
-    if t is Type::TByte || t is Type::TBool { return Simple { ok: true, layout: Layout { size: 1, align: 1 } }; };
-    if t is Type::TWord {
-        b = (t as Type::TWord).bits / 8;
-        return Simple { ok: true, layout: Layout { size: b, align: b } };
-    };
-    return Simple { ok: false, layout: wordLayout() };
-};
 
 fn layoutOf(types: &List<TypeDecl>, t: &Type) -> Layout ~ {
     if t is Type::TBlock { return Layout { size: 0, align: 1 }; };
