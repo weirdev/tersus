@@ -14,7 +14,7 @@ import qualified Modules
 import qualified PackageCompile
 import qualified MirHousekeeping
 import qualified Data.Map.Strict as Map
-import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime)
+import System.Directory (copyFile, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getPermissions, getTemporaryDirectory, listDirectory, removeDirectoryRecursive, removeFile, renameFile, setModificationTime, setPermissions)
 import System.Environment (getEnvironment, getExecutablePath, lookupEnv, setEnv, unsetEnv)
 import System.Exit (ExitCode (..))
 import System.FilePath ((</>), takeDirectory, takeFileName)
@@ -1012,13 +1012,32 @@ parserRetryProbe = do
         Right _ -> do
             let parser = home </> "tersus" </> ("tersus-parser-" ++ TersusParser.parserHash)
                 source = "return 987823;"
+            permissions <- getPermissions parser
+            modified <- getModificationTime parser
             before <- bracket (renameFile parser (parser ++ ".held"))
-                (\_ -> renameFile (parser ++ ".held") parser)
-                (\_ -> compileOnce source)
+                (\_ -> do
+                    present <- doesFileExist parser
+                    when present (removeFile parser)
+                    renameFile (parser ++ ".held") parser)
+                (\_ -> do
+                    writeFile parser "#!/bin/sh\nprintf '%s\\n' 'intentional transient parser failure' >&2\nexit 23\n"
+                    setPermissions parser permissions
+                    compileOnce source)
+            restoredPermissions <- getPermissions parser
+            restoredModified <- getModificationTime parser
+            failedFile <- sharedProgramCacheFile "compile" source
+            wasFiled <- maybe (pure False) doesFileExist failedFile
             after <- compileOnce source
-            pure $ case (before, after) of
-                (Error e, Ok _) | "Parser tool failure:" `isPrefixOf` e -> Nothing
-                _ -> Just ("native parser retry: before=" ++ describe before ++ "; after=" ++ describe after)
+            pure $ firstFailure
+                [ testAssertEq (restoredPermissions, restoredModified) (permissions, modified)
+                , testAssertTrue (not wasFiled)
+                , case (before, after) of
+                    (Error e, Ok _)
+                        | "Parser tool failure:" `isPrefixOf` e
+                        , "native parser exited 23" `isInfixOf` e
+                        , "intentional transient parser failure" `isInfixOf` e -> Nothing
+                    _ -> Just ("native parser retry: before=" ++ describe before ++ "; after=" ++ describe after)
+                ]
   where
     describe (Error e) = e
     describe (Ok _) = "success"
