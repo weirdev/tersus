@@ -25,6 +25,7 @@ import System.Posix.Signals (sigKILL, signalProcess)
 import System.Process (CreateProcess (..), ProcessHandle, StdStream (UseHandle), createProcess, proc, readCreateProcessWithExitCode, terminateProcess, waitForProcess)
 import System.Timeout (timeout)
 
+import GHC.Conc (getNumCapabilities)
 import Modules (LoadResult (..), LoadedPackage (..), LoadedModule (..), LoadedFile (..), ModuleId (..), loadFromFilesystem, normalizePath, snapshotFromFilesystem)
 import MirHousekeeping (emitterEntry)
 import Mir (BasicBlock (..), BlockId (..), Function (..), FunctionSpec (..), LocalDecl (..), Program (..), Statement (..))
@@ -146,6 +147,13 @@ testSharedCacheProbe = TestList "testSharedCacheProbe" [TestCase "probe" probe]
 
 probe :: IO TestResult
 probe = do
+    routing <- lookupEnv "TERSUS_TEST_ROUTING_PROBE"
+    case routing of
+        Just "1" -> getNumCapabilities >>= \count -> putStrLn ("[CAPABILITIES] " ++ show count) >> pure Nothing
+        _ -> cacheProbe
+
+cacheProbe :: IO TestResult
+cacheProbe = do
     native <- lookupEnv "TERSUS_NATIVE_CACHE_PROBE"
     package <- lookupEnv "TERSUS_PACKAGE_CACHE_PROBE"
     case package of

@@ -2,6 +2,7 @@ module TestScheduling
     ( Arguments (..)
     , parseArguments
     , selectGroupNames
+    , useWorkerProcesses
     , assignShards
     , groupWeight
     , splitTestGroups
@@ -13,7 +14,11 @@ module TestScheduling
 import Control.Exception (evaluate)
 import Data.Char (isDigit)
 import Data.IORef (modifyIORef', newIORef, readIORef)
-import Data.List (delete, foldl', isPrefixOf, minimumBy, sort, sortBy)
+import Data.List (delete, foldl', isInfixOf, isPrefixOf, minimumBy, sort, sortBy)
+import System.Environment (getEnvironment, getExecutablePath)
+import System.Exit (ExitCode (..))
+import System.Process (CreateProcess (..), proc, readCreateProcessWithExitCode)
+import System.Timeout (timeout)
 import Data.Ord (comparing)
 import System.Mem.StableName (makeStableName)
 import TestHarness (Test (..), TestResult, testAssertEq, testAssertTrue, testCase)
@@ -83,6 +88,10 @@ selectGroupNames arguments names
     inShard name = case argumentShard arguments of
         Nothing -> True
         Just (index, _) -> lookup name assignments == Just index
+
+useWorkerProcesses :: Arguments -> Int -> Int -> Bool
+useWorkerProcesses arguments jobs selectedCount =
+    not (argumentChild arguments) && jobs > 1 && selectedCount > 0
 
 assignShards :: Int -> [String] -> [(String, Int)]
 assignShards count names
@@ -228,6 +237,32 @@ splitTestGroups count original
             || "function-list identity, interpreted" `elem` path || "call metadata, interpreted" `elem` path -> 5
         _ -> length (leafPaths test)
 
+-- Observe the real dispatch through the existing no-compiler probe group.
+routingProbe :: [String] -> Maybe Int -> Bool -> Bool -> IO TestResult
+routingProbe arguments capabilities worker summarized = do
+    self <- getExecutablePath
+    inherited <- getEnvironment
+    let environment = [("TERSUS_TEST_ROUTING_PROBE", "1"), ("TERSUS_TEST_RTS_STATS", "1")]
+            ++ [(key, value) | (key, value) <- inherited, key `notElem` ["TERSUS_TEST_ROUTING_PROBE", "TERSUS_TEST_RTS_STATS"]]
+    outcome <- timeout 30000000 (readCreateProcessWithExitCode
+        (proc self (arguments ++ ["+RTS", "-N2", "-RTS"])){env = Just environment} "")
+    pure $ case outcome of
+        Nothing -> Just "routing probe did not finish"
+        Just (code, output, errors) ->
+            let actualCaps = [line | line <- lines output, "[CAPABILITIES]" `isPrefixOf` line]
+                expectedCaps = maybe [] (\count -> ["[CAPABILITIES] " ++ show count]) capabilities
+                starts = length [() | line <- lines output, "[START] testSharedCacheProbe" `isPrefixOf` line]
+                times = length [() | line <- lines output, "[TIME] testSharedCacheProbe" `isPrefixOf` line]
+                passes = length [() | line <- lines output, "[PASS] testSharedCacheProbe" `isPrefixOf` line]
+                expectedPasses = maybe 0 (const 1) capabilities
+             in if code == ExitSuccess && actualCaps == expectedCaps
+                    && starts == (if worker then 1 else 0) && times == starts
+                    && passes == expectedPasses
+                    && ("Summary:" `isInfixOf` output) == summarized
+                    && (not worker || "using -N1" `isInfixOf` errors)
+                    then Nothing
+                    else Just ("unexpected worker routing: " ++ show (code, output, errors))
+
 testScheduling :: [String] -> [(Test, [Test])] -> Test
 testScheduling names batches = TestList "testScheduling"
     [ testCase "no flags preserve the full suite" $
@@ -250,6 +285,24 @@ testScheduling names batches = TestList "testScheduling"
             [["-j"], ["--jobs"], ["-j0"], ["--jobs=-1"], ["-j", "wat"], ["--shrad=1/3"]])
     , testCase "child arguments select the original single group without a shard" $
         testAssertEq (parseArguments ["testCli", "--child"] >>= (`selectGroupNames` names)) (Right ["testCli"])
+    , testCase "worker dispatch preserves child, serial and empty routing" $
+        let arguments child = Arguments (Just 4) [] child Nothing
+         in testAssertTrue (useWorkerProcesses (arguments False) 4 1
+            && useWorkerProcesses (arguments False) 4 2
+            && not (useWorkerProcesses (arguments True) 4 1)
+            && not (useWorkerProcesses (arguments False) 1 1)
+            && not (useWorkerProcesses (Arguments Nothing [] False Nothing) 1 1)
+            && not (useWorkerProcesses (arguments False) 4 0))
+    , TestCase "explicit parallel single group uses one N1 worker with RTS statistics" $
+        routingProbe ["-j", "4", "testSharedCacheProbe"] (Just 1) True True
+    , TestCase "default single group retains the parent RTS" $
+        routingProbe ["testSharedCacheProbe"] (Just 2) False True
+    , TestCase "serial single group retains the parent RTS" $
+        routingProbe ["-j", "1", "testSharedCacheProbe"] (Just 2) False True
+    , TestCase "explicit parallel child stays in process and cannot recurse" $
+        routingProbe ["-j", "4", "testSharedCacheProbe", "--child"] (Just 2) False False
+    , TestCase "empty explicit parallel selection launches no child" $
+        routingProbe ["-j", "4", "--shard", "999/999", "testSharedCacheProbe"] Nothing False True
     , testCase "all registered group names are unique" $
         testAssertEq (length names) (length (unique names))
     , testCase "every group belongs to exactly one shard for every tested count" $
