@@ -1,7 +1,10 @@
 module TestBorrow (testBorrow) where
 
+import Compile (lowerSource)
+import Data.List (isInfixOf)
 import Syntax
 import TestHarness
+import Utils (Result (..))
 
 -- &T: a parameter that the function only reads. A call lends the value, so it is not copied for the call and the caller keeps it; in
 -- the function the parameter is its type, which it cannot assign.
@@ -10,6 +13,10 @@ testBorrow =
     let runs body expected = parseEvalProgramHelper body (Just expected)
         valid = parseValidProgramHelper
         rejected = parseValidateFailProgramHelper
+        callRejected source expected = case lowerSource True source of
+            Error err | expected `isInfixOf` err -> Nothing
+            Error err -> Just ("Expected destination loan conflict: " ++ expected ++ "\nGot: " ++ err)
+            Ok _ -> Just ("Expected destination loan conflict: " ++ expected)
         parseFails source = case parseValidProgramHelper source of
             Just err | take 11 err == "Parse faile" -> Nothing
             _ -> Just ("Expected a parse error for: " ++ source)
@@ -140,6 +147,17 @@ testBorrow =
                 , testCase "a result through a function value still freezes its place" (rejected "fn head(xs: &List<Int>) -> &Int from xs [{ affirm size(xs) > 0; }] [{ }] { return &get(xs, 0); }; g = head; xs = [1]; r = g(xs); xs = [2]; return *r;" "cannot be assigned while it is borrowed")
                 , testCase "an update result is read after it is written through" (runs "fn f(x: &mut Int) -> &mut Int from x { return x; }; a = 1; r = f(&mut a); *r = 9; return *r;" (VInt 9))
                 , testCase "a reference to an unsized array can be sized" (runs "fn f(b: Box<Array<Int>>) -> Int { a = &*b; return size(*a); }; return f(Box::new(#[10, 20]));" (VInt 2))
+                ]
+            , TestList
+                "call destinations"
+                [ testCase "a call cannot replace a live read borrow's root" (callRejected "fn helper() -> Int { return 2; }; x = 1; r = &x; x = helper(); return *r;" "x cannot be assigned while it is borrowed by r")
+                , testCase "a call cannot replace a live update borrow's root" (callRejected "fn helper() -> Int { return 2; }; x = 1; r = &mut x; x = helper(); return *r;" "x cannot be assigned while it is borrowed by r")
+                , testCase "a call in one branch cannot replace a live borrow's root" (callRejected "fn helper() -> Int { return 2; }; fn f(flag: Bool) -> Int { x = 1; r = &x; if flag { x = helper(); }; return *r; }; return f(true);" "x cannot be assigned while it is borrowed by r")
+                , testCase "a live reference field freezes the call destination" (callRejected "struct H { r: &Int }; fn helper() -> Int { return 2; }; x = 1; h = H { r: &x }; x = helper(); r = h.r; return *r;" "x cannot be assigned while it is borrowed by h")
+                , testCase "a call can replace the root after the loan's last use" (valid "fn helper() -> Int { return 2; }; x = 1; r = &x; saved = *r; x = helper(); return saved + x;")
+                , testCase "a call can read its destination as an owned argument" (valid "fn helper(n: Int) -> Int { return n + 1; }; x = 1; x = helper(x); return x;")
+                , testCase "a borrow used only by the call ends before replacing the destination" (valid "fn helper(n: &Int) -> Int { return n + 1; }; x = 1; r = &x; x = helper(r); return x;")
+                , testCase "a returned reference can replace its own reference local" (valid "fn identity(n: &Int) -> &Int from n { return n; }; x = 1; r = &x; r = identity(r); return *r;")
                 ]
             , TestList
                 "conflicts"

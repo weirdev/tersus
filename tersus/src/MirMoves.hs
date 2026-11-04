@@ -327,6 +327,15 @@ placesOf st l = case Map.lookup l (stViews st) of
     Just ps | not (Set.null ps) -> Set.toList ps
     _ -> [(l, [])]
 
+destinationLoanErrors :: Cx -> Pos -> St -> Local -> [String]
+destinationLoanErrors cx pos st dest =
+    [ message cx pos (describeLocal cx dest ++ " cannot be assigned while it is borrowed by " ++ describeLocal cx ref ++ ": the borrow ends at the last use of " ++ describeLocal cx ref)
+    | (ref, place, _) <- loanEntries st
+    , ref `Set.member` cxLiveNow cx
+    , ref /= dest
+    , fst place == dest
+    ]
+
 assign :: Cx -> Pos -> St -> Local -> Rvalue -> (St, [String])
 assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFieldLoans = fieldLoans'', stConst = consts', stFnAlias = fnAlias'}, errs ++ lost cx pos st1 d ++ loanErrs)
   where
@@ -397,10 +406,7 @@ assign cx pos st0 d rv = (base{stLoans = loans'', stExtraLoans = extras'', stFie
             [ message cx pos (describe cx place ++ " is borrowed by " ++ describeLocal cx ref ++ ", so it cannot be borrowed" ++ (if mutable then " for updating" else "") ++ " while that borrow is live: the borrow ends at the last use of " ++ describeLocal cx ref)
             | (ref, lplace, lmut) <- activeLoans, ref `notElem` borrowChain, overlaps place lplace, mutable || lmut
             ]
-        Nothing ->
-            [ message cx pos (describeLocal cx d ++ " cannot be assigned while it is borrowed by " ++ describeLocal cx ref ++ ": the borrow ends at the last use of " ++ describeLocal cx ref)
-            | (ref, lplace, _) <- activeLoans, fst lplace == d
-            ]
+        Nothing -> destinationLoanErrors cx pos st1 d
     (st1, errs) = takenApart (foldl' (access cx pos) (st0, []) (if forLoopList then [(l, ps, Read) | (l, ps, _) <- accesses rv] else if tuplePart then [(l, ps, Consume) | (l, ps, _) <- accesses rv] else accesses rv))
     -- (a value of a linear type is used when a function of its own impl takes it apart: reads a field of it, or tests or casts its variant)
     takenApart (st, es) = case rv of
@@ -614,7 +620,7 @@ terminator cx pos st term = case term of
             windowed = case (refFieldNames cx (typeOf cx dest), resultFromPlaces cx st' callee args) of
                 (fields@(_ : _), places@(_ : _)) -> loaned{stFieldLoans = foldl' (\m f -> Map.insert (dest, f) places m) (Map.filterWithKey (\(root, _) _ -> root /= dest) (stFieldLoans loaned)) fields, stExtraLoans = Map.insert dest places (stExtraLoans loaned)}
                 _ -> loaned
-         in (hold cx pos windowed dest [], errs ++ take 1 conflicts ++ mutErrs ++ lost cx pos st' dest)
+         in (hold cx pos windowed dest [], errs ++ take 1 conflicts ++ mutErrs ++ destinationLoanErrors cx pos st dest ++ lost cx pos st' dest)
     -- (what a function returns is given to its caller, and a permission it has not used by then is lost)
     Return ->
         let (st', errs) = if Local 0 `Map.member` fnLocals (cxFn cx) then accessAll [(Local 0, [], Consume)] else (st, [])
