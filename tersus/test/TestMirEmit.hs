@@ -47,20 +47,19 @@ testMirEmitPrograms =
         "testMirEmitPrograms"
         [TestCase name (nativeCheck name source) | (name, source) <- validatedPrograms]
 
--- The four programs of the mir package import the shared reader, and none
--- of them carries a copy of it: the reader's types live only in
--- examples/mir/reader/reader.tersus, and the sweeps below run all four
--- programs through the package.
 sharedReader :: IO TestResult
 sharedReader = do
+    codec <- readFile "examples/data/codec/codec.tersus"
     reader <- readFile "examples/mir/reader/reader.tersus"
     programs <- mapM readFile ["examples/mir/mir_reader/mir_reader.tersus", "examples/mir/emit/emit.tersus", "examples/mir/mir_verify/mir_verify.tersus", "examples/mir/mir_erase/mir_erase.tersus"]
     pure $
-        if "struct Token" `isInfixOf` reader
+        if "struct Token" `isInfixOf` codec
+            && "struct Field" `isInfixOf` reader
+            && all ("import data::codec::codec" `isInfixOf`) (reader : programs)
             && all ("import mir::reader::reader" `isInfixOf`) programs
-            && not (any ("struct Token" `isInfixOf`) programs)
+            && not (any ("struct Token" `isInfixOf`) (reader : programs))
             then Nothing
-            else Just "a program of the mir package does not import the shared reader, or still carries its own copy of it"
+            else Just "a MIR program does not use the shared reader and codec, or contains its own Token declaration"
 
 -- The emitter of examples/mir/emit/emit.tersus, compiled once: the three interpreted cases each run it for a part of the IR, and its
 -- validation is the most expensive thing in this group.
