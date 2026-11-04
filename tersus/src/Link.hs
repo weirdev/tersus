@@ -13,7 +13,7 @@ import LibParsed (nativeStorageModules)
 import qualified Mir as M
 import Modules (ModuleId (..), renderModuleId)
 import qualified Syntax
-import Syntax (Proof (..), ValidationStatement (..), VariableProof, Value (..))
+import Syntax (StructSpec (..), Proof (..), ValidationStatement (..), VariableProof, Value (..))
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, baseNameOf)
 import Utils (Result (..), bindResult)
 
@@ -192,7 +192,7 @@ pruneProgram program =
         keptFnList = [fn | name <- Set.toList fns, Just fn <- [Map.lookup name (M.progFunctions program)]]
         fromFns = Set.unions (map (functionRefs program) keptFnList)
         fromTypes = Set.unions [implFunctions ty | ty <- Set.toList types]
-        invariantRefs = Set.unions [Set.fromList (concatMap proofNames invariant) | name <- Set.toList types, Just invariant <- [Map.lookup name (M.progInvariants program)]]
+        invariantRefs = Set.unions [Set.fromList (concatMap proofNames (structInvariant invariant)) | name <- Set.toList types, Just invariant <- [Map.lookup name (M.progInvariants program)]]
         fnsNext = Set.union fns (Set.intersection (Map.keysSet (M.progFunctions program)) (Set.unions [fromFns, fromTypes, invariantRefs]))
         typesFromFns = Set.unions (map (typeRefsOfFunction program) keptFnList)
         typesFromTypes = Set.unions [declTypeRefs decl | name <- Set.toList types, Just decl <- [Map.lookup name (M.progTypes program)]]

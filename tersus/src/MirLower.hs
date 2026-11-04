@@ -184,7 +184,7 @@ data LS = LS
     , lsAssigned :: Set.Set Variable -- the names the program assigns other than by defining a function
     , lsBuilder :: Builder
     , lsGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes
-    , lsInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets
+    , lsInvariants :: Map Name StructSpec -- what every value of a struct meets
     , lsChecking :: Bool -- whether the program is checked for values used after they were moved
     , lsCopies :: Set.Set Name -- the structs and enums that implement Copy
     , lsLinear :: Set.Set Name -- the structs and enums that are linear
@@ -323,7 +323,8 @@ registerTopLevel stmts = do
 
 program :: [Statement] -> L M.Program
 program stmts = do
-    when (hasValueProjection stmts) $ failL "Unmodeled: checked declaration-backed value projections"
+    when (any (\statement -> case statement of BoundedDef _ body -> hasValueProjection [body]; ImplDef _ _ _ _ bounds body -> not (null bounds) && hasValueProjection body; _ -> False) stmts) $
+        failL "Unmodeled: checked declaration-backed value projections in deferred templates"
     when (any unsupportedTemplateDeclaration stmts) $ failL "Unmodeled: checked borrowed whole-value return places in bounded templates"
     registerTopLevel stmts
     lowerStatements stmts
@@ -544,12 +545,10 @@ lowerStatement stmt =
             modifyB (\b -> b{bPlace = Just (line, column)})
             emit (M.Ghost Map.empty (M.GhostPosition line column))
         StructDef name sizes fields spec | not (null sizes) -> do
-            unless (structProjection spec == Nothing) $ failL "Unmodeled: checked declaration-backed value projections"
-            modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s), lsInvariants = withInvariant name (structInvariant spec) (lsInvariants s)})
+            modifyS (\s -> s{lsGenerics = Map.insert name (sizes, fields) (lsGenerics s), lsInvariants = withInvariant name spec (lsInvariants s)})
         StructDef name _ fields spec -> do
-            unless (structProjection spec == Nothing) $ failL "Unmodeled: checked declaration-backed value projections"
             addType name (M.StructDecl fields)
-            modifyS (\s -> s{lsInvariants = withInvariant name (structInvariant spec) (lsInvariants s)})
+            modifyS (\s -> s{lsInvariants = withInvariant name spec (lsInvariants s)})
         EnumDef name variants -> do
             addType name (M.EnumDecl variants)
         -- (the checker takes a trait apart and hands an impl back as the functions it defines)
@@ -577,9 +576,10 @@ visibleEnv = do
         operandOf (BFn name _) = M.Const (M.CFn name)
     return (Map.union scoped' globals)
 
-withInvariant :: Name -> [ValidationStatement] -> Map Name [ValidationStatement] -> Map Name [ValidationStatement]
-withInvariant _ [] invariants = invariants
-withInvariant name invariant invariants = Map.insert name invariant invariants
+withInvariant :: Name -> StructSpec -> Map Name StructSpec -> Map Name StructSpec
+withInvariant name spec invariants
+    | null (structInvariant spec) && structProjection spec == Nothing = invariants
+    | otherwise = Map.insert name spec invariants
 
 addType :: Name -> M.TypeDecl -> L ()
 addType name decl = modifyS (\s -> s{lsTypes = Map.insert name decl (lsTypes s)})

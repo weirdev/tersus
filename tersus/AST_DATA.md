@@ -120,8 +120,11 @@ is the builtin `Field`; `Field` is the `(name, Type)` field declaration.
 constructor order. `StructDef` has five references: name, parameters, fields,
 invariants and projection names. Projection names are exactly `[]`,
 `["prefix", blockField, lengthField]` or `["payload", blockField]`; other forms
-are rejected. Ordinary authored structs have no projection. Unsupported
-programmatic projection metadata is rejected before lowering or interface export.
+are rejected. Ordinary authored structs have no projection. Programmatic
+projection metadata is transported intact in the declaration's existing
+invariant carriers; native validation rejects it before filtering until the
+checked paired-value consumer is implemented. Deferred-template projections
+remain explicitly unsupported before their local declarations can be exported.
 
 A signature's final reference is an origin list, not a names list:
 `OriginsEnd`, `ReferenceOriginsCons NAME TAIL` or `BorrowedOriginsCons NAME TAIL`.

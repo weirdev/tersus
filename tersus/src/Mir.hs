@@ -53,7 +53,7 @@ import Text.ParserCombinators.ReadPrec (lift)
 import Text.Read (readPrec)
 import qualified Data.Set as Set
 import Types (Arg (..), ResultOrigin, Name, Rel (..), Type (..), Variable, instanceFields, instanceName, tupleGeneric, Size (..), pattern TArray, pattern TList, pattern TBox)
-import Syntax (Termination (..), ValidationStatement (..), RwRule (..), Expression, exprToProof)
+import Syntax (StructSpec, Termination (..), ValidationStatement (..), RwRule (..), Expression, exprToProof)
 
 -- The MIR is the program as a control-flow graph: what the machine does, with no `if`, `while`, `match`, `for` or nested
 -- expressions left. It follows Rust's MIR where Tersus is like Rust: a function is blocks of simple statements, each
@@ -85,7 +85,7 @@ data Program = Program
     , progFunctions :: Map Name Function -- every function but main, a nested one lifted to the top (outer::inner)
     , progMain :: Function -- the statements of the program; no parameters
     , progGenerics :: Map Name ([Variable], [(Variable, Type)]) -- the structs with sizes: their sizes and fields (see completeInstances)
-    , progInvariants :: Map Name [ValidationStatement] -- what every value of a struct meets, by the name of the struct (not of an instance of it)
+    , progInvariants :: Map Name StructSpec -- what every value of a struct meets, by the name of the struct (not of an instance of it)
     }
     deriving (Show, Eq, Read)
 

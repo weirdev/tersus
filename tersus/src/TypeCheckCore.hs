@@ -503,7 +503,10 @@ checkConstruct ty0 fields argTys0 = do
 
 -- Reading a field; the base of an update must be the struct being built
 readField :: Maybe Name -> Variable -> Type -> TC Type
-readField owner field structTy = do
+readField owner field structTy = fst <$> readFieldWithOwner owner field structTy
+
+readFieldWithOwner :: Maybe Name -> Variable -> Type -> TC (Type, Name)
+readFieldWithOwner owner field structTy = do
     -- (a Box is looked into for the base of an update as for a field)
     typed <- zonk structTy
     let held = case typed of
@@ -512,7 +515,7 @@ readField owner field structTy = do
     case owner of
         Just name -> do h <- zonk held; unless (namedMatches h name) $ expect ("base of an update of " ++ name) (TNamed name []) held
         Nothing -> return ()
-    fieldType field (maybe typed (const held) owner)
+    fieldTypeWithOwner field (maybe typed (const held) owner)
 
 -- The type a value is looked through to where a struct or an enum is looked at (a field, `is`, `as`, a `match`, the base of an
 -- update, `shrinks`): a Box to what it holds, which the language gives itself since what a Box holds is not a field of it, and a type
@@ -544,12 +547,15 @@ isLookThrough _ = False
 
 -- The type of reading a field from a value of the given type
 fieldType :: Variable -> Type -> TC Type
-fieldType field structTy = do
+fieldType field structTy = fst <$> fieldTypeWithOwner field structTy
+
+fieldTypeWithOwner :: Variable -> Type -> TC (Type, Name)
+fieldTypeWithOwner field structTy = do
     t <- zonk structTy
     case t of
         -- (a Box has the fields of what it holds, and its own: the address of what it holds and the permission to it)
         TBox inner
-            | field `notElem` ["addr", "blk"] -> fieldType field inner
+            | field `notElem` ["addr", "blk"] -> fieldTypeWithOwner field inner
         TNamed "Self" _ -> failTc ("Type error: a trait does not know the fields of Self, so field " ++ field ++ " cannot be read from it")
         TNamed base args -> do
             let name = instanceName base args
@@ -559,13 +565,13 @@ fieldType field structTy = do
                 [ctor] -> do
                     (_, declared) <- ctorInfo ctor
                     case lookup field declared of
-                        Just fieldTy -> return fieldTy
+                        Just fieldTy -> return (fieldTy, ctor)
                         Nothing -> failTc ("Type error: " ++ name ++ " has no field " ++ field)
                 _ -> failTc ("Type error: " ++ name ++ " has several variants, so its field " ++ field ++ " may be absent: cast the value to a variant first, as in (value as " ++ name ++ "::Variant)." ++ field ++ ", or take it apart with match")
         TVariant variant -> do
             (_, declared) <- ctorInfo variant
             case lookup field declared of
-                Just fieldTy -> return fieldTy
+                Just fieldTy -> return (fieldTy, variant)
                 Nothing -> failTc ("Type error: " ++ variant ++ " has no field " ++ field)
         TVar _ -> failTc ("Type error: the type of the value whose field " ++ field ++ " is read is not known yet; annotate it")
         other -> failTc ("Type error: field " ++ field ++ " is read from a " ++ renderType other ++ ", which is not a struct")

@@ -51,6 +51,7 @@ import TestSharedCache
 import TestScheduling
 import TestAstData
 import TestCanonicalAst
+import TestStructSpecCarrier
 import TestBorrowedReviewRegressions
 import TestModules
 import TestParity
@@ -194,6 +195,7 @@ originalGroups =
     , testScheduling (map groupName allGroups) batchedGroups
     , testAstData
     , testCanonicalAst
+    , testStructSpecCarrier
     , testBorrowedReviewRegressions
     , testParser
     , testParserBootstrap

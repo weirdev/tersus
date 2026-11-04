@@ -621,24 +621,18 @@ inferExprRaw ctx env expr =
             -- (a field of the value itself is read as it is, and so is one of each value it is looked through to in turn; a field
             -- none of them has is read from the last of them, which is where the error names it)
             let go texpr = do
-                    direct <- tryTc (readField owner field (tType texpr))
+                    direct <- tryTc (readFieldWithOwner owner field (tType texpr))
                     case direct of
-                        Just t -> return (t, texpr)
+                        Just (t, actualOwner) -> return (t, actualOwner, texpr)
                         Nothing -> do
                             next <- derefStepExpr ctx env texpr
                             case next of
                                 Just stepped -> go stepped
                                 Nothing -> do
-                                    t <- readField owner field (tType texpr)
-                                    return (t, texpr)
-            (t, struct'') <- go struct0
-            ty <- zonk (tType struct'')
-            let funct' = case (owner, ty) of
-                    (Nothing, TNamed "Box" args) ->
-                        let access = namedField (instanceName "Box" args) field
-                         in if access == Field Nothing field then funct else Val (builtinFunct access)
-                    _ -> funct
-            return (TExpr t (F funct' [tExpr struct'']) [struct''])
+                                    (t, actualOwner) <- readFieldWithOwner owner field (tType texpr)
+                                    return (t, actualOwner, texpr)
+            (t, actualOwner, struct'') <- go struct0
+            return (TExpr t (F (Val (builtinFunct (Field (Just actualOwner) field))) [tExpr struct'']) [struct''])
         F funct@(Val (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
             inferred0 <- mapM (inferExprR ctx env) args
             -- (a tuple's parts are what they are: it is made of their types)
@@ -1490,24 +1484,18 @@ inferProofR ctx env proof =
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [struct] -> do
             (structTy, struct') <- inferProofR ctx env struct
             let go (ty, proof) = do
-                    direct <- tryTc (readField owner field ty)
+                    direct <- tryTc (readFieldWithOwner owner field ty)
                     case direct of
-                        Just t -> return (t, proof, ty)
+                        Just (t, actualOwner) -> return (t, proof, actualOwner)
                         Nothing -> do
                             next <- derefStepProof (ty, proof)
                             case next of
                                 Just stepped -> go stepped
                                 Nothing -> do
-                                    t <- readField owner field ty
-                                    return (t, proof, ty)
-            (t, struct'', receiverTy) <- go (structTy, struct')
-            ty <- zonk receiverTy
-            let funct' = case (owner, ty) of
-                    (Nothing, TNamed "Box" args) ->
-                        let access = namedField (instanceName "Box" args) field
-                         in if access == Field Nothing field then funct else CTerm (builtinFunct access)
-                    _ -> funct
-            return (t, FApp funct' [struct''])
+                                    (t, actualOwner) <- readFieldWithOwner owner field ty
+                                    return (t, proof, actualOwner)
+            (t, struct'', actualOwner) <- go (structTy, struct')
+            return (t, FApp (CTerm (builtinFunct (Field (Just actualOwner) field))) [struct''])
         FApp funct@(CTerm (VFunct _ _ _ (BuiltinFunct (Ctor name ctorArgs fields)) _)) args -> do
             inferred <- mapM (inferProofR ctx env) args
             t <- checkConstruct (TNamed (baseNameOf name) ctorArgs) fields (map fst inferred)

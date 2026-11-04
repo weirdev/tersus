@@ -159,8 +159,8 @@ proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Cast variantName)) _)
         (constructorId, b3) = namedFunction ("variant:" ++ variantName) b2
         require = withNote ("value is " ++ variantName) (step "RequireVariant" [("object", value), ("family", MInt familyId), ("constructor", MInt constructorId)])
     pure (prefix ++ [require], value, b3)
-proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Project _ field)) _)) [arg]) b0 =
-    proofOperand env (FApp (CTerm (builtinFunct (Field Nothing field))) [arg]) b0
+proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Project variant field)) _)) [arg]) b0 =
+    proofOperand env (FApp (CTerm (builtinFunct (Field (Just variant) field))) [arg]) b0
 proofOperand env (FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [arg]) b0 = do
     (prefix, value, b1) <- proofOperand env arg b0
     let (function, b2) = namedFunction (fieldKey owner field) b1
@@ -1818,7 +1818,7 @@ sizeParameterSteps assume fn values b0
 
 -- Facts guaranteed by a value's type are trusted in the same places as in
 -- the reference validator: parameters and values assigned to typed locals.
-typeSteps :: Rules -> Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> M.Function -> M.Local -> Build -> Maybe ([MirValue], Build)
+typeSteps :: Rules -> Map.Map Name M.TypeDecl -> Map.Map Name StructSpec -> M.Function -> M.Local -> Build -> Maybe ([MirValue], Build)
 typeSteps rules types invariants fn local@(M.Local number) b0 = do
     decl <- Map.lookup local (M.fnLocals fn)
     facts (M.localType decl) b0
@@ -1842,7 +1842,7 @@ typeSteps rules types invariants fn local@(M.Local number) b0 = do
         pure ([step "ApplyFresh" [("local", MInt localId), ("function", MInt (-13)), ("arguments", MList [value])]], b1)
     facts (TNamed base args) b = do
         let name = instanceName base args
-            clauses = Map.findWithDefault [] base invariants
+            clauses = maybe [] structInvariant (Map.lookup base invariants)
         case Map.lookup name types <|> Map.lookup base types of
             Just (M.StructDecl fs) -> do
                 let fields = map fst fs
@@ -1931,8 +1931,8 @@ exprOperand env expr b0 = case expr of
             (constructorId, b3) = namedFunction ("variant:" ++ variantName) b2
             require = withNote ("value is " ++ variantName) (step "RequireVariant" [("object", value), ("family", MInt familyId), ("constructor", MInt constructorId)])
         pure (steps ++ [require], value, b3)
-    F (Val (VFunct _ _ _ (BuiltinFunct (Project _ field)) _)) [arg] ->
-        exprOperand env (F (Val (builtinFunct (Field Nothing field))) [arg]) b0
+    F (Val (VFunct _ _ _ (BuiltinFunct (Project variant field)) _)) [arg] ->
+        exprOperand env (F (Val (builtinFunct (Field (Just variant) field))) [arg]) b0
     F (Val (VFunct _ _ _ (BuiltinFunct (Field owner field)) _)) [arg] -> do
         (steps, value, b1) <- exprOperand env arg b0
         let (function, b2) = namedFunction (fieldKey owner field) b1
@@ -2110,7 +2110,7 @@ reachesName functions caller from target = go Set.empty [from]
         | Set.member x seen = go seen xs
         | otherwise = go (Set.insert x seen) (maybe [] callNamesOf (Map.lookup x allFns) ++ xs)
 
-block :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
+block :: Map.Map Name M.TypeDecl -> Map.Map Name StructSpec -> Map.Map Name M.Function -> Rules -> Maybe (Bool, MirValue) -> Bool -> M.Function -> (M.BlockId, M.BasicBlock) -> Build -> Maybe (MirValue, Build)
 block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockId n), M.BasicBlock stmts end) b0' = do
     -- (the locals every path to a statement has assigned: a reference to an
     -- element is refreshed after a write of its root only where it exists)
@@ -2496,7 +2496,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
         M.AssignRef _ _ _ -> Nothing
         M.Assign dest (M.MakeData name fields) -> do
             let base = baseNameOf name
-                clauses = Map.findWithDefault [] base invariants
+                clauses = maybe [] structInvariant (Map.lookup base invariants)
             (checks, b1) <- contractSteps rules False (Map.fromList fields) clauses b
             (more, b2) <- statement rules s b1
             (typeFacts, b3) <- typeSteps rules types invariants fn dest b2
@@ -2617,7 +2617,7 @@ block types invariants functions rules termInfo allowCalls fn (blockId@(M.BlockI
             pure (steps' ++ [step "ApplyFresh" [("local", MInt local), ("function", MInt function), ("arguments", MList [newRef])], step "Assume" [("relation", MInt 0), ("left", ref), ("right", argRef)]], b2)
         invariantChecks ctor newRef argRefs fields b = do
             let base = baseNameOf ctor
-                clauses = Map.findWithDefault [] base invariants
+                clauses = maybe [] structInvariant (Map.lookup base invariants)
             if null clauses then pure ([], b) else do
                 env <- case traverse refOperand (zip fields argRefs) of Just pairs -> Just (Map.fromList pairs); Nothing -> Nothing
                 (checks, b') <- contractSteps rules False env clauses b
@@ -2802,7 +2802,7 @@ genericClauses rules assumeMode env0 clauses b0 next0 = foldM go ([], b0, env0, 
         (more, b') <- contractSteps rules True env [ProofAssert proof] b
         pure (steps ++ more, b', env, next)
 
-encodeFunction :: Map.Map Name M.TypeDecl -> Map.Map Name [ValidationStatement] -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
+encodeFunction :: Map.Map Name M.TypeDecl -> Map.Map Name StructSpec -> Map.Map Name M.Function -> Rules -> Bool -> M.Function -> Maybe (MirValue, MirValue, Integer)
 encodeFunction types invariants functions rules allowCalls fn
     | any (\(M.Local n) -> n < 0) (Map.keys (M.fnLocals fn)) = Nothing
     | length (M.fnParams fn) /= length (nub (M.fnParams fn)) = Nothing
@@ -2896,11 +2896,19 @@ withoutNotes v = case v of
     MList items -> MList (map withoutNotes items)
     _ -> v
 
+projectionSupport :: M.Program -> Either String ()
+projectionSupport program = case [(name, spec) | (name, spec) <- Map.toList (M.progInvariants program), structProjection spec /= Nothing] of
+    (name, _) : _ -> Left ("checked declaration-backed value projection of " ++ name)
+    [] -> Right ()
+
 encode :: M.Program -> Either String [(Name, (MirValue, MirValue, Integer))]
-encode program = fmap (map (\(name, (blocks, state, entry)) -> (name, (withoutNotes blocks, state, entry)))) (encodeNoted (sourceContainerView program))
+encode program = do
+    projectionSupport program
+    fmap (map (\(name, (blocks, state, entry)) -> (name, (withoutNotes blocks, state, entry)))) (encodeNoted (sourceContainerView program))
 
 obligationNote :: M.Program -> Name -> Int -> Int -> Maybe String
 obligationNote program name blockId stepIndex = do
+    either (const Nothing) Just (projectionSupport program)
     functions <- either (const Nothing) Just (encodeNoted (sourceContainerView program))
     (blocks, _, _) <- lookup name functions
     blockList <- listItems blocks

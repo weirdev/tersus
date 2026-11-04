@@ -12,6 +12,7 @@ import TypeCheck (Elaborated(..), elaborate, elaborateWith, emptyImportEnv)
 import qualified MirLower
 import qualified Interface
 import Modules (ModuleId(..))
+import qualified ValidatorNative as V
 import qualified TersusParser
 import qualified MirHousekeeping as H
 import qualified Native
@@ -38,14 +39,14 @@ testCanonicalAst = TestList "testCanonicalAst" $
         Ok back -> testAssertEq (show back) (show (Elaborated projected [TInt]))
     , testCase "ordinary authored declarations do not acquire projection metadata" $ parsed "struct List { n: Int }; struct Box { n: Int };" `bindTest` \body ->
         testAssertEq [structProjection spec | StructDef _ _ _ spec <- body] [Nothing, Nothing]
-    , testCase "unsupported projection on an unused generic declaration is not ignored by lowering" $ case elaborate projected `bindResult` MirLower.lowerElaborated of
-        Error err | "Unmodeled: checked declaration-backed value projections" `isInfixOf` err -> Nothing
+    , testCase "unsupported projection on an unused generic declaration is not ignored by native validation" $ case elaborate projected `bindResult` MirLower.lowerElaborated `bindResult` V.validateCompiledUncached of
+        Error err | "checked declaration-backed value projection" `isInfixOf` err -> Nothing
         other -> Just ("Expected projection rejection, got " ++ show other)
-    , testCase "unsupported projection cannot disappear into a module interface" $ case elaborateWith emptyImportEnv projected of
+    , testCase "unsupported projection survives the checked module interface" $ case elaborateWith emptyImportEnv projected of
         Error err -> Just err
         Ok (Elaborated typed _, state) -> case Interface.extractLibInterface (ModuleId "tersuslib" (Just "fixture")) projected typed state of
-            Error err | "Unmodeled" `isInfixOf` err -> Nothing
-            _ -> Just "projection interface was published without checked meaning"
+            Error err -> Just err
+            Ok iface -> testAssertTrue (maybe False ((/= Nothing) . structProjection) (Map.lookup "Prefix" (Interface.ifInvariants iface)))
     ] ++
     [ testCase label $ case A.readParsed bytes of Error _ -> Nothing; Ok _ -> Just "malformed canonical AST accepted"
     | (label, bytes) <- malformed

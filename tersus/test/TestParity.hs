@@ -93,7 +93,7 @@ sourceContainerCapabilities = TestList "logical container layouts"
     , testCase "user invariants are retained" (case lower "struct P { n: Int } invariant [{ affirm n >= 0; }]; return P { n: 0 - 1 };" of
         Error e -> Just e
         Ok program -> case Map.lookup "P" (M.progInvariants program) of
-            Just clauses | not (null clauses) -> testAssertEq (Map.lookup "P" (M.progInvariants (sourceContainerView program))) (Just clauses)
+            Just clauses | not (null (structInvariant clauses)) -> testAssertEq (Map.lookup "P" (M.progInvariants (sourceContainerView program))) (Just clauses)
             _ -> Just "fixture lost its user invariant")
     , testCase "non-layout declarations named List are retained" (case lower "return 1;" of
         Error e -> Just e
@@ -109,7 +109,7 @@ sourceContainerCapabilities = TestList "logical container layouts"
     alteredLayout name source = case lowerSource False source of
         Error e -> Just e
         Ok program -> case Map.lookup name (M.progInvariants program) of
-            Just clauses | not (null clauses) ->
+            Just clauses | not (null (structInvariant clauses)) ->
                 let viewed = sourceContainerView program
                  in if Map.lookup name (M.progInvariants viewed) == Just clauses && unsupportedReason program /= Nothing
                         then Nothing
@@ -455,10 +455,10 @@ unsupportedShape program
             | fn <- allFunctions
             , decl <- Map.elems (M.fnLocals fn)
             , TNamed base args <- [M.localType decl]
-            , let clauses = Map.findWithDefault [] base (M.progInvariants program)
+            , let clauses = maybe [] structInvariant (Map.lookup base (M.progInvariants program))
             ]
             || or
-                [ '<' `elem` name && not (null (Map.findWithDefault [] (baseName name) (M.progInvariants program)))
+                [ '<' `elem` name && not (null (maybe [] structInvariant (Map.lookup (baseName name) (M.progInvariants program))))
                 | fn <- allFunctions
                 , block <- Map.elems (M.fnBlocks fn)
                 , M.Assign _ (M.MakeData name _) <- M.blockStatements block
@@ -486,7 +486,7 @@ unsupportedProofs program
     allClauses =
         concatMap (\fn -> M.specRequires (M.fnSpec fn) ++ M.specEnsures (M.fnSpec fn)) allFunctions
             ++ concatMap (M.loopInvariant . snd) (concatMap (Map.toList . M.specLoops . M.fnSpec) allFunctions)
-            ++ concat (Map.elems (M.progInvariants program))
+            ++ concatMap structInvariant (Map.elems (M.progInvariants program))
             ++ [clause | fn <- allFunctions, block <- Map.elems (M.fnBlocks fn), M.Ghost _ (M.GhostValidation clause) <- M.blockStatements block]
 
 unsupportedCalls :: M.Program -> Maybe String
@@ -598,7 +598,7 @@ unsupportedAssumed program
     assumedClauses =
         concatMap (M.specRequires . M.fnSpec) (M.progMain program : Map.elems functions)
             ++ [clause | fn <- M.progMain program : Map.elems functions, block <- Map.elems (M.fnBlocks fn), M.Call (M.Const (M.CFn name)) _ _ _ <- [M.blockTerminator block], Just callee <- [Map.lookup name functions], clause <- M.specEnsures (M.fnSpec callee)]
-            ++ concat (Map.elems (M.progInvariants program))
+            ++ concatMap structInvariant (Map.elems (M.progInvariants program))
     clauseTotal (ProofAssert proof) = case proof of
         FApp (CTerm (VFunct _ _ _ (BuiltinFunct (Rel _)) _)) [a, b] -> totalOperand a && totalOperand b
         _ -> False
