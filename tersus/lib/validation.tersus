@@ -394,12 +394,20 @@ fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, 
     uf = emptyIntMap();
     weight = emptyIntMap();
     for f in facts { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, f.left, f.right); };
+    // (constants of one kind and value are one: each is joined to the first of its value)
+    byValue = emptyPositions();
     for i in 0..size(constants) {
-        a = get(constants, i);
-        for j in 0..i {
-            b = get(constants, j);
-            if a.kind = b.kind && a.value = b.value { UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, a.id, b.id); };
+        v = get(constants, i).value;
+        joined = false;
+        for j in byValue.lookup(v, []) {
+            if joined = false && j >= 0 && j < size(constants) {
+                if get(constants, j).kind = get(constants, i).kind {
+                    UnionFind { parent: uf, weight: weight } = ufUnion(uf, weight, get(constants, i).id, get(constants, j).id);
+                    joined = true;
+                };
+            };
         };
+        if joined = false { byValue = byValue.insert(v, push(byValue.lookup(v, []), i)); };
     };
     changed = true;
     for round in 0..size(terms) + 2 {
@@ -463,14 +471,22 @@ fn congruenceClosure(facts: &List<EqualityFact>, terms: &List<ApplicationTerm>, 
                     };
                 };
             };
+            // (the sums of each class, so that a difference finds the sums it undoes)
+            sumsOfClass = emptyPositions();
+            for bPosition in 0..size(terms) {
+                if get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
+                    rb = ufFind(uf, get(terms, bPosition).id);
+                    sumsOfClass = sumsOfClass.insert(rb, push(sumsOfClass.lookup(rb, []), bPosition));
+                };
+            };
             for aPosition in 0..size(terms) {
                 a = get(terms, aPosition);
                 if a.function = -2 && size(a.arguments) = 2 {
                     r = ufFind(uf, get(a.arguments, 0));
                     subtrahend = ufFind(uf, get(a.arguments, 1));
-                    for bPosition in 0..size(terms) {
-                        b = get(terms, bPosition);
-                        if b.function = -1 && size(b.arguments) = 2 {
+                    for bPosition in sumsOfClass.lookup(r, []) {
+                        if bPosition >= 0 && bPosition < size(terms) && get(terms, bPosition).function = -1 && size(get(terms, bPosition).arguments) = 2 {
+                            b = get(terms, bPosition);
                             if ufFind(uf, b.id) = r {
                                 leftPart = get(b.arguments, 0);
                                 rightPart = get(b.arguments, 1);
@@ -2616,6 +2632,89 @@ fn sizeTermOf(context: &ValidatorContext, equalities: &List<EqualityFact>, seq: 
     return SizeFact { term: 0, found: false };
 };
 
+// Whether the two lists of a forall fact over a range are the lists of two reads (either way round), or the first read
+// is of a push onto one of them: which of the fact's lists the push is onto
+struct FactLists { same: Bool, pushed: Bool, inner: Int };
+
+impl Clone for FactLists { };
+
+fn listsOfFact(context: &ValidatorContext, equalities: &List<EqualityFact>, leftSeq: Int, rightSeq: Int, a: Int, b: Int) -> FactLists {
+    same = false;
+    pushed = false;
+    inner = a;
+    if hasEquality(equalities, leftSeq, a) && hasEquality(equalities, rightSeq, b) { same = true; };
+    if hasEquality(equalities, leftSeq, b) && hasEquality(equalities, rightSeq, a) { same = true; };
+    for pushAppPosition in 0..size(context.applications) {
+        pushApp = get(context.applications, pushAppPosition);
+        if pushApp.function = -16 && size(pushApp.arguments) = 2 {
+            if hasEquality(equalities, pushApp.id, leftSeq) {
+                if hasEquality(equalities, get(pushApp.arguments, 0), a) && hasEquality(equalities, rightSeq, b) { same = true; pushed = true; inner = a; };
+                if hasEquality(equalities, get(pushApp.arguments, 0), b) && hasEquality(equalities, rightSeq, a) { same = true; pushed = true; inner = b; };
+            };
+        };
+    };
+    return FactLists { same: same, pushed: pushed, inner: inner };
+};
+
+// Whether a term is a sum of base and other, either way round
+fn sumOfEqual(context: &ValidatorContext, equalities: &List<EqualityFact>, term: Int, base: Int, other: Int) -> Bool {
+    for sumPosition in 0..size(context.applications) {
+        sum = get(context.applications, sumPosition);
+        if sum.function = -1 && size(sum.arguments) = 2 {
+            if hasEquality(equalities, sum.id, term) {
+                if hasEquality(equalities, get(sum.arguments, 0), base) && hasEquality(equalities, get(sum.arguments, 1), other) { return true; };
+                if hasEquality(equalities, get(sum.arguments, 1), base) && hasEquality(equalities, get(sum.arguments, 0), other) { return true; };
+            };
+        };
+    };
+    return false;
+};
+
+fn strictOrderStated(context: &ValidatorContext, equalities: &List<EqualityFact>, smaller: Int, greater: Int) -> Bool {
+    for oPosition in 0..size(context.orders) {
+        o = get(context.orders, oPosition);
+        if o.strict && hasEquality(equalities, o.smaller, smaller) && hasEquality(equalities, o.greater, greater) { return true; };
+    };
+    return false;
+};
+
+// (at the end of the range the element may follow from another forall at that index: get(out, i) = get(a, i), say)
+fn endReadsEqual(context: &ValidatorContext, eqContext: &ValidatorContext, eqEqualities: &List<EqualityFact>, a: Int, b: Int, leftSeq: Int, rightSeq: Int, hi: Int, base: Int, offsetAt: Int) -> Bool {
+    for gPosition in 0..size(context.applications) {
+        g = get(context.applications, gPosition);
+        if g.function = -14 && size(g.arguments) = 2 {
+            gList = get(g.arguments, 0);
+            if hasEquality(eqEqualities, gList, a) || hasEquality(eqEqualities, gList, leftSeq) {
+                gIndex = get(g.arguments, 1);
+                if hasEquality(eqEqualities, gIndex, hi) || sumOfEqual(context, eqEqualities, gIndex, base, hi) {
+                    if endReadOf(context, eqContext, eqEqualities, g.id, b, rightSeq, hi, offsetAt) { return true; };
+                };
+            };
+        };
+    };
+    return false;
+};
+
+fn endReadOf(context: &ValidatorContext, eqContext: &ValidatorContext, eqEqualities: &List<EqualityFact>, read: Int, b: Int, rightSeq: Int, hi: Int, offsetAt: Int) -> Bool {
+    for hPosition in 0..size(context.applications) {
+        h = get(context.applications, hPosition);
+        if h.function = -14 && size(h.arguments) = 2 {
+            hList = get(h.arguments, 0);
+            if hasEquality(eqEqualities, hList, b) || hasEquality(eqEqualities, hList, rightSeq) {
+                hIndex = get(h.arguments, 1);
+                hIndexOk = hasEquality(eqEqualities, hIndex, hi);
+                if hIndexOk = false {
+                    if linearEntails(eqContext, hIndex, offsetAt, 0) {
+                        if linearEntails(eqContext, offsetAt, hIndex, 0) { hIndexOk = true; };
+                    };
+                };
+                if hIndexOk && hasEquality(eqEqualities, read, h.id) { return true; };
+            };
+        };
+    };
+    return false;
+};
+
 // The bridge records `forall j in lo..hi: get(a, j) = get(b, j)` as an
 // application of function -30 to (a, b, lo, hi). It proves an element
 // equality inside the range (and at the end point when that element is
@@ -2639,69 +2738,18 @@ fn forallEqualPairWithin(context: &ValidatorContext, analysis: &ContextAnalysis,
                 base = get(app.arguments, 4);
                 if lg.found {
                     if rg.found {
-                        sameLists = false;
-                        pushed = false;
-                        innerList = a;
-                        if hasEquality(equalities, lg.seq, a) {
-                            if hasEquality(equalities, rg.seq, b) { sameLists = true; };
-                        };
-                        if hasEquality(equalities, lg.seq, b) {
-                            if hasEquality(equalities, rg.seq, a) { sameLists = true; };
-                        };
-                        for pushAppPosition in 0..size(context.applications) {
-                            pushApp = get(context.applications, pushAppPosition);
-                            if pushApp.function = -16 {
-                                if size(pushApp.arguments) = 2 {
-                                    if hasEquality(equalities, pushApp.id, lg.seq) {
-                                        if hasEquality(equalities, get(pushApp.arguments, 0), a) {
-                                            if hasEquality(equalities, rg.seq, b) { sameLists = true; pushed = true; innerList = a; };
-                                        };
-                                        if hasEquality(equalities, get(pushApp.arguments, 0), b) {
-                                            if hasEquality(equalities, rg.seq, a) { sameLists = true; pushed = true; innerList = b; };
-                                        };
-                                    };
-                                };
-                            };
-                        };
+                        lists = listsOfFact(context, equalities, lg.seq, rg.seq, a, b);
+                        sameLists = lists.same;
+                        pushed = lists.pushed;
+                        innerList = lists.inner;
                         if sameLists {
                             j = rg.at;
                             offsetAt = lg.at;
-                            indexMatches = false;
-                            if hasEquality(equalities, offsetAt, j) { indexMatches = true; };
-                            for sumPosition in 0..size(context.applications) {
-                                sum = get(context.applications, sumPosition);
-                                if sum.function = -1 {
-                                    if size(sum.arguments) = 2 {
-                                        if hasEquality(equalities, sum.id, offsetAt) {
-                                            if hasEquality(equalities, get(sum.arguments, 0), base) {
-                                                if hasEquality(equalities, get(sum.arguments, 1), j) { indexMatches = true; };
-                                            };
-                                            if hasEquality(equalities, get(sum.arguments, 1), base) {
-                                                if hasEquality(equalities, get(sum.arguments, 0), j) { indexMatches = true; };
-                                            };
-                                        };
-                                    };
-                                };
-                            };
+                            indexMatches = hasEquality(equalities, offsetAt, j) || sumOfEqual(context, equalities, offsetAt, base, j);
                             if indexMatches = false {
                                 j = lg.at;
                                 offsetAt = rg.at;
-                                if hasEquality(equalities, offsetAt, j) { indexMatches = true; };
-                                for sumPosition in 0..size(context.applications) {
-                                    sum = get(context.applications, sumPosition);
-                                    if sum.function = -1 {
-                                        if size(sum.arguments) = 2 {
-                                            if hasEquality(equalities, sum.id, offsetAt) {
-                                                if hasEquality(equalities, get(sum.arguments, 0), base) {
-                                                    if hasEquality(equalities, get(sum.arguments, 1), j) { indexMatches = true; };
-                                                };
-                                                if hasEquality(equalities, get(sum.arguments, 1), base) {
-                                                    if hasEquality(equalities, get(sum.arguments, 0), j) { indexMatches = true; };
-                                                };
-                                            };
-                                        };
-                                    };
-                                };
+                                indexMatches = hasEquality(equalities, offsetAt, j) || sumOfEqual(context, equalities, offsetAt, base, j);
                             };
                             if indexMatches {
                                 if hasDifference(equalities, differences, lo, j, 0) {
@@ -2719,15 +2767,7 @@ fn forallEqualPairWithin(context: &ValidatorContext, analysis: &ContextAnalysis,
                                     atMost = hasDifference(equalities, differences, j, hi, 0);
                                     if atMost = false { atMost = linearEntails(context, j, hi, 0); };
                                     if atMost {
-                                        alreadyStrict = false;
-                                        for oPosition in 0..size(context.orders) {
-                                            o = get(context.orders, oPosition);
-                                            if o.strict {
-                                                if hasEquality(equalities, o.smaller, j) {
-                                                    if hasEquality(equalities, o.greater, hi) { alreadyStrict = true; };
-                                                };
-                                            };
-                                        };
+                                        alreadyStrict = strictOrderStated(context, equalities, j, hi);
                                         strictContext = ValidatorContext { orders: push(clone(context.orders), OrderFact { smaller: j, greater: hi, strict: true }), ..clone(context) };
                                         strictAnalysis = analyzeContext(strictContext);
                                         if alreadyStrict = false && fuel > 0 && forallEqualPairWithin(strictContext, strictAnalysis, left, right, lg, rg, fuel - 1) {
@@ -2746,54 +2786,7 @@ fn forallEqualPairWithin(context: &ValidatorContext, analysis: &ContextAnalysis,
                                                 if widerAnalysis.contradictory { return true; };
                                                 if contextEqual(widerAnalysis.equalities, widerAnalysis.differences, left, right) { return true; };
                                             };
-                                            for gPosition in 0..size(context.applications) {
-                                                g = get(context.applications, gPosition);
-                                                if g.function = -14 {
-                                                    if size(g.arguments) = 2 {
-                                                        gList = get(g.arguments, 0);
-                                                        if hasEquality(eqAnalysis.equalities, gList, a) || hasEquality(eqAnalysis.equalities, gList, lg.seq) {
-                                                            atEnd = false;
-                                                            if hasEquality(eqAnalysis.equalities, get(g.arguments, 1), hi) { atEnd = true; };
-                                                            for sumPosition in 0..size(context.applications) {
-                                                                sum = get(context.applications, sumPosition);
-                                                                if sum.function = -1 {
-                                                                    if size(sum.arguments) = 2 {
-                                                                        if hasEquality(eqAnalysis.equalities, sum.id, get(g.arguments, 1)) {
-                                                                            if hasEquality(eqAnalysis.equalities, get(sum.arguments, 0), base) {
-                                                                                if hasEquality(eqAnalysis.equalities, get(sum.arguments, 1), hi) { atEnd = true; };
-                                                                            };
-                                                                            if hasEquality(eqAnalysis.equalities, get(sum.arguments, 1), base) {
-                                                                                if hasEquality(eqAnalysis.equalities, get(sum.arguments, 0), hi) { atEnd = true; };
-                                                                            };
-                                                                        };
-                                                                    };
-                                                                };
-                                                            };
-                                                            if atEnd {
-                                                                for hPosition in 0..size(context.applications) {
-                                                                    h = get(context.applications, hPosition);
-                                                                    if h.function = -14 {
-                                                                        if size(h.arguments) = 2 {
-                                                                            hList = get(h.arguments, 0);
-                                                                            if hasEquality(eqAnalysis.equalities, hList, b) || hasEquality(eqAnalysis.equalities, hList, rg.seq) {
-                                                                                hIndexOk = hasEquality(eqAnalysis.equalities, get(h.arguments, 1), hi);
-                                                                                if hIndexOk = false {
-                                                                                    if linearEntails(eqContext, get(h.arguments, 1), offsetAt, 0) {
-                                                                                        if linearEntails(eqContext, offsetAt, get(h.arguments, 1), 0) { hIndexOk = true; };
-                                                                                    };
-                                                                                };
-                                                                                if hIndexOk {
-                                                                                    if hasEquality(eqAnalysis.equalities, g.id, h.id) { return true; };
-                                                                                };
-                                                                            };
-                                                                        };
-                                                                    };
-                                                                };
-                                                            };
-                                                        };
-                                                    };
-                                                };
-                                            };
+                                            if endReadsEqual(context, eqContext, eqAnalysis.equalities, a, b, lg.seq, rg.seq, hi, base, offsetAt) { return true; };
                                         };
                                     };
                                 };
