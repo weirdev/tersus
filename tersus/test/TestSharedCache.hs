@@ -851,7 +851,7 @@ ciPackageFixture home = do
     pure (entry, dependency)
 
 packageStages :: IO TestResult
-packageStages = withCacheHome $ \home -> do
+packageStages = withToolsCacheHome $ \home -> do
     (entry, _) <- ciPackageFixture home
     owned <- ownedFromFile entry
     program <- programFromFile entry
@@ -868,7 +868,7 @@ packageStages = withCacheHome $ \home -> do
         other -> Just (show other)
 
 packageInputs :: IO TestResult
-packageInputs = withCacheHome $ \home -> do
+packageInputs = withToolsCacheHome $ \home -> do
     (entry, dependency) <- ciPackageFixture home
     original <- validatedFromFile entry
     writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 42; };"
@@ -888,18 +888,23 @@ packageInputs = withCacheHome $ \home -> do
             testAssertTrue (a /= b && a == c && not filed)
         other -> Just (show other)
 
+-- A fresh cache home given the compiled tools of this process's cache (the
+-- validator written in Tersus and what builds it), which are not what the
+-- tests that use it measure: building them again takes minutes
+withToolsCacheHome :: (FilePath -> IO a) -> IO a
+withToolsCacheHome use = do
+    warm <- compileOnce "return 0;"
+    original <- cacheDirectory
+    withCacheHome $ \home -> do
+        case (warm, original) of
+            (Ok _, Ok dir) -> copyCompiledTools dir (home </> "tersus")
+            _ -> pure ()
+        use home
+
 ciPackageProcesses :: Bool -> IO TestResult
-ciPackageProcesses concurrent = do
-  -- (validation runs the validator written in Tersus, compiled once into the
-  -- cache: the fresh cache homes of the probes are given the compiled tools,
-  -- which are not what this test measures, so that each probe has 30 seconds
-  -- for the package)
-  warm <- compileOnce "return 0;"
-  original <- cacheDirectory
-  withCacheHome $ \home -> do
-    case (warm, original) of
-        (Ok _, Ok dir) -> copyCompiledTools dir (home </> "tersus")
-        _ -> pure ()
+ciPackageProcesses concurrent =
+  -- (each probe has 30 seconds for the package)
+  withToolsCacheHome $ \home -> do
     (entry, _) <- ciPackageFixture home
     let markers = if concurrent then ["first" ++ show i | i <- [1 .. 4 :: Int]] else ["first"]
         extra marker = [("TERSUS_PACKAGE_CACHE_PROBE", entry), ("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_PARSER", "haskell")]
