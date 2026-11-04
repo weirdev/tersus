@@ -17,6 +17,7 @@ import TestHarness
 import TestBasics
 import TestValidation
 import TestProofs
+import TestNativeRules
 import TestControl
 import TestData
 import TestPipeline
@@ -127,6 +128,7 @@ originalGroups =
     , testControlFlow
     , testLists
     , testForallSyntax
+    , testNativeRules
     , testForallInstantiation
     , testForallProof
     , testForallLoops

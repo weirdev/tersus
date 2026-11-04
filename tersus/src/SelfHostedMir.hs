@@ -786,8 +786,47 @@ refOperandOf _ _ = Nothing
 -- terms and its result to the application's term, as a call in the
 -- code is worth. One level only: a contract whose proofs call again
 -- leaves those inner calls as applications.
+functionRulesAvailable :: Name -> Build -> Bool
+functionRulesAvailable name b = visit Set.empty [name]
+  where
+    visit _ [] = True
+    visit seen (target : rest)
+        | Set.member target seen = visit seen rest
+        | Just fn <- Map.lookup target (buildFunctions b) =
+            let scoped = scopedClauses fn
+             in all (`Map.member` buildRules b) (concatMap (usedRules . snd) scoped)
+                && case traverse namedCalls scoped of
+                    Nothing -> False
+                    Just calls -> visit (Set.insert target seen) (Set.toList (M.functionsNamed fn) ++ concat calls ++ rest)
+    visit seen (_ : rest) = visit seen rest
+    scopedClauses fn =
+        [(env, clause) | M.BasicBlock statements _ <- Map.elems (M.fnBlocks fn), M.Ghost env (M.GhostValidation clause) <- statements]
+            ++ [(M.specEnv (M.fnSpec fn), clause) | clause <- M.specRequires (M.fnSpec fn) ++ M.specEnsures (M.fnSpec fn)]
+    usedRules (Rewrite (UserRewrite rule _)) = [rule]
+    usedRules _ = []
+    namedCalls (env, clause) = fmap concat (traverse (targetOf env) (concatMap proofNames (proofs clause)))
+    targetOf env name = case Map.lookup name env of
+        Just (M.Const (M.CFn target)) -> Just [target]
+        Just _ -> Just []
+        Nothing -> case [target | (key, M.Const (M.CFn target)) <- Map.toList env, suffix key == name] of
+            [] -> Just []
+            [target] -> Just [target]
+            _ -> Nothing
+    suffix key = case break (== ':') (reverse key) of
+        (revSuffix, ':' : ':' : _) -> reverse revSuffix
+        _ -> key
+    proofs (ProofAssert proof) = [proof]
+    proofs (AssignProofVar _ expr) = [exprToProof expr]
+    proofs (Assume proof) = [proof]
+    proofs (Rewrite (UserRewrite _ args)) = args
+    proofs (Rewrite (CheckRel proof)) = [proof]
+    proofs (Rewrite (CheckGtZero proof)) = [proof]
+    proofs (Rewrite (Refl proof)) = [proof]
+    proofs _ = []
+
 proofCallFacts :: Name -> [MirValue] -> Integer -> Build -> Maybe ([MirValue], Build)
 proofCallFacts callee refs result b
+    | not (functionRulesAvailable callee b) = Nothing
     | Just fn <- Map.lookup callee (buildFunctions b)
     , M.specTermination (M.fnSpec fn) == Just MayDiverge = Nothing
     | buildInline b > 0 = pure ([], b)
@@ -1093,16 +1132,7 @@ contractSteps rules assume env clauses b0 = do
         pure (filter keptStep prefix ++ [encoded], b')
     -- A clause list that is itself assumed assumes a rewrite's inputs too:
     -- they are part of the same hypothesis.
-    assumeRewrite (UserRewrite name args) b0 = do
-        (params, ins, outs, _) <- Map.lookup name rules
-        if length params == length args then Just () else Nothing
-        let substIn = buildSubst (Map.fromList (zip params args)) ins
-        inClauses <- instantiate substIn ins
-        (s1, b1) <- contractSteps rules True env inClauses b0
-        let substOut = buildSubst substIn outs
-        outClauses <- instantiate substOut outs
-        (s2, b2) <- contractSteps rules True env outClauses b1
-        pure (s1 ++ s2, b2)
+    assumeRewrite (UserRewrite name args) b0 = ruleSteps True rules env name args b0
     assumeRewrite _ _ = Nothing
     totalStep (MData "ExecutionStep::ApplyFresh" _) = True
     totalStep _ = False
@@ -1139,7 +1169,14 @@ contractSteps rules assume env clauses b0 = do
 
 -- A rewrite rule: its parameters, input clauses, output clauses, and (for a
 -- proof, not an axiom) the body that is checked once, generically.
-type Rule = ([Variable], [ValidationStatement], [ValidationStatement], Maybe [ValidationStatement])
+data Rule = Rule
+    { ruleParams :: [Variable]
+    , ruleInputs :: [ValidationStatement]
+    , ruleOutputs :: [ValidationStatement]
+    , ruleBody :: Maybe [ValidationStatement]
+    , ruleEnv :: M.Env
+    , ruleAvailable :: Set.Set Variable
+    }
 
 type Rules = Map.Map Variable Rule
 
@@ -1151,11 +1188,13 @@ collectRules program
     fns = M.progMain program : Map.elems (M.progFunctions program)
     found = [(name, rule) | fn <- fns, blk <- Map.elems (M.fnBlocks fn), stmt <- M.blockStatements blk, (name, rule) <- ruleOf stmt]
     names = map fst found
-    programRules = Map.fromList found
-    ruleOf (M.Ghost _ (M.GhostProof name args ins outs body)) = [(name, (args, ins, outs, Just body))]
-    ruleOf (M.Ghost _ (M.GhostAxiom name args ins outs)) = [(name, (args, ins, outs, Nothing))]
+    (_, programRules) = foldl add (Map.keysSet stdRules, Map.empty) found
+    add (available, rules) (name, rule) =
+        (Set.insert name available, Map.insert name rule{ruleAvailable = available} rules)
+    ruleOf (M.Ghost env (M.GhostProof name args ins outs body)) = [(name, Rule args ins outs (Just body) env Set.empty)]
+    ruleOf (M.Ghost env (M.GhostAxiom name args ins outs)) = [(name, Rule args ins outs Nothing env Set.empty)]
     ruleOf _ = []
-    stdRules = Map.fromList [(name, (args, ins, outs, Nothing)) | (name, AxiomRule args ins outs) <- Map.toList stdLibRuleCtx]
+    stdRules = Map.fromList [(name, Rule args ins outs Nothing Map.empty Set.empty) | (name, AxiomRule args ins outs) <- Map.toList stdLibRuleCtx]
 
 substituteProof :: Map.Map Variable VariableProof -> VariableProof -> VariableProof
 substituteProof definitions proof = case proof of
@@ -1166,23 +1205,38 @@ substituteProof definitions proof = case proof of
          in Forall index (map (substituteProof scoped) guards) (substituteProof scoped body)
     _ -> proof
 
--- Definitions in a clause list, expanded in order against the bindings in
--- scope at their definition point (the semantics Ghost.defineProofRule gives
--- exported facts, expressed as translation).
-buildSubst :: Map.Map Variable VariableProof -> [ValidationStatement] -> Map.Map Variable VariableProof
-buildSubst bindings clauses = foldl add bindings [(var, expr) | AssignProofVar var expr <- clauses]
+ruleSteps :: Bool -> Rules -> M.Env -> Variable -> [VariableProof] -> Build -> Maybe ([MirValue], Build)
+ruleSteps assumeInputs rules callerEnv name args b0 = do
+    rule <- Map.lookup name rules
+    if length (ruleParams rule) == length args && not (any proofHasForall args) then Just () else Nothing
+    (argumentSteps, argumentEnv, b1) <- foldM argument ([], Map.empty, b0) (zip (ruleParams rule) args)
+    let env = Map.union argumentEnv (Map.filter isConstant (ruleEnv rule))
+    (checks, inputEnv, b2) <- ruleClauses rules assumeInputs env (ruleInputs rule) b1
+    (promises, _, b3) <- ruleClauses rules True inputEnv (ruleOutputs rule) b2
+    pure (argumentSteps ++ checks ++ promises, b3)
   where
-    add m (var, expr) = Map.insert var (substituteProof m (exprToProof expr)) m
+    argument (steps, env, b) (param, proof) = do
+        (prefix, ref, b1) <- proofOperand callerEnv proof b
+        let (term, b2) = fresh b1
+            local = negate term - 1
+            bind = step "Assign" [("local", MInt local), ("value", ref)]
+        pure (steps ++ prefix ++ [bind], Map.insert param (M.Copy (M.Local (fromInteger local))) env, b2)
+    isConstant M.Const{} = True
+    isConstant _ = False
 
-instantiate :: Map.Map Variable VariableProof -> [ValidationStatement] -> Maybe [ValidationStatement]
-instantiate subst = fmap concat . traverse clause
+ruleClauses :: Rules -> Bool -> M.Env -> [ValidationStatement] -> Build -> Maybe ([MirValue], M.Env, Build)
+ruleClauses rules assumeMode env0 clauses b0 = foldM clause ([], env0, b0) clauses
   where
-    clause (ProofAssert proof) = Just [ProofAssert (substituteProof subst proof)]
-    clause (AssignProofVar _ _) = Just []
-    clause (Assume proof) = Just [ProofAssert (substituteProof subst proof)]
-    clause (Rewrite (CheckGtZero proof)) = Just [ProofAssert (FApp (CTerm (builtinFunct (Rel Gt))) [substituteProof subst proof, CTerm (VInt 0)])]
-    clause (Rewrite (CheckRel proof)) = Just [ProofAssert (substituteProof subst proof)]
-    clause (Rewrite _) = Nothing
+    clause (steps, env, b) (AssignProofVar var expr) = do
+        (prefix, ref, b1) <- proofOperand env (exprToProof expr) b
+        let (term, b2) = fresh b1
+            local = negate term - 1
+            bind = step "Assign" [("local", MInt local), ("value", ref)]
+        pure (steps ++ prefix ++ [bind], Map.insert var (M.Copy (M.Local (fromInteger local))) env, b2)
+    clause (steps, env, b) validation = do
+        (more, b1) <- contractSteps rules assumeMode env [validation] b
+        pure (steps ++ more, env, b1)
+
 
 substituteRule :: Map.Map Variable VariableProof -> RwRule -> RwRule
 substituteRule subst (UserRewrite name args) = UserRewrite name (map (substituteProof subst) args)
@@ -1192,18 +1246,7 @@ substituteRule subst (CheckRel proof) = CheckRel (substituteProof subst proof)
 substituteRule _ rule = rule
 
 rewriteSteps :: Rules -> M.Env -> RwRule -> Build -> Maybe ([MirValue], Build)
-rewriteSteps rules env (UserRewrite name args) b0 = do
-    (params, ins, outs, _) <- Map.lookup name rules
-    if length params == length args then Just () else Nothing
-    -- (a rule's arguments are terms: a forall is not one)
-    if any proofHasForall args then Nothing else Just ()
-    let substIn = buildSubst (Map.fromList (zip params args)) ins
-    inClauses <- instantiate substIn ins
-    (checks, b1) <- contractSteps rules False env inClauses b0
-    let substOut = buildSubst substIn outs
-    outClauses <- instantiate substOut outs
-    (assumptions, b2) <- contractSteps rules True env outClauses b1
-    pure (checks ++ assumptions, b2)
+rewriteSteps rules env (UserRewrite name args) b0 = ruleSteps False rules env name args b0
 rewriteSteps _ env (Refl proof) b0 = do
     (prefix, checked, b1) <- proofCheck env (FApp eqVarProof [proof, proof]) b0
     assumed <- case checked of
@@ -2719,19 +2762,30 @@ contextOf b = record "ValidatorContext" [("equalities", MList []), ("application
 -- A proof rule is checked once, generically: its input clauses are assumed
 -- over fresh parameter terms, then its body and output clauses are checked.
 -- An axiom has no body and is taken on trust, as `tersus assumptions` says.
-encodeRule :: Rules -> (Variable, Rule) -> Maybe (MirValue, MirValue, Integer)
-encodeRule rules (_, (params, ins, outs, Just body)) = do
+encodeRule :: M.Program -> Rules -> (Variable, Rule) -> Maybe (MirValue, MirValue, Integer)
+encodeRule program rules (_, rule) = do
+    body <- ruleBody rule
+    if length params == length (nub params) then Just () else Nothing
     let indexed = zip params [0 ..]
-        env0 = Map.fromList [(param, M.Copy (M.Local i)) | (param, i) <- indexed]
+        captured = Map.filter isConstant (ruleEnv rule)
+        env0 = Map.union (Map.fromList [(param, M.Copy (M.Local i)) | (param, i) <- indexed]) captured
+        available = Map.restrictKeys rules (ruleAvailable rule)
+        start = emptyBuild{buildFunctions = functions, buildRules = available,
+            buildReaders = M.readersOfInput program,
+            buildInputReaders = inputReadersOf functions}
         alloc (bindings, b) (_, i) = let (term, b') = fresh b in (bindings ++ [record "LocalBinding" [("local", MInt (toInteger i)), ("term", MInt term)]], b')
-        (paramBindings, b0) = foldl alloc ([], emptyBuild) indexed
-    (inSteps, b1, env1, next1) <- genericClauses rules True env0 ins b0 (length params)
-    (bodySteps, b2, env2, next2) <- genericClauses rules False env1 body b1 next1
-    (outSteps, b3, _, _) <- genericClauses rules False env2 outs b2 next2
+        (paramBindings, b0) = foldl alloc ([], start) indexed
+    (inSteps, b1, env1, next1) <- genericClauses available True env0 (ruleInputs rule) b0 (length params)
+    (bodySteps, b2, _, next2) <- genericClauses available False env1 body b1 next1
+    (outSteps, b3, _, _) <- genericClauses available False env1 (ruleOutputs rule) b2 next2
     let block' = record "ExecutionBlock" [("id", MInt 0), ("steps", MList (inSteps ++ bodySteps ++ outSteps)), ("end", record "ExecutionEnd::Done" [])]
         initial = record "ExecutionState" [("context", contextOf b3), ("locals", MList paramBindings), ("templates", MList [])]
     pure (MList [block'], initial, 0)
-encodeRule _ _ = Nothing
+  where
+    functions = M.progFunctions program
+    params = ruleParams rule
+    isConstant M.Const{} = True
+    isConstant _ = False
 
 genericClauses :: Rules -> Bool -> M.Env -> [ValidationStatement] -> Build -> Int -> Maybe ([MirValue], Build, M.Env, Int)
 genericClauses rules assumeMode env0 clauses b0 next0 = foldM go ([], b0, env0, next0) clauses
@@ -2912,7 +2966,9 @@ encodeMono program
         -- checked as a function with no contract)
         checked <- traverse encodeOne [fn | fn <- Map.elems functions, not (externFunction fn), not ("builtin::" `isPrefixOf` M.fnName fn), null (M.fnTypeParams fn) || isJust (parseImplCheckName (M.fnName fn))]
         main <- encodeOne (M.progMain program)
-        let ruleEntries = [("rule " ++ name, v) | entry@(name, _) <- Map.toList rules', Just v <- [encodeRule rules' entry]]
+        ruleEntries <- traverse (\entry@(name, _) ->
+            maybe (Left ("the body of proof rule " ++ name)) (\v -> Right ("rule " ++ name, v)) (encodeRule program rules' entry))
+            [(name, rule) | (name, rule) <- Map.toList rules', isJust (ruleBody rule)]
         pure (checked ++ ruleEntries ++ [main])
   where
     allFunctions = M.progMain program : Map.elems (M.progFunctions program)

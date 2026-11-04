@@ -1414,6 +1414,10 @@ affirm x > 0;
 
 Rule names share one validation rule namespace. Defining the same name twice fails validation. Rule bodies contain validation statements only.
 
+Every proof body must be encoded and checked; an unsupported body rejects the program instead of silently dropping the check. Formal parameters are fresh values, independent of a rewrite caller's facts. Input definitions and guards are evaluated in order, and a body-local name does not replace the binding used by the output contract. Rules retain their defining function environment; captured runtime locals that cannot be represented are rejected.
+
+A proof cannot justify its own conclusion through another rule or through a function whose code or proof dependencies use an unavailable rule. Prior rules and pure global helpers remain usable. This does not replace function termination checks or ban mutually recursive functions. Proof-call effect admission remains incomplete: output-writing functions and implicit callback effects are not yet all excluded.
+
 ## Function Contracts
 
 Function definitions can include validation contract sections between the argument list and body:
