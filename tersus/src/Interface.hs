@@ -15,6 +15,7 @@ import Data.List (isInfixOf, isPrefixOf)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
+import LibParsed (nativeStorageModules)
 import Modules (ModuleId (..), renderModuleId)
 import Syntax
 import Types
@@ -100,12 +101,12 @@ extractInterfaceWith inModule isLib modu original elaborated state
                 , ifTraitParams = Map.fromList [(name, params) | TraitDef name params _ <- original]
                 , ifFunctions = Map.fromList [(name, interfaceFunction params ins outs signature termination exported) | Assign name (Val (VFunct params ins outs (NativeFunct signature termination _) exported)) <- elaborated, name `Set.member` declaredFunctions]
                 , ifImpls = Set.filter implVisible (tcImpls state)
-                , ifAssoc = Map.filterWithKey (\(owner, _) origins -> if isLib then baseNameOf owner `Set.member` ownNames || any (`Set.member` ownNames) [trait | Just trait <- origins] else inModule owner) (tcAssoc state)
+                , ifAssoc = Map.filterWithKey (\(owner, _) origins -> if isLib then baseNameOf owner `Set.member` ownNames || any (\trait -> implHere (trait, baseNameOf owner)) [trait | Just trait <- origins] else inModule owner) (tcAssoc state)
                 , ifImplArgs = Map.filterWithKey (\(trait, ty) _ -> implVisible (trait, ty)) (tcImplArgs state)
                 , ifImplBounds = Map.filterWithKey (\(trait, ty) _ -> implVisible (trait, ty)) (tcImplBounds state)
                 , ifCopies = Set.union (Set.fromList [name | CopyDef name <- elaborated]) (Set.fromList [ty | ("Copy", ty) <- Set.toList (tcImpls state), if isLib then implHere ("Copy", ty) else inModule ty])
                 , ifLinear = Set.filter typeVisible (tcLinear state)
-                , ifDrops = Set.filter typeVisible (tcDrops state)
+                , ifDrops = Set.filter (\name -> typeVisible name || isLib && ("Drop", baseNameOf name) `Set.member` declaredImpls) (tcDrops state)
                 , ifAxioms = [stmt | stmt@(AxiomDef{}) <- elaborated]
                 , ifProofs = [stmt | stmt@(ProofDef{}) <- elaborated]
                 , ifExterns = Set.fromList [name | ExternDef name <- elaborated]
@@ -127,7 +128,10 @@ extractInterfaceWith inModule isLib modu original elaborated state
         EnumDef name _ -> [name]
         TraitDef name _ _ -> [name]
         _ -> []
-    implHere (trait, ty) = trait `Set.member` ownNames || baseNameOf ty `Set.member` ownNames
+    implHere pair@(trait, ty) = pair `Set.member` declaredImpls || trait `Set.member` ownNames || baseNameOf ty `Set.member` ownNames
+    declaredImpls
+        | modu `elem` [ModuleId "tersuslib" (Just name) | name <- nativeStorageModules] = Set.fromList [(trait, ty) | ImplDef (Just trait) _ ty _ _ _ <- original]
+        | otherwise = Set.empty
     implVisible pair =
         if isLib
             then implHere pair

@@ -1950,10 +1950,12 @@ A name is the UTF-8 bytes of the string, up to 4095 of them, and stops at a byte
 
 ### Lists In Native Code
 
-A `List<T>` is checked and validated as a list, and run by the interpreter (`tersus eval`) as a list. Native code (`llvm`, `build`) has no list of its own: a list is a struct of an address, the permission to the memory at it, a count and the room there is, written in Tersus (`lib/lists.tersus`) and managed by hand (see Addresses and permissions), and a program is changed to use it after it is validated.
+A `List<T>` is checked, validated and interpreted with the logical list model.
+Native lowering uses the same bare `List` identity and the physical layout
+owned by `lib/types.tersus`:
 
-```
-struct StdList<T> {
+```tersus
+struct List<T> {
     addr: Addr<T>,
     len: Int,
     cap: Int,
@@ -1962,17 +1964,36 @@ struct StdList<T> {
     affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = cap; affirm count(blk) = len; affirm len >= 0; affirm len <= cap;
     affirm forall j in 0..len: filled(blk, j) = true; affirm forall j in len..cap: filled(blk, j) = false;
 }];
-
-fn stdListPush<T>(l: StdList<T>, x: T) -> StdList<T> [{ }] [{ affirm return.len = l.len + 1; affirm at(return.blk, l.len) = x; affirm forall j in 0..l.len: at(return.blk, j) = at(l.blk, j); }] { ... };
 ```
 
-- **What a list operation becomes** (`MirLists`): `size(l)` reads `len`; `get`, `first` and `last` read the element out of the array where it is, so a part that is only read is not copied; `push` and `set` are calls of `stdListPush` and `stdListSet`, which change the memory where it is when nothing else holds the list (`set` drops the element it replaces, and `pop` the one it takes off); a list written as `[1, 2]` is a call of `stdListNew` and one of `stdListPush` for each element. A `List<T>` in a type is a `StdList<T>`, in a struct, an enum, an array, a Box or another list. A push into a full list moves the elements to memory with room for twice as many and four more (`Addr::resize`), so a list built by pushing is built in time and room in proportion to its length. A list is freed by the drop of the library (`impl<T> Drop for StdList<T>`: the elements in use are dropped and the memory freed), and a copy of one has memory of its own; a function of the library that is given a list and returns one made of its memory takes the one it is given apart (`StdList { ... } = l;`), so that its drop does not free that memory.
-- **Comparing and printing** a list are done as a list is: `=` compares the first `len` elements and not the room that is left, and the result of a program that is a list prints as `[1, 2, 3]`. (The runtime knows a `StdList` by its name.)
-- **What is proved, and where.** The proofs about a program's lists are those of lists: the validator never sees the struct. The library is validated on its own, with contracts that say what a list does (`get` gives what `set` put, `push` adds one at the end and leaves the others, and the size changes by the right amount), so the form that native code uses has been shown to do what a list does. That the change itself is right is checked by running: every test program that has a list is built and run, and its output has to be the executor's.
-- **A Box is made the same way** (`lib/box.tersus`): a `Box<T>` whose `T` is not an array is a `StdBox<T>`, one filled slot at an address with the permission to it (`invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]`), and `Box::new(x)` and `Box::unbox(b)` are calls of `stdBoxNew` and `stdBoxUnbox`. A field read, a test of a variant or a cast through a Box stays one through the `StdBox`, which native code reads at its address as it read a Box, so a `match` on a Box that is not used again still takes the fields out of it rather than copying them. A `StdBox` has a drop (see Drops), which drops the value and frees the room, so the runtime has nothing of its own to free; it prints, compares and copies one as the value it holds. A Box of an array, of a size or of any (`Box<Array<T, n>>`, `Box<Array<T>>`), is a `StdList<T>` with as many elements as it has room for: `size`, `get` and `set` of it are those of a list, `Array::boxed(n, x)` is a call of `stdListFilled`, `Array::empty()` one of `stdListNew`, the unsizing of a Box of an array of a size is the list as it is, and `Box::new` of an inline array and `Box::unbox` of a Box of an array move the elements into memory of their own and out of it.
-- **Reserved names.** A program may not declare a struct, an enum or a trait named `StdList` or `StdBox`, or a function whose name starts with `stdList` or `stdBox` (`Type error: stdListNew is reserved`), since native code calls the functions of the library by those names.
-- **See it** with `tersus owned <file>`, which prints the program after the change, with the moves, copies and frees: `l = push(l, i)` is `_1 = call stdListPush<Int>(move _1, _2)`.
-- **Not changed**: the executor runs the list as a list, and the checker, the validator and the proof engine know lists as they did. A struct with `size`, `get`, `set` and `push` of its own (`Vec`, see A list written in Tersus) is a program's own type, and is used the same way. Moving the facts of lists onto the traits is step 24 of the README.
+`lib/lists.tersus` and `lib/box.tersus` import their type and trait interfaces
+as compiler-owned modules of `tersuslib`. They are lowered separately and
+linked for physical-container validation, including their invariants, ghost
+permissions and function contracts. Native helper bodies and Drop impls are
+not user-facing implicit libraries. User validation and ghost erasure finish
+before `MirLists` transforms the user program and links the needed erased
+helper units. Ordinary package impl coherence is unchanged; the native units
+use the compiler-owned unit contract described in [MIR.md](MIR.md).
+
+- **List operations.** `size` reads `len`; `get`, `first` and `last` read the
+  element in place. Construction, push, set and pop call `listNew`,
+  `listPush`, `listSet` and `listPop`. Set and pop drop the removed element;
+  a full push grows the allocation with `Addr::resize`. The List Drop impl
+  frees its live elements and allocation. Clones have independent storage.
+- **Box operations.** A scalar `Box<T>` has one runtime field, `addr`;
+  `boxNew` and `boxUnbox` allocate and take its value. Its Drop impl drops the
+  value and frees the slot. A Box of an array uses List storage:
+  `Array::boxed` calls `listFilled`, `Array::empty` calls `listNew`, and
+  boxing/unboxing an inline array moves its elements into/out of that storage.
+- **Names and linking.** Normal user compilation reserves `List`, `Box` and
+  the native helper function names. Native linking also refuses a user/helper
+  function collision, even if the body was copied exactly. Repeated copies of
+  a helper unit deduplicate only with the same unit identity and contents.
+- **Unchanged.** Runtime List fields remain `addr`, `len`, `cap` in that
+  order; Box has only `addr` after erasure. Printing, equality, cloning,
+  ownership, ABI and MIR wire representation retain their existing behavior.
+  No storage means no helper units are linked. `tersus owned <file>` shows
+  the resulting calls, moves and drops.
 
 ### Structs with sizes
 

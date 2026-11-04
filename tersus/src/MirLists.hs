@@ -10,6 +10,11 @@ import qualified Data.Map.Strict as Map
 import Data.Map.Strict (Map)
 import Data.Maybe (fromMaybe, listToMaybe)
 
+import LibParsed (nativeStorageModules)
+import Link (linkPrograms)
+import LibPackage (libModuleId, stripDeclaredFromUnits)
+import Modules (ModuleId (..))
+import Utils (Result (..), bindResult, mapResult)
 import Mir
 import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, instanceName, mentionsParameter)
 
@@ -36,22 +41,26 @@ import Types (Arg (..), Name, Type (..), pattern TList, pattern TBox, instanceNa
 
 -- Whether the program has a list or a Box (of what is not an array) anywhere
 hasLists :: Program -> Bool
-hasLists program =
-    any mentionsList (programTypes program)
-        || or [hasListOperation fn | fn <- progMain program : Map.elems (progFunctions program)]
+hasLists = not . null . storageModules
+
+storageModules :: Program -> [String]
+storageModules program =
+    [name | name <- nativeStorageModules, name `elem` concatMap storageTypes (programTypes program) || name == "lists" && any hasListConstant functions]
   where
-    mentionsList ty = case ty of
-        TList _ -> True
-        TArrayOf t _ -> mentionsList t
-        TBox _ -> True
-        TAddr t -> mentionsList t
-        TUninit t -> mentionsList t
-        TRef t -> mentionsList t
-        TMutRef t -> mentionsList t
-        TFn args ret -> any mentionsList (ret : args)
-        TNamed _ args -> or [mentionsList t | ArgType t <- args]
-        _ -> False
-    hasListOperation fn = or [constantList c | BasicBlock stmts term <- Map.elems (fnBlocks fn), c <- concatMap statementConstants stmts ++ terminatorConstants term]
+    functions = progMain program : Map.elems (progFunctions program)
+    storageTypes ty = case ty of
+        TList t -> "lists" : storageTypes t
+        TBox (TArrayOf t _) -> "lists" : storageTypes t
+        TBox t -> "box" : storageTypes t
+        TArrayOf t _ -> storageTypes t
+        TAddr t -> storageTypes t
+        TUninit t -> storageTypes t
+        TRef t -> storageTypes t
+        TMutRef t -> storageTypes t
+        TFn args ret -> concatMap storageTypes (ret : args)
+        TNamed _ args -> concat [storageTypes t | ArgType t <- args]
+        _ -> []
+    hasListConstant fn = or [constantList c | BasicBlock stmts term <- Map.elems (fnBlocks fn), c <- concatMap statementConstants stmts ++ terminatorConstants term]
     constantList c = case c of
         CList _ -> True
         CData _ fs -> any (constantList . snd) fs
@@ -98,20 +107,14 @@ operandsOf rv = case rv of
     Borrow _ steps _ -> [o | RefIndex o <- steps]
     Deref o -> [o]
 
--- The program with lists and Boxes made of the library's structs and functions. The first program is the library (lib/lists.tersus and
--- lib/box.tersus compiled).
-lowerLists :: Program -> Program -> Program
+lowerLists :: Result [(ModuleId, Program)] String -> Program -> Result Program String
 lowerLists library program
-    | not (hasLists program) = program
-    | otherwise =
-        completeErasedInstances
-            lowered
-                { progTypes = Map.union (progTypes lowered) (progTypes library)
-                , progFunctions = Map.union (progFunctions lowered) (progFunctions library)
-                , progGenerics = Map.union (progGenerics lowered) (progGenerics library)
-                , progInvariants = Map.union (progInvariants lowered) (progInvariants library)
-                }
+    | not (hasLists program) = Ok program
+    | otherwise = library `bindResult` \units -> mapResult completeErasedInstances (linkPrograms (selected units ++ [(ModuleId "native" Nothing, lowered)]))
   where
+    wanted = storageModules program
+    unusedTypes = [ty | (modu, ty) <- [("lists", "List"), ("box", "Box")], modu `notElem` wanted]
+    selected units = stripDeclaredFromUnits unusedTypes [(modu, unit) | (modu, unit) <- units, modu `elem` map libModuleId wanted]
     lowered =
         program
             { progTypes = Map.fromList [(renameName (renamesForTypes (programTypes program)) n, renameDecl d) | (n, d) <- Map.toList (progTypes program)]

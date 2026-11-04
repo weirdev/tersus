@@ -2,8 +2,10 @@ module MirHousekeeping
     ( verifyProgram
     , eraseGhosts
     , validatedListLibrary
+    , validatedStorage
     , cachedEmitter
     , listLibrary
+    , nativeProgram
     , emitterEntry
     , mirVerifyEntry
     , mirEraseEntry
@@ -22,8 +24,9 @@ import System.FilePath ((</>))
 import System.IO (hClose, hPutStrLn, openTempFile, stderr)
 import System.IO.Unsafe (unsafePerformIO)
 
-import Compile (lowerSource)
 import Hash (fingerprint)
+import LibPackage (nativeStorageUnits)
+import Link (linkPrograms)
 import LlvmRuntime (runtimeSource)
 import Mir
 import MirData (readProgram, writeProgram, writeProgramWithGhosts)
@@ -33,9 +36,9 @@ import MirOwnership (expandRefWrites, insertOwnership)
 import MirValidate (validateContainerLibrary)
 import Native (buildExecutable, cachedProgram, runWithInput, runWithInputFull)
 import Seed (cachedSeed, emitterHash)
-import Modules (LoadResult (..), loadFromEntry, resolverFromFiles)
+import Modules (ModuleId, LoadResult (..), loadFromEntry, resolverFromFiles)
 import PackageCompile (compileModulesValidated)
-import PreludeSource (boxSource, listsSource, mirPackageFiles, toolPackageFiles)
+import PreludeSource (mirPackageFiles, toolPackageFiles)
 import Types (Type (..))
 import Utils
 
@@ -274,24 +277,29 @@ compileToolProgram entry = case loadFromEntry (resolverFromFiles toolPackageFile
 toolOwnedProgram :: FilePath -> Result Program String
 toolOwnedProgram entry =
     toolValidatedProgram entry `bindResult` \program ->
-        Ok (insertOwnership (lowerLists listLibrary (expandRefWrites program)))
+        mapResult insertOwnership (nativeProgram program)
+
+nativeProgram :: Program -> Result Program String
+nativeProgram = lowerLists listLibrary . expandRefWrites
 
 emitterOwnedProgram :: Result Program String
 emitterOwnedProgram = toolOwnedProgram emitterEntry
 
--- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once, its
--- ghosts erased with the eraser itself (it holds a permission, in a contract's ghost local)
-validatedListLibrary :: Program
-validatedListLibrary = case lowerSource False (listsSource ++ "\n" ++ boxSource) of
-    Error e -> error ("lib/lists.tersus and lib/box.tersus do not lower: " ++ e)
-    Ok program -> case validateContainerLibrary program of
-        Error e -> error ("lib/lists.tersus and lib/box.tersus do not validate: " ++ e)
-        Ok _ -> program
+validatedStorage :: Result ([(ModuleId, Program)], Program) String
+validatedStorage = nativeStorageUnits `bindResult` \modules ->
+    let units = [(modu, program) | (modu, _, program) <- modules]
+     in linkPrograms units `bindResult` \program ->
+        stage "Native storage validation: " (validateContainerLibrary program) `bindResult` \_ -> Ok (units, program)
 
-listLibrary :: Program
-listLibrary = case eraseGhosts validatedListLibrary of
-    Error e -> error ("lib/lists.tersus and lib/box.tersus are not erased: " ++ e)
-    Ok erased -> erased
+validatedListLibrary :: Program
+validatedListLibrary = case validatedStorage of
+    Error e -> error e
+    Ok (_, program) -> program
+
+listLibrary :: Result [(ModuleId, Program)] String
+listLibrary = validatedStorage `bindResult` \(units, _) -> flatResultMap eraseUnit units
+  where
+    eraseUnit (modu, program) = mapResult ((,) modu) (eraseGhosts program)
 
 -- Runs a program of the housekeeping with what a user of it gives on the standard input: what it wrote, what
 -- it wrote to the standard error, and its value. The interpreter reads the world the program is not given, so

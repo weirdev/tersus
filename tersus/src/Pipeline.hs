@@ -34,7 +34,7 @@ import PackageCompile (CompiledModule (..), CompiledPackage (..), assumptionsOfP
 import Link (pruneProgram)
 import qualified Modules as Mod
 import MirOwnership (expandRefWrites, insertOwnership)
-import MirHousekeeping (eraseGhosts, verifyProgram, validatedListLibrary)
+import MirHousekeeping (eraseGhosts, verifyProgram)
 import qualified MirHousekeeping as Housekeeping
 import MirEval (MirValue, runProgram)
 import MirValidate (Validated, validateProgram)
@@ -130,8 +130,8 @@ ownedOfProgram program =
     -- carry yet, so it is refused here rather than miscompiled)
     if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
         then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
-        else
-            let owned = insertOwnership (nativeProgram program)
+        else nativeProgram program `bindResult` \native ->
+            let owned = insertOwnership native
              in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)
@@ -144,14 +144,12 @@ ownedOfProgram program =
 
 -- The program that native code is made of: a validated program with each list and Box made of the library's structs (see MirLists).
 -- Each Uninit<T> is already a T in it: the erasure makes it one (it is laid out as one: an empty one is the words of a T cleared, which own nothing)
-nativeProgram :: M.Program -> M.Program
+nativeProgram :: M.Program -> Result M.Program String
 nativeProgram = lowerLists listLibrary . expandRefWrites
 
--- The library of lists and Boxes (lib/lists.tersus and lib/box.tersus), compiled and validated once
-listLibrary :: M.Program
-listLibrary = case checkedLowered validatedListLibrary of
-    Ok _ -> Housekeeping.listLibrary
-    Error e -> error ("lib/lists.tersus and lib/box.tersus do not compile: " ++ e)
+listLibrary :: Result [(Mod.ModuleId, M.Program)] String
+listLibrary = Housekeeping.validatedStorage `bindResult` \(_, program) ->
+    checkedLowered program `bindResult` \_ -> Housekeeping.listLibrary
 
 -- Checks and validates a program given as statements
 validateStatements :: [Statement] -> Result Validated String
@@ -185,8 +183,8 @@ ownedModuleProgram :: M.Program -> Result M.Program String
 ownedModuleProgram program =
     if any unsizedRef (M.progMain program : Map.elems (M.progFunctions program))
         then Error "a reference to an unsized value (&Array<T>) is not in native code yet: run it with eval, or check it"
-        else
-            let owned = pruneProgram (insertOwnership (nativeProgram program))
+        else nativeProgram program `bindResult` \native ->
+            let owned = pruneProgram (insertOwnership native)
              in stage "Ownership failed: " (verifyProgram owned) `bindResult` \_ -> Ok owned
   where
     unsizedRef fn = any (\d -> hasUnsizedRef (M.localType d)) (Map.elems (M.fnLocals fn)) || maybe False hasUnsizedRef (M.fnReturns fn)

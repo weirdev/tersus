@@ -187,6 +187,7 @@ originalGroups =
     , testAstReader
     , testParity
     , testLibModules
+    , testNativeStorageModules
     ]
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)

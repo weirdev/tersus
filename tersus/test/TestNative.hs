@@ -54,6 +54,7 @@ testNative =
         , TestParallel "output" [TestCase name (sameAsMir name source) | (name, source) <- outputPrograms]
         , TestParallel "input" [TestCase name (sameAsMirWithInput name input source) | (name, input, source) <- inputPrograms]
         , TestParallel "arrays" [TestCase name (sameAsMir name source) | (name, source) <- arrayPrograms]
+        , TestParallel "native storage" [TestCase name (sameAsMir name source) | (name, source) <- nativeStoragePrograms]
         , TestParallel "data" [TestCase name (sameAsMir name source) | (name, source) <- dataPrograms]
         , TestParallel "a list written in Tersus" [TestCase name (sameAsMir name (vecLibrary ++ body)) | (name, body) <- vecPrograms]
         , TestParallel "methods of generic structs" [TestCase name (sameAsMir name source) | (name, source) <- genericImplPrograms]
@@ -128,7 +129,7 @@ testNativeProgram path = TestCase path $ do
                     case compiled of
                         Error e -> pure (Just ("Does not compile: " ++ e))
                         Ok program -> do
-                            ir <- emitUnvalidated (nativeProgram program)
+                            ir <- emitUnvalidated program
                             case ir of
                                 Error e -> pure (Just e)
                                 Ok text -> buildAndRun "" [] (map safeChar path) path text (expected (runProgramIn noWorld program))
@@ -177,7 +178,7 @@ testNativeIr =
                 else case lowerSource "fn inc(n: Int) -> Int { return n + 1; }; f = inc; return f(1);" of
                     Left e -> pure (Just e)
                     Right program -> do
-                        ir <- emitUnvalidated (nativeProgram program)
+                        ir <- emitUnvalidated program
                         pure $ case ir of
                             Error e -> Just e
                             Ok text -> testAssertTrue ("store ptr @\"fn.inc\"" `isInfixOf` text && "call i64 %" `isInfixOf` text)
@@ -784,7 +785,15 @@ referencePrograms =
 
 -- Every program of these tests that validates, and every one that is lowered without being validated
 validatedPrograms :: [(String, String)]
-validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ stopPrograms
+validatedPrograms = arithmeticPrograms ++ controlPrograms ++ listPrograms ++ dataPrograms ++ nativeStoragePrograms ++ stopPrograms
+
+nativeStoragePrograms :: [(String, String)]
+nativeStoragePrograms =
+    [ ("nested Box/List Clone+Drop storage", owned ++ "fn wrap<T>(x: T) -> Box<T> { return Box::new(x); }; x = Owned::new(3); y = clone(x); xs = push([], wrap(y)); xs = pop(xs); return x.n + size(xs);")
+    , ("array-backed Clone+Drop storage", owned ++ "x = Owned::new(4); xs = Array::boxed(2, x); xs = set(xs, 1, Owned::new(5)); return get(xs, 0).n + get(xs, 1).n;")
+    ]
+  where
+    owned = "trait Clone { fn clone(self: &Self) -> Self; }; trait Drop { fn drop(self: Self) -> Int; }; struct Owned { addr: Addr<Int>, n: Int, ghost blk: Block<Int> } invariant [{ affirm base(blk) = addr; affirm whole(blk); affirm cap(blk) = 1; affirm count(blk) = 1; affirm filled(blk, 0) = true; }]; impl Owned { fn new(n: Int) -> Self { (a, b) = Addr::alloc(1); return Self { addr: a, n: n, blk: Addr::write(a, 0, n, b) }; }; }; impl Clone for Owned { fn clone(self: &Self) -> Self { return Owned::new(self.n); }; }; impl Drop for Owned { fn drop(self: Self) -> Int { return Addr::free(self.addr, Addr::dropValue(self.addr, 0, self.blk)); }; }; "
 
 unvalidatedPrograms :: [(String, String)]
 unvalidatedPrograms = functionPrograms
@@ -869,7 +878,7 @@ sameAsMirWorld name world source = do
             case compiled of
                 Error e -> pure (Just ("Does not compile: " ++ e))
                 Ok program -> do
-                    ir <- emitUnvalidated (nativeProgram program)
+                    ir <- emitUnvalidated program
                     case ir of
                         Error e -> pure (Just e)
                         Ok text -> buildAndRun (worldInput world) (worldArgs world) (map safeChar name) name text (expected (runProgramIn world program))
@@ -1014,7 +1023,7 @@ sameAsMirFiles name initial source = do
             case compiled of
                 Error e -> pure (Just ("Does not compile: " ++ e))
                 Ok program -> do
-                    ir <- emitUnvalidated (nativeProgram program)
+                    ir <- emitUnvalidated program
                     case ir of
                         Error e -> pure (Just e)
                         Ok text -> case runProgramIn noWorld{worldFile = \path -> lookup path initial} program of
@@ -1114,7 +1123,7 @@ sameAsUnvalidated name source = do
         else case lowerSource source of
             Left e -> pure (Just e)
             Right program -> do
-                ir <- emitUnvalidated (nativeProgram program)
+                ir <- emitUnvalidated program
                 case ir of
                     Error e -> pure (Just e)
                     Ok text -> buildAndRun "" [] ("unvalidated_" ++ map safeChar name) name text (expected (runProgram program))
@@ -1125,11 +1134,11 @@ sameAsUnvalidated name source = do
 -- The IR of a program that is lowered without being validated, written by the emitter in Tersus: who owns each value is
 -- made explicit and checked, and the emitter is given the owned MIR as data
 emitUnvalidated :: M.Program -> IO (Result String String)
-emitUnvalidated program = case verifyProgram owned of
+emitUnvalidated program = case mapResult insertOwnership (nativeProgram program) of
     Error e -> pure (Error e)
-    Ok () -> llvmOfOwned owned
-  where
-    owned = insertOwnership (nativeProgram program)
+    Ok owned -> case verifyProgram owned of
+        Error e -> pure (Error e)
+        Ok () -> llvmOfOwned owned
 
 lowerSource :: String -> Either String M.Program
 lowerSource source = case parseStatementBlock source of
