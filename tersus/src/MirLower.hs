@@ -6,7 +6,7 @@ import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
 
-import Interface (InterfaceFunction (..), ModuleInterface (..))
+import Interface (InterfaceFunction (..), ModuleInterface (..), genericConstructorSeeds)
 import Link (linkPrograms)
 import Modules (ModuleId(..))
 import qualified Mir as M
@@ -134,9 +134,11 @@ interfaceTypeDecls iface =
         [ (name, decl)
         | (name, variants) <- Map.toList (ifTypes iface)
         , name `Map.notMember` ifGenerics iface
+        , name `Set.notMember` symbolicSeeds
         , let decl = if variants == [name] then M.StructDecl (fieldsOf name) else M.EnumDecl [(variant, fieldsOf variant) | variant <- variants]
         ]
   where
+    symbolicSeeds = Set.fromList (map fst (genericConstructorSeeds (ifGenerics iface)))
     fieldsOf ctor = maybe [] snd (Map.lookup ctor (ifCtors iface))
 
 -- The lowering monad: state, and failure for what should not happen to a program that has been checked

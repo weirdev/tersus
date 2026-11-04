@@ -59,6 +59,7 @@ import TestParser
 import TestParserBootstrap
 import TestParserUnicode
 import TestLibModules
+import TestLibInterfaceProviders
 
 main :: IO ()
 main = do
@@ -197,6 +198,7 @@ originalGroups =
     , testAstReader
     , testParity
     , testLibModules
+    , testLibInterfaceProviders
     ]
 
 runInProcess :: [Test] -> IO (TestSummary, Bool)
