@@ -110,7 +110,7 @@ operandsOf rv = case rv of
 lowerLists :: Result [(ModuleId, Program)] String -> Program -> Result Program String
 lowerLists library program
     | not (hasLists program) = Ok program
-    | otherwise = library `bindResult` \units -> mapResult completeErasedInstances (linkPrograms (selected units ++ [(ModuleId "native" Nothing, lowered)]))
+    | otherwise = library `bindResult` \units -> mapResult completeErasedInstances (linkPrograms (selected units ++ [(ModuleId "native" Nothing, completeErasedInstances lowered)]))
   where
     wanted = storageModules program
     unusedTypes = [ty | (modu, ty) <- [("lists", "List"), ("box", "Box")], modu `notElem` wanted]
