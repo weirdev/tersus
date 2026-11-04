@@ -113,10 +113,14 @@ corpusParity = do
     paths <- corpusPaths
     sources <- forM paths $ \path -> do source <- readFile path; pure (path, source)
     let resolver = Modules.resolverFromFiles (sources ++ toolPackageFiles)
+    emitter <- comparePreparedPackage resolver emitterCorpusEntry
     results <- forM sources $ \(path, source) -> do
         putStrLn ("Native corpus file: " ++ path)
         result <- case Modules.discoverEntry resolver path of
-            Modules.InPackage _ _ | takeFileName path /= "package.tersus" -> comparePreparedPackage resolver path
+            Modules.InPackage _ _ | takeFileName path /= "package.tersus" ->
+                if path `elem` emitterCorpusFiles
+                    then pure (observedSource source emitter)
+                    else observedSource source <$> comparePreparedPackage resolver path
             _ -> do
                 ast <- compareSource tersusData source
                 wire <- compareFileRecords source
@@ -125,7 +129,19 @@ corpusParity = do
     putStrLn ("Native corpus parity: " ++ show (length paths) ++ " files, " ++ show (length [e | Just e <- results]) ++ " failures")
     pure (firstFailure results)
 
-comparePreparedPackage :: Modules.Resolver -> FilePath -> IO TestResult
+emitterCorpusEntry :: FilePath
+emitterCorpusEntry = "examples/mir/emit/emit.tersus"
+
+emitterCorpusFiles :: [FilePath]
+emitterCorpusFiles = ["examples/mir/emit/" ++ name ++ ".tersus" | name <- ["emit", "types", "values", "operations", "functions", "helpers"]]
+
+observedSource :: String -> ([String], TestResult) -> TestResult
+observedSource source (observations, result) = firstFailure
+    [ result
+    , if source `elem` observations then Nothing else Just "requested corpus source was not observed by the paired P0/P1 parsers"
+    ]
+
+comparePreparedPackage :: Modules.Resolver -> FilePath -> IO ([String], TestResult)
 comparePreparedPackage resolver path = do
     observations <- newIORef []
     let paired declared source = unsafePerformIO $ do
@@ -136,15 +152,33 @@ comparePreparedPackage resolver path = do
                     (Left a, Left b) | not (ParserSeed.toolFailure a || ParserSeed.toolFailure b) -> Nothing
                     (Left e, _) -> Just ("P0 prepared package file: " ++ e)
                     (_, Left e) -> Just ("P1 prepared package file: " ++ e)
-            modifyIORef' observations (result :)
+            modifyIORef' observations ((source, result) :)
             pure current
         loaded = Modules.loadFromEntryWith paired resolver path
     _ <- evaluate (length (show loaded))
-    results <- readIORef observations
-    pure $ firstFailure (case loaded of
+    records <- readIORef observations
+    let results = map snd records
+    pure (map fst records, firstFailure (case loaded of
         Left e -> Just e : results
         Right (Modules.PackageResult _) -> testAssertTrue (not (null results)) : results
-        Right _ -> Just "expected a prepared package" : results)
+        Right _ -> Just "expected a prepared package" : results))
+
+preparedEmitterHelper :: IO TestResult
+preparedEmitterHelper = do
+    let helper = "examples/mir/emit/functions.tersus"
+        source = "fn answer() -> Int [{ }] [{ }] { return 42; };"
+        resolver = Modules.resolverFromFiles
+            [ ("examples/mir/package.tersus", "")
+            , (emitterCorpusEntry, "import mir::emit::functions { answer }; return answer();")
+            , (helper, source)
+            ]
+    report <- comparePreparedPackage resolver emitterCorpusEntry
+    pure $ firstFailure
+        [ testAssertTrue (helper `elem` emitterCorpusFiles)
+        , observedSource source report
+        , testAssertEq (observedSource "fn unseen() -> Int { return 0; };" report)
+            (Just "requested corpus source was not observed by the paired P0/P1 parsers")
+        ]
 
 {-# NOINLINE recordedFile #-}
 recordedFile :: IORef [Either String String] -> (Decls -> String -> IO (Either String (ParsedFile, Decls))) -> Decls -> String -> Either String (ParsedFile, Decls)
@@ -379,5 +413,6 @@ testParser = TestList "testParser"
     , TestCase "imports are not linked yet" importsVerdict
     , TestCase "generated snippet parity" snippetParity
     , TestCase "three interpreted smoke programs" interpretedSmoke
+    , TestCase "emitter helper corpus uses its program entry and proves requested source observation" preparedEmitterHelper
     , TestCase "whole corpus parity" corpusParity
     ]
