@@ -857,8 +857,13 @@ copyCompiledTools from to = do
     names <- listDirectory from
     mapM_ (\name -> do
         regular <- doesFileExist (from </> name)
-        when (regular && any (`isPrefixOf` name) ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "tersus_rt_"] && not (".lock" `isInfixOf` name)) $
+        when (regular && compiledToolName name) $
             copyFile (from </> name) (to </> name)) names
+
+compiledToolName :: String -> Bool
+compiledToolName name = any (`isPrefixOf` name)
+    ["validator-", "emitter-", "mir-verify-", "mir-erase-", "seed-", "tersus_rt_"]
+    && not (".lock" `isInfixOf` name)
 
 withCacheHome :: (FilePath -> IO a) -> IO a
 withCacheHome use = withNativeHome $ \home -> do
@@ -977,6 +982,36 @@ ciPackageFixture home = do
     writeFile dependency "fn answer() -> Int [{ }] [{ }] { return 41; };"
     pure (entry, dependency)
 
+withToolsCacheHome :: (FilePath -> IO TestResult) -> IO TestResult
+withToolsCacheHome use = do
+    warm <- compileOnce "return 0;"
+    original <- cacheDirectory
+    case (warm, original) of
+        (Error e, _) -> pure (Just e)
+        (_, Error e) -> pure (Just e)
+        (Ok _, Ok dir) -> withCacheHome $ \home -> do
+            let cache = home </> "tersus"
+            copyCompiledTools dir cache
+            names <- listDirectory cache
+            before <- mapM (toolIdentity cache) names
+            entries <- entryFiles home
+            result <- use home
+            afterNames <- filter compiledToolName <$> listDirectory cache
+            after <- mapM (toolIdentity cache) names
+            pure $ firstFailure
+                [ testAssertEq entries []
+                , testAssertTrue (not (null names) && all (not . isPrefixOf "verdicts-") names)
+                , result
+                , testAssertEq (sort afterNames) (sort names)
+                , testAssertEq after before
+                ]
+  where
+    toolIdentity cache name = do
+        let path = cache </> name
+        digest <- executableDigest path
+        time <- getModificationTime path
+        pure (digest, time)
+
 packageStages :: IO TestResult
 packageStages = withToolsCacheHome $ \home -> do
     (entry, _) <- ciPackageFixture home
@@ -1014,19 +1049,6 @@ packageInputs = withToolsCacheHome $ \home -> do
         (Ok a, Ok b, Error _, Error _, Ok c) ->
             testAssertTrue (a /= b && a == c && not filed)
         other -> Just (show other)
-
--- A fresh cache home given the compiled tools of this process's cache (the
--- validator written in Tersus and what builds it), which are not what the
--- tests that use it measure: building them again takes minutes
-withToolsCacheHome :: (FilePath -> IO a) -> IO a
-withToolsCacheHome use = do
-    warm <- compileOnce "return 0;"
-    original <- cacheDirectory
-    withCacheHome $ \home -> do
-        case (warm, original) of
-            (Ok _, Ok dir) -> copyCompiledTools dir (home </> "tersus")
-            _ -> pure ()
-        use home
 
 ciPackageProcesses :: Bool -> IO TestResult
 ciPackageProcesses concurrent =
