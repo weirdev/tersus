@@ -169,7 +169,9 @@ not checked again. A program's verdict is the first refusal in its order of
 functions, as without the cache. Verdicts are also kept on disk under the
 validator's build hash, and a function not known yet is checked under a lock
 of its own, so processes that start together (the groups of the tests) check
-each shared function once. The native List/Box helper units are lowered separately by `LibPackage`,
+each shared function once. A per-path thread mutex encloses the writable lock
+handle within a process; the file lock still coordinates different processes.
+The native List/Box helper units are lowered separately by `LibPackage`,
 then linked and erased once by `MirHousekeeping`. Native code of the validator
 itself is made with them, so they are built unvalidated, and the validator, once
 built, validates them (`SelfHostedMir.encodeLibrary`: a List and a Box are the

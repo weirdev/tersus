@@ -1,7 +1,7 @@
-module TestSharedCache (testSharedCache, testSharedCacheProbe) where
+module TestSharedCache (testSharedCache, testSharedCacheProbe, testVerdictLocks) where
 
-import Control.Concurrent (forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
-import Control.Exception (SomeException, bracket, finally, throwIO, try)
+import Control.Concurrent (MVar, ThreadId, forkIOWithUnmask, forkIO, killThread, newEmptyMVar, putMVar, takeMVar, threadDelay)
+import Control.Exception (MaskingState (..), SomeException, bracket, displayException, finally, getMaskingState, throwIO, try)
 import Control.Monad (when)
 import Data.IORef (atomicModifyIORef', newIORef, readIORef)
 import Data.List (isInfixOf, isPrefixOf, sort)
@@ -35,6 +35,7 @@ import MirData (forNative)
 import TestHarness
 import Types (Type (..))
 import Utils
+import ValidatorNative (withVerdictLock)
 
 richSource :: String
 richSource = "struct Packet<n> { body: Array<Int, n> }; struct S { n: Int } invariant [{ affirm n >= 0; }]; fn f(n: Int) -> Int [{ affirm n > 0; }] [{ affirm return > 0; }] { return n; }; p = Packet<2> { body: #[1, 2] }; s = S { n: f(get(p.body, 0)) }; return s.n;"
@@ -199,6 +200,17 @@ awaitNativeFile path = do
         if present then pure () else threadDelay 10000 >> loop
 
 nativeProbe :: String -> IO TestResult
+nativeProbe mode | mode `elem` ["verdict", "verdict-hold", "verdict-wait"] = do
+    Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
+    Just home <- lookupEnv "XDG_CACHE_HOME"
+    writeFile (marker ++ ".started") ""
+    when (mode == "verdict-wait") (awaitNativeFile (home </> "go"))
+    withVerdictLock "process-lock" $ do
+        pid <- getProcessID
+        writeFile (marker ++ ".pid") (show pid)
+        writeFile (marker ++ ".entered") ""
+        when (mode == "verdict-hold") (threadDelay 600000000)
+        pure Nothing
 nativeProbe mode = do
     Just home <- lookupEnv "XDG_CACHE_HOME"
     Just marker <- lookupEnv "TERSUS_SHARED_CACHE_PROBE"
@@ -236,6 +248,121 @@ withNativeChildren :: FilePath -> [(String, String)] -> ([ProcessHandle] -> IO a
 withNativeChildren home children = bracket
     (mapM (\(marker, mode) -> spawnProbe home [("TERSUS_SHARED_CACHE_PROBE", home </> marker), ("TERSUS_NATIVE_CACHE_PROBE", mode)]) children)
     (mapM_ (\child -> terminateProcess child >> waitForProcess child >> pure ()))
+
+testVerdictLocks :: Test
+testVerdictLocks = TestList "testVerdictLocks"
+    [ TestCase "bracketed lock worker computation is unmasked" verdictWorkerMasking
+    , TestCase "same-path threads wait before opening a second Handle" (verdictThreads True)
+    , TestCase "different-path threads do not serialize" (verdictThreads False)
+    , TestCase "an exception releases the Handle and thread mutex" verdictException
+    , TestCase "cancelling a lock holder releases the lock" verdictCancellation
+    , TestCase "processes wait for the same verdict lock" verdictProcesses
+    , TestCase "a killed process releases the verdict lock" verdictKilledProcess
+    ]
+
+withWorker :: IO () -> (ThreadId -> MVar (Either SomeException ()) -> IO TestResult) -> IO TestResult
+withWorker action use = bracket start (killThread . fst) (uncurry use)
+  where
+    start = do
+        done <- newEmptyMVar
+        thread <- forkIOWithUnmask $ \unmask -> do
+            result <- try (unmask action)
+            putMVar done result
+        pure (thread, done)
+
+awaitVerdict :: MVar () -> IO ()
+awaitVerdict ready = do
+    outcome <- timeout 2000000 (takeMVar ready)
+    case outcome of
+        Just () -> pure ()
+        Nothing -> ioError (userError "verdict lock worker did not reach its barrier")
+
+workerResult :: MVar (Either SomeException ()) -> IO (Maybe (Either String ()))
+workerResult done = fmap (fmap (either (Left . displayException) Right)) (timeout 2000000 (takeMVar done))
+
+verdictWorkerMasking :: IO TestResult
+verdictWorkerMasking = do
+    observed <- newEmptyMVar
+    withWorker (getMaskingState >>= putMVar observed) $ \_ done -> do
+        state <- timeout 2000000 (takeMVar observed)
+        result <- workerResult done
+        pure $ firstFailure [testAssertEq state (Just Unmasked), testAssertEq result (Just (Right ()))]
+
+verdictThreads :: Bool -> IO TestResult
+verdictThreads same = withCacheHome $ \_ -> do
+    held <- newEmptyMVar
+    release <- newEmptyMVar
+    started <- newEmptyMVar
+    withWorker (withVerdictLock "thread-lock" (putMVar held () >> takeMVar release)) $ \_ owner -> do
+        awaitVerdict held
+        let key = if same then "thread-lock" else "different-thread-lock"
+        withWorker (putMVar started () >> withVerdictLock key (pure ())) $ \_ waiter -> do
+            awaitVerdict started
+            early <- timeout (if same then 100000 else 2000000) (takeMVar waiter)
+            putMVar release ()
+            ownerResult <- workerResult owner
+            waiterResult <- maybe (workerResult waiter) (pure . Just . either (Left . displayException) Right) early
+            pure $ firstFailure
+                [ testAssertEq (fmap (either (Left . displayException) Right) early) (if same then Nothing else Just (Right ()))
+                , testAssertEq ownerResult (Just (Right ()))
+                , testAssertEq waiterResult (Just (Right ()))
+                ]
+
+verdictException :: IO TestResult
+verdictException = withCacheHome $ \_ -> do
+    failed <- try (withVerdictLock "exception-lock" (throwIO (userError "verdict lock exception"))) :: IO (Either SomeException ())
+    retried <- timeout 2000000 (withVerdictLock "exception-lock" (pure ()))
+    pure $ firstFailure
+        [ testAssertTrue (either (isInfixOf "verdict lock exception" . displayException) (const False) failed)
+        , testAssertEq retried (Just ())
+        ]
+
+verdictCancellation :: IO TestResult
+verdictCancellation = withCacheHome $ \_ -> do
+    held <- newEmptyMVar
+    release <- newEmptyMVar
+    withWorker (withVerdictLock "cancelled-lock" (putMVar held () >> takeMVar release)) $ \thread owner -> do
+        awaitVerdict held
+        killThread thread
+        stopped <- workerResult owner
+        retried <- timeout 2000000 (withVerdictLock "cancelled-lock" (pure ()))
+        pure $ firstFailure
+            [ testAssertTrue (case stopped of Just (Left _) -> True; _ -> False)
+            , testAssertEq retried (Just ())
+            ]
+
+verdictProcesses :: IO TestResult
+verdictProcesses = withCacheHome $ \home ->
+    -- Start the child before opening the lock Handle so it cannot inherit that fd.
+    withNativeChildren home [("waiter", "verdict-wait")] $ \children -> do
+        awaitNativeFile (home </> "waiter.started")
+        enteredEarly <- withVerdictLock "process-lock" $ do
+            writeFile (home </> "go") ""
+            threadDelay 100000
+            doesFileExist (home </> "waiter.entered")
+        codes <- mapM (waitChild 5) children
+        entered <- doesFileExist (home </> "waiter.entered")
+        pure $ firstFailure
+            [ testAssertTrue (not enteredEarly)
+            , testAssertEq codes [Just ExitSuccess]
+            , testAssertTrue entered
+            ]
+
+verdictKilledProcess :: IO TestResult
+verdictKilledProcess = withNativeHome $ \home ->
+    withNativeChildren home [("owner", "verdict-hold")] $ \owners -> do
+        awaitNativeFile (home </> "owner.entered")
+        pid <- read <$> readFile (home </> "owner.pid")
+        signalProcess sigKILL pid
+        ownerCodes <- mapM (waitChild 5) owners
+        withNativeChildren home [("retry", "verdict")] $ \children -> do
+            retryCodes <- mapM (waitChild 5) children
+            entered <- doesFileExist (home </> "retry.entered")
+            pure $ firstFailure
+                [ testAssertTrue (all (maybe False (/= ExitSuccess)) ownerCodes)
+                , testAssertEq retryCodes [Just ExitSuccess]
+                , testAssertTrue entered
+                ]
 
 nativeProcesses :: Bool -> IO TestResult
 nativeProcesses nested = withNativeHome $ \home -> do
